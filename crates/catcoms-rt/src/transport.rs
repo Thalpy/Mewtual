@@ -14,6 +14,19 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
 
+/// Released request/response frame ceiling. Native work allowances must also use this bound
+/// for legacy CID-only blob requests, whose wire grammar cannot express a smaller response cap.
+pub const MAX_REQUEST_RESPONSE_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Reserved connected member file-service kinds. Transport bounds alone do not enable their
+/// application handlers or authorize forwarding; unknown/old handlers still refuse them.
+pub const FILE_BRIDGE_KIND: u8 = 29;
+pub const FILE_SOURCE_KIND: u8 = 30;
+/// Closed frame ceilings applied before body allocation on these request/response substreams.
+/// The response includes signatures and the helper wrapper, not just a 64 KiB page.
+pub const FILE_SERVICE_REQUEST_MAX_BYTES: usize = 2 * 1024;
+pub const FILE_SERVICE_RESPONSE_MAX_BYTES: usize = 72 * 1024;
+
 /// A stable peer identifier. In production this is derived from a libp2p public
 /// key; here it is an opaque 32-byte value so tests need no real keys.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -164,11 +177,94 @@ impl<T: Send + Sync + fmt::Debug> RequestKeepalive for T {}
 /// Shared, object-safe ownership token for one transport request.
 pub type SharedRequestKeepalive = Arc<dyn RequestKeepalive>;
 
-/// Cancellation signal plus optional accounting authority for an addressed request.
+/// Opaque ownership of one aggregate authenticated connection incarnation. A driver creates
+/// this when the first connection to a peer becomes live and revokes it synchronously on the
+/// final disconnect, before publishing events. Same-peer reconnect creates a different owner.
+/// This grants no membership or dial authority and is never serialized or restored.
+#[derive(Clone, Debug)]
+pub struct ConnectionLease(Arc<ConnectionLeaseState>);
+#[derive(Debug)]
+struct ConnectionLeaseState {
+    live: std::sync::atomic::AtomicBool,
+    changed: watch::Sender<bool>,
+    // Only MemNetwork composes two base registration owners. No recursive graph or spawned
+    // forwarding task is needed; local and remote retirement wake the captured pair directly.
+    parents: Option<(Arc<ConnectionLeaseState>, Arc<ConnectionLeaseState>)>,
+}
+impl Default for ConnectionLease {
+    fn default() -> Self {
+        Self(Arc::new(ConnectionLeaseState {
+            live: std::sync::atomic::AtomicBool::new(true),
+            changed: watch::channel(true).0,
+            parents: None,
+        }))
+    }
+}
+impl ConnectionLease {
+    pub fn is_live(&self) -> bool {
+        self.0.live.load(std::sync::atomic::Ordering::Acquire)
+            && self.0.parents.as_ref().is_none_or(|(local, remote)| {
+                local.live.load(std::sync::atomic::Ordering::Acquire)
+                    && remote.live.load(std::sync::atomic::Ordering::Acquire)
+            })
+    }
+    pub(crate) fn dependent(local: &Self, remote: &Self) -> Self {
+        // Registration owners are base leases, never compositions. This bounded internal seam
+        // avoids letting a synthetic transport create an unbounded recursive authority chain.
+        assert!(local.0.parents.is_none() && remote.0.parents.is_none());
+        Self(Arc::new(ConnectionLeaseState {
+            live: std::sync::atomic::AtomicBool::new(true),
+            changed: watch::channel(true).0,
+            parents: Some((local.0.clone(), remote.0.clone())),
+        }))
+    }
+    pub fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    /// Trusted transport lifecycle only. Never revive this owner after revocation.
+    pub fn revoke(&self) {
+        self.0
+            .live
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.0.changed.send_replace(false);
+    }
+    pub async fn revoked(&self) {
+        let mut changed = self.0.changed.subscribe();
+        let mut parents = self
+            .0
+            .parents
+            .as_ref()
+            .map(|(local, remote)| (local.changed.subscribe(), remote.changed.subscribe()));
+        while self.is_live() {
+            tokio::select! {
+                _ = changed.changed() => {},
+                _ = async { if let Some((local, remote)) = &mut parents { tokio::select! { _ = local.changed() => {}, _ = remote.changed() => {} } } else { std::future::pending::<()>().await; } } => {},
+            }
+        }
+    }
+}
+
+/// Additional native authority for an addressed effect. This is deliberately independent of
+/// accounting: revocation can stop a waiter without terminating a transport-owned stream.
+///
+/// `authorized` must be bounded and synchronous, with no application or transport effects
+/// (bounded time/authority bookkeeping is permitted). Drivers call it at their
+/// admission boundary, before submitting bytes; revocation after admission cannot recall them.
+/// `revoked` must register its wakeup before rechecking authority, fail closed if its owner
+/// disappears, and complete permanently after revocation. Implementations must not restore an
+/// old authority on readmission, unlock or actor replacement; those operations need new owners.
+#[async_trait]
+pub trait RequestAuthority: Send + Sync + fmt::Debug {
+    fn authorized(&self) -> bool;
+    async fn revoked(&self);
+}
+
+/// Cancellation signal, optional current-effect authority and actual-completion accounting.
 #[derive(Clone)]
 pub struct RequestCancellation {
     signal: watch::Receiver<bool>,
     keepalive: Option<SharedRequestKeepalive>,
+    authority: Option<Arc<dyn RequestAuthority>>,
 }
 
 impl fmt::Debug for RequestCancellation {
@@ -176,6 +272,7 @@ impl fmt::Debug for RequestCancellation {
         f.debug_struct("RequestCancellation")
             .field("cancelled", &self.is_cancelled())
             .field("has_keepalive", &self.keepalive.is_some())
+            .field("has_authority", &self.authority.is_some())
             .finish()
     }
 }
@@ -183,18 +280,42 @@ impl fmt::Debug for RequestCancellation {
 impl RequestCancellation {
     /// Bind a native cancellation receiver to accounting that outlives the caller future.
     pub fn new(signal: watch::Receiver<bool>, keepalive: Option<SharedRequestKeepalive>) -> Self {
-        Self { signal, keepalive }
+        Self {
+            signal,
+            keepalive,
+            authority: None,
+        }
     }
 
-    /// Whether cancellation was already published.
+    /// Add an exact native effect owner without changing lower-layer accounting custody.
+    /// A queued driver checks it synchronously, so a separate task need not propagate revocation
+    /// through another cancellation channel before the driver can refuse stale work.
+    pub fn with_authority(mut self, authority: Arc<dyn RequestAuthority>) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+
+    /// Whether cancellation was published, its publisher disappeared, or authority was revoked.
     pub fn is_cancelled(&self) -> bool {
         *self.signal.borrow()
+            || self.signal.has_changed().is_err()
+            || self
+                .authority
+                .as_ref()
+                .is_some_and(|owner| !owner.authorized())
     }
 
     /// Wait until cancellation is published or its authority disappears.
     pub async fn cancelled(&mut self) {
+        let authority = self.authority.clone();
         while !self.is_cancelled() {
-            if self.signal.changed().await.is_err() {
+            if let Some(owner) = &authority {
+                tokio::select! {
+                    biased;
+                    _ = owner.revoked() => break,
+                    changed = self.signal.changed() => if changed.is_err() { break; },
+                }
+            } else if self.signal.changed().await.is_err() {
                 break;
             }
         }
@@ -268,14 +389,123 @@ pub trait DialPermit: Send + fmt::Debug {
 /// Owned permit passed through an object-safe transport seam.
 pub type BoxedDialPermit = Box<dyn DialPermit>;
 
-/// Reply handle handed to a request handler. Dropping it without calling
-/// [`Responder::respond`] surfaces [`TransportError::NoResponse`] to the caller.
+/// Capacity-only response custody. Implementations prepay actual queued/lower response buffers
+/// before accepting the bytes; they must not mutate protocol state or grant authorization.
+pub trait ResponseBudget: Send + Sync + fmt::Debug {
+    fn retain(
+        self: Arc<Self>,
+        actual_bytes: usize,
+    ) -> Result<SharedRequestKeepalive, TransportError>;
+}
+
+/// An admitted response together with opaque custody for its actual lower serialized copy.
+/// Native transports retain that owner until actual send/failure, separately from byte clones.
+#[derive(Debug)]
+pub struct ResponderReply {
+    data: Bytes,
+    custody: Option<SharedRequestKeepalive>,
+    effect: Option<Arc<dyn RequestAuthority>>,
+}
+impl ResponderReply {
+    /// Present-time application effect gate, independent of the driver's original ingress gate.
+    /// Drivers MUST check both immediately before copying/submitting a response. Bytes/credits
+    /// remain owned after revocation; a false observation grants no accounting refund.
+    pub fn is_current(&self) -> bool {
+        self.effect
+            .as_ref()
+            .is_none_or(|effect| effect.authorized())
+    }
+    /// Borrow the exact admitted bytes without detaching their capacity owner.
+    pub fn data(&self) -> &Bytes {
+        &self.data
+    }
+    /// Lend capacity custody only; this grants no response or application authorization.
+    pub fn keepalive(&self) -> Option<SharedRequestKeepalive> {
+        self.custody.clone()
+    }
+    /// Transfer the Bytes owner; its last clone still retains any response byte credit.
+    /// This is not an authority check. Transport callers must check is_current at admission.
+    pub fn into_bytes(self) -> Bytes {
+        self.data
+    }
+}
+/// Fixed two-owner composition: the driver prepays its lower serialization, while a service
+/// can retain its own chain/read owner through that actual send. Never flatten either into byte
+/// ownership alone: a native driver copies Bytes into a Vec and then drops those original bytes.
+#[derive(Debug)]
+struct ReplyCustody {
+    _driver: SharedRequestKeepalive,
+    _service: SharedRequestKeepalive,
+}
+struct OwnedReplyBytes {
+    data: Bytes,
+    _custody: SharedRequestKeepalive,
+}
+impl AsRef<[u8]> for OwnedReplyBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+/// Reply-bearing work may continue only while the driver still awaits its answer. This owner
+/// is deliberately separate from ingress and byte custody: receiving a reply retires it before
+/// the driver sends that reply, while the original ingress and response credits remain alive.
+#[derive(Debug)]
+struct ReplyLifetime {
+    live: std::sync::atomic::AtomicBool,
+    changed: watch::Sender<bool>,
+    ingress: Option<Arc<dyn RequestAuthority>>,
+}
+impl ReplyLifetime {
+    fn new(ingress: Option<Arc<dyn RequestAuthority>>) -> Arc<Self> {
+        Arc::new(Self {
+            live: std::sync::atomic::AtomicBool::new(true),
+            changed: watch::channel(true).0,
+            ingress,
+        })
+    }
+    fn retire(&self) {
+        self.live.store(false, std::sync::atomic::Ordering::Release);
+        self.changed.send_replace(false);
+    }
+}
+#[async_trait]
+impl RequestAuthority for ReplyLifetime {
+    fn authorized(&self) -> bool {
+        self.live.load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .ingress
+                .as_ref()
+                .is_none_or(|ingress| ingress.authorized())
+    }
+    async fn revoked(&self) {
+        // Register before inspecting either owner, including a receiver dropped before the
+        // first poll. Ingress implements the same register-before-recheck contract itself.
+        let mut changed = self.changed.subscribe();
+        while self.authorized() {
+            if let Some(ingress) = &self.ingress {
+                tokio::select! {
+                    _ = ingress.revoked() => return,
+                    result = changed.changed() => if result.is_err() { return; },
+                }
+            } else if changed.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Reply handle with optional exact driver lifetime and capacity owners. These owners grant
+/// neither membership nor application effects; the handler still authenticates its request.
+/// Dropping without replying surfaces honest NoResponse to the remote caller.
 #[derive(Debug)]
 pub struct Responder {
-    pub(crate) reply: oneshot::Sender<Bytes>,
+    reply: oneshot::Sender<ResponderReply>,
     /// Optional request accounting retained by in-memory delivery until the queued request is
     /// actually handled or dropped. Production libp2p keeps the same authority in `pending_req`.
     pub(crate) _keepalive: Option<SharedRequestKeepalive>,
+    lifetime: Arc<ReplyLifetime>,
+    response_budget: Option<Arc<dyn ResponseBudget>>,
 }
 
 impl Responder {
@@ -288,7 +518,125 @@ impl Responder {
     /// Success means the channel accepted the bytes, even if they have not been read yet.
     /// It does NOT prove the transport driver sent them or that the remote peer received them.
     pub fn try_respond(self, data: Bytes) -> Result<(), TransportError> {
-        self.reply.send(data).map_err(|_| TransportError::Closed)
+        self.try_respond_inner(data, None, None)
+    }
+
+    /// Queue a reply under an additional observing native scope/deadline authority. It must not
+    /// keep its revocation publisher, Root, native entry or keys alive. Drivers repeat the check
+    /// at actual response admission; success here proves only local channel acceptance.
+    ///
+    /// Do NOT include cancellation_authority() in this final effect gate: receiving the response
+    /// retires that reply-wait lifetime BEFORE network send and would cancel every success.
+    /// Deferred work uses scope + reply lifetime; final sending uses scope alone. Revocation
+    /// cannot retract an already admitted send or refund still-owned buffers/lower requests.
+    pub fn try_respond_with_authority(
+        self,
+        data: Bytes,
+        authority: Arc<dyn RequestAuthority>,
+    ) -> Result<(), TransportError> {
+        self.try_respond_inner(data, Some(authority), None)
+    }
+
+    /// Queue a scoped response whose service capacity must follow BOTH original byte clones
+    /// and the native driver's serialized lower copy until actual send/failure. The supplied
+    /// owner is native accounting only: it grants no authority and does not replace the driver's
+    /// independent ResponseBudget. A service must prepay it before accepting its bounded work.
+    /// It must retain real buffers/credits, not an outer permit refunded when a waiter times out.
+    pub fn try_respond_with_custody(
+        self,
+        data: Bytes,
+        authority: Arc<dyn RequestAuthority>,
+        service: SharedRequestKeepalive,
+    ) -> Result<(), TransportError> {
+        self.try_respond_inner(data, Some(authority), Some(service))
+    }
+
+    fn try_respond_inner(
+        self,
+        data: Bytes,
+        effect: Option<Arc<dyn RequestAuthority>>,
+        service: Option<SharedRequestKeepalive>,
+    ) -> Result<(), TransportError> {
+        // Custody must protect the INPUT even when authority/receiver/budget refuses below.
+        // Parameter drop order must never return its service allowance while the final bytes
+        // still exist. The later composite additionally covers actual driver serialization.
+        let data = if let Some(custody) = &service {
+            Bytes::from_owner(OwnedReplyBytes {
+                data,
+                _custody: custody.clone(),
+            })
+        } else {
+            data
+        };
+        if self
+            .lifetime
+            .ingress
+            .as_ref()
+            .is_some_and(|authority| !authority.authorized())
+        {
+            return Err(TransportError::Cancelled);
+        }
+        if effect.as_ref().is_some_and(|effect| !effect.authorized()) {
+            return Err(TransportError::Cancelled);
+        }
+        // Preserve the ingress refusal above, but a known-dead reply receiver needs no new
+        // capacity callback. Its retirement cannot refund any already-owned lower buffers.
+        if self.reply.is_closed() || !self.lifetime.authorized() {
+            return Err(TransportError::Closed);
+        }
+        let custody = self
+            .response_budget
+            .as_ref()
+            .map(|budget| budget.clone().retain(data.len()))
+            .transpose()?;
+        let custody = match (custody, service) {
+            (Some(driver), Some(service)) => Some(Arc::new(ReplyCustody {
+                _driver: driver,
+                _service: service,
+            }) as SharedRequestKeepalive),
+            (Some(driver), None) => Some(driver),
+            (None, service) => service,
+        };
+        let data = if let Some(custody) = &custody {
+            Bytes::from_owner(OwnedReplyBytes {
+                data,
+                _custody: custody.clone(),
+            })
+        } else {
+            data
+        };
+        self.reply
+            .send(ResponderReply {
+                data,
+                custody,
+                effect,
+            })
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// Driver ingress custody remains current only through its original connection and lower
+    /// response owner. This is transport lifetime, not membership or application authorization.
+    pub fn is_current(&self) -> bool {
+        !self.reply.is_closed() && self.lifetime.authorized()
+    }
+
+    /// A bounded native lifetime for deferred reply-bearing work. A receiver drop revokes it
+    /// synchronously, so a queued lower driver can refuse work without waiting for a forwarding
+    /// task to propagate cancellation. It also follows the original ingress revocation.
+    ///
+    /// This grants no membership, group, deadline or application authority. Compose those at
+    /// each real effect edge. It ends when the receiver consumes a reply, BEFORE network send;
+    /// drivers must retain their original ingress authority and actual byte/stream custody.
+    /// Fire-and-forget notifications may already have no receiver and must not be discarded
+    /// merely because this reply-specific lifetime is retired.
+    pub fn cancellation_authority(&self) -> Arc<dyn RequestAuthority> {
+        self.lifetime.clone()
+    }
+
+    /// Wait for receiver loss/consumption or original ingress revocation. Cancelling this wait
+    /// does not consume the responder or release any accounting retained by other owners.
+    pub async fn cancelled(&self) {
+        self.lifetime.revoked().await;
     }
 
     /// Create a responder paired with its receiver. A transport implementation
@@ -297,24 +645,80 @@ impl Responder {
     /// reply and forward it over the wire.
     pub fn channel() -> (Responder, ResponderRx) {
         let (tx, rx) = oneshot::channel();
+        let lifetime = ReplyLifetime::new(None);
         (
             Responder {
                 reply: tx,
                 _keepalive: None,
+                lifetime: lifetime.clone(),
+                response_budget: None,
             },
-            ResponderRx(rx),
+            ResponderRx {
+                reply: rx,
+                _keepalive: None,
+                lifetime,
+            },
+        )
+    }
+
+    /// Bind exact ingress lifetime and retained accounting before either half escapes. Both the
+    /// application reply and driver waiter retain actual custody; dropping an outer waiter alone
+    /// cannot refund a queued payload or a still-owned lower response channel.
+    pub fn channel_owned(
+        keepalive: SharedRequestKeepalive,
+        authority: Arc<dyn RequestAuthority>,
+        response_budget: Arc<dyn ResponseBudget>,
+    ) -> (Responder, ResponderRx) {
+        let (reply, receiver) = oneshot::channel();
+        let lifetime = ReplyLifetime::new(Some(authority));
+        (
+            Responder {
+                reply,
+                _keepalive: Some(keepalive.clone()),
+                lifetime: lifetime.clone(),
+                response_budget: Some(response_budget),
+            },
+            ResponderRx {
+                reply: receiver,
+                _keepalive: Some(keepalive),
+                lifetime,
+            },
         )
     }
 }
 
 /// The receiving half of a [`Responder`], held by a transport implementation.
 #[derive(Debug)]
-pub struct ResponderRx(oneshot::Receiver<Bytes>);
+pub struct ResponderRx {
+    reply: oneshot::Receiver<ResponderReply>,
+    _keepalive: Option<SharedRequestKeepalive>,
+    lifetime: Arc<ReplyLifetime>,
+}
+
+impl Drop for ResponderRx {
+    fn drop(&mut self) {
+        // Revoke before releasing any receiver/accounting field. Outstanding lower owners are
+        // independent and remain charged; this only prevents another deferred effect.
+        self.lifetime.retire();
+    }
+}
 
 impl ResponderRx {
     /// Await the reply, or `None` if the responder was dropped without replying.
     pub async fn recv(self) -> Option<Bytes> {
-        self.0.await.ok()
+        self.recv_owned().await.map(ResponderReply::into_bytes)
+    }
+    /// Keep the response's actual lower-owner custody distinct from its byte clones. Drivers
+    /// transfer this keepalive into their pending table until real ResponseSent/Failure.
+    pub async fn recv_owned(mut self) -> Option<ResponderReply> {
+        // Keep the whole receiver (and its Drop) inside this future. Dropping an unpolled or
+        // pending receive must synchronously revoke the authority exported to queued drivers.
+        // A scope can retire after the handler queued its reply. This is the in-memory final
+        // admission edge; native drivers MUST repeat it after this transfer before their copy.
+        (&mut self.reply)
+            .await
+            .ok()
+            .filter(ResponderReply::is_current)
     }
 }
 
@@ -411,6 +815,9 @@ pub struct PeerConnectionSnapshot {
 /// An inbound transport event, drained via [`MeshTransport::next_event`].
 #[derive(Debug)]
 pub enum TransportEvent {
+    /// Best-effort gossip was dropped under bounded local delivery pressure. Reconcile through
+    /// existing authenticated membership/document recovery; this signal itself grants nothing.
+    RecoveryNeeded,
     /// A gossip message delivered on a subscribed topic.
     Gossip {
         /// The topic it arrived on.
@@ -439,8 +846,10 @@ pub enum TransportEvent {
     /// time-bounded historical success after the connection closes. `active` is a full snapshot,
     /// not a delta, so consumers do not reconstruct path state. Events share the ordered
     /// `MeshTransport::next_event` stream; no cross-stream reordering guarantee is implied.
-    /// Existing `PeerConnected`/`PeerDisconnected` events retain their one-per-peer semantics for
-    /// callers interested only in aggregate liveness.
+    /// These are aggregate liveness edges, not one event per socket. Under congestion a driver
+    /// may coalesce a connection generation which was never announced to this stream. An
+    /// announced generation's disconnect and empty paths precede its replacement's connect;
+    /// captured connection leases still revoke immediately, before event consumption.
     PeerPathsChanged {
         /// The peer whose path set changed.
         peer: PeerId,
@@ -503,6 +912,18 @@ pub trait MeshTransport: Send + Sync {
     /// by [`MAX_CONNECTION_PATH_SNAPSHOT`].
     fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
         Vec::new()
+    }
+    /// Capture the actual driver's current connection owner without consuming events. Consumers
+    /// must retain and recheck this exact lease at queued submission and completion. A current
+    /// snapshot alone cannot distinguish disconnect/reconnect before its events are drained.
+    /// Unsupported transports return None; upgraded effects must fail closed, never synthesize it.
+    fn connection_lease(&self, _peer: PeerId) -> Option<ConnectionLease> {
+        None
+    }
+    /// Legacy maintenance may use event-driven fencing on unsupported transports. Implementors
+    /// with this capability return true even while a peer is disconnected (and its lease None).
+    fn supports_connection_leases(&self) -> bool {
+        false
     }
 
     /// Start receiving gossip on `topic`.
@@ -617,6 +1038,20 @@ pub trait MeshTransport: Send + Sync {
         peer: PeerId,
         _proto: ProtocolId,
         _data: Bytes,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
+
+    /// Admit an authorized connected-only notification, acknowledging local driver admission
+    /// only. The lower request retains cancellation.keepalive through actual response/failure,
+    /// but response payloads are discarded in the driver, never queued as application answers.
+    /// Unsupported transports fail closed; falling back to request would add unbudgeted replies.
+    async fn notify_connected_cancellable(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        _data: Bytes,
+        _cancellation: RequestCancellation,
     ) -> Result<(), TransportError> {
         Err(TransportError::Unreachable(peer))
     }
@@ -816,8 +1251,328 @@ pub trait MeshTransport: Send + Sync {
 }
 
 #[cfg(test)]
+mod authority_tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct Gate {
+        live: AtomicBool,
+        changed: watch::Sender<bool>,
+        revoke_at_registration: bool,
+    }
+    impl Gate {
+        fn new(revoke_at_registration: bool) -> Arc<Self> {
+            Arc::new(Self {
+                live: AtomicBool::new(true),
+                changed: watch::channel(false).0,
+                revoke_at_registration,
+            })
+        }
+        fn revoke(&self) {
+            self.live.store(false, Ordering::Release);
+            self.changed.send_replace(true);
+        }
+    }
+    #[async_trait]
+    impl RequestAuthority for Gate {
+        fn authorized(&self) -> bool {
+            self.live.load(Ordering::Acquire)
+        }
+        async fn revoked(&self) {
+            // Exercise revocation between the caller's first check and wake registration.
+            if self.revoke_at_registration {
+                self.revoke();
+            }
+            let mut receiver = self.changed.subscribe();
+            while self.authorized() {
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn request_authority_refuses_stale_queued_work_without_a_propagation_task() {
+        let (_cancel, receiver) = watch::channel(false);
+        let authority = Gate::new(false);
+        let mut cancellation =
+            RequestCancellation::new(receiver, None).with_authority(authority.clone());
+        assert!(!cancellation.is_cancelled());
+        authority.revoke();
+        assert!(cancellation.is_cancelled());
+        cancellation.cancelled().await;
+    }
+
+    #[tokio::test]
+    async fn request_authority_registration_race_and_pending_revocation_wake() {
+        for at_registration in [true, false] {
+            let (_cancel, receiver) = watch::channel(false);
+            let authority = Gate::new(at_registration);
+            let mut cancellation =
+                RequestCancellation::new(receiver, None).with_authority(authority.clone());
+            // Poll once to prove the ordinary path registered a pending waiter. The race path
+            // revokes while that waiter is being registered and must already be ready.
+            let mut waiting = std::pin::pin!(cancellation.cancelled());
+            std::future::poll_fn(|cx| {
+                let polled = waiting.as_mut().poll(cx);
+                if at_registration {
+                    assert!(polled.is_ready());
+                } else {
+                    assert!(polled.is_pending());
+                }
+                std::task::Poll::Ready(())
+            })
+            .await;
+            authority.revoke();
+            if !at_registration {
+                waiting.await;
+            }
+        }
+    }
+
+    #[test]
+    fn a_closed_cancellation_owner_refuses_queued_work() {
+        let (cancel, receiver) = watch::channel(false);
+        let cancellation = RequestCancellation::new(receiver, None);
+        drop(cancel);
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[derive(Debug)]
+    struct UnusedBudget;
+    impl ResponseBudget for UnusedBudget {
+        fn retain(self: Arc<Self>, _: usize) -> Result<SharedRequestKeepalive, TransportError> {
+            panic!("revoked ingress must refuse before retaining response bytes")
+        }
+    }
+
+    #[test]
+    fn refused_service_reply_releases_original_bytes_before_its_last_capacity_owner() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Input {
+            data: Vec<u8>,
+            dropped: Arc<AtomicBool>,
+        }
+        impl AsRef<[u8]> for Input {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
+        }
+        impl Drop for Input {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        #[derive(Debug)]
+        struct Credit {
+            input_dropped: Arc<AtomicBool>,
+            observed_retired: Arc<AtomicBool>,
+        }
+        impl Drop for Credit {
+            fn drop(&mut self) {
+                self.observed_retired
+                    .store(self.input_dropped.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+        }
+        #[derive(Debug)]
+        struct Refuse;
+        impl ResponseBudget for Refuse {
+            fn retain(self: Arc<Self>, _: usize) -> Result<SharedRequestKeepalive, TransportError> {
+                Err(TransportError::NoResponse)
+            }
+        }
+        // Exercise every refusal BEFORE the accepted-response composite is created.
+        for boundary in 0..4 {
+            let input_dropped = Arc::new(AtomicBool::new(false));
+            let observed_retired = Arc::new(AtomicBool::new(false));
+            let data = Bytes::from_owner(Input {
+                data: vec![7; 1024],
+                dropped: input_dropped.clone(),
+            });
+            let service: SharedRequestKeepalive = Arc::new(Credit {
+                input_dropped,
+                observed_retired: observed_retired.clone(),
+            });
+            let effect = Gate::new(false);
+            let ingress = Gate::new(false);
+            let (responder, receiver) =
+                Responder::channel_owned(Arc::new(()), ingress.clone(), Arc::new(Refuse));
+            if boundary == 0 {
+                effect.revoke();
+            }
+            if boundary == 3 {
+                ingress.revoke();
+            }
+            let receiver = if boundary == 1 {
+                drop(receiver);
+                None
+            } else {
+                Some(receiver)
+            };
+            assert!(responder
+                .try_respond_with_custody(data, effect, service)
+                .is_err());
+            assert!(
+                observed_retired.load(Ordering::SeqCst),
+                "boundary {boundary} refunded live input bytes"
+            );
+            drop(receiver);
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_reply_authority_follows_original_ingress_and_registration_race() {
+        for at_registration in [true, false] {
+            let ingress = Gate::new(at_registration);
+            let (responder, _receiver) =
+                Responder::channel_owned(Arc::new(()), ingress.clone(), Arc::new(UnusedBudget));
+            let authority = responder.cancellation_authority();
+            assert!(authority.authorized());
+            let mut waiting = std::pin::pin!(authority.revoked());
+            std::future::poll_fn(|cx| {
+                let polled = waiting.as_mut().poll(cx);
+                assert_eq!(polled.is_ready(), at_registration);
+                std::task::Poll::Ready(())
+            })
+            .await;
+            ingress.revoke();
+            if !at_registration {
+                waiting.await;
+            }
+            assert!(!authority.authorized());
+            assert!(!responder.is_current());
+            assert!(matches!(
+                responder.try_respond(Bytes::new()),
+                Err(TransportError::Cancelled)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_reply_effect_refuses_before_budget_and_queued_receive() {
+        let effect = Gate::new(false);
+        effect.revoke();
+        let (responder, receiver) =
+            Responder::channel_owned(Arc::new(()), Gate::new(false), Arc::new(UnusedBudget));
+        assert!(matches!(
+            responder.try_respond_with_authority(Bytes::new(), effect),
+            Err(TransportError::Cancelled)
+        ));
+        assert!(receiver.recv_owned().await.is_none());
+
+        let effect = Gate::new(false);
+        let (responder, receiver) = Responder::channel();
+        responder
+            .try_respond_with_authority(Bytes::from_static(b"queued"), effect.clone())
+            .unwrap();
+        effect.revoke();
+        assert!(receiver.recv_owned().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reply_effect_outlives_wait_transfer_but_not_its_scope() {
+        let effect = Gate::new(false);
+        let (responder, receiver) = Responder::channel();
+        let work = responder.cancellation_authority();
+        responder
+            .try_respond_with_authority(Bytes::from_static(b"valid"), effect.clone())
+            .unwrap();
+        let response = receiver.recv_owned().await.unwrap();
+        assert!(!work.authorized());
+        assert!(
+            response.is_current(),
+            "final scope excludes the retired reply wait"
+        );
+        effect.revoke();
+        assert!(!response.is_current());
+        assert_eq!(
+            response.data().as_ref(),
+            b"valid",
+            "revocation cannot recall owned buffers"
+        );
+    }
+
+    #[derive(Debug)]
+    struct RetainedResponseOwner(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for RetainedResponseOwner {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    #[derive(Debug)]
+    struct CountedResponseBudget(Arc<std::sync::atomic::AtomicUsize>);
+    impl ResponseBudget for CountedResponseBudget {
+        fn retain(self: Arc<Self>, _: usize) -> Result<SharedRequestKeepalive, TransportError> {
+            Ok(Arc::new(RetainedResponseOwner(self.0.clone())))
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_service_custody_follows_byte_clones_and_actual_lower_independently() {
+        use std::sync::atomic::AtomicUsize;
+        for driver_budget in [false, true] {
+            let lower_drops = Arc::new(AtomicUsize::new(0));
+            let service_drops = Arc::new(AtomicUsize::new(0));
+            let effect = Gate::new(false);
+            let (responder, receiver) = if driver_budget {
+                Responder::channel_owned(
+                    Arc::new(()),
+                    Gate::new(false),
+                    Arc::new(CountedResponseBudget(lower_drops.clone())),
+                )
+            } else {
+                Responder::channel()
+            };
+            responder
+                .try_respond_with_custody(
+                    Bytes::from_static(b"exact page"),
+                    effect.clone(),
+                    Arc::new(RetainedResponseOwner(service_drops.clone())),
+                )
+                .unwrap();
+            let response = receiver.recv_owned().await.unwrap();
+            let actual_lower = response
+                .keepalive()
+                .expect("explicit service custody transfers even without driver budget");
+            let byte_clone = response.data().clone();
+            drop(response);
+            effect.revoke();
+            assert_eq!(service_drops.load(Ordering::SeqCst), 0);
+            drop(byte_clone);
+            assert_eq!(
+                service_drops.load(Ordering::SeqCst),
+                0,
+                "actual lower serialization still owns service capacity"
+            );
+            assert_eq!(lower_drops.load(Ordering::SeqCst), 0);
+            drop(actual_lower);
+            assert_eq!(service_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                lower_drops.load(Ordering::SeqCst),
+                usize::from(driver_budget)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_owned_receiver_refuses_before_response_budget_admission() {
+        let (responder, receiver) =
+            Responder::channel_owned(Arc::new(()), Gate::new(false), Arc::new(UnusedBudget));
+        drop(receiver);
+        assert!(matches!(
+            responder.try_respond(Bytes::from_static(b"late response")),
+            Err(TransportError::Closed)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod response_tests {
     use super::*;
+    use std::future::Future;
 
     #[tokio::test]
     async fn checked_response_accepts_an_unread_channel_but_refuses_a_dropped_receiver() {
@@ -832,6 +1587,71 @@ mod response_tests {
         let (tx, rx) = Responder::channel();
         drop(rx);
         tx.respond(Bytes::new());
+    }
+
+    #[tokio::test]
+    async fn receiver_drop_synchronously_retires_queued_authority_without_a_wait_task() {
+        let (responder, receiver) = Responder::channel();
+        let authority = responder.cancellation_authority();
+        let (_cancel, signal) = watch::channel(false);
+        let queued = RequestCancellation::new(signal, None).with_authority(authority.clone());
+        assert!(!queued.is_cancelled());
+        drop(receiver);
+        assert!(
+            queued.is_cancelled(),
+            "driver checks require no propagation poll"
+        );
+        authority.revoked().await;
+        let (_replacement, _replacement_receiver) = Responder::channel();
+        assert!(
+            !authority.authorized(),
+            "another request cannot revive this owner"
+        );
+        assert!(!responder.is_current());
+    }
+
+    #[tokio::test]
+    async fn abandoned_unpolled_or_pending_receive_retires_deferred_reply_work() {
+        for poll_receive in [false, true] {
+            let (responder, receiver) = Responder::channel();
+            let authority = responder.cancellation_authority();
+            let mut receiving = Box::pin(receiver.recv_owned());
+            if poll_receive {
+                std::future::poll_fn(|cx| {
+                    assert!(receiving.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+            }
+            assert!(authority.authorized());
+            drop(receiving);
+            assert!(!authority.authorized());
+            responder.cancelled().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_deferred_wait_wakes_and_reply_transfer_ends_only_reply_authority() {
+        let (responder, receiver) = Responder::channel();
+        let mut waiting = std::pin::pin!(responder.cancelled());
+        std::future::poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(receiver);
+        waiting.await;
+
+        let (responder, receiver) = Responder::channel();
+        let authority = responder.cancellation_authority();
+        responder.try_respond(Bytes::from_static(b"reply")).unwrap();
+        assert!(
+            authority.authorized(),
+            "unread reply remains owned by its receiver"
+        );
+        let reply = receiver.recv_owned().await.unwrap();
+        assert!(!authority.authorized());
+        assert_eq!(reply.data().as_ref(), b"reply");
     }
 }
 
@@ -884,6 +1704,8 @@ mod publication_tests {
         let transport: &dyn MeshTransport = &LegacyOnly;
         let (_sender, receiver) = watch::channel(false);
         let peer = PeerId::from_u64(1);
+        assert!(!transport.supports_connection_leases());
+        assert!(transport.connection_lease(peer).is_none());
         assert!(matches!(
             transport.request_connected_cancellable(peer, ProtocolId("test"), Bytes::new(),
                 RequestCancellation::new(receiver, None)).await,

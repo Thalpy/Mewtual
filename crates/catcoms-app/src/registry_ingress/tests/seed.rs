@@ -27,269 +27,206 @@ async fn fetched_fixture(queue_epoch_zero: bool) -> SeedFixture {
     fetched_fixture_mode(queue_epoch_zero, false).await
 }
 
-async fn fetched_fixture_mode(queue_epoch_zero: bool, owner_generated: bool) -> SeedFixture {
-    assert!(!queue_epoch_zero || !owner_generated);
-    let mut p = Pair::new().await;
-    let key = (0u32..)
-        .map(|n| PointerKey::new(DocType::StudioObject, n.to_be_bytes().to_vec()).unwrap())
-        .find(|k| k.bucket() != p.key.bucket())
-        .unwrap();
-    let bucket = key.bucket();
-    let document = registry_document(&p.alice.group_id(), bucket).unwrap();
-    let id = epoch_zero_id(DocType::DocRegistry, &document.logical_key);
-    let (receipt, close, seed) = p.alice.sync.with_registry_context(|g, d, _, r| {
-        let mut writer =
-            AutoCommit::new().with_actor(ActorId::from(d.device_id().as_bytes().to_vec()));
-        for n in 0..10u8 {
-            let op = RegistryOp::Put {
-                key: key.clone(),
-                epoch: u64::from(n),
-            }
-            .domain_op(&g.group_id(), [n; 16])
+fn fetched_fixture_mode(
+    queue_epoch_zero: bool,
+    owner_generated: bool,
+) -> impl std::future::Future<Output = SeedFixture> {
+    // Keep this large two-server, multi-phase fixture off each caller's inline future. The
+    // joined receive/serve phases otherwise coexist with the caller's installation/recovery
+    // state and overflow the default Windows test stack. This changes storage only: the real
+    // admission, fetch and assertion paths below still run on the ordinary test runtime.
+    Box::pin(async move {
+        assert!(!queue_epoch_zero || !owner_generated);
+        let mut p = Pair::new().await;
+        let key = (0u32..)
+            .map(|n| PointerKey::new(DocType::StudioObject, n.to_be_bytes().to_vec()).unwrap())
+            .find(|k| k.bucket() != p.key.bucket())
             .unwrap();
-            for (field, value) in [("bucket", u64::from(bucket)), ("epoch", 0), ("v", 1)] {
-                writer.put(ROOT, field, value).unwrap();
+        let bucket = key.bucket();
+        let document = registry_document(&p.alice.group_id(), bucket).unwrap();
+        let id = epoch_zero_id(DocType::DocRegistry, &document.logical_key);
+        let (receipt, close, seed) = p.alice.sync.with_registry_context(|g, d, _, r| {
+            let mut writer =
+                AutoCommit::new().with_actor(ActorId::from(d.device_id().as_bytes().to_vec()));
+            for n in 0..10u8 {
+                let op = RegistryOp::Put {
+                    key: key.clone(),
+                    epoch: u64::from(n),
+                }
+                .domain_op(&g.group_id(), [n; 16])
+                .unwrap();
+                for (field, value) in [("bucket", u64::from(bucket)), ("epoch", 0), ("v", 1)] {
+                    writer.put(ROOT, field, value).unwrap();
+                }
+                writer.put(ROOT, "kind", "registry").unwrap();
+                writer
+                    .put(ROOT, "key", hex::encode(&document.logical_key))
+                    .unwrap();
+                writer
+                    .put(
+                        ROOT,
+                        format!("p/0010/{}", hex::encode(key.logical_key())),
+                        u64::from(n),
+                    )
+                    .unwrap();
+                writer
+                    .put(
+                        ROOT,
+                        format!("_p1/op/{}", hex::encode(op.id(&d.device_id()))),
+                        1u64,
+                    )
+                    .unwrap();
+                // Real signed bytes meet the production close threshold without 10,000 disk edits.
+                writer.commit_with(CommitOptions::default().with_message("x".repeat(220_000)));
+                let signed = SignedOp::sign_domain(
+                    d,
+                    DocType::DocRegistry,
+                    id,
+                    writer.get_last_local_change().unwrap().raw_bytes().to_vec(),
+                    &op,
+                )
+                .unwrap();
+                let sealed = SealedOp::seal(&signed, g, d, r).unwrap();
+                p.alice_store
+                    .ingest_registry_epoch(SERVER, g, bucket, d, &sealed, r, &mut p.alice_budget)
+                    .unwrap();
             }
-            writer.put(ROOT, "kind", "registry").unwrap();
-            writer
-                .put(ROOT, "key", hex::encode(&document.logical_key))
-                .unwrap();
-            writer
-                .put(
-                    ROOT,
-                    format!("p/0010/{}", hex::encode(key.logical_key())),
-                    u64::from(n),
-                )
-                .unwrap();
-            writer
-                .put(
-                    ROOT,
-                    format!("_p1/op/{}", hex::encode(op.id(&d.device_id()))),
-                    1u64,
-                )
-                .unwrap();
-            // Real signed bytes meet the production close threshold without 10,000 disk edits.
-            writer.commit_with(CommitOptions::default().with_message("x".repeat(220_000)));
-            let signed = SignedOp::sign_domain(
-                d,
-                DocType::DocRegistry,
+            let close = CloseRecord::sign(
+                &document,
                 id,
-                writer.get_last_local_change().unwrap().raw_bytes().to_vec(),
-                &op,
+                0,
+                writer.get_heads().into_iter().map(|h| h.0).collect(),
+                d,
             )
             .unwrap();
-            let sealed = SealedOp::seal(&signed, g, d, r).unwrap();
-            p.alice_store
-                .ingest_registry_epoch(SERVER, g, bucket, d, &sealed, r, &mut p.alice_budget)
+            let state = p
+                .alice_store
+                .load_registry_epoch(SERVER, g, bucket, d)
+                .unwrap()
                 .unwrap();
-        }
-        let close = CloseRecord::sign(
-            &document,
-            id,
-            0,
-            writer.get_heads().into_iter().map(|h| h.0).collect(),
-            d,
-        )
-        .unwrap();
-        let state = p
-            .alice_store
-            .load_registry_epoch(SERVER, g, bucket, d)
-            .unwrap()
-            .unwrap();
-        let seed = state
-            .projection()
-            .unwrap()
-            .checkpoint(close.hash())
-            .unwrap();
-        let receipt = Receipt::sign(
-            document.clone(),
-            0,
-            close.hash(),
-            seed.change_hash(),
-            0,
-            InheritedCheckpoint::EpochZero,
-            d,
-        )
-        .unwrap();
-        if !owner_generated {
-            p.alice_store
-                .prepare_epoch_owner_receipt(SERVER, receipt.clone(), g, 0, r, &mut p.alice_budget)
+            let seed = state
+                .projection()
+                .unwrap()
+                .checkpoint(close.hash())
                 .unwrap();
-            p.alice_store
-                .seal_registry_epoch(
-                    SERVER,
-                    g,
-                    bucket,
-                    d,
-                    receipt.clone(),
-                    0,
-                    r,
-                    &mut p.alice_budget,
-                )
-                .unwrap();
-        }
-        (receipt, close.encode(), seed)
-    });
-    let (proof, tick) = tokio::join!(
-        p.bob
-            .sync
-            .request_catchup(p.alice.local_peer(), DocType::Wiki, 125),
-        p.alice.sync_once()
-    );
-    proof.unwrap();
-    tick.unwrap();
-    let head_watch = p.alice.watch_registry_head(&p.alice_store, SERVER, bucket);
-    let seed_watch = p.alice.watch_registry_seed(&p.alice_store, SERVER, bucket);
-    let permit = p
-        .alice
-        .prepare_owner_head_snapshot(&p.alice_store, SERVER)
-        .unwrap();
-    if owner_generated {
-        assert!(p
-            .alice
-            .rotate_registry_owner_step(
-                &mut p.alice_store,
-                SERVER + 1,
-                bucket,
-                &permit,
-                &mut p.alice_budget,
-                &mut p.alice_intents
-            )
-            .is_err());
-        assert!(p
-            .alice
-            .rotate_registry_owner_step(
-                &mut p.bob_store,
-                SERVER,
-                bucket,
-                &permit,
-                &mut p.bob_budget,
-                &mut p.alice_intents
-            )
-            .is_err());
-        let (outcome, state) = p
-            .alice
-            .rotate_registry_owner_step(
-                &mut p.alice_store,
-                SERVER,
-                bucket,
-                &permit,
-                &mut p.alice_budget,
-                &mut p.alice_intents,
+            let receipt = Receipt::sign(
+                document.clone(),
+                0,
+                close.hash(),
+                seed.change_hash(),
+                0,
+                InheritedCheckpoint::EpochZero,
+                d,
             )
             .unwrap();
-        assert_eq!(
-            outcome,
-            crate::store::RegistryOwnerRotationOutcome::Installed {
-                publication_pending: true
+            if !owner_generated {
+                p.alice_store
+                    .prepare_epoch_owner_receipt(
+                        SERVER,
+                        receipt.clone(),
+                        g,
+                        0,
+                        r,
+                        &mut p.alice_budget,
+                    )
+                    .unwrap();
+                p.alice_store
+                    .seal_registry_epoch(
+                        SERVER,
+                        g,
+                        bucket,
+                        d,
+                        receipt.clone(),
+                        0,
+                        r,
+                        &mut p.alice_budget,
+                    )
+                    .unwrap();
             }
-        );
-        assert_eq!(state.epoch(), 1);
-        let journal = p
-            .alice_store
-            .load_epoch_owner_receipts(SERVER, &document)
-            .unwrap();
-        assert_eq!(journal.pending(), Some(&receipt));
-        assert_eq!(journal.close_for(&receipt).unwrap().encode(), close);
-    }
-    let (answer, ()) = tokio::join!(
-        p.bob
-            .discover_registry_seed(&p.bob_store, SERVER, p.alice.local_peer(), bucket),
-        async {
-            p.alice.sync_once().await.unwrap();
-            p.alice
-                .serve_registry_head_step(
-                    &mut p.alice_store,
-                    &head_watch,
-                    Some(&permit),
-                    &mut p.alice_budget,
-                )
-                .unwrap()
-                .unwrap();
-        }
-    );
-    let mut pass = match answer.unwrap().unwrap() {
-        ServerRegistrySeedDiscovery::Selected(pass) => pass,
-        _ => panic!("owner proof"),
-    };
-    let (answer, ()) = tokio::join!(
-        p.bob
-            .fetch_registry_seed_step(&mut pass, p.alice.local_peer()),
-        async {
-            p.alice.sync_once().await.unwrap();
-            p.alice
-                .serve_registry_seed_step(&mut p.alice_store, &seed_watch, &mut p.alice_budget)
-                .unwrap()
-                .unwrap();
-        }
-    );
-    assert_eq!(
-        answer.unwrap(),
-        owner_generated,
-        "only the explicit owner driver has installed its seed"
-    );
-    // Retain an actual old-epoch page, not merely an idle receive handle. After installation
-    // this must still target epoch zero; fetching it must not have created a local document.
-    let queued_epoch_zero = if queue_epoch_zero {
-        let watch = p
-            .bob
-            .watch_registry_epoch(&p.bob_store, SERVER, bucket)
-            .unwrap();
-        p.bob.flush_registry_subscriptions().await.unwrap();
-        let owner_watch = p
-            .alice
-            .watch_registry_epoch(&p.alice_store, SERVER, bucket)
-            .unwrap();
-        p.alice.flush_registry_subscriptions().await.unwrap();
-        let mut receive = p
-            .bob
-            .begin_registry_receive(
-                &mut p.bob_store,
-                &watch,
-                p.alice.local_peer(),
-                &mut p.bob_budget,
-            )
-            .unwrap();
-        let mut provider = p
-            .alice
-            .begin_registry_page_provider(&p.alice_store, SERVER, bucket)
-            .unwrap();
-        crate::registry_catchup::prepare_test_source(&mut p.alice, &p.alice_store, &mut provider)
-            .await
-            .unwrap();
-        let (result, ()) = tokio::join!(p.bob.fetch_registry_receive_step(&mut receive), async {
-            p.alice.sync_once().await.unwrap();
-            p.alice
-                .serve_registry_request_step(&p.alice_store, &mut provider, &owner_watch)
-                .unwrap()
-                .unwrap();
+            (receipt, close.encode(), seed)
         });
-        assert_eq!(result.unwrap(), RegistryReceiveState::PageReady);
-        assert!(receive.progress().received_operations > 0);
-        assert_eq!(receive.progress().saved_pages, 0);
-        Some((watch, receive))
-    } else {
-        None
-    };
-    if !owner_generated {
-        p.alice.sync.with_registry_context(|g, d, clock, r| {
-            p.alice_store
-                .install_registry_checkpoint(
-                    SERVER,
-                    g,
+        let (proof, tick) = tokio::join!(
+            p.bob
+                .sync
+                .request_catchup(p.alice.local_peer(), DocType::Wiki, 125),
+            p.alice.sync_once()
+        );
+        proof.unwrap();
+        tick.unwrap();
+        let head_watch = p.alice.watch_registry_head(&p.alice_store, SERVER, bucket);
+        let seed_watch = p.alice.watch_registry_seed(&p.alice_store, SERVER, bucket);
+        let permit = p
+            .alice
+            .prepare_owner_head_snapshot(&p.alice_store, SERVER)
+            .unwrap();
+        if owner_generated {
+            assert!(p
+                .alice
+                .rotate_registry_owner_step(
+                    &mut p.alice_store,
+                    SERVER + 1,
                     bucket,
-                    d,
-                    &receipt.encode(),
-                    &close,
-                    0,
-                    clock,
-                    r,
+                    &permit,
+                    &mut p.alice_budget,
+                    &mut p.alice_intents
+                )
+                .is_err());
+            assert!(p
+                .alice
+                .rotate_registry_owner_step(
+                    &mut p.bob_store,
+                    SERVER,
+                    bucket,
+                    &permit,
+                    &mut p.bob_budget,
+                    &mut p.alice_intents
+                )
+                .is_err());
+            let (outcome, state) = p
+                .alice
+                .rotate_registry_owner_step(
+                    &mut p.alice_store,
+                    SERVER,
+                    bucket,
+                    &permit,
                     &mut p.alice_budget,
                     &mut p.alice_intents,
                 )
                 .unwrap();
-        });
-        p.clock.advance_ms(1000);
+            assert_eq!(
+                outcome,
+                crate::store::RegistryOwnerRotationOutcome::Installed {
+                    publication_pending: true
+                }
+            );
+            assert_eq!(state.epoch(), 1);
+            let journal = p
+                .alice_store
+                .load_epoch_owner_receipts(SERVER, &document)
+                .unwrap();
+            assert_eq!(journal.pending(), Some(&receipt));
+            assert_eq!(journal.close_for(&receipt).unwrap().encode(), close);
+        }
+        let (answer, ()) = tokio::join!(
+            p.bob
+                .discover_registry_seed(&p.bob_store, SERVER, p.alice.local_peer(), bucket),
+            async {
+                p.alice.sync_once().await.unwrap();
+                p.alice
+                    .serve_registry_head_step(
+                        &mut p.alice_store,
+                        &head_watch,
+                        Some(&permit),
+                        &mut p.alice_budget,
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+        );
+        let mut pass = match answer.unwrap().unwrap() {
+            ServerRegistrySeedDiscovery::Selected(pass) => pass,
+            _ => panic!("owner proof"),
+        };
         let (answer, ()) = tokio::join!(
             p.bob
                 .fetch_registry_seed_step(&mut pass, p.alice.local_peer()),
@@ -301,43 +238,131 @@ async fn fetched_fixture_mode(queue_epoch_zero: bool, owner_generated: bool) -> 
                     .unwrap();
             }
         );
-        assert!(answer.unwrap());
-    }
-    assert!(p.bob.registry_seed_ready(&p.bob_store, SERVER, &pass));
-    assert!(!p.bob.registry_seed_ready(&p.alice_store, SERVER, &pass));
-    assert!(!p.bob.registry_seed_ready(&p.bob_store, SERVER + 1, &pass));
-    p.bob
-        .sync
-        .with_registry_seed(&pass.inner, |_, _, _, selected| {
-            assert_eq!(selected.checkpoint.bytes(), seed.bytes())
-        })
-        .unwrap();
-    p.bob.sync.with_registry_context(|g, d, _, _| {
-        assert!(p
-            .bob_store
-            .load_registry_epoch(SERVER, g, bucket, d)
-            .unwrap()
-            .is_none());
         assert_eq!(
-            p.bob_store
-                .load_epoch_recovery(SERVER, &document)
-                .unwrap()
-                .retained()
-                .count(),
-            0
+            answer.unwrap(),
+            owner_generated,
+            "only the explicit owner driver has installed its seed"
         );
-    });
-    p.alice.unwatch_registry_head(&head_watch).unwrap();
-    SeedFixture {
-        p,
-        key,
-        document,
-        receipt,
-        seed,
-        pass,
-        seed_watch,
-        queued_epoch_zero,
-    }
+        // Retain an actual old-epoch page, not merely an idle receive handle. After installation
+        // this must still target epoch zero; fetching it must not have created a local document.
+        let queued_epoch_zero = if queue_epoch_zero {
+            let watch = p
+                .bob
+                .watch_registry_epoch(&p.bob_store, SERVER, bucket)
+                .unwrap();
+            p.bob.flush_registry_subscriptions().await.unwrap();
+            let owner_watch = p
+                .alice
+                .watch_registry_epoch(&p.alice_store, SERVER, bucket)
+                .unwrap();
+            p.alice.flush_registry_subscriptions().await.unwrap();
+            let mut receive = p
+                .bob
+                .begin_registry_receive(
+                    &mut p.bob_store,
+                    &watch,
+                    p.alice.local_peer(),
+                    &mut p.bob_budget,
+                )
+                .unwrap();
+            let mut provider = p
+                .alice
+                .begin_registry_page_provider(&p.alice_store, SERVER, bucket)
+                .unwrap();
+            crate::registry_catchup::prepare_test_source(
+                &mut p.alice,
+                &p.alice_store,
+                &mut provider,
+            )
+            .await
+            .unwrap();
+            let (result, ()) =
+                tokio::join!(p.bob.fetch_registry_receive_step(&mut receive), async {
+                    p.alice.sync_once().await.unwrap();
+                    p.alice
+                        .serve_registry_request_step(&p.alice_store, &mut provider, &owner_watch)
+                        .unwrap()
+                        .unwrap();
+                });
+            assert_eq!(result.unwrap(), RegistryReceiveState::PageReady);
+            assert!(receive.progress().received_operations > 0);
+            assert_eq!(receive.progress().saved_pages, 0);
+            Some((watch, receive))
+        } else {
+            None
+        };
+        if !owner_generated {
+            p.alice.sync.with_registry_context(|g, d, clock, r| {
+                p.alice_store
+                    .install_registry_checkpoint(
+                        SERVER,
+                        g,
+                        bucket,
+                        d,
+                        &receipt.encode(),
+                        &close,
+                        0,
+                        clock,
+                        r,
+                        &mut p.alice_budget,
+                        &mut p.alice_intents,
+                    )
+                    .unwrap();
+            });
+            p.clock.advance_ms(1000);
+            let (answer, ()) = tokio::join!(
+                p.bob
+                    .fetch_registry_seed_step(&mut pass, p.alice.local_peer()),
+                async {
+                    p.alice.sync_once().await.unwrap();
+                    p.alice
+                        .serve_registry_seed_step(
+                            &mut p.alice_store,
+                            &seed_watch,
+                            &mut p.alice_budget,
+                        )
+                        .unwrap()
+                        .unwrap();
+                }
+            );
+            assert!(answer.unwrap());
+        }
+        assert!(p.bob.registry_seed_ready(&p.bob_store, SERVER, &pass));
+        assert!(!p.bob.registry_seed_ready(&p.alice_store, SERVER, &pass));
+        assert!(!p.bob.registry_seed_ready(&p.bob_store, SERVER + 1, &pass));
+        p.bob
+            .sync
+            .with_registry_seed(&pass.inner, |_, _, _, selected| {
+                assert_eq!(selected.checkpoint.bytes(), seed.bytes())
+            })
+            .unwrap();
+        p.bob.sync.with_registry_context(|g, d, _, _| {
+            assert!(p
+                .bob_store
+                .load_registry_epoch(SERVER, g, bucket, d)
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                p.bob_store
+                    .load_epoch_recovery(SERVER, &document)
+                    .unwrap()
+                    .retained()
+                    .count(),
+                0
+            );
+        });
+        p.alice.unwatch_registry_head(&head_watch).unwrap();
+        SeedFixture {
+            p,
+            key,
+            document,
+            receipt,
+            seed,
+            pass,
+            seed_watch,
+            queued_epoch_zero,
+        }
+    })
 }
 
 #[tokio::test]

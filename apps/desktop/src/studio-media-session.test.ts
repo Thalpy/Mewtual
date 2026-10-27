@@ -86,7 +86,9 @@ test("an unrebuildable draft never exports its ordinary base", async () => {
 });
 
 test("post-publication reference refusal preserves the real blob receipt", async () => {
-  for (const phase of ["closing", "fault"]) {
+  // Closing now has the separate ticketed local-draft route pinned below. Fault still refuses
+  // reference authoring outright; neither that refusal nor an RNG failure loses blob custody.
+  for (const phase of ["fault"]) {
     const h = await harness(); h.ipc.on("studio_read", () => ({ ...h.view(), phase })); await h.session.refreshDoc(object);
     h.ipc.on("publish_pixa", (args) => ({ cid: id64(5), bytes: atob(String(args.bytesB64)).length }));
     const result = await h.session.publishFlipnotePixa(object);
@@ -96,6 +98,41 @@ test("post-publication reference refusal preserves the real blob receipt", async
   const h = await harness(); h.ipc.on("publish_pixa", (args) => ({ cid: id64(6), bytes: atob(String(args.bytesB64)).length }));
   Object.defineProperty(h.session, "newId", { value: () => { throw new Error("RNG unavailable"); } });
   const result = await h.session.publishFlipnotePixa(object); assert.equal(result.publication.cid, id64(6)); assert.match(result.warning!, /RNG unavailable/);
+});
+
+test("publication during Closing queues only a local reference and preserves custody when its ticket refuses", async () => {
+  for (const closeAvailable of [true, false]) {
+    const h = await harness(); h.ipc.on("studio_read", () => ({...h.view(), phase: "closing"})); await h.session.refreshDoc(object);
+    h.ipc.on("publish_pixa", args => ({cid: id64(5), bytes: atob(String(args.bytesB64)).length}));
+    h.ipc.on("studio_closing_overlay_save_begin", args => closeAvailable
+      ? {v: 1, kind: "closingOverlaySaveTicket", channel: args.channel, object: args.object, basis: id64(1), branch: id64(2), provenance: "closing"}
+      : {v: 1, kind: "closingOverlaySave", channel: args.channel, object: args.object, state: "refused", reason: "receiptChanged", retry: "newTicket"});
+    h.ipc.on("studio_closing_overlay_save", args => ({v: 1, kind: "closingOverlaySave", channel: args.channel, object: args.object, state: "pending", retry: "sameRequest"}));
+    const result = await h.session.publishFlipnotePixa(object); await h.sync();
+    assert.equal(result.publication.cid, id64(5)); assert.equal(result.referenceSaveId, h.session.saves[0].id);
+    assert.equal(result.warning, null, "a queued reference is distinct from an acknowledged Save");
+    const save = h.session.saves[0]; assert.equal(save.kind, "overlayApply");
+    if (save.kind !== "overlayApply") assert.fail("Closing must never authorize ordinary Apply");
+    assert.equal(save.route, "closing"); assert.equal(save.op.op, "set_export");
+    if (save.op.op !== "set_export") assert.fail("wrong reference operation");
+    assert.equal(save.op.cid, result.publication.cid); assert.equal(save.op.bytes, result.publication.bytes);
+    assert.equal(save.status, closeAvailable ? "uncertain" : "blocked"); assert.equal(save.mayHaveCommitted, closeAvailable);
+    assert.equal(h.calls("studio_closing_overlay_save_begin").length, 1);
+    assert.equal(h.calls("studio_closing_overlay_save").length, closeAvailable ? 1 : 0);
+    assert.equal(h.calls("studio_apply").length, 0); assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 0);
+  }
+});
+
+test("a successful Closing reference Save retains the actual blob receipt and uses only the Closing route", async () => {
+  const h = await harness(); h.ipc.on("studio_read", () => ({ ...h.view(), phase: "closing" })); await h.session.refreshDoc(object);
+  h.ipc.on("publish_pixa", args => ({ cid: id64(5), bytes: atob(String(args.bytesB64)).length }));
+  h.ipc.on("studio_closing_overlay_save_begin", a => ({ v: 1, kind: "closingOverlaySaveTicket", channel: a.channel, object: a.object, basis: id64(1), branch: id64(2), provenance: "closing" }));
+  h.ipc.on("studio_closing_overlay_save", a => ({ v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "closing" }));
+  const result = await h.session.publishFlipnotePixa(object); await h.sync();
+  assert.equal(result.publication.cid, id64(5)); assert.ok(result.publication.bytes > 0); assert.ok(result.referenceSaveId);
+  assert.equal(h.session.saves.length, 0); assert.equal(h.calls("studio_apply").length, 0); assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 0);
+  const body = JSON.parse(String((h.calls("studio_closing_overlay_save")[0].args.save as { body: string }).body));
+  assert.equal(body.cid, result.publication.cid); assert.equal(body.bytes, result.publication.bytes);
 });
 
 test("timeline gaps, duplicate ids and lying aggregate declarations refuse before frame fetches", async () => {

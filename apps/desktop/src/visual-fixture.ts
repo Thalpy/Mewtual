@@ -2,6 +2,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging.ts";
 import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
+import { createVisualFileUploads } from "./visual-file-uploads.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -176,6 +177,10 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       return servers;
     }
     if (command === "get_channels" && args.server === 1) return [{ id: "1", name: "general" }, { id: "2", name: "design" }, { id: "3", name: "field-notes" }];
+    // Studio exports bind a full native device identity, not the descriptive stand-ins used
+    // by the old chat-only fixture. Install these before App first loads its roster.
+    if (command === "get_members") return (visualFixtureResponse(command, payload) as {fingerprint: string; identity: string; you: boolean}[]).map(member => ({...member, identity: member.fingerprint.repeat(2)}));
+    if (command === "get_roles") return Object.fromEntries(Object.entries(visualFixtureResponse(command, payload) as Record<string, string>).map(([identity, role]) => [identity.split("-")[0].repeat(2), role]));
     const channel = args.channel === "1" ? "general" : args.channel === "2" ? "design" : args.channel === "3" ? "notes" : args.channel;
     return visualFixtureResponse(command, { ...args, ...(channel === undefined ? {} : { channel }) });
   }
@@ -183,6 +188,17 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
   const channel = String(args.channel ?? "general");
 
   switch (command) {
+    // The visual fixture has no router. It still explicitly models controller acquisition so
+    // unlocked App lifecycle cannot silently bypass a newly added native command.
+    case "prepare_call_mapping_controller":
+      return "fixture-call-controller";
+    case "prepare_call_mapping_owner":
+      return "fixture-call-owner";
+    case "activate_call_mapping_owner":
+      return String(args.candidate);
+    case "end_call_mapping_owner":
+    case "unmap_call_port":
+      return null;
     case "resume_session":
       return clone([
         {
@@ -306,8 +322,15 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
           },
         ],
       });
+    case "get_private_downloads": return [];
+    case "get_storage_health":
+      return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,
+        missing_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
+        has_peers: true, checked_at_ms: VISUAL_FIXTURE_NOW, logical_bytes: 2048,
+        local_estimated_bytes: 2048, pinned_files: 0, pinned_logical_bytes: 0,
+        pinned_local_estimated_bytes: 0, categories: [], largest_files: [], local_files: [] };
     case "get_kept_files":
-      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], error: null };
+      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], transfers: [], error: null };
     case "file_available":
       return true;
     case "get_file_usage":
@@ -663,7 +686,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         relay_likely_required: true,
         router_maps: true,
         advice:
-          "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay.",
+          "Voice tries its own direct connection checks. If voice cannot connect, configure TURN in Settings, Calls.",
       });
     case "get_debug_logging":
     case "test_debug_logging":
@@ -723,9 +746,16 @@ export function installVisualFixture(name: string): void {
   // The existing DEV+localhost entry point still owns availability and readiness. Nothing in
   // production recognizes this flag, and default chat fixtures remain byte-for-byte unchanged.
   const studio = new URLSearchParams(window.location.search).get("studio") === "1";
+  const uploads = studio ? createVisualFileUploads(ME.repeat(2)) : null;
   mockIPC(
     (command, payload) => {
-      const response = visualFixtureResponse(command, payload, studio);
+      const args = payload as Record<string, unknown> ?? {};
+      const fileResponse = uploads?.response(command, args);
+      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio);
+      if (uploads && command === "get_files") {
+        const list = response as { files: unknown[]; has_peers: boolean };
+        response = { ...list, files: [...list.files, ...uploads.files(Number(args.server))] };
+      }
       // `get_moderation` is the final awaited load in switchServer. Once it has returned, wait for
       // fonts and the next task so Svelte can flush its pending microtasks. Do not use
       // requestAnimationFrame here: screenshot browsers intentionally run in the background and

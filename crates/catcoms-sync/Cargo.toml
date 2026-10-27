@@ -16,18 +16,21 @@ catcoms-discovery = { path = "../catcoms-discovery" }
 thiserror.workspace = true
 bytes.workspace = true
 futures.workspace = true
+async-trait.workspace = true
 # Cancellation signalling only; production execution still uses the catcoms-rt clock seam.
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 blake3 = "1"
+sha2 = "0.10"
 hex = "0.4"
 automerge = "0.10"
 zeroize = "1"
 
 [dev-dependencies]
-# Only the test module needs it: the recording transport that proves an applied Remove reaches
-# `MeshTransport::evict_peer` has to implement the (async-trait) seam itself.
-async-trait.workspace = true
+# `test-support` builds the proposal and external-commit fixtures the commit-log tests wrap in
+# signed commit records. Test-only: resolver 2 keeps it out of every non-test build.
+catcoms-mls = { path = "../catcoms-mls", features = ["test-support"] }
+tempfile = "3"
 catcoms-log = { path = "../catcoms-log" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-net = { path = "../catcoms-net" }

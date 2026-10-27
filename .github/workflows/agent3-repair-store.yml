@@ -27,7 +27,12 @@ jobs:
   repair-store:
     name: repair-store (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # 2026-10-27 Windows evidence: 19/22 exact mutant/restored pairs completed before
+    # the 90-minute job limit interrupted the next rebuild. The cold build took 10m47s;
+    # later pairs spent about four minutes compiling and about one second per test.
+    # Allow the complete serial workload; the harness's 900s command watchdog and all
+    # protocol/test deadlines, assertions and per-entry restored controls stay unchanged.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       # Each mutant and restored control is intentionally serial. Keep the two platform jobs
@@ -39,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Record actual checkout
         run: git rev-parse HEAD
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:

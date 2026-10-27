@@ -98,15 +98,26 @@ pub(crate) async fn request_blob_bounded(
     cid: String,
     max_bytes: usize,
 ) -> Result<Option<BlobBytes>, String> {
-    let generation = unlocked_ui_session_generation(&state).await?;
+    request_blob_bounded_with_state(&state, server, cid, max_bytes).await
+}
+
+/// The registered command and cross-language acceptance borrow this one bounded, fenced
+/// implementation. This internal seam does not add another download or unlock authority.
+pub(super) async fn request_blob_bounded_with_state(
+    state: &AppState,
+    server: u64,
+    cid: String,
+    max_bytes: usize,
+) -> Result<Option<BlobBytes>, String> {
+    let generation = unlocked_ui_session_generation(state).await?;
     let cid = parse_bounded_request(&cid, max_bytes)?;
-    let (lease, signal) = claim_internal_inline_download(&state)?;
-    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let (lease, signal) = claim_internal_inline_download(state)?;
+    let (actor, instance) = actor_instance_of(state, server).await?;
     let cancellation = RequestCancellation::new(signal, Some(lease.request_keepalive()));
     let bytes = actor
         .request_blob_bounded(cid, max_bytes, Some(cancellation))
         .await?;
-    finish_response(&state, server, instance, generation, || {
+    finish_response(state, server, instance, generation, || {
         bytes.map(|bytes| BlobBytes {
             bytes_b64: B64.encode(&bytes),
             bytes: bytes.len(),
@@ -185,6 +196,7 @@ mod tests {
         state.servers.lock().await.insert(
             12,
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor: actor.clone(),
                 instance: 40,
                 group_id,
@@ -199,6 +211,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: 0,
+                voice: None,
                 persist: PersistCounters::default(),
             },
         );

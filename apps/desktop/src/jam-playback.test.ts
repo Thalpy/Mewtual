@@ -368,7 +368,8 @@ test("App delegates seek reconstruction and its first bounded dispatch to the ow
   assert.doesNotMatch(body, /take\.events\.findIndex/,
     "a seek is held state plus a schedule, never just the first event at or after the offset");
   assert.match(body, /const transport = new JamTakeTransport\(engine, jamPlaybackPreparationQueue\)/);
-  assert.match(body, /takePlaybackIsRemote\(deckCid\), current\)/);
+  assert.match(body, /takePlaybackIsRemote\(deckCid\), current, offsetAtStart\)/,
+    "the same live capability fence also owns the post-preparation listener seek");
   assert.doesNotMatch(body, /engine\.noteOn\(/, "imported holds cannot enter the raw live 30-second watchdog API");
   const revive = body.indexOf("await transport.start(take, Math.max(0, offsetMs)");
   const firstTick = body.lastIndexOf("void jamPlayTick()");

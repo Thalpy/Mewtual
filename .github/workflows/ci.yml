@@ -19,7 +19,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -27,8 +27,20 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # These bounded actor tests diagnose clock/transport boundaries before the much longer
+      # complete workspace run. A failure still fails this job; no full-suite gate is replaced.
+      - name: File transfer actor boundaries
+        run: cargo test -p catcoms-app --all-features --lib actor::file_transfers::tests
       - name: Test
         run: cargo test --all --all-features
+      # WMI accepts independent broad windows/windows-core ranges. A valid lock resolution
+      # can mix their incompatible COM interfaces while all Linux builds still pass. Check
+      # that native dependency on Windows without compiling the entire WebView application.
+      - name: Native Windows COM binding compatibility
+        if: runner.os == 'Windows'
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -p wmi
+        env:
+          CARGO_TARGET_DIR: target
       - name: Ambient-dependency gate
         if: runner.os == 'Linux'
         shell: bash
@@ -44,6 +56,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+      # The native workspace has an independent graph (including updater/WebView dependencies).
+      # Audit it completely; a Root pass does not cover it. Keep the shared config explicit so
+      # a deny.toml under apps/desktop cannot silently replace the reviewed fences.
+      - name: Desktop workspace supply chain
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: apps/desktop/src-tauri/Cargo.toml
+          # Setting `arguments` replaces the action's default `--all-features`; keep it, since
+          # release builds enable `custom-protocol`.
+          arguments: --all-features --config=deny.toml
+          command: check
 
   linux-desktop:
     name: Linux frontend & Tauri
@@ -55,7 +78,7 @@ jobs:
           mkdir -p .claude
           printf 'must-not-enter-build-context\n' > .claude/review-secret
           docker build --target context-audit -f docker/linux-test.Dockerfile .
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2

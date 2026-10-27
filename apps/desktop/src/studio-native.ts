@@ -39,6 +39,7 @@ export type StudioIpc = {
 
 export const STUDIO_UPDATED_EVENT = "studio-updated";
 export const STUDIO_RECEIVE_PAUSED_EVENT = "studio-receive-paused";
+export const STUDIO_SYNC_STATE_EVENT = "studio-sync-state";
 export const SETTLEMENT_CHANGED_EVENT = "settlement-changed";
 
 // --- Read model --------------------------------------------------------------------------------
@@ -280,20 +281,26 @@ export type OverlayCopyRefused = {
   reason: "stalePreview"; retry: "repreview"; written: false;
 };
 export type OverlayCopyApplyResult = OverlayCopyApplied | OverlayCopyRefused;
-export type UnconfirmedOverlaySaveTicket = {
-  v: 1; kind: "unconfirmedOverlaySaveTicket"; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind;
-  basis: Hex64; branch: Hex64; provenance: "unconfirmed";
+export type OverlaySaveProvenance = "unconfirmed" | "closing";
+export type OverlaySaveTicket<P extends OverlaySaveProvenance> = {
+  v: 1; kind: `${P}OverlaySaveTicket`; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind;
+  basis: Hex64; branch: Hex64; provenance: P;
 };
-export type UnconfirmedOverlaySave = ({
-  v: 1; kind: "unconfirmedOverlaySave"; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind;
+export type OverlaySaveResult<P extends OverlaySaveProvenance> = ({
+  v: 1; kind: `${P}OverlaySave`; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind;
 } & (
-  | { state: "saved"; basis: Hex64; accepted: number; localOnly: true; provisional: true; provenance: "unconfirmed" }
+  | { state: "saved"; basis: Hex64; accepted: number; localOnly: true; provisional: true; provenance: P }
   | { state: "pending" | "busy"; retry: "sameRequest" }
   | { state: "paused"; retry: "afterExplicitAccess" }
   | { state: "refused"; reason: OverlaySaveRefusal; retry: "sameRequest" | "newTicket" | "none" }
   | { state: "disposed"; disposal: OverlayDisposed }
   | { state: "handedOff"; basis: Hex64; epoch: Decimal; docId: Hex32; accepted: number }
 ));
+export type UnconfirmedOverlaySaveTicket = OverlaySaveTicket<"unconfirmed">;
+export type UnconfirmedOverlaySave = OverlaySaveResult<"unconfirmed">;
+export type ClosingOverlaySaveTicket = OverlaySaveTicket<"closing">;
+export type ClosingOverlaySave = OverlaySaveResult<"closing">;
+export type ClosingOverlaySaveBegin = ClosingOverlaySaveTicket | Extract<ClosingOverlaySave, { state: "refused" }>;
 /// Begin normally returns a ticket, but a preview that ceased to authorize a local branch is a
 /// typed, known-no-write refusal. Keeping that refusal in the public union prevents the renderer
 /// from inventing ticket fields or misreporting a clean refusal as delivery uncertainty.
@@ -316,7 +323,8 @@ export type UnconfirmedOverlaySaveInput = { basis: Hex64; branch: Hex64; nonce: 
 
 export type StudioUpdatedEvent = { server: number; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind };
 export type StudioReceivePausedEvent = { server: number };
-export type SettlementState = "open" | "closing" | "settled" | "fault" | "recoveryAvailable" | "recoveryEvictionPending" | "refreshRequired";
+export type StudioSyncStateEvent = { server: number; instance: Decimal; sequence: Decimal; paused: boolean; cause: "background" | "incoming" | null; detail: string | null };
+export type SettlementState = "open" | "closing" | "settled" | "fault" | "recoveryAvailable" | "recoveryEvictionPending" | "refreshRequired" | "repairing" | "storageRefused";
 export type SettlementChangedEvent = { server: number; docType: 15 | 16; logicalKey: Hex32; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind; state: SettlementState };
 
 // --- Checks --------------------------------------------------------------------------------------
@@ -1052,17 +1060,23 @@ export function parseOverlayCopyApplyResult(v: unknown): OverlayCopyApplyResult 
   return { v: 1, kind: "overlayCopyRefused", ...overlayTarget(r, "overlay copy refused"), reason: "stalePreview", retry: "repreview", written: false };
 }
 export function parseUnconfirmedOverlaySaveTicket(v: unknown): UnconfirmedOverlaySaveTicket {
+  return parseOverlaySaveTicket(v, "unconfirmed");
+}
+function parseOverlaySaveTicket<P extends OverlaySaveProvenance>(v: unknown, provenance: P): OverlaySaveTicket<P> {
   const r = record(v, "unconfirmed overlay save ticket");
-  if (r.v !== 1 || r.kind !== "unconfirmedOverlaySaveTicket" || r.provenance !== "unconfirmed") fail("not an unconfirmed overlay save ticket");
-  return { v: 1, kind: "unconfirmedOverlaySaveTicket", ...overlayTarget(r, "unconfirmed overlay save ticket"), basis: hex64(r.basis, "unconfirmed overlay save ticket.basis"), branch: hex64(r.branch, "unconfirmed overlay save ticket.branch"), provenance: "unconfirmed" };
+  if (r.v !== 1 || r.kind !== `${provenance}OverlaySaveTicket` || r.provenance !== provenance) fail(`not a ${provenance} overlay save ticket`);
+  return { v: 1, kind: `${provenance}OverlaySaveTicket`, ...overlayTarget(r, "overlay save ticket"), basis: hex64(r.basis, "overlay save ticket.basis"), branch: hex64(r.branch, "overlay save ticket.branch"), provenance };
 }
 export function parseUnconfirmedOverlaySave(v: unknown): UnconfirmedOverlaySave {
+  return parseOverlaySave(v, "unconfirmed");
+}
+function parseOverlaySave<P extends OverlaySaveProvenance>(v: unknown, provenance: P): OverlaySaveResult<P> {
   const r = record(v, "unconfirmed overlay save");
-  if (r.v !== 1 || r.kind !== "unconfirmedOverlaySave") fail("not an unconfirmed overlay save result");
-  const common = { v: 1 as const, kind: "unconfirmedOverlaySave" as const, ...overlayTarget(r, "unconfirmed overlay save") };
+  if (r.v !== 1 || r.kind !== `${provenance}OverlaySave`) fail(`not a ${provenance} overlay save result`);
+  const common = { v: 1 as const, kind: `${provenance}OverlaySave` as const, ...overlayTarget(r, "overlay save") };
   if (r.state === "saved") {
-    if (r.localOnly !== true || r.provisional !== true || r.provenance !== "unconfirmed") fail("unconfirmed overlay saved claims are invalid");
-    return { ...common, state: "saved", basis: hex64(r.basis, "unconfirmed overlay save.basis"), accepted: count(r.accepted, "unconfirmed overlay save.accepted"), localOnly: true, provisional: true, provenance: "unconfirmed" };
+    if (r.localOnly !== true || r.provisional !== true || r.provenance !== provenance) fail("overlay saved claims are invalid");
+    return { ...common, state: "saved", basis: hex64(r.basis, "overlay save.basis"), accepted: count(r.accepted, "overlay save.accepted"), localOnly: true, provisional: true, provenance };
   }
   if (r.state === "pending" || r.state === "busy") {
     if (r.retry !== "sameRequest") fail("unconfirmed overlay save retry is invalid");
@@ -1095,10 +1109,26 @@ export function parseStudioUpdated(v: unknown): StudioUpdatedEvent {
 export function parseReceivePaused(v: unknown): StudioReceivePausedEvent {
   return { server: count(record(v, "studio-receive-paused").server, "event.server") };
 }
+export function parseStudioSyncState(v: unknown): StudioSyncStateEvent {
+  const r = record(v, "studio-sync-state"), paused = flag(r.paused, "event.paused");
+  const sequence = (value: unknown, name: string): Decimal => {
+    if (typeof value !== "string" || value.length > 20) fail(`${name} is not a u64`);
+    const result = decimal(value, name);
+    if (BigInt(result) > (1n << 64n) - 1n) fail(`${name} is not a u64`);
+    return result;
+  };
+  if (r.cause !== null && r.cause !== "background" && r.cause !== "incoming") fail("event.cause is unknown");
+  if (r.detail !== null && (typeof r.detail !== "string" || r.detail.length > 2048)) fail("event.detail is invalid");
+  if (!paused && (r.cause !== null || r.detail !== null)) fail("a resumed event cannot retain a pause reason");
+  return { server: count(r.server, "event.server"), instance: sequence(r.instance, "event.instance"), sequence: sequence(r.sequence, "event.sequence"),
+    paused, cause: r.cause as StudioSyncStateEvent["cause"], detail: r.detail as string | null };
+}
 export function parseSettlementChanged(v: unknown): SettlementChangedEvent {
   const r = record(v, "settlement-changed");
   const s = r.state;
-  if (s !== "open" && s !== "closing" && s !== "settled" && s !== "fault" && s !== "recoveryAvailable" && s !== "recoveryEvictionPending" && s !== "refreshRequired") fail("event.state is unknown");
+  // These notifications invalidate observations; accepting runtime repair/storage states
+  // grants no renderer repair authority. Do not depend on a companion refreshRequired event.
+  if (s !== "open" && s !== "closing" && s !== "settled" && s !== "fault" && s !== "recoveryAvailable" && s !== "recoveryEvictionPending" && s !== "refreshRequired" && s !== "repairing" && s !== "storageRefused") fail("event.state is unknown");
   if (r.docType !== 15 && r.docType !== 16) fail("event.docType is unknown");
   return {
     server: count(r.server, "event.server"),
@@ -1244,6 +1274,16 @@ export async function unconfirmedOverlaySaveBegin(ipc: StudioIpc, t: RecoveryTar
 }
 export async function unconfirmedOverlaySave(ipc: StudioIpc, t: RecoveryTargetArgs, save: UnconfirmedOverlaySaveInput): Promise<UnconfirmedOverlaySave> {
   return parseUnconfirmedOverlaySave(await ipc.invoke<unknown>("studio_unconfirmed_overlay_save", { ...recoveryArgs(t), save }));
+}
+export async function closingOverlaySaveBegin(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<ClosingOverlaySaveBegin> {
+  const value = await ipc.invoke<unknown>("studio_closing_overlay_save_begin", recoveryArgs(t));
+  if (record(value, "closing Save begin").kind === "closingOverlaySaveTicket") return parseOverlaySaveTicket(value, "closing");
+  const result = parseOverlaySave(value, "closing");
+  if (result.state !== "refused") fail("Closing Save begin must return a ticket or refusal");
+  return result;
+}
+export async function closingOverlaySave(ipc: StudioIpc, t: RecoveryTargetArgs, save: UnconfirmedOverlaySaveInput): Promise<ClosingOverlaySave> {
+  return parseOverlaySave(await ipc.invoke<unknown>("studio_closing_overlay_save", { ...recoveryArgs(t), save }), "closing");
 }
 
 export async function recoveryList(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<RecoveryListing> {

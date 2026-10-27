@@ -27,10 +27,11 @@ export type FileTrustPolicies = Record<number, FileTrustPolicy>;
  * `true` at a call site reads as nothing at all, and this is the argument that decides whether
  * untrusted bytes reach the platform media stack without a click.
  *
- * `validated-media` means the renderer's own safe-list admitted the declared type. It is a
- * screening question ("is it worth asking the native scheme for this?"), never a verdict: the
- * native `catcoms-media:` handler stays the authority on what actually gets a body, and it
- * re-checks the declared type against the real container bytes. SEC-MEDIA-003.
+ * `validated-media` means the renderer admitted a declared platform type or a PIXA file to its
+ * bounded preview path. It is screening, never a verdict: native `catcoms-media:` checks platform
+ * containers; PixaFileReader applies native manifest/input caps and complete PIXA/PIX/take
+ * validation before its application-owned canvas or existing archival synth sees content.
+ * SEC-MEDIA-003.
  */
 export type PassiveFileClass = "validated-media" | "non-media";
 

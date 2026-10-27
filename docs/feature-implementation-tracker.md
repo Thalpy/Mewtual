@@ -6,7 +6,13 @@ documentation, and the repository's mandatory full suites all pass.
 
 Last reconciled against the tree: **2026-09-10**, at `0.3.0-alpha.18`.
 
-Creative Suite row specifically reconciled on **2026-10-14** at the Gate 6 candidate
+Creative Suite current status (2026-10-17): Gate 6 is owner-accepted and merged at `82631a81`;
+Gate 7's composed backend/TCP/native acceptance and current UI contract are tracked in
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) and [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
+The older row below retains its dated checkpoint, rather than asserting pending Gate 6 acceptance
+as the current owner status.
+
+Creative Suite row previously reconciled on **2026-10-14** at the Gate 6 candidate
 `818e711641bc8193af5cde3be8e56d4817c475f9`; unrelated feature rows retain their earlier audits.
 
 | Feature | Phase | Status | Required security/antagonist focus | Test and documentation gate |

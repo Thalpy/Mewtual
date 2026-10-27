@@ -65,16 +65,16 @@ const DEFAULT_CAPS: Caps = {
 /// Nightshade's values as the fallback, and ten literal colours that never move. The fixed
 /// tones (t0..t3) are roles a palette may carry, not ones it must.
 export const DEFAULT_PALETTE: readonly PixPaletteEntry[] = [
-  { role: 0, r: 0xf2, g: 0xec, b: 0xdf }, // 0 paper
-  { role: 0, r: 0x2a, g: 0x26, b: 0x33 }, // 1 ink
+  { role: 0, r: 0xff, g: 0xff, b: 0xff }, // 0 paper
+  { role: 0, r: 0x00, g: 0x00, b: 0x00 }, // 1 ink
   { role: 1, r: 0x13, g: 0x12, b: 0x18 }, // 2 bg role
   { role: 2, r: 0xe8, g: 0xe6, b: 0xf0 }, // 3 fg role
   { role: 3, r: 0x97, g: 0x7d, b: 0xf2 }, // 4 accent role
   { role: 4, r: 0x8f, g: 0x8b, b: 0xa3 }, // 5 muted role
-  { role: 0, r: 0x00, g: 0x00, b: 0x00 }, // 6 black
-  { role: 0, r: 0xff, g: 0xff, b: 0xff }, // 7 white
+  { role: 0, r: 0xc0, g: 0xc0, b: 0xc0 }, // 6 light gray
+  { role: 0, r: 0x60, g: 0x60, b: 0x60 }, // 7 dark gray
   { role: 0, r: 0xe0, g: 0x7a, b: 0xb8 }, // 8 pink
-  { role: 0, r: 0xd8, g: 0xa6, b: 0x57 }, // 9 gold
+  { role: 0, r: 0xa6, g: 0x74, b: 0xe8 }, // 9 purple
   { role: 0, r: 0xe0, g: 0x57, b: 0x4b }, // 10 red
   { role: 0, r: 0xe8, g: 0x8a, b: 0x3a }, // 11 orange
   { role: 0, r: 0xf2, g: 0xe2, b: 0x7a }, // 12 yellow
@@ -82,7 +82,7 @@ export const DEFAULT_PALETTE: readonly PixPaletteEntry[] = [
   { role: 0, r: 0x4f, g: 0xc1, b: 0xb8 }, // 14 teal
   { role: 0, r: 0x6c, g: 0xa0, b: 0xd8 }, // 15 blue
 ];
-export const PALETTE_LABELS: readonly string[] = ["pa", "in", "bg", "fg", "ac", "mu", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"];
+export const PALETTE_LABELS: readonly string[] = ["White", "Black", "Background", "Text", "Accent", "Muted", "Light gray", "Dark gray", "Pink", "Purple", "Red", "Orange", "Yellow", "Green", "Teal", "Blue"];
 
 export class StudioStore {
   readonly serverId: string;

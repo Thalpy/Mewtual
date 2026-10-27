@@ -4,12 +4,19 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 fn open(path: &Path) -> KeptBlobStore<ChaCha20Rng> {
-    KeptBlobStore::open(
+    let mut store = KeptBlobStore::open(
         Box::new(MemoryBlobStore::new()),
         path.to_path_buf(),
         [7; 32],
+        [8; 32],
         ChaCha20Rng::seed_from_u64(6),
-    )
+    );
+    // Expected fault tests inspect the returned handle. Binding cannot clear a load/lease fault.
+    let _ = store.configure_keep_scope(KeepScope {
+        group: vec![3; 32],
+        device: catcoms_crypto::DeviceId::from_bytes([4; 32]),
+    });
+    store
 }
 fn plan(bytes: &[u8]) -> KeepPlan {
     KeepPlan {
@@ -65,7 +72,7 @@ fn kept_copy_is_durable_separate_and_requires_recheck_after_restart() {
     assert!(store.kept_files().files[0].checked);
     store.forget_kept(&cid).unwrap();
     assert!(!store.has(&cid));
-    assert_eq!(store.kept_files().allocated_bytes, 0);
+    assert_eq!(store.kept_files().allocated_bytes, FORMAT_CHARGE);
 }
 
 #[test]
@@ -75,20 +82,37 @@ fn incomplete_and_failed_keeps_remain_bounded_across_restart() {
     let token = store.begin_keep(plan(b"partial")).unwrap();
     assert!(store.put_keep(token, b"unreserved bytes").is_err());
     store.put_keep(token, b"partial").unwrap();
+    let charge = store.kept_files().allocated_bytes;
     assert!(store.begin_keep(plan(b"another")).is_err());
     drop(store);
     let mut store = open(dir.path());
     assert!(store.kept_files().files.is_empty());
-    assert_eq!(store.kept_files().allocated_bytes, 0);
+    assert_eq!(store.kept_files().allocated_bytes, charge);
     assert_eq!(
-        fs::read_dir(dir.path()).unwrap().count(),
+        store.kept_files().transfers.len(),
         1,
-        "only the mount lease remains"
+        "the new format retains partial ownership across restart"
     );
+    let resumed = store.begin_keep(plan(b"partial")).unwrap();
+    assert_ne!(resumed, token);
+    assert_eq!(
+        store
+            .get_keep(resumed, &Cid::of(b"partial"), 7)
+            .unwrap()
+            .unwrap(),
+        b"partial"
+    );
+    store.abort_keep(resumed).unwrap();
     let token = store.begin_keep(plan(b"x")).unwrap();
     // A surprising nested directory blocks cleanup; it must not trigger recursive deletion or
     // recycle the still-live reservation. Startup fails closed on it as well.
-    fs::create_dir(dir.path().join(PENDING).join("unexpected")).unwrap();
+    fs::create_dir(
+        dir.path()
+            .join(TRANSFERS)
+            .join(Cid::of(b"x").to_hex())
+            .join("unexpected"),
+    )
+    .unwrap();
     assert!(store.abort_keep(token).is_err());
     assert!(store.kept_files().allocated_bytes > 0);
     assert!(store.begin_keep(plan(b"y")).is_err());
@@ -140,7 +164,11 @@ fn primary_corruption_falls_back_and_recheck_repairs_retained_records() {
     let token = store.begin_keep(p.clone()).unwrap();
     store.put_keep(token, bytes).unwrap();
     store.finish_keep(token).unwrap();
-    let record = dir.path().join(p.cid.to_hex()).join(p.cid.to_hex());
+    let record = dir
+        .path()
+        .join(TRANSFERS)
+        .join(p.cid.to_hex())
+        .join(p.cid.to_hex());
     fs::write(&record, b"corrupt").unwrap();
     store.primary.put(bytes).unwrap();
     let token = store.begin_keep(p.clone()).unwrap();
@@ -165,7 +193,7 @@ fn metadata_and_chunks_draw_distinct_nonces_from_one_injected_rng() {
         let token = store.begin_keep(p.clone()).unwrap();
         store.put_keep(token, bytes).unwrap();
         store.finish_keep(token).unwrap();
-        for path in entries(&dir.path().join(p.cid.to_hex()), 2).unwrap() {
+        for path in entries(&dir.path().join(TRANSFERS).join(p.cid.to_hex()), 2).unwrap() {
             assert!(nonces.insert(fs::read(path).unwrap()[..24].to_vec()));
         }
     }
@@ -180,7 +208,12 @@ fn overlapping_mounts_cannot_sweep_or_fork_retained_accounting() {
     let mut second = open(dir.path());
     assert!(second.kept_files().error.is_some());
     assert!(second.begin_keep(plan(b"another")).is_err());
-    assert!(dir.path().join(PENDING).join(META).exists());
+    assert!(dir
+        .path()
+        .join(TRANSFERS)
+        .join(Cid::of(b"owned").to_hex())
+        .join("current")
+        .exists());
     first.finish_keep(token).unwrap();
     assert!(second.forget_kept(&Cid::of(b"owned")).is_err());
     assert!(first.kept_files().files[0].checked);
@@ -193,11 +226,22 @@ fn overlapping_mounts_cannot_sweep_or_fork_retained_accounting() {
 #[test]
 fn interrupted_release_is_recoverable_even_after_manifest_deletion() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = open(dir.path());
     let p = plan(b"owned");
-    let token = store.begin_keep(p.clone()).unwrap();
-    store.put_keep(token, b"owned").unwrap();
-    store.finish_keep(token).unwrap();
+    // Build an actual released-format completed copy. Legacy pending remains cleanup-only;
+    // V2 never adopts it as resumable work or changes its crash-release interpretation.
+    let path = dir.path().join(p.cid.to_hex());
+    let mut rng = ChaCha20Rng::seed_from_u64(16);
+    let mut legacy =
+        SealingBlobStore::open(&path, [7; 32], ChaCha20Rng::seed_from_u64(18)).unwrap();
+    legacy.put(b"owned").unwrap();
+    fs::write(
+        path.join(META),
+        encode_sealed(&seal(&[7; 32], &p.encode(), &mut rng).unwrap()),
+    )
+    .unwrap();
+    drop(legacy);
+    let store = open(dir.path());
+    assert_eq!(store.kept_files().files.len(), 1);
     // Crash after the release-intent rename and deletion of its manifest, before other leaves.
     fs::rename(dir.path().join(p.cid.to_hex()), dir.path().join(PENDING)).unwrap();
     fs::remove_file(dir.path().join(PENDING).join(META)).unwrap();
@@ -217,11 +261,17 @@ fn failed_directory_flush_never_certifies_a_repaired_copy() {
     store.put_keep(token, b"owned").unwrap();
     store.finish_keep(token).unwrap();
     let charge = store.kept_files().allocated_bytes;
-    std::fs::remove_file(dir.path().join(p.cid.to_hex()).join(p.cid.to_hex())).unwrap();
+    std::fs::remove_file(
+        dir.path()
+            .join(TRANSFERS)
+            .join(p.cid.to_hex())
+            .join(p.cid.to_hex()),
+    )
+    .unwrap();
     let token = store.begin_keep(p.clone()).unwrap();
     store.put_keep(token, b"owned").unwrap();
     let result = store.finish_keep_with_sync(token, |path| {
-        assert_eq!(path, dir.path().join(p.cid.to_hex()));
+        assert_eq!(path, dir.path().join(TRANSFERS).join(p.cid.to_hex()));
         Err(StorageError::CommittedButNotDurable(
             "injected directory sync failure".into(),
         ))
@@ -246,8 +296,15 @@ fn corrupt_primary_record_falls_back_to_the_completed_kept_copy() {
         Box::new(primary),
         root.path().join("kept"),
         [6; 32],
+        [8; 32],
         ChaCha20Rng::seed_from_u64(5),
     );
+    store
+        .configure_keep_scope(KeepScope {
+            group: vec![3; 32],
+            device: catcoms_crypto::DeviceId::from_bytes([4; 32]),
+        })
+        .unwrap();
     let p = plan(b"owned");
     store.put(b"owned").unwrap();
     let token = store.begin_keep(p.clone()).unwrap();

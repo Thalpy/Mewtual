@@ -96,6 +96,16 @@ Application reuses the existing `$effect` that stamps `data-preset` / `--accent`
 scheme live. Semantic tokens (`--ok/--warn/--danger`) are **not** livery-controllable;
 green/gold/red keep their jobs under any admin.
 
+Text inks are derived, never published. `--on-accent` (text on a solid accent) is not in the
+token allow-list: the same effect sets it to white when the painted accent (the `accent` field,
+else a `--accent` token, else the preset's) is dark by WCAG contrast against the near-black ink,
+and otherwise leaves the preset's ink (`apps/desktop/src/accent-ink.ts`). Dark text on the fixed
+semantic fills uses `--on-signal`, a constant (a few red badges use plain white), so a dark livery
+accent cannot change how a gold moderation badge or a red Leave button reads. The Livery preview
+derives its ink from whichever accent the preview itself paints; note that the preview lets a
+`--accent` token beat the `accent` field while the live app does the reverse, a pre-existing
+mismatch this does not resolve.
+
 ## UI
 
 - **Server settings → Livery** (owner/admin only): the same preset tiles + accent swatches

@@ -5,6 +5,7 @@ import {
   downloadSavedNotice,
   guideSavedNotice,
   saveGroupFile,
+  resumeGroupFile,
   saveSpaceGuide,
   type NativeInvoker,
   type SavedFileResult,
@@ -45,6 +46,23 @@ test("the image guide uses its constrained native command", async () => {
     command: "save_and_open_space_guide",
     args: { pngBase64: "iVBORw0KGgo=" },
   }]);
+});
+
+test("explicit resume sends only saved identity and revision with a fresh native destination name", async () => {
+  const saved = { path: "/Downloads/resumed.bin", displayed: true };
+  const mock = mockInvoker(saved);
+  assert.deepEqual(await resumeGroupFile(mock.invoke, 2, "c", "resumed.bin", "d", "7"), saved);
+  assert.deepEqual(mock.calls, [{ command: "save_group_file", args: {
+    server: 2, cid: "c", name: "resumed.bin", resume: "d", expectedIntent: "7",
+  } }]);
+});
+test("successful reveal does not hide a committed save's encrypted-cleanup warning", () => {
+  const warning = "The encrypted download copy could not be removed; remove it from Transfers.";
+  const notice = downloadSavedNotice("cat.bin", { path: "/Downloads/cat.bin", displayed: true, warning });
+  assert.match(notice.text, /Saved cat.bin/);
+  assert.ok(notice.text.includes(warning));
+  assert.equal(notice.kind, "info");
+  assert.ok(downloadSavedNotice("cat.png", { path: "/Downloads/cat.png", displayed: true, warning, contentValidation: "mismatch" }).text.includes(warning));
 });
 
 test("native completion turns the UI transfer into a fully saved row", () => {

@@ -15,6 +15,17 @@ use crate::device::MlsDevice;
 use crate::invite::{membership_from_key_package, InviteError, InviteLedger, InviteToken};
 use crate::{proto, MlsError};
 
+mod commit_gate;
+pub use commit_gate::{
+    check_commit_header, commit_header, AppliedCommit, CommitHeader, CommitRefusal,
+};
+
+mod catalog;
+pub use catalog::{
+    MemberCatalogCursor, MemberCatalogEntry, MemberCatalogError, MemberCatalogPage,
+    MemberCatalogView, MAX_MEMBER_CATALOG_CREDENTIAL_BYTES, MAX_MEMBER_CATALOG_PROBES,
+};
+
 /// The result of adding a member: the joiner's Welcome, the Commit to fan out to
 /// existing members, and the epoch the commit was built at.
 #[derive(Debug, Clone)]
@@ -63,6 +74,9 @@ pub enum Incoming {
 /// One server/connection: a wrapper over an MLS group.
 pub struct ServerGroup {
     group: MlsGroup,
+    // Native observation only: fresh for every create/join/load, never serialized. Catalog
+    // pages cannot accidentally reuse a summary from a same-epoch replacement group instance.
+    catalog: catalog::CatalogCache,
 }
 
 impl ServerGroup {
@@ -75,7 +89,45 @@ impl ServerGroup {
             device.credential(),
         )
         .map_err(proto)?;
-        Ok(Self { group })
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
+    }
+
+    /// Test-only: [`ServerGroup::create`] with an explicit founder-leaf lifetime (frozen fixtures).
+    #[cfg(test)]
+    pub(crate) fn create_with_lifetime(
+        device: &MlsDevice,
+        lifetime: Lifetime,
+    ) -> Result<Self, MlsError> {
+        let group = MlsGroup::new(
+            device.provider(),
+            device.signer(),
+            &crate::config::create_config_with_lifetime(lifetime),
+            device.credential(),
+        )
+        .map_err(proto)?;
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
+    }
+
+    /// Test-only: `not_after` of every KeyPackage-sourced leaf in the tree. openmls checks these
+    /// lifetimes against the wall clock when a Welcome is joined or an Add is processed.
+    #[cfg(test)]
+    pub(crate) fn key_package_leaf_not_after(&self) -> Vec<u64> {
+        self.group
+            .members()
+            .filter_map(|m| self.group.public_group().leaf(m.index))
+            .filter_map(|leaf| match leaf.leaf_node_source() {
+                openmls::treesync::LeafNodeSource::KeyPackage(lifetime) => {
+                    Some(lifetime.not_after())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Join an existing group from a serialized Welcome (as produced by
@@ -86,12 +138,38 @@ impl ServerGroup {
             MlsMessageBodyIn::Welcome(w) => w,
             _ => return Err(MlsError::WrongMessageType),
         };
-        let group =
-            StagedWelcome::new_from_welcome(device.provider(), &join_config(), welcome, None)
-                .map_err(proto)?
-                .into_group(device.provider())
-                .map_err(proto)?;
-        Ok(Self { group })
+        // Leaf lifetimes in the received tree are NOT checked (docs/design-mls-leaf-lifetime.md).
+        //
+        // A leaf added from a KeyPackage keeps that KeyPackage's lifetime (openmls default: 84
+        // days) until its owner replaces it. Only the designated committer commits, and the app
+        // has no MLS Update flow, so every other member's leaf keeps its join-time lifetime for
+        // good. openmls's default join compares every such leaf with the wall clock, so 84 days
+        // after the first non-committer joined, every Welcome to the group failed. openmls offers
+        // this switch for exactly that case (RFC 9420 section 7.3; openmls issue #1810), with the
+        // same API on 0.8 and 0.9.
+        //
+        // Only the lifetime comparison on tree leaves is skipped. Still checked here: the
+        // GroupInfo signature, tree hash, parent hashes, leaf signatures, capabilities,
+        // credentials and key uniqueness, and the caller's own checks (Welcome signed by the
+        // invite's inviter or the granted owner, group id). Still checked elsewhere: the joiner's
+        // KeyPackage lifetime when it is admitted, by the committer and by every member that
+        // processes the Add, so a stale KeyPackage is still refused. An expired leaf is a member
+        // that has not rotated its leaf key, which every existing member already lives with;
+        // refusing to join never removed it.
+        //
+        // `build_from_welcome` consumes the KeyPackage's private material, as `new_from_welcome`
+        // did, so a refused join cannot be retried with the same Welcome.
+        let group = StagedWelcome::build_from_welcome(device.provider(), &join_config(), welcome)
+            .map_err(proto)?
+            .skip_lifetime_validation()
+            .build()
+            .map_err(proto)?
+            .into_group(device.provider())
+            .map_err(proto)?;
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
     }
 
     /// Reconstruct a group from a `device` whose provider storage was **restored** from a
@@ -102,7 +180,10 @@ impl ServerGroup {
         let group = MlsGroup::load(device.provider().storage(), &gid)
             .map_err(|e| MlsError::Protocol(format!("{e:?}")))?
             .ok_or(MlsError::Internal("group missing from restored storage"))?;
-        Ok(Self { group })
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
     }
 
     /// Add `key_package`'s device and merge the commit. Returns the [`AddOutcome`]:
@@ -471,6 +552,10 @@ impl ServerGroup {
     }
 
     /// Process a serialized inbound MLS message (application message or commit).
+    ///
+    /// `Ok` means "processed", not "a commit was merged": application messages and proposals
+    /// succeed too. Anything that will be recorded or counted as a membership commit must go
+    /// through [`ServerGroup::apply_commit`] instead, which refuses every non-commit.
     pub fn process_incoming(
         &mut self,
         device: &MlsDevice,
@@ -588,7 +673,22 @@ impl ServerGroup {
                     .map_err(proto)?;
                 Ok(Incoming::CommitApplied { removed })
             }
-            _ => Ok(Incoming::Other),
+            // openmls 0.9 reports a message this client authored (or one whose encrypted sender
+            // data merely CLAIMS our leaf, which any member can write) as a successful process
+            // with no content, where 0.8 returned an error. Keep 0.8's contract: refuse it.
+            // `Incoming::Other` means "processed, nothing to apply", and the sync layer records a
+            // commit as applied on any `Ok` (`apply_commit_in_order`), so mapping these to `Other`
+            // would mark an unmerged, or forged, commit as applied while the epoch stayed put.
+            // Our own staged commit is adopted only through `merge_staged_self`.
+            ProcessedMessageContent::OwnPrivateMessage
+            | ProcessedMessageContent::OwnPendingCommit => Err(MlsError::Protocol(
+                "refused a message attributed to this device's own leaf".into(),
+            )),
+            // Named, not `_`: an openmls upgrade that adds a variant must fail to compile here
+            // rather than silently become "processed, nothing to apply" (that is how the two
+            // variants above would have slipped through).
+            ProcessedMessageContent::ProposalMessage(_)
+            | ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(Incoming::Other),
         }
     }
 
@@ -617,7 +717,9 @@ impl ServerGroup {
 
     /// The number of current members.
     pub fn member_count(&self) -> usize {
-        self.group.members().count()
+        // This observation already traversed the whole native roster. Retain its small summary
+        // once per actual epoch, rather than making bounded catalog pages repeat that traversal.
+        self.observe_member_catalog().member_count()
     }
 
     /// The device ids of all current members.
@@ -631,6 +733,18 @@ impl ServerGroup {
     /// Whether `id` is a current member.
     pub fn contains_device(&self, id: &DeviceId) -> bool {
         self.member_device_ids().contains(id)
+    }
+
+    /// Compare this actual MLS instance's borrowed local leaf signing key with `id`.
+    /// Unlike members(), own_leaf() borrows without cloning credentials/keys. Bounded
+    /// native admission must not materialize a roster (or clone one oversized restored
+    /// remote Member) before it can pay for work. This is stronger than finding `id`
+    /// anywhere in the roster: a misbound local device cannot borrow another member's role.
+    /// Authentication callers must also require is_active(); a removed instance is unusable.
+    pub fn has_local_device(&self, id: &DeviceId) -> bool {
+        self.group.own_leaf().is_some_and(|leaf| {
+            DeviceId::from_public_key_bytes(leaf.signature_key().as_slice()) == *id
+        })
     }
 
     /// Whether this local MLS instance still belongs to the group after applied removals.
@@ -649,8 +763,39 @@ impl fmt::Debug for ServerGroup {
 }
 
 #[cfg(test)]
+mod own_echo_tests;
+
+#[cfg(test)]
+mod suite_refusal_tests;
+
+#[cfg(test)]
+mod commit_gate_tests;
+
+#[cfg(test)]
 mod m1_tests {
     use super::*;
+
+    #[test]
+    fn local_device_query_does_not_adopt_another_current_member() {
+        let alice = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let absent = MlsDevice::generate().unwrap();
+        let mut group = ServerGroup::create(&alice).unwrap();
+        assert!(group.has_local_device(&alice.device_id()));
+        assert!(!group.has_local_device(&bob.device_id()));
+        let package = bob
+            .key_package_for_invite(&group.group_id(), [17; 16])
+            .unwrap();
+        group.add_member(&alice, package).unwrap();
+        assert!(group.contains_device(&alice.device_id()));
+        assert!(group.contains_device(&bob.device_id()));
+        assert!(!group.has_local_device(&bob.device_id()));
+        assert!(!group.contains_device(&absent.device_id()));
+        group.remove_member(&alice, &bob.device_id()).unwrap();
+        assert!(group.contains_device(&alice.device_id()));
+        assert!(!group.contains_device(&bob.device_id()));
+        assert!(group.has_local_device(&alice.device_id()));
+    }
 
     /// The leaf identity excludes the HPKE encryption key, so a key rotation is not a discontinuity.
     ///
@@ -762,3 +907,8 @@ mod m1_tests {
         assert_eq!(carol_group.designated_committer(), Some(alice.device_id()));
     }
 }
+
+// Expired KeyPackage leaves and Welcome joins (docs/design-mls-leaf-lifetime.md). Declared last so
+// the openmls-upgrade branch's test modules above `m1_tests` merge without touching this line.
+#[cfg(test)]
+mod leaf_lifetime_tests;

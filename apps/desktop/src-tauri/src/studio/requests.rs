@@ -5,7 +5,12 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-type Key = (usize, u64, StudioTarget);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Lane {
+    View,
+    Save,
+}
+type Key = (usize, u64, StudioTarget, Lane);
 type Requests = BTreeMap<Key, Weak<()>>;
 fn requests() -> &'static Mutex<Requests> {
     static REQUESTS: OnceLock<Mutex<Requests>> = OnceLock::new();
@@ -17,11 +22,25 @@ pub(super) struct ViewRequest {
 }
 impl ViewRequest {
     pub(super) fn begin(state: &AppState, server: u64, target: StudioTarget) -> Self {
-        let key = (std::ptr::from_ref(state) as usize, server, target);
+        Self::register(state, server, target, Lane::View)
+    }
+
+    /// A refresh may supersede another projection, but must not suppress a Save's receipt.
+    /// Saves still revoke older projections and older Save responses for the same document.
+    /// Lock, actor-incarnation and cancellation fences apply independently to both lanes.
+    pub(super) fn begin_save(state: &AppState, server: u64, target: StudioTarget) -> Self {
+        Self::register(state, server, target, Lane::Save)
+    }
+
+    fn register(state: &AppState, server: u64, target: StudioTarget, lane: Lane) -> Self {
+        let key = (std::ptr::from_ref(state) as usize, server, target, lane);
         let generation = Arc::new(());
         let mut requests = requests().lock().expect("Studio request map");
         // Native operation slots bound live requests. Dead entries disappear on every admission.
         requests.retain(|_, value| value.strong_count() != 0);
+        if lane == Lane::Save {
+            requests.remove(&(key.0, server, target, Lane::View));
+        }
         requests.insert(key, Arc::downgrade(&generation));
         Self { key, generation }
     }
@@ -55,5 +74,23 @@ mod tests {
             !old.is_current(),
             "dropping a newer request cannot revive its predecessor"
         );
+    }
+
+    #[test]
+    fn refresh_does_not_revoke_save_but_a_new_save_revokes_older_results() {
+        let state = AppState::default();
+        let target = StudioTarget::Index { channel: [5; 16] };
+        let old_read = ViewRequest::begin(&state, 7, target);
+        let save = ViewRequest::begin_save(&state, 7, target);
+        assert!(!old_read.is_current());
+        let refresh = ViewRequest::begin(&state, 7, target);
+        assert!(
+            save.is_current(),
+            "background reads cannot hide a durable Save receipt"
+        );
+        let next_save = ViewRequest::begin_save(&state, 7, target);
+        assert!(!save.is_current());
+        assert!(!refresh.is_current());
+        assert!(next_save.is_current());
     }
 }

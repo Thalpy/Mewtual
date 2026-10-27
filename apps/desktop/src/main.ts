@@ -23,6 +23,8 @@ async function start() {
   // caught failure with a screen rather than a silent one. The window shows nothing until the mount
   // below, so nothing renders unstyled in the meantime.
   await import("./app.css");
+  // Drag-and-drop rules that must not be inline styles; see the file's header.
+  await import("./drag-drop.css");
 
   const fixture = new URLSearchParams(window.location.search).get("fixture");
 

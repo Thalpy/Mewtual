@@ -6,7 +6,8 @@ use catcoms_app::studio::{
 };
 use serde_json::{json, Value};
 // Overlay lifecycle and copy commands are registered atomically with their reviewed policy,
-// capability, frontend-contract and session-gate rows. Signed-repair controls remain absent.
+// capability, frontend-contract and session-gate rows. Explicit repair delegates to the actor's
+// current durable-owner authority; Closing edits use a separate vault-derived local draft ticket.
 pub(crate) mod copy;
 pub(crate) mod fault;
 pub(crate) mod inspection;
@@ -35,6 +36,7 @@ enum WithheldWrite {
     Release,
     Dispose,
     Copy,
+    Repair,
 }
 
 /// Classify the response before conversion or any final UI-session fence can withhold it. This is
@@ -47,11 +49,13 @@ fn withheld_write(response: &InvokeResponse) -> Option<WithheldWrite> {
         InvokeResponse::Control(R::OverlayArchiveReleased) => Some(WithheldWrite::Release),
         InvokeResponse::Control(R::OverlayDisposed(_)) => Some(WithheldWrite::Dispose),
         InvokeResponse::Control(R::OverlayCopyApplied { .. }) => Some(WithheldWrite::Copy),
-        InvokeResponse::Control(R::UnconfirmedOverlaySaved { outcome, .. })
-            if outcome.may_have_durable_effect() =>
-        {
-            Some(WithheldWrite::Save)
-        }
+        InvokeResponse::Control(R::RepairStarted {
+            start: catcoms_app::studio::StudioRepairStart::Scheduled,
+            ..
+        }) => Some(WithheldWrite::Repair),
+        InvokeResponse::Control(
+            R::UnconfirmedOverlaySaved { outcome, .. } | R::ClosingOverlaySaved { outcome, .. },
+        ) if outcome.may_have_durable_effect() => Some(WithheldWrite::Save),
         _ => None,
     }
 }
@@ -136,10 +140,20 @@ async fn invoke_custody<V>(
         request.validate().map_err(|e| e.to_string())?;
     }
     let target = match &request {
-        InvokeRequest::Document(request) => Some(request.target()),
+        InvokeRequest::Document(request) => Some((
+            request.target(),
+            !matches!(request, StudioRequest::Read { .. }),
+        )),
         _ => None,
     };
-    let context = InvokeContext::new(state, server, target).await?;
+    let mut context = InvokeContext::new(state, server, None).await?;
+    context.view_request = target.map(|(target, save)| {
+        if save {
+            requests::ViewRequest::begin_save(state, server, target)
+        } else {
+            requests::ViewRequest::begin(state, server, target)
+        }
+    });
     invoke_with_context(state, &context, request, convert).await
 }
 
@@ -285,6 +299,7 @@ async fn invoke_with_context<V>(
             WithheldWrite::Release => UNDELIVERED_RELEASE,
             WithheldWrite::Dispose => UNDELIVERED_DISPOSE,
             WithheldWrite::Copy => UNDELIVERED_COPY,
+            WithheldWrite::Repair => "outcome=uncertain; repair was scheduled and may still commit; refresh the actual fault status before making another decision",
         };
         return delivered.map_err(|error| format!("{message} ({error})"));
     }
@@ -457,24 +472,46 @@ async fn receive_once(
 
 /// Retain exact UI/incarnation custody through synchronous emission, after source leases have
 /// dropped. Delayed old-actor events cannot invalidate a replacement server's Studio views.
+/// The bounded actor-event consumer must never await the long command commit mutex: an upload
+/// can own it while queued behind that very consumer. Lock instead crosses a short event fence.
 pub(crate) async fn forward_if_current(
     state: &AppState,
     server: u64,
     instance: u64,
     emit: impl FnOnce(),
 ) -> bool {
-    let Ok(generation) = unlocked_ui_session_generation(state).await else {
+    // Capture before ANY await so a delayed event cannot adopt a replacement UI authorization.
+    let generation = state.ui_session_generation.load(Ordering::Acquire);
+    if require_unlocked_session(state).await.is_err() {
         return false;
-    };
-    let Ok(_commit) = require_ui_session_generation(state, generation).await else {
-        return false;
-    };
+    }
     let entries = state.servers.lock().await;
+    let _event = state.ui_event_commit.lock().await;
     if entries.get(&server).is_none_or(|e| e.instance != instance) {
         return false;
     }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return false;
+    }
+    // Both final guards cover this synchronous emit. No callback or await may reacquire native
+    // state here. An admitted emit may finish after lock is requested, but never after it returns.
     emit();
     true
+}
+
+/// Preserve lossless ordering and actor incarnation through the renderer boundary. The detail
+/// is private display data; it cannot select a repair or change any persistence decision.
+pub(crate) fn sync_state_payload(
+    server: u64,
+    instance: u64,
+    observation: catcoms_app::studio::StudioSyncObservation,
+) -> Value {
+    use catcoms_app::studio::StudioSyncPauseCause;
+    serde_json::json!({ "server": server, "instance": instance.to_string(), "sequence": observation.sequence.to_string(),
+        "paused": observation.paused, "cause": observation.cause.map(|cause| match cause {
+            StudioSyncPauseCause::Background => "background", StudioSyncPauseCause::Incoming => "incoming"
+        }), "detail": observation.detail })
 }
 
 #[tauri::command]

@@ -34,9 +34,13 @@
 pub mod addr;
 pub mod admission;
 pub mod autonat_server;
+#[cfg(test)]
+mod bytes_codec_tests;
 pub mod fdlimit;
 pub mod infra_transport;
 pub mod join_reply;
+#[cfg(test)]
+mod media_mapping_tests;
 pub mod metering;
 mod pcp_ipv6;
 pub mod relay_node;
@@ -79,7 +83,9 @@ use catcoms_rt::{
     Clock, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
     CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
     ProtocolId, RendezvousRegistration, RequestCancellation, Responder, SharedRequestKeepalive,
-    SystemClock, Topic, TransportError, TransportEvent, MAX_PEER_DIAL_BATCH,
+    SystemClock, Topic, TransportError, TransportEvent, FILE_BRIDGE_KIND,
+    FILE_SERVICE_REQUEST_MAX_BYTES, FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND,
+    MAX_PEER_DIAL_BATCH,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -88,7 +94,7 @@ use libp2p::core::transport::PortUse;
 use libp2p::core::upgrade::Version;
 use libp2p::core::{ConnectedPoint, Endpoint};
 use libp2p::multiaddr::Protocol;
-use libp2p::request_response::{OutboundRequestId, ResponseChannel};
+use libp2p::request_response::{InboundRequestId, OutboundRequestId, ResponseChannel};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{
@@ -104,10 +110,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
+mod connection_leases;
+mod event_dispatch;
 mod publication;
 
 /// Max request/response frame size.
-const MAX_FRAME: usize = 16 * 1024 * 1024;
+const MAX_FRAME: usize = catcoms_rt::MAX_REQUEST_RESPONSE_FRAME_BYTES;
 
 /// Cap on discovered records surfaced from a single rendezvous Discover response, so a
 /// hostile rendezvous cannot flood the never-dropping discovered queue (the higher
@@ -388,26 +396,66 @@ pub struct MeshObservationSnapshot {
 
 // ----- request/response codec ------------------------------------------------
 
-/// A minimal length-prefixed raw-bytes codec for request/response.
-#[derive(Clone, Default, Debug)]
-pub struct BytesCodec;
+/// Length-prefixed bytes with one request-class bound per actual substream, never per peer.
+///
+/// Pinned libp2p-request-response 0.29.0 `handler.rs` clones the base codec for EACH substream,
+/// then uses that same mutable clone for write_request/read_response (outbound) or
+/// read_request/write_response (inbound). The captured value prevents a malicious new-service
+/// reply allocating the released 16 MiB ceiling under a small page allowance. Dependency upgrades
+/// must preserve this ordering; the real TCP hostile-codec regression pins the actual handoff.
+/// This is transport capacity only: neither new kind is registered or authorized by this codec.
+#[derive(Clone, Debug)]
+pub struct BytesCodec {
+    response_max: usize,
+}
+impl Default for BytesCodec {
+    fn default() -> Self {
+        Self {
+            response_max: MAX_FRAME,
+        }
+    }
+}
+impl BytesCodec {
+    fn begin_request(&mut self, kind: Option<u8>) -> usize {
+        // Always reset, including empty/legacy requests. Value-only clone state cannot narrow
+        // another concurrent stream, and reusing a codec cannot inherit its preceding class.
+        if matches!(kind, Some(FILE_BRIDGE_KIND | FILE_SOURCE_KIND)) {
+            self.response_max = FILE_SERVICE_RESPONSE_MAX_BYTES;
+            FILE_SERVICE_REQUEST_MAX_BYTES
+        } else {
+            self.response_max = MAX_FRAME;
+            MAX_FRAME
+        }
+    }
+}
 
-async fn read_frame<T: AsyncRead + Unpin + Send>(io: &mut T) -> io::Result<Vec<u8>> {
+fn oversized_frame() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "frame too large")
+}
+async fn frame_length<T: AsyncRead + Unpin + Send>(io: &mut T, max: usize) -> io::Result<usize> {
     let mut len = [0u8; 4];
     io.read_exact(&mut len).await?;
     let n = u32::from_be_bytes(len) as usize;
-    if n > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame too large",
-        ));
+    if n > max {
+        return Err(oversized_frame());
     }
+    Ok(n)
+}
+async fn read_frame<T: AsyncRead + Unpin + Send>(io: &mut T, max: usize) -> io::Result<Vec<u8>> {
+    let n = frame_length(io, max).await?;
     let mut buf = vec![0u8; n];
     io.read_exact(&mut buf).await?;
     Ok(buf)
 }
 
-async fn write_frame<T: AsyncWrite + Unpin + Send>(io: &mut T, data: &[u8]) -> io::Result<()> {
+async fn write_frame<T: AsyncWrite + Unpin + Send>(
+    io: &mut T,
+    data: &[u8],
+    max: usize,
+) -> io::Result<()> {
+    if data.len() > max {
+        return Err(oversized_frame());
+    }
     let len = u32::try_from(data.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
     io.write_all(&len.to_be_bytes()).await?;
@@ -426,14 +474,29 @@ impl request_response::Codec for BytesCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_frame(io).await
+        self.begin_request(None);
+        let n = frame_length(io, MAX_FRAME).await?;
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        // Inspect only the fixed header and first kind byte before allocating. An untrusted
+        // new-kind sender cannot force a legacy-sized body allocation before classification.
+        let mut kind = [0u8; 1];
+        io.read_exact(&mut kind).await?;
+        if n > self.begin_request(Some(kind[0])) {
+            return Err(oversized_frame());
+        }
+        let mut request = vec![0; n];
+        request[0] = kind[0];
+        io.read_exact(&mut request[1..]).await?;
+        Ok(request)
     }
 
     async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> io::Result<Vec<u8>>
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_frame(io).await
+        read_frame(io, self.response_max).await
     }
 
     async fn write_request<T>(
@@ -445,7 +508,8 @@ impl request_response::Codec for BytesCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        write_frame(io, &req).await
+        let max = self.begin_request(req.first().copied());
+        write_frame(io, &req, max).await
     }
 
     async fn write_response<T>(
@@ -457,7 +521,7 @@ impl request_response::Codec for BytesCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        write_frame(io, &resp).await
+        write_frame(io, &resp, self.response_max).await
     }
 }
 
@@ -553,7 +617,7 @@ impl MeshBehaviour {
             gossipsub::Config::default(),
         )?;
         let request_response = request_response::Behaviour::with_codec(
-            BytesCodec,
+            BytesCodec::default(),
             [(
                 StreamProtocol::new(RR_PROTOCOL),
                 request_response::ProtocolSupport::Full,
@@ -1212,6 +1276,13 @@ fn from_topic_hash(hash: &gossipsub::TopicHash) -> Topic {
 // ----- actor -----------------------------------------------------------------
 
 enum Command {
+    /// Test-only deterministic hold AFTER real terminal evidence, to inspect the actual pending
+    /// response table without relying on socket speed or preserving original application Bytes.
+    #[cfg(test)]
+    HoldInboundRetirement {
+        hold: bool,
+        observed: oneshot::Sender<usize>,
+    },
     Subscribe(Topic),
     Unsubscribe(Topic),
     Publish(Topic, Bytes),
@@ -1245,6 +1316,13 @@ enum Command {
     NotifyConnected {
         peer: PeerId,
         data: Bytes,
+    },
+    /// Local admission ACK only; actual lower custody stays in pending_req with no answer sink.
+    NotifyConnectedOwned {
+        peer: PeerId,
+        data: Bytes,
+        cancellation: RequestCancellation,
+        reply: oneshot::Sender<Result<(), TransportError>>,
     },
     /// Start listening on `addr` (e.g. a `…/p2p-circuit` relay reservation).
     Listen(Multiaddr),
@@ -1522,8 +1600,30 @@ impl NetworkBehaviour for Eviction {
 }
 
 type InboundResponses = FuturesUnordered<
-    Pin<Box<dyn Future<Output = (ResponseChannel<Vec<u8>>, Option<Bytes>)> + Send>>,
+    Pin<
+        Box<
+            dyn Future<
+                    Output = (
+                        InboundRequestId,
+                        Option<(ResponseChannel<Vec<u8>>, catcoms_rt::ResponderReply)>,
+                        Arc<event_dispatch::Credit>,
+                    ),
+                > + Send,
+        >,
+    >,
 >;
+
+struct InboundRequest {
+    authority: Arc<event_dispatch::IngressAuthority>,
+    terminal: watch::Sender<bool>,
+    _request_credit: Arc<event_dispatch::Credit>,
+    response_credit: Option<SharedRequestKeepalive>,
+}
+impl Drop for InboundRequest {
+    fn drop(&mut self) {
+        self.terminal.send_replace(true);
+    }
+}
 
 /// A PCP/NAT-PMP worker is tied to exactly one stable TCP or UDP listen port. Dropping the actor
 /// aborts these workers and stops lease renewal; the router's bounded lease then expires naturally.
@@ -2236,7 +2336,7 @@ async fn run_port_mapper_attempt(
     drop(probe_client);
 
     // A probe result says a protocol answered discovery; it does not say the subsequent MAP
-    // request will be granted. `portmapper` 0.18 only logs that request's error and leaves its
+    // request will be granted. `portmapper` (0.18 and 0.19) only logs that request's error and leaves its
     // watch channel open at `None`, so waiting on `changed()` alone can hang forever. Give each
     // advertised protocol its own bounded attempt, allowing NAT-PMP to follow a failed PCP MAP.
     const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
@@ -2575,8 +2675,8 @@ async fn run_upnp_bound_mapper_attempt(
 const MEDIA_MAP_LEASE_SECS: u32 = 4 * 60 * 60;
 
 /// A live media-port mapping: the public socket to advertise plus whatever keeps the route
-/// alive. A UPnP lease is bounded and self-sufficient; a PCP/NAT-PMP lease is short and renewed
-/// by the retained `portmapper` client, so dropping this struct is what ends that route.
+/// alive. A UPnP lease is bounded and self-sufficient; a PCP/NAT-PMP lease is renewed by the
+/// retained `portmapper` client. Release is best-effort, not proof of immediate router closure.
 pub struct MediaPortMapping {
     /// The public socket a remote peer can be told about.
     pub external: SocketAddrV4,
@@ -2590,6 +2690,9 @@ pub struct MediaPortMapping {
     pub confirmed: bool,
     local_port: NonZeroU16,
     keepalive: Option<portmapper::Client>,
+    // Cleanup must address the router that granted this lease, even after Wi-Fi/default-route
+    // changes. Rediscovering a gateway here could delete an unrelated router's same-port entry.
+    upnp: Option<UpnpMediaLease<igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>>>,
 }
 
 // `portmapper::Client` is a live handle, not data; report only whether one is retained.
@@ -2606,13 +2709,157 @@ impl std::fmt::Debug for MediaPortMapping {
 }
 
 impl MediaPortMapping {
-    /// Release the route. Best-effort for UPnP (the bounded lease dies on its own regardless);
-    /// dropping the retained client is the whole release for PCP/NAT-PMP.
-    pub async fn release(self) {
-        if self.keepalive.is_none() {
-            unmap_media_udp_port(self.local_port).await;
+    /// Retire the route. `true` means the granting IGD acknowledged deletion. `false` means
+    /// effects may survive: the caller must retain its same-port exclusion and capacity charge.
+    /// PCP/NAT-PMP Client drop requests cancellation, but exposes no worker-drain/deletion ACK.
+    pub async fn release(self) -> bool {
+        if let Some(lease) = self.upnp {
+            lease.release().await
+        } else {
+            false
         }
     }
+}
+
+/// A failed media mapping and whether router/worker effects may still occupy the port. An
+/// uncertain attempt must not be retried automatically or refunded as completed cleanup.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct MediaPortMappingError {
+    message: String,
+    /// Retain exclusive port ownership and the attempt's process capacity charge until exit.
+    pub uncertain: bool,
+}
+
+impl MediaPortMappingError {
+    fn clean(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            uncertain: false,
+        }
+    }
+    fn uncertain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            uncertain: true,
+        }
+    }
+}
+
+/// The subset of IGD used by media custody. Kept separate from discovery so tests can defer or
+/// fail router operations without real network access, and assert cleanup at the original owner.
+#[async_trait]
+trait MediaGateway: Send + Sync {
+    async fn add_media_port(&self, local_ip: Ipv4Addr, port: NonZeroU16) -> Result<(), String>;
+    async fn external_ip(&self) -> Result<IpAddr, String>;
+    async fn confirmed(&self, port: NonZeroU16) -> bool;
+    async fn remove_media_port(&self, port: NonZeroU16) -> Result<(), String>;
+}
+
+#[async_trait]
+impl MediaGateway for igd_next::aio::Gateway<igd_next::aio::tokio::Tokio> {
+    async fn add_media_port(&self, local_ip: Ipv4Addr, port: NonZeroU16) -> Result<(), String> {
+        self.add_port(
+            igd_next::PortMappingProtocol::UDP,
+            port.get(),
+            SocketAddr::new(IpAddr::V4(local_ip), port.get()),
+            MEDIA_MAP_LEASE_SECS,
+            "Mewtual call",
+        )
+        .await
+        .map_err(|error| format!("gateway refused the mapping: {error}"))
+    }
+
+    async fn external_ip(&self) -> Result<IpAddr, String> {
+        self.get_external_ip()
+            .await
+            .map_err(|error| format!("external-address query failed: {error}"))
+    }
+
+    async fn confirmed(&self, port: NonZeroU16) -> bool {
+        upnp_mapping_confirmed(self, port).await
+    }
+
+    async fn remove_media_port(&self, port: NonZeroU16) -> Result<(), String> {
+        self.remove_port(igd_next::PortMappingProtocol::UDP, port.get())
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// One acknowledged Add, including the exact gateway and external UDP port. The native caller
+/// must retain its worker through finalization/cleanup; cancelling a waiter is not cancellation
+/// of the router side effect. No persistent ownership or crash-atomic deletion is claimed.
+struct UpnpMediaLease<G> {
+    gateway: G,
+    port: NonZeroU16,
+}
+
+const MEDIA_GATEWAY_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn media_gateway_rpc<T>(
+    clock: &impl Clock,
+    operation: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {
+        result = operation => result,
+        _ = clock.sleep(MEDIA_GATEWAY_RPC_TIMEOUT) => Err("router request timed out".into()),
+    }
+}
+
+impl<G: MediaGateway> UpnpMediaLease<G> {
+    async fn release(self) -> bool {
+        // A failed deletion is still bounded by the requested lease. Never rediscover another
+        // gateway, and never turn best-effort cleanup into an external-reachability claim.
+        media_gateway_rpc(&SystemClock, self.gateway.remove_media_port(self.port))
+            .await
+            .is_ok()
+    }
+}
+
+async fn acquire_upnp_media_lease<G: MediaGateway>(
+    gateway: G,
+    local_ip: Ipv4Addr,
+    port: NonZeroU16,
+    clock: &impl Clock,
+) -> Result<(UpnpMediaLease<G>, SocketAddrV4, bool), MediaPortMappingError> {
+    // Only an acknowledged Add establishes custody. An ambiguous Add timeout can leave a
+    // bounded router lease, but deleting on a refusal/timeout could remove somebody else's
+    // existing entry. Do not report success or blindly delete in that case.
+    media_gateway_rpc(clock, gateway.add_media_port(local_ip, port))
+        .await
+        .map_err(MediaPortMappingError::uncertain)?;
+    let lease = UpnpMediaLease { gateway, port };
+    let external = media_gateway_rpc(clock, lease.gateway.external_ip()).await;
+    let usable = match external {
+        Ok(IpAddr::V4(ip)) if ipv4_is_globally_routable(&ip) => Ok(ip),
+        Ok(ip) => Err(format!(
+            "gateway returned a non-public IPv4 mapping address ({ip})"
+        )),
+        Err(error) => Err(error),
+    };
+    let external = match usable {
+        Ok(ip) => ip,
+        Err(error) => {
+            // The grant already exists: retain custody until this cleanup completes before
+            // falling through to another protocol. Previously this path leaked its handle.
+            return Err(
+                match media_gateway_rpc(clock, lease.gateway.remove_media_port(port)).await {
+                    Ok(()) => MediaPortMappingError::clean(error),
+                    Err(cleanup) => MediaPortMappingError::uncertain(format!(
+                        "{error}; cleanup uncertain: {cleanup}"
+                    )),
+                },
+            );
+        }
+    };
+    // Confirmation is advisory. Cap the whole table scan rather than allowing 64 slow router
+    // replies to hold an acquisition slot indefinitely.
+    let confirmed = tokio::select! {
+        confirmed = lease.gateway.confirmed(port) => confirmed,
+        _ = clock.sleep(MEDIA_GATEWAY_RPC_TIMEOUT) => false,
+    };
+    Ok((lease, SocketAddrV4::new(external, port.get()), confirmed))
 }
 
 /// Scan the router's own mapping table for the UDP entry on `port`. The strongest check
@@ -2641,53 +2888,38 @@ async fn upnp_mapping_confirmed(
 async fn map_media_port_upnp(
     local_ip: Ipv4Addr,
     port: NonZeroU16,
-) -> Result<MediaPortMapping, String> {
+) -> Result<MediaPortMapping, MediaPortMappingError> {
     let gateway = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
         bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
         timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
         ..Default::default()
     })
     .await
-    .map_err(|error| format!("no IGD gateway answered a search bound to {local_ip}: {error}"))?;
-    gateway
-        .add_port(
-            igd_next::PortMappingProtocol::UDP,
-            port.get(),
-            SocketAddr::new(IpAddr::V4(local_ip), port.get()),
-            MEDIA_MAP_LEASE_SECS,
-            "Mewtual call",
-        )
-        .await
-        .map_err(|error| format!("gateway refused the mapping: {error}"))?;
-    let external = match gateway.get_external_ip().await {
-        Ok(IpAddr::V4(ip)) => ip,
-        Ok(IpAddr::V6(ip)) => {
-            return Err(format!(
-                "gateway reported an IPv6 external address ({ip}) for an IPv4 mapping"
-            ))
-        }
-        Err(error) => return Err(format!("external-address query failed: {error}")),
-    };
-    if !ipv4_is_globally_routable(&external) {
-        return Err(format!(
-            "gateway returned non-public address {external} (likely CGNAT or double NAT)"
-        ));
-    }
-    let confirmed = upnp_mapping_confirmed(&gateway, port).await;
+    .map_err(|error| {
+        MediaPortMappingError::clean(format!(
+            "no IGD gateway answered a search bound to {local_ip}: {error}"
+        ))
+    })?;
+    let (lease, external, confirmed) =
+        acquire_upnp_media_lease(gateway, local_ip, port, &SystemClock).await?;
     Ok(MediaPortMapping {
-        external: SocketAddrV4::new(external, port.get()),
+        external,
         mechanism: PortMappingMechanism::Upnp,
         confirmed,
         local_port: port,
         keepalive: None,
+        upnp: Some(lease),
     })
 }
 
 /// The PCP/NAT-PMP rung for a media port, for routers that don't speak UPnP. Probe first (an
 /// unprobed one-shot optimistically tries PCP and stops at its timeout without falling through,
-/// same trap as [`run_port_mapper_attempt`]), then give each advertised protocol a bounded
-/// attempt. The client that succeeds is retained: it owns the short lease's renewal.
-async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping, String> {
+/// same trap as [`run_port_mapper_attempt`]), then give the first advertised protocol a bounded
+/// attempt. An uncertain result cannot fall through to another protocol on the same port. The
+/// client that succeeds is retained: it owns the lease's renewal, but exposes no joined shutdown.
+async fn map_media_port_pcp_natpmp(
+    port: NonZeroU16,
+) -> Result<MediaPortMapping, MediaPortMappingError> {
     const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
     let probe_client = portmapper::Client::new(portmapper::Config {
         enable_upnp: false,
@@ -2697,15 +2929,25 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
     });
     let probe = match probe_client.probe().await {
         Ok(Ok(probe)) => probe,
-        Ok(Err(error)) => return Err(error.to_string()),
-        Err(error) => return Err(format!("port-mapping probe stopped: {error}")),
+        // Even the probe client owns a spawned service. Its public API has no joined shutdown;
+        // retain the attempt charge on every failure after creating it, not just after MAP.
+        Ok(Err(error)) => return Err(MediaPortMappingError::uncertain(error.to_string())),
+        Err(error) => {
+            return Err(MediaPortMappingError::uncertain(format!(
+                "port-mapping probe stopped: {error}"
+            )))
+        }
     };
     drop(probe_client);
     let plan = mapping_attempt_plan(probe.pcp, probe.nat_pmp);
     if plan.is_empty() {
-        return Err("no compatible gateway answered the probe".to_string());
+        return Err(MediaPortMappingError::uncertain(
+            "no compatible gateway answered the probe",
+        ));
     }
-    for mechanism in plan {
+    // Once a mutating attempt starts, the public Client API cannot prove its worker drained on
+    // drop. Do not start another protocol on this port after an ambiguous result.
+    if let Some(mechanism) = plan.into_iter().next() {
         let client = portmapper::Client::new(portmapper::Config {
             enable_upnp: false,
             enable_pcp: mechanism == PortMappingMechanism::Pcp,
@@ -2723,10 +2965,10 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
         };
         if let Some(socket) = first {
             if !ipv4_is_globally_routable(socket.ip()) {
-                return Err(format!(
+                return Err(MediaPortMappingError::uncertain(format!(
                     "gateway returned non-public address {} (likely CGNAT or double NAT)",
                     socket.ip()
-                ));
+                )));
             }
             return Ok(MediaPortMapping {
                 external: socket,
@@ -2734,21 +2976,24 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
                 confirmed: true,
                 local_port: port,
                 keepalive: Some(client),
+                upnp: None,
             });
         }
     }
-    Err("a gateway answered discovery but granted no mapping".to_string())
+    Err(MediaPortMappingError::uncertain(
+        "a gateway answered discovery but granted no mapping",
+    ))
 }
 
 /// Map one webview media UDP port through the router and return the live mapping. One-shot by
 /// design: the mesh's mapping workers own the stable listen port, but a call's ICE agent binds
 /// fresh ephemeral ports the mesh never sees. The caller signals the mapping's public socket as
-/// an extra ICE candidate; a router mapping forwards from **any** source, which is what makes
-/// one mapped side sufficient for a call regardless of the other side's NAT type.
+/// an extra ICE candidate. A mapping can help the pair connect, but does not prove a working
+/// media route: firewalls, peer candidate policy and connectivity checks still matter.
 ///
 /// Tries UPnP over the bound-interface search first (the proven path; see
-/// [`run_upnp_bound_mapper_attempt`]), then PCP and NAT-PMP for routers that speak those
-/// instead.
+/// [`run_upnp_bound_mapper_attempt`]), then the first advertised PCP/NAT-PMP protocol after a
+/// clean IGD failure. Any uncertain Add/delete/client result stops fallback and remains charged.
 ///
 /// `claimed_ip` is the address the ICE candidate itself named (a mic-granted page gets real IPs
 /// in its host candidates); when present it must be the default-route interface, or the port
@@ -2760,42 +3005,27 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
 pub async fn map_media_udp_port(
     port: NonZeroU16,
     claimed_ip: Option<Ipv4Addr>,
-) -> Result<MediaPortMapping, String> {
-    let local_ip = default_route_ipv4().ok_or("no IPv4 default route")?;
+) -> Result<MediaPortMapping, MediaPortMappingError> {
+    let local_ip = default_route_ipv4()
+        .ok_or_else(|| MediaPortMappingError::clean("no IPv4 default route"))?;
     if let Some(claimed) = claimed_ip {
         if claimed != local_ip {
-            return Err(format!(
+            return Err(MediaPortMappingError::clean(format!(
                 "ICE socket {claimed}:{port} is not on the default-route interface ({local_ip}); a router mapping cannot reach it"
-            ));
+            )));
         }
     }
     match map_media_port_upnp(local_ip, port).await {
         Ok(mapping) => Ok(mapping),
+        Err(upnp_error) if upnp_error.uncertain => Err(upnp_error),
         Err(upnp_error) => match map_media_port_pcp_natpmp(port).await {
             Ok(mapping) => Ok(mapping),
-            Err(pcp_error) => Err(format!("UPnP: {upnp_error}; PCP/NAT-PMP: {pcp_error}")),
+            Err(pcp_error) => Err(MediaPortMappingError {
+                uncertain: pcp_error.uncertain,
+                message: format!("UPnP: {upnp_error}; PCP/NAT-PMP: {pcp_error}"),
+            }),
         },
     }
-}
-
-/// Best-effort removal of a mapping created by [`map_media_udp_port`]. Failure is acceptable:
-/// the lease is bounded and dies on its own.
-pub async fn unmap_media_udp_port(port: NonZeroU16) {
-    let Some(local_ip) = default_route_ipv4() else {
-        return;
-    };
-    let Ok(gateway) = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
-        bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
-        timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
-        ..Default::default()
-    })
-    .await
-    else {
-        return;
-    };
-    let _ = gateway
-        .remove_port(igd_next::PortMappingProtocol::UDP, port.get())
-        .await;
 }
 
 /// The bound-interface UPnP companion to [`run_port_mapper`], with the same retry cadence and
@@ -3300,7 +3530,9 @@ async fn run_ipv6_port_mapper_with<C, R, D>(
 }
 
 struct PendingRequest {
-    reply: oneshot::Sender<Result<Bytes, TransportError>>,
+    /// None for an accounted notification. Its possibly hostile reply is discarded directly
+    /// in the driver; a local ACK never creates an application-owned response buffer.
+    reply: Option<oneshot::Sender<Result<Bytes, TransportError>>>,
     /// Deliberately unread: ownership is the accounting action. It survives a dropped waiter and
     /// is released only by the matching response/failure event.
     _keepalive: Option<SharedRequestKeepalive>,
@@ -3321,9 +3553,21 @@ struct Actor {
     enable_port_mapping: bool,
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
+    delivery: event_dispatch::Dispatcher,
+    delivery_budget: Arc<event_dispatch::Budget>,
+    inbound_req: HashMap<InboundRequestId, InboundRequest>,
+    // Test-only observation immediately before inbound application dispatch. This makes the
+    // real-driver congestion regression deterministic without sleeps or a fake transport.
+    #[cfg(test)]
+    test_requests: watch::Sender<u64>,
+    #[cfg(test)]
+    test_hold_inbound_retirement: bool,
+    #[cfg(test)]
+    test_retired_inbound: HashSet<InboundRequestId>,
     /// Coalesced, present-time liveness/path table. Pre-actor admission and infrastructure waits
     /// observe this instead of consuming the sole ordered event stream that `ChannelSync` owns.
     connection_snapshot_tx: watch::Sender<Vec<PeerConnectionSnapshot>>,
+    connection_leases: connection_leases::Owners,
     /// Address-bearing companion to the privacy-preserving connection snapshot. Only current
     /// outbound, Noise-authenticated direct routes enter this table; consumers use it to seal a
     /// same-LAN reconnect hint after admission, never for UI presence.
@@ -3497,6 +3741,22 @@ impl Actor {
         }
     }
 
+    fn queue_connection_state(&mut self, peer_id: libp2p::PeerId, newly: Option<ConnectionPath>) {
+        let peer = to_peer(&peer_id);
+        let Some(lease) = connection_leases::current(&self.connection_leases.table, peer) else {
+            return;
+        };
+        let TransportEvent::PeerPathsChanged { active, .. } = self.peer_paths_event(peer_id, newly)
+        else {
+            unreachable!()
+        };
+        if !self.delivery.connected(peer, lease, active, newly) {
+            // Preserve existing announced owners instead of evicting their disconnect obligations.
+            // A new generation outside the bounded metadata table is not offered to the app.
+            let _ = self.swarm.disconnect_peer_id(peer_id);
+        }
+    }
+
     async fn run(mut self) {
         let mut inbound: InboundResponses = FuturesUnordered::new();
         // Held publications need a clock of their own; see `PENDING_PUBLISH_RETRY`. The arm is
@@ -3516,7 +3776,10 @@ impl Actor {
                             // what lets those addresses be raced in a single dial. Nothing here
                             // depends on the drain succeeding: an address that misses the batch is
                             // dialed on its own, which is still correct, just less efficient.
-                            while let Ok(next) = self.cmd_rx.try_recv() {
+                            // A producer cannot keep one turn alive indefinitely and starve
+                            // response/timeout/disconnect polling, even under a busy app actor.
+                            for _ in 0..31 {
+                                let Ok(next) = self.cmd_rx.try_recv() else { break; };
                                 self.handle_command(next);
                             }
                             self.flush_dials();
@@ -3525,7 +3788,11 @@ impl Actor {
                     }
                 }
                 event = self.swarm.select_next_some() => {
-                    self.on_swarm_event(event, &mut inbound).await;
+                    self.on_swarm_event(event, &mut inbound);
+                }
+                permit = self.event_tx.clone().reserve_owned(), if self.delivery.has_pending() => {
+                    let Ok(permit) = permit else { break; };
+                    if let Some(event) = self.delivery.next() { permit.send(event); }
                 }
                 Some(report) = self.port_mapper_rx.recv() => {
                     let current = port_mapper_report_is_current(&self.port_mapper_tasks, &report);
@@ -3543,19 +3810,29 @@ impl Actor {
                     publish_retry.set(SystemClock.sleep(PENDING_PUBLISH_RETRY));
                     self.flush_pending_publish();
                 }
-                Some((channel, resp)) = inbound.next(), if !inbound.is_empty() => {
-                    if let Some(bytes) = resp {
-                        let _ = self
-                            .swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_response(channel, bytes.to_vec());
+                Some((id, response, custody)) = inbound.next(), if !inbound.is_empty() => {
+                    if let (Some(pending), Some((channel, response))) = (self.inbound_req.get_mut(&id), response) {
+                        use catcoms_rt::RequestAuthority;
+                        // Sender bytes and the lower serialized Vec coexist until ResponseSent.
+                        // Refusal drops the lower channel honestly; retain initial custody until
+                        // its actual InboundFailure, rather than recycling it at outer timeout.
+                        // This is final response admission, after the reply-wait lifetime
+                        // retired on receive. Group/native scope is an independent observer;
+                        // revocation after this synchronous boundary cannot recall the send.
+                        if pending.authority.authorized() && response.is_current() {
+                            pending.response_credit = response.keepalive();
+                            let _ = self.swarm.behaviour_mut().request_response.send_response(channel, response.data().to_vec());
+                        }
+                    } else if let Some(pending) = self.inbound_req.get_mut(&id) {
+                        pending.terminal.send_replace(true);
                     }
+                    drop(custody);
                 }
             }
         }
         // A normal command-channel shutdown has an explicit empty terminal value. A panic cannot
         // run this line, so readers additionally reject any retained value once the sender closes.
+        self.connection_leases.clear();
         self.connection_snapshot_tx.send_replace(Vec::new());
         self.authenticated_route_tx.send_replace(Vec::new());
         self.authenticated_route_evidence_tx
@@ -3938,6 +4215,17 @@ impl Actor {
 
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
+            #[cfg(test)]
+            Command::HoldInboundRetirement { hold, observed } => {
+                self.test_hold_inbound_retirement = hold;
+                let count = self.test_retired_inbound.len();
+                if !hold {
+                    for id in self.test_retired_inbound.drain() {
+                        self.inbound_req.remove(&id);
+                    }
+                }
+                let _ = observed.send(count);
+            }
             Command::Subscribe(topic) => {
                 tracing::debug!(topic = %hex::encode(topic.as_bytes()), "subscribe");
                 let _ = self
@@ -3984,7 +4272,7 @@ impl Actor {
                             self.pending_req.insert(
                                 id,
                                 PendingRequest {
-                                    reply,
+                                    reply: Some(reply),
                                     _keepalive: keepalive,
                                     kind: data.first().copied(),
                                     bytes: data.len(),
@@ -4033,7 +4321,7 @@ impl Actor {
                         self.pending_req.insert(
                             id,
                             PendingRequest {
-                                reply,
+                                reply: Some(reply),
                                 _keepalive: keepalive,
                                 kind: data.first().copied(),
                                 bytes: data.len(),
@@ -4077,6 +4365,41 @@ impl Actor {
                         "connected-only notification refused: peer is not live"
                     ),
                 }
+            }
+            Command::NotifyConnectedOwned {
+                peer,
+                data,
+                cancellation,
+                reply,
+            } => {
+                if reply.is_closed() || cancellation.is_cancelled() {
+                    let _ = reply.send(Err(TransportError::Cancelled));
+                    return;
+                }
+                let live = self
+                    .peers
+                    .get(&peer)
+                    .copied()
+                    .filter(|target| self.swarm.is_connected(target));
+                let Some(target) = live else {
+                    let _ = reply.send(Err(TransportError::Unreachable(peer)));
+                    return;
+                };
+                let id = self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_request(&target, data.to_vec());
+                self.pending_req.insert(
+                    id,
+                    PendingRequest {
+                        reply: None,
+                        _keepalive: cancellation.keepalive(),
+                        kind: data.first().copied(),
+                        bytes: data.len(),
+                    },
+                );
+                let _ = reply.send(Ok(()));
             }
             Command::Listen(addr) => {
                 // Listening on a `…/p2p-circuit` address is how a reservation is requested, so the
@@ -4633,7 +4956,7 @@ impl Actor {
         }
     }
 
-    async fn on_swarm_event(
+    fn on_swarm_event(
         &mut self,
         event: SwarmEvent<MeshBehaviourEvent>,
         inbound: &mut InboundResponses,
@@ -4751,6 +5074,9 @@ impl Actor {
                     endpoint.get_remote_address().clone(),
                 );
                 let first_connection = self.peers.insert(peer, peer_id).is_none();
+                if first_connection {
+                    self.connection_leases.connected(peer);
+                }
                 self.connection_paths.insert((peer_id, connection_id), path);
                 if let Some(route) = authenticated_dial_route(peer_id, &endpoint) {
                     self.authenticated_routes
@@ -4765,17 +5091,10 @@ impl Actor {
                 // Update the queryable state atomically before sending either ordered edge. A
                 // waiter that wakes here sees both aggregate liveness and its current path.
                 self.publish_connection_snapshot();
-                if first_connection {
-                    let _ = self
-                        .event_tx
-                        .send(TransportEvent::PeerConnected(peer))
-                        .await;
-                }
-                // Preserve `PeerConnected` as the first event for a peer so existing consumers
-                // keep their one-edge liveness contract. The path snapshot follows immediately;
-                // consumers that understand it may refine "connected" to direct vs relay.
-                let paths = self.peer_paths_event(peer_id, Some(path));
-                let _ = self.event_tx.send(paths).await;
+                // Connection state precedes this generation's requests in the ordered stream.
+                // Congestion coalesces never-announced generations; announced disconnects are
+                // retained and cannot be mistaken for a replacement same-peer connection.
+                self.queue_connection_state(peer_id, Some(path));
             }
             SwarmEvent::OutgoingConnectionError {
                 connection_id,
@@ -4839,32 +5158,21 @@ impl Actor {
                     self.clear_dial_ledger(&peer_id);
                     let peer = to_peer(&peer_id);
                     self.peers.remove(&peer);
+                    // Close captured driver authority before snapshot/event publication. An
+                    // undrained application disconnect must not authorize a replacement link.
+                    self.connection_leases.disconnected(peer);
                     self.publish_connection_snapshot();
                     if self.mesh_observations.remove(&peer_id).is_some() {
                         self.mesh_observation_order
                             .retain(|candidate| candidate != &peer_id);
                         self.publish_mesh_observations();
                     }
-                    // Always paired: an evicted peer is refused by `Eviction` before a connection
-                    // is ever established, so it cannot reach this arm without having been
-                    // announced as connected first.
-                    let _ = self
-                        .event_tx
-                        .send(TransportEvent::PeerDisconnected(peer))
-                        .await;
-                    // `num_established` is libp2p's authoritative count. Clear every entry for
-                    // the peer as a fail-safe if an earlier close edge was missed or changed
-                    // shape, then publish the empty snapshot after the legacy disconnect edge.
-                    if paths_changed {
-                        let paths = self.peer_paths_event(peer_id, None);
-                        let _ = self.event_tx.send(paths).await;
-                    }
+                    self.delivery.disconnected(peer);
                 } else if paths_changed {
                     // The address-bearing watch was already published independently above. The
                     // coarse snapshot/event need move only when their deduplicated set changed.
                     self.publish_connection_snapshot();
-                    let paths = self.peer_paths_event(peer_id, None);
-                    let _ = self.event_tx.send(paths).await;
+                    self.queue_connection_state(peer_id, None);
                 }
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -4878,14 +5186,23 @@ impl Actor {
                     .unwrap_or_else(|| to_peer(&propagation_source));
                 let topic = from_topic_hash(&message.topic);
                 tracing::trace!(bytes = message.data.len(), "gossip received");
-                let _ = self
-                    .event_tx
-                    .send(TransportEvent::Gossip {
-                        topic,
-                        from,
-                        data: Bytes::from(message.data),
-                    })
-                    .await;
+                let carrier = to_peer(&propagation_source);
+                if let (Some(ingress), Some(credit)) = (
+                    connection_leases::current(&self.connection_leases.table, carrier),
+                    self.delivery_budget.charge(message.data.len(), None),
+                ) {
+                    self.delivery.queue(
+                        TransportEvent::Gossip {
+                            topic,
+                            from,
+                            data: event_dispatch::charged_bytes(Bytes::from(message.data), credit),
+                        },
+                        carrier,
+                        ingress,
+                    );
+                } else {
+                    self.delivery.note_gossip_loss();
+                }
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(
                 gossipsub::Event::Subscribed { .. },
@@ -4896,31 +5213,96 @@ impl Actor {
                 request_response::Event::Message { peer, message, .. },
             )) => match message {
                 request_response::Message::Request {
-                    request, channel, ..
+                    request_id,
+                    request,
+                    channel,
                 } => {
+                    use catcoms_rt::RequestAuthority;
+                    #[cfg(test)]
+                    self.test_requests.send_modify(|count| *count += 1);
                     let from = to_peer(&peer);
-                    self.peers.entry(from).or_insert(peer);
-                    let (responder, rx) = Responder::channel();
-                    let _ = self
-                        .event_tx
-                        .send(TransportEvent::Request {
+                    let Some(ingress) =
+                        connection_leases::current(&self.connection_leases.table, from)
+                    else {
+                        return;
+                    };
+                    let Some(credit) = self.delivery_budget.charge_request(
+                        request.len(),
+                        from,
+                        request.first().copied(),
+                    ) else {
+                        tracing::trace!(?from, kind = ?request.first(), bytes = request.len(),
+                            "inbound request refused before application delivery");
+                        return;
+                    };
+                    let (authority, terminal) =
+                        event_dispatch::IngressAuthority::new(ingress.clone());
+                    let (responder, rx) = Responder::channel_owned(
+                        credit.clone(),
+                        authority.clone(),
+                        self.delivery_budget.clone(),
+                    );
+                    if !self.delivery.queue(
+                        TransportEvent::Request {
                             from,
                             proto: ProtocolId(RR_PROTOCOL),
-                            data: Bytes::from(request),
+                            data: event_dispatch::charged_bytes(
+                                Bytes::from(request),
+                                credit.clone(),
+                            ),
                             responder,
-                        })
-                        .await;
-                    inbound.push(Box::pin(async move { (channel, rx.recv().await) }));
+                        },
+                        from,
+                        ingress,
+                    ) {
+                        return;
+                    }
+                    self.inbound_req.insert(
+                        request_id,
+                        InboundRequest {
+                            authority: authority.clone(),
+                            terminal,
+                            _request_credit: credit.clone(),
+                            response_credit: None,
+                        },
+                    );
+                    inbound.push(Box::pin(async move {
+                        let custody = credit;
+                        let response = tokio::select! {
+                            response = rx.recv_owned() => response,
+                            _ = authority.revoked() => None,
+                            _ = SystemClock.sleep(catcoms_rt::REQUEST_TIMEOUT) => None,
+                        };
+                        (request_id, response.map(|bytes| (channel, bytes)), custody)
+                    }));
                 }
                 request_response::Message::Response {
                     request_id,
                     response,
                 } => {
                     if let Some(pending) = self.pending_req.remove(&request_id) {
-                        let _ = pending.reply.send(Ok(Bytes::from(response)));
+                        if let Some(reply) = pending.reply {
+                            let _ = reply.send(Ok(Bytes::from(response)));
+                        }
                     }
                 }
             },
+            SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
+                request_response::Event::InboundFailure { request_id, .. }
+                | request_response::Event::ResponseSent { request_id, .. },
+            )) => {
+                // Actual lower terminal evidence, not application timeout or receiver loss.
+                // Bytes/responder clones still retain independent shared custody after this.
+                #[cfg(test)]
+                if self.test_hold_inbound_retirement && self.inbound_req.contains_key(&request_id) {
+                    self.test_retired_inbound.insert(request_id);
+                    // Refused channels can emit terminal events without ever owning a table
+                    // row. Only real owned rows justify this finite test-retention allowance.
+                    assert!(self.test_retired_inbound.len() <= self.inbound_req.len());
+                    return;
+                }
+                self.inbound_req.remove(&request_id);
+            }
             SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
                 request_response::Event::OutboundFailure {
                     request_id,
@@ -4945,8 +5327,8 @@ impl Actor {
                     request_bytes = ?pending.as_ref().map(|entry| entry.bytes),
                     "outbound request failed"
                 );
-                if let Some(pending) = pending {
-                    let _ = pending.reply.send(Err(match error {
+                if let Some(reply) = pending.and_then(|pending| pending.reply) {
+                    let _ = reply.send(Err(match error {
                         request_response::OutboundFailure::Timeout => {
                             TransportError::Timeout(to_peer(&peer))
                         }
@@ -5214,7 +5596,14 @@ pub struct MeshService {
     /// cancellation until the queued command is drained. No unbounded admission waiters.
     publish_once_slots: Arc<Semaphore>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
+    #[cfg(test)]
+    test_event_tx: mpsc::Sender<TransportEvent>,
+    #[cfg(test)]
+    test_requests: watch::Receiver<u64>,
+    #[cfg(test)]
+    test_delivery_budget: Arc<event_dispatch::Budget>,
     connection_snapshot_rx: watch::Receiver<Vec<PeerConnectionSnapshot>>,
+    connection_leases: Arc<std::sync::Mutex<HashMap<PeerId, catcoms_rt::ConnectionLease>>>,
     authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
     authenticated_route_evidence_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
@@ -5256,7 +5645,14 @@ impl MeshService {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
+        #[cfg(test)]
+        let test_event_tx = event_tx.clone();
+        #[cfg(test)]
+        let (test_requests_tx, test_requests_rx) = watch::channel(0);
+        let delivery_budget = event_dispatch::Budget::shared();
         let (connection_snapshot_tx, connection_snapshot_rx) = watch::channel(Vec::new());
+        let connection_owners = connection_leases::Owners::default();
+        let connection_leases = connection_owners.table.clone();
         let (authenticated_route_tx, authenticated_route_rx) = watch::channel(Vec::new());
         let (authenticated_route_evidence_tx, authenticated_route_evidence_rx) =
             watch::channel(Vec::new());
@@ -5285,7 +5681,17 @@ impl MeshService {
             enable_port_mapping,
             cmd_rx,
             event_tx,
+            delivery: event_dispatch::Dispatcher::default(),
+            delivery_budget: delivery_budget.clone(),
+            inbound_req: HashMap::new(),
+            #[cfg(test)]
+            test_requests: test_requests_tx,
+            #[cfg(test)]
+            test_hold_inbound_retirement: false,
+            #[cfg(test)]
+            test_retired_inbound: HashSet::new(),
             connection_snapshot_tx,
+            connection_leases: connection_owners,
             authenticated_route_tx,
             authenticated_route_evidence_tx,
             listen_tx,
@@ -5340,7 +5746,14 @@ impl MeshService {
             cmd_tx,
             publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
             event_rx: Mutex::new(event_rx),
+            #[cfg(test)]
+            test_event_tx,
+            #[cfg(test)]
+            test_requests: test_requests_rx,
+            #[cfg(test)]
+            test_delivery_budget: delivery_budget,
             connection_snapshot_rx,
+            connection_leases,
             authenticated_route_rx,
             authenticated_route_evidence_rx,
             listen_rx: Mutex::new(listen_rx),
@@ -5965,6 +6378,12 @@ impl MeshTransport for MeshService {
     fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
         MeshService::connection_snapshot(self)
     }
+    fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
+        connection_leases::current(&self.connection_leases, peer)
+    }
+    fn supports_connection_leases(&self) -> bool {
+        true
+    }
 
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
         self.cmd_tx
@@ -6112,8 +6531,45 @@ impl MeshTransport for MeshService {
             .map_err(|_| TransportError::Closed)
     }
 
+    async fn notify_connected_cancellable(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+        mut cancellation: RequestCancellation,
+    ) -> Result<(), TransportError> {
+        if cancellation.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+        let (reply, rx) = oneshot::channel();
+        tokio::select! {
+            result = self.cmd_tx.send(Command::NotifyConnectedOwned { peer, data, cancellation: cancellation.clone(), reply }) => result.map_err(|_| TransportError::Closed)?,
+            _ = cancellation.cancelled() => return Err(TransportError::Cancelled),
+        }
+        tokio::select! {
+            result = rx => result.map_err(|_| TransportError::Closed)?,
+            _ = cancellation.cancelled() => Err(TransportError::Cancelled),
+        }
+    }
+
     async fn next_event(&self) -> Option<TransportEvent> {
-        self.event_rx.lock().await.recv().await
+        let mut events = self.event_rx.lock().await;
+        let mut skipped = 0;
+        loop {
+            let event = events.recv().await?;
+            if matches!(&event, TransportEvent::Request { responder, .. } if !responder.is_current())
+            {
+                // A response deadline/failure or disconnect can retire an already-enqueued
+                // request before the app reads it. It must not run under a replacement link.
+                skipped += 1;
+                if skipped == 32 {
+                    skipped = 0;
+                    tokio::task::yield_now().await;
+                }
+                continue;
+            }
+            return Some(event);
+        }
     }
 
     // Rendezvous discovery; delegate to the inherent methods, mapping rt-native opaque bytes/
@@ -6223,6 +6679,103 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    #[tokio::test]
+    async fn full_application_event_sink_keeps_real_tcp_driver_commands_and_responses_live() {
+        let (a, a_id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (b, b_id) = MeshService::new_tcp(None, &[]).unwrap();
+        let b = Arc::new(b);
+        let (c, c_id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let a_listen = tokio::time::timeout(Duration::from_secs(3), a.next_listen_addr())
+            .await
+            .unwrap()
+            .unwrap();
+        let a_address = format!("{a_listen}/p2p/{a_id}").parse().unwrap();
+        b.dial(a_address).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            a.wait_for_peer_connected(b.local_peer()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let lease = a.connection_lease(b.local_peer()).unwrap();
+        let mut observed = a.test_requests.clone();
+        // Fill the REAL bounded application sink. Only the deterministic fill/arrival observer
+        // is a test seam; Noise, TCP, request/response, command ACKs and connection owners are real.
+        while a
+            .test_event_tx
+            .try_send(TransportEvent::Gossip {
+                topic: Topic::new(Bytes::from_static(b"congestion fixture")),
+                from: b.local_peer(),
+                data: Bytes::from_static(b"queued"),
+            })
+            .is_ok()
+        {}
+        assert_eq!(a.test_event_tx.capacity(), 0);
+        let outbound = b.handle();
+        let a_peer = a.local_peer();
+        let waiting = tokio::spawn(async move {
+            outbound
+                .request_control_connected_only(a_peer, Bytes::from_static(b"overloaded request"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while *observed.borrow_and_update() == 0 {
+                observed.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the real inbound request reaches driver dispatch");
+
+        let c_listen = tokio::time::timeout(Duration::from_secs(3), c.next_listen_addr())
+            .await
+            .unwrap()
+            .unwrap();
+        let c_address = format!("{c_listen}/p2p/{c_id}").parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), a.dial_outcome(c_address))
+            .await
+            .expect("a full application sink cannot block a local dial acknowledgement")
+            .unwrap();
+
+        let responder_node = b.clone();
+        let responder = tokio::spawn(async move {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = responder_node.next_event().await
+                {
+                    assert_eq!(&data[..], b"independent outbound request");
+                    responder.respond(Bytes::from_static(b"actual TCP response"));
+                    return;
+                }
+            }
+        });
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            a.handle().request_control_connected_only(
+                to_peer(&b_id),
+                Bytes::from_static(b"independent outbound request"),
+            ),
+        )
+        .await
+        .expect("swarm response polling continues while application delivery is full")
+        .unwrap();
+        assert_eq!(&response[..], b"actual TCP response");
+        responder.await.unwrap();
+        b.evict_peer(a.local_peer()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), lease.revoked())
+            .await
+            .expect("driver connection retirement does not depend on application delivery");
+        waiting.abort();
+        assert_eq!(
+            a.test_event_tx.capacity(),
+            0,
+            "no application drain concealed driver progress"
+        );
+    }
+
     #[derive(Debug)]
     struct DropObservedPermit {
         address: String,
@@ -6238,6 +6791,23 @@ mod tests {
     #[derive(Debug)]
     struct RequestDropObserved {
         drops: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct RequestTestAuthority(watch::Receiver<bool>);
+    #[async_trait::async_trait]
+    impl catcoms_rt::RequestAuthority for RequestTestAuthority {
+        fn authorized(&self) -> bool {
+            !*self.0.borrow() && self.0.has_changed().is_ok()
+        }
+        async fn revoked(&self) {
+            let mut receiver = self.0.clone();
+            while !*receiver.borrow() {
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
     }
 
     impl Drop for RequestDropObserved {
@@ -6484,6 +7054,92 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         drop(queued);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_peer_batch_cancelled_before_enqueue_releases_only_its_unsubmitted_permit() {
+        let mut service = MeshService::new_memory(None, &[]).unwrap();
+        let target = libp2p_peer();
+        let address = format!("/ip4/198.51.100.7/tcp/22487/p2p/{target}");
+        let (commands, mut receiver) = mpsc::channel(1);
+        // Control only the driver's command-consumption seam. The production public method
+        // still parses the batch and transfers its exact affine permits through its real send.
+        commands
+            .try_send(Command::Dial {
+                addr: address.parse().unwrap(),
+                permit: None,
+                reply: None,
+            })
+            .unwrap();
+        service.cmd_tx = commands;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut waiting = Box::pin(service.dial_peer_permits(
+            phase0_peer_id(&target),
+            vec![Box::new(DropObservedPermit {
+                address,
+                drops: drops.clone(),
+            })],
+        ));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(waiting);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "only the unqueued reservation is released"
+        );
+        drop(receiver.recv().await.unwrap());
+        assert!(
+            receiver.try_recv().is_err(),
+            "the canceled sender cannot later queue a batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_batch_cancelled_after_enqueue_leaves_one_driver_owned_submission() {
+        let mut service = MeshService::new_memory(None, &[]).unwrap();
+        let target = libp2p_peer();
+        let address = format!("/ip4/198.51.100.7/tcp/22487/p2p/{target}");
+        let (commands, mut receiver) = mpsc::channel(1);
+        service.cmd_tx = commands;
+        let commits = Arc::new(AtomicUsize::new(0));
+        let mut waiting = Box::pin(service.dial_peer_permits(
+            phase0_peer_id(&target),
+            vec![Box::new(CommitObservedPermit {
+                address,
+                commits: commits.clone(),
+            })],
+        ));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        drop(waiting); // the actor's bounded acknowledgement wait expired
+        assert_eq!(commits.load(Ordering::SeqCst), 0);
+        let Command::DialPeerBatch {
+            peer,
+            permits: Some(permits),
+            reply,
+            ..
+        } = receiver.recv().await.unwrap()
+        else {
+            panic!("the exact batch remains driver-owned")
+        };
+        assert_eq!(peer, phase0_peer_id(&target));
+        assert!(reply.is_closed());
+        assert_eq!(permits.len(), 1);
+        assert!(permits
+            .into_iter()
+            .next()
+            .unwrap()
+            .commit_if_current()
+            .is_some());
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            1,
+            "driver ownership can commit once after waiter loss"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "no second command was manufactured"
+        );
     }
 
     #[tokio::test]
@@ -7234,8 +7890,14 @@ mod tests {
         let refused = map_media_udp_port(port, Some(other)).await;
         let message = refused.expect_err("a foreign-interface claim must never reach the router");
         assert!(
-            message.contains("not on the default-route interface"),
+            message
+                .to_string()
+                .contains("not on the default-route interface"),
             "refusal must say why: {message}"
+        );
+        assert!(
+            !message.uncertain,
+            "a refused interface must not start router work"
         );
     }
 
@@ -8219,10 +8881,11 @@ mod tests {
             .expect("the memory peers should connect");
         }
 
-        for closed_reply in [false, true] {
+        for refusal in 0..3 {
             let (reply, receiver) = oneshot::channel();
-            let (signal, cancelled) = watch::channel(!closed_reply);
-            if closed_reply {
+            let (signal, cancelled) = watch::channel(refusal == 0);
+            let (_native_owner, native_signal) = watch::channel(refusal == 2);
+            if refusal == 1 {
                 drop(receiver);
             }
             // Send directly so caller-side early cancellation cannot hide a missing driver check.
@@ -8232,7 +8895,10 @@ mod tests {
                     peer: server_peer,
                     data: Bytes::from_static(b"must not send"),
                     reply,
-                    cancellation: Some(RequestCancellation::new(cancelled, None)),
+                    cancellation: Some(
+                        RequestCancellation::new(cancelled, None)
+                            .with_authority(Arc::new(RequestTestAuthority(native_signal))),
+                    ),
                 })
                 .await
                 .unwrap();
@@ -8343,13 +9009,15 @@ mod tests {
             .expect("the memory peers should connect");
         }
 
-        for connected_only in [false, true] {
+        for (connected_only, native_authority) in [(false, false), (true, false), (true, true)] {
             let drops = Arc::new(AtomicUsize::new(0));
             let keepalive: SharedRequestKeepalive = Arc::new(RequestDropObserved {
                 drops: Arc::clone(&drops),
             });
             let (cancel, receiver) = watch::channel(false);
-            let cancellation = RequestCancellation::new(receiver, Some(keepalive));
+            let (native_owner, native_signal) = watch::channel(false);
+            let cancellation = RequestCancellation::new(receiver, Some(keepalive))
+                .with_authority(Arc::new(RequestTestAuthority(native_signal)));
             let request_client = Arc::clone(&client);
             let request = tokio::spawn(async move {
                 if connected_only {
@@ -8386,7 +9054,11 @@ mod tests {
             })
             .await
             .expect("the request should enter the remote transport");
-            cancel.send(true).unwrap();
+            if native_authority {
+                native_owner.send(true).unwrap();
+            } else {
+                cancel.send(true).unwrap();
+            }
             assert!(matches!(
                 request.await.unwrap(),
                 Err(TransportError::Cancelled)
@@ -8407,6 +9079,563 @@ mod tests {
             .expect("the matching response should retire the pending request and its keepalive");
             assert_eq!(drops.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn owned_notification_ack_discards_max_reply_and_keeps_actual_tcp_request_custody() {
+        let (server, server_id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let listen = tokio::time::timeout(Duration::from_secs(3), server.next_listen_addr())
+            .await
+            .unwrap()
+            .unwrap();
+        client
+            .dial(format!("{listen}/p2p/{server_id}").parse().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            client.wait_for_peer_connected(server.local_peer()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        for size in [0, MAX_FRAME] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let custody: SharedRequestKeepalive = Arc::new(RequestDropObserved {
+                drops: drops.clone(),
+            });
+            let (publisher, receiver) = watch::channel(false);
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                client.notify_connected_cancellable(
+                    server.local_peer(),
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(b"notification"),
+                    RequestCancellation::new(receiver, Some(custody)),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            // No application answer future exists after this local ACK. Even a maximal reply
+            // must retire in the driver while the client never polls its application stream.
+            drop(publisher);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            let responder = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Some(TransportEvent::Request { responder, .. }) =
+                        server.next_event().await
+                    {
+                        break responder;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "local ACK cannot refund an active lower request"
+            );
+            responder.try_respond(Bytes::from(vec![0; size])).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while drops.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect(
+                "driver consumes response and releases exact lower custody without Root polling",
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+        // An authority already retired at local submission grants neither a command nor a stream.
+        let (publisher, receiver) = watch::channel(true);
+        assert!(matches!(
+            client
+                .notify_connected_cancellable(
+                    server.local_peer(),
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::new(),
+                    RequestCancellation::new(receiver, None)
+                )
+                .await,
+            Err(TransportError::Cancelled)
+        ));
+        drop(publisher);
+    }
+
+    /// Deterministically close a synthetic scope immediately after its receive-edge observation.
+    /// Checks one/two are queue/receive; check three is the real driver's final send boundary.
+    /// This fixture bookkeeping models a concurrent owner retirement between those boundaries,
+    /// without a blocking driver hook or a timing-dependent sleep.
+    #[derive(Debug)]
+    struct RetireAfterReplyReceive {
+        observations: AtomicUsize,
+        retire: bool,
+        retired: watch::Sender<bool>,
+    }
+    #[async_trait::async_trait]
+    impl catcoms_rt::RequestAuthority for RetireAfterReplyReceive {
+        fn authorized(&self) -> bool {
+            let observation = self.observations.fetch_add(1, Ordering::SeqCst);
+            if self.retire && observation >= 2 {
+                self.retired.send_replace(true);
+                false
+            } else {
+                true
+            }
+        }
+        async fn revoked(&self) {
+            // Register before rechecking the permanent retirement latch. Waiting must not
+            // itself consume one of the three synchronous observation slots in this fixture.
+            let mut retired = self.retired.subscribe();
+            while !*retired.borrow_and_update() {
+                if retired.changed().await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_tcp_reply_scope_is_rechecked_after_receive_before_driver_send() {
+        async fn bounded<F: Future>(future: F) -> F::Output {
+            tokio::select! {
+                result = future => result,
+                _ = SystemClock.sleep(Duration::from_secs(3)) => panic!("response effect TCP phase timed out"),
+            }
+        }
+        let (server, id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let client = Arc::new(client);
+        let address = bounded(server.next_listen_addr()).await.unwrap();
+        bounded(client.dial(format!("{address}/p2p/{id}").parse().unwrap()))
+            .await
+            .unwrap();
+        bounded(client.wait_for_peer_connected(server.local_peer()))
+            .await
+            .unwrap();
+        let target = server.local_peer();
+        let source = client.local_peer();
+        for kind in [0, 1, 2, 0] {
+            let client = client.clone();
+            let waiting = tokio::spawn(async move {
+                client
+                    .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[29]))
+                    .await
+            });
+            let (data, responder) = bounded(async {
+                loop {
+                    if let Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) = server.next_event().await
+                    {
+                        break (data, responder);
+                    }
+                }
+            })
+            .await;
+            let effect = Arc::new(RetireAfterReplyReceive {
+                observations: AtomicUsize::new(0),
+                retire: kind == 2,
+                retired: watch::channel(false).0,
+            });
+            let retired = Arc::new(AtomicUsize::new(0));
+            #[derive(Debug)]
+            struct PageOwner {
+                drops: Arc<AtomicUsize>,
+            }
+            impl AsRef<[u8]> for PageOwner {
+                fn as_ref(&self) -> &[u8] {
+                    b"exact page"
+                }
+            }
+            impl Drop for PageOwner {
+                fn drop(&mut self) {
+                    self.drops.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let page = Bytes::from_owner(PageOwner {
+                drops: retired.clone(),
+            });
+            let actual_copy = page.clone();
+            if kind == 0 {
+                responder.try_respond(page).unwrap();
+            } else {
+                responder
+                    .try_respond_with_authority(page, effect.clone())
+                    .unwrap();
+            }
+            let result = bounded(waiting).await.unwrap();
+            if kind == 2 {
+                assert!(
+                    matches!(result, Err(TransportError::NoResponse)),
+                    "retired scope escaped driver: {:?}",
+                    result.as_ref().map(|bytes| bytes.len())
+                );
+                assert_eq!(
+                    effect.observations.load(Ordering::SeqCst),
+                    3,
+                    "queue and receive succeeded before final refusal"
+                );
+                bounded(catcoms_rt::RequestAuthority::revoked(effect.as_ref())).await;
+            } else {
+                assert_eq!(result.unwrap().as_ref(), b"exact page");
+                assert!(
+                    if kind == 0 {
+                        effect.observations.load(Ordering::SeqCst) == 0
+                    } else {
+                        effect.observations.load(Ordering::SeqCst) >= 2
+                    },
+                    "healthy queue/receive and unchanged legacy path"
+                );
+            }
+            assert_eq!(
+                retired.load(Ordering::SeqCst),
+                0,
+                "an actual byte clone still owns source custody"
+            );
+            drop(actual_copy);
+            bounded(async {
+                while retired.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                server.test_delivery_budget.peer_counts(source),
+                [1, 0],
+                "actual request payload remains charged after refusal/success"
+            );
+            drop(data);
+            bounded(async {
+                while server.test_delivery_budget.peer_counts(source) != [0, 0] {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_tcp_service_response_custody_survives_original_bytes_and_waiter_retirement() {
+        async fn bounded<F: Future>(future: F) -> F::Output {
+            tokio::select! {
+                result = future => result,
+                _ = SystemClock.sleep(Duration::from_secs(3)) => panic!("service response custody phase timed out"),
+            }
+        }
+        async fn hold(node: &MeshService, held: bool) -> usize {
+            let (observed, result) = oneshot::channel();
+            node.cmd_tx
+                .send(Command::HoldInboundRetirement {
+                    hold: held,
+                    observed,
+                })
+                .await
+                .unwrap();
+            result.await.unwrap()
+        }
+        #[derive(Debug)]
+        struct Owner(Arc<AtomicUsize>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        impl AsRef<[u8]> for Owner {
+            fn as_ref(&self) -> &[u8] {
+                b"source page"
+            }
+        }
+
+        let (server, id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let client = Arc::new(client);
+        let address = bounded(server.next_listen_addr()).await.unwrap();
+        bounded(client.dial(format!("{address}/p2p/{id}").parse().unwrap()))
+            .await
+            .unwrap();
+        bounded(client.wait_for_peer_connected(server.local_peer()))
+            .await
+            .unwrap();
+        assert_eq!(bounded(hold(&server, true)).await, 0);
+        let target = server.local_peer();
+        let source = client.local_peer();
+        let sending = client.clone();
+        let waiting = tokio::spawn(async move {
+            sending
+                .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[30]))
+                .await
+        });
+        let (data, responder) = bounded(async {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = server.next_event().await
+                {
+                    break (data, responder);
+                }
+            }
+        })
+        .await;
+        let bytes_drops = Arc::new(AtomicUsize::new(0));
+        let service_drops = Arc::new(AtomicUsize::new(0));
+        let effect = Arc::new(RetireAfterReplyReceive {
+            observations: AtomicUsize::new(0),
+            retire: false,
+            retired: watch::channel(false).0,
+        });
+        let work = responder.cancellation_authority();
+        responder
+            .try_respond_with_custody(
+                Bytes::from_owner(Owner(bytes_drops.clone())),
+                effect.clone(),
+                Arc::new(Owner(service_drops.clone())),
+            )
+            .unwrap();
+        let result = bounded(waiting).await.unwrap().unwrap();
+        assert_eq!(result.as_ref(), b"source page");
+        drop(result);
+        bounded(async {
+            while hold(&server, true).await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(!work.authorized(), "reply waiter has already retired");
+        assert_eq!(
+            bytes_drops.load(Ordering::SeqCst),
+            1,
+            "original application Bytes really dropped after driver serialization"
+        );
+        assert_eq!(
+            service_drops.load(Ordering::SeqCst),
+            0,
+            "actual driver pending row still owns service credit"
+        );
+        // A second ADMITTED request fails without an application response. Holding its actual
+        // InboundFailure also preserves ownership. Further requests then refuse before any row
+        // exists; those unowned failure IDs must not accumulate in the test's held set.
+        let sending = client.clone();
+        let no_reply = tokio::spawn(async move {
+            sending
+                .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[30]))
+                .await
+        });
+        let failed = bounded(async {
+            loop {
+                if let Some(TransportEvent::Request { responder, .. }) = server.next_event().await {
+                    break responder;
+                }
+            }
+        })
+        .await;
+        drop(failed);
+        assert!(matches!(
+            bounded(no_reply).await.unwrap(),
+            Err(TransportError::NoResponse)
+        ));
+        bounded(async {
+            while hold(&server, true).await < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        for _ in 0..20 {
+            assert!(matches!(
+                bounded(client.request_connected(
+                    target,
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(&[30])
+                ))
+                .await,
+                Err(TransportError::NoResponse)
+            ));
+        }
+        assert_eq!(
+            bounded(hold(&server, true)).await,
+            2,
+            "unowned/refused terminal IDs have no retention allowance"
+        );
+        assert_eq!(service_drops.load(Ordering::SeqCst), 0);
+        drop((work, effect, data));
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 0]);
+        assert_eq!(bounded(hold(&server, false)).await, 2);
+        assert_eq!(
+            service_drops.load(Ordering::SeqCst),
+            1,
+            "actual pending owner retirement releases last service credit exactly once"
+        );
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [0, 0]);
+    }
+
+    #[tokio::test]
+    async fn actual_tcp_maintenance_survives_ordinary_pressure_and_owners_retire_exactly() {
+        async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
+            tokio::select! {
+                result = future => result,
+                _ = SystemClock.sleep(Duration::from_secs(3)) => panic!("TCP admission phase timed out: {label}"),
+            }
+        }
+        async fn request_event(node: &MeshService) -> (Bytes, Responder) {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = node.next_event().await
+                {
+                    return (data, responder);
+                }
+            }
+        }
+        let (server, server_id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let client = Arc::new(client);
+        let listen = bounded("listener", server.next_listen_addr())
+            .await
+            .unwrap();
+        client
+            .dial(format!("{listen}/p2p/{server_id}").parse().unwrap())
+            .await
+            .unwrap();
+        let target = server.local_peer();
+        let source = client.local_peer();
+        bounded("connection", client.wait_for_peer_connected(target))
+            .await
+            .unwrap();
+        let sender = client.clone();
+        let ordinary = tokio::spawn(async move {
+            sender
+                .request_connected(
+                    target,
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(&[19, 1]),
+                )
+                .await
+        });
+        let (held_data, held_reply) =
+            bounded("held ordinary request", request_event(&server)).await;
+        assert_eq!(&held_data[..], &[19, 1]);
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [1, 0]);
+        let sender = client.clone();
+        let second = tokio::spawn(async move {
+            sender
+                .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[8, 2]))
+                .await
+        });
+        let (second_data, second_reply) =
+            bounded("second ordinary request", request_event(&server)).await;
+        assert_eq!(&second_data[..], &[8, 2]);
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 0]);
+        let refused = bounded(
+            "ordinary refusal",
+            client.request_connected(
+                target,
+                ProtocolId(RR_PROTOCOL),
+                Bytes::from_static(&[16, 2]),
+            ),
+        )
+        .await;
+        assert!(matches!(refused, Err(TransportError::NoResponse)));
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 0]);
+        let sender = client.clone();
+        let maintenance = tokio::spawn(async move {
+            sender
+                .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[2, 3]))
+                .await
+        });
+        let (data, reply) = bounded(
+            "maintenance while ordinary owner is held",
+            request_event(&server),
+        )
+        .await;
+        // Deliberately malformed application bytes: this proves capacity admission only. The
+        // authenticated native matrix separately proves actual MLS recovery over this lane.
+        assert_eq!(&data[..], &[2, 3]);
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 1]);
+        held_reply
+            .try_respond(Bytes::from_static(b"ordinary"))
+            .unwrap();
+        assert_eq!(
+            &bounded("ordinary response", ordinary)
+                .await
+                .unwrap()
+                .unwrap()[..],
+            b"ordinary"
+        );
+        assert_eq!(
+            server.test_delivery_budget.peer_counts(source),
+            [2, 1],
+            "a held payload retains its request class even after the actual response"
+        );
+        drop(held_data);
+        bounded("last ordinary payload retirement", async {
+            while server.test_delivery_budget.peer_counts(source) != [1, 1] {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let sender = client.clone();
+        let next = tokio::spawn(async move {
+            sender
+                .request_connected(
+                    target,
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(&[19, 4]),
+                )
+                .await
+        });
+        let (next_data, next_reply) =
+            bounded("next ordinary admission", request_event(&server)).await;
+        assert_eq!(&next_data[..], &[19, 4]);
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 1],
+            "one exact ordinary slot is reusable while the other ordinary and maintenance owners survive");
+        let refused = bounded(
+            "third ordinary still refused",
+            client.request_connected(
+                target,
+                ProtocolId(RR_PROTOCOL),
+                Bytes::from_static(&[16, 5]),
+            ),
+        )
+        .await;
+        assert!(matches!(refused, Err(TransportError::NoResponse)));
+        drop(next_data);
+        next_reply.try_respond(Bytes::new()).unwrap();
+        bounded("next ordinary response", next)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(second_data);
+        second_reply.try_respond(Bytes::new()).unwrap();
+        bounded("second ordinary response", second)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(data);
+        reply
+            .try_respond(Bytes::from_static(b"maintenance"))
+            .unwrap();
+        assert_eq!(
+            &bounded("maintenance response", maintenance)
+                .await
+                .unwrap()
+                .unwrap()[..],
+            b"maintenance"
+        );
+        bounded("all actual owners retired", async {
+            while server.test_delivery_budget.peer_counts(source) != [0, 0] {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
     }
 
     #[test]

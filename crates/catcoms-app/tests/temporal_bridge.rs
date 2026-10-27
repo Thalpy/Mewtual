@@ -334,232 +334,237 @@ async fn signed_history_crosses_a_crashed_sealed_bridge_without_an_origin_edge()
     .await;
 }
 
-async fn temporal_bridge(clock: &ManualClock) {
-    let a_dir = tempfile::tempdir().unwrap();
-    let b_dir = tempfile::tempdir().unwrap();
-    let c_dir = tempfile::tempdir().unwrap();
-    let mut vault_rng = ChaCha20Rng::seed_from_u64(701);
-    let a_store = ServerStore::open(a_dir.path(), PASSWORD, &mut vault_rng).unwrap();
-    let b_store = ServerStore::open(b_dir.path(), PASSWORD, &mut vault_rng).unwrap();
-    let c_store = ServerStore::open(c_dir.path(), PASSWORD, &mut vault_rng).unwrap();
-    let trace = Arc::new(Mutex::new(Vec::new()));
-    let chain = Arc::new(Chain {
-        delivered: Arc::clone(&trace),
-        ..Chain::default()
-    });
+// The multi-peer sealed setup contains several large Server futures. Keep its lazy scenario
+// state on the heap so the test exercises the normal thread stack without overflowing it while
+// constructing/copying nested setup futures. Assertions and crash/checkpoint order are unchanged.
+fn temporal_bridge(clock: &ManualClock) -> impl std::future::Future<Output = ()> + '_ {
+    Box::pin(async move {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let c_dir = tempfile::tempdir().unwrap();
+        let mut vault_rng = ChaCha20Rng::seed_from_u64(701);
+        let a_store = ServerStore::open(a_dir.path(), PASSWORD, &mut vault_rng).unwrap();
+        let b_store = ServerStore::open(b_dir.path(), PASSWORD, &mut vault_rng).unwrap();
+        let c_store = ServerStore::open(c_dir.path(), PASSWORD, &mut vault_rng).unwrap();
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let chain = Arc::new(Chain {
+            delivered: Arc::clone(&trace),
+            ..Chain::default()
+        });
 
-    let mut a_server = Server::found(
-        chain.join(A),
-        MlsDevice::generate().unwrap(),
-        ChaCha20Rng::seed_from_u64(A),
-        Box::new(clock.clone()),
-        "origin",
-    )
-    .unwrap();
-    a_server.publish_self_record(Vec::new(), 1).unwrap();
-    let mut a = Node::start(a_server).await;
-    let invite_b = mint(&a.actor, 1).await;
-    let mut b_server = bounded(
-        clock,
-        "B joins A",
-        Server::join(
-            chain.join(B),
+        let mut a_server = Server::found(
+            chain.join(A),
             MlsDevice::generate().unwrap(),
-            ChaCha20Rng::seed_from_u64(B),
+            ChaCha20Rng::seed_from_u64(A),
             Box::new(clock.clone()),
-            "bridge",
-            PeerId::from_u64(A),
-            &invite_b,
-        ),
-    )
-    .await
-    .unwrap();
-    b_server.publish_self_record(Vec::new(), 1).unwrap();
-    // The production eager admission exchange supplies the inviter descriptor required by the
-    // explicit helper gate. It neither bypasses the roster nor grants a general proxy route.
-    bounded(
-        clock,
-        "B connected descriptor exchange",
-        b_server.request_pex_connected(PeerId::from_u64(A)),
-    )
-    .await
-    .unwrap();
-    assert!(bounded(
-        clock,
-        "B admission finalization",
-        b_server.finalize_member_connection(PeerId::from_u64(A))
-    )
-    .await
-    .unwrap());
-    let mut b = Node::start(b_server).await;
-    let invite_c = mint(&a.actor, 2).await;
-    assert!(
-        bounded(
+            "origin",
+        )
+        .unwrap();
+        a_server.publish_self_record(Vec::new(), 1).unwrap();
+        let mut a = Node::start(a_server).await;
+        let invite_b = mint(&a.actor, 1).await;
+        let mut b_server = bounded(
             clock,
-            "one-time helper capability",
-            b.actor.authorize_join_helper(
-                PeerId::from_u64(C),
-                invite_c.invite_nonce,
-                invite_c.inviter_device_id,
+            "B joins A",
+            Server::join(
+                chain.join(B),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(B),
+                Box::new(clock.clone()),
+                "bridge",
                 PeerId::from_u64(A),
-                clock.now_ms() + 30_000,
-            )
+                &invite_b,
+            ),
         )
         .await
-    );
-    let mut c_server = bounded(
-        clock,
-        "C joins through B only",
-        Server::join_via_helper(
+        .unwrap();
+        b_server.publish_self_record(Vec::new(), 1).unwrap();
+        // The production eager admission exchange supplies the inviter descriptor required by the
+        // explicit helper gate. It neither bypasses the roster nor grants a general proxy route.
+        bounded(
+            clock,
+            "B connected descriptor exchange",
+            b_server.request_pex_connected(PeerId::from_u64(A)),
+        )
+        .await
+        .unwrap();
+        assert!(bounded(
+            clock,
+            "B admission finalization",
+            b_server.finalize_member_connection(PeerId::from_u64(A))
+        )
+        .await
+        .unwrap());
+        let mut b = Node::start(b_server).await;
+        let invite_c = mint(&a.actor, 2).await;
+        assert!(
+            bounded(
+                clock,
+                "one-time helper capability",
+                b.actor.authorize_join_helper(
+                    PeerId::from_u64(C),
+                    invite_c.invite_nonce,
+                    invite_c.inviter_device_id,
+                    PeerId::from_u64(A),
+                    clock.now_ms() + 30_000,
+                )
+            )
+            .await
+        );
+        let mut c_server = bounded(
+            clock,
+            "C joins through B only",
+            Server::join_via_helper(
+                chain.join(C),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(C),
+                Box::new(clock.clone()),
+                "later reader",
+                PeerId::from_u64(B),
+                PeerId::from_u64(A),
+                &invite_c,
+            ),
+        )
+        .await
+        .unwrap();
+        c_server.publish_self_record(Vec::new(), 1).unwrap();
+        bounded(
+            clock,
+            "C connected descriptor exchange",
+            c_server.request_pex_connected(PeerId::from_u64(B)),
+        )
+        .await
+        .unwrap();
+        assert!(bounded(
+            clock,
+            "C admission finalization",
+            c_server.finalize_member_connection(PeerId::from_u64(B))
+        )
+        .await
+        .unwrap());
+        let mut c = Node::start(c_server).await;
+        assert_eq!(c.actor.member_count().await, 3);
+        assert_eq!(b.actor.member_count().await, 3);
+        assert_eq!(c.actor.group_mode().await.unwrap(), GroupMode::PeerToPeer);
+        let c_identity = fingerprint(&c.actor).await;
+        c.checkpoint(&c_store, &mut vault_rng).await;
+        c.crash().await;
+        drop(c_store);
+        assert!(!chain
+            .live
+            .lock()
+            .unwrap()
+            .contains_key(&PeerId::from_u64(C)));
+
+        // This directory entry did not exist in C's session; opening only `general` or preserving a
+        // visible-channel cache cannot satisfy the test. B must acquire its signed directory first.
+        let channel = bounded(
+            clock,
+            "origin creates a new channel",
+            a.actor.create_channel("later-history"),
+        )
+        .await
+        .unwrap();
+        let expected: Vec<String> = (0..12)
+            .map(|n| format!("origin-only retained message {n:02}"))
+            .collect();
+        for text in &expected {
+            a.actor.send_message(channel.id, text.clone()).await;
+        }
+        await_history(&b, clock, channel.id, &expected).await;
+        let original = a.actor.messages(channel.id).await;
+        assert_eq!(
+            b.actor.messages(channel.id).await,
+            original,
+            "bridge keeps original authorship and IDs"
+        );
+        a.checkpoint(&a_store, &mut vault_rng).await;
+        b.checkpoint(&b_store, &mut vault_rng).await;
+        let b_identity = fingerprint(&b.actor).await;
+        a.crash().await;
+        b.crash().await;
+        drop(a_store);
+        drop(b_store);
+        assert!(chain.live.lock().unwrap().is_empty());
+        drop(chain);
+
+        // A is gone permanently. Fresh vault handles, Hub, transports, RNGs and actors exclude
+        // residual socket queues, live author state, or an in-memory bridge snapshot as an oracle.
+        let chain = Arc::new(Chain {
+            delivered: Arc::clone(&trace),
+            ..Chain::default()
+        });
+        let b_store = ServerStore::open(b_dir.path(), PASSWORD, &mut vault_rng).unwrap();
+        let c_store = ServerStore::open(c_dir.path(), PASSWORD, &mut vault_rng).unwrap();
+        let b_server = Server::restore(
+            &b_store.load_server(1).unwrap(),
+            chain.join(B),
+            ChaCha20Rng::seed_from_u64(102),
+            Box::new(clock.clone()),
+            "bridge",
+        )
+        .unwrap();
+        assert_eq!(b_server.my_fingerprint(), b_identity);
+        assert_eq!(
+            b_server.messages(channel.id),
+            original,
+            "B reopens retained evidence before any peer exists"
+        );
+        let mut b = Node::start(b_server).await;
+        let c_server = Server::restore(
+            &c_store.load_server(1).unwrap(),
             chain.join(C),
-            MlsDevice::generate().unwrap(),
-            ChaCha20Rng::seed_from_u64(C),
+            ChaCha20Rng::seed_from_u64(103),
             Box::new(clock.clone()),
             "later reader",
-            PeerId::from_u64(B),
-            PeerId::from_u64(A),
-            &invite_c,
-        ),
-    )
-    .await
-    .unwrap();
-    c_server.publish_self_record(Vec::new(), 1).unwrap();
-    bounded(
-        clock,
-        "C connected descriptor exchange",
-        c_server.request_pex_connected(PeerId::from_u64(B)),
-    )
-    .await
-    .unwrap();
-    assert!(bounded(
-        clock,
-        "C admission finalization",
-        c_server.finalize_member_connection(PeerId::from_u64(B))
-    )
-    .await
-    .unwrap());
-    let mut c = Node::start(c_server).await;
-    assert_eq!(c.actor.member_count().await, 3);
-    assert_eq!(b.actor.member_count().await, 3);
-    assert_eq!(c.actor.group_mode().await.unwrap(), GroupMode::PeerToPeer);
-    let c_identity = fingerprint(&c.actor).await;
-    c.checkpoint(&c_store, &mut vault_rng).await;
-    c.crash().await;
-    drop(c_store);
-    assert!(!chain
-        .live
-        .lock()
-        .unwrap()
-        .contains_key(&PeerId::from_u64(C)));
+        )
+        .unwrap();
+        assert_eq!(c_server.my_fingerprint(), c_identity);
+        assert!(!c_server
+            .channels()
+            .iter()
+            .any(|entry| entry.id == channel.id));
+        assert!(
+            c_server.messages(channel.id).is_empty(),
+            "C has no origin history in its own vault"
+        );
+        let mut c = Node::start(c_server).await;
+        await_history(&c, clock, channel.id, &expected).await;
+        assert_eq!(
+            c.actor.messages(channel.id).await,
+            original,
+            "C recovers exact signed origin messages through reopened B"
+        );
+        c.checkpoint(&c_store, &mut vault_rng).await;
+        b.crash().await;
+        c.crash().await;
+        drop(c_store);
 
-    // This directory entry did not exist in C's session; opening only `general` or preserving a
-    // visible-channel cache cannot satisfy the test. B must acquire its signed directory first.
-    let channel = bounded(
-        clock,
-        "origin creates a new channel",
-        a.actor.create_channel("later-history"),
-    )
-    .await
-    .unwrap();
-    let expected: Vec<String> = (0..12)
-        .map(|n| format!("origin-only retained message {n:02}"))
-        .collect();
-    for text in &expected {
-        a.actor.send_message(channel.id, text.clone()).await;
-    }
-    await_history(&b, clock, channel.id, &expected).await;
-    let original = a.actor.messages(channel.id).await;
-    assert_eq!(
-        b.actor.messages(channel.id).await,
-        original,
-        "bridge keeps original authorship and IDs"
-    );
-    a.checkpoint(&a_store, &mut vault_rng).await;
-    b.checkpoint(&b_store, &mut vault_rng).await;
-    let b_identity = fingerprint(&b.actor).await;
-    a.crash().await;
-    b.crash().await;
-    drop(a_store);
-    drop(b_store);
-    assert!(chain.live.lock().unwrap().is_empty());
-    drop(chain);
-
-    // A is gone permanently. Fresh vault handles, Hub, transports, RNGs and actors exclude
-    // residual socket queues, live author state, or an in-memory bridge snapshot as an oracle.
-    let chain = Arc::new(Chain {
-        delivered: Arc::clone(&trace),
-        ..Chain::default()
-    });
-    let b_store = ServerStore::open(b_dir.path(), PASSWORD, &mut vault_rng).unwrap();
-    let c_store = ServerStore::open(c_dir.path(), PASSWORD, &mut vault_rng).unwrap();
-    let b_server = Server::restore(
-        &b_store.load_server(1).unwrap(),
-        chain.join(B),
-        ChaCha20Rng::seed_from_u64(102),
-        Box::new(clock.clone()),
-        "bridge",
-    )
-    .unwrap();
-    assert_eq!(b_server.my_fingerprint(), b_identity);
-    assert_eq!(
-        b_server.messages(channel.id),
-        original,
-        "B reopens retained evidence before any peer exists"
-    );
-    let mut b = Node::start(b_server).await;
-    let c_server = Server::restore(
-        &c_store.load_server(1).unwrap(),
-        chain.join(C),
-        ChaCha20Rng::seed_from_u64(103),
-        Box::new(clock.clone()),
-        "later reader",
-    )
-    .unwrap();
-    assert_eq!(c_server.my_fingerprint(), c_identity);
-    assert!(!c_server
-        .channels()
-        .iter()
-        .any(|entry| entry.id == channel.id));
-    assert!(
-        c_server.messages(channel.id).is_empty(),
-        "C has no origin history in its own vault"
-    );
-    let mut c = Node::start(c_server).await;
-    await_history(&c, clock, channel.id, &expected).await;
-    assert_eq!(
-        c.actor.messages(channel.id).await,
-        original,
-        "C recovers exact signed origin messages through reopened B"
-    );
-    c.checkpoint(&c_store, &mut vault_rng).await;
-    b.crash().await;
-    c.crash().await;
-    drop(c_store);
-
-    // The third device now independently retains the bridge's answer, even with nobody online.
-    let c_store = ServerStore::open(c_dir.path(), PASSWORD, &mut vault_rng).unwrap();
-    let offline = Arc::new(Chain::default());
-    let c_restored = Server::restore(
-        &c_store.load_server(1).unwrap(),
-        offline.join(C),
-        ChaCha20Rng::seed_from_u64(203),
-        Box::new(clock.clone()),
-        "later reader",
-    )
-    .unwrap();
-    assert_eq!(c_restored.messages(channel.id), original);
-    let trace = trace.lock().unwrap();
-    assert!(trace
-        .iter()
-        .all(|(from, to, _)| Chain::adjacent(*from, *to)));
-    assert!(trace
-        .iter()
-        .any(|(from, to, kind)| *from == PeerId::from_u64(B)
-            && *to == PeerId::from_u64(A)
-            && *kind == 19));
-    assert!(trace
-        .iter()
-        .any(|(from, to, kind)| *from == PeerId::from_u64(C)
-            && *to == PeerId::from_u64(B)
-            && *kind == 19));
+        // The third device now independently retains the bridge's answer, even with nobody online.
+        let c_store = ServerStore::open(c_dir.path(), PASSWORD, &mut vault_rng).unwrap();
+        let offline = Arc::new(Chain::default());
+        let c_restored = Server::restore(
+            &c_store.load_server(1).unwrap(),
+            offline.join(C),
+            ChaCha20Rng::seed_from_u64(203),
+            Box::new(clock.clone()),
+            "later reader",
+        )
+        .unwrap();
+        assert_eq!(c_restored.messages(channel.id), original);
+        let trace = trace.lock().unwrap();
+        assert!(trace
+            .iter()
+            .all(|(from, to, _)| Chain::adjacent(*from, *to)));
+        assert!(trace
+            .iter()
+            .any(|(from, to, kind)| *from == PeerId::from_u64(B)
+                && *to == PeerId::from_u64(A)
+                && *kind == 19));
+        assert!(trace
+            .iter()
+            .any(|(from, to, kind)| *from == PeerId::from_u64(C)
+                && *to == PeerId::from_u64(B)
+                && *kind == 19));
+    })
 }

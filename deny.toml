@@ -18,28 +18,17 @@ reason = "paste: unmaintained, no vulnerability, transitive, no upgrade availabl
 id = "RUSTSEC-2026-0173"
 reason = "proc-macro-error2: unmaintained, no vulnerability, transitive, no upgrade available"
 
-# The three libcrux advisories below are pinned in place by openmls_rust_crypto 0.5, which
-# requires hpke-rs ^0.6, which requires libcrux-sha3 0.0.8. The fixed 0.0.10 cannot be selected
-# without moving to the openmls 0.9 release-candidate line, which is a protocol decision rather
-# than a lint fix. Drop these ignores the moment openmls_rust_crypto 0.5.x bumps hpke-rs.
-#
-# Neither SHAKE advisory is reachable from this app: crates/catcoms-mls/src/config.rs pins the
-# single ciphersuite MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519 and advertises no other,
-# so the group never negotiates SHA-3/SHAKE or ML-KEM at all.
+# Linux GTK 3's two proc-macro crates still use proc-macro-error 1.0.4. This advisory is
+# maintenance-only, with no announced vulnerability or safe upgrade. These macros process
+# trusted build input and ship no proc-macro code into the app. This is a recorded maintenance
+# risk, not a general security proof. The version/wrapper bans below reject new direct uses
+# and stable version changes. Current GTK requirements select stable 0.18 releases; changing
+# them to admit prereleases also requires review (ordinary semver bans skip prereleases).
+# Remove this decision when GTK replaces/backports the dependency, and
+# re-evaluate immediately if a vulnerability or another use is announced.
 [[advisories.ignore]]
-id = "RUSTSEC-2026-0207"
-reason = "libcrux-sha3 incremental SHAKE: unreachable, our pinned ciphersuite never uses SHAKE"
-
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0208"
-reason = "libcrux-sha3 AVX2 SHAKE-256 panic: unreachable, our pinned ciphersuite never uses SHAKE"
-
-# NOTE: this one is architecture-scoped, not unreachable. It is inert on the x64 builds we ship
-# today, and becomes live the day Mewtual builds for aarch64 (Windows on ARM, Apple Silicon,
-# ARM Linux). Revisit before adding any ARM target.
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0212"
-reason = "libcrux-secrets constant-time swap on aarch64: we ship x64 only; revisit for any ARM build"
+id = "RUSTSEC-2024-0370"
+reason = "GTK build-only proc-macro-error 1.0.4 via reviewed glib-macros 0.18.5/gtk3-macros 0.18.2; maintenance advisory only, no announced vulnerability or safe upgrade; exact version/wrapper bans force re-review"
 
 # hickory-proto arrives through libp2p-dns 0.44 (libp2p 0.56), which pins the 0.25 line. Both
 # advisories below sit behind that pin: drop them the moment libp2p moves to a hickory 0.26 line.
@@ -58,6 +47,43 @@ reason = "hickory-proto NSEC3 validation loop: DNSSEC features are not compiled 
 id = "RUSTSEC-2026-0119"
 reason = "hickory-proto O(n^2) encoding: client encodes only its own small queries; fix requires hickory 0.26 via a libp2p bump"
 
+# 0.26.11 is only a compatibility re-export: src/lib.rs contains
+# `pub use parent::TLS_SERVER_ROOTS`, with parent = webpki-roots ^1. Both locks now resolve
+# that parent to 1.0.10, which removes the affected root. The advisory nevertheless matches
+# the shim's old version. The bans below are REQUIRED with this exception: they reject every
+# affected published concrete root bundle, including the published prerelease family, so a downgrade cannot hide
+# behind this advisory-wide ignore. Remove the exception when libp2p drops the shim or the
+# upstream advisory classifies this forwarding version separately. No verifier exception:
+# rustls-webpki is independently updated to 0.103.16 in both workspaces.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0381"
+reason = "webpki-roots 0.26.11 only re-exports patched parent 1.0.10; mandatory bans below reject vulnerable stable bundles and the published 0.26.0 prereleases"
+
+# crypto-bigint < 0.7.6: operations meant to be constant-time could branch on secrets (subtraction,
+# zero counting, division, Montgomery multiplication). Full analysis:
+# docs/design-crypto-bigint-upgrade.md.
+#
+# Where secrets meet crypto-bigint, and why this ignore is safe:
+# - The ONLY native secret P-256 path is the voice local-channel bootstrap
+#   (apps/desktop/src-tauri/src/voice_handoff/channel/bootstrap.rs: the ephemeral scalar, both
+#   scalar multiplications, the shared secret). It is on p256 0.14 -> crypto-bigint >= 0.7.6.
+# - crypto-bigint 0.5.5 remains only inside the openmls RustCrypto backend (openmls_rust_crypto,
+#   openmls_basic_credential, hpke-rs-rust-crypto, all still on p256/p384/k256 0.13 in every
+#   release). No secret reaches that code: catcoms-mls pins the single X25519/Ed25519 suite, signs
+#   with Ed25519 only, and openmls rejects a foreign-suite KeyPackage (ValSem105) or Welcome
+#   (CiphersuiteMismatch) before any HPKE operation; what a peer can drive is public-key ECDSA
+#   verification. MLS refusal tests in catcoms-mls pin that (group/suite_refusal_tests.rs).
+#   Even for 0.5.5 itself, the fixes in 0.7.6 are in code 0.5.5 lacks or ECDH does not call.
+# - The bans below are REQUIRED with this exception. They keep the fixed line >= 0.7.6, confine
+#   0.5.x to the reviewed wrapper chain at reviewed versions, and make a new direct user of the
+#   0.13 curve crates fail. They cannot see a new call inside catcoms-mls; any change to its suite,
+#   signature scheme or openmls version must re-read the design note first.
+# Exit: remove this ignore and the crypto-bigint/0.13-curve bans when openmls releases a p256 0.14
+# backend (upstream main has it; it needs Rust >= 1.94, which this workspace now uses).
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0387"
+reason = "crypto-bigint 0.5.5 survives only in openmls's p256/p384/k256 0.13 code, which no secret reaches under the pinned X25519/Ed25519 suite; the native secret ECDH is on 0.7.x; bans below fence it"
+
 [bans]
 # Flag duplicate versions of the same crate; tighten to "deny" as the tree stabilises.
 multiple-versions = "warn"
@@ -66,6 +92,61 @@ wildcards = "deny"
 # wildcard. That check exists to stop `foo = "*"` against a registry, which this is not: a path
 # dependency resolves to the tree in front of you, so there is no unpinned third party involved.
 allow-wildcard-paths = true
+
+# Preserve RUSTSEC-2026-0381 enforcement despite its compatibility-shim false positive. Only
+# the reviewed 0.26.11 forwarding crate and fixed >=1.0.10 bundles are permitted. Its parent
+# appears as a separate package in the graph, so resolving it to 1.0.9 fails these bans.
+deny = [
+    { name = "h2", version = "<0.4.16", reason = "RUSTSEC-2026-0258: refuse unbounded empty-DATA queue versions" },
+    { name = "zip", version = "<9.0.0", reason = "RUSTSEC-2026-0367/-0368/-0369: unsafe extraction; official updater artifacts need no legacy ZIP support" },
+
+    # Exact maintenance exception above. A new direct user or macro version must not quietly
+    # inherit it, even though no runtime vulnerability is announced by this advisory.
+    { name = "proc-macro-error", version = "<1.0.4", reason = "Only reviewed GTK build-time proc-macro-error 1.0.4 is admitted" },
+    { name = "proc-macro-error", version = ">1.0.4", reason = "Re-review or remove the maintenance exception before changing versions" },
+    { name = "proc-macro-error", version = "=1.0.4", wrappers = ["glib-macros", "gtk3-macros"], reason = "GTK build-only maintenance exception; no direct application use" },
+    { name = "glib-macros", version = "<0.18.5", reason = "RUSTSEC-2024-0370 maintenance decision pins reviewed GTK wrappers" },
+    { name = "glib-macros", version = ">0.18.5", reason = "Re-review or remove the GTK maintenance decision on wrapper upgrade" },
+    { name = "gtk3-macros", version = "<0.18.2", reason = "RUSTSEC-2024-0370 maintenance decision pins reviewed GTK wrappers" },
+    { name = "gtk3-macros", version = ">0.18.2", reason = "Re-review or remove the GTK maintenance decision on wrapper upgrade" },
+
+    { name = "webpki-roots", version = "<0.26.11", reason = "RUSTSEC-2026-0381: vulnerable concrete root bundle" },
+    { name = "webpki-roots", version = ">0.26.11, <1.0.10", reason = "RUSTSEC-2026-0381: only exact 0.26.11 forwarding shim is exempt before fixed 1.0.10" },
+    # Ordinary semver ranges exclude prereleases. Explicitly cover the published alpha.0/.1/.2
+    # family; review this exception if another prerelease release-tuple is introduced upstream.
+    { name = "webpki-roots", version = ">=0.26.0-alpha.0, <0.26.0", reason = "RUSTSEC-2026-0381: published prerelease root bundles must not bypass stable-version bans" },
+
+    # RUSTSEC-2026-0387 fence (see the ignore above). Use the name/version form: `crate =
+    # "name@<req>"` treats the part after `@` as an exact version and silently matches nothing.
+    # Ring 0: crypto-bigint only inside curve crates, and never an affected 0.6/0.7 build. The
+    # version-less entry also covers prereleases, which ordinary ranges skip.
+    { name = "crypto-bigint", wrappers = ["elliptic-curve", "primefield"], reason = "RUSTSEC-2026-0387: only curve crates may use crypto-bigint" },
+    { name = "crypto-bigint", version = ">=0.5.0-0, <0.5.0", reason = "RUSTSEC-2026-0387: affected prerelease" },
+    { name = "crypto-bigint", version = ">=0.6.0-0, <0.6.0", reason = "RUSTSEC-2026-0387: affected prerelease" },
+    { name = "crypto-bigint", version = ">=0.7.0-0, <0.7.0", reason = "RUSTSEC-2026-0387: affected prerelease" },
+    { name = "crypto-bigint", version = ">=0.6.0, <0.7.6", reason = "RUSTSEC-2026-0387: the fixed line must stay >= 0.7.6" },
+    # Ring 1: the 0.13 curve family only under the reviewed openmls backend crates. A new direct
+    # user (e.g. a native p256 0.13 edge) fails here.
+    { name = "elliptic-curve", version = "<0.14", wrappers = ["p256", "p384", "k256", "ecdsa", "primeorder"], reason = "RUSTSEC-2026-0387: elliptic-curve 0.13 carries crypto-bigint 0.5" },
+    { name = "p256", version = "<0.14", wrappers = ["openmls_rust_crypto", "openmls_basic_credential", "hpke-rs-rust-crypto"], reason = "RUSTSEC-2026-0387: p256 0.13 only inside the reviewed MLS backend" },
+    { name = "p384", version = "<0.14", wrappers = ["openmls_rust_crypto", "openmls_basic_credential", "hpke-rs-rust-crypto"], reason = "RUSTSEC-2026-0387: p384 0.13 only inside the reviewed MLS backend" },
+    { name = "k256", version = "<0.14", wrappers = ["hpke-rs-rust-crypto"], reason = "RUSTSEC-2026-0387: k256 0.13 only inside the reviewed MLS backend" },
+    { name = "ecdsa", version = "<0.17", wrappers = ["p256", "p384"], reason = "RUSTSEC-2026-0387: ecdsa 0.16 only under the 0.13 curves" },
+    { name = "primeorder", version = "<0.14", wrappers = ["p256", "p384"], reason = "RUSTSEC-2026-0387: primeorder 0.13 only under the 0.13 curves" },
+    # Ring 2: those backend crates only under catcoms-mls, at the reviewed versions (the analysis
+    # read openmls 0.9.2's enforcement code). Moving any of them is a deliberate fence edit.
+    { name = "openmls_rust_crypto", wrappers = ["catcoms-mls"], reason = "RUSTSEC-2026-0387: reviewed MLS backend, catcoms-mls only" },
+    { name = "openmls_basic_credential", wrappers = ["catcoms-mls"], reason = "RUSTSEC-2026-0387: reviewed MLS signer, catcoms-mls only" },
+    { name = "hpke-rs-rust-crypto", wrappers = ["openmls_rust_crypto"], reason = "RUSTSEC-2026-0387: reviewed HPKE provider, MLS backend only" },
+    { name = "openmls", version = "<0.9.2", reason = "RUSTSEC-2026-0387 fence: reviewed version is 0.9.2" },
+    { name = "openmls", version = ">0.9.2", reason = "RUSTSEC-2026-0387 fence: re-read the design note, then move this pin" },
+    { name = "openmls_rust_crypto", version = "<0.6.0", reason = "RUSTSEC-2026-0387 fence: reviewed version is 0.6.0" },
+    { name = "openmls_rust_crypto", version = ">0.6.0", reason = "RUSTSEC-2026-0387 fence: a newer backend may clear 0387; re-check and drop the exception" },
+    { name = "openmls_basic_credential", version = "<0.6.0", reason = "RUSTSEC-2026-0387 fence: reviewed version is 0.6.0" },
+    { name = "openmls_basic_credential", version = ">0.6.0", reason = "RUSTSEC-2026-0387 fence: re-check the signer's curve dependencies" },
+    { name = "hpke-rs-rust-crypto", version = "<0.7.0", reason = "RUSTSEC-2026-0387 fence: reviewed version is 0.7.0" },
+    { name = "hpke-rs-rust-crypto", version = ">0.7.0", reason = "RUSTSEC-2026-0387 fence: re-check the HPKE provider's curve dependencies" },
+]
 
 [licenses]
 # Permissive + the copyleft variants we expect from the crypto/p2p ecosystem.

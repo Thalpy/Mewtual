@@ -44,6 +44,9 @@ use catcoms_rt::{
     Clock, MeshTransport, OsCryptoRng, PeerId, RequestCancellation, RngCore,
     SharedRequestKeepalive, SystemClock, TransportEvent,
 };
+use catcoms_sync::voice_v2::runtime::{
+    ActorRegistration, RegistrationError, Runtime as VoiceRuntime, SessionTicket,
+};
 use catcoms_sync::{fingerprint, join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
@@ -54,16 +57,27 @@ use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 mod admission_storage;
+mod call_mappings;
 mod creative_blobs;
 mod discovery_timer;
 mod durable_chat;
 mod errors;
 mod group_policy;
+mod keep_session;
 mod leaving;
 mod media_decode;
 mod media_worker;
 mod member_reconnect;
+mod private_downloads;
 mod studio_exports;
+#[cfg(test)]
+mod voice_activation_tests;
+mod voice_authority;
+// Authenticated action dispatch exists, but App V2 call selection is still off. Remove the
+// temporary unused-item allowance as the App driver takes ownership of these private APIs.
+#[allow(dead_code)]
+mod voice_handoff;
+mod voice_join_key;
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
 #[cfg(test)]
@@ -73,6 +87,7 @@ mod shutdown;
 mod six_client_recovery;
 mod studio;
 mod tasks;
+mod upload_session;
 use errors::{codes, AppError, ErrorCode};
 
 /// Independent reasons an exact address belongs in this device's aggregate bootstrap set. The
@@ -95,7 +110,13 @@ struct InterfaceRouteIdentity {
 /// One running server: its actor handle, the single-use invite to share (founder only), and
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
+    /// Sole exact native file-work publisher. Removal/replacement explicitly retires it under
+    /// the row guard; Drop is a final unwind/registry-clear backstop.
+    files: keep_session::EntryOwner,
     actor: ServerActor,
+    /// Exact native registry custody. Removal/replacement revokes detached voice work before
+    /// waiting for the still-network-active actor to process any shutdown command.
+    voice: Option<RegisteredVoiceActor>,
     /// Process-local incarnation of this registry row. Persisted ids are intentionally reused on
     /// reload, so the id alone cannot stop a scan begun for a removed actor from populating a new
     /// actor's cache after that id is installed again.
@@ -141,6 +162,42 @@ struct ServerEntry {
     /// how many the newest completed write covered. See [`persist_server`]. Per incarnation, so a
     /// reinstalled id starts from zero and cannot inherit a departed entry's completions.
     persist: PersistCounters,
+}
+
+struct RegisteredVoiceActor(ActorRegistration);
+impl Drop for RegisteredVoiceActor {
+    fn drop(&mut self) {
+        self.0.revoke();
+    }
+}
+
+/// Called under the native row guard immediately before restore insertion. A competing owner
+/// preserves the previous row; optional preparation expiry/capacity leaves restored chat usable.
+fn install_reloaded_voice(
+    registration: Option<ActorRegistration>,
+) -> Result<Option<RegisteredVoiceActor>, String> {
+    let Some(registration) = registration else {
+        return Ok(None);
+    };
+    match registration.register_install() {
+        Ok(()) => Ok(Some(RegisteredVoiceActor(registration))),
+        Err(RegistrationError::Unavailable(error)) => {
+            registration.revoke();
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            Ok(None)
+        }
+        Err(RegistrationError::Conflict) => {
+            Err("server reload was superseded by another voice actor installation".into())
+        }
+    }
+}
+
+fn voice_runtime(state: &AppState) -> Arc<VoiceRuntime> {
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .runtime()
 }
 
 /// Where one server is between "a change happened" and "a write that contains it finished".
@@ -366,6 +423,7 @@ impl Drop for InlineDownloadLeaseInner {
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
 struct AppState {
+    keep_session: StdMutex<Option<(u64, watch::Sender<bool>)>>,
     servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
     /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
     /// actor installations than the process can perform in its lifetime; zero has no special
@@ -408,10 +466,20 @@ struct AppState {
     /// Serialize the state-map transition with the actor's revoke/authorize commands. Without
     /// this, concurrent replacement completions can re-install a displaced helper capability.
     join_reply_apply: Mutex<()>,
-    /// Live router mappings for the active call's media UDP ports, keyed by the local port. A
-    /// PCP/NAT-PMP entry's short lease is renewed by the client retained inside the mapping, so
-    /// dropping the entry (call end, or the app closing) is what ends that route.
-    media_mappings: Mutex<HashMap<u16, catcoms_net::MediaPortMapping>>,
+    /// Native call/controller/grant custody. Pending and uncertain effects remain charged across
+    /// lock, leave and remount; neither a UI waiter nor a physical port is release authority.
+    media_mappings: Arc<StdMutex<call_mappings::Coordinator<catcoms_net::MediaPortMapping>>>,
+    /// Distinct voice-session authority and active-or-uncertain process crypto charges. Revoking
+    /// a UI/controller ends effects immediately but cannot refund unresolved engine work.
+    voice_authority: Arc<StdMutex<voice_authority::Coordinator>>,
+    /// Process lifetime, independent of UI lock/controller replacement and invoke waiters.
+    /// The disabled pilot has no command consumer yet; do not clear uncertain rows on End.
+    #[allow(dead_code)]
+    voice_handoff: Arc<voice_handoff::ledger::Ledger>,
+    /// Immutable local-channel setup/counters outlive an invoke waiter. Status bootstrap only;
+    /// End/lock cannot clear uncertain setup or install a new session for the original owner.
+    #[allow(dead_code)]
+    voice_channels: Arc<voice_handoff::bootstrap::Registry>,
     next_id: Mutex<u64>,
     /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
     /// never race two reloads, while an explicitly UI-locked session must authenticate against
@@ -425,21 +493,33 @@ struct AppState {
     /// writes did not even serialize against each other. Here they do, and the incarnation check
     /// inside the lock then decides which of them is still entitled to write.
     persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
+    /// Order reconnect claims -> sealed merge -> live installation separately from ordinary
+    /// snapshot persistence. Numeric-id lifetime also serializes departing/replaced entries;
+    /// the final registry check still decides which incarnation may write. Never substitute
+    /// persist_locks here: capture itself seals a snapshot through that other lock.
+    reconnect_persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
     store: Arc<Mutex<Option<ServerStore>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
-    session_resumable: Mutex<bool>,
+    session_resumable: Arc<Mutex<bool>>,
     /// Set before an explicit lock performs any awaited cleanup. Commands check this as well as
     /// `session_resumable`, so new IPC cannot slip through while the lock is waiting to serialize
     /// against an older command's final native commit.
-    session_lock_requested: AtomicBool,
+    session_lock_requested: Arc<AtomicBool>,
     /// Every explicit lock invalidates work that began in an earlier UI authorization epoch.
     /// Long-running joins carry the captured value to both their reply event and durable commit.
-    ui_session_generation: AtomicU64,
+    ui_session_generation: Arc<AtomicU64>,
+    /// Exact generation last committed by authenticated unlock. Publishing a newer lock
+    /// generation closes IPC even if that thread stops before setting the separate request flag.
+    ui_authorized_generation: Arc<AtomicU64>,
     /// Orders the externally-visible parts of a long command against explicit lock completion.
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
     ui_session_commit: Arc<Mutex<()>>,
+    /// Short fence for synchronous actor-event emission only. Event consumers must not wait for
+    /// `ui_session_commit`: its holder can be waiting for this same bounded event sink to drain.
+    /// Never retain this guard across actor/store/registry awaits; lock crosses it separately.
+    ui_event_commit: Mutex<()>,
     /// The newest exact Ctrl+L/close snapshot registered before either command waits on the shared
     /// commit mutex. A remounted close can consume it even though its JS coordinator is gone.
     pending_ui_lock_snapshot: Mutex<Option<PendingUiLockSnapshot>>,
@@ -505,8 +585,8 @@ struct AppState {
     /// One native monitor fans a coalesced generation out to every per-server discovery loop.
     /// Polling remains active, so monitor initialization failure affects latency, not correctness.
     network_changes: NetworkChangeSignal,
-    /// Streamed uploads in flight, keyed by `(server, upload id)`. See [`PendingUpload`].
-    uploads: Mutex<HashMap<UploadKey, PendingUpload>>,
+    /// Streamed uploads in flight, keyed by `(server, native token)`. See [`RegisteredUpload`].
+    uploads: Mutex<HashMap<UploadKey, RegisteredUpload>>,
 }
 
 /// Fixed-size keyed singleflight. Hash collisions only serialize two explicit scans; unlike a map
@@ -574,6 +654,27 @@ struct PendingUpload {
     chunk_total: usize,
     /// When this upload last made progress, for the idle sweep.
     touched_at: u64,
+}
+
+/// Native custody of a streamed upload, separate from its pure slice/parser state. Numeric
+/// server IDs and a later unlock cannot replace the actor/session that began this transfer.
+/// Keeping the original actor also makes cancellation cleanup independent of registry lookup.
+struct RegisteredUpload {
+    pending: PendingUpload,
+    generation: u64,
+    instance: u64,
+    actor: ServerActor,
+}
+impl std::ops::Deref for RegisteredUpload {
+    type Target = PendingUpload;
+    fn deref(&self) -> &Self::Target {
+        &self.pending
+    }
+}
+impl std::ops::DerefMut for RegisteredUpload {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.pending
+    }
 }
 
 // Manual Debug, redacting the buffer: it holds plaintext of the file being shared, and a derived
@@ -713,7 +814,7 @@ const MAX_UPLOAD_ID_BYTES: usize = 64;
 /// always land on a chunk boundary. Sealing happens at [`CHUNK_BYTES`]; this is only about keeping
 /// any single IPC message small enough that serializing it does not stall the webview.
 const UPLOAD_SLICE_BYTES: usize = 1024 * 1024;
-const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES % UPLOAD_SLICE_BYTES == 0);
+const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES.is_multiple_of(UPLOAD_SLICE_BYTES));
 
 /// The most a file may be and still be readable through `download_file`, which returns the whole
 /// thing as one base64 string.
@@ -747,24 +848,36 @@ fn inline_download_allowed(size: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// A renderer may request a stricter format cap, but can never enlarge the native ceiling.
+/// Check the authenticated manifest plan before allocating the reassembly buffer or fetching.
+fn inline_download_allowed_with_limit(size: u64, requested: Option<u64>) -> Result<(), String> {
+    inline_download_allowed(size)?;
+    if size
+        > requested
+            .unwrap_or(MAX_INLINE_DOWNLOAD_BYTES)
+            .min(MAX_INLINE_DOWNLOAD_BYTES)
+    {
+        return Err("this file exceeds the requested inline format limit".into());
+    }
+    Ok(())
+}
+
 /// How many [`CHUNK_BYTES`] chunks a file of `size` bytes is split into. An empty file is still
 /// one (empty) chunk, so a manifest always has at least one.
 fn upload_chunk_count(size: u64) -> usize {
     (size.max(1) as usize).div_ceil(CHUNK_BYTES)
 }
 
-/// Drop a pending upload's sealed-but-unpublished chunk blobs. Uses the unchecked actor lookup so
-/// cleanup still runs when the vault has just been locked, which is one of the ways an upload ends.
+/// Drop a pending upload's sealed-but-unpublished chunk blobs through its original actor.
+/// Cleanup still runs after lock or registry replacement without adopting a different server.
 ///
 /// Awaited rather than fire-and-forget: cancel and lock report that the upload has been cleaned
 /// up, so they must not return while the blobs are still queued for deletion.
-async fn discard_pending_upload(state: &AppState, upload: PendingUpload) {
+async fn discard_pending_upload(upload: RegisteredUpload) {
     if upload.chunks.is_empty() {
         return;
     }
-    if let Ok(actor) = actor_of_unchecked(state, upload.server).await {
-        actor.discard_upload(upload.chunks).await;
-    }
+    upload.actor.discard_upload(upload.pending.chunks).await;
 }
 
 /// A fresh generation token for one `begin_file_upload`. See [`UploadKey`]: this is the identity
@@ -992,18 +1105,59 @@ struct PendingGrant {
 /// Reject webview IPC while the explicit UI lock is active. Server actors intentionally continue
 /// networking in the background, but that must not leave their plaintext projections callable by
 /// injected/stale frontend code behind the lock screen.
-async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
-    if state.session_lock_requested.load(Ordering::Acquire) {
-        return Err("the vault is locked".into());
+/// Borrow the actual session policy, including its mounted store. This is not a cached
+/// authorization decision or owned grant. Both ordinary IPC and the native handoff context
+/// use this same implementation so lock/unlock cannot make their policies diverge.
+#[derive(Clone, Copy)]
+struct UiSessionGate<'a> {
+    resumable: &'a Mutex<bool>,
+    requested: &'a AtomicBool,
+    generation: &'a AtomicU64,
+    authorized: &'a AtomicU64,
+    store: &'a Mutex<Option<ServerStore>>,
+}
+impl UiSessionGate<'_> {
+    fn is_closed(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+            || self.generation.load(Ordering::Acquire) != self.authorized.load(Ordering::Acquire)
     }
-    if *state.session_resumable.lock().await
-        && state.store.lock().await.is_some()
-        && !state.session_lock_requested.load(Ordering::Acquire)
-    {
+    async fn require_unlocked(&self) -> Result<(), String> {
+        if self.is_closed() {
+            return Err("the vault is locked".into());
+        }
+        // Preserve the existing resumable -> actual store lock order and repeat the atomic
+        // fence AFTER both awaits. A lock request can arrive while either mutex is busy.
+        if *self.resumable.lock().await && self.store.lock().await.is_some() && !self.is_closed() {
+            Ok(())
+        } else {
+            Err("the vault is locked".into())
+        }
+    }
+    /// Pure final fence, safe while Coordinator is held. No await or native callback.
+    fn check_generation(&self, expected: u64) -> Result<(), String> {
+        if self.is_closed() || self.generation.load(Ordering::Acquire) != expected {
+            return Err("the UI session changed while the operation was in progress".into());
+        }
         Ok(())
-    } else {
-        Err("the vault is locked".into())
     }
+}
+impl AppState {
+    fn ui_session_gate(&self) -> UiSessionGate<'_> {
+        UiSessionGate {
+            resumable: &self.session_resumable,
+            requested: &self.session_lock_requested,
+            generation: &self.ui_session_generation,
+            authorized: &self.ui_authorized_generation,
+            store: &self.store,
+        }
+    }
+}
+fn ui_session_closed(state: &AppState) -> bool {
+    state.ui_session_gate().is_closed()
+}
+
+async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
+    state.ui_session_gate().require_unlocked().await
 }
 
 /// Capture an unlocked UI epoch while serialized with the final phase of any older command.
@@ -2288,6 +2442,7 @@ fn forward_events(
                 AppEvent::SnapshotNeeded => {}
                 event @ (AppEvent::StudioUpdated { .. }
                 | AppEvent::StudioReceivePaused
+                | AppEvent::StudioSyncState(_)
                 | AppEvent::SettlementChanged { .. }) => {
                     let state = app.state::<AppState>();
                     studio::forward_if_current(&state, server, instance, || match event {
@@ -2299,6 +2454,7 @@ fn forward_events(
                             serde_json::json!({"server": server, "channel": channel.to_string(), "object": object.map(hex::encode)}), trace,
                         ),
                         AppEvent::StudioReceivePaused => emit_tracked(&app, "studio-receive-paused", ServerEvt { server }, trace),
+                        AppEvent::StudioSyncState(observation) => emit_tracked(&app, "studio-sync-state", studio::sync_state_payload(server, instance, observation), trace),
                         _ => unreachable!(),
                     }).await;
                 }
@@ -3338,6 +3494,7 @@ async fn register_server(
     app: &AppHandle,
     state: &AppState,
     actor: ServerActor,
+    registration: Option<ActorRegistration>,
     events: mpsc::Receiver<catcoms_app::TracedEvent>,
     task: tokio::task::JoinHandle<()>,
     group_id: Vec<u8>,
@@ -3352,18 +3509,53 @@ async fn register_server(
     is_dm: bool,
     switchboard: bool,
     record_seq: u64,
-) -> u64 {
+    expected_generation: u64,
+) -> Result<u64, String> {
     let id = {
         let mut n = state.next_id.lock().await;
         *n += 1;
         *n
     };
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
-    supervise("server_actor", id, task);
     let timer_actor = actor.clone();
-    state.servers.lock().await.insert(
+    let mut servers = state.servers.lock().await;
+    let install = if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+        || ui_session_closed(state)
+    {
+        Err("server registration was superseded by a lock request".into())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = install {
+        drop(servers);
+        if let Some(registration) = &registration {
+            registration.revoke();
+        }
+        drop(registration);
+        drop(events);
+        // Caller holds native commit. Never wait for an actor command here: authority is
+        // already closed, and actual task/lower-work custody survives until cancellation drops it.
+        task.abort();
+        return Err(error);
+    }
+    let voice = registration.and_then(|registration| match registration.register() {
+        Ok(()) => Some(RegisteredVoiceActor(registration)),
+        Err(error) => {
+            registration.revoke();
+            tracing::warn!(server = id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    });
+    let files = keep_session::EntryOwner::new();
+    actor.set_keep_session(
+        keep_session::current(state, expected_generation).map(|account| files.scope(account)),
+    );
+    // Exact row guard is already held. No await or fallible operation may separate the voice
+    // registration CAS from publishing the native row that owns it.
+    servers.insert(
         id,
         ServerEntry {
+            files,
             actor,
             instance,
             group_id,
@@ -3378,9 +3570,12 @@ async fn register_server(
             is_dm,
             switchboard,
             record_seq,
+            voice,
             persist: PersistCounters::default(),
         },
     );
+    drop(servers);
+    supervise("server_actor", id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, id, instance).await;
     forward_events(app.clone(), id, instance, events);
@@ -3389,7 +3584,7 @@ async fn register_server(
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
     spawn_discovery_timer(app.clone(), id, instance, timer_actor);
-    id
+    Ok(id)
 }
 
 /// Draw the next peer-record sequence number for `server` from this launch's reserved block, or
@@ -5823,6 +6018,7 @@ async fn found_server_inner(
     ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
     // This server's own network identity + stable port, minted once here and sealed to disk, so
     // every later launch keeps the same PeerId and port and the invites minted today still resolve
     // tomorrow. Per server, never per device (see `ServerNet`).
@@ -5927,6 +6123,16 @@ async fn found_server_inner(
     let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     let channels = ui_channels(actor.channels().await);
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     let session_commit = match require_ui_session_generation(state, ui_session_generation).await {
         Ok(commit) => commit,
         Err(error) => {
@@ -5940,6 +6146,7 @@ async fn found_server_inner(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -5957,8 +6164,9 @@ async fn found_server_inner(
         is_dm,
         net.switchboard,
         net.record_seq,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     // Seal the new server, its network identity and the registry to disk (if the store is
     // unlocked). The identity has to land before the first restart or the invite just minted dies
     // with the process that made it.
@@ -6210,6 +6418,7 @@ async fn join_server_inner(
     ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
     let decoded = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
         diag.steps.push(DiagStep::failed("invite", "", e.clone()));
     })?;
@@ -6724,6 +6933,16 @@ async fn join_server_inner(
     // peer record. A later router mapping or relay reservation is folded into this same set.
     let joiner_bootstrap_owners =
         bootstrap_owners(&joiner_addrs, BootstrapOwner::AutomaticInterface);
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     // Catch-up can take arbitrarily longer than the UI session that initiated it. Serialize the
     // native registration + sealing boundary with explicit lock, and abandon the transient actor
     // if that lock already invalidated this operation. No server id, registry row, or event
@@ -6741,6 +6960,7 @@ async fn join_server_inner(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -6758,8 +6978,9 @@ async fn join_server_inner(
         is_dm,
         net.switchboard,
         net.record_seq,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     // Seal the joined server, its network identity and the registry to disk (if unlocked).
     let membership_save = persist_server(state, server_id).await;
     let network_save = persist_server_net(state, server_id, &net).await;
@@ -7106,7 +7327,18 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
     let _persist = persist_lock_for(&state, server).lock_owned().await;
     let _session = require_ui_session_generation(&state, generation).await?;
     let removed = stopped.remove(&mut *state.servers.lock().await)?;
+    let mappings = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retire_server(server, removed.instance);
+    clean_call_mappings(&state.media_mappings, mappings);
     admission_storage::remove_pending_net(&state, server, removed.instance);
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retire_server(server, removed.instance);
     remove_persistence_signal(&state, server, removed.instance);
     state.storage_health.lock().await.remove(&server);
     if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
@@ -7168,7 +7400,7 @@ fn invite_addresses_changed(minted: &[String], current: &[String]) -> bool {
         || current.iter().any(|a| !minted.contains(a))
 }
 
-/// The single-use invite to share (founder only); `None` for a joiner.
+/// The stored single-use invite to share; `None` when absent or this device is a regular member.
 ///
 /// Re-mints first if reachability improved since the stored invite was made. This exists because
 /// of a real ordering trap: founding mints the invite immediately, but UPnP takes seconds to
@@ -7181,29 +7413,57 @@ fn invite_addresses_changed(minted: &[String], current: &[String]) -> bool {
 /// token whose signed address set matches the current route set.
 #[tauri::command]
 async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<String>, String> {
-    require_unlocked_session(&state).await?;
-    let has_invite = {
+    get_available_invite(&state, server).await
+}
+
+/// Optional reads run on network events as well as display/copy. A retained invite is not
+/// evidence of current permission: joined or demoted devices must quietly withdraw it from the
+/// UI, rather than turn an automatic refresh into an unrelated-looking global permission error.
+async fn get_available_invite(state: &AppState, server: u64) -> Result<Option<String>, String> {
+    require_unlocked_session(state).await?;
+    let (actor, device_id) = {
         let servers = state.servers.lock().await;
         match servers.get(&server) {
-            Some(e) => e.invite.is_some(),
-            None => return Ok(None),
+            Some(e) if e.invite.is_some() => (e.actor.clone(), e.device_id),
+            _ => return Ok(None),
         }
     };
-    if !has_invite {
-        return Ok(None); // a joiner mints nothing
+    if !current_device_can_share_invite(&actor, device_id).await? {
+        return Ok(None);
     }
     // A standing offer is intentionally short-lived and can disappear without changing our own
     // bootstrap. Re-wrap the same still-valid inner token on every display/copy, changing only
     // its signed helper plan. A new nonce is minted only when the inner token expired or its own
     // direct/rendezvous routes changed; otherwise opening this panel would create bearer invites
     // and rendezvous registrations without an explicit human action.
-    match refresh_or_mint_invite(&state, server, false).await {
+    let refreshed = refresh_or_mint_invite(state, server, false).await;
+    // The actor can observe a demotion while refresh awaits minting or helper wrapping. Re-read
+    // even on failure so that race also withdraws the code without a permission warning. Explicit
+    // Generate still uses mint_invite_fresh and retains its backend authorization/error contract.
+    if !current_device_can_share_invite(&actor, device_id).await? {
+        return Ok(None);
+    }
+    match refreshed {
         Ok(fresh) => Ok(Some(fresh)),
         Err(e) => {
             tracing::warn!(target: "catcoms_app", error = %e, "JOIN.INVITE.REMINT_FAILED");
-            Err(format!("the live invite could not be refreshed: {e}"))
+            Err(format!("Could not update this server's invite code: {e}"))
         }
     }
+}
+
+/// Use the full signing-device identity, never the display fingerprint. Missing state is an
+/// error, not a member role: roles() returns an empty map if its actor has stopped, and genuine
+/// failures for an owner/admin must not be mistaken for an ordinary unavailable invitation.
+async fn current_device_can_share_invite(
+    actor: &ServerActor,
+    device_id: DeviceId,
+) -> Result<bool, String> {
+    let roles = actor.roles().await;
+    let role = roles
+        .get(&device_id.to_string())
+        .ok_or_else(|| "Could not read your role in this server".to_string())?;
+    Ok(matches!(role.as_str(), "owner" | "admin"))
 }
 
 /// Mint a **fresh** single-use invite on demand (owner/admin only; gated in `Server::mint_invite`),
@@ -7844,9 +8104,13 @@ async fn begin_file_upload(
     );
     // Reaching the actor is both the session gate and proof the server exists, before this
     // reserves a slot for it.
-    let actor = actor_of(&state, server)
+    let generation = keep_session::invocation_generation(&state)
         .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    let (actor, instance) = actor_instance_of(&state, server)
+        .await
+        .map_err(|e| op.fail(e.code(), e.message()))?;
+    let actor = op.bind_actor(actor);
     if upload_id.is_empty()
         || upload_id.len() > MAX_UPLOAD_ID_BYTES
         || !upload_id
@@ -7868,56 +8132,31 @@ async fn begin_file_upload(
     let chunk_total = upload_chunk_count(size);
     let token = mint_upload_token();
     let now = SystemClock.now_ms();
-    let mut uploads = state.uploads.lock().await;
-    // Retire what this begin supersedes, in one pass:
-    //  - the previous generation of the same visible transfer (a restart). It is retired rather
-    //    than reused, so an earlier seal still in flight finds nothing to attach to and collects.
-    //  - anything untouched for long enough that its caller is plainly gone.
-    let retired: Vec<UploadKey> = uploads
-        .iter()
-        .filter(|(k, v)| {
-            (k.0 == server && v.upload_id == upload_id)
-                || v.idle_since(now.saturating_sub(UPLOAD_IDLE_TIMEOUT_MS))
-        })
-        .map(|(k, _)| k.clone())
-        .collect();
-    let retired: Vec<PendingUpload> = retired.iter().filter_map(|k| uploads.remove(k)).collect();
-    if uploads.len() >= MAX_PENDING_UPLOADS {
-        return Err(op.fail(
-            codes::FILE_UPLOAD_REFUSED,
-            "too many uploads are already in flight",
-        ));
-    }
-    // The entry cap does not bound vault growth; this does. Counted against what is already
-    // staged plus what this upload would add if it ran to the end and never finished.
-    let staged: u64 = uploads.values().map(PendingUpload::staged_bytes).sum();
-    if staged.saturating_add(chunk_total as u64 * CHUNK_BYTES as u64) > MAX_STAGED_UPLOAD_BYTES {
-        return Err(op.fail(
-            codes::FILE_UPLOAD_REFUSED,
-            "too much upload data is already waiting to be published",
-        ));
-    }
-    uploads.insert(
-        (server, token.clone()),
-        PendingUpload {
-            server,
-            upload_id,
-            mime,
-            address: CidHasher::new(),
-            buffer: Vec::new(),
-            chunks: Vec::new(),
-            sealing: None,
-            bytes_seen: 0,
-            declared_size: size,
-            chunk_total,
-            touched_at: now,
+    let superseded = upload_session::register(
+        &state,
+        token.clone(),
+        RegisteredUpload {
+            generation,
+            instance,
+            actor,
+            pending: PendingUpload {
+                server,
+                upload_id,
+                mime,
+                address: CidHasher::new(),
+                buffer: Vec::new(),
+                chunks: Vec::new(),
+                sealing: None,
+                bytes_seen: 0,
+                declared_size: size,
+                chunk_total,
+                touched_at: now,
+            },
         },
-    );
-    drop(uploads);
-    let superseded = retired.len();
-    for old in retired {
-        discard_pending_upload(&state, old).await;
-    }
+        now,
+    )
+    .await
+    .map_err(|e| op.fail(codes::FILE_UPLOAD_REFUSED, e))?;
     // Not a terminal phase: the upload has started, not finished. `finish` or `cancel` closes it,
     // and a trace with neither is the orphan.
     op.stage("FILE.UPLOAD.RESERVED");
@@ -7980,22 +8219,30 @@ async fn push_file_chunk(
     let key = (server, token);
     // Validate and buffer under the lock, then seal outside it: an actor round-trip must never
     // happen while holding a lock every other upload needs.
-    let (full_chunk, mime, chunk_total, upload_id) = {
+    let (full_chunk, mime, chunk_total, upload_id, generation) = {
         let mut uploads = state.uploads.lock().await;
         let up = uploads
             .get_mut(&key)
             .ok_or_else(|| "no such upload".to_string())?;
+        if ui_session_closed(&state)
+            || state.ui_session_generation.load(Ordering::Acquire) != up.generation
+            || !up.actor.same_instance(&actor)
+        {
+            return Err("this upload is no longer active".into());
+        }
         (
             up.admit_slice(offset, &bytes)?,
             up.mime.clone(),
             up.chunk_total,
             up.upload_id.clone(),
+            up.generation,
         )
     };
     let Some(chunk) = full_chunk else {
         return Ok(()); // buffered; the chunk it belongs to is not complete yet
     };
     let done = seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
+    let _progress_commit = require_ui_session_generation(&state, generation).await?;
     emit_tracked(
         &app,
         "upload-progress",
@@ -8010,38 +8257,6 @@ async fn push_file_chunk(
         external_progress_trace(trace.as_deref()),
     );
     Ok(())
-}
-
-/// Take an upload out of the map if, and only if, it may still be published.
-///
-/// The last gate before an irreversible, group-visible act, so it is deliberately one step: the
-/// upload is removed and returned, or it is removed and destroyed, and there is no state in
-/// between where a lock could arrive and find nothing to cancel. `locked` is read *after* the last
-/// seal, because an answer from before that await says nothing about the session now.
-///
-/// A locked session ends the upload rather than deferring it: the chunks are already sealed, and
-/// holding them across a lock would mean the vault carrying an unpublished transfer the user
-/// believes they closed. An incomplete upload is destroyed for a different reason: its chunks
-/// would be listed under the address of a whole file that was never sent, and every member would
-/// fail the reassembly check forever.
-async fn take_publishable_upload(
-    state: &AppState,
-    key: &UploadKey,
-    locked: bool,
-) -> Result<PendingUpload, String> {
-    let taken = state.uploads.lock().await.remove(key);
-    let Some(pending) = taken else {
-        return Err("no such upload".to_string());
-    };
-    if locked {
-        discard_pending_upload(state, pending).await;
-        return Err("the vault is locked".into());
-    }
-    if !pending.is_complete() {
-        discard_pending_upload(state, pending).await;
-        return Err("the upload did not send every chunk".into());
-    }
-    Ok(pending)
 }
 
 /// Seal one assembled chunk into the vault and record its reference against the pending upload;
@@ -8073,7 +8288,12 @@ async fn seal_pending_chunk(
         Ok(file_ref) => {
             let attached = uploads
                 .get_mut(key)
-                .filter(|up| up.can_accept(index))
+                .filter(|up| {
+                    up.can_accept(index)
+                        && !ui_session_closed(state)
+                        && state.ui_session_generation.load(Ordering::Acquire) == up.generation
+                        && up.actor.same_instance(actor)
+                })
                 .map(|up| up.chunk_sealed(file_ref.clone()));
             match attached {
                 Some(done) => Ok(done),
@@ -8090,7 +8310,7 @@ async fn seal_pending_chunk(
             let abandoned = uploads.remove(key);
             drop(uploads);
             if let Some(up) = abandoned {
-                discard_pending_upload(state, up).await;
+                discard_pending_upload(up).await;
             }
             Err(e)
         }
@@ -8131,6 +8351,12 @@ async fn finish_file_upload(
         let up = uploads
             .get_mut(&key)
             .ok_or_else(|| op.fail(codes::FILE_UPLOAD_FAILED, "no such upload"))?;
+        if ui_session_closed(&state)
+            || state.ui_session_generation.load(Ordering::Acquire) != up.generation
+            || !up.actor.same_instance(&actor)
+        {
+            return Err(op.fail(codes::FILE_UPLOAD_FAILED, "this upload is no longer active"));
+        }
         up.take_tail()
             .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?
             .map(|chunk| (chunk, up.mime.clone()))
@@ -8140,51 +8366,78 @@ async fn finish_file_upload(
             .await
             .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
     }
-    let locked = require_unlocked_session(&state).await.is_err();
-    let pending = take_publishable_upload(&state, &key, locked)
+    let admitted = upload_session::take(&state, &key)
         .await
         .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
-    let cid = pending.address.cid();
-    let chunk_total = pending.chunk_total;
-    let upload_id = pending.upload_id;
-    // Kept for the failure path: a failed publish must not leave sealed bytes nothing names.
-    let sealed = pending.chunks.clone();
-    let published = actor
-        .publish_upload(
-            name,
-            pending.mime,
-            path,
-            *cid.as_bytes(),
-            pending.declared_size,
-            pending.chunks,
-        )
-        .await;
-    let hex = match published {
-        Ok(hex) => hex,
-        Err(e) => {
-            actor.discard_upload(sealed).await;
-            // Sealed bytes existed and were thrown away. Distinguishable from a refusal at begin,
-            // where nothing had been written yet.
-            return Err(op.fail(codes::FILE_UPLOAD_FAILED, e));
-        }
-    };
-    emit_tracked(
-        &app,
-        "upload-progress",
-        UploadProgressEvt {
-            server,
-            upload_id,
-            done: chunk_total + 1,
-            total: chunk_total + 1,
+    let (actor, instance) = admitted.origin();
+    let actor = op.bind_actor(actor);
+    let persist_actor = actor.clone();
+    let op = Arc::new(op);
+    let settled_op = op.clone();
+    let settled_app = app.clone();
+    let progress_trace = op.trace;
+    // No await between admission/removal and transfer to the detached owner. Even a cancelled
+    // invoke waiter cannot release the commit fence while its actor command is still queued.
+    upload_session::spawn_publication(
+        admitted,
+        move |upload| async move {
+            let pending = upload.pending;
+            let cid = pending.address.cid();
+            let chunk_total = pending.chunk_total;
+            let upload_id = pending.upload_id;
+            let sealed = pending.chunks.clone();
+            let published = actor
+                .publish_upload(
+                    name,
+                    pending.mime,
+                    path,
+                    *cid.as_bytes(),
+                    pending.declared_size,
+                    pending.chunks,
+                )
+                .await;
+            let hex = match published {
+                Ok(hex) => hex,
+                Err(error) => {
+                    actor.discard_upload(sealed).await;
+                    return Err(error);
+                }
+            };
+            emit_tracked(
+                &app,
+                "upload-progress",
+                UploadProgressEvt {
+                    server,
+                    upload_id,
+                    done: chunk_total + 1,
+                    total: chunk_total + 1,
+                },
+                progress_trace,
+            );
+            Ok(hex)
         },
-        op.trace,
-    );
-    persist_server(&state, server).await;
-    // Deliberately after persistence, like every other operation here: an upload reported as
-    // succeeding before its index entry reached the disk is the shape of "it uploaded and then it
-    // was gone after a restart".
-    op.succeeded("FILE.UPLOAD.PUBLISHED");
-    Ok(hex)
+        move |outcome| async move {
+            let state = settled_app.state::<AppState>();
+            // Publication has settled before commit releases. Persistence is background-safe and
+            // exact-instance bound; it must run AFTER release to preserve leave's persist?commit
+            // lock order. A lock may complete during persistence, but never ahead of publication.
+            let _ = persist_server_instance(&state, server, instance, persist_actor).await;
+            match outcome {
+                Ok(hex) => {
+                    settled_op.succeeded("FILE.UPLOAD.PUBLISHED");
+                    Ok(hex)
+                }
+                Err(error) => Err(settled_op.fail(codes::FILE_UPLOAD_FAILED, error)),
+            }
+        },
+    )
+    .await
+    .map_err(|e| {
+        op.fail(
+            codes::FILE_UPLOAD_FAILED,
+            format!("upload worker failed: {e}"),
+        )
+    })?
 }
 
 /// Abandon a streamed upload and garbage-collect whatever it had already sealed. Called when the
@@ -8212,7 +8465,7 @@ async fn cancel_file_upload(
     let pending = state.uploads.lock().await.remove(&(server, token));
     let had_reservation = pending.is_some();
     if let Some(up) = pending {
-        discard_pending_upload(&state, up).await;
+        discard_pending_upload(up).await;
     }
     if had_reservation {
         op.succeeded("FILE.UPLOAD.CANCELLED");
@@ -8738,7 +8991,8 @@ async fn send_dm_invite(
 }
 
 /// Push a call-signalling message (base64 payload) to the member whose full device identity is
-/// `target` (64 lowercase hex, `MemberView.identity`). `true` if addressed.
+/// `target` (64 lowercase hex, `MemberView.identity`). `true` means local network submission,
+/// not a peer receipt: the transport may still fail to connect or deliver after this returns.
 ///
 /// The target used to be an 8-hex fingerprint, which a member can collide with a victim's by
 /// grinding a device key; the actor now refuses anything but the canonical full identity, and a
@@ -8749,8 +9003,7 @@ async fn send_dm_invite(
 /// turned into a `console.warn` and nothing else. The `false` is not an error and must not be
 /// recorded as one, but it is the whole diagnosis, so it is recorded as its own outcome.
 ///
-/// The payload is opaque here and stays that way: what is recorded is whether it went, never what
-/// it said.
+/// The payload is opaque here and stays that way: record submission, never its contents.
 #[tauri::command]
 async fn send_call_signal(
     state: State<'_, AppState>,
@@ -8770,18 +9023,18 @@ async fn send_call_signal(
         .decode(payload.as_bytes())
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, format!("bad payload: {e}")))?;
     let actor = op.actor(&state, server).await?;
-    let delivered = actor
+    let submitted = actor
         .send_call_signal(target, bytes)
         .await
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, e))?;
-    if delivered {
-        op.succeeded("VOICE.SIGNAL.DELIVERED");
+    if submitted {
+        op.succeeded("VOICE.SIGNAL.SUBMITTED");
     } else {
         // The roster says this member is here and the transport has nowhere to send to. Not a
         // failure of this command, and precisely the thing that was invisible.
         op.failed("VOICE.SIGNAL.NO_MEMBER_ROUTE");
     }
-    Ok(delivered)
+    Ok(submitted)
 }
 
 /// This call's E2E media base key (base64) + the MLS epoch it's keyed to. Derived locally from the
@@ -8835,6 +9088,22 @@ struct UiKeptFile {
     manifest_version: String,
     checked: bool,
 }
+#[derive(Serialize)]
+struct UiKeptTransfer {
+    cid: String,
+    manifest_version: String,
+    transfer: String,
+    phase: &'static str,
+    verified_chunks: usize,
+    total_chunks: usize,
+    running: bool,
+    user_paused: bool,
+    blocked: bool,
+    intent: String,
+    exhausted: bool,
+    /// Decimal identity, never an imprecise JavaScript Number.
+    grant: String,
+}
 
 #[derive(Serialize)]
 struct UiKeptFiles {
@@ -8842,6 +9111,7 @@ struct UiKeptFiles {
     allocated_bytes: u64,
     limit_bytes: u64,
     files: Vec<UiKeptFile>,
+    transfers: Vec<UiKeptTransfer>,
     error: Option<String>,
 }
 
@@ -8860,6 +9130,28 @@ fn bridge_kept_files(view: catcoms_storage::kept::KeptFiles) -> UiKeptFiles {
             })
             .collect(),
         error: view.error,
+        transfers: view
+            .transfers
+            .into_iter()
+            .map(|transfer| UiKeptTransfer {
+                cid: transfer.plan.cid.to_hex(),
+                manifest_version: hex::encode(transfer.plan.version),
+                transfer: hex::encode(transfer.transfer),
+                phase: match transfer.phase {
+                    catcoms_storage::kept::KeepPhase::Resumable => "paused",
+                    catcoms_storage::kept::KeepPhase::Completed => "completed",
+                    catcoms_storage::kept::KeepPhase::Deleting => "deleting",
+                },
+                verified_chunks: transfer.verified_chunks,
+                total_chunks: transfer.plan.chunks.len(),
+                running: transfer.running,
+                user_paused: transfer.user_paused,
+                blocked: transfer.blocked,
+                intent: transfer.intent.to_string(),
+                exhausted: transfer.exhausted,
+                grant: transfer.grant.to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -8900,17 +9192,20 @@ async fn keep_file(
     cid: String,
     cancellation: String,
 ) -> Result<(), String> {
+    let generation = keep_session::invocation_generation(&state).await?;
     let raw = kept_cid(&cid)?;
-    let generation = unlocked_ui_session_generation(&state).await?;
     let (lease, receiver) = claim_inline_download(&state, &cancellation)?;
     let (actor, instance) = actor_instance_of(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
+        .await
+        .ok_or_else(|| "The file read is no longer active.".to_string())?;
     drop(require_ui_session_generation(&state, generation).await?);
     actor
         .keep_file(
             raw,
-            Some(RequestCancellation::new(
-                receiver,
-                Some(lease.request_keepalive()),
+            Some(keep_session::bind_read(
+                origin,
+                RequestCancellation::new(receiver, Some(lease.request_keepalive())),
             )),
         )
         .await?;
@@ -8928,6 +9223,60 @@ async fn keep_file(
     Ok(())
 }
 
+/// Queue an explicitly requested saved copy and return after native admission. This response
+/// proves neither possession nor full verification; progress arrives through inventory/events.
+#[tauri::command]
+async fn request_kept_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.request_kept_file(raw),
+    )
+    .await
+}
+
+/// Explicit user Pause/Resume changes only the saved intent revision. A late earlier command
+/// cannot pause a resumed/replacement run, and neither action replenishes execution allowance.
+#[tauri::command]
+async fn set_kept_paused(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    transfer: String,
+    expected_intent: String,
+    paused: bool,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let owner: [u8; 32] = kept_cid(&transfer)?
+        .try_into()
+        .map_err(|_| "invalid transfer identity")?;
+    let intent = expected_intent
+        .parse::<u64>()
+        .map_err(|_| "invalid transfer intent")?;
+    if intent.to_string() != expected_intent {
+        return Err("invalid transfer intent".into());
+    }
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.set_kept_paused(raw, owner, intent, paused),
+    )
+    .await
+}
+
 /// Explicit local release only; unrelated cached chunks or replicated listings are unchanged.
 #[tauri::command]
 async fn forget_kept_file(
@@ -8937,9 +9286,114 @@ async fn forget_kept_file(
 ) -> Result<(), String> {
     let raw = kept_cid(&cid)?;
     let generation = unlocked_ui_session_generation(&state).await?;
-    let actor = actor_of(&state, server).await?;
-    let _commit = require_ui_session_generation(&state, generation).await?;
-    actor.forget_kept_file(raw).await
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.forget_kept_file(raw),
+    )
+    .await
+}
+
+/// The shared UI commit guard orders short local retained-state mutations before a production
+/// same-ID actor replacement. Lock requests revoke the generation *before* waiting for that
+/// guard, so check the atomics again after the actor reply before exposing any stale result.
+async fn commit_kept_command<T>(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    generation: u64,
+    command: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    let result = command.await;
+    if state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    result
+}
+
+fn kept_retry_request(
+    transfer: &str,
+    expected_grant: &str,
+    request: &str,
+) -> Result<catcoms_storage::kept::KeepRetry, String> {
+    fn fixed<const N: usize>(text: &str) -> Result<[u8; N], String> {
+        if text.len() != 2 * N
+            || !text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("invalid transfer identity".into());
+        }
+        hex::decode(text)
+            .map_err(|_| "invalid transfer identity".to_string())?
+            .try_into()
+            .map_err(|_| "invalid transfer identity".into())
+    }
+    let grant = expected_grant
+        .parse::<u64>()
+        .map_err(|_| "invalid transfer grant".to_string())?;
+    if grant == 0 || grant.to_string() != expected_grant {
+        return Err("invalid transfer grant".into());
+    }
+    Ok(catcoms_storage::kept::KeepRetry {
+        transfer: fixed(transfer)?,
+        expected_grant: grant,
+        request: fixed(request)?,
+    })
+}
+/// Explicit Retry only, under the actual unlocked session/actor. Browser identities can select
+/// an existing exhausted grant but cannot choose its allowance or create a new transfer owner.
+#[tauri::command]
+async fn retry_kept_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    transfer: String,
+    expected_grant: String,
+    request: String,
+) -> Result<String, String> {
+    let raw = kept_cid(&cid)?;
+    let request = kept_retry_request(&transfer, &expected_grant, &request)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let receipt = commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.retry_kept_file(raw, request),
+    )
+    .await?;
+    Ok(receipt.granted.to_string())
 }
 
 /// Cheap local presence only. This does not authenticate each chunk or prove remote availability.
@@ -9064,7 +9518,7 @@ fn register_inline_download(state: &AppState, id: &str) -> Result<(), String> {
         .unwrap_or_else(|e| e.into_inner());
     // Lock publishes this flag before acquiring the same table to cancel its contents. Testing it
     // while holding the table closes the otherwise possible sweep-before-insert race.
-    if state.session_lock_requested.load(Ordering::Acquire) {
+    if ui_session_closed(state) {
         return Err("the vault is locked".to_string());
     }
     if let Some(existing) = table.get(id) {
@@ -9105,7 +9559,7 @@ fn claim_internal_inline_download(
             .inline_downloads
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if state.session_lock_requested.load(Ordering::Acquire) {
+        if ui_session_closed(state) {
             return Err("the vault is locked".to_string());
         }
         require_inline_download_capacity(&mut table)?;
@@ -9278,6 +9732,7 @@ async fn download_file(
     cid: String,
     trace: Option<String>,
     cancellation: Option<String>,
+    max_bytes: Option<u64>,
 ) -> Result<String, AppError> {
     let op = Operation::start(
         trace,
@@ -9286,6 +9741,9 @@ async fn download_file(
         server,
         None,
     );
+    let generation = keep_session::invocation_generation(&state)
+        .await
+        .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;
     let raw = hex::decode(cid.trim())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, format!("bad cid: {e}")))?;
     let progress_cancellation = cancellation.clone();
@@ -9309,6 +9767,9 @@ async fn download_file(
         .try_into()
         .map_err(|_| op.fail(codes::FILE_DOWNLOAD_FAILED, "bad cid length"))?;
     let actor = op.actor(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
+        .await
+        .ok_or_else(|| op.fail(codes::SESSION_LOCKED, "The file read is no longer active."))?;
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
@@ -9317,10 +9778,11 @@ async fn download_file(
             "this file can't be downloaded; it isn't listed, or its reference is invalid",
         )
     })?;
-    inline_download_allowed(size).map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    inline_download_allowed_with_limit(size, max_bytes)
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
-    require_unlocked_session(&state)
+    let plan_commit = keep_session::read_commit(&state, generation, &origin)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The plan, before any bytes move. A download that stalls is one of these with no completion
@@ -9342,6 +9804,7 @@ async fn download_file(
         },
         op.trace,
     );
+    drop(plan_commit);
     let mut out = Vec::with_capacity(size as usize);
     let mut network_bytes_done = 0u64;
     for i in 0..total {
@@ -9349,23 +9812,34 @@ async fn download_file(
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         // A transfer can outlive the click that started it. Do not return plaintext or continue
         // emitting file metadata after an explicit lock closes the webview session.
-        require_unlocked_session(&state)
-            .await
-            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
-        let request_cancellation = cancellation.as_ref().map(|signal| {
-            RequestCancellation::new(
-                signal.clone(),
-                cancellation_lease
-                    .as_ref()
-                    .map(InlineDownloadLease::request_keepalive),
-            )
-        });
+        drop(
+            keep_session::read_commit(&state, generation, &origin)
+                .await
+                .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?,
+        );
+        let request_cancellation = cancellation
+            .as_ref()
+            .map(|signal| {
+                keep_session::bind_read(
+                    origin.clone(),
+                    RequestCancellation::new(
+                        signal.clone(),
+                        cancellation_lease
+                            .as_ref()
+                            .map(InlineDownloadLease::request_keepalive),
+                    ),
+                )
+            })
+            .or_else(|| Some(origin.clone()));
         let (chunk, provider) = actor
             .fetch_file_chunk_cancellable(raw.clone(), i, request_cancellation)
             .await
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         ensure_inline_download_not_cancelled(cancellation.as_ref())
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+        let _commit = keep_session::read_commit(&state, generation, &origin)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
@@ -9412,15 +9886,17 @@ async fn download_file(
             "the reassembled file failed its integrity check",
         ));
     }
-    require_unlocked_session(&state)
-        .await
-        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    drop(
+        keep_session::read_commit(&state, generation, &origin)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?,
+    );
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     let encoded = B64.encode(&out);
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
-    require_unlocked_session(&state)
+    let _commit = keep_session::read_commit(&state, generation, &origin)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     op.succeeded("FILE.DOWNLOAD.COMPLETED");
@@ -9965,7 +10441,7 @@ fn routable_media_hosts(advertised: &[String]) -> (Vec<String>, Vec<String>) {
     (v4, v6)
 }
 
-/// One member this device could hand its media to when a direct path cannot be built.
+/// One member offering mesh admission help. This grants no media-relay authority or allocation.
 #[derive(Serialize)]
 struct CallBridge {
     /// Short fingerprint, matching the identifier the call UI already renders for a peer.
@@ -9973,19 +10449,18 @@ struct CallBridge {
     /// How many routes the helper published. More routes is a better bet, not a guarantee.
     addresses: usize,
     /// True when at least one published route is a literal public address rather than a circuit.
-    /// A helper reachable only through *another* relay is a poor media bridge: it inherits that
-    /// relay's latency and its liveness.
+    /// This describes the helper's mesh route only; it does not establish a media route.
     direct: bool,
 }
 
-/// What the media plane should do for this server, derived entirely from what the mesh already
-/// proved. The frontend owns ICE; this is the evidence it has never had access to.
+/// Mesh route context for call troubleshooting. Advertisements are distinct from tested
+/// reachability; the frontend's ICE checks establish the separate media route.
 ///
 /// The two planes are otherwise disjoint by construction: the libp2p transport's PCP/UPnP/PCPv6
 /// mappings cover the *mesh* socket, and the webview's ICE agent binds its own ephemeral ports,
 /// so none of that traversal work has ever applied to a call. What does transfer is the
-/// *knowledge*: whether this node is directly reachable, whether it has a global IPv6 route, and
-/// which members have proven they can host for others.
+/// *knowledge*: advertised public mesh addresses, separate AutoNAT observations, and
+/// which members offer mesh admission help. None of these establish a WebRTC media relay.
 #[derive(Serialize)]
 struct CallTransport {
     /// Whether this node advertises at least one non-circuit, globally routable address.
@@ -9998,7 +10473,7 @@ struct CallTransport {
     /// Public IPv6 literals. These matter more than IPv4: IPv6 has no NAT to traverse, so a
     /// direct media path needs only a firewall pinhole rather than a mapping.
     public_ipv6: Vec<String>,
-    /// Members currently offering to host, best candidates first.
+    /// Mesh admission helpers, best routes first; these are not voice-relay allocations.
     bridges: Vec<CallBridge>,
     /// Whether a third-party relay is likely to be required for this node to be heard at all.
     relay_likely_required: bool,
@@ -10038,9 +10513,8 @@ async fn get_call_transport(
     };
     let (public_ipv4, public_ipv6) = routable_media_hosts(&advertised);
 
-    // Reuse the switchboard's consent-gated offer pool: a member who has already agreed to carry
-    // somebody else's traffic is exactly the member who should be asked to carry their media.
-    // Sorting puts literal-route helpers first so the picker never prefers a relayed helper.
+    // Report the existing consent-gated admission offer pool as mesh context only. Its hosting
+    // consent does not authorize media forwarding, and no WebRTC relay is created by an offer.
     let mut bridges: Vec<CallBridge> = actor
         .switchboard_offers()
         .await
@@ -10064,23 +10538,7 @@ async fn get_call_transport(
     });
 
     let relay_likely_required = !public_direct && public_ipv6.is_empty() && !router_maps;
-    let mut advice = if public_direct {
-        "This device is directly reachable, so a call should connect without a relay. A peer that still fails is behind the stricter NAT.".to_string()
-    } else if !public_ipv6.is_empty() {
-        "This device has a public IPv6 route but no verified IPv4 path. Calls will connect directly to IPv6 peers once the router permits inbound UDP to the app; IPv4-only peers will need a relay.".to_string()
-    } else if bridges.is_empty() {
-        "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay: ask a member with a public route to enable hosting, or set a TURN server in Settings, Calls.".to_string()
-    } else {
-        format!(
-            "This device is behind NAT. {} member(s) are offering to host, so a relayed path is available.",
-            bridges.len()
-        )
-    };
-    if router_maps {
-        advice.push_str(
-            " Your router opens ports on request, so each call also offers a router-mapped direct route; one mapped side is enough for the pair.",
-        );
-    }
+    let advice = call_transport_advice(public_direct, router_maps, !bridges.is_empty());
 
     Ok(CallTransport {
         public_direct,
@@ -10094,9 +10552,32 @@ async fn get_call_transport(
     })
 }
 
+/// Mesh addresses, admission consent and router support are context for troubleshooting; none
+/// proves voice connectivity. Keep this advice independent of any claimed media-relay offer.
+fn call_transport_advice(public_mesh_route: bool, router_maps: bool, mesh_helpers: bool) -> String {
+    let mut advice = if public_mesh_route {
+        "This device advertises a public mesh address. Voice uses its own connection checks."
+            .to_string()
+    } else {
+        "Voice tries its own direct connection checks.".to_string()
+    };
+    if router_maps {
+        advice.push_str(" The call can also try a router-mapped UDP port.");
+    }
+    if mesh_helpers {
+        advice.push_str(
+            " Connection helpers assist with joining the server; voice uses separate routes.",
+        );
+    }
+    advice.push_str(" If voice cannot connect, configure TURN in Settings, Calls.");
+    advice
+}
+
 /// The public socket a router granted for one webview media port.
 #[derive(Serialize)]
 struct MappedCallPort {
+    /// Opaque attempt identity; port-only unmap authority is deliberately unsupported.
+    grant: String,
     ip: String,
     port: u16,
     /// Which protocol granted it, for the log and the call panel.
@@ -10123,52 +10604,566 @@ async fn default_route_address(state: State<'_, AppState>) -> Result<Option<Stri
     Ok(catcoms_net::default_route_ipv4().map(|ip| ip.to_string()))
 }
 
-/// Ask the router to forward one of the active call's media UDP ports to this machine, over the
-/// bound-interface IGD path the invite reachability fix proved out, with PCP/NAT-PMP as the
-/// fallback rung for routers that don't speak UPnP. The webview signals the returned public
-/// socket to the peer as an extra ICE candidate; a router mapping forwards from any source, so
-/// one mapped side connects the pair regardless of the other side's NAT type. This is the
-/// media-plane counterpart of the mesh's mapping workers, which only ever cover the stable
-/// libp2p listen port and never the ICE agent's ephemeral sockets.
+/// Prepare a fresh webview controller without revoking the current controller/call. Activation
+/// is a separate compare-and-swap after the frontend checks that this mount is still current.
+#[tauri::command]
+async fn prepare_call_mapping_controller(state: State<'_, AppState>) -> Result<String, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            call_mappings::CandidateKind::Controller { generation },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+#[tauri::command]
+async fn prepare_call_mapping_owner(
+    state: State<'_, AppState>,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    if room
+        .parse::<u128>()
+        .ok()
+        .map(|id| id.to_string())
+        .as_deref()
+        != Some(room.as_str())
+    {
+        return Err("invalid call room".into());
+    }
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    let servers = state.servers.lock().await;
+    let entry = servers
+        .get(&server)
+        .ok_or("call server is no longer open")?;
+    let binding = call_mappings::Binding {
+        generation,
+        server,
+        instance: entry.instance,
+        group: entry.group_id.clone(),
+        room,
+    };
+    state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            call_mappings::CandidateKind::Call {
+                controller,
+                binding,
+            },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+async fn call_mapping_binding_current(state: &AppState, binding: &call_mappings::Binding) -> bool {
+    let servers = state.servers.lock().await;
+    !ui_session_closed(state)
+        && state.ui_session_generation.load(Ordering::Acquire) == binding.generation
+        && servers.get(&binding.server).is_some_and(|entry| {
+            entry.instance == binding.instance && entry.group_id == binding.group
+        })
+}
+
+fn clean_call_mappings(
+    coordinator: &Arc<StdMutex<call_mappings::Coordinator<catcoms_net::MediaPortMapping>>>,
+    work: Vec<call_mappings::Cleanup<catcoms_net::MediaPortMapping>>,
+) {
+    for cleanup in work {
+        let coordinator = coordinator.clone();
+        // The task, not its IPC caller, owns cleanup. Its slot remains charged even when the
+        // caller disappears. No server actor or UI commit mutex is held across router I/O.
+        tokio::spawn(async move {
+            let reusable = cleanup.grant.release().await;
+            coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish_cleanup(&cleanup.id, reusable);
+        });
+    }
+}
+
+#[tauri::command]
+async fn activate_call_mapping_owner(
+    state: State<'_, AppState>,
+    candidate: String,
+) -> Result<String, String> {
+    let kind = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .candidate(&candidate, SystemClock.monotonic_ms())
+        .ok_or("call mapping candidate expired")?;
+    let generation = match &kind {
+        call_mappings::CandidateKind::Controller { generation } => *generation,
+        call_mappings::CandidateKind::Call { binding, .. } => binding.generation,
+    };
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    if let call_mappings::CandidateKind::Call { binding, .. } = &kind {
+        if !call_mapping_binding_current(&state, binding).await {
+            return Err("call server changed".into());
+        }
+    }
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .activate(&candidate, SystemClock.monotonic_ms())?;
+    clean_call_mappings(&state.media_mappings, work);
+    Ok(candidate)
+}
+
+/// Revoke one exact candidate/controller/call. This closes authority immediately; best-effort
+/// router cleanup continues in native-owned workers and may remain uncertain until process exit.
+#[tauri::command]
+async fn end_call_mapping_owner(state: State<'_, AppState>, owner: String) -> Result<(), String> {
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end(&owner);
+    clean_call_mappings(&state.media_mappings, work);
+    Ok(())
+}
+
+/// Optional extra ICE route. Ownership, capacity and the physical port are reserved before a
+/// detached worker starts. A router grant helps connectivity; it does not establish reachability.
 #[tauri::command]
 async fn map_call_port(
+    app: AppHandle,
     state: State<'_, AppState>,
+    owner: String,
     port: u16,
     address: Option<String>,
 ) -> Result<MappedCallPort, String> {
-    require_unlocked_session(&state).await?;
-    let key = port;
     let port = std::num::NonZeroU16::new(port).ok_or("port must be nonzero")?;
     // The candidate's own claimed IPv4, when the webview could read one (mic-granted pages get
     // real IPs; an mDNS-obfuscated candidate passes None and is mapped permissively).
     let claimed = address
         .as_deref()
         .and_then(|a| a.parse::<std::net::Ipv4Addr>().ok());
-    let mapped = catcoms_net::map_media_udp_port(port, claimed).await?;
-    let result = MappedCallPort {
-        ip: mapped.external.ip().to_string(),
-        port: mapped.external.port(),
-        mechanism: mapped.mechanism.to_string(),
-        confirmed: mapped.confirmed,
-    };
-    // Retain the mapping: a PCP/NAT-PMP lease is renewed by the client inside it, and call end
-    // releases it. A same-port remap (shouldn't happen; ICE ports are fresh per call) releases
-    // the entry it replaces rather than leaking its renewal task.
-    if let Some(previous) = state.media_mappings.lock().await.insert(key, mapped) {
-        previous.release().await;
+    let binding = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .binding(&owner)
+        .cloned()
+        .ok_or("call mapping owner is no longer active")?;
+    let commit = require_ui_session_generation(&state, binding.generation).await?;
+    if !call_mapping_binding_current(&state, &binding).await {
+        return Err("call server changed".into());
     }
-    Ok(result)
+    let grant = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reserve(&owner, port.get())?;
+    drop(commit);
+    // Dropping the JoinHandle detaches rather than cancels this worker. Even a cancelled Tauri
+    // waiter leaves someone responsible for the router result and its charged slot.
+    call_mappings::spawn_acquisition(
+        state.media_mappings.clone(),
+        grant,
+        async move {
+            catcoms_net::map_media_udp_port(port, claimed)
+                .await
+                .map_err(|e| (e.uncertain, e.to_string()))
+        },
+        move || async move {
+            let state = app.state::<AppState>();
+            // Return the owned commit guard so the shared worker retains it through exact
+            // owner installation. Returning a boolean here would reopen a lock/commit gap.
+            let commit = state.ui_session_commit.clone().lock_owned().await;
+            if require_unlocked_session(&state).await.is_ok()
+                && call_mapping_binding_current(&state, &binding).await
+            {
+                Some(commit)
+            } else {
+                None
+            }
+        },
+        |mapped, grant| MappedCallPort {
+            grant: grant.into(),
+            ip: mapped.external.ip().to_string(),
+            port: mapped.external.port(),
+            mechanism: mapped.mechanism.to_string(),
+            confirmed: mapped.confirmed,
+        },
+        catcoms_net::MediaPortMapping::release,
+    )
+    .await
+    .map_err(|e| format!("router mapping worker failed: {e}"))?
 }
 
-/// Release a call mapping when the call ends. Best-effort at the router; the UPnP lease is
-/// bounded and a dropped PCP/NAT-PMP client stops renewing, so nothing outlives a crash long.
+/// Exact grant release. A queued old release cannot affect a newer same-port grant.
 #[tauri::command]
-async fn unmap_call_port(state: State<'_, AppState>, port: u16) -> Result<(), String> {
-    require_unlocked_session(&state).await?;
-    let mapping = state.media_mappings.lock().await.remove(&port);
-    if let Some(mapping) = mapping {
-        mapping.release().await;
+async fn unmap_call_port(
+    state: State<'_, AppState>,
+    owner: String,
+    grant: String,
+) -> Result<(), String> {
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unmap(&owner, &grant);
+    clean_call_mappings(&state.media_mappings, work.into_iter().collect());
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct VoiceActivation {
+    owner: String,
+    group: Option<String>,
+    join: Option<String>,
+}
+
+/// Resolve a consumed activation and a pending candidate under one Coordinator observation.
+/// Otherwise a concurrent winner could consume the candidate between two separate lookups.
+enum VoiceActivationPlan {
+    Accepted(voice_authority::AcceptedActivation),
+    Candidate(voice_authority::CandidateKind),
+}
+
+async fn voice_binding_current(state: &AppState, binding: &voice_authority::Binding) -> bool {
+    let servers = state.servers.lock().await;
+    !ui_session_closed(state)
+        && state.ui_session_generation.load(Ordering::Acquire) == binding.generation
+        && servers.get(&binding.server).is_some_and(|entry| {
+            entry.instance == binding.instance && entry.group_id == binding.group
+        })
+}
+
+/// An actor query can suspend. Its answer is only a snapshot; the command must subsequently
+/// reacquire UI commit and exact native-owner/registry authority before any synchronous effect.
+async fn check_voice_binding(
+    state: &AppState,
+    binding: &voice_authority::Binding,
+) -> Result<(), String> {
+    check_voice_binding_in(&state.servers, binding).await
+}
+
+/// The same exact registry/actor query for ordinary IPC and an upgraded handoff context.
+/// Its result is only a snapshot; both callers still need final commit/selection fencing.
+async fn check_voice_binding_in(
+    servers: &Mutex<HashMap<u64, ServerEntry>>,
+    binding: &voice_authority::Binding,
+) -> Result<(), String> {
+    let actor = {
+        let servers = servers.lock().await;
+        let entry = servers
+            .get(&binding.server)
+            .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
+            .ok_or("voice server changed")?;
+        entry.actor.clone()
+    };
+    let context = actor.voice_v2_context(binding.scope.room).await?;
+    if context.scope != binding.scope {
+        return Err("voice policy changed; rejoin the call".into());
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn prepare_voice_controller(state: State<'_, AppState>) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    prepare_voice_controller_inner(&state).await
+}
+
+async fn prepare_voice_controller_inner(state: &AppState) -> Result<String, String> {
+    // A last detached IO owner may drain after final-close returned. Reclaim only its proven
+    // dead history BEFORE any new grant/key admission can be blocked by that paid metadata.
+    // This bounded pass is grant-independent and runs outside Coordinator; it refunds no work.
+    state.voice_channels.collect_retired(&state.voice_handoff);
+    let generation = unlocked_ui_session_generation(state).await?;
+    let _commit = require_ui_session_generation(state, generation).await?;
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            voice_authority::CandidateKind::Controller(generation),
+            SystemClock.monotonic_ms(),
+        )
+}
+
+async fn prepare_voice_owner_inner(
+    state: &AppState,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    let room_id = room.parse::<u128>().map_err(|_| "invalid voice room")?;
+    if room_id.to_string() != room {
+        return Err("invalid voice room".into());
+    }
+    state.voice_channels.collect_retired(&state.voice_handoff);
+    let generation = unlocked_ui_session_generation(state).await?;
+    let (actor, instance, group) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or("voice server is no longer open")?;
+        (entry.actor.clone(), entry.instance, entry.group_id.clone())
+    };
+    let context = actor.voice_v2_context(room_id).await?;
+    let binding = voice_authority::Binding {
+        generation,
+        server,
+        instance,
+        group,
+        scope: context.scope,
+    };
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if !voice_binding_current(state, &binding).await {
+        return Err("voice server changed".into());
+    }
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            voice_authority::CandidateKind::Call {
+                controller,
+                binding,
+            },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+#[tauri::command]
+async fn prepare_voice_owner(
+    state: State<'_, AppState>,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    prepare_voice_owner_inner(&state, controller, server, room).await
+}
+
+async fn activate_voice_owner_inner(
+    state: &AppState,
+    candidate: String,
+) -> Result<VoiceActivation, String> {
+    state.voice_channels.collect_retired(&state.voice_handoff);
+    // Successful activation consumes its candidate. Resolve the original current installation
+    // first, or a lost accepted reply would force a new join/key generation. This is metadata
+    // recovery only: never adopt a past grant or skip the actor/UI/native identity checks.
+    let plan = {
+        let authority = state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(accepted) = authority.accepted_activation(&candidate) {
+            VoiceActivationPlan::Accepted(accepted)
+        } else {
+            VoiceActivationPlan::Candidate(
+                authority
+                    .candidate(&candidate, SystemClock.monotonic_ms())
+                    .ok_or("voice candidate expired")?,
+            )
+        }
+    };
+    let kind = match plan {
+        VoiceActivationPlan::Accepted(accepted) => {
+            if let Some(owner) = accepted.owner() {
+                check_voice_binding(state, &owner.binding).await?;
+            }
+            let _commit = require_ui_session_generation(state, accepted.generation()).await?;
+            if let Some(owner) = accepted.owner() {
+                if !voice_binding_current(state, &owner.binding).await {
+                    return Err("voice server changed".into());
+                }
+            }
+            let authority = state
+                .voice_authority
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            check_voice_activation_generation(state, accepted.generation())?;
+            authority.validate_accepted_activation(&accepted)?;
+            return Ok(voice_activation_projection(candidate, accepted.owner()));
+        }
+        VoiceActivationPlan::Candidate(kind) => kind,
+    };
+    let (generation, mut grant) = match &kind {
+        voice_authority::CandidateKind::Controller(generation) => (*generation, None),
+        voice_authority::CandidateKind::Call { binding, .. } => {
+            let actor = {
+                let servers = state.servers.lock().await;
+                servers
+                    .get(&binding.server)
+                    .filter(|entry| {
+                        entry.instance == binding.instance && entry.group_id == binding.group
+                    })
+                    .ok_or("voice server changed")?
+                    .actor
+                    .clone()
+            };
+            // The reply owns its child grant. Cancellation while waiting for the final native
+            // boundary drops/revokes it, rather than leaving an actor-retained lease live.
+            let grant = actor.voice_call_grant(binding.scope.room).await?;
+            if grant.scope() != binding.scope || !grant.lease().is_live() {
+                return Err("voice policy changed; rejoin the call".into());
+            }
+            (binding.generation, Some(grant))
+        }
+    };
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if let voice_authority::CandidateKind::Call { binding, .. } = &kind {
+        if !voice_binding_current(state, binding).await {
+            return Err("voice server changed".into());
+        }
+    }
+    // Two duplicate invokes can both observe the candidate before either reaches UI commit.
+    // That guard serializes this tail: recover the winner before sampling RNG or publishing.
+    // The unused temporary affine grant is declared before _commit, so all return/error paths
+    // release Coordinator and UI guards before its destructor revokes the unused actor child.
+    {
+        let authority = state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        check_voice_activation_generation(state, generation)?;
+        if let Some(accepted) = authority.accepted_activation(&candidate) {
+            authority.validate_accepted_activation(&accepted)?;
+            if accepted.generation() != generation {
+                return Err("voice controller changed".into());
+            }
+            return Ok(voice_activation_projection(candidate, accepted.owner()));
+        }
+    }
+    let mut nonce = [0; 32];
+    OsCryptoRng.fill_bytes(&mut nonce);
+    let mut authority = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    check_voice_activation_generation(state, generation)?;
+    authority.activate(&candidate, nonce, SystemClock.monotonic_ms(), &mut grant)?;
+    let owner = authority.owner(&candidate);
+    Ok(voice_activation_projection(candidate, owner.as_ref()))
+}
+
+/// Lock registration publishes a new generation before it can acquire Coordinator. Repeat its
+/// pure atomic fence inside the final native guard, including after nonce generation, so a
+/// delayed revocation hook cannot make an already registered lock look like a current session.
+fn check_voice_activation_generation(state: &AppState, generation: u64) -> Result<(), String> {
+    state.ui_session_gate().check_generation(generation)
+}
+
+/// Fixed public activation metadata. This does not return a key, actor grant or RTC authority.
+fn voice_activation_projection(
+    owner: String,
+    accepted: Option<&voice_authority::Owner>,
+) -> VoiceActivation {
+    VoiceActivation {
+        owner,
+        group: accepted.map(|owner| hex::encode(owner.binding.scope.group)),
+        join: accepted.map(|owner| hex::encode(owner.join)),
+    }
+}
+
+#[tauri::command]
+async fn activate_voice_owner(
+    state: State<'_, AppState>,
+    candidate: String,
+) -> Result<VoiceActivation, String> {
+    require_unlocked_session(&state).await?;
+    activate_voice_owner_inner(&state, candidate).await
+}
+
+/// Exact revocation is available during lock/destruction. It never refunds unsettled crypto.
+#[tauri::command]
+async fn end_voice_owner(state: State<'_, AppState>, owner: String) -> Result<(), String> {
+    end_voice_owner_inner(&state, &owner).await;
+    Ok(())
+}
+
+/// Logical revocation is synchronous; actual Root participant cleanup uses the original
+/// affine grant even after End. Never look up a replacement by room or serialized join id.
+/// This does not settle outstanding SDK/transport owners: authenticated channel cleanup
+/// retains those original payments and waits on its independent retirement witness.
+async fn end_voice_owner_inner(state: &AppState, owner: &str) {
+    let original = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end_with_cleanup(owner);
+    if let Some(original) = original {
+        let actor = {
+            let servers = state.servers.lock().await;
+            servers
+                .get(&original.binding.server)
+                .filter(|entry| {
+                    entry.instance == original.binding.instance
+                        && entry.group_id == original.binding.group
+                })
+                .map(|entry| entry.actor.clone())
+        };
+        if let Some(actor) = actor {
+            // Once admitted, the actor applies Stop even if this reply is lost. Cancellation
+            // before mailbox admission is not completion; no code treats it as drainage.
+            // A stopped/removed original actor has no replacement participant to operate on.
+            let _ = actor.stop_voice_endpoint(original.cleanup_grant()).await;
+        }
+    }
+    state.voice_channels.collect_retired(&state.voice_handoff);
+}
+
+async fn admit_voice_crypto_inner(
+    state: &AppState,
+    owner: String,
+    operation: String,
+    bytes: usize,
+) -> Result<String, String> {
+    let operation = voice_authority::Operation::parse(&operation)?;
+    state.voice_channels.collect_retired(&state.voice_handoff);
+    let binding = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .owner(&owner)
+        .ok_or("voice owner changed")?
+        .binding;
+    check_voice_binding(state, &binding).await?;
+    let _commit = require_ui_session_generation(state, binding.generation).await?;
+    if !voice_binding_current(state, &binding).await {
+        return Err("voice server changed".into());
+    }
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .admit(&owner, operation, bytes)
+}
+
+/// Resource admission alone authorizes no signing, network submission or plaintext delivery.
+#[tauri::command]
+async fn admit_voice_crypto(
+    state: State<'_, AppState>,
+    owner: String,
+    operation: String,
+    bytes: usize,
+) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    admit_voice_crypto_inner(&state, owner, operation, bytes).await
+}
+
+/// The trusted window reports real settlement even after its owner retires or the vault locks.
+#[tauri::command]
+async fn settle_voice_crypto(state: State<'_, AppState>, token: String) -> Result<(), String> {
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settle(&token);
     Ok(())
 }
 
@@ -10286,6 +11281,7 @@ fn bodyless_media_denial(code: http::StatusCode) -> http::Response<Vec<u8>> {
 async fn publish_media_response<F>(
     state: &AppState,
     generation: Option<u64>,
+    origin: Option<&RequestCancellation>,
     response: http::Response<Vec<u8>>,
     publish: F,
 ) where
@@ -10296,7 +11292,8 @@ async fn publish_media_response<F>(
         return;
     };
     match require_ui_session_generation(state, generation).await {
-        Ok(_commit) => publish(response),
+        Ok(_commit) if origin.is_none_or(|origin| !origin.is_cancelled()) => publish(response),
+        Ok(_) => publish(bodyless_media_denial(http::StatusCode::FORBIDDEN)),
         Err(_) => publish(bodyless_media_denial(http::StatusCode::FORBIDDEN)),
     }
 }
@@ -10381,6 +11378,19 @@ async fn serve_media(
     state: &AppState,
     path: &str,
     range: Option<String>,
+    expected_generation: u64,
+) -> (Option<(u64, RequestCancellation)>, http::Response<Vec<u8>>) {
+    let mut origin = None;
+    let response = serve_media_body(state, path, range, expected_generation, &mut origin).await;
+    (origin, response)
+}
+
+async fn serve_media_body(
+    state: &AppState,
+    path: &str,
+    range: Option<String>,
+    expected_generation: u64,
+    captured: &mut Option<(u64, RequestCancellation)>,
 ) -> http::Response<Vec<u8>> {
     let deny = |code: http::StatusCode| bodyless_media_denial(code);
     let Some((server, cid)) = parse_media_path(path) else {
@@ -10388,7 +11398,7 @@ async fn serve_media(
     };
     // The same boundary every native command sits behind: a locked vault serves no plaintext,
     // and a media element left in the DOM must not keep pulling bytes after an explicit lock.
-    let generation = match unlocked_ui_session_generation(state).await {
+    let generation = match keep_session::authorize_invocation(state, expected_generation).await {
         Ok(generation) => generation,
         Err(_) => return deny(http::StatusCode::FORBIDDEN),
     };
@@ -10398,6 +11408,10 @@ async fn serve_media(
     let Ok(actor) = actor_of(state, server).await else {
         return deny(http::StatusCode::NOT_FOUND);
     };
+    let Some(origin) = keep_session::for_actor(state, server, &actor, generation).await else {
+        return deny(http::StatusCode::FORBIDDEN);
+    };
+    *captured = Some((generation, origin.clone()));
     let Ok(raw) = hex::decode(&cid) else {
         return deny(http::StatusCode::BAD_REQUEST);
     };
@@ -10411,7 +11425,7 @@ async fn serve_media(
     // The head comes from the index rather than from chunk 0 for the same reason: reading a whole
     // chunk to learn a size and a mime put a second decrypt on every response and, because the
     // cache is small, evicted the chunk the player was actually reading.
-    let head = match media_head(state, &actor, server, &cid, &raw, generation).await {
+    let head = match media_head(state, &actor, server, &cid, &raw, generation, &origin).await {
         Some(head) => head,
         None => return deny(http::StatusCode::NOT_FOUND),
     };
@@ -10452,6 +11466,7 @@ async fn serve_media(
                 head.manifest_version,
                 index,
                 generation,
+                &origin,
             )
             .await
             {
@@ -10480,7 +11495,7 @@ async fn serve_media(
         // The same last authorization point the windowed path holds, for the same reason: no
         // plaintext crosses the scheme boundary if an explicit lock completed during the reads or
         // during the transcode, which is the longest await on this path.
-        let _response_commit = match require_ui_session_generation(state, generation).await {
+        let _response_commit = match keep_session::read_commit(state, generation, &origin).await {
             Ok(commit) => commit,
             Err(_) => return deny(http::StatusCode::FORBIDDEN),
         };
@@ -10512,6 +11527,7 @@ async fn serve_media(
         head.manifest_version,
         plan.index,
         generation,
+        &origin,
     )
     .await
     {
@@ -10525,7 +11541,7 @@ async fn serve_media(
     // This is the last authorization point and remains held through response construction. If an
     // explicit lock completed during either actor read, no plaintext crosses the scheme boundary;
     // if lock begins after this guard, it cannot complete until this response has been built.
-    let _response_commit = match require_ui_session_generation(state, generation).await {
+    let _response_commit = match keep_session::read_commit(state, generation, &origin).await {
         Ok(commit) => commit,
         Err(_) => return deny(http::StatusCode::FORBIDDEN),
     };
@@ -10593,6 +11609,7 @@ async fn media_head(
     cid: &str,
     raw: &[u8],
     generation: u64,
+    origin: &RequestCancellation,
 ) -> Option<MediaHead> {
     // Re-resolve the cheap index metadata on every request. The claimed plaintext CID is not a
     // trustworthy manifest identity until a full export hashes every byte, and another member may
@@ -10608,7 +11625,7 @@ async fn media_head(
             .cloned()
     };
     if let Some(hit) = cached {
-        let _commit = require_ui_session_generation(state, generation)
+        let _commit = keep_session::read_commit(state, generation, origin)
             .await
             .ok()?;
         return Some(hit);
@@ -10631,12 +11648,14 @@ async fn media_head(
         live.manifest_version,
         0,
         generation,
+        origin,
     )
     .await?;
     let mime = validated_inline_media_mime(&declared, &first)?;
-    media_head_put_for_generation(
+    media_head_put_for_read(
         state,
         generation,
+        Some(origin),
         MediaHead {
             server,
             cid: cid.to_string(),
@@ -10648,15 +11667,28 @@ async fn media_head(
     .await
 }
 
+#[cfg(test)]
 async fn media_head_put_for_generation(
     state: &AppState,
     generation: u64,
+    head: MediaHead,
+) -> Option<MediaHead> {
+    media_head_put_for_read(state, generation, None, head).await
+}
+
+async fn media_head_put_for_read(
+    state: &AppState,
+    generation: u64,
+    origin: Option<&RequestCancellation>,
     head: MediaHead,
 ) -> Option<MediaHead> {
     let _commit = require_ui_session_generation(state, generation)
         .await
         .ok()?;
     let mut heads = state.media_heads.lock().await;
+    if origin.is_some_and(RequestCancellation::is_cancelled) {
+        return None;
+    }
     heads.retain(|existing| existing.server != head.server || existing.cid != head.cid);
     heads.push(head);
     while heads.len() > MEDIA_HEAD_ENTRIES {
@@ -10684,31 +11716,45 @@ async fn media_chunk(
     manifest_version: [u8; 32],
     index: usize,
     generation: u64,
+    origin: &RequestCancellation,
 ) -> Option<Arc<Vec<u8>>> {
     let cached = {
         let mut cache = state.media_cache.lock().await;
         media_cache_take(&mut cache, server, cid, manifest_version, index)
     };
     if let Some(bytes) = cached {
-        let _commit = require_ui_session_generation(state, generation)
+        let _commit = keep_session::read_commit(state, generation, origin)
             .await
             .ok()?;
+        if origin.is_cancelled() {
+            return None;
+        }
         return Some(bytes);
     }
     let start = index as u64 * CHUNK_BYTES as u64;
     let range = actor
-        .read_file_range(raw.to_vec(), manifest_version, start, CHUNK_BYTES)
+        .read_file_range_cancellable(
+            raw.to_vec(),
+            manifest_version,
+            start,
+            CHUNK_BYTES,
+            Some(origin.clone()),
+        )
         .await
         .ok()?;
     // A read past the end is how the caller learns the file is shorter than it guessed; it is not
     // worth a cache entry.
     if range.bytes.is_empty() && start > 0 {
+        let _commit = keep_session::read_commit(state, generation, origin)
+            .await
+            .ok()?;
         return Some(Arc::new(Vec::new()));
     }
     let bytes = Arc::new(range.bytes);
-    media_cache_put_for_generation(
+    media_cache_put_for_read(
         state,
         generation,
+        Some(origin),
         MediaChunk {
             server,
             cid: cid.to_string(),
@@ -10721,15 +11767,28 @@ async fn media_chunk(
     .then_some(bytes)
 }
 
+#[cfg(test)]
 async fn media_cache_put_for_generation(
     state: &AppState,
     generation: u64,
+    chunk: MediaChunk,
+) -> bool {
+    media_cache_put_for_read(state, generation, None, chunk).await
+}
+
+async fn media_cache_put_for_read(
+    state: &AppState,
+    generation: u64,
+    origin: Option<&RequestCancellation>,
     chunk: MediaChunk,
 ) -> bool {
     let Ok(_commit) = require_ui_session_generation(state, generation).await else {
         return false;
     };
     let mut cache = state.media_cache.lock().await;
+    if origin.is_some_and(RequestCancellation::is_cancelled) {
+        return false;
+    }
     media_cache_put(&mut cache, chunk);
     true
 }
@@ -10950,10 +12009,10 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
     if json.len() > MAX_UI_STATE_BYTES {
         return Err("UI continuity state is too large".into());
     }
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|_| "UI continuity state is not valid JSON")?;
     let object = value
-        .as_object()
+        .as_object_mut()
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
     if object.get("version").and_then(serde_json::Value::as_u64) != Some(1)
         || !object
@@ -10964,6 +12023,35 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
             .is_some_and(serde_json::Value::is_object)
     {
         return Err("unsupported UI continuity state shape".into());
+    }
+    // Studio's owned PIX drafts need a larger envelope, not a larger allowance for unrelated
+    // chat/read/trust state. Validate each independent budget before the atomic sealed write.
+    if let Some(studio) = object.remove("studioDraft") {
+        if !studio.is_null() {
+            let draft = studio
+                .as_str()
+                .ok_or("Studio continuity must be a string")?;
+            if draft.len() > 12 * 1024 * 1024 {
+                return Err("Studio continuity is too large".into());
+            }
+            let draft: serde_json::Value =
+                serde_json::from_str(draft).map_err(|_| "Studio continuity is not JSON")?;
+            if draft.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+                || draft
+                    .get("records")
+                    .and_then(serde_json::Value::as_array)
+                    .is_none_or(|records| records.len() > 512)
+            {
+                return Err("unsupported Studio continuity shape".into());
+            }
+        }
+    }
+    if serde_json::to_vec(&value)
+        .map_err(|_| "UI continuity cannot be encoded")?
+        .len()
+        > 1024 * 1024
+    {
+        return Err("non-Studio UI continuity state is too large".into());
     }
     Ok(())
 }
@@ -12251,7 +13339,15 @@ async fn reload_one(
     state: &AppState,
     snapshot: &[u8],
     record: &ServerRecord,
+    expected_generation: u64,
+    voice_ticket: &SessionTicket,
 ) -> Result<(), String> {
+    let previous_instance = state
+        .servers
+        .lock()
+        .await
+        .get(&record.id)
+        .map(|entry| entry.instance);
     // 9g used to dial every address in the snapshot's peer records here, straight at the
     // transport: up to `MAX_PEX_ADDRESSES` per record for every record ever stored, unconditional,
     // bypassing `DiscoveryPolicy` and its dial budget entirely, and with no membership check, so a
@@ -12359,13 +13455,64 @@ async fn reload_one(
         Some(record.invite.clone())
     };
 
+    // Preparation remains outside native commit. Slow actor work cannot delay lock completion;
+    // the exact ticket captured before authentication keeps this result inert until unlock.
+    let registration = actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket.clone())
+        .await;
+    let registration = match registration {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(server = record.id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     // Register under the SAME id as on disk (don't allocate a new one).
-    supervise("server_actor", record.id, task);
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     let timer_actor = actor.clone();
-    state.servers.lock().await.insert(
+    let commit = state.ui_session_commit.lock().await;
+    let mut servers = state.servers.lock().await;
+    let install = if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+        || !voice_runtime(state).is_current_ticket(voice_ticket)
+        || servers.get(&record.id).map(|entry| entry.instance) != previous_instance
+    {
+        Err("server reload was superseded by a lock request".into())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = install {
+        drop(servers);
+        drop(commit);
+        drop(registration);
+        drop(events);
+        actor.shutdown().await;
+        let _ = task.await;
+        return Err(error);
+    }
+    let voice = match install_reloaded_voice(registration) {
+        Ok(voice) => voice,
+        Err(error) => {
+            drop(servers);
+            drop(commit);
+            drop(events);
+            actor.shutdown().await;
+            let _ = task.await;
+            return Err(error);
+        }
+    };
+    let files = keep_session::EntryOwner::new();
+    if let Some(old) = servers.get(&record.id) {
+        old.files.retire();
+    }
+    // Restores remain inactive until the authenticated account unlock commits below. If this
+    // reload is within a live unlock, current() still checks that exact account generation.
+    actor.set_keep_session(
+        keep_session::current(state, expected_generation).map(|account| files.scope(account)),
+    );
+    servers.insert(
         record.id,
         ServerEntry {
+            files,
             actor,
             instance,
             group_id,
@@ -12383,9 +13530,13 @@ async fn reload_one(
             is_dm: record.is_dm,
             switchboard: net.switchboard,
             record_seq: net.record_seq,
+            voice,
             persist: PersistCounters::default(),
         },
     );
+    drop(servers);
+    drop(commit);
+    supervise("server_actor", record.id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, record.id, instance).await;
     forward_events(app.clone(), record.id, instance, events);
@@ -12700,46 +13851,72 @@ fn write_download(downloads: &Path, requested_name: &str, bytes: &[u8]) -> Resul
     Ok(path)
 }
 
-/// Extension for a download still being written. A streamed save fills one of these and renames it
-/// onto the real name only once the whole file has been verified, so the peer-chosen name never
+/// Extension for a download still being written. A streamed save fills one of these and publishes
+/// the real name only once the whole file has been verified, so the peer-chosen name never
 /// exists holding bytes Mewtual has not authenticated. Crash, kill or power loss during a transfer
 /// therefore leaves a `.part`, not something that looks like the file.
 const DOWNLOAD_STAGING_SUFFIX: &str = "part";
 
-/// Reserve a staging file and the final name it will be renamed onto.
+/// Reserve a staging file corresponding to an unoccupied final name.
 ///
-/// Both are reserved up front with `create_new`, so a second save of the same file cannot pick the
-/// same final name while this one is still writing, and the rename at the end cannot collide.
+/// The `.part` is the cooperative reservation between Mewtual saves. Final-path existence is
+/// advisory here: another local action may occupy it while chunks are fetched, so publication
+/// must atomically refuse replacement. We never own a destination merely because we chose it.
 fn create_staged_download(
     downloads: &Path,
     requested_name: &str,
 ) -> Result<(std::fs::File, PathBuf, PathBuf), String> {
-    let (final_file, final_path) = create_download(downloads, requested_name)?;
-    // The reservation is a placeholder, not the download: hold the name, write elsewhere.
-    drop(final_file);
-    let staging_name = format!(
-        "{}.{DOWNLOAD_STAGING_SUFFIX}",
-        final_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("mewtual-download")
-    );
-    match create_download(downloads, &staging_name) {
-        Ok((file, staging_path)) => Ok((file, staging_path, final_path)),
-        Err(e) => {
-            let _ = std::fs::remove_file(&final_path);
-            Err(e)
+    std::fs::create_dir_all(downloads).map_err(|e| e.to_string())?;
+    let safe_name = safe_download_name(requested_name);
+    for number in 0..1_000 {
+        let name = numbered_download_name(&safe_name, number);
+        let final_path = downloads.join(&name);
+        match final_path.symlink_metadata() {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        let staging_path = downloads.join(format!("{name}.{DOWNLOAD_STAGING_SUFFIX}"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+        {
+            Ok(file) => return Ok((file, staging_path, final_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
         }
     }
+    Err("Too many downloads with this name already exist.".into())
 }
 
-/// Move a verified staging file onto its reserved final name.
+/// Atomically add the verified file at an absent destination, never replacing a local file.
 ///
-/// The reservation is an empty file this same call created, so replacing it is not clobbering
-/// anyone: `rename` over it is the atomic publish, and no window exists in which the final name
-/// holds a partial download.
+/// Both paths are on the same filesystem. Hard-link creation refuses an occupied destination;
+/// there is deliberately no overwriting-rename fallback on filesystems without hard links.
+/// Once the link succeeds publication is committed. Failed staging unlink leaves an orphan
+/// `.part`, not a failed/rolled-back download. This is not a sandbox against another process
+/// with authority to modify the source staging path itself.
 fn publish_staged_download(staging: &Path, final_path: &Path) -> Result<(), String> {
-    std::fs::rename(staging, final_path).map_err(|e| e.to_string())
+    publish_staged_download_with(
+        staging,
+        final_path,
+        |from, to| std::fs::hard_link(from, to),
+        |path| std::fs::remove_file(path),
+    )
+}
+
+// Private filesystem seams pin the commit boundary without relying on platform-specific
+// permissions or a race with antivirus. Production always uses the standard no-replace link.
+fn publish_staged_download_with(
+    staging: &Path,
+    final_path: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    link(staging, final_path).map_err(|e| e.to_string())?;
+    let _ = cleanup(staging);
+    Ok(())
 }
 
 fn launch_path(path: &Path) -> Result<(), String> {
@@ -13465,10 +14642,9 @@ trait SaveSource {
 
 /// Stream a listed file into Downloads and return the path it was published at.
 ///
-/// Writes into a `.part` and renames onto the reserved name only once the whole file has been
-/// verified: reserving the final name up front stops a second save landing on it, and writing
-/// elsewhere until the end means neither an error here nor a crash can leave the peer's chosen
-/// filename holding bytes this device has not authenticated. Every failure path removes both.
+/// Writes into a `.part` and publishes at an unoccupied name only after whole-file verification.
+/// The final name stays absent until then. Failures remove only our staging path; a destination
+/// created by another local action during a fetch is never overwritten or deleted.
 async fn stream_download_to_disk(
     downloads: &Path,
     name: &str,
@@ -13477,10 +14653,11 @@ async fn stream_download_to_disk(
     target: &[u8; 32],
     source: &mut impl SaveSource,
 ) -> Result<PathBuf, String> {
+    // Refuse a command retired during its earlier plan awaits before creating plaintext staging.
+    source.still_unlocked().await?;
     let (mut file, staging, path) = create_staged_download(downloads, name)?;
     let failed = |error: String| -> String {
         let _ = std::fs::remove_file(&staging);
-        let _ = std::fs::remove_file(&path);
         error
     };
     source.progress(0, 0, 0, None);
@@ -13576,25 +14753,37 @@ struct ActorSaveSource<'a> {
     app: &'a AppHandle,
     server: u64,
     cid: String,
-    raw: Vec<u8>,
+    ready: catcoms_app::DownloadReady,
     total: usize,
     size: u64,
     generation: u64,
+    origin: RequestCancellation,
+    operation: Option<String>,
 }
 
 impl SaveSource for ActorSaveSource<'_> {
     async fn chunk(&mut self, index: usize) -> Result<(Vec<u8>, Option<String>), String> {
-        self.actor.fetch_file_chunk(self.raw.clone(), index).await
+        self.actor
+            .read_download_chunk(self.ready.clone(), index, self.origin.clone())
+            .await
+            .map(|chunk| (chunk.into_bytes(), None))
     }
 
     async fn still_unlocked(&self) -> Result<(), String> {
         let generation_check = require_ui_session_generation(self.state, self.generation).await?;
         drop(generation_check);
+        if self.origin.is_cancelled() || !self.ready.is_current() {
+            return Err("The file read is no longer active.".into());
+        }
         Ok(())
     }
 
     async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
-        publish_download_for_generation(self.state, self.generation, staging, final_path).await
+        let _commit = require_ui_session_generation(self.state, self.generation).await?;
+        if self.origin.is_cancelled() || !self.ready.is_current() {
+            return Err("The file read is no longer active.".into());
+        }
+        publish_staged_download(staging, final_path)
     }
 
     fn progress(
@@ -13604,23 +14793,29 @@ impl SaveSource for ActorSaveSource<'_> {
         network_bytes_done: u64,
         provider: Option<String>,
     ) {
-        let _ = self.app.emit(
-            "download-progress",
-            DownloadProgressEvt {
-                server: self.server,
-                cid: self.cid.clone(),
-                cancellation: None,
-                done,
-                total: self.total,
-                bytes_done,
-                bytes_total: self.size,
-                network_bytes_done,
-                provider,
-            },
-        );
+        if !self.ready.is_current() {
+            return;
+        }
+        keep_session::publish_progress(&self.origin, || {
+            let _ = self.app.emit(
+                "download-progress",
+                DownloadProgressEvt {
+                    server: self.server,
+                    cid: self.cid.clone(),
+                    cancellation: self.operation.clone(),
+                    done,
+                    total: self.total,
+                    bytes_done,
+                    bytes_total: self.size,
+                    network_bytes_done,
+                    provider,
+                },
+            );
+        });
     }
 }
 
+#[cfg(test)]
 async fn publish_download_for_generation(
     state: &AppState,
     generation: u64,
@@ -13643,30 +14838,72 @@ async fn publish_download_for_generation(
 /// Unlike `<a download>`, this has an observable result in a Tauri webview. The file is revealed,
 /// never executed automatically.
 #[tauri::command]
+// Each argument is a named Tauri command field. Preserve that existing frontend/native wire
+// contract rather than introducing a differently shaped request just to shorten this signature.
+#[allow(clippy::too_many_arguments)]
 async fn save_group_file(
     app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
     cid: String,
     name: String,
+    resume: Option<String>,
+    expected_intent: Option<String>,
+    operation: Option<String>,
 ) -> Result<SavedFileResult, String> {
-    let generation = unlocked_ui_session_generation(&state).await?;
+    let generation = keep_session::invocation_generation(&state).await?;
+    let export_slot = private_downloads::export_slot()?;
+    if operation.as_ref().is_some_and(|id| {
+        id.is_empty()
+            || id.len() > 128
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }) {
+        return Err("Invalid download progress ID.".into());
+    }
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
     let target: [u8; 32] = raw
         .clone()
         .try_into()
         .map_err(|_| "bad cid length".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
-        "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
-    })?;
-    let declared_mime = actor
-        .file_head(raw.clone())
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
         .await
-        .ok_or_else(|| {
-            "this file can't be inspected; it isn't listed, or its reference is invalid".to_string()
-        })?
-        .mime;
+        .ok_or_else(|| "The file read is no longer active.".to_string())?;
+    let resume = resume.as_deref().map(private_downloads::id).transpose()?;
+    if let Some(id) = resume {
+        // Explicit Resume changes intent by CAS; it neither supplies a new plan nor replenishes
+        // an exhausted allowance. A newer pause/replacement must defeat this delayed click.
+        let intent = private_downloads::intent(
+            expected_intent
+                .as_deref()
+                .ok_or("Download revision is required.")?,
+        )?;
+        commit_kept_command(
+            &state,
+            server,
+            instance,
+            generation,
+            actor.set_download_paused(id, intent, false),
+        )
+        .await?;
+    } else if expected_intent.is_some() {
+        return Err("Download ID is required.".into());
+    }
+    if origin.is_cancelled() {
+        return Err("The download is no longer active.".into());
+    }
+    // No external .part exists during acquisition. Only encrypted, owner-scoped chunks survive
+    // interruption/restart; resuming always captures this fresh invocation and destination.
+    let ready = actor
+        .acquire_download(raw, resume, origin.clone())
+        .await?
+        .with_export_custody(export_slot);
+    if origin.is_cancelled() || !ready.is_current() {
+        return Err("The download is no longer active.".into());
+    }
+    let total = ready.chunks();
+    let size = ready.total_size();
+    let declared_mime = ready.mime().to_owned();
     if size > MAX_FILE_BYTES as u64 {
         return Err(format!(
             "file is larger than the {MAX_FILE_BYTES}-byte limit"
@@ -13679,21 +14916,128 @@ async fn save_group_file(
         app: &app,
         server,
         cid,
-        raw,
+        ready,
         total,
         size,
         generation,
+        origin,
+        operation,
     };
     let path =
         stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
-    // Keep inspection and the OS reveal in the same initiating UI epoch as publication. If lock
-    // won after the rename guard was released, the verified file may remain in Downloads, but the
-    // stale command cannot inspect/reveal it or report success behind the lock screen.
-    let _commit = require_ui_session_generation(&state, generation).await?;
-    let content_validation = exported_media_validation(&path, &declared_mime);
-    let warning = reveal_path(&path)
+    let saved = finish_saved_read_if(
+        &state,
+        generation,
+        &source.origin,
+        &path,
+        &declared_mime,
+        exported_media_validation,
+        reveal_path,
+        || source.ready.is_current(),
+    )
+    .await?;
+    // Publication is already committed. Cleanup failure must never turn that success into a
+    // retryable save error or remove the external file; retained ciphertext remains charged.
+    finish_download_response(
+        &state,
+        generation,
+        &source.origin,
+        saved,
+        || source.ready.invocation_current(),
+        source.actor.finish_download_export(source.ready.clone()),
+    )
+    .await
+}
+
+/// Cleanup can wait behind actor work AFTER external publication. Its completion is not a new
+/// native response capability: the ORIGINAL invocation must still authorize returning a path.
+/// Self-cleanup deliberately retires storage custody, so only the original actor/Root observer
+/// participates in this final fence. A refusal never rolls back the committed external file.
+async fn finish_download_response<A, F>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    mut saved: SavedFileResult,
+    allowed: A,
+    cleanup: F,
+) -> Result<SavedFileResult, String>
+where
+    A: Fn() -> bool,
+    F: Future<Output = Result<(), String>>,
+{
+    if cleanup.await.is_err() {
+        saved.warning = Some("The file was saved. Its encrypted download copy could not be removed; remove it from Transfers.".into());
+    }
+    let _commit = keep_session::read_commit(state, generation, origin).await?;
+    if !allowed() {
+        return Err("The download is no longer active.".into());
+    }
+    Ok(saved)
+}
+
+/// Post-publication inspection/reveal is still part of the ORIGINAL native invocation. Lock
+/// can publish its atomic generation during CPU/OS work even while the commit mutex is held.
+/// Recheck at each synchronous boundary; a file already renamed stays in Downloads on refusal.
+#[cfg(test)]
+async fn finish_saved_read<I, R>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    path: &Path,
+    declared_mime: &str,
+    inspect: I,
+    reveal: R,
+) -> Result<SavedFileResult, String>
+where
+    I: FnOnce(&Path, &str) -> Option<String>,
+    R: FnOnce(&Path) -> Result<(), String>,
+{
+    finish_saved_read_if(
+        state,
+        generation,
+        origin,
+        path,
+        declared_mime,
+        inspect,
+        reveal,
+        || true,
+    )
+    .await
+}
+
+// Keep original session/read owners and the independently testable authorization/publication
+// callbacks explicit. Their ordering is a security boundary; an argument-bundle refactor is not
+// needed to preserve this established helper's contract.
+#[allow(clippy::too_many_arguments)]
+async fn finish_saved_read_if<I, R, A>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    path: &Path,
+    declared_mime: &str,
+    inspect: I,
+    reveal: R,
+    allowed: A,
+) -> Result<SavedFileResult, String>
+where
+    I: FnOnce(&Path, &str) -> Option<String>,
+    R: FnOnce(&Path) -> Result<(), String>,
+    A: Fn() -> bool,
+{
+    let _commit = keep_session::read_commit(state, generation, origin).await?;
+    if !allowed() {
+        return Err("The download is no longer active.".into());
+    }
+    let content_validation = inspect(path, declared_mime);
+    if origin.is_cancelled() || !allowed() {
+        return Err("The file read is no longer active.".into());
+    }
+    let warning = reveal(path)
         .err()
         .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
+    if origin.is_cancelled() || !allowed() {
+        return Err("The file read is no longer active.".into());
+    }
     Ok(SavedFileResult {
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
@@ -13814,16 +15158,93 @@ async fn settle_ui_lock_continuity_before_unlock(
     Ok(())
 }
 
-/// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
-/// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
-/// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
-/// commit mutex. A racing lock therefore either wins first or makes this transition roll itself
-/// back; a completed lock can never be undone by stale unlock work.
+/// Prepare retained actors one at a time outside native commit. Mounted lock deliberately keeps
+/// their network loops alive, but unlock must attach new owners rather than revive closed ones.
+async fn reattach_voice_actors(
+    state: &AppState,
+    expected_generation: u64,
+    ticket: &SessionTicket,
+) -> Result<(), String> {
+    let actors: Vec<_> = state
+        .servers
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .voice
+                .as_ref()
+                .is_none_or(|owner| !owner.0.is_current_for(ticket))
+        })
+        .map(|(id, entry)| (*id, entry.instance, entry.actor.clone()))
+        .collect();
+    for (id, instance, actor) in actors {
+        let preparation = actor
+            .prepare_voice_actor(voice_runtime(state), ticket.clone())
+            .await;
+        let _commit = state.ui_session_commit.lock().await;
+        let mut servers = state.servers.lock().await;
+        if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+            || !voice_runtime(state).is_current_ticket(ticket)
+        {
+            return Err("unlock was superseded by a newer lock request; try again".into());
+        }
+        let Some(entry) = servers
+            .get_mut(&id)
+            .filter(|entry| entry.instance == instance)
+        else {
+            // Leave/reload won while the actor reply was pending. Its abandoned candidate is
+            // dropped; it must never install itself onto a reused numeric server id.
+            continue;
+        };
+        if entry
+            .voice
+            .as_ref()
+            .is_some_and(|owner| owner.0.is_current_for(ticket))
+        {
+            continue;
+        }
+        match preparation.and_then(|registration| {
+            registration.register().map_err(|error| error.to_string())?;
+            Ok(registration)
+        }) {
+            Ok(registration) => entry.voice = Some(RegisteredVoiceActor(registration)),
+            Err(error) => {
+                // Voice capacity and a stopped actor cannot turn authentication into a vault-
+                // wide failure. This row remains closed; a later unlock retries the attachment.
+                entry.voice = None;
+                tracing::warn!(server = id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            }
+        }
+        // Drop both native guards before the next actor await. Already registered inactive
+        // actors consume no pending-preparation slot, so large restores do not hit the cap of 8.
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 async fn finalize_unlock_session(
     state: &AppState,
     expected_generation: u64,
     include_running_servers: bool,
 ) -> Result<Option<Vec<ReloadedServer>>, String> {
+    let ticket = voice_runtime(state).session_ticket();
+    finalize_unlock_session_with_voice(state, expected_generation, include_running_servers, &ticket)
+        .await
+}
+
+/// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
+/// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
+/// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
+/// commit mutex. A racing lock therefore either wins first or makes this transition roll itself
+/// back; a completed lock can never be undone by stale unlock work.
+async fn finalize_unlock_session_with_voice(
+    state: &AppState,
+    expected_generation: u64,
+    include_running_servers: bool,
+    voice_ticket: &SessionTicket,
+) -> Result<Option<Vec<ReloadedServer>>, String> {
+    reattach_voice_actors(state, expected_generation, voice_ticket).await?;
     let _commit = state.ui_session_commit.lock().await;
     if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
         return Err("unlock was superseded by a newer lock request; try again".into());
@@ -13843,15 +15264,33 @@ async fn finalize_unlock_session(
     }
 
     let mut resumable = state.session_resumable.lock().await;
-    let reopening = !*resumable || state.session_lock_requested.load(Ordering::Acquire);
+    let reopening = !*resumable || ui_session_closed(state);
     *resumable = true;
-    state.session_lock_requested.store(false, Ordering::Release);
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    let activation = voice_runtime(state).activate_session(voice_ticket);
+    if activation.is_ok()
+        && state.ui_session_generation.load(Ordering::Acquire) == expected_generation
+    {
+        state
+            .ui_authorized_generation
+            .store(expected_generation, Ordering::Release);
+        state.session_lock_requested.store(false, Ordering::Release);
+    }
+    if activation.is_err()
+        || state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+        || state.session_lock_requested.load(Ordering::Acquire)
+    {
         // A lock request may publish its generation without this mutex so new IPC fails promptly.
         // Restore the conservative state before releasing either transition boundary.
         *resumable = false;
         state.session_lock_requested.store(true, Ordering::Release);
         return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+    if let Some(session) = keep_session::current(state, expected_generation) {
+        for entry in state.servers.lock().await.values() {
+            entry
+                .actor
+                .set_keep_session(Some(entry.files.scope(session.clone())));
+        }
     }
     if reopening {
         // Reuse each running server's single discovery worker. A mounted unlock must not wait
@@ -13886,6 +15325,7 @@ async fn unlock(
     // Capture before the first await. Any lock command that starts after this unlock invalidates
     // its generation, even if the unlock was queued behind another mount or expensive KDF work.
     let unlock_generation = state.ui_session_generation.load(Ordering::Acquire);
+    let voice_ticket = voice_runtime(&state).session_ticket();
     // This lock covers both the already-mounted authentication path and first reload. Without it,
     // two concurrent webview mounts can both observe `None` and start duplicate actors.
     let _mount = state.vault_mount.lock().await;
@@ -13893,10 +15333,11 @@ async fn unlock(
         .await
         .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
     {
-        let servers = finalize_unlock_session(&state, unlock_generation, true)
-            .await
-            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
-            .expect("the mounted-store path requests a running-server projection");
+        let servers =
+            finalize_unlock_session_with_voice(&state, unlock_generation, true, &voice_ticket)
+                .await
+                .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
+                .expect("the mounted-store path requests a running-server projection");
         op.succeeded("VAULT.UNLOCK.ALREADY_OPEN");
         return Ok(servers);
     }
@@ -13963,7 +15404,16 @@ async fn unlock(
             failed += 1;
             continue;
         };
-        if let Err(e) = reload_one(&app, &state, bytes, record).await {
+        if let Err(e) = reload_one(
+            &app,
+            &state,
+            bytes,
+            record,
+            unlock_generation,
+            &voice_ticket,
+        )
+        .await
+        {
             tracing::error!(target: "catcoms_app", server = record.id, error = %e, "VAULT.SERVER.RESTORE_FAILED");
             failed += 1;
             continue;
@@ -13982,7 +15432,7 @@ async fn unlock(
             reconnect_warning,
         });
     }
-    finalize_unlock_session(&state, unlock_generation, false)
+    finalize_unlock_session_with_voice(&state, unlock_generation, false, &voice_ticket)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The summary that makes a partial unlock visible.
@@ -14210,6 +15660,19 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
         .1
 }
 
+/// Register the lock before calling any hook that may acquire a mutex. The separately committed
+/// authorized generation makes this one atomic increment close IPC immediately, even if this
+/// thread is descheduled before publishing the request flag or revoking actor/mapping owners.
+fn register_ui_lock_request(state: &AppState) -> u64 {
+    let generation = state
+        .ui_session_generation
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    state.session_lock_requested.store(true, Ordering::Release);
+    keep_session::revoke(state);
+    generation
+}
+
 /// Execute one lock request and return the exact generation it registered. Native window-close
 /// policy needs this provenance because a different caller may consume the request's snapshot
 /// while holding the shared commit mutex.
@@ -14217,16 +15680,23 @@ async fn lock_session_with_generation_inner(
     state: &AppState,
     ui_state_json: Option<String>,
 ) -> (u64, Result<(), String>) {
-    // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
+    // Revoke old work before any await, then cross the separate event and command fences. Once
     // this function returns, an old join can neither emit its private reply nor register/persist.
-    state.session_lock_requested.store(true, Ordering::Release);
+    let lock_generation = register_ui_lock_request(state);
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .revoke_all();
+    let mappings = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .revoke_all();
+    clean_call_mappings(&state.media_mappings, mappings);
     // Cancellation destroys authority and must not wait behind the persistence transaction. This
     // also retires unclaimed registrations left by a reloaded/crashed webview.
     cancel_all_inline_downloads(state);
-    let lock_generation = state
-        .ui_session_generation
-        .fetch_add(1, Ordering::AcqRel)
-        .wrapping_add(1);
     // Register before either session mutex await. A later close from a remounted webview carries no
     // JS snapshot, but it can still save this exact native transaction if it reaches commit first.
     if let Some(json) = ui_state_json {
@@ -14243,6 +15713,13 @@ async fn lock_session_with_generation_inner(
         }
     }
     *state.session_resumable.lock().await = false;
+    // Native snapshot custody must precede BOTH publication fences. If this future disappears
+    // while waiting for an emission, a later snapshot-less close still owns the exact bytes.
+    // Detached owners were revoked before the first await above. Release this short guard
+    // before waiting for command publication so the actor's event sink can continue draining.
+    {
+        let _events = state.ui_event_commit.lock().await;
+    }
     let _session_commit = state.ui_session_commit.lock().await;
     // Close the registration/early-sweep race as a second line of defence. Registration itself
     // checks `session_lock_requested` while holding the cancellation table, but this post-commit
@@ -14304,10 +15781,10 @@ async fn lock_session_with_generation_inner(
     state.storage_health.lock().await.clear();
     // An upload in flight is session state too. Dropping the reservations frees their slots and
     // garbage-collects the chunks they had sealed but will now never publish.
-    let abandoned: Vec<PendingUpload> =
+    let abandoned: Vec<RegisteredUpload> =
         state.uploads.lock().await.drain().map(|(_, v)| v).collect();
     for upload in abandoned {
-        discard_pending_upload(state, upload).await;
+        discard_pending_upload(upload).await;
     }
     (lock_generation, save_result)
 }
@@ -14726,6 +16203,8 @@ async fn join_one_grant(
     state: &AppState,
     grant: &PerServerGrant,
 ) -> Result<u64, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
+    let ui_session_generation = unlocked_ui_session_generation(state).await?;
     // The device identity the certificate names. Every granted server needs its own MLS provider
     // but the SAME signature key (one certified device id across the bundle), so each join takes
     // a duplicate and the ceremony secrets stay intact for a retry.
@@ -14837,10 +16316,30 @@ async fn join_one_grant(
     // becomes visible on its first reload, which goes through `reload_one` on a persisted
     // identity and a reserved sequence block like every other server. (Giving this path a
     // persisted identity is multi-device work, not discovery work.)
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
+    let _commit = match require_ui_session_generation(state, ui_session_generation).await {
+        Ok(commit) => commit,
+        Err(error) => {
+            drop(events);
+            actor.shutdown().await;
+            let _ = task.await;
+            return Err(error);
+        }
+    };
     let server_id = register_server(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -14855,8 +16354,9 @@ async fn join_one_grant(
         false,
         false,
         0,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     persist_server(state, server_id).await;
     persist_registry(state).await;
     Ok(server_id)
@@ -16339,12 +17839,22 @@ fn record_ui_log(level: &str, message: String, repeats: u32) -> bool {
 
 /// Build and run the Tauri application.
 pub fn run() {
-    tauri::Builder::default()
+    let state = AppState::default();
+    let mut context = tauri::generate_context!();
+    // Tauri creates configured windows BEFORE calling user setup. Bind the paid socket and
+    // add only its exact numeric-loopback source before build/run, never in a late setup hook.
+    let voice_host = Arc::new(
+        voice_handoff::application::Host::prepare(&state, context.config_mut(), tauri::is_dev())
+            .unwrap_or_else(voice_handoff::application::Host::unavailable),
+    );
+    let exit_voice_host = voice_host.clone();
+    let app = tauri::Builder::default()
         // Update checking lives in Rust so the download and its minisign verification never
         // touch the webview: the frontend only asks "is there one?" and "install it".
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(AppState::default())
+        .manage(state)
+        .manage(voice_host)
         // Shared media plays straight out of the vault instead of crossing the IPC bridge as a
         // base64 string. The handler answers Range requests, so a player starts on the first
         // chunk and a seek costs one chunk, and the bytes never become a JS string at all.
@@ -16356,14 +17866,22 @@ pub fn run() {
                 .get(http::header::RANGE)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
+            // Capture at synchronous request entry, before the spawned future can be delayed
+            // across lock/unlock. No async continuation may adopt a new session for this URI.
+            let expected_generation = handle
+                .state::<AppState>()
+                .ui_session_generation
+                .load(Ordering::Acquire);
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
                 // Capture authorization before any actor/disk await, then hold its native commit
                 // boundary through the synchronous responder publication. A stale response is
                 // replaced by a bodyless denial rather than escaping after explicit lock.
-                let generation = unlocked_ui_session_generation(&state).await.ok();
-                let response = serve_media(&state, &path, range).await;
-                publish_media_response(&state, generation, response, |response| {
+                let (scope, response) =
+                    serve_media(&state, &path, range, expected_generation).await;
+                let generation = scope.as_ref().map(|(generation, _)| *generation);
+                let origin = scope.as_ref().map(|(_, origin)| origin);
+                publish_media_response(&state, generation, origin, response, |response| {
                     responder.respond(response);
                 })
                 .await;
@@ -16392,7 +17910,18 @@ pub fn run() {
                 init_error,
                 dir,
             });
+            if let Err(reason) = app
+                .state::<Arc<voice_handoff::application::Host>>()
+                .start_in_tauri_runtime()
+            {
+                // Fixed native metadata only. No owner, point, transcript or port is logged.
+                // Local handoff failure must not prevent chat/the rest of the app starting.
+                tracing::warn!(?reason, "VOICE.HANDOFF.UNAVAILABLE");
+            }
             spawn_network_monitor(&handle);
+            app.manage(voice_authority::CollectionTask::start(&voice_runtime(
+                &app.state::<AppState>(),
+            )));
             // The last line of `setup`, and the only proof that startup got all the way through.
             //
             // Everything before this point can fail in ways that leave a plausible-looking log: a
@@ -16461,7 +17990,10 @@ pub fn run() {
             file_available,
             get_kept_files,
             keep_file,
+            request_kept_file,
+            set_kept_paused,
             forget_kept_file,
+            retry_kept_file,
             delete_file,
             set_file_expiry,
             get_file_usage,
@@ -16484,10 +18016,14 @@ pub fn run() {
             studio::lifecycle::studio_overlay_dispose,
             studio::lifecycle::studio_unconfirmed_overlay_save_begin,
             studio::lifecycle::studio_unconfirmed_overlay_save,
+            studio::lifecycle::studio_closing_overlay_save_begin,
+            studio::lifecycle::studio_closing_overlay_save,
             studio::studio_create,
             studio::studio_apply,
             studio::studio_apply_index,
             studio::recovery::studio_recovery_list,
+            studio::fault::studio_fault_read,
+            studio::fault::studio_fault_repair,
             studio::recovery::studio_recovery_preview,
             studio::recovery::studio_recovery_apply,
             studio::recovery::studio_recovery_restore_pointer,
@@ -16530,6 +18066,23 @@ pub fn run() {
             get_connectivity,
             get_call_transport,
             map_call_port,
+            prepare_call_mapping_controller,
+            prepare_call_mapping_owner,
+            activate_call_mapping_owner,
+            end_call_mapping_owner,
+            prepare_voice_controller,
+            prepare_voice_owner,
+            activate_voice_owner,
+            end_voice_owner,
+            admit_voice_crypto,
+            settle_voice_crypto,
+            voice_join_key::admit_voice_join_key,
+            voice_join_key::publish_voice_join_key,
+            voice_join_key::settle_voice_join_key,
+            voice_handoff::commands::setup_voice_channel,
+            voice_handoff::commands::read_voice_channel_work,
+            voice_handoff::commands::settle_voice_channel_setup,
+            voice_handoff::commands::collect_voice_channel,
             default_route_address,
             unmap_call_port,
             get_switchboard_status,
@@ -16588,10 +18141,26 @@ pub fn run() {
             save_and_open_space_guide,
             save_space_layout,
             save_jam_sheet,
-            save_group_file
+            save_group_file,
+            private_downloads::get_private_downloads,
+            private_downloads::set_private_download_paused,
+            private_downloads::retry_private_download,
+            private_downloads::cancel_private_download
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Mewtual desktop app");
+        .build(context)
+        .expect("error while building the Mewtual desktop app");
+    app.run(move |_, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            // App::run never returns, and restart also exits directly. The Exit callback runs
+            // before Tauri cleanup/restart. Stop and collect here while IO runtime and logging
+            // still exist. This status worker has no UI/actor dependency that could deadlock
+            // the final event callback; preserve that invariant when adding action transport.
+            match tauri::async_runtime::block_on(exit_voice_host.finish()) {
+                Ok(()) => tracing::info!(target: "catcoms_app", "VOICE.HANDOFF.STOPPED"),
+                Err(reason) => tracing::warn!(?reason, "VOICE.HANDOFF.STOP_FAILED"),
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -16616,12 +18185,140 @@ mod tests {
                 checked: false,
             }],
             error: None,
+            transfers: vec![catcoms_storage::kept::KeptTransfer {
+                plan: catcoms_storage::kept::KeepPlan {
+                    cid: catcoms_storage::Cid::of(b"partial"),
+                    version: [8; 32],
+                    manifest: b"secret partial wrapped keys".to_vec(),
+                    chunks: vec![(catcoms_storage::Cid::of(b"partial ciphertext"), 30)],
+                },
+                listing: [9; 32],
+                transfer: [10; 32],
+                phase: catcoms_storage::kept::KeepPhase::Resumable,
+                verified_chunks: 0,
+                running: false,
+                user_paused: true,
+                blocked: false,
+                intent: u64::MAX,
+                exhausted: true,
+                grant: u64::MAX,
+                remaining: catcoms_storage::kept::KeepAllowance {
+                    requests: 0,
+                    pages: 0,
+                    bytes: 0,
+                    slices: 0,
+                },
+            }],
         });
         let json = serde_json::to_value(value).unwrap();
         assert_eq!(json["files"][0]["checked"], false);
         assert_eq!(json["files"][0].as_object().unwrap().len(), 3);
         assert!(json["files"][0].get("manifest").is_none());
         assert!(!json.to_string().contains("secret"));
+        assert_eq!(json["transfers"][0]["phase"], "paused");
+        assert_eq!(json["transfers"][0]["grant"], u64::MAX.to_string());
+        assert_eq!(json["transfers"][0].as_object().unwrap().len(), 12);
+        assert!(json["transfers"][0].get("listing").is_none());
+        assert!(json["transfers"][0].get("remaining").is_none());
+    }
+
+    #[test]
+    fn kept_retry_input_requires_closed_canonical_identities_and_lossless_grants() {
+        let transfer = "ab".repeat(32);
+        let request = "cd".repeat(16);
+        let accepted = kept_retry_request(&transfer, &u64::MAX.to_string(), &request).unwrap();
+        assert_eq!(accepted.expected_grant, u64::MAX);
+        assert_eq!(accepted.transfer, [0xab; 32]);
+        for grant in [
+            "0",
+            "01",
+            "+1",
+            " 1",
+            "1 ",
+            "1.0",
+            "18446744073709551616",
+            "",
+        ] {
+            assert!(
+                kept_retry_request(&transfer, grant, &request).is_err(),
+                "{grant}"
+            );
+        }
+        for identity in [
+            "AB".repeat(32),
+            "ab".repeat(33),
+            "ab".repeat(31),
+            "../".repeat(22),
+            "é".repeat(32),
+        ] {
+            assert!(kept_retry_request(&identity, "1", &request).is_err());
+        }
+        assert!(kept_retry_request(&transfer, "1", &"CD".repeat(16)).is_err());
+        assert!(kept_retry_request(&transfer, "1", &"cd".repeat(17)).is_err());
+    }
+
+    #[tokio::test]
+    async fn kept_mutation_rejects_replaced_actor_and_reply_after_lock_request() {
+        use catcoms_rt::{Hub, PeerId};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"kept test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(72)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(72),
+            Box::new(ManualClock::new(1_000)),
+            "member",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .insert(7, snapshot_test_entry(2, actor.clone(), group, device));
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let called = AtomicBool::new(false);
+        let error = commit_kept_command(&state, 7, 1, generation, async {
+            called.store(true, Ordering::Release);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("server changed"));
+        assert!(
+            !called.load(Ordering::Acquire),
+            "a stale actor command was never polled"
+        );
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, deferred) = tokio::sync::oneshot::channel();
+        let pending_state = state.clone();
+        let pending = tokio::spawn(async move {
+            commit_kept_command(&pending_state, 7, 2, generation, async {
+                entered.send(()).unwrap();
+                deferred.await.unwrap();
+                Ok("native receipt")
+            })
+            .await
+        });
+        waiting.await.unwrap();
+        register_ui_lock_request(&state);
+        release.send(()).unwrap();
+        assert!(pending
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("session changed"));
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 
     #[test]
@@ -17671,6 +19368,19 @@ mod tests {
     }
 
     #[test]
+    fn format_inline_limit_only_tightens_the_authenticated_plan_bound() {
+        let pixa = 9 * 1024 * 1024;
+        assert!(inline_download_allowed_with_limit(pixa, Some(pixa)).is_ok());
+        assert!(inline_download_allowed_with_limit(pixa + 1, Some(pixa)).is_err());
+        assert!(inline_download_allowed_with_limit(MAX_INLINE_DOWNLOAD_BYTES, None).is_ok());
+        assert!(
+            inline_download_allowed_with_limit(MAX_INLINE_DOWNLOAD_BYTES + 1, Some(u64::MAX))
+                .is_err()
+        );
+        assert!(inline_download_allowed_with_limit(1, Some(0)).is_err());
+    }
+
+    #[test]
     fn cancellable_inline_downloads_are_globally_bounded_and_reusable() {
         let state = AppState::default();
         let mut leases = Vec::new();
@@ -17923,6 +19633,7 @@ mod tests {
         /// Lock once this many chunks have actually been written. Reaches the phase after the
         /// loop, where there is no next iteration left to notice a lock.
         lock_after_writes: Option<usize>,
+        occupy_during_fetch: Option<PathBuf>,
         fetches: std::cell::Cell<usize>,
         locked: std::cell::Cell<bool>,
         /// `(chunks written, bytes written)` after each successful write. The observable record of
@@ -17937,6 +19648,7 @@ mod tests {
                 chunks,
                 lock_after_fetches: None,
                 lock_after_writes: None,
+                occupy_during_fetch: None,
                 fetches: std::cell::Cell::new(0),
                 locked: std::cell::Cell::new(false),
                 progress: std::cell::RefCell::new(Vec::new()),
@@ -17987,6 +19699,11 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| format!("no chunk {index}"))?;
             self.fetches.set(self.fetches.get() + 1);
+            if self.fetches.get() == 1 {
+                if let Some(path) = &self.occupy_during_fetch {
+                    std::fs::write(path, b"unrelated local file").unwrap();
+                }
+            }
             // The lock lands while this fetch is outstanding, which is the whole point: it becomes
             // true only after the await the caller was suspended in.
             if Some(self.fetches.get()) == self.lock_after_fetches {
@@ -18133,7 +19850,10 @@ mod tests {
                 .is_err()
         );
         assert!(staging.exists());
-        assert_eq!(std::fs::metadata(&final_path).unwrap().len(), 0);
+        assert!(
+            !final_path.exists(),
+            "a retired save cannot create its final destination"
+        );
 
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
@@ -18205,84 +19925,29 @@ mod tests {
         assert!(downloads_empty(dir.path()));
     }
 
-    /// An `AppState` holding one pending upload under `key`, in the shape `finish` would see.
-    async fn state_with_upload(key: &UploadKey, up: PendingUpload) -> AppState {
-        let state = AppState::default();
-        state.uploads.lock().await.insert(key.clone(), up);
-        state
-    }
+    // Streamed upload session/lock tests live beside the actual admission and publication
+    // worker in upload_session/tests.rs. They use real native sessions rather than a supplied
+    // `locked` boolean, which cannot authorize a publication across an await.
 
     #[tokio::test]
-    async fn a_lock_before_the_index_post_ends_the_upload_instead_of_publishing_it() {
-        // The upload-side twin of the save race. Everything is sealed and complete, and the only
-        // step left is the group-visible one. A lock arriving here must end the transfer, not
-        // publish it a moment later; and it must take the upload with it rather than leaving a
-        // reservation nothing will ever close.
-        let key = (1u64, "tok".to_string());
-        let (complete, _) = stream(CHUNK_BYTES);
-        assert!(complete.is_complete(), "the upload was ready to publish");
-        let state = state_with_upload(&key, complete).await;
-
-        let err = take_publishable_upload(&state, &key, true)
-            .await
-            .unwrap_err();
-
-        assert!(err.contains("locked"), "{err}");
-        assert!(
-            state.uploads.lock().await.is_empty(),
-            "and the upload is gone, not left pending across the lock"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_complete_upload_publishes_and_an_incomplete_one_is_destroyed() {
-        let key = (1u64, "tok".to_string());
-        let (complete, _) = stream(CHUNK_BYTES * 2 + 3);
-        let state = state_with_upload(&key, complete).await;
-
-        let taken = take_publishable_upload(&state, &key, false).await.unwrap();
-        assert!(taken.is_complete());
-        assert!(state.uploads.lock().await.is_empty(), "taken, not copied");
-
-        // Removed twice is not publishable twice.
-        assert!(take_publishable_upload(&state, &key, false).await.is_err());
-
-        // A short upload is refused and destroyed rather than published under a whole-file address
-        // that was never sent.
-        let mut short = pending(CHUNK_BYTES as u64 * 2);
-        short
-            .admit_slice(0, &vec![0u8; UPLOAD_SLICE_BYTES])
-            .unwrap();
-        let state = state_with_upload(&key, short).await;
-        let err = take_publishable_upload(&state, &key, false)
-            .await
-            .unwrap_err();
-        assert!(err.contains("did not send every chunk"), "{err}");
-        assert!(state.uploads.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn locking_the_session_drains_every_upload_in_flight() {
-        // Uploads are session state. A lock must not leave one holding a slot (and its staged
-        // chunks) into whatever comes next.
-        let state = AppState::default();
-        for token in ["a", "b"] {
-            let (up, _) = stream(CHUNK_BYTES);
-            state
-                .uploads
-                .lock()
-                .await
-                .insert((1, token.to_string()), up);
-        }
-        *state.session_resumable.lock().await = true;
-
-        lock_session_inner(&state, None).await.unwrap();
-
-        assert!(state.uploads.lock().await.is_empty(), "drained by the lock");
-        assert!(
-            !*state.session_resumable.lock().await,
-            "and the session closed"
-        );
+    async fn already_retired_stream_never_creates_staging_or_reports_initial_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = b"file".to_vec();
+        let mut source = ScriptedSave::new(vec![data.clone()]);
+        source.locked.set(true);
+        assert!(stream_download_to_disk(
+            directory.path(),
+            "file.bin",
+            1,
+            data.len() as u64,
+            Cid::of(&data).as_bytes(),
+            &mut source
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert_eq!(source.fetches.get(), 0);
+        assert!(source.progress.borrow().is_empty());
     }
 
     #[tokio::test]
@@ -18335,10 +20000,9 @@ mod tests {
         assert_eq!(final_path.file_name().unwrap(), "notes.txt");
         assert_eq!(staging.file_name().unwrap(), "notes.txt.part");
         file.write_all(b"half a file").unwrap();
-        assert_eq!(
-            std::fs::metadata(&final_path).unwrap().len(),
-            0,
-            "the reserved name stays empty while bytes land in the staging file"
+        assert!(
+            !final_path.exists(),
+            "only staging exists before verified publication"
         );
 
         // A second save cannot take the reserved name, nor the staging file, while this one runs.
@@ -18354,19 +20018,80 @@ mod tests {
 
     #[test]
     fn an_abandoned_download_leaves_neither_a_partial_nor_a_reservation() {
-        // What the failure path has to undo: both the staging file and the name it was holding.
+        // Only staging belongs to this operation; the final name has not been created.
         let dir = tempfile::tempdir().unwrap();
         let (mut file, staging, final_path) =
             create_staged_download(dir.path(), "cat.png").unwrap();
         file.write_all(b"partial").unwrap();
         drop(file);
         let _ = std::fs::remove_file(&staging);
-        let _ = std::fs::remove_file(&final_path);
         assert!(!staging.exists());
         assert!(!final_path.exists());
         // And the name is free again for a later, honest save.
         let (_f, _s, again) = create_staged_download(dir.path(), "cat.png").unwrap();
         assert_eq!(again, final_path);
+    }
+
+    #[tokio::test]
+    async fn download_destination_created_during_fetch_is_never_replaced_or_deleted() {
+        for cancelled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("notes.txt");
+            let mut source = ScriptedSave::new(vec![b"verified download".to_vec()]);
+            source.occupy_during_fetch = Some(destination.clone());
+            if cancelled {
+                source.lock_after_fetches = Some(1);
+            }
+            let (total, size, target) = (source.total(), source.size(), source.address());
+            assert!(stream_download_to_disk(
+                dir.path(),
+                "notes.txt",
+                total,
+                size,
+                &target,
+                &mut source,
+            )
+            .await
+            .is_err());
+            assert_eq!(std::fs::read(destination).unwrap(), b"unrelated local file");
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "only our staging file is cleaned on collision or cancellation"
+            );
+        }
+    }
+
+    #[test]
+    fn download_link_commit_survives_failed_staging_cleanup_and_unsupported_link_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut file, staging, destination) =
+            create_staged_download(dir.path(), "notes.txt").unwrap();
+        file.write_all(b"verified bytes").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let error = publish_staged_download_with(
+            &staging,
+            &destination,
+            |_, _| Err(std::io::ErrorKind::Unsupported.into()),
+            |_| panic!("a refused publication must never run committed cleanup"),
+        )
+        .unwrap_err();
+        assert!(!error.is_empty());
+        assert!(!destination.exists());
+        assert!(staging.exists());
+        publish_staged_download_with(
+            &staging,
+            &destination,
+            |from, to| std::fs::hard_link(from, to),
+            |_| Err(std::io::ErrorKind::PermissionDenied.into()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"verified bytes");
+        assert!(
+            staging.exists(),
+            "failed cleanup cannot undo committed output"
+        );
     }
 
     #[test]
@@ -18597,7 +20322,7 @@ mod tests {
             .body(b"must not escape".to_vec())
             .unwrap();
         let mut published = None;
-        publish_media_response(&state, Some(generation), plaintext, |response| {
+        publish_media_response(&state, Some(generation), None, plaintext, |response| {
             published = Some(response);
         })
         .await;
@@ -18613,7 +20338,7 @@ mod tests {
         assert!(stale_range.body().is_empty());
 
         let cid = Cid::of(b"locked media").to_hex();
-        let response = serve_media(&state, &format!("/1/{cid}"), None).await;
+        let (_, response) = serve_media(&state, &format!("/1/{cid}"), None, generation).await;
         assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
         assert!(response.body().is_empty());
     }
@@ -19928,21 +21653,49 @@ mod tests {
         assert!(state.vault_window_close_debt.lock().await.is_none());
     }
 
-    #[tokio::test]
-    async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
+    const BEFORE_CANCELLED_LOCK_UI_STATE: &str =
+        r#"{"version":1,"drafts":{"room":"saved draft"},"readMarks":{}}"#;
+
+    /// Cancel the real native lock at a held emission fence, leaving native-owned continuity.
+    /// The command fence is held too so this cannot pass by completing some other lock path.
+    async fn cancelled_lock_at_emission_fence(latest: &str) -> (tempfile::TempDir, AppState) {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        store
+            .save_ui_state(BEFORE_CANCELLED_LOCK_UI_STATE.as_bytes(), &mut OsCryptoRng)
+            .unwrap();
         *state.store.lock().await = Some(store);
         *state.session_resumable.lock().await = true;
-        let latest = r#"{"version":1,"drafts":{"room":"before remount"},"readMarks":{}}"#;
+        let events = state.ui_event_commit.lock().await;
+        let commands = state.ui_session_commit.lock().await;
+        let mut locking = Box::pin(lock_session_inner(&state, Some(latest.into())));
+        std::future::poll_fn(|cx| {
+            assert!(locking.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.json.as_str()),
+            Some(latest)
+        );
+        assert!(!*state.session_resumable.lock().await);
+        drop(locking); // Native future cancellation, without assuming WebView reload cancels IPC.
+        drop(commands);
+        drop(events);
+        (root, state)
+    }
 
-        // This is the native transaction left behind after the Ctrl+L webview was remounted. The
-        // new component has no JS snapshot and therefore calls close with `None`.
-        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
-            generation: 1,
-            json: latest.into(),
-        });
+    #[tokio::test]
+    async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
+        let latest = r#"{"version":1,"drafts":{"room":"before remount"},"readMarks":{}}"#;
+        let (_root, state) = cancelled_lock_at_emission_fence(latest).await;
+        // A fresh component has no JS snapshot; the cancelled native invocation retained it.
         let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
         assert!(outcome.continuity_error.is_none());
         assert!(may_destroy);
@@ -19959,6 +21712,32 @@ mod tests {
             "snapshot-less remounted close must finish the exact pending native transaction",
         );
         assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_lock_emission_wait_keeps_malformed_snapshot_from_authorizing_close() {
+        let (_root, state) = cancelled_lock_at_emission_fence("not valid UI state").await;
+        let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+        assert!(outcome.continuity_error.is_some());
+        assert!(!may_destroy);
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            BEFORE_CANCELLED_LOCK_UI_STATE.as_bytes(),
+            "refusing malformed continuity must preserve the previous saved draft",
+        );
+        let (retry, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+        assert_eq!(retry.continuity_error, outcome.continuity_error);
+        assert!(
+            !may_destroy,
+            "a snapshot-less retry cannot erase the unacknowledged loss"
+        );
     }
 
     #[tokio::test]
@@ -20008,13 +21787,14 @@ mod tests {
         assert!(state.storage_health.lock().await.is_empty());
     }
 
-    fn snapshot_test_entry(
+    pub(super) fn snapshot_test_entry(
         instance: u64,
         actor: ServerActor,
         group_id: Vec<u8>,
         device_id: DeviceId,
     ) -> ServerEntry {
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id,
@@ -20029,8 +21809,473 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn voice_authority_bridge_checks_room_actor_call_cas_and_lock_before_engine_admission() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(71)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(71),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let controller = prepare_voice_controller_inner(&state).await.unwrap();
+        let activated = activate_voice_owner_inner(&state, controller.clone())
+            .await
+            .unwrap();
+        assert!(activated.join.is_none());
+        assert!(
+            prepare_voice_owner_inner(&state, controller.clone(), 7, "001".into())
+                .await
+                .is_err()
+        );
+        assert!(
+            prepare_voice_owner_inner(&state, controller.clone(), 7, "999".into())
+                .await
+                .is_err()
+        );
+        let room = channel_id("general").to_string();
+        let stale = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let candidate = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let first = activate_voice_owner_inner(&state, candidate).await.unwrap();
+        assert_eq!(first.join.as_ref().unwrap().len(), 64);
+        assert_eq!(first.group.as_ref().unwrap().len(), 64);
+        let lease = state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .owner(&first.owner)
+            .unwrap()
+            .lease;
+        assert!(activate_voice_owner_inner(&state, stale).await.is_err());
+        assert!(lease.is_live());
+        let charge = admit_voice_crypto_inner(&state, first.owner.clone(), "generate".into(), 128)
+            .await
+            .unwrap();
+        // Hold the real final commit boundary. The following actor query is ordered after the
+        // admission's eligibility query, so End occurs after that snapshot but before its charge.
+        let boundary = state.ui_session_commit.lock().await;
+        let (late_end, ()) = tokio::join!(biased;
+            admit_voice_crypto_inner(&state, first.owner.clone(), "generate".into(), 128),
+            async {
+                actor.member_count().await;
+                state.voice_authority.lock().unwrap().end(&first.owner);
+                drop(boundary);
+            }
+        );
+        assert!(late_end.is_err());
+        assert!(!lease.is_live());
+        let candidate = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let second = activate_voice_owner_inner(&state, candidate).await.unwrap();
+        let current_lease = state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .owner(&second.owner)
+            .unwrap()
+            .lease;
+        let candidate = prepare_voice_owner_inner(&state, controller, 7, room)
+            .await
+            .unwrap();
+        state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+        assert!(activate_voice_owner_inner(&state, candidate).await.is_err());
+        assert!(
+            admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128)
+                .await
+                .is_err()
+        );
+        state.servers.lock().await.get_mut(&7).unwrap().instance = 1;
+        let (_download, download_cancelled) = claim_internal_inline_download(&state).unwrap();
+        let mapping_owner = {
+            let mut mappings = state.media_mappings.lock().unwrap();
+            let controller = mappings
+                .prepare(
+                    call_mappings::CandidateKind::Controller {
+                        generation: state.ui_session_generation.load(Ordering::Acquire),
+                    },
+                    0,
+                )
+                .unwrap();
+            assert!(mappings.activate(&controller, 0).unwrap().is_empty());
+            let owner = mappings
+                .prepare(
+                    call_mappings::CandidateKind::Call {
+                        controller,
+                        binding: call_mappings::Binding {
+                            generation: state.ui_session_generation.load(Ordering::Acquire),
+                            server: 7,
+                            instance: 1,
+                            group: vec![4; 16],
+                            room: channel_id("general").to_string(),
+                        },
+                    },
+                    0,
+                )
+                .unwrap();
+            assert!(mappings.activate(&owner, 0).unwrap().is_empty());
+            owner
+        };
+        let boundary = state.ui_session_commit.lock().await;
+        let event_boundary = state.ui_event_commit.lock().await;
+        let (late_lock, ()) = tokio::join!(biased;
+            admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128),
+            async {
+                actor.member_count().await;
+                // Even a withheld event emission cannot postpone detached-owner revocation.
+                // These are the actual call lease, mapping owner and charged read cancellation.
+                let mut locking = Box::pin(lock_session_inner(&state, None));
+                std::future::poll_fn(|cx| {
+                    assert!(locking.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                }).await;
+                assert!(!current_lease.is_live());
+                assert!(*download_cancelled.borrow());
+                assert!(state.media_mappings.lock().unwrap().binding(&mapping_owner).is_none());
+                drop(event_boundary);
+                drop(boundary);
+                locking.await.unwrap();
+            }
+        );
+        assert!(late_lock.is_err());
+        assert!(!current_lease.is_live());
+        assert!(prepare_voice_controller_inner(&state).await.is_err());
+        assert!(
+            admit_voice_crypto_inner(&state, second.owner, "generate".into(), 128)
+                .await
+                .is_err()
+        );
+        assert!(
+            state.voice_authority.lock().unwrap().settle(&charge),
+            "lock retains the exact uncertain operation"
+        );
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn voice_mounted_unlock_reattaches_more_than_eight_actors_without_reviving_old_calls() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let runtime = VoiceRuntime::new(Arc::new(ManualClock::new(1000)));
+        *state.voice_authority.lock().unwrap() =
+            voice_authority::Coordinator::with_runtime(runtime.clone());
+        let mut workers = Vec::new();
+        let mut actors = Vec::new();
+        for id in 1..=12 {
+            let server = Server::found(
+                Hub::new().join(PeerId::from_u64(id)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(id),
+                Box::new(ManualClock::new(1000)),
+                "member",
+            )
+            .unwrap();
+            let (group, device) = (server.group_id(), server.device_id());
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            state
+                .servers
+                .lock()
+                .await
+                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+            actors.push(actor);
+            workers.push((task, drain));
+        }
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let mut old = Vec::new();
+        for actor in &actors {
+            old.push(actor.voice_call_grant(channel_id("general")).await.unwrap());
+        }
+        let counts = runtime.resources().counts();
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(
+            old.iter().all(|grant| grant.lease().is_live()),
+            "idempotent unlock keeps exact registered owners"
+        );
+        assert_eq!(runtime.resources().counts(), counts);
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(old.iter().all(|grant| !grant.lease().is_live()));
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let mut current = Vec::new();
+        for actor in &actors {
+            current.push(actor.voice_call_grant(channel_id("general")).await.unwrap());
+        }
+        assert!(current.iter().all(|grant| grant.lease().is_live()));
+        assert!(old.iter().all(|grant| !grant.lease().is_live()));
+        state.servers.lock().await.remove(&1);
+        assert!(
+            !current[0].lease().is_live(),
+            "native row removal revokes before actor shutdown"
+        );
+        assert!(current[1].lease().is_live());
+        state.servers.lock().await.clear();
+        for actor in &actors {
+            actor.shutdown().await;
+        }
+        for (task, drain) in workers {
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_reattachment_waiting_for_native_commit_cannot_win_after_lock() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(75)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(75),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let (group, device) = (server.group_id(), server.device_id());
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
+        let runtime = voice_runtime(&state);
+        let old_ticket = runtime.session_ticket();
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let boundary = state.ui_session_commit.lock().await;
+        let (result, ()) = tokio::join!(biased;
+            reattach_voice_actors(&state, generation, &old_ticket),
+            async {
+                actor.member_count().await;
+                let (locked, ()) = tokio::join!(biased;
+                    lock_session_inner(&state, None), async { drop(boundary); }
+                );
+                locked.unwrap();
+            }
+        );
+        assert!(result.is_err());
+        assert!(state.servers.lock().await.get(&7).unwrap().voice.is_none());
+        assert!(actor.voice_call_grant(channel_id("general")).await.is_err());
+        assert!(runtime.activate_session(&old_ticket).is_err());
+        state.servers.lock().await.clear();
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn voice_attachment_failure_does_not_block_healthy_servers_or_authenticated_unlock() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let mut actors = Vec::new();
+        let mut workers = Vec::new();
+        for id in 1..=2 {
+            let server = Server::found(
+                Hub::new().join(PeerId::from_u64(id)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(id),
+                Box::new(ManualClock::new(1000)),
+                "member",
+            )
+            .unwrap();
+            let (group, device) = (server.group_id(), server.device_id());
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            state
+                .servers
+                .lock()
+                .await
+                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+            actors.push(actor);
+            workers.push((task, drain));
+        }
+        actors[0].shutdown().await;
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(*state.session_resumable.lock().await);
+        assert!(state.servers.lock().await.get(&1).unwrap().voice.is_none());
+        let grant = actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .unwrap();
+        assert!(grant.lease().is_live());
+        lock_session_inner(&state, None).await.unwrap();
+        let runtime = voice_runtime(&state);
+        // Fill the declared process byte budget without fabricating any native admission.
+        let resources = runtime.resources();
+        let mut charges = Vec::new();
+        while let Ok(credit) = resources.charge(
+            [99; 32],
+            1024,
+            catcoms_sync::voice_v2::resources::ResourceKind::Retained,
+        ) {
+            charges.push(credit);
+        }
+        // One group has a stricter cap than the process; consume the remainder in other groups.
+        for group in 100..108 {
+            while let Ok(credit) = resources.charge(
+                [group; 32],
+                1024,
+                catcoms_sync::voice_v2::resources::ResourceKind::Retained,
+            ) {
+                charges.push(credit);
+            }
+        }
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(*state.session_resumable.lock().await);
+        assert!(actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .is_err());
+        drop(charges);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .unwrap()
+            .lease()
+            .is_live());
+        assert!(!grant.lease().is_live());
+        state.servers.lock().await.clear();
+        actors[1].shutdown().await;
+        for (task, drain) in workers {
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_old_unlock_cannot_erase_lock_registered_before_revocation_hooks() {
+        let state = AppState::default();
+        let old_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let runtime = voice_runtime(&state);
+        let old_ticket = runtime.session_ticket();
+        // Split the real synchronous entry seam at the point where a coordinator/mapping mutex
+        // could stall. The new generation is already published, even before any Runtime hook.
+        let new_generation = register_ui_lock_request(&state);
+        assert_ne!(old_generation, new_generation);
+        assert!(
+            finalize_unlock_session_with_voice(&state, old_generation, false, &old_ticket)
+                .await
+                .is_err()
+        );
+        assert!(ui_session_closed(&state));
+        assert!(!*state.session_resumable.lock().await);
+        assert!(require_unlocked_session(&state).await.is_err());
+        // Clearing only the separate flag cannot open the still-uncommitted generation.
+        state.session_lock_requested.store(false, Ordering::Release);
+        assert!(ui_session_closed(&state));
+        assert!(require_unlocked_session(&state).await.is_err());
+        state.voice_authority.lock().unwrap().revoke_all();
+        assert!(runtime.activate_session(&old_ticket).is_err());
+    }
+
+    #[tokio::test]
+    async fn voice_restore_install_keeps_chat_when_optional_preparation_expired() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let clock = Arc::new(ManualClock::new(1000));
+        let runtime = VoiceRuntime::new(clock.clone());
+        let ticket = runtime.session_ticket();
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(76)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(76),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let registration = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        clock.advance_ms(30_000);
+        assert!(runtime.is_current_ticket(&ticket));
+        assert!(install_reloaded_voice(Some(registration))
+            .unwrap()
+            .is_none());
+        runtime.activate_session(&ticket).unwrap();
+        let room = channel_id("general");
+        assert!(actor.voice_call_grant(room).await.is_err());
+        actor.open_channel(room).await;
+        actor
+            .send_message(room, "chat survives optional voice expiry")
+            .await;
+        assert!(actor
+            .messages(room)
+            .await
+            .iter()
+            .any(|message| message.text == "chat survives optional voice expiry"));
+        let first = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        let second = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        let current = install_reloaded_voice(Some(first)).unwrap().unwrap();
+        assert!(install_reloaded_voice(Some(second)).is_err());
+        assert!(current.0.is_current_for(&ticket));
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 
     #[tokio::test]
@@ -20205,6 +22450,8 @@ mod tests {
         .await
         .expect("the background snapshot worker did not complete its dirty ticket");
     }
+
+    include!("member_discovery_tests.rs");
 
     #[tokio::test]
     async fn received_chat_is_saved_by_the_event_worker_while_the_ui_is_locked() {
@@ -20527,6 +22774,7 @@ mod tests {
         state.servers.lock().await.insert(
             SERVER,
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor: actor.clone(),
                 instance: INSTANCE,
                 group_id,
@@ -20541,6 +22789,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: 0,
+                voice: None,
                 persist: PersistCounters::default(),
             },
         );
@@ -20710,6 +22959,7 @@ mod tests {
         let (new_actor, new_events, new_task) = spawn(replacement);
 
         let entry = |instance, actor: ServerActor| ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id: replacement_group.clone(),
@@ -20724,6 +22974,7 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         };
 
@@ -20837,6 +23088,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
         let entry = |instance| ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor: actor.clone(),
             instance,
             group_id: group_id.clone(),
@@ -20851,6 +23103,7 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         };
         const SERVER: u64 = 12;
@@ -21329,6 +23582,7 @@ mod tests {
             state.servers.lock().await.insert(
                 SERVER_ID,
                 ServerEntry {
+                    files: keep_session::EntryOwner::new(),
                     actor: restored.actor,
                     instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
                     group_id: restored.group_id,
@@ -21343,6 +23597,7 @@ mod tests {
                     is_dm: records[0].is_dm,
                     switchboard: network.switchboard,
                     record_seq: network.record_seq,
+                    voice: None,
                     persist: PersistCounters::default(),
                 },
             );
@@ -21498,6 +23753,170 @@ mod tests {
             ),
             "an older overlapping mint cannot store after the live route set changes"
         );
+    }
+
+    #[tokio::test]
+    async fn optional_invite_refresh_withdraws_member_codes_but_explicit_mint_still_rejects() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (owner, member, _, _) = admitted_reply_pair(Vec::new()).await;
+        assert_eq!(member.my_role(), catcoms_app::Role::Member);
+        let stored = hex::encode(
+            owner
+                .mint_invite([0x73; 16], u64::MAX, vec![])
+                .unwrap()
+                .encode(),
+        );
+        let device = member.device_id();
+        let group = member.group_id();
+        let (actor, events, task) = spawn(member);
+        let mut entry = snapshot_test_entry(1, actor.clone(), group, device);
+        entry.invite = Some(stored.clone());
+        state.servers.lock().await.insert(1, entry);
+
+        // Even a reusable token must disappear for a current ordinary member. Previously this
+        // either exposed a retained code or tried to refresh it and raised a global error.
+        assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
+        assert_eq!(state.servers.lock().await[&1].invite, Some(stored));
+        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
+        assert!(mint_and_store_invite(&state, 1)
+            .await
+            .unwrap_err()
+            .contains("only the owner or an admin"));
+        state.servers.lock().await.get_mut(&1).unwrap().invite = None;
+        assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
+        assert_eq!(get_available_invite(&state, 99).await.unwrap(), None);
+        state.session_lock_requested.store(true, Ordering::Release);
+        assert_eq!(
+            get_available_invite(&state, 1).await.unwrap_err(),
+            "the vault is locked"
+        );
+        actor.shutdown().await;
+        task.await.unwrap();
+        drop(events);
+    }
+
+    #[tokio::test]
+    async fn optional_invite_refresh_follows_owner_admin_and_demotion_roles() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (owner, member, owner_peer, _) = admitted_reply_pair(Vec::new()).await;
+        let owner_device = owner.device_id();
+        let member_device = member.device_id();
+        let group = owner.group_id();
+        let owner_invite = hex::encode(
+            owner
+                .mint_invite([0x74; 16], u64::MAX, vec![])
+                .unwrap()
+                .encode(),
+        );
+        let (owner, owner_events, owner_task) = spawn(owner);
+        let (member, member_events, member_task) = spawn(member);
+        let mut owner_entry = snapshot_test_entry(1, owner.clone(), group.clone(), owner_device);
+        owner_entry.invite = Some(owner_invite);
+        state.servers.lock().await.insert(1, owner_entry);
+        assert!(get_available_invite(&state, 1).await.unwrap().is_some());
+
+        owner.set_admin(member_device, true).await.unwrap();
+        member.catch_up_roles(owner_peer).await;
+        timeout(Duration::from_secs(5), async {
+            while member
+                .roles()
+                .await
+                .get(&member_device.to_string())
+                .map(String::as_str)
+                != Some("admin")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let admin_invite = hex::encode(
+            member
+                .mint_invite([0x75; 16], u64::MAX, vec![])
+                .await
+                .unwrap(),
+        );
+        let mut member_entry = snapshot_test_entry(2, member.clone(), group, member_device);
+        member_entry.invite = Some(admin_invite.clone());
+        state.servers.lock().await.insert(2, member_entry);
+        assert!(get_available_invite(&state, 2).await.unwrap().is_some());
+
+        for cached in [admin_invite, "stale code".into()] {
+            owner.set_admin(member_device, true).await.unwrap();
+            member.catch_up_roles(owner_peer).await;
+            timeout(Duration::from_secs(5), async {
+                while !current_device_can_share_invite(&member, member_device)
+                    .await
+                    .unwrap()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            state.servers.lock().await.get_mut(&2).unwrap().invite = Some(cached);
+
+            // Pause refresh at the mint mutex AFTER its permitted-role preflight. One poll
+            // sends the role query; the actor query barrier ensures its reply is ready for the
+            // next poll, which parks on this held mutex. No scheduling sleeps or test hooks.
+            let mint_guard = state.invite_mint.lock().await;
+            let refresh = get_available_invite(&state, 2);
+            tokio::pin!(refresh);
+            std::future::poll_fn(|cx| {
+                assert!(refresh.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            member.roles().await;
+            std::future::poll_fn(|cx| {
+                assert!(refresh.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            owner.set_admin(member_device, false).await.unwrap();
+            member.catch_up_roles(owner_peer).await;
+            timeout(Duration::from_secs(5), async {
+                while current_device_can_share_invite(&member, member_device)
+                    .await
+                    .unwrap()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(mint_guard);
+            // Reusable cache wrapping succeeds; stale-cache re-minting fails its role gate.
+            // Both must yield absence after the demotion, never a code or a global error.
+            assert_eq!(refresh.await.unwrap(), None);
+        }
+
+        // Do not hide a genuine failure behind 'no invite': an unavailable actor has no current
+        // role projection, while a permitted owner's malformed cache still self-heals by minting.
+        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        assert!(get_available_invite(&state, 1).await.unwrap().is_some());
+        owner.shutdown().await;
+        owner_task.await.unwrap();
+        assert_eq!(
+            get_available_invite(&state, 1).await.unwrap_err(),
+            "Could not read your role in this server"
+        );
+        member.shutdown().await;
+        member_task.await.unwrap();
+        drop((owner_events, member_events));
     }
 
     /// Settings promises the user "this session's file is X". The name now comes from the sink
@@ -22867,6 +25286,34 @@ mod tests {
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());
+        // The native shape gate independently rejects missing/mistyped records and excess
+        // rows, even before the frontend's stricter draft decoder sees this envelope.
+        for draft in [
+            serde_json::json!({ "version": 1 }),
+            serde_json::json!({ "version": 1, "records": {} }),
+            serde_json::json!({ "version": 1, "records": vec![serde_json::Value::Null; 513] }),
+        ] {
+            let state = serde_json::json!({ "version": 1, "drafts": {}, "readMarks": {}, "studioDraft": draft.to_string() });
+            assert!(validate_ui_state_json(&state.to_string()).is_err());
+        }
+        let boundary =
+            serde_json::json!({ "version": 1, "records": vec![serde_json::Value::Null; 512] });
+        let state = serde_json::json!({ "version": 1, "drafts": {}, "readMarks": {}, "studioDraft": boundary.to_string() });
+        assert!(validate_ui_state_json(&state.to_string()).is_ok());
+        let studio = serde_json::json!({ "version": 1, "records": [], "padding": "x".repeat(2 * 1024 * 1024) }).to_string();
+        let state = serde_json::json!({ "version": 1, "drafts": {}, "readMarks": {}, "studioDraft": studio });
+        assert!(validate_ui_state_json(&state.to_string()).is_ok());
+        let mut oversized_chat = state.clone();
+        oversized_chat["drafts"] = serde_json::json!({ "1:2": "x".repeat(1024 * 1024) });
+        assert!(validate_ui_state_json(&oversized_chat.to_string())
+            .unwrap_err()
+            .contains("non-Studio"));
+        let mut oversized_studio = state;
+        oversized_studio["studioDraft"] =
+            serde_json::Value::String("x".repeat(12 * 1024 * 1024 + 1));
+        assert!(validate_ui_state_json(&oversized_studio.to_string())
+            .unwrap_err()
+            .contains("Studio continuity is too large"));
     }
 
     #[test]

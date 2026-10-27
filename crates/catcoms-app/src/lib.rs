@@ -14,7 +14,7 @@
 //! [`Server::sync_once`]. The background run-loop + live event stream and multi-server
 //! management land with the Tauri bridge (8b), where the real async runtime lives.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use automerge::transaction::Transactable;
@@ -56,6 +56,7 @@ mod actor;
 pub mod creative;
 pub mod durable_chat;
 mod file_resolution;
+pub mod file_source;
 mod moderation;
 pub mod pairing;
 pub mod registry_catchup;
@@ -67,7 +68,20 @@ pub mod shutdown;
 pub mod store;
 pub mod studio;
 pub mod studio_exchange;
-pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
+pub use actor::{
+    spawn, voice_context_queue_bytes, voice_initial_media_rpc_bytes, voice_sdp_delivery_rpc_bytes,
+    voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes, voice_sdp_rpc_bytes, AppCommand,
+    AppEvent, DownloadReady, Envelope, InitialSdpCompletion, InitialSdpPending, ServerActor, Trace,
+    TracedEvent, VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceContextPending,
+    VoiceEndpointCommand, VoiceEndpointError, VoiceInitialMediaPublisher, VoiceInitialMediaWork,
+    VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpDeliveryPublisher,
+    VoiceSdpDeliveryWork, VoiceSdpEnginePublisher, VoiceSdpEngineWork, VoiceSdpInputPublisher,
+    VoiceSdpInputWork, VoiceSdpPending, VoiceSdpPublication, VoiceSdpRecordedInput,
+    VoiceSdpRecordedQueue, VoiceSdpResult, VoiceSdpResultInput, VoiceSdpResultPublisher,
+    VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
+    VOICE_INITIAL_MEDIA_RPC_BYTES, VOICE_SDP_DELIVERY_RPC_BYTES, VOICE_SDP_ENGINE_RPC_BYTES,
+    VOICE_SDP_INPUT_RPC_BYTES, VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
+};
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,
     MAX_MOD_REASON_BYTES,
@@ -492,6 +506,72 @@ fn read_channel_index(doc: &AutoCommit) -> Vec<ChannelInfo> {
     out
 }
 
+/// Native V2 authority has a bounded/fallible directory reader rather than using the UI's full
+/// catalog projection. `general` is a permanent compatibility room, including missing old
+/// catalogs and a deleted general key. Invalid entries grant no room; overflow closes V2 room
+/// authority instead of retaining a stale/truncated permission set. This changes no chat data.
+fn voice_directory_snapshot(
+    doc: Option<&AutoCommit>,
+) -> Result<BTreeSet<u128>, catcoms_sync::voice_v2::VoiceError> {
+    use catcoms_sync::voice_v2::directory::{MAX_DIRECTORY_KEYS, MAX_DIRECTORY_ROOMS};
+    use catcoms_sync::voice_v2::VoiceError;
+    let mut rooms = BTreeSet::from([channel_id("general")]);
+    let Some(doc) = doc else { return Ok(rooms) };
+    for (index, key) in doc.keys(ROOT).enumerate() {
+        if index >= MAX_DIRECTORY_KEYS {
+            return Err(VoiceError::Capacity);
+        }
+        if key.len() != 32 {
+            continue;
+        }
+        let Ok(id) = u128::from_str_radix(&key, 16) else {
+            continue;
+        };
+        let Some((value, _)) = doc.get(ROOT, &key).map_err(|_| VoiceError::Malformed)? else {
+            continue;
+        };
+        let Some(name) = value.to_str() else { continue };
+        if name.len() > MAX_CHANNEL_NAME_CHARS * 4 || name.is_empty() {
+            continue;
+        }
+        if channel_id(name) == id {
+            rooms.insert(id);
+        }
+        if rooms.len() > MAX_DIRECTORY_ROOMS {
+            return Err(VoiceError::Capacity);
+        }
+    }
+    Ok(rooms)
+}
+
+/// Inspect only newly accepted authenticated original changes. Projection alone misses a
+/// buffered deletion/recreation or both actions in one change. Decoding uses the replication
+/// scanner's raw/action/RLE bounds first; refusal retires V2 authority without changing history.
+fn voice_directory_deletions(
+    change: &automerge::Change,
+) -> Result<BTreeSet<u128>, catcoms_sync::voice_v2::VoiceError> {
+    use automerge::legacy::{Key, ObjectId, OpType};
+    use catcoms_sync::voice_v2::VoiceError;
+    let expanded =
+        catcoms_replication::decode_change_projection(change).map_err(|_| VoiceError::Bounds)?;
+    let mut removed = BTreeSet::new();
+    for op in expanded.operations {
+        if op.obj != ObjectId::Root || !matches!(op.action, OpType::Delete) {
+            continue;
+        }
+        if let Key::Map(key) = op.key {
+            if key.len() == 32 {
+                if let Ok(id) = u128::from_str_radix(&key, 16) {
+                    if id != channel_id("general") {
+                        removed.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// Wall-clock ceiling on a join handshake. Past this the joiner gives up (and the user can
 /// retry); so an Option-C admin invite whose owner never comes online can't wedge it forever.
 const JOIN_TIMEOUT_SECS: u64 = 120;
@@ -585,7 +665,17 @@ pub fn append_message(
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, MESSAGES)? {
         Some((Value::Object(ObjType::List), id)) => id,
-        _ => doc.put_object(ROOT, MESSAGES, ObjType::List)?,
+        _ => match doc
+            .get_all(ROOT, MESSAGES)?
+            .into_iter()
+            .find_map(|(value, list)| matches!(value, Value::Object(ObjType::List)).then_some(list))
+        {
+            // A concurrent malformed scalar may win the root property while valid lists remain
+            // visible. Replacing that property would causally hide every observed list and make
+            // an ordinary new message erase the visible conversation. Reuse a live list instead.
+            Some(list) => list,
+            None => doc.put_object(ROOT, MESSAGES, ObjType::List)?,
+        },
     };
     let index = doc.length(&list);
     let msg = doc.insert_object(&list, index, ObjType::Map)?;
@@ -783,6 +873,45 @@ fn read_message(doc: &AutoCommit, msg: &ObjId) -> ChatMessage {
 /// Separator (0x1F); a control char that appears in neither emoji nor hex fingerprints.
 const REACTION_SEP: char = '\u{1f}';
 
+/// An exact visible message object and its list element. Concurrent first writers may create
+/// several live `messages` lists, all of which the reader displays. Addressing only the winning
+/// root property would acknowledge edits/deletes without changing the message the user sees.
+struct MessageLocation {
+    list: ObjId,
+    index: usize,
+    object: ObjId,
+}
+
+/// Resolve the same objects that `read_messages` renders, before any mutation. A repeated id is
+/// ambiguous even within one list: never authorize one author's row and change another one's.
+/// Legacy id-less rows remain readable but cannot be addressed. No history is rewritten or pruned.
+fn resolve_message(doc: &AutoCommit, id: &str) -> Result<Option<MessageLocation>, AutomergeError> {
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let mut found = None;
+    for (value, list) in doc.get_all(ROOT, MESSAGES)? {
+        if !matches!(value, Value::Object(ObjType::List)) {
+            continue;
+        }
+        for item in doc.list_range(&list, ..) {
+            if matches!(item.value, automerge::ValueRef::Object(ObjType::Map))
+                && str_field(doc, &item.id(), MSG_ID) == id
+            {
+                if found.is_some() {
+                    return Ok(None);
+                }
+                found = Some(MessageLocation {
+                    list: list.clone(),
+                    index: item.index,
+                    object: item.id(),
+                });
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Whether `emoji` is one this server will store as a reaction key. An emoji carrying the key
 /// separator would forge a second field on the message map, so the flat-key layout only holds if
 /// every document that uses it applies the same rule; hence one predicate rather than a copy per
@@ -803,49 +932,31 @@ fn toggle_reaction_in_doc(
     emoji: &str,
     fp: &str,
 ) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? else {
-            continue;
-        };
-        if str_field(doc, &msg, MSG_ID) != id {
-            continue;
-        }
-        let key = format!("{emoji}{REACTION_SEP}{fp}");
-        if doc.get(&msg, &key)?.is_some() {
-            doc.delete(&msg, &key)?;
-        } else {
-            doc.put(&msg, &key, true)?;
-        }
-        return Ok(true);
+    let key = format!("{emoji}{REACTION_SEP}{fp}");
+    if doc.get(&location.object, &key)?.is_some() {
+        doc.delete(&location.object, &key)?;
+    } else {
+        doc.put(&location.object, &key, true)?;
     }
-    Ok(false)
+    Ok(true)
 }
 
 /// Pin or unpin the message with `id` by setting/removing a `pinned` flag **directly on its message
 /// map** (which always exists); so concurrent pins of different messages never conflict and a
 /// pin/unpin race on one message is a clean last-writer-wins. Returns whether the message was found.
 fn set_pin_in_doc(doc: &mut AutoCommit, id: &str, pinned: bool) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? else {
-            continue;
-        };
-        if str_field(doc, &msg, MSG_ID) != id {
-            continue;
-        }
-        if pinned {
-            doc.put(&msg, PINNED, true)?;
-        } else {
-            doc.delete(&msg, PINNED)?;
-        }
-        return Ok(true);
+    if pinned {
+        doc.put(&location.object, PINNED, true)?;
+    } else {
+        doc.delete(&location.object, PINNED)?;
     }
-    Ok(false)
+    Ok(true)
 }
 
 /// Read a channel document's topic (empty when it was never set; every channel written before
@@ -1042,44 +1153,35 @@ fn valid_juke_link(link: &str) -> bool {
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
-/// whether a message was found + changed. (Honest-client own-message gating is the caller's job.)
+/// whether an unambiguous message was found + changed. (Honest-client own-message gating is the
+/// caller's job.) All conflicting first-writer containers remain addressable.
 fn edit_message_in_doc(
     doc: &mut AutoCommit,
     id: &str,
     new_text: &str,
     edited_ts: u64,
 ) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        if let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? {
-            if str_field(doc, &msg, MSG_ID) == id {
-                doc.put(&msg, TEXT, new_text)?;
-                doc.put(&msg, EDITED, edited_ts as i64)?;
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    doc.put(&location.object, TEXT, new_text)?;
+    doc.put(&location.object, EDITED, edited_ts as i64)?;
+    Ok(true)
 }
 
-/// Delete the message with `id` from a channel document. Returns whether one was removed. Ids are
-/// unique, so it removes (at most) the single matching element and returns.
+/// Delete the uniquely addressed message from a channel document. Missing, id-less and ambiguous
+/// duplicate ids return false without mutation; the signed history of the deleted row is retained.
 fn delete_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        if let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? {
-            if str_field(doc, &msg, MSG_ID) == id {
-                doc.delete(&list, i)?;
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    doc.delete(&location.list, location.index)?;
+    Ok(true)
 }
+
+#[cfg(test)]
+#[path = "chat_history_tests.rs"]
+mod chat_history_tests;
 
 #[cfg(test)]
 mod message_list_conflict_tests {
@@ -4028,6 +4130,63 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             })
     }
 
+    /// Ephemeral voice-v2 admission uses the current MLS member/policy and known channel
+    /// directory. Opening an arbitrary document is not authority to invent a voice room.
+    pub fn voice_v2_context(&self, room: u128) -> Result<catcoms_sync::voice_v2::Context, String> {
+        let directory = voice_directory_snapshot(
+            self.sync
+                .doc(DocType::ChannelIndex, CHANNEL_INDEX_DOC)
+                .map(|doc| doc.doc()),
+        )
+        .map_err(|error| error.to_string())?;
+        if !directory.contains(&room) {
+            return Err("voice room is not in this server".into());
+        }
+        self.sync
+            .voice_v2_context(room)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Sole-actor housekeeping remains active across lock and needs no UI call authority.
+    pub(crate) fn collect_expired_voice(&mut self) {
+        self.sync.collect_expired_voice();
+    }
+    pub(crate) fn voice_housekeeping_wake(&self) -> Option<(Arc<dyn Clock>, u64)> {
+        self.sync.voice_housekeeping_wake()
+    }
+    pub fn prepare_voice_actor(
+        &mut self,
+        runtime: &catcoms_sync::voice_v2::runtime::Runtime,
+        ticket: &catcoms_sync::voice_v2::runtime::SessionTicket,
+    ) -> Result<catcoms_sync::voice_v2::runtime::ActorRegistration, String> {
+        self.sync
+            .prepare_voice_actor(
+                runtime,
+                ticket,
+                CHANNEL_INDEX_DOC,
+                voice_directory_snapshot,
+                voice_directory_deletions,
+            )
+            .map_err(|error| error.to_string())
+    }
+    pub fn voice_call_lease(
+        &mut self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::CallLease, String> {
+        self.sync
+            .voice_call_lease(room)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn voice_call_grant(
+        &mut self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::CallGrant, String> {
+        self.sync
+            .voice_call_grant(room)
+            .map_err(|error| error.to_string())
+    }
+
     /// Add a channel to the shared directory and subscribe to its message document locally.
     /// Repeating the same normalized name is idempotent.
     pub async fn create_channel(&mut self, name: &str) -> Result<ChannelInfo, AppError> {
@@ -4153,9 +4312,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let me = self.my_fingerprint();
         let Some(current) = self
-            .messages(channel)
-            .into_iter()
-            .find(|m| m.id == id && m.author == me)
+            .addressable_message(channel, id)
+            .filter(|m| m.author == me)
         else {
             return Err(AppError::Invalid(
                 "you can only edit your own messages".into(),
@@ -4190,7 +4348,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         let me = self.my_fingerprint();
-        let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
+        let Some(msg) = self.addressable_message(channel, id) else {
             return Err(AppError::Invalid("no such message".into()));
         };
         let moderator = matches!(self.my_role(), Role::Owner | Role::Admin);
@@ -4230,7 +4388,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         let me = self.my_fingerprint();
-        if !self.messages(channel).iter().any(|m| m.id == id) {
+        if self.addressable_message(channel, id).is_none() {
             return Err(AppError::Invalid("no such message".into()));
         }
         let id = id.to_string();
@@ -4261,7 +4419,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "a message with no id cannot be addressed".into(),
             ));
         }
-        let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
+        let Some(msg) = self.addressable_message(channel, id) else {
             return Err(AppError::Invalid("no such message".into()));
         };
         if msg.pinned == pinned {
@@ -5635,6 +5793,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     pub fn finalized_member_peers(&self) -> Vec<PeerId> {
         self.sync.finalized_member_peers()
+    }
+
+    /// Successful outbound kind26 exchanges on the current live connections, for scheduling.
+    pub fn member_finalization_ready_peers(&self) -> Vec<PeerId> {
+        self.sync.member_finalization_ready_peers()
     }
 
     pub fn member_mesh_allowed(&self) -> bool {
@@ -7747,6 +7910,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.with_messages(channel, |msgs| msgs.to_vec())
     }
 
+    /// Product authorization must address the same unique visible object as the writer. Reject
+    /// duplicated ids before posting: a false helper result otherwise republishes the previous
+    /// local change under the legacy replication API while incorrectly acknowledging success.
+    fn addressable_message(&self, channel: u128, id: &str) -> Option<ChatMessage> {
+        if id.is_empty() {
+            return None;
+        }
+        self.with_messages(channel, |messages| {
+            let mut matches = messages.iter().filter(|message| message.id == id);
+            let first = matches.next()?;
+            matches.next().is_none().then(|| first.clone())
+        })
+    }
+
     /// Run `f` over the channel's current messages without copying them. The list is materialized
     /// at most once per document version; every later call at the same version borrows it.
     ///
@@ -8366,14 +8543,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Dial the cached previously-proven members (policy-gated; candidates only, never promoted
-    /// into the trusted catch-up pool). Returns the number of peers dialed.
-    pub async fn dial_cached_peers(&mut self) -> usize {
-        self.sync.dial_cached_peers().await
+    /// into the trusted catch-up pool). Returns locally admitted jobs; the sync loop applies
+    /// driver acknowledgements later. No network/command-channel wait borrows this Server.
+    pub async fn dial_cached_peers(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_cached_dials().await
     }
 
-    /// Run one bounded SWIM/reciprocal/topology repair pass.
-    pub async fn drive_mesh_repair(&mut self) -> usize {
-        self.sync.drive_mesh_repair().await
+    /// Locally queue one bounded SWIM/reciprocal/topology repair pass.
+    pub async fn drive_mesh_repair(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_mesh_repair().await
     }
 
     /// Queue a paced reconciliation of open documents with currently proven neighbours.
@@ -8386,12 +8570,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.has_pending_reciprocal()
     }
 
-    pub async fn drive_pending_reciprocal(&mut self) -> usize {
-        self.sync.drive_pending_reciprocal().await
+    /// Admit reciprocal jobs without awaiting a driver acknowledgement inside the actor.
+    pub async fn drive_pending_reciprocal(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_pending_reciprocal().await
     }
 
     /// Explicit fallback redial that preserves every shared safety budget.
-    pub async fn manual_fallback_redial(&mut self) -> catcoms_sync::ManualRedialOutcome {
+    pub async fn manual_fallback_redial(&mut self) -> catcoms_sync::ManualRedialOutcome
+    where
+        T: 'static,
+    {
         self.sync.manual_fallback_redial().await
     }
 
@@ -8566,6 +8757,106 @@ mod tests {
             "alice",
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn voice_v2_requires_a_directory_room_instead_of_an_arbitrary_open_document() {
+        let mut server = founder();
+        assert!(server.voice_v2_context(channel_id("general")).is_ok());
+        let invented = channel_id("not in the directory");
+        server.open_channel(invented).await.unwrap();
+        assert!(server.voice_v2_context(invented).is_err());
+        server.open_channel_index().await.unwrap();
+        let created = server.create_channel("new voice room").await.unwrap();
+        assert!(server.voice_v2_context(created.id).is_ok());
+    }
+
+    #[test]
+    fn voice_directory_schema_is_bounded_and_preserves_permanent_general() {
+        use catcoms_sync::voice_v2::{directory::MAX_DIRECTORY_KEYS, VoiceError};
+        let general = channel_id("general");
+        let room = channel_id("room");
+        assert_eq!(
+            voice_directory_snapshot(None).unwrap(),
+            BTreeSet::from([general])
+        );
+        let mut doc = AutoCommit::new();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.put(ROOT, "invalid-key", "ignored").unwrap();
+        doc.put(
+            ROOT,
+            format!("{:032x}", channel_id("redirected")),
+            "somewhere else",
+        )
+        .unwrap();
+        assert_eq!(
+            voice_directory_snapshot(Some(&doc)).unwrap(),
+            BTreeSet::from([general, room])
+        );
+        doc.put(ROOT, format!("{general:032x}"), "general").unwrap();
+        doc.delete(ROOT, format!("{general:032x}")).unwrap();
+        assert!(voice_directory_snapshot(Some(&doc))
+            .unwrap()
+            .contains(&general));
+        for index in 0..MAX_DIRECTORY_KEYS {
+            doc.put(ROOT, format!("invalid{index}"), true).unwrap();
+        }
+        assert_eq!(
+            voice_directory_snapshot(Some(&doc)),
+            Err(VoiceError::Capacity)
+        );
+    }
+
+    #[test]
+    fn voice_directory_deletions_see_compound_changes_but_exempt_general_and_bound_expansion() {
+        use catcoms_sync::voice_v2::VoiceError;
+        let general = channel_id("general");
+        let room = channel_id("room");
+        let mut doc = AutoCommit::new().with_actor(automerge::ActorId::from(vec![1; 32]));
+        doc.put(ROOT, format!("{general:032x}"), "general").unwrap();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.commit();
+        doc.delete(ROOT, format!("{general:032x}")).unwrap();
+        doc.delete(ROOT, format!("{room:032x}")).unwrap();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.commit();
+        assert_eq!(
+            voice_directory_deletions(&doc.get_last_local_change().unwrap()).unwrap(),
+            BTreeSet::from([room])
+        );
+        for index in 0..513 {
+            doc.put(ROOT, format!("invalid{index}"), true).unwrap();
+        }
+        doc.commit();
+        assert_eq!(
+            voice_directory_deletions(&doc.get_last_local_change().unwrap()),
+            Err(VoiceError::Bounds)
+        );
+    }
+
+    #[tokio::test]
+    async fn product_voice_attachment_uses_current_directory_incarnations_after_unlock() {
+        use catcoms_sync::voice_v2::runtime::Runtime;
+        let mut server = founder();
+        server.open_channel_index().await.unwrap();
+        let room = server.create_channel("voice room").await.unwrap().id;
+        let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+        let ticket = runtime.session_ticket();
+        let registration = server.prepare_voice_actor(&runtime, &ticket).unwrap();
+        registration.register().unwrap();
+        assert!(server.voice_call_lease(room).is_err());
+        runtime.activate_session(&ticket).unwrap();
+        let old = server.voice_call_lease(room).unwrap();
+        server
+            .sync
+            .post(DocType::ChannelIndex, CHANNEL_INDEX_DOC, |doc| {
+                doc.delete(ROOT, format!("{room:032x}"))?;
+                doc.put(ROOT, format!("{room:032x}"), "voice room")
+            })
+            .await
+            .unwrap();
+        assert!(!old.is_live());
+        assert!(server.voice_call_lease(room).unwrap().is_live());
     }
 
     // ---------- multi-device: companion admission by certificate (M3) ----------

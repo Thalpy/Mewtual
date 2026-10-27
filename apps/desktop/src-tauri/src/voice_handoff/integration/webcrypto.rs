@@ -1,0 +1,1985 @@
+//! Actual Node/WebCrypto endpoint fixture. Only bounded public metadata uses the process
+//! control pipe. Input/Result/key material uses the actual authenticated HTTP service.
+use super::*;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::future::Future;
+use std::process::Stdio;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+
+const FRAME_BYTES: usize = 4096;
+pub(crate) type Failure = Box<dyn std::any::Any + Send>;
+
+/// Test-only panic collection, so a failed native assertion still goes through explicit
+/// subprocess/service collection. This neither aborts nor refunds an application task.
+pub(crate) async fn catch_fixture<F: Future>(future: F) -> Result<F::Output, Failure> {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Ready(value)) => std::task::Poll::Ready(Ok(value)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(error) => std::task::Poll::Ready(Err(error)),
+        }
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "tag", rename_all = "camelCase", deny_unknown_fields)]
+enum Frame {
+    Call { method: Method, args: Metadata },
+    Done { value: Value },
+    Failed { reason: String },
+    Blocked,
+}
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum Method {
+    AdmitKey,
+    PublishKey,
+    SettleKey,
+    Setup,
+    SettleSetup,
+    CollectChannel,
+    ReadWork,
+    ObserveTerminal,
+    ObserveSdpRound,
+}
+#[derive(Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Metadata {
+    owner: String,
+    executor: String,
+    permit: Option<String>,
+    point: Option<String>,
+    #[serde(rename = "fromSlot")]
+    from_slot: Option<u8>,
+}
+
+/// Closed test scenarios, never a production mode or renderer effect permission.
+#[derive(Clone, Copy)]
+pub(crate) enum Round {
+    Sdp,
+    LostSdp,
+    Media,
+    LostMedia,
+    MediaRetire,
+    LostMediaRetire,
+    MediaHeldLower,
+    NativeIndexDrop,
+    MediaHistory,
+    MediaHistoryCollector,
+}
+
+struct Callbacks {
+    publication: Option<Metadata>,
+    publish_calls: usize,
+    collect_calls: usize,
+    refuse_publish: bool,
+    refuse_collect: bool,
+    // Rust-only observation scope, derived from actual native discovery, never Node input.
+    expected_parent: Option<ledger::RowId>,
+    pause_setup: bool,
+    discovery_hold: Option<super::super::channel::NativeHold>,
+    // Negative test-owned cadence barrier; dropping always resumes the actual Host.
+    deferred_maintenance: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl Default for Callbacks {
+    fn default() -> Self {
+        Self {
+            publication: None,
+            publish_calls: 0,
+            collect_calls: 0,
+            refuse_publish: true,
+            refuse_collect: true,
+            expected_parent: None,
+            pause_setup: false,
+            discovery_hold: None,
+            deferred_maintenance: None,
+        }
+    }
+}
+
+pub(crate) struct Endpoint {
+    state: Arc<AppState>,
+    owner: String,
+    child: Child,
+    input: Option<ChildStdin>,
+    output: Option<ChildStdout>,
+    stderr: Option<tokio::task::JoinHandle<Vec<u8>>>,
+    server: Option<service::RunningServer>,
+    port: u16,
+    // Resources are owned before the first callback, but a selected grant exists only
+    // after actual publication. None is preparation state, never a synthetic admission.
+    selected: Option<Arc<SelectedHandoffOwner>>,
+    callbacks: Callbacks,
+    // An identity-rejection fixture wrapper shares the real affine lease. Retain it
+    // until actual End so its destructor cannot accidentally revoke a positive scenario.
+    media_fixture_grant: Option<Arc<catcoms_sync::voice_v2::CallGrant>>,
+    media_http: bool,
+}
+impl Endpoint {
+    /// Complete the actual selected-key publication and channel Status before starting a
+    /// protected pair. A slow process launch/setup cannot consume the original pair deadline.
+    pub(crate) async fn prepare(state: Arc<AppState>, owner: String) -> Result<Self, Failure> {
+        Self::prepare_inner(state, owner, false, false).await
+    }
+
+    /// Pause only the actual native factory position before delivering Setup/Ready ACK.
+    /// This gives ordinary discovery time to observe both already-published endpoints.
+    pub(crate) async fn prepare_paused(
+        state: Arc<AppState>,
+        owner: String,
+    ) -> Result<Self, Failure> {
+        Self::prepare_inner(state, owner, true, false).await
+    }
+
+    pub(crate) async fn prepare_deferred_discovery(
+        state: Arc<AppState>,
+        owner: String,
+    ) -> Result<Self, Failure> {
+        Self::prepare_inner(state, owner, true, true).await
+    }
+
+    async fn prepare_inner(
+        state: Arc<AppState>,
+        owner: String,
+        pause_setup: bool,
+        defer_maintenance: bool,
+    ) -> Result<Self, Failure> {
+        super::super::channel::Session::fixture_prepare_native_diagnostics();
+        let runtime = crate::voice_runtime(&state);
+        let mut bound = match service::BoundServer::bind_application(
+            state.voice_channels.clone(),
+            runtime,
+            service::Origin::PackagedHttp,
+            context::Context::new(&state),
+        ) {
+            Ok(bound) => bound,
+            Err(error) => {
+                return Err(preparation_failed(
+                    &state,
+                    &owner,
+                    None,
+                    format!("effect service bind refused: {error:?}"),
+                )
+                .await)
+            }
+        };
+        let deferred = defer_maintenance.then(|| service::defer_first_maintenance(&mut bound));
+        let port = bound.port();
+        let server = match bound.start() {
+            Ok(server) => server,
+            Err(error) => {
+                return Err(preparation_failed(
+                    &state,
+                    &owner,
+                    None,
+                    format!("complete effect service start/layout refused: {error:?}"),
+                )
+                .await)
+            }
+        };
+        // No browser/HTTP client exists yet. Pin the actual first maintenance sleep
+        // before it can compete with the explicit Cursor's local-refusal regression.
+        if let Some((entered, _)) = &deferred {
+            let clock = crate::voice_runtime(&state).clock();
+            if tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !entered.load(std::sync::atomic::Ordering::Acquire) {
+                    clock.sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_err()
+            {
+                return Err(preparation_failed(
+                    &state,
+                    &owner,
+                    Some(server),
+                    "first native cadence did not enter its test barrier".into(),
+                )
+                .await);
+            }
+        }
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/voice-native-interop.ts");
+        let mut command = Command::new("node");
+        command
+            .arg("--experimental-strip-types")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: this is a hidden test helper.
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return Err(preparation_failed(
+                    &state,
+                    &owner,
+                    Some(server),
+                    format!("Node is required for actual WebCrypto acceptance: {error}"),
+                )
+                .await);
+            }
+        };
+        let input = child.stdin.take().unwrap();
+        let output = child.stdout.take().unwrap();
+        let mut errors = child.stderr.take().unwrap();
+        let stderr = tokio::spawn(async move {
+            let mut retained = Vec::new();
+            let mut scratch = [0; 1024];
+            loop {
+                let count = errors.read(&mut scratch).await.unwrap();
+                if count == 0 {
+                    return retained;
+                }
+                assert!(
+                    retained.len() + count <= 16 * 1024,
+                    "endpoint stderr exceeded fixture bound"
+                );
+                // Surface bounded child diagnostics while its stdout reader still owns
+                // the step. A fatal Node exit otherwise reports only pipe EOF, and a
+                // panic can prevent the later collection report from being reached.
+                eprintln!(
+                    "bounded Node stderr: {}",
+                    String::from_utf8_lossy(&scratch[..count])
+                );
+                retained.extend_from_slice(&scratch[..count]);
+            }
+        });
+        let mut endpoint = Self {
+            state,
+            owner,
+            child,
+            input: Some(input),
+            output: Some(output),
+            stderr: Some(stderr),
+            server: Some(server),
+            port,
+            selected: None,
+            callbacks: Callbacks {
+                pause_setup,
+                deferred_maintenance: deferred.map(|(_, sender)| sender),
+                ..Callbacks::default()
+            },
+            media_fixture_grant: None,
+            media_http: false,
+        };
+        let prepared = catch_fixture(async {
+        let group = endpoint.state.voice_authority.lock().unwrap().owner(&endpoint.owner).unwrap().binding.scope.group;
+        let (ready, executor) = drive_streams(
+            &endpoint.state,
+            &endpoint.owner,
+            port,
+            endpoint.input.as_mut().unwrap(),
+            endpoint.output.as_mut().unwrap(),
+            &mut endpoint.callbacks,
+            json!({
+                "tag": "step", "name": "prepare", "owner": endpoint.owner, "group": hex::encode(group),
+            }),
+        )
+        .await;
+        assert_eq!(ready, json!({"kind": "ready"}));
+        endpoint.state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .selected_handoff_owner(&endpoint.owner, executor.expect("actual selected-key publication"))
+            .unwrap()
+        }).await;
+        match prepared {
+            Ok(selected) => {
+                endpoint.selected = Some(selected);
+                Ok(endpoint)
+            }
+            Err(error) => {
+                let _ = endpoint.collect().await;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn selected(&self) -> Arc<SelectedHandoffOwner> {
+        self.selected
+            .as_ref()
+            .expect("only a completed native publication supplies a selected owner")
+            .clone()
+    }
+
+    async fn step(&mut self, value: Value) -> Value {
+        // Borrow the actual process streams without cloning or creating another reader.
+        drive_streams(
+            &self.state,
+            &self.owner,
+            self.port,
+            self.input.as_mut().unwrap(),
+            self.output.as_mut().unwrap(),
+            &mut self.callbacks,
+            value,
+        )
+        .await
+        .0
+    }
+    /// Start the production coordinator after authenticated selected/setup. This sends no
+    /// parent, role, storage/SDK/PC proof or phase hint. Native history is an independent
+    /// oracle after actual browser compaction, never permission for the next operation.
+    pub(crate) async fn coordinate_peers(&mut self, peers: usize) {
+        assert!((1..=2).contains(&peers));
+        assert_eq!(
+            self.step(json!({"tag":"step", "name":"coordinator", "peers":peers}))
+                .await,
+            json!({"kind":"coordinated", "peers":peers})
+        );
+        assert_eq!(
+            self.state
+                .voice_handoff
+                .collected_media_count(&self.selected()),
+            peers
+        );
+    }
+    pub(crate) async fn end_coordinated_peers(&mut self, peers: usize) {
+        assert_eq!(
+            self.step(json!({"tag":"step", "name":"coordinator-end", "peers":peers}))
+                .await,
+            json!({"kind":"coordinator-ended", "peers":peers})
+        );
+    }
+    /// No public row/purpose/role is supplied. Keep servicing the one metadata callback
+    /// until actual native history independently establishes all four completed actions.
+    pub(crate) async fn automatic_confirmation(&mut self) {
+        let answer = self.step(json!({"tag":"step", "name":"pump"})).await;
+        assert_eq!(answer, json!({"kind":"observed"}));
+        assert!(automatic_terminal(
+            &self.state,
+            &self.selected(),
+            self.callbacks.expected_parent
+        ));
+    }
+    /// Scope only the independent test oracle; the normal browser work pump still chooses
+    /// its own metadata. The expected full RowId comes from actual native discovery.
+    pub(crate) async fn automatic_pair(&mut self, selector: PairSelector) -> ledger::ResolvedRow {
+        let parent = self.wait_native_derivation(selector).await;
+        self.callbacks.expected_parent = Some(parent.id());
+        self.automatic_confirmation().await;
+        parent
+    }
+
+    pub(crate) fn release_discovery(&mut self) {
+        assert!(self.callbacks.discovery_hold.take().is_some());
+    }
+
+    pub(crate) async fn discover_after_local_refusal(&mut self) {
+        let selected = self.selected();
+        let route = (1..=64)
+            .find_map(|slot| {
+                self.state
+                    .voice_channels
+                    .route(slot)
+                    .ok()
+                    .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+            })
+            .unwrap();
+        let clock = crate::voice_runtime(&self.state).clock();
+        service::discovery_after_local_refusal(
+            &context::Context::new(&self.state),
+            &route,
+            clock.as_ref(),
+        )
+        .await;
+        // Resume the original, previously unpolled maintenance turn only AFTER the real
+        // candidate attached. No existing cursor or Root authority is reset/replaced.
+        drop(
+            self.callbacks
+                .deferred_maintenance
+                .take()
+                .expect("original cadence barrier"),
+        );
+    }
+
+    pub(crate) async fn advance_pair(&mut self) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"advance-pair"})).await,
+            json!({"kind":"advanced"})
+        );
+        self.callbacks.expected_parent = None;
+    }
+
+    /// Close only the browser's OWN currently attached plan after known confirmation/
+    /// key admission. Original native Plan-final/ACK is checked independently afterward.
+    pub(crate) async fn fail_attached_pair(
+        &mut self,
+        peers: usize,
+        parent: &ledger::ResolvedRow,
+    ) -> [u8; 16] {
+        assert!(peers <= 1);
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"fail-attached","peers":peers}))
+                .await,
+            json!({"kind":"failed-plan-retired","peers":peers,"closed":0})
+        );
+        assert!(parent
+            .retired_plan_test_observation(&self.selected())
+            .unwrap());
+        self.callbacks.expected_parent = None;
+        parent.id().logical()
+    }
+
+    /// Real HTTP media Close/Release plus original Plan-final/ACK, while another
+    /// indexed peer remains current. The Node command carries no row/proof/SDP hint.
+    pub(crate) async fn fail_attached_media_pair(
+        &mut self,
+        peers: usize,
+        parent: &ledger::ResolvedRow,
+    ) -> [u8; 16] {
+        assert!(peers <= 1);
+        let root = parent.media_test_root().unwrap();
+        assert!(root.was_admitted() && root.is_current());
+        drop(root); // A test observer must not retain real progress across its cleanup.
+        let selected = self.selected();
+        let route = (1..=64)
+            .find_map(|slot| {
+                self.state
+                    .voice_channels
+                    .route(slot)
+                    .ok()
+                    .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+            })
+            .unwrap();
+        let request = parent.media_test_original(route.session().identity());
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"fail-media","peers":peers}))
+                .await,
+            json!({"kind":"failed-media-retired","peers":peers,"closed":1})
+        );
+        let history = parent
+            .media_original_history(
+                route.session().identity(),
+                &request,
+                super::super::requests::media::OriginalKind::Resolve,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(history.admitted && history.closed && history.released && !history.current);
+        if let Some(root) = parent.media_test_root() {
+            assert!(!root.is_current());
+        }
+        assert!(parent.retired_plan_test_observation(&selected).unwrap());
+        self.callbacks.expected_parent = None;
+        parent.id().logical()
+    }
+
+    /// Keep successful all-peer baseline checks unchanged. A failed-media scenario
+    /// additionally retains its terminal observation while acting on exactly A-B.
+    pub(crate) async fn surviving_peer(&mut self, end: bool) {
+        let (name, result) = if end {
+            ("end-survivor", "survivor-ended")
+        } else {
+            ("current-survivor", "survivor-current")
+        };
+        assert_eq!(
+            self.step(json!({"tag":"step","name":name,"peers":1})).await,
+            json!({"kind":result,"peers":1,"terminal":1})
+        );
+    }
+
+    pub(crate) async fn end_browser_peers(&mut self, count: usize) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"end-peers"})).await,
+            json!({"kind":"peers-ended","peers":count})
+        );
+    }
+
+    /// Bounded aggregate composition evidence, never a grant or a drainage assertion.
+    pub(crate) fn ready_diagnostic(&self, parent: &ledger::ResolvedRow) -> String {
+        let selected = self.selected();
+        let pool = selected.resources();
+        let mut from = 0;
+        let mut parents = 0;
+        let mut pending = 0;
+        while from < 32 {
+            let projection = self
+                .state
+                .voice_handoff
+                .project_work(&selected, from)
+                .unwrap();
+            from = projection.next_slot;
+            if let Some(work) = projection.metadata.as_ref() {
+                if matches!(work.purpose, ledger::Purpose::Derive(_)) {
+                    parents += 1;
+                }
+                if work.action.is_none() {
+                    pending += 1;
+                }
+            }
+        }
+        format!(
+            "ready={:?}; group={:?}; process={:?}; native parents={parents}, pending={pending}",
+            parent.ready_test_observation(),
+            pool.group_counts(selected.binding().scope.group),
+            pool.counts()
+        )
+    }
+
+    pub(crate) async fn current_peers(&mut self, count: usize) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-current-all"}))
+                .await,
+            json!({"kind":"all-media-current","peers":count})
+        );
+    }
+
+    pub(crate) async fn derive(&mut self, selector: PairSelector) -> ledger::ResolvedRow {
+        let selected = self.selected();
+        let bootstrap::Status::Ready(public) = bootstrap::ensure(
+            &self.state,
+            selected.id(),
+            selected.executor(),
+            &mut catcoms_rt::OsCryptoRng,
+        )
+        .await
+        .unwrap() else {
+            panic!("original browser channel")
+        };
+        let route = self
+            .state
+            .voice_channels
+            .route(public.public().slot)
+            .unwrap();
+        let row = self.wait_native_derivation(selector).await;
+        // The fixture can only make the next authenticated Input fail locally; it cannot
+        // synthesize a receipt or renew this original parent/action's authority.
+        route.session().fixture_arm_input_pressure();
+        let answer = self
+            .step(json!({"tag":"step", "name":"derive",
+                "purpose": {"peer":selector.peer.to_string(), "join":hex::encode(selector.join),
+                    "keyRef":hex::encode(selector.key_ref), "epoch":selector.epoch.to_string()},
+            }))
+            .await;
+        assert_eq!(answer, json!({"kind":"accepted"}));
+        assert!(!route.session().fixture_input_pressure_pending());
+        assert!(matches!(
+            row.status().unwrap().engine.receipt.unwrap().outcome,
+            catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Derived
+        ));
+        row
+    }
+
+    /// Read-only choice among the fixture's two independently proven members. Discovery
+    /// may rotate after an admitted worker's local Capacity refusal; an expected peer is
+    /// not a promise about which original parent native will attach first. Never deliver
+    /// these selectors to a factory or reset a producer cursor to impose fixture order.
+    pub(crate) async fn naturally_attached_pair(&self, candidates: [PairSelector; 2]) -> usize {
+        let selected = self.selected();
+        let clock = crate::voice_runtime(&self.state).clock();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                for (index, selector) in candidates.into_iter().enumerate() {
+                    if self.state.voice_handoff.lookup_original(&selected, ledger::Purpose::Derive(selector))
+                        .is_some_and(|row| row.status().unwrap().action.is_some()) {
+                        return index;
+                    }
+                }
+                clock.sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.unwrap_or_else(|error| {
+            let first = self.state.voice_handoff.fixture_derivation_diagnostic(&selected, candidates[0]);
+            let second = self.state.voice_handoff.fixture_derivation_diagnostic(&selected, candidates[1]);
+            let native = self.state.voice_channels.fixture_native_diagnostic(&selected, candidates[0]);
+            panic!("neither proven native pair attached: {error:?}; first={first}; second={second}; {native}");
+        })
+    }
+
+    /// Observe original automatic work without delivering a descriptor/Input to Node.
+    /// Used by the real-HTTP End-before-first-browser-work regression.
+    pub(crate) async fn wait_native_derivation(
+        &self,
+        selector: PairSelector,
+    ) -> ledger::ResolvedRow {
+        let selected = self.selected();
+        let clock = crate::voice_runtime(&self.state).clock();
+        // No fixture factory call: the ordinary application service must independently
+        // discover this proven counterpart and attach the original native Derive. The
+        // browser then reads its descriptor through the actual metadata IPC handler.
+        let began = clock.monotonic_ms();
+        let row = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(row) = self
+                    .state
+                    .voice_handoff
+                    .lookup_original(&selected, ledger::Purpose::Derive(selector))
+                {
+                    if row.status().unwrap().action.is_some() {
+                        break row;
+                    }
+                }
+                clock.sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| {
+            // Non-creating snapshots use try-locks and primitive comparisons. Do not
+            // query a potentially parked Actor, keep rows/Inputs alive, renew authority,
+            // or infer successful publication from a spawned worker's layout log.
+            let ledger = self.state.voice_handoff.fixture_derivation_diagnostic(&selected, selector);
+            let native = self.state.voice_channels.fixture_native_diagnostic(&selected, selector);
+            panic!("automatic native producer did not attach the original Derive: {error:?}; elapsed_ms={}; selected_live={}; {native}; {ledger}",
+                clock.monotonic_ms().saturating_sub(began), selected.lease().is_live());
+        });
+        assert!(row.status().unwrap().action.is_some());
+        assert!(
+            row.status().unwrap().engine.receipt.is_none(),
+            "genuine uncommitted native Derive"
+        );
+        row
+    }
+    pub(crate) async fn start(&mut self, parent: &ledger::ResolvedRow) -> ledger::RowId {
+        self.child(parent, ledger::ConfirmationPurpose::Start(None))
+            .await
+    }
+    pub(crate) async fn incoming(
+        &mut self,
+        parent: &ledger::ResolvedRow,
+        role: u8,
+    ) -> ledger::RowId {
+        self.child(parent, ledger::ConfirmationPurpose::Incoming(role))
+            .await
+    }
+    pub(crate) async fn respond(
+        &mut self,
+        parent: &ledger::ResolvedRow,
+        trigger: ledger::RowId,
+    ) -> ledger::RowId {
+        self.child(parent, ledger::ConfirmationPurpose::Respond(trigger))
+            .await
+    }
+    async fn child(
+        &mut self,
+        parent: &ledger::ResolvedRow,
+        request: ledger::ConfirmationPurpose,
+    ) -> ledger::RowId {
+        let selected = self.selected();
+        // No fixture or browser factory call may make this attachment. The actual normal
+        // service must independently choose Start/Respond or the authenticated incoming
+        // action, under the original parent and real native worker/shutdown position.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(row) = self
+                    .state
+                    .voice_handoff
+                    .lookup_child(&selected, parent, request, None)
+                {
+                    if row.status().unwrap().action.is_some() {
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("automatic native confirmation attachment exceeded its bound");
+        let metadata = match request {
+            ledger::ConfirmationPurpose::Start(predecessor) => {
+                json!({"kind":"start", "predecessor":predecessor.map(hex::encode)})
+            }
+            ledger::ConfirmationPurpose::Respond(trigger) => {
+                json!({"kind":"respond", "triggerRow":hex::encode(trigger.logical())})
+            }
+            ledger::ConfirmationPurpose::Incoming(role) => json!({"kind":"incoming", "role":role}),
+        };
+        let answer = self
+            .step(json!({"tag":"step", "name":"child", "request":metadata}))
+            .await;
+        assert_eq!(answer["kind"], "accepted");
+        let id = ledger::RowId::from_logical(
+            hex::decode(answer["row"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let row = self
+            .state
+            .voice_handoff
+            .resolve(
+                &self.selected(),
+                ledger::Purpose::Confirmation {
+                    parent: parent.id(),
+                    request,
+                },
+                id,
+            )
+            .unwrap();
+        let status = row.status().unwrap();
+        let receipt = status
+            .engine
+            .receipt
+            .expect("actual native terminal result, not browser acceptance alone");
+        match request {
+            ledger::ConfirmationPurpose::Incoming(_) => assert_eq!(
+                receipt.outcome,
+                catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Opened
+            ),
+            _ => assert!(matches!(
+                receipt.outcome,
+                catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Sealed { .. }
+            )),
+        }
+        assert!(
+            status.acknowledged && status.drained && status.engine.settled,
+            "actual native ACK/settlement/Return must precede next role"
+        );
+        id
+    }
+    /// Actual original browser broker -> HTTP -> native12/13, after the caller established
+    /// native core/extraction/Ready separately. No fixture proof or mutable SDK flag is sent.
+    pub(crate) async fn sdp_custody(&mut self, parent: &ledger::ResolvedRow) {
+        assert!(parent.has_established_key_claim());
+        assert_eq!(parent.sdk_test_released(), None);
+        let selector = parent.confirmation_selector().unwrap();
+        let (action, version, input_tag) = parent.status().unwrap().action.unwrap();
+        let answer = self.step(json!({"tag":"step", "name":"sdp-custody",
+            "purpose":{"peer":selector.peer.to_string(), "join":hex::encode(selector.join),
+                "keyRef":hex::encode(selector.key_ref), "epoch":selector.epoch.to_string()},
+            "row":hex::encode(parent.id().logical()),
+            "identity":{"action":action.to_string(), "version":version.to_string(), "inputTag":hex::encode(input_tag)},
+        })).await;
+        assert_eq!(answer, json!({"kind":"custody-attempted", "bytes":65536}));
+        // Promise<void> alone is not success evidence: inspect the actual native installed
+        // phase and SDK record after the real authenticated dispatch/physical owners drained.
+        let phase = parent
+            .sdp_test_phase()
+            .expect("actual native64KiB storage admission");
+        let selected = self.selected();
+        assert!(phase.uses(&selected.resources(), selected.binding().scope));
+        assert_eq!(
+            phase.try_status().unwrap(),
+            catcoms_sync::voice_v2::chain::sdp_handoff::Status::Open
+        );
+        assert_eq!(parent.sdk_test_released(), Some(false));
+    }
+
+    /// Actual retained browser -> framed HTTP14 -> native -> queued Actor -> Root.
+    /// No PC proof, Ready/role or admission bool is supplied by this test control pipe.
+    pub(crate) async fn pc_custody(&mut self, parent: &ledger::ResolvedRow) {
+        assert!(
+            parent.pc_test_intent().is_none(),
+            "no preinstalled native PC intent"
+        );
+        assert_eq!(
+            self.step(json!({"tag":"step", "name":"pc-custody"})).await,
+            json!({"kind":"pc-attempted"})
+        );
+        let intent = parent
+            .pc_test_intent()
+            .expect("actual HTTP14 must attach Root's original intent");
+        let phase = parent.sdp_test_phase().unwrap();
+        let clock = crate::voice_runtime(&self.state).clock();
+        assert!(intent.uses_phase(&phase));
+        assert_eq!(intent.generation(), 1);
+        assert_eq!(
+            intent.round().profile,
+            catcoms_sync::voice_v2::SdpProfile::CompleteSdpV1
+        );
+        assert!(intent.current_at(clock.now_ms(), clock.monotonic_ms()));
+        assert_eq!(parent.sdk_test_released(), Some(false));
+    }
+
+    /// Full original retained browser round through actual HTTP and native actors. Only
+    /// the RTC provider is controlled; no Input/Result/SDP/receipt crosses the control pipe.
+    pub(crate) async fn sdp_round(&mut self, parent: &ledger::ResolvedRow, round: Round) {
+        let lose_replies = matches!(round, Round::LostSdp);
+        let exercise_media = matches!(
+            round,
+            Round::Media
+                | Round::LostMedia
+                | Round::MediaRetire
+                | Round::LostMediaRetire
+                | Round::MediaHistory
+                | Round::MediaHistoryCollector
+                | Round::MediaHeldLower
+        );
+        assert!(parent.pc_test_intent().is_some());
+        let name = if matches!(round, Round::LostMedia | Round::LostMediaRetire) {
+            "rtc-round-media-loss"
+        } else if exercise_media {
+            "rtc-round-media"
+        } else if lose_replies {
+            "rtc-round-loss"
+        } else {
+            "rtc-round"
+        };
+        assert_eq!(
+            self.step(json!({"tag":"step", "name":name})).await,
+            json!({"kind":"sdp-round", "peers":1, "local":1, "remote":1,
+                "lost":if lose_replies { 4 } else { 0 }})
+        );
+        assert!(
+            sdp_round_observation(
+                &self.state,
+                &self.selected(),
+                self.callbacks.expected_parent
+            )
+            .complete
+        );
+        assert_eq!(parent.sdk_test_released(), Some(false));
+        {
+            let selected = self.selected();
+            let route = (1..=64)
+                .find_map(|slot| {
+                    self.state
+                        .voice_channels
+                        .route(slot)
+                        .ok()
+                        .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+                })
+                .unwrap();
+            if exercise_media {
+                // Actual op28 HTTP created the claim. Do not run the trusted-scope native
+                // exerciser here: it would manufacture/close a second acceptance path.
+                let root = parent
+                    .media_test_root()
+                    .expect("actual HTTP28 must retain original media");
+                assert!(root.was_admitted());
+                assert!(root.is_current());
+                let request = parent.media_test_original(route.session().identity());
+                let observed = parent
+                    .media_original_history(
+                        route.session().identity(),
+                        &request,
+                        super::super::requests::media::OriginalKind::Resolve,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert!(observed.admitted && !observed.closed && !observed.released);
+                assert!(!observed.current, "history is never a current permission");
+                self.media_http = true;
+                if matches!(
+                    round,
+                    Round::MediaRetire
+                        | Round::LostMediaRetire
+                        | Round::MediaHistory
+                        | Round::MediaHistoryCollector
+                ) {
+                    let original = parent.media_test_original(route.session().identity());
+                    let proof = observed.proof;
+                    drop(root); // Do not mask independent index custody with a test owner.
+                    let step = if matches!(round, Round::LostMediaRetire) {
+                        "media-retire-loss"
+                    } else {
+                        "media-retire"
+                    };
+                    assert_eq!(
+                        self.step(json!({"tag":"step","name":step})).await,
+                        json!({"kind":"negotiation-retired","peers":1,"closed":0,"releasedBytes":65536})
+                    );
+                    assert!(parent.media_test_migrated());
+                    assert_eq!(parent.sdk_test_released(), Some(true));
+                    let phase = parent.sdp_test_phase().unwrap();
+                    assert_eq!(
+                        phase.try_status().unwrap(),
+                        catcoms_sync::voice_v2::chain::sdp_handoff::Status::Drained
+                    );
+                    assert!(phase.try_is_collected().unwrap());
+                    let request = super::super::requests::media::Request::Existing {
+                        parent: parent.id(),
+                        action: original.pc.base.action,
+                        proof,
+                        kind: super::super::requests::media::ExistingKind::Current,
+                    };
+                    let indexed = self
+                        .state
+                        .voice_handoff
+                        .indexed_media(route.selected(), route.session().identity(), &request)
+                        .unwrap()
+                        .unwrap();
+                    // Same labels/bytes are not the actual Session allocation.
+                    let foreign_session = Arc::new(super::super::channel::SessionIdentity(
+                        route.session().identity().0,
+                    ));
+                    assert!(self
+                        .state
+                        .voice_handoff
+                        .indexed_media(route.selected(), &foreign_session, &request)
+                        .unwrap()
+                        .is_none());
+                    // A retained target must also refuse fresh admission from another
+                    // Ledger, even with the SAME actual selected/Session/UI allocations.
+                    let mut foreign_context = super::super::context::Context::new(&self.state)
+                        .upgrade()
+                        .unwrap();
+                    foreign_context.ledger = Arc::new(ledger::Ledger::default());
+                    let clock = crate::voice_runtime(&self.state).clock();
+                    {
+                        let foreign_mono = clock.monotonic_ms();
+                        let commit = self.state.ui_session_commit.clone().lock_owned().await;
+                        let authority = self.state.voice_authority.lock().unwrap();
+                        let admission = super::super::transition::Admission::new(
+                            &foreign_context,
+                            &authority,
+                            &route,
+                            &commit,
+                        );
+                        assert!(matches!(
+                            indexed.observe(&request, Some((&admission, foreign_mono))),
+                            Err(catcoms_sync::voice_v2::VoiceError::Unauthorized)
+                        ));
+                    }
+                    let limit = clock.monotonic_ms() + 1000;
+                    let current = loop {
+                        let mono = clock.monotonic_ms();
+                        match super::super::sdp::current(
+                            &super::super::context::Context::new(&self.state),
+                            &route,
+                            |admission| indexed.observe(&request, Some((admission, mono))),
+                        ) {
+                            Ok(current) => break current,
+                            Err(super::super::factory::Refused::Protocol(
+                                catcoms_sync::voice_v2::VoiceError::Capacity,
+                            )) if mono < limit => {
+                                clock.sleep(std::time::Duration::from_millis(5)).await;
+                            }
+                            Err(error) => panic!("indexed original current refused: {error:?}"),
+                        }
+                    };
+                    assert!(
+                        current.current && current.admitted && !current.released && !current.closed
+                    );
+                    assert_eq!(current.retire_in, Some(0));
+                    assert!(
+                        !self.state.voice_handoff.channel_may_close(route.selected()),
+                        "indexed media still owns Control"
+                    );
+                }
+            } else if lose_replies {
+                super::super::media::tests::negative_before_admission(&route, parent);
+            } else {
+                self.media_fixture_grant = Some(if matches!(round, Round::NativeIndexDrop) {
+                    super::super::media::tests::exercise_index_drop(&self.state, &route, parent)
+                        .await
+                } else {
+                    super::super::media::tests::exercise(&self.state, &route, parent).await
+                });
+            }
+        }
+    }
+
+    /// Native-only history collection after the real browser retired its negotiation.
+    /// The browser fixed graph remains paid; no handle detachment is claimed. Native
+    /// barriers hold real rows while actual HTTP mode8 requests pending/complete history
+    /// and recovers a lost authenticated completion. Actual Session and peer are unchanged.
+    pub(crate) async fn native_history_retirement(
+        &mut self,
+        parent: ledger::ResolvedRow,
+        selector: PairSelector,
+        held_collector: bool,
+    ) {
+        self.history_retirement(parent, selector, held_collector, true)
+            .await;
+    }
+
+    pub(crate) async fn collect_pair_history(
+        &mut self,
+        parent: ledger::ResolvedRow,
+        selector: PairSelector,
+    ) -> [u8; 16] {
+        let id = parent.id().logical();
+        self.history_retirement(parent, selector, false, false)
+            .await;
+        id
+    }
+
+    /// Observe only the original native tombstone; do not export a creating ledger
+    /// operation or widen production visibility merely for the external TCP fixture.
+    pub(crate) fn assert_collected_pair_known(&self, selector: PairSelector) {
+        let selected = self.selected();
+        assert!(self
+            .state
+            .voice_handoff
+            .lookup_original(&selected, ledger::Purpose::Derive(selector))
+            .is_none());
+        assert!(
+            self.state
+                .voice_handoff
+                .derivation_known(&selected, selector),
+            "permanent old-purpose tombstone survives next peer admission"
+        );
+    }
+
+    async fn history_retirement(
+        &mut self,
+        parent: ledger::ResolvedRow,
+        selector: PairSelector,
+        held_collector: bool,
+        probe_unused_slot: bool,
+    ) {
+        use super::super::requests::media::{ExistingKind, Request};
+        use catcoms_sync::voice_v2::VoiceError;
+        let selected = self.selected();
+        let route = (1..=64)
+            .find_map(|slot| {
+                self.state
+                    .voice_channels
+                    .route(slot)
+                    .ok()
+                    .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+            })
+            .unwrap();
+        let original = parent.media_test_original(route.session().identity());
+        let proof = parent
+            .media_original_history(
+                route.session().identity(),
+                &original,
+                super::super::requests::media::OriginalKind::Resolve,
+            )
+            .unwrap()
+            .unwrap()
+            .proof;
+        let parent_id = parent.id();
+        let request = Request::Existing {
+            parent: parent_id,
+            action: original.pc.base.action,
+            proof,
+            kind: ExistingKind::RetireHistory,
+        };
+        let ledger = self.state.voice_handoff.clone();
+        let target = ledger
+            .indexed_media(&selected, route.session().identity(), &request)
+            .unwrap()
+            .unwrap();
+        let root_history_owner =
+            held_collector.then(|| ledger.hold_root_history_for_test(&selected, parent_id));
+        // Real retained row owners, not renderer drained booleans, delay reclamation.
+        let child = ledger
+            .lookup_original(
+                &selected,
+                ledger::Purpose::Sdp {
+                    parent: parent_id,
+                    purpose: catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose::Seal,
+                },
+            )
+            .unwrap();
+        // Both real row owners are held BEFORE the browser submits its first actual
+        // authenticated mode8. Native must latch that original request and report pending.
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-history-pending"}))
+                .await,
+            json!({"kind":"history-pending"})
+        );
+        assert!(matches!(target.retire_history(), Err(VoiceError::Capacity)));
+        assert!(ledger.derivation_known(&selected, selector));
+        assert!(
+            matches!(
+                ledger.begin(selected.clone(), ledger::Purpose::Derive(selector)),
+                Err(VoiceError::Unauthorized)
+            ),
+            "same-purpose Begin must not resume while history retires"
+        );
+        let clock = crate::voice_runtime(&self.state).clock();
+        // Mode8 now certifies TWO real collectors: native's250ms cadence (possibly
+        // child then parent) and Root's1000ms cadence. Bound the composed operation,
+        // retaining the deterministic negative barriers rather than relying on timing.
+        let limit = clock.monotonic_ms() + 3000;
+        if held_collector {
+            let mut batch = loop {
+                if let Some(batch) = ledger.test_hold_collection() {
+                    break batch;
+                }
+                assert!(
+                    clock.monotonic_ms() < limit,
+                    "actual collector gate did not return"
+                );
+                clock.sleep(std::time::Duration::from_millis(5)).await;
+            };
+            drop((parent, child));
+            batch.next_pass(); // Actual child destruction precedes parent eligibility.
+            batch.next_pass(); // Parent is now unlinked but STILL retained in actual scratch.
+            assert!(
+                batch.contains(parent_id),
+                "barrier must retain the actual removed parent"
+            );
+            assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+            assert!(matches!(ledger.automatic_parent_available(&selected), Err(VoiceError::Capacity)),
+                "unlinked actual parent must not admit discovery before collector/destructor return");
+            // A genuinely different collector runs while A's original ticket is parked.
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| ledger.collect_media_history())
+                    .join()
+                    .unwrap();
+            });
+            assert!(
+                matches!(target.retire_history(), Err(VoiceError::Capacity)),
+                "index absence must not overtake another collector's last destructor"
+            );
+            drop(batch); // Only actual ticket Drop may now publish completion.
+            assert!(target.native_history_collected_for_test());
+            assert!(
+                matches!(target.retire_history(), Err(VoiceError::Capacity)),
+                "native row destruction cannot overtake the actual independent Root Action owner"
+            );
+            let original = root_history_owner.as_ref().unwrap();
+            assert!(original.is_settled());
+            assert!(original.input().is_err());
+            assert!(original.admit_engine(original.engine_bytes()).is_err());
+        } else {
+            drop(parent);
+            assert!(
+                matches!(target.retire_history(), Err(VoiceError::Capacity)),
+                "actual child projection still owns the original subtree"
+            );
+            assert!(ledger
+                .lookup_original(&selected, ledger::Purpose::Derive(selector))
+                .is_some());
+            drop(child);
+            // No bootstrap/setup/explicit-GC call follows. Ordinary service maintenance
+            // alone must make this same retained request observable as completed.
+        }
+        drop(root_history_owner); // Only actual last Root ownership can complete its GC.
+        let receipt = loop {
+            match target.retire_history() {
+                Ok(receipt) => break receipt,
+                Err(VoiceError::Capacity) if clock.monotonic_ms() < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await
+                }
+                Err(error) => panic!(
+                    "original history retirement failed: {error:?}; native_collected={}; Root funding still pending",
+                    target.native_history_collected_for_test()
+                ),
+            }
+        };
+        assert!(receipt.admitted && !receipt.current && !receipt.closed && !receipt.released);
+        // Drop the successful observation. Exact repetition recovers completed tombstone,
+        // without requiring any of its erased rows or pretending Session collection.
+        let recovered = target.retire_history().unwrap();
+        assert_eq!(receipt.proof, recovered.proof);
+        assert!(ledger
+            .lookup_original(&selected, ledger::Purpose::Derive(selector))
+            .is_none());
+        assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+        assert!(ledger.derivation_known(&selected, selector));
+        assert!(matches!(
+            ledger.begin(selected.clone(), ledger::Purpose::Derive(selector)),
+            Err(VoiceError::Unauthorized)
+        ));
+        if probe_unused_slot {
+            let mut later = selector;
+            later.join[0] ^= 1;
+            assert!(
+                !ledger.derivation_known(&selected, later),
+                "discovery must continue past compact old purpose"
+            );
+            // Native index-only slot reuse keeps the monotonically increasing generation.
+            let registration = match ledger
+                .begin(selected.clone(), ledger::Purpose::Derive(later))
+                .unwrap()
+            {
+                ledger::Begin::Factory(value) => value,
+                _ => panic!("new purpose must reserve a reclaimed slot"),
+            };
+            let new_id = registration.id();
+            assert_ne!(new_id, parent_id);
+            assert_eq!(
+                &new_id.logical()[..8],
+                &parent_id.logical()[..8],
+                "same native slot, fresh serial"
+            );
+            drop(registration); // No Root factory was invoked for this capacity-only reservation.
+                                // Existing Registration semantics erase a provably unstarted reservation on Drop;
+                                // no published effect/history exists here and there is nothing left to close.
+            assert!(ledger
+                .resolve(&selected, ledger::Purpose::Derive(later), new_id)
+                .is_err());
+            assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+        }
+        assert!(
+            !ledger.channel_may_close(&selected),
+            "indexed live media still owns physical Control"
+        );
+        drop(target);
+        // Same actual Node peer and authenticated HTTP Current remain usable after all
+        // original native rows disappear. The browser then explicitly compacts its own
+        // joined handles while preserving that same peer/Session and fresh Current.
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-current-after-history"}))
+                .await,
+            json!({"kind":"indexed-media-current","peers":1})
+        );
+    }
+
+    pub(crate) fn block_media_index(&self, parent: &ledger::ResolvedRow) -> impl Send + 'static {
+        let selected = self.selected();
+        let route = (1..=64)
+            .find_map(|slot| {
+                self.state
+                    .voice_channels
+                    .route(slot)
+                    .ok()
+                    .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+            })
+            .unwrap();
+        parent.media_test_block_index(route.selected().clone(), route.session().identity().clone())
+    }
+    pub(crate) async fn media_retire_start(&mut self) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-retire-start"}))
+                .await,
+            json!({"kind":"retirement-started"})
+        );
+    }
+    pub(crate) async fn media_retire_progress(&mut self) -> Value {
+        self.step(json!({"tag":"step","name":"media-retire-progress"}))
+            .await
+    }
+    pub(crate) async fn media_retire_finish(&mut self) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-retire-finish"}))
+                .await,
+            json!({"kind":"negotiation-retired","peers":1,"closed":0,"releasedBytes":65536})
+        );
+    }
+
+    pub(crate) async fn close(mut self) -> Result<(), Failure> {
+        let closed =
+            catch_fixture(async {
+                crate::end_voice_owner_inner(&self.state, &self.owner).await;
+                if self.media_http {
+                    assert_eq!(
+                        self.step(json!({"tag":"step", "name":"media-revoked"}))
+                            .await,
+                        json!({"kind":"media-stopped"})
+                    );
+                }
+                assert_eq!(
+                    self.step(json!({"tag":"step", "name":"close"})).await,
+                    json!({"kind":"closed", "bytes":0})
+                );
+                assert!(self.callbacks.publish_calls >= 2 && !self.callbacks.refuse_publish,
+            "one deliberately refused publication must succeed on the same original metadata");
+                assert!(
+                    self.callbacks.collect_calls >= 2 && !self.callbacks.refuse_collect,
+                    "one deliberately refused collection must succeed on the same original channel"
+                );
+            })
+            .await;
+        let success = self.collect().await;
+        if closed.is_ok() && !success {
+            return Err(Box::new(
+                "Node exited unsuccessfully after reported collection".to_string(),
+            ));
+        }
+        closed
+    }
+
+    /// Failure collection deliberately does not claim browser final ACK or native ledger
+    /// drainage. It revokes this original native owner, then observes actual process/IO
+    /// retirement before returning a test failure. Original application history is retained.
+    pub(crate) async fn collect(&mut self) -> bool {
+        drop(self.callbacks.discovery_hold.take()); // Release real factory custody before failure End.
+        drop(self.callbacks.deferred_maintenance.take()); // A failed test cannot leave its Host parked.
+        let ended = catch_fixture(tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::end_voice_owner_inner(&self.state, &self.owner),
+        ))
+        .await;
+        drop(self.input.take());
+        drop(self.output.take());
+        let (exited, success) = match tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.child.wait(),
+        )
+        .await
+        {
+            Ok(Ok(status)) => (true, status.success()),
+            Ok(Err(_)) => (false, false),
+            Err(_) => {
+                let _ = self.child.start_kill();
+                (
+                    matches!(
+                        tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait())
+                            .await,
+                        Ok(Ok(_))
+                    ),
+                    false,
+                )
+            }
+        };
+        let stderr = if let Some(mut errors) = self.stderr.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut errors).await {
+                Ok(Ok(bytes)) => {
+                    if !success && !bytes.is_empty() {
+                        eprintln!("bounded Node stderr: {}", String::from_utf8_lossy(&bytes));
+                    }
+                    true
+                }
+                Ok(Err(_)) => false,
+                Err(_) => {
+                    errors.abort();
+                    let _ = errors.await;
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        let served = if let Some(server) = self.server.take() {
+            matches!(tokio::time::timeout(std::time::Duration::from_secs(5), server.finish()).await, Ok(Ok(completion)) if !completion.io_failed)
+        } else {
+            true
+        };
+        assert!(matches!(ended, Ok(Ok(()))) && exited && stderr && served,
+            "fixture collection failed: native End {}, child {exited}, stderr {stderr}, service {served}", matches!(ended, Ok(Ok(()))));
+        success
+    }
+}
+
+/// Failure before the full Endpoint exists still owns an activated native join. End that
+/// exact owner and collect any actual service before exposing the failed preparation result.
+async fn preparation_failed(
+    state: &AppState,
+    owner: &str,
+    server: Option<service::RunningServer>,
+    reason: String,
+) -> Failure {
+    let ended = catch_fixture(tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::end_voice_owner_inner(state, owner),
+    ))
+    .await;
+    let served = match server {
+        Some(server) => {
+            matches!(tokio::time::timeout(std::time::Duration::from_secs(5), server.finish()).await, Ok(Ok(completion)) if !completion.io_failed)
+        }
+        None => true,
+    };
+    assert!(
+        matches!(ended, Ok(Ok(()))) && served,
+        "preparation failure must collect original native owner/service: {reason}"
+    );
+    Box::new(reason)
+}
+async fn write(input: &mut ChildStdin, value: Value) {
+    let bytes = serde_json::to_vec(&value).unwrap();
+    assert!(
+        bytes.len() <= FRAME_BYTES,
+        "only bounded public metadata belongs on the control pipe"
+    );
+    input
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .await
+        .unwrap();
+    input.write_all(&bytes).await.unwrap();
+    input.flush().await.unwrap();
+}
+async fn drive_streams(
+    state: &AppState,
+    owner: &str,
+    port: u16,
+    input: &mut ChildStdin,
+    output: &mut ChildStdout,
+    callbacks: &mut Callbacks,
+    step: Value,
+) -> (Value, Option<[u8; 32]>) {
+    // This bounds a broken subprocess/harness, never a protocol deadline. Cancelling this
+    // waiter drops its original pipe/process owners; admitted native work keeps its own
+    // custody. No timeout creates a replacement key, action, Phase or channel.
+    // A coordinator step spans the formerly separate confirmation, Ready, SDP, RTC,
+    // media and two-sided retirement steps. Its aggregate observer bound is60s;
+    // each original protocol/physical deadline remains unchanged.
+    let bound = if step["name"] == "coordinator" {
+        60
+    } else {
+        30
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(bound),
+        drive_streams_inner(state, owner, port, input, output, callbacks, step),
+    )
+    .await
+    .expect("native/WebCrypto control step exceeded its harness bound")
+}
+async fn drive_streams_inner(
+    state: &AppState,
+    owner: &str,
+    port: u16,
+    input: &mut ChildStdin,
+    output: &mut ChildStdout,
+    callbacks: &mut Callbacks,
+    step: Value,
+) -> (Value, Option<[u8; 32]>) {
+    let automatic = step["name"] == "pump";
+    let coordinator = step["name"] == "coordinator";
+    let rtc_round = matches!(
+        step["name"].as_str(),
+        Some("rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss")
+    );
+    write(input, step).await;
+    let mut published_executor = None;
+    // One callback owner spans the automatic step, rather than returning while a
+    // background Node readWork waits forever. The bound follows the pump's minimum50ms
+    // cadence, maximum32-slot scan and unchanged30s outer harness bound. Ordinary steps
+    // retain32. No budget, timeout or protocol attempt is renewed by this fixture.
+    let callbacks_bound = if coordinator {
+        32 * (60_000 / 50)
+    } else if automatic || rtc_round {
+        32 * (30_000 / 50)
+    } else {
+        32
+    };
+    for _ in 0..callbacks_bound {
+        let length = output
+            .read_u32()
+            .await
+            .expect("endpoint pipe closed before step completion") as usize;
+        assert!(
+            (1..=FRAME_BYTES).contains(&length),
+            "endpoint exceeded fixed control frame"
+        );
+        let mut bytes = [0; FRAME_BYTES];
+        output.read_exact(&mut bytes[..length]).await.unwrap();
+        match serde_json::from_slice::<Frame>(&bytes[..length]).expect("closed metadata protocol") {
+            Frame::Done { value } => return (value, published_executor),
+            Frame::Failed { reason } => panic!("actual native/WebCrypto step failed: {reason}"),
+            Frame::Blocked => panic!("unexpected blocked-step acknowledgement"),
+            Frame::Call { method, args } => {
+                let stop_pump = automatic
+                    && matches!(method, Method::ObserveTerminal)
+                    && hex::decode(&args.executor)
+                        .ok()
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .and_then(|executor| {
+                            state
+                                .voice_authority
+                                .lock()
+                                .unwrap()
+                                .selected_handoff_owner(owner, executor)
+                                .ok()
+                        })
+                        .is_some_and(|selected| {
+                            automatic_terminal(state, &selected, callbacks.expected_parent)
+                        });
+                let refuse = match method {
+                    Method::PublishKey => {
+                        callbacks.publish_calls += 1;
+                        if let Some(original) = &callbacks.publication {
+                            assert!(
+                                original == &args,
+                                "publication retry changed original owner/key/executor/permit"
+                            );
+                        } else {
+                            callbacks.publication = Some(args.clone());
+                        }
+                        std::mem::replace(&mut callbacks.refuse_publish, false)
+                    }
+                    Method::CollectChannel => {
+                        callbacks.collect_calls += 1;
+                        let original = callbacks
+                            .publication
+                            .as_ref()
+                            .expect("original selected publication");
+                        assert!(
+                            original.owner == args.owner && original.executor == args.executor,
+                            "collection retry changed original selected channel identity"
+                        );
+                        std::mem::replace(&mut callbacks.refuse_collect, false)
+                    }
+                    _ => false,
+                };
+                let reply = if refuse {
+                    Err(())
+                } else {
+                    metadata(state, owner, port, method, args, callbacks.expected_parent).await
+                };
+                if matches!(method, Method::Setup) && reply.is_ok() && callbacks.pause_setup {
+                    // Setup has installed the actual Session, but Node cannot ACK it until
+                    // this reply returns. Reserve its existing sole factory position here;
+                    // neither a fabricated pair nor a renderer authority hint is involved.
+                    let publication = callbacks.publication.as_ref().unwrap();
+                    let executor = hex::decode(&publication.executor)
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                    let selected = state
+                        .voice_authority
+                        .lock()
+                        .unwrap()
+                        .selected_handoff_owner(owner, executor)
+                        .unwrap();
+                    let route = (1..=64)
+                        .find_map(|slot| {
+                            state
+                                .voice_channels
+                                .route(slot)
+                                .ok()
+                                .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+                        })
+                        .unwrap();
+                    callbacks.discovery_hold = Some(route.session().native_hold().unwrap());
+                    callbacks.pause_setup = false;
+                }
+                if let Ok(reply) = &reply {
+                    if let Some(executor) = reply.executor {
+                        published_executor = Some(executor);
+                    }
+                }
+                // The actual public projection/payment survives serialization AND actual
+                // control-pipe write, rather than being dropped at reply construction.
+                let envelope = match &reply {
+                    Ok(reply) => {
+                        json!({"tag":"reply", "ok":true, "value":reply.value, "stopPump":stop_pump})
+                    }
+                    // Retryable native pressure/closure is a real adapter rejection. Let
+                    // the SAME retained broker decide recovery; never panic or dump input.
+                    Err(()) => json!({"tag":"reply", "ok":false}),
+                };
+                write(input, envelope).await;
+                drop(reply);
+            }
+        }
+    }
+    panic!("endpoint exceeded its bounded callback count");
+}
+
+/// Independent original native history, not the pump's public metadata or JS progress.
+/// Both endpoints must retain exactly one Derived parent and three original confirmation
+/// actions, with actual terminal receipt, exact ACK, settlement and ordinary Return.
+fn automatic_terminal(
+    state: &AppState,
+    selected: &SelectedHandoffOwner,
+    expected: Option<ledger::RowId>,
+) -> bool {
+    use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
+    let mut from = 0;
+    let mut parent = None;
+    let mut children = 0;
+    while from < 32 {
+        let projection = state.voice_handoff.project_work(selected, from).unwrap();
+        from = projection.next_slot;
+        let Some(metadata) = projection.metadata.as_ref() else {
+            continue;
+        };
+        if let Some(expected) = expected {
+            let relevant = match metadata.purpose {
+                ledger::Purpose::Derive(_) => metadata.row == expected,
+                ledger::Purpose::Confirmation { parent, .. } => parent == expected,
+                ledger::Purpose::Sdp { .. } => false,
+            };
+            if !relevant {
+                continue;
+            }
+        }
+        let row = state
+            .voice_handoff
+            .resolve(selected, metadata.purpose, metadata.row)
+            .unwrap();
+        let status = row.status().unwrap();
+        if !status.acknowledged || !status.drained || !status.engine.settled {
+            return false;
+        }
+        let Some(receipt) = &status.engine.receipt else {
+            return false;
+        };
+        match metadata.purpose {
+            ledger::Purpose::Sdp { .. } => {
+                panic!("private SDP rows must not appear in the confirmation public pump")
+            }
+            ledger::Purpose::Derive(_) => {
+                if parent.replace(metadata.row).is_some()
+                    || receipt.outcome != CryptoOutcome::Derived
+                    || !row.has_transition_claim()
+                    || !row.has_established_key_claim()
+                {
+                    return false;
+                }
+            }
+            ledger::Purpose::Confirmation {
+                parent: original,
+                request,
+            } => {
+                if parent != Some(original) {
+                    return false;
+                }
+                let valid = match request {
+                    ledger::ConfirmationPurpose::Incoming(_) => {
+                        receipt.outcome == CryptoOutcome::Opened
+                    }
+                    _ => matches!(receipt.outcome, CryptoOutcome::Sealed { .. }),
+                };
+                if !valid {
+                    return false;
+                }
+                children += 1;
+            }
+        }
+    }
+    parent.is_some() && children == 3
+}
+
+/// Independent exact native terminal/Applied/compaction observations. Missing work or
+/// transient try-lock refusal means incomplete, never success or permission to run RTC.
+/// This is bounded test-only metadata inspection and cannot publish/renew any authority.
+#[derive(serde::Serialize)]
+struct SdpRowObservation {
+    row: String,
+    accepted: bool,
+    drained: bool,
+    applied: bool,
+}
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SdpRoundObservation {
+    complete: bool,
+    first_row: Option<String>,
+    seal: Option<SdpRowObservation>,
+    open: Option<SdpRowObservation>,
+}
+fn sdp_round_observation(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    expected: Option<ledger::RowId>,
+) -> SdpRoundObservation {
+    use catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose;
+    use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
+    let mut result = SdpRoundObservation::default();
+    let Some(route) = (1..=64).find_map(|slot| {
+        state
+            .voice_channels
+            .route(slot)
+            .ok()
+            .filter(|route| Arc::ptr_eq(route.selected(), selected))
+    }) else {
+        return result;
+    };
+    let mut from = 0;
+    let mut parent = None;
+    while from < 32 {
+        let Ok(projection) = state.voice_handoff.project_work(selected, from) else {
+            return SdpRoundObservation::default();
+        };
+        from = projection.next_slot;
+        if let Some(metadata) = &projection.metadata {
+            if matches!(metadata.purpose, ledger::Purpose::Derive(_))
+                && expected.is_none_or(|id| id == metadata.row)
+            {
+                if parent.is_some() {
+                    return SdpRoundObservation::default();
+                }
+                let Ok(row) = state
+                    .voice_handoff
+                    .resolve(selected, metadata.purpose, metadata.row)
+                else {
+                    return SdpRoundObservation::default();
+                };
+                parent = Some(row);
+            }
+        }
+    }
+    let Some(parent) = parent else {
+        return result;
+    };
+    let Some(intent) = parent.pc_test_intent() else {
+        return result;
+    };
+    let mut settled_acknowledged = 0;
+    for purpose in [NativeRowPurpose::Seal, NativeRowPurpose::Open] {
+        let Some(row) = state.voice_handoff.lookup_original(
+            selected,
+            ledger::Purpose::Sdp {
+                parent: parent.id(),
+                purpose,
+            },
+        ) else {
+            continue;
+        };
+        let Ok(history) = row.sdp_history(route.session().identity()) else {
+            return SdpRoundObservation::default();
+        };
+        let status = history.status();
+        let accepted = status
+            .engine
+            .receipt
+            .as_ref()
+            .is_some_and(|receipt| match purpose {
+                NativeRowPurpose::Seal => matches!(receipt.outcome, CryptoOutcome::Sealed { .. }),
+                NativeRowPurpose::Open => receipt.outcome == CryptoOutcome::Opened,
+            });
+        if accepted
+            && status.acknowledged
+            && status.engine.settled
+            && status
+                .engine
+                .receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.retired)
+        {
+            settled_acknowledged += 1;
+        }
+        let observed = SdpRowObservation {
+            row: hex::encode(row.id().logical()),
+            accepted,
+            drained: status.drained,
+            applied: history
+                .delivery()
+                .is_some_and(|delivery| delivery.was_applied()),
+        };
+        if (purpose == NativeRowPurpose::Seal) == intent.local_is_low() {
+            result.first_row = Some(observed.row.clone());
+        }
+        match purpose {
+            NativeRowPurpose::Seal => result.seal = Some(observed),
+            NativeRowPurpose::Open => result.open = Some(observed),
+        }
+    }
+    result.complete = settled_acknowledged == 2
+        && result
+            .seal
+            .as_ref()
+            .is_some_and(|row| row.accepted && row.drained)
+        && result
+            .open
+            .as_ref()
+            .is_some_and(|row| row.accepted && row.drained && row.applied);
+    result
+}
+
+struct MetadataReply {
+    value: Value,
+    executor: Option<[u8; 32]>,
+    _projection: Option<commands::SetupReply>,
+    _work_projection: Option<commands::WorkReply>,
+}
+async fn metadata(
+    state: &AppState,
+    owner: &str,
+    port: u16,
+    method: Method,
+    args: Metadata,
+    expected: Option<ledger::RowId>,
+) -> Result<MetadataReply, ()> {
+    if args.owner != owner {
+        return Err(());
+    }
+    if !matches!(method, Method::PublishKey) && (args.permit.is_some() || args.point.is_some()) {
+        return Err(());
+    }
+    if !matches!(method, Method::ReadWork) && args.from_slot.is_some() {
+        return Err(());
+    }
+    let executor = hex::decode(&args.executor)
+        .map_err(|_| ())?
+        .try_into()
+        .map_err(|_| ())?;
+    let mut projection = None;
+    let mut work_projection = None;
+    let mut published = None;
+    let value = match method {
+        Method::AdmitKey => serde_json::to_value(
+            crate::voice_join_key::admit_inner(state, owner, &args.executor)
+                .await
+                .map_err(|_| ())?,
+        )
+        .map_err(|_| ())?,
+        Method::PublishKey => {
+            let point = hex::decode(args.point.as_deref().ok_or(())?)
+                .map_err(|_| ())?
+                .try_into()
+                .map_err(|_| ())?;
+            let value = crate::voice_join_key::publish_inner(
+                state,
+                owner,
+                &args.executor,
+                args.permit.as_deref().ok_or(())?,
+                point,
+            )
+            .await
+            .map_err(|_| ())?;
+            published = Some(executor);
+            serde_json::to_value(value).map_err(|_| ())?
+        }
+        Method::SettleKey => {
+            crate::voice_join_key::settle_inner(state, owner, executor)
+                .await
+                .map_err(|_| ())?;
+            Value::Null
+        }
+        Method::Setup => {
+            let status = bootstrap::ensure(state, owner, executor, &mut catcoms_rt::OsCryptoRng)
+                .await
+                .map_err(|_| ())?;
+            let metadata = state
+                .voice_channels
+                .project(owner, executor)
+                .map_err(|_| ())?;
+            let reply =
+                commands::SetupReply::new(status, owner.to_string(), args.executor, port, metadata)
+                    .map_err(|_| ())?;
+            let value = serde_json::from_str(&reply.json().map_err(|_| ())?).map_err(|_| ())?;
+            projection = Some(reply);
+            value
+        }
+        Method::SettleSetup => {
+            commands::settle_inner(state, owner, &args.executor)
+                .await
+                .map_err(|_| ())?;
+            Value::Null
+        }
+        Method::ReadWork => {
+            let reply = commands::read_work_inner(
+                state,
+                owner.to_string(),
+                args.executor,
+                args.from_slot.ok_or(())?,
+            )
+            .map_err(|_| ())?;
+            let value =
+                serde_json::from_str(&reply.fixture_json().map_err(|_| ())?).map_err(|_| ())?;
+            work_projection = Some(reply);
+            value
+        }
+        Method::CollectChannel => {
+            commands::collect_inner(state, owner, &args.executor)
+                .await
+                .map_err(|_| ())?;
+            Value::Null
+        }
+        // Test-only bounded observation. Its exact selected owner is validated above and
+        // the caller independently inspects actual native histories + original Claim.
+        // It creates no work, grant, token, key, adoption or SDK/RTC authority.
+        Method::ObserveTerminal => Value::Null,
+        Method::ObserveSdpRound => {
+            let selected = state
+                .voice_authority
+                .lock()
+                .unwrap()
+                .selected_handoff_owner(owner, executor)
+                .map_err(|_| ())?;
+            serde_json::to_value(sdp_round_observation(state, &selected, expected))
+                .map_err(|_| ())?
+        }
+    };
+    Ok(MetadataReply {
+        value,
+        executor: published,
+        _projection: projection,
+        _work_projection: work_projection,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wedged_node_step_is_bounded_and_actual_child_stderr_and_service_are_collected() {
+    let mut fixture = crate::voice_activation_tests::Fixture::new().await;
+    let owner = fixture.candidate().await;
+    crate::activate_voice_owner_inner(&fixture.state, owner.clone())
+        .await
+        .unwrap();
+    // Move the exact existing state into shared fixture ownership. All native Arc/grant/
+    // registry allocations remain the originals; Fixture::close uses its Actor handles.
+    let state = Arc::new(std::mem::take(&mut fixture.state));
+    let mut endpoint = match Endpoint::prepare(state, owner).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => std::panic::resume_unwind(error),
+    };
+    let selected = endpoint.selected();
+    let port = endpoint.port;
+    let wedged = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        catch_fixture(async {
+            write(
+                endpoint.input.as_mut().unwrap(),
+                json!({"tag":"step", "name":"wedge"}),
+            )
+            .await;
+            let output = endpoint.output.as_mut().unwrap();
+            let length = output.read_u32().await.unwrap() as usize;
+            assert!((1..=FRAME_BYTES).contains(&length));
+            let mut bytes = [0; FRAME_BYTES];
+            output.read_exact(&mut bytes[..length]).await.unwrap();
+            assert!(matches!(
+                serde_json::from_slice::<Frame>(&bytes[..length]).unwrap(),
+                Frame::Blocked
+            ));
+            // The child acknowledges its blocked state before this timer starts. It never
+            // completes the step; this bounds external fixture IO, not protocol time.
+            tokio::time::timeout(std::time::Duration::from_millis(100), output.read_u32()).await
+        }),
+    )
+    .await;
+    let success = endpoint.collect().await;
+    assert!(matches!(wedged, Ok(Ok(Err(_)))) && !success,
+        "only the acknowledged wedged step's timeout is success; EOF/read errors or pre-ACK timeout are failures");
+    assert!(
+        endpoint.child.try_wait().unwrap().is_some(),
+        "the actual child was reaped"
+    );
+    assert!(
+        endpoint.input.is_none()
+            && endpoint.output.is_none()
+            && endpoint.stderr.is_none()
+            && endpoint.server.is_none()
+    );
+    assert!(
+        selected.grant().is_err(),
+        "failure collection Ends the original native owner"
+    );
+    assert!(
+        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err(),
+        "the actual original service listener is closed"
+    );
+    drop((selected, endpoint));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn bind_capacity_refusal_ends_the_activated_original_owner_before_returning() {
+    for warm_registry in [false, true] {
+        let mut fixture = crate::voice_activation_tests::Fixture::new().await;
+        let owner = fixture.candidate().await;
+        crate::activate_voice_owner_inner(&fixture.state, owner.clone())
+            .await
+            .unwrap();
+        let lease = fixture
+            .state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .owner(&owner)
+            .unwrap()
+            .lease;
+        let resources = crate::voice_runtime(&fixture.state).resources();
+        // Production setup binds/pays the empty registry before call activation. Otherwise
+        // full pressure refuses that earlier allocation (mapped to Binding), and never
+        // exercises the intended fixed service-payment refusal checked below.
+        if warm_registry {
+            fixture.state.voice_channels.bind_pool(&resources).unwrap();
+        }
+        let bytes = catcoms_sync::voice_v2::resources::PROCESS_BYTES - resources.counts().0;
+        let pressure = resources.charge_process_retained(bytes).unwrap();
+        let state = Arc::new(std::mem::take(&mut fixture.state));
+        let failed = Endpoint::prepare(state, owner).await;
+        let error = match failed {
+            Ok(mut endpoint) => {
+                endpoint.collect().await;
+                panic!("full process pool must refuse before listener/process creation")
+            }
+            Err(error) => error,
+        };
+        let stage = if warm_registry { "Capacity" } else { "Binding" };
+        assert!(
+            error
+                .downcast_ref::<String>()
+                .is_some_and(|reason| reason == &format!("effect service bind refused: {stage}")),
+            "must exercise the exact constructor allocation refusal, not a later script failure"
+        );
+        assert!(
+            !lease.is_live(),
+            "construction refusal Ends the same activated owner"
+        );
+        drop((pressure, lease));
+        fixture.close().await;
+    }
+}

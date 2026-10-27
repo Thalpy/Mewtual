@@ -101,10 +101,9 @@ fn studio_gif_safe_download_never_overwrites_and_reports_reveal_failure() {
     let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
     let abandoned = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
     assert_eq!(std::fs::read(&abandoned.staging).unwrap(), gif);
-    assert_eq!(
-        std::fs::read(&abandoned.path).unwrap(),
-        b"",
-        "the reserved name holds no bytes"
+    assert!(
+        !abandoned.path.exists(),
+        "the final name stays absent until publication"
     );
     drop(abandoned);
     let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
@@ -126,7 +125,46 @@ fn studio_gif_safe_download_never_overwrites_and_reports_reveal_failure() {
     assert_eq!(
         std::fs::read_dir(dir.path()).unwrap().count(),
         2,
-        "an unpublished stage removes both its staging file and its reserved name"
+        "an unpublished stage removes only its own staging file"
+    );
+}
+
+#[test]
+fn studio_export_collision_never_replaces_or_cleans_up_another_local_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
+    for publish in [false, true] {
+        let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
+        let final_path = staged.path.clone();
+        let staging_path = staged.staging.clone();
+        std::fs::write(&final_path, b"local file created during export").unwrap();
+        if publish {
+            assert!(staged.publish().is_err());
+        }
+        drop(staged);
+        assert_eq!(
+            std::fs::read(final_path).unwrap(),
+            b"local file created during export"
+        );
+        assert!(!staging_path.exists());
+    }
+}
+
+#[test]
+fn studio_export_link_is_committed_when_staging_cleanup_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
+    let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
+    let (path, staging) = (staged.path.clone(), staged.staging.clone());
+    staged
+        .publish_with_cleanup(|_| Err(std::io::ErrorKind::PermissionDenied.into()))
+        .unwrap();
+    assert!(staged.published);
+    drop(staged);
+    assert_eq!(std::fs::read(path).unwrap(), gif);
+    assert!(
+        staging.exists(),
+        "Drop cannot reclassify a committed export as abandoned"
     );
 }
 
@@ -161,6 +199,7 @@ async fn register_server(
     state.servers.lock().await.insert(
         12,
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor: actor.clone(),
             instance,
             group_id,
@@ -175,6 +214,7 @@ async fn register_server(
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         },
     );
@@ -253,7 +293,37 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
     .await
     .is_err());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert_eq!(
+        unlocked_ui_session_generation(&state).await.unwrap_err(),
+        "the vault is locked",
+        "a changed generation is not an authenticated unlock"
+    );
+    {
+        let _commit = state.ui_session_commit.lock().await;
+        // This fixture already holds an unlocked vault. Explicitly model successful native
+        // authentication before allowing fresh work; never restore authority to the old token.
+        state.ui_authorized_generation.store(
+            state.ui_session_generation.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+    }
     let current = unlocked_ui_session_generation(&state).await.unwrap();
+    assert_ne!(current, generation);
+    assert!(save_gif(
+        &state,
+        12,
+        41,
+        generation,
+        dir.path().to_path_buf(),
+        gif.clone(),
+        &cancellation,
+        || {},
+        std::future::ready(()),
+        |_| panic!("unlock must not revive the old generation")
+    )
+    .await
+    .is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     let result = save_gif(
         &state,
         12,

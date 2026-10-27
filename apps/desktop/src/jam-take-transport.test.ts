@@ -1,13 +1,62 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JamTakeTransport, type JamTakeTransportEngine } from "./jam-take-transport.ts";
+import { archivalDjPosition, archivalPlaybackNeedsStart, JamTakeTransport, type JamTakeTransportEngine } from "./jam-take-transport.ts";
+import { pixaFrameAt } from "./pixa-media.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
 import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
 import type { JamArchivalPlayback, JamPlayResult } from "./jam-engine.ts";
 import type { JamTake } from "./jam-contract.ts";
 import { deferred } from "./studio-testkit.ts";
+import { readFileSync } from "node:fs";
+import { decodePixa } from "./pixa.ts";
 const take: JamTake = { v: 1, group: "group", call: "call", met: { bpm: 120, bpb: 4 }, parts: ["author"], lanes: [{ src: 0, sn: "a".repeat(16) }], patches: [], events: [{ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 0 }, { ms: 95_000, lane: 0, n: 60, on: 0, q: 1 }] };
 const scope = { generation: 1, server: 1, channel: "channel", membership: 1 };
+
+test("PIXA DJ pictures and announcements use the actual audio clock after delayed fetch and preparation", async () => {
+  const vector = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
+  const p = decodePixa(Buffer.from(vector.pixaHex, "hex"));
+  const animation = { ...p, fps: 2, frames: Array(6).fill(p.frames[0]), take: { ...p.take, patches: [vector.patch] }, sfx: [{ frame: 0, patch: 0, note: 72, durationMs: 5000 }] };
+  const h = harness(), download = deferred<void>(), preparation = deferred<void>();
+  h.digest(preparation.promise);
+  assert.equal(archivalDjPosition(0, null), 0);
+  const loading = (async () => { await download.promise; return h.transport.startPixa(animation, 0, scope, false, h.current); })();
+  h.now(2000); download.resolve(); await Promise.resolve();
+  assert.equal(archivalDjPosition(0, h.transport), 0, "the DJ holds its pressed frame during preparation");
+  h.now(3000); preparation.resolve(); assert.equal(await loading, true); await h.transport.tick();
+  assert.equal(h.transport.elapsedMs, 0); assert.equal(h.events[0].age, 0);
+  assert.equal(pixaFrameAt(animation, archivalDjPosition(0, h.transport) * 1000), 0);
+  h.now(3500); await h.transport.tick();
+  assert.equal(archivalDjPosition(0, h.transport), .5);
+  assert.equal(pixaFrameAt(animation, h.transport.elapsedMs), 1);
+});
+
+test("a listener samples its seek after preparation and reconstructs the actual held sound age", async () => {
+  const h = harness(), preparation = deferred<void>(); h.digest(preparation.promise);
+  let projectedMs = 2000;
+  const pending = h.transport.start(take, projectedMs, scope, true, h.current, () => projectedMs);
+  projectedMs = 3500; h.now(1500); preparation.resolve(); assert.equal(await pending, true);
+  await h.transport.tick();
+  assert.equal(h.transport.elapsedMs, 3500); assert.equal(h.events[0].age, 3500);
+  assert.equal(h.resumes(), 0);
+});
+
+test("heartbeats preserve slow preparation and a fresh press can replace it", async () => {
+  const h = harness(), gate = deferred<void>(); h.digest(gate.promise);
+  let roomMs = 0;
+  const pending = h.transport.start(take, 0, scope, true, h.current, () => roomMs);
+  for (const at of [5000, 10000, 15000]) {
+    roomMs = at; h.now(at);
+    assert.equal(archivalPlaybackNeedsStart(true, null, roomMs), false);
+    assert.equal(h.transport.state, "preparing"); assert.equal(h.revoked(), 0);
+  }
+  gate.resolve(); assert.equal(await pending, true); await h.transport.tick();
+  assert.equal(h.events[0].age, 15000);
+  assert.equal(archivalPlaybackNeedsStart(false, { elapsedMs: h.transport.elapsedMs, done: false }, roomMs), false);
+  h.transport.stop(); // App retires ownership on a fresh sequence, including a same-CID seek.
+  assert.equal(archivalPlaybackNeedsStart(false, null, 500), true);
+  assert.equal(await h.transport.start(take, 500, scope, true, h.current), true);
+  assert.equal(h.transport.elapsedMs, 500);
+});
 function harness() {
   let now = 0, resumes = 0, live = true, revoked = 0;
   const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>(), events: { index: number; age: number }[] = [], levels: number[] = [];
@@ -65,4 +114,20 @@ test("volume changes are capability-scoped and malformed values cannot reach the
   assert.equal(h.transport.setLevel(.2), true); for (const bad of [-1, 2, NaN, Infinity]) assert.equal(h.transport.setLevel(bad), false);
   assert.deepEqual(h.levels, [1, .2]);
   h.retire(); assert.equal(h.transport.setLevel(.8), false); assert.deepEqual(h.levels, [1, .2], "retired App lease cannot control old owned gains before the next tick");
+});
+
+test("shared PIXA preserves visual horizon/SFX seek age, remote resume gate and retirement", async () => {
+  const vector = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
+  const p = decodePixa(Buffer.from(vector.pixaHex, "hex"));
+  const animation = { ...p, fps: 2, frames: [p.frames[0], p.frames[0]], take: { ...p.take, patches: [vector.patch] }, sfx: [{ frame: 1, patch: 0, note: 72, durationMs: 1000 }] };
+  const h = harness(); h.context.state = "suspended";
+  assert.equal(await h.transport.startPixa(animation, 750, scope, true, h.current), false); assert.equal(h.resumes(), 0);
+  h.context.state = "running";
+  assert.equal(await h.transport.startPixa(animation, 750, scope, true, h.current), true);
+  await h.transport.tick(); assert.equal(h.events[0].age, 250, "late join reconstructs authored held SFX, not a fresh attack");
+  h.now(250); await h.transport.tick(); assert.equal(h.transport.state, "playing", "visual EOF cannot truncate longer sound");
+  h.retire(); await h.transport.tick(); assert.equal(h.transport.state, "stopped"); assert.equal(h.transport.completed, false);
+  const silent = harness(); await silent.transport.startPixa(p, 0, scope, true, silent.current);
+  assert.equal(silent.transport.state, "playing", "empty music still owns the animation horizon");
+  silent.now(100); await silent.transport.tick(); assert.equal(silent.transport.completed, true);
 });

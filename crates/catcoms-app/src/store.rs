@@ -13,7 +13,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -105,9 +105,11 @@ pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 pub(crate) use epoch_studio::studio_inventory_key_for_test;
 #[cfg(test)]
 pub(crate) use epoch_studio::tests::performance::{
-    fill_studio_epoch_fixture, save_studio_source_fixture, save_studio_source_fixture_ops,
-    studio_closing_capture_fixture, studio_handoff_interrupted_fixture,
-    studio_handoff_ready_fixture, studio_owner_decision_fixture,
+    corrupt_studio_closing_journal_fixture, fill_studio_epoch_fixture,
+    remove_studio_closing_journal_fixture, save_studio_source_fixture,
+    save_studio_source_fixture_ops, studio_closing_capture_fixture, studio_closing_control_fixture,
+    studio_handoff_interrupted_fixture, studio_handoff_ready_fixture,
+    studio_owner_decision_fixture,
 };
 #[cfg(test)]
 pub(crate) use epoch_studio::StudioRotationBoundary;
@@ -235,9 +237,10 @@ const PORT_DOMAIN: &[u8] = b"catcoms/server-port/v1";
 /// Domain separator for the address cache's keyed integrity tag, derived off the vault's
 /// `db_key` (see [`ServerStore::address_cache_key`]).
 const ADDRESS_CACHE_TAG_DOMAIN: &[u8] = b"catcoms/addr-cache-tag/v1";
-/// Maximum sealed UI-continuity payload. This is intentionally small: drafts/read markers are
-/// convenience state, not an alternate attachment or message store.
-pub const MAX_UI_STATE_BYTES: usize = 1024 * 1024;
+/// Maximum sealed UI-continuity envelope, including bounded Studio edits awaiting Save.
+/// The native bridge separately retains the 1 MiB budget for ordinary UI continuity and a
+/// 12 MiB Studio draft budget (8 MiB of PIX expands in base64).
+pub const MAX_UI_STATE_BYTES: usize = 16 * 1024 * 1024;
 /// The band [`ServerNet::derived_port`] draws from: above the well-known/registered clutter and
 /// below the ephemeral ranges the OS hands out on its own (Linux from 32768, Windows from 49152),
 /// so the number is unlikely to already be lent to something else.
@@ -1555,9 +1558,36 @@ impl ServerStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let bytes = fs::read(path).map_err(|e| AppError::Io(e.to_string()))?;
+        // Check both metadata and the actual read: a file may grow after metadata was observed.
+        // Seal overhead is the 24-byte nonce plus the 16-byte authentication tag.
+        let max_sealed = MAX_UI_STATE_BYTES + 40;
+        let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
+        if !metadata.file_type().is_file() || metadata.len() > max_sealed as u64 {
+            return Err(AppError::Invalid(
+                "UI state is not bounded and regular".into(),
+            ));
+        }
+        let file = File::open(path).map_err(|e| AppError::Io(e.to_string()))?;
+        if !file
+            .metadata()
+            .map_err(|e| AppError::Io(e.to_string()))?
+            .is_file()
+        {
+            return Err(AppError::Invalid("opened UI state is not regular".into()));
+        }
+        let mut bytes = Vec::new();
+        file.take(max_sealed as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        if bytes.len() > max_sealed {
+            return Err(AppError::Invalid("UI state exceeds its bound".into()));
+        }
         let sealed = unframe(&bytes)?;
-        unseal(&self.keys.db_key()?, &sealed).map_err(Into::into)
+        let plain = unseal(&self.keys.db_key()?, &sealed)?;
+        if plain.len() > MAX_UI_STATE_BYTES {
+            return Err(AppError::Invalid("UI state exceeds its bound".into()));
+        }
+        Ok(plain)
     }
 
     /// Seal + atomically write a server's [`ServerNet`] (its libp2p identity seed, listen port and
@@ -1718,15 +1748,23 @@ impl ServerStore {
         }
         let dir = self.dir.join("blobs").join(key);
         let store = SealingBlobStore::open(&dir, self.keys.blob_key()?, OsCryptoRng)?;
-        let inner = Box::new(catcoms_storage::kept::KeptBlobStore::open(
+        let mut inner = catcoms_storage::kept::KeptBlobStore::open(
             Box::new(store),
             dir.join("kept"),
             self.keys.blob_key()?,
+            self.keys.kept_metadata_key()?,
             OsCryptoRng,
-        ));
+        );
+        let group = hex::decode(key).unwrap_or_else(|_| key.as_bytes().to_vec());
+        // A full group has exactly one retained namespace on case-sensitive filesystems too.
+        // Legacy/test aliases still work as ordinary caches, but uppercase hex or an alias
+        // cannot mount a second retained quota under the same actual MLS group identity.
+        if hex::encode(&group) != key {
+            inner.disable_retention();
+        }
         Ok(Box::new(creative_references::ProtectedBlobs {
-            inner,
-            group: hex::decode(key).unwrap_or_else(|_| key.as_bytes().to_vec()),
+            inner: Box::new(inner),
+            group,
             protection: self.creative_protection.clone(),
         }))
     }
@@ -2289,6 +2327,18 @@ mod tests {
     }
 
     #[test]
+    fn ui_state_rejects_oversized_physical_file_before_unsealing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(12);
+        let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
+        let file = File::create(store.ui_state_path()).unwrap();
+        file.set_len((MAX_UI_STATE_BYTES + 41) as u64).unwrap();
+        assert!(
+            matches!(store.load_ui_state(), Err(AppError::Invalid(message)) if message.contains("bounded and regular"))
+        );
+    }
+
+    #[test]
     fn a_v1_registry_without_is_dm_flags_decodes_with_dm_false() {
         // A registry sealed before the is_dm trailing block: count + (id, name, invite)* and
         // nothing more. The decoder must accept it and default every flag to false.
@@ -2341,6 +2391,30 @@ mod tests {
             .get(&cid)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn retained_namespace_has_one_canonical_full_group_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(97);
+        let store = ServerStore::open(dir.path(), b"canonical retention", &mut rng).unwrap();
+        let group = vec![0xab; 32];
+        let scope = catcoms_storage::kept::KeepScope {
+            group: group.clone(),
+            device: catcoms_crypto::DeviceId::from_bytes([1; 32]),
+        };
+        let mut canonical = store.blob_store(&hex::encode(&group)).unwrap();
+        canonical.configure_keep_scope(scope.clone()).unwrap();
+        assert!(canonical.kept_files().error.is_none());
+        for alias in [hex::encode_upper(&group), "legacy-alias".to_string()] {
+            let mut blobs = store.blob_store(&alias).unwrap();
+            assert!(blobs.configure_keep_scope(scope.clone()).is_err());
+            let cid = blobs.put(b"ordinary cache remains usable").unwrap();
+            assert!(blobs.get(&cid).unwrap().is_some());
+            assert!(blobs.kept_files().error.is_some());
+        }
+        let mut wrong_group = store.blob_store(&hex::encode([2; 32])).unwrap();
+        assert!(wrong_group.configure_keep_scope(scope).is_err());
     }
 
     #[test]

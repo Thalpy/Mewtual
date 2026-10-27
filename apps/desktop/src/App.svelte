@@ -1,12 +1,13 @@
 <script lang="ts">
   import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
-  import { fileAvailability, keptCopyLabel, fileInventoryRequests, mutateFileInventory, type KeptFiles } from "./file-availability";
+  import { fileAvailability, keptCopyLabel, keptTransferLabel, keptAllocationCount, keptTransferRows, fileInventoryRequests, mutateFileInventory, type KeptFiles, type KeptTransfer } from "./file-availability";
   import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { onMount, tick, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
+  import { CallMappingSession } from "./call-mappings.ts";
   import { renderMessage, renderTextDocument, renderWiki, parseRedirect, tocDirective } from "./render";
   import {
     TEXT_PREVIEW_MAX_BYTES, decodeTextFile, lineCountLabel, textFileKind,
@@ -38,11 +39,12 @@
     PageAdmission, planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
-  import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send";
-  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
+  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
+  import { DARK_INK, inkOn, onAccentOverride } from "./accent-ink";
   import { pastedMedia, pastedName } from "./clipboard-media";
   import {
     confirmQuestion, confirmVerb, parseTally, placeMenu, tallyReaction, topReactions, typeaheadIndex,
@@ -92,8 +94,9 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
+  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadLabel, type PrivateDownload } from "./private-downloads";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -102,8 +105,10 @@
   import { disposeStreamAudioGraph } from "./stream-audio";
   import {
     bufferIce, directionIdle, hangupTargets, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState,
-    videoSlotPlan, VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
+    legacyCallSignalAdmission, legacyCallSignalEgress, legacyCallSignalKind,
+    videoSlotPlan, VIDEO_BITRATE, type CallSignalMode, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
+  import { voiceV2Activation } from "./voice-v2-call";
   import {
     DEFAULT_STREAM_SETTINGS, MAX_STREAM_AUDIO_SOURCES, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
     estimatedMeshMbps, isStreamHeight,
@@ -127,6 +132,7 @@
   } from "./deck-players";
   import { soundcloudDeckUrl } from "./providers-audio";
   import { StudioAudioSession, type StudioAudioActions, type StudioAudioState } from "./studio-audio.ts";
+  import { createStudioExit, type StudioRoute } from "./studio-exit.ts";
   import { vimeoFrameUrl } from "./providers-video";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
@@ -191,7 +197,7 @@
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import {
-    NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
+    captureLockContinuity, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
   import {
     DEFAULT_FILE_TRUST_POLICY, authorOverride, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
@@ -243,12 +249,31 @@
     withOrderedSwitchboardStatus,
   } from "./joinreply";
   import {
-    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate,
+    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, mappedIceIsCurrent,
     shouldSignalHostCandidate, type MappedPort,
   } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
-  import { JamTakeTransport } from "./jam-take-transport.ts";
+  import { archivalDjPosition, archivalPlaybackNeedsStart, JamTakeTransport } from "./jam-take-transport.ts";
+  import { StudioSharedPatches, STUDIO_SHARED_PATCH_LIMIT } from "./studio-shared-patches.ts";
   import { JamTakeSuppression } from "./jam-take-suppression.ts";
+  import PixaCanvas from "./PixaCanvas.svelte";
+  import PixaViewer from "./PixaViewer.svelte";
+  import LightboxPicture from "./LightboxPicture.svelte";
+  import VideoEditor from "./VideoEditor.svelte";
+  import { studioMusic } from "./clip-music.ts";
+  import {
+    editableContainer, editedFileName, webCodecsAvailable, type VideoEditorContext, type VideoEditorResult,
+  } from "./video-export.ts";
+  import { VideoReviewQueue, type OpenReview, type ReviewPosition } from "./video-review.ts";
+  import { VIDEO_EDITOR_SHORTCUTS, editorWords } from "./video-editor-ui.ts";
+  import { ShiftIntent, shiftPick } from "./upload-intent.ts";
+  import { carriesFiles, installFileDropGuard } from "./drop-guard.ts";
+  import { draftAttachments, removeDraftAttachment } from "./draft-attachments.ts";
+  import ServerStudioSettings from "./ServerStudioSettings.svelte";
+  import { PixaPreviewManager, type PixaPreviewScope } from "./pixa-preview.ts";
+  import { decodePixaBase64, mayFetchPixa, PixaMediaCache, PixaFileReader, PIXA_MIME } from "./pixa-media.ts";
+  import { encodePixa, PIXA_MAX_BYTES, type Pixa } from "./pixa.ts";
+  import { planJamArchivalPlayback, archivalReleaseTailMs } from "./jam-archival-plan.ts";
   import { JamPeerBudget } from "./jam-budget";
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
   import {
@@ -568,6 +593,7 @@
     { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
     { id: "filetrust", label: "File Trust", cat: "Content" },
+    { id: "studio", label: "Studio", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
   ];
@@ -672,9 +698,10 @@
     if (target === "dms") enterDmHome();
     else if (target === "inbox") openInbox();
     else if (target === "news") {
-      openInbox();
-      inboxMode = "news";
-      loadNews();
+      openInbox(() => {
+        inboxMode = "news";
+        loadNews();
+      });
     } else if (target === "quick") openQuickSwitch();
     else if (target === "space" && !spaceOpen) toggleSpace();
     else if (target === "feedback") showFeedback = true;
@@ -691,13 +718,32 @@
   }
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
+    // Every settings request owns navigation, including one for the server already on screen. A
+    // newer request thereby retires an older one still waiting on a Studio Save to switch servers:
+    // that switch then never commits, so it can neither close this dialog (clearServerView) nor
+    // seed another server's draft over the one being edited.
+    const route = studioExit.begin();
+    if (id !== null && id !== activeServerId) {
+      // With nothing for the Studio to save, switchServer runs synchronously as far as its first
+      // await, so `cur` below already names the target. It also empties `livery` on the way past
+      // and refills it a round-trip later, which is why the editor draft is seeded from
+      // liveryLoaded rather than from `livery` directly. When the Studio must save first the
+      // switch has NOT happened yet, and seeding now would show (and Rename) the server being left;
+      // a refused Save keeps that server for good. Open the dialog in the turn the switch commits
+      // (never after B's whole load, by when the member may already be editing a dialog of their
+      // own that a late re-entry would re-seed); a refused or superseded switch never commits. The
+      // commit hook checks this request's own route as well as its target: the switch it watches
+      // is the one that just made B active, so `activeServerId === id` alone proves nothing.
+      let deferred = false;
+      void switchServer(id, () => { if (deferred && route.current() && activeServerId === id) seedServerSettings(id, page); }, route);
+      if (activeServerId !== id) { deferred = true; return; }
+    }
+    seedServerSettings(id, page);
+  }
+  function seedServerSettings(id: number | null, page: string) {
     communicationMode = null;
     communicationModeError = "";
     const targetServer = id ?? activeServerId;
-    // switchServer runs synchronously as far as its first await, so `cur` below already names the
-    // target. It also empties `livery` on the way past and refills it a round-trip later, which is
-    // why the editor draft is seeded from liveryLoaded rather than from `livery` directly.
-    if (id !== null && id !== activeServerId) void switchServer(id);
     serverNameDraft = cur ? serverLabel(cur) : "";
     // Seeded from the published name only; an unread livery seeds nothing, for the same reason
     // the colour draft does not. Publishing an empty name would clear the group's name for
@@ -1324,6 +1370,15 @@
     for (const [k, v] of Object.entries(liveryDraft.tokens)) {
       if (LIVERY_TOKENS.includes(k) && HEX_COLOR.test(v)) parts.push(`${k}:${v}`);
     }
+    // The ink on the accent follows the accent this preview paints. A valid `--accent` token is
+    // pushed after the draft accent, so it wins in the inline style and wins here too. A light
+    // accent still needs an explicit ink when the draft is Nightshade: with no data-preset the
+    // preview would otherwise inherit the root's ink, including a light-ink override made for the
+    // dark accent the app itself is wearing.
+    const tokenAccent = liveryDraft.tokens["--accent"] ?? "";
+    const ink = onAccentOverride(HEX_COLOR.test(tokenAccent) ? tokenAccent : accent);
+    if (ink) parts.push(`--on-accent:${ink}`);
+    else if (!liveryDraft.preset) parts.push(`--on-accent:${DARK_INK}`);
     const rad = LIVERY_RADIUS[liveryDraft.tokens["radius"] ?? ""];
     if (rad?.r) parts.push(`--r:${rad.r}`, `--r-lg:${rad.rlg}`);
     const font = LIVERY_FONTS[liveryDraft.tokens["font"] ?? ""];
@@ -1410,7 +1465,7 @@
       ? "off"
       : appearance.textEffects === "low" || reduced ? "low" : "full";
     set("text-effects", textEffects);
-    for (const t of [...LIVERY_TOKENS, "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
+    for (const t of [...LIVERY_TOKENS, "--on-accent", "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
     el.removeAttribute("data-livery-pattern");
     el.removeAttribute("data-livery-cursor");
     if (followLivery) {
@@ -1435,6 +1490,13 @@
       el.style.setProperty("--accent", accent);
       el.style.setProperty("--accent-hi", `color-mix(in oklab, ${accent} 80%, white)`);
     }
+    // Text on a solid accent follows the accent actually painted: the accent override, else a
+    // livery's own `--accent` token, else the preset's default. Each preset's near-black ink suits
+    // its default accent, but a custom or livery accent can be any hex, and a dark one left black
+    // text on a near-black button. Only a dark accent overrides; otherwise the preset's ink (cleared
+    // above along with the other inline tokens) stays in charge.
+    const ink = onAccentOverride(accent || (followLivery ? livery.tokens["--accent"] ?? "" : ""));
+    if (ink) el.style.setProperty("--on-accent", ink);
     // Scale the root rather than one chat token: menus, member names, dialogs and every other
     // rem-sized label now follow the same accessibility preference.
     const scale = Math.min(200, Math.max(70, appearance.scale || 100));
@@ -1495,14 +1557,17 @@
     melodySeq = [];
   }
   function beginVaultSecretChange() {
-    showSettings = false;
-    error = "";
-    vaultChangeCurrent = "";
-    vaultChangeFirst = "";
-    vaultChangeMismatch = false;
-    vaultChangeError = "";
-    vaultChangeStep = "current";
-    clearUnlockEntry();
+    // The vault-change screen replaces the whole layout, so beginning it takes the Studio off screen.
+    leaveStudioThen(() => {
+      showSettings = false;
+      error = "";
+      vaultChangeCurrent = "";
+      vaultChangeFirst = "";
+      vaultChangeMismatch = false;
+      vaultChangeError = "";
+      vaultChangeStep = "current";
+      clearUnlockEntry();
+    });
   }
   function cancelVaultSecretChange() {
     vaultChangeCurrent = "";
@@ -1571,6 +1636,7 @@
       vaultChangeFirst = "";
       vaultChangeMismatch = false;
       vaultChangeError = `The vault secret was not changed: ${e}`;
+      // studio-exit: forced edge (not an exit: the vault change already left the Studio as it began)
       vaultChangeStep = "current";
       clearUnlockEntry();
     } finally {
@@ -3186,7 +3252,7 @@
   async function goToHit(h: SearchHit, pos: number) {
     searchPos = pos;
     if (cur && h.ch !== cur.active) {
-      await switchTo(h.ch, true);
+      if (!(await switchTo(h.ch, true))) return; // a refused move must not jump in the channel left on screen
       if (h.m.id) jumpToMessageId(h.m.id);
       else void scrollToMatch(h.idx); // a legacy message has no id: its index still holds
       return;
@@ -3271,7 +3337,7 @@
   let quickItems = $derived.by(() => {
     const out: QuickItem[] = [];
     for (const c of cur?.channels ?? []) {
-      out.push({ label: `#${c.name}`, hint: "channel", run: () => { switchTo(c.id); view = "chat"; } });
+      out.push({ label: `#${c.name}`, hint: "channel", run: () => leaveStudioThen((route) => { switchTo(c.id, false, route); view = "chat"; }) });
     }
     if (cur) {
       for (const s of QUICK_SURFACES) out.push({ label: s.label, hint: "surface", run: () => switchView(s.tab) });
@@ -3521,7 +3587,8 @@
     }
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts });
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
+      studioDraft: studioSnapshot?.() ?? restoredStudioDraft });
   }
   /**
    * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
@@ -3586,6 +3653,8 @@
       fileTrustPolicies = next.fileTrustPolicies;
       latePast = next.latePast;
       embedAutoLoad = next.embedAutoLoad;
+      restoredStudioDraft = next.studioDraft;
+      if (restoredStudioDraft && studioRestore) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
       loaded = true;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
@@ -3745,37 +3814,72 @@
     for (const file of files) if (!index.has(file.cid)) index.set(file.cid, file);
     return index;
   });
+  // Flipnote embeds in the chat draft, for the composer's attachment chips. Only embeds whose
+  // cid names a listed .pixa qualify; other embeds keep rendering as they always have.
+  const draftFlipnotes = $derived(draftAttachments(draft)
+    .map((a) => ({ ...a, file: filesByCid.get(a.cid) }))
+    .filter((a): a is typeof a & { file: UiFile } => !!a.file && mediaKind(a.file.name, a.file.mime) === "pixa"));
   // Whether ≥1 live peer previously proved it could serve authenticated catch-up (a conservative
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
+  let privateDownloads = $state<PrivateDownload[]>([]);
+  let privateDownloadBusy = $state<symbol | null>(null);
+  let privateDownloadSaves = $state<Record<string, symbol>>({});
+  let privateDownloadError = $state("");
   const fileInventoryGate = fileInventoryRequests();
   let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
+  // A primitive identity survives Svelte's deep state proxies unchanged.
+  let keptMutation = $state<symbol | null>(null);
 
+  // View teardown clears only pending UI ownership. The native requested job belongs to the
+  // unlocked account session; explicit Pause below changes durable intent separately.
   function cancelKeptTransfer() {
     const transfer = keptTransfer;
     keptTransfer = null;
-    if (transfer) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
+    if (transfer?.cancellation) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
   }
   $effect(() => {
     if (keptTransfer && (locked || keptTransfer.server !== activeServerId)) untrack(cancelKeptTransfer);
   });
 
   async function keepFileHere(cid: string) {
-    const server = activeServerId;
-    const gen = viewGeneration;
-    if (server === null || locked || keptTransfer) return;
-    const transfer = { server, cid, cancellation: `keep-${crypto.randomUUID()}` };
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept admission");
+    keptMutation = mutation;
+    keptTransfer = { server, cid, cancellation: "" };
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(() => invoke("request_kept_file", { server, cid }), refreshFiles,
+        () => unlockedViewCurrent(gen, server));
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) { keptMutation = null; keptTransfer = null; }
+    }
+  }
+
+  // Completed-copy checks keep their explicit cancelable runtime lease. Stopping a check
+  // never releases the saved copy, changes durable intent or creates automatic repair work.
+  async function checkKeptFile(cid: string) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const transfer = { server, cid, cancellation: `keep-check-${crypto.randomUUID()}` };
     keptTransfer = transfer;
     fileInventoryGate.invalidate();
     try {
+      const saved = keptFiles?.transfers.find(row => row.cid === cid && row.phase === "completed");
+      if (saved && (saved.user_paused || saved.blocked)) {
+        await invoke("set_kept_paused", { server, cid, transfer: saved.transfer, expectedIntent: saved.intent, paused: false });
+      }
+      if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) return;
       await invoke("begin_inline_download", { cancellation: transfer.cancellation });
       if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) {
         await invoke("cancel_inline_download", { cancellation: transfer.cancellation });
         return;
       }
       await invoke("keep_file", { server, cid, cancellation: transfer.cancellation });
-      if (unlockedViewCurrent(gen, server)) await refreshFiles();
     } catch (e) {
       if (keptTransfer?.cancellation === transfer.cancellation && unlockedViewCurrent(gen, server)) error = String(e);
     } finally {
@@ -3784,10 +3888,34 @@
     }
   }
 
+  async function setKeptPaused(copy: KeptTransfer, paused: boolean) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept intent");
+    keptMutation = mutation;
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(() => invoke("set_kept_paused", {
+        server, cid: copy.cid, transfer: copy.transfer, expectedIntent: copy.intent, paused,
+      }), refreshFiles, () => unlockedViewCurrent(gen, server));
+      if (keptMutation === mutation) keptMutation = null;
+      if (!paused && unlockedViewCurrent(gen, server)) await keepFileHere(copy.cid);
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
+    }
+  }
+  async function resumeKeptFile(copy: KeptTransfer) {
+    await setKeptPaused(copy, false);
+  }
+
   async function forgetKeptFile(cid: string) {
     const server = activeServerId;
     const gen = viewGeneration;
-    if (server === null || locked || keptTransfer) return;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept mutation");
+    keptMutation = mutation;
     fileInventoryGate.invalidate();
     try {
       await mutateFileInventory(
@@ -3796,9 +3924,42 @@
       );
     } catch (e) {
       if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
+    }
+  }
+  async function retryKeptFile(copy: KeptTransfer) {
+    const server = activeServerId;
+    const gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept mutation");
+    keptMutation = mutation;
+    fileInventoryGate.invalidate();
+    // Native CAS binds this request to the saved transfer and exhausted grant. A lost reply
+    // cannot grant twice, even if a later inventory refresh or a new window retries the button.
+    const request = crypto.randomUUID().replaceAll("-", "");
+    try {
+      await mutateFileInventory(() => invoke("retry_kept_file", {
+        server, cid: copy.cid, transfer: copy.transfer, expectedGrant: copy.grant, request,
+      }), refreshFiles, () => unlockedViewCurrent(gen, server));
+      if (keptMutation === mutation) keptMutation = null;
+      if (unlockedViewCurrent(gen, server)) {
+        // Retry can migrate an older journal and change its explicit intent revision. Use the
+        // freshly read same native owner, never the pre-Retry projection or a replacement CID.
+        const current = keptFiles?.transfers.find(row => row.cid === copy.cid && row.transfer === copy.transfer);
+        if (current && !current.running && !current.exhausted) {
+          if (current.phase === "completed") await checkKeptFile(current.cid);
+          else if (current.phase === "paused") await resumeKeptFile(current);
+        }
+      }
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
     }
   }
   let uploading = $state(false);
+  let windowCloseInFlight = $state(false);
   let folder = $state(""); // current folder in the Files tab
   let newFolder = $state(""); // new-folder name input
   let dragOver = $state(false); // composer drag-over highlight
@@ -4410,6 +4571,9 @@
   }
   let wikiMeta = $state<Record<string, string>>({}); // name -> "md" | "wiki" (per-page format, shared)
   let activeWikiPage = $state("");
+  // Exact displayed-page identity for delayed writes. A same-name reopen is a replacement too;
+  // server/view generation alone cannot distinguish it from the page an old rename captured.
+  let wikiPaneSerial = 0;
   let wikiBody = $state("");
   let newWikiPage = $state("");
   let wikiDirty = $state(false); // unsaved edits in the open page (avoid clobbering on live updates)
@@ -5624,10 +5788,16 @@
   function jumpToNews(n: NewsItem) {
     navStepStart(); // the server hop and the surface hop are one move, not two
     inboxView = false;
-    switchServer(n.server)
-      .then(() => switchView(n.kind === "event" ? "events" : "status"))
-      // The row named one post, so land on it rather than on the feed it sits somewhere in.
-      .then(() => (n.kind === "status" && n.id ? openStatusRef(n.id) : undefined))
+    const route = studioExit.begin();
+    switchServer(n.server, undefined, route)
+      .then((switched) => {
+        // A refused or superseded switch leaves another server on screen: its feed is not this row's.
+        // So does a newer action taken while the server loaded.
+        if (!switched || !route.current() || activeServerId !== n.server) return;
+        switchView(n.kind === "event" ? "events" : "status", route);
+        // The row named one post, so land on it rather than on the feed it sits somewhere in.
+        return n.kind === "status" && n.id ? openStatusRef(n.id, route) : undefined;
+      })
       .finally(navStepEnd);
   }
 
@@ -6212,18 +6382,23 @@
 
   // Upload an image as a custom emoji `:code:` (stored under the "emoji" folder).
   async function addEmoji(fileList: FileList | null) {
-    const code = newEmojiCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
+    const originalCode = newEmojiCode;
+    const code = originalCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
     const file = fileList?.[0];
-    if (!code || !file || activeServerId === null) return;
+    if (!code || !file || !canStartUpload(1)) return;
+    const session = uiStateLoadGeneration, gen = viewGeneration, server = activeServerId;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && viewCurrent(gen, server);
     uploading = true;
     try {
       // Encode an optional size into the file name (`code~px`) so it's shared with everyone.
       const sz = Math.min(Math.max(newEmojiSize, 0), EMOJI_MAX_SIZE);
       await addSharedFile(file, "emoji", sz ? `${code}~${sz}` : code, file.type || "image/png");
-      newEmojiCode = "";
-      await refreshFiles();
+      if (current()) {
+        if (newEmojiCode === originalCode) newEmojiCode = "";
+        await refreshFiles();
+      }
     } catch (e) {
-      error = String(e);
+      if (current()) error = String(e);
     } finally {
       uploading = false;
     }
@@ -6263,6 +6438,7 @@
       isDm: r.is_dm,
     }));
     locked = false;
+    void callMappingSession.claimController();
     const reconnectWarnings = reloaded.filter((r) => r.reconnect_warning);
     if (reconnectWarnings.length) {
       toast(reconnectWarnings.map((r) => `${r.name}: ${r.reconnect_warning}`).join("\n"), "warn", 0);
@@ -6343,6 +6519,7 @@
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
     pendingSendRetry.cancel();
+    callMappingSession.resetController();
     // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
     // `inCall`, so the ordinary leave path alone cannot see or invalidate them.
     callLifecycleSession.invalidate();
@@ -6374,7 +6551,9 @@
     clearTimeout(newsAggregateTimer); // a pending re-aggregation must not read feeds behind the lock
     if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
     inboxIdle = undefined;
-    const finalContinuityJson = uiStateReady ? continuityJson() : null;
+    // A malformed/full draft must never prevent privacy revocation. Keep the previous sealed
+    // record on capture failure and disclose that the latest work could not be retained.
+    const { json: finalContinuityJson, error: studioCaptureError } = captureLockContinuity(() => uiStateReady ? continuityJson() : null);
     try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
     // Reply/recovery codes carry current listener routes. Clear them synchronously and ignore any
@@ -6415,6 +6594,9 @@
     profileCard = null;
     verifyFor = null;
     fileInfo = null;
+    // The image viewer holds the decoded <img> it was opened from (its fit copy is resampled from
+    // it), so it must not survive the lock and pop back up, pixels and all, after unlock.
+    closeLightbox();
     menu = null;
     closeSearch();
     navStack = []; // where you have been is part of what the lock screen takes off the screen
@@ -6423,15 +6605,18 @@
     tickerReceipts = new Set(); // receipts can include wiki/page ids; do not retain them behind lock
     stopStudioAudio();
     studioReset?.(); // and the studio's views, held pixels and unsaved strokes
+    restoredStudioDraft = null;
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
+    // studio-exit: forced edge. Lock does not ask the Studio to save: studioSnapshot() above
+    // captured its retained queue and it is restored after unlock.
     activeServerId = null;
     dmHome = false;
     inboxView = false;
     // One definition of "every window onto a group's contents", not two that drift. The hand-rolled
     // list here used to miss the sanitized message-render cache and wikiMap, both of which hold
     // plaintext, along with roles, livery, badges and the rest.
-    clearServerView();
+    clearServerView(); // studio-exit: forced edge (lock, as above)
     inboxItems = [];
     newsItems = [];
     serverIcons = {};
@@ -6451,15 +6636,17 @@
     embedAutoLoad = false; // a locked app contacts nobody on its own; unlock re-reads the answer
     embedGrants.clear();
     pendingStatusMarks.clear(); // and a mark still waiting on hydration is not replayed behind a lock
-    uiStateReady = false;
+    uiStateReady = false; // studio-exit: forced edge (lock; the Studio queue was snapshotted above)
     uiStateSaveFailed = false;
     uiStateLoadGeneration += 1;
     clearTimeout(uiStateSaveTimer);
     passphrase = "";
     revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
-    error = "";
+    // The one message the lock screen keeps: the latest Studio edits could not be captured. Assigned
+    // here, after the reset, because assigning it earlier was cleared by this line (review of d2548a37).
+    error = studioCaptureError;
     syncIntent = false;
-    locked = true;
+    locked = true; // studio-exit: forced edge (lock, as above)
   }
 
   async function found() {
@@ -6841,22 +7028,25 @@
   // Open the DMs area (the friends/DM list); land on the first DM if there is one, else an empty
   // DM-home (no active group) ready for a New DM / Add friend.
   function enterDmHome() {
-    dmHome = true;
-    inboxView = false;
-    menu = null;
-    showNewDm = false;
-    showAddFriend = false;
-    refreshDmStats();
-    if (dmList.length) {
-      // Sequenced, not raced: switchServer merges the target DM's own requests in, so running the
-      // cross-server aggregate first would have it replaced or not depending on IPC timing.
-      void switchServer(dmList[0].id).then(refreshAllDmRequests);
-    } else {
-      refreshAllDmRequests();
-      beginViewSwitch();
-      activeServerId = null;
-      clearServerView(); // no active group: drop the previous server's stale messages/roster/etc.
-    }
+    // DM home with no DM clears the active group, which takes the Studio off screen.
+    leaveStudioThen((route) => {
+      dmHome = true;
+      inboxView = false;
+      menu = null;
+      showNewDm = false;
+      showAddFriend = false;
+      refreshDmStats();
+      if (dmList.length) {
+        // Sequenced, not raced: switchServer merges the target DM's own requests in, so running the
+        // cross-server aggregate first would have it replaced or not depending on IPC timing.
+        void switchServer(dmList[0].id, undefined, route).then(refreshAllDmRequests);
+      } else {
+        refreshAllDmRequests();
+        beginViewSwitch();
+        activeServerId = null;
+        clearServerView(); // no active group: drop the previous server's stale messages/roster/etc.
+      }
+    });
   }
   // Reset every collection the panes render for the active group, synchronously. Called when there
   // is no active group (the empty DM-home placeholder) and at the top of every switch: without it
@@ -6907,6 +7097,10 @@
     files = [];
     hasPeers = false;
     keptFiles = null;
+    privateDownloads = [];
+    privateDownloadError = "";
+    privateDownloadBusy = null;
+    privateDownloadSaves = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -6956,6 +7150,7 @@
     // switchServer, so the paths that end with no active group (leaving your last server, empty
     // DM-home, locking) kept a page body and its drafts in memory as plaintext.
     activeWikiPage = "";
+    wikiPaneSerial++;
     wikiBody = "";
     wikiDirty = false;
     wikiEdit = false;
@@ -6986,7 +7181,25 @@
     dmInvite = "";
   }
 
-  async function switchServer(id: number) {
+  /// For composite routes ("go to that server, then act there"): true only when `server` is the one
+  /// on screen afterwards, because it already was or because the switch committed and still holds.
+  async function arriveAtServer(server: number, route: StudioRoute): Promise<boolean> {
+    return server === activeServerId || ((await switchServer(server, undefined, route)) && route.current() && activeServerId === server);
+  }
+  /// Resolves false when the switch never happened: the window is closing, the Studio's Save
+  /// refused, or a newer navigation superseded it. A caller with a continuation (open that server's
+  /// settings, jump to a message there) must check it; carrying on after a refusal acts on the
+  /// server still on screen. True means the switch committed (`activeServerId` was set to `id`),
+  /// even if a later switch has since replaced it, so callers that care also compare
+  /// `activeServerId`. It resolves only after the new server's batch read; `committed` runs in the
+  /// turn the switch commits, once that read has started and before it is awaited. With no Studio
+  /// work that is the call's own synchronous prefix, which openServerSettings relies on, so the
+  /// route is only awaited when there is something to save (or it is already stale). `route` is the
+  /// action this switch belongs to; a standalone call is its own action.
+  async function switchServer(id: number, committed: () => void = () => {}, route: StudioRoute = studioExit.begin()): Promise<boolean> {
+    if (windowCloseInFlight) return false;
+    if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
+    if (!route.current() || windowCloseInFlight) return false;
     saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
     const gen = beginViewSwitch(); // everything still in flight for the old group is now stale
     activeServerId = id;
@@ -7058,7 +7271,7 @@
     // `all`, one rejection abandoned the rest of this function, and the panes it had not reached
     // yet kept their loading claim for the rest of the session: a roster that never stopped saying
     // "Loading members…" on a server that had plenty of them.
-    await Promise.allSettled([
+    const batch = Promise.allSettled([
       messages,
       refreshMembers(),
       refreshProfiles(),
@@ -7076,7 +7289,10 @@
       refreshWikiPages(),
       refreshFileSizeLimit(),
     ]);
-    if (!viewCurrent(gen, id)) return; // moved on while this group was loading
+    // Exactly the state a synchronous caller saw before this hook existed: committed, reads begun.
+    committed();
+    await batch;
+    if (!viewCurrent(gen, id)) return true; // committed, then moved on while this group was loading
     groupLoading = false;
     messagesLoading = false; // already false unless the messages read itself failed
     syncProfileEditor();
@@ -7084,6 +7300,7 @@
     // badges right for a server whose directory was still a stub when the session started, and for
     // anything that arrived in a channel this session has never opened.
     void rebuildUnread(id);
+    return true;
   }
 
   // Populate the Profile tab's editor from this member's own saved profile (so the tab shows
@@ -7112,41 +7329,126 @@
     }
   }
 
+  /// Servers whose native leave is in flight, each with whether its `server-closed` has arrived. The
+  /// stopping actor emits that event before leave_server returns, and only leave_server's outcome
+  /// says whether this was a leave, so the event waits for it (serverClosed).
+  const leavingServers = new Map<number, { session: number; closed: boolean }>();
+
+  /// The server a draft restored at unlock belongs to, read from App's copy without loading the
+  /// Studio chunk (studio-draft.ts's `scope.server`). Null when unreadable: such a draft fails to
+  /// restore at all, so it can never install, or block, anywhere.
+  function restoredDraftServer(): number | null {
+    try { const server = JSON.parse(restoredStudioDraft ?? "null")?.scope?.server; return typeof server === "number" ? server : null; }
+    catch { return null; }
+  }
+
   async function leaveServer(id: number) {
+    if (windowCloseInFlight || locked || !uiStateReady) return;
+    const session = uiStateLoadGeneration;
+    const current = () => !locked && uiStateReady && session === uiStateLoadGeneration;
+    if (leavingServers.get(id)?.session === session) return;
+    // The Studio's unsaved work for this server is settled while its actor can still take it.
+    // After leave_server nothing can, and serverGone drops whatever is left (review of d2548a37).
+    // A restored draft for it installs only when its channel opens, so that is where the member
+    // saves or discards it first. Before the Studio has loaded, App holds that draft itself.
+    const work = restoredStudioDraft ? (restoredDraftServer() === id ? { server: id, restored: true } : null) : studioWork?.() ?? null;
+    if (work?.server === id) {
+      if (work.restored) {
+        toast("Your restored Studio edits for this server are not saved yet. Open their channel in the Studio to save or discard them, then leave.", "warn", 8000);
+        return;
+      }
+      const route = studioExit.begin();
+      if (!(await route.scope())) {
+        // A refused Save has said why. A newer action (a click, a lock) retiring this one has not.
+        if (current() && !windowCloseInFlight && !route.current()) toast("Leaving the server was cancelled by a newer action. Leave again if you still want to.", "info", 5000);
+        return; // nothing has left
+      }
+    }
+    // A Save gate may have waited through lock/unlock. It cannot authorize a native leave in
+    // the replacement session, even if the same server is selected there again.
+    if (!current() || windowCloseInFlight || leavingServers.get(id)?.session === session) return;
     // Leaving a server is also a privacy boundary. End its independent WebRTC session before the
     // native request can hang or fail so a forgotten server can never retain a hot mic, display or
     // separately granted application-audio source.
     if (inCall && callServer === id) leaveVoice();
+    const operation = { session, closed: false };
+    leavingServers.set(id, operation);
     try {
       await invoke("leave_server", { server: id });
     } catch (e) {
+      const owns = leavingServers.get(id) === operation;
+      if (owns) leavingServers.delete(id);
+      if (!owns || !current()) return;
       error = String(e);
+      // The leave failed after the actor had stopped: still a member, but the server is gone from
+      // this session, so it is handled as a closure and its Studio edits are kept.
+      if (operation.closed) serverGone(id, false);
       return;
     }
+    // The operation object also fences bookkeeping: an old completion cannot remove a new
+    // session's leave of the same server or retire its Studio draft and file-trust policy.
+    const owns = leavingServers.get(id) === operation;
+    if (owns) leavingServers.delete(id);
+    if (!owns || !current()) return;
     const { [id]: _removedTrust, ...remainingTrust } = fileTrustPolicies;
     fileTrustPolicies = remainingTrust;
+    serverGone(id, true); // first, so the continuity saved next no longer carries its Studio work
     void saveUiStateImmediately();
+  }
+
+  /// `server-closed`: the server's actor stopped. During this server's own leave the leave decides
+  /// (it calls serverGone once it knows how leave_server ended); otherwise this is a closure.
+  function serverClosed(id: number) {
+    const operation = leavingServers.get(id);
+    if (operation?.session === uiStateLoadGeneration) { operation.closed = true; return; }
+    serverGone(id, false);
+  }
+
+  /// A server's native session ended: the member left it (`left`), or it closed under this session.
+  /// Its actor accepts nothing now, so moving off it is a forced edge that never waits on a Studio
+  /// Save to it. Before d2548a37's review this went through switchServer's Save gate, which refused
+  /// against the stopped actor and left the app selected on a server that no longer existed, with
+  /// the Studio still scoped to it. The Studio scope is retired first. A closed server's unsaved
+  /// edits are kept as a restored draft: a lock does not restart its actor, so they come back when
+  /// its channel opens after Mewtual restarts, and the Studio sidebar can discard them meanwhile. A
+  /// left server's are dropped, since leaveServer saved what it could beforehand. A later event for
+  /// a server already gone finds nothing to do.
+  function serverGone(id: number, left: boolean) {
+    const name = servers.find((s) => s.id === id)?.name || "A server";
     servers = servers.filter((s) => s.id !== id);
-    if (activeServerId === id) {
-      if (servers.length) switchServer(servers[0].id);
-      else {
-        beginViewSwitch();
-        activeServerId = null;
-        clearServerView(); // leaving the last one must not leave its messages on screen
-      }
-    }
+    // Lock already cleared all of this. A window close may be under way: the Studio keeps its
+    // input hold, and a snapshot the close takes later carries a kept draft. If the close is then
+    // abandoned the app is on no server, not on this one (switchServer refuses during a close).
+    if (locked) return;
+    const retired = retireStudioServer?.(id, !left) ?? "none";
+    if (retired === "kept" || retired === "partial") {
+      toast(`${name} stopped. Its unsaved Studio edits are kept and come back when you open their channel after Mewtual restarts; the Studio sidebar can discard them.${retired === "partial" ? " A stroke still being drawn could not be kept." : ""}`, "warn", 10000);
+    } else if (retired === "dropped") toast(left ? `You left ${name}, so Studio edits for it that were not saved were discarded.` : `${name} stopped, and its unsaved Studio edits could not be kept.`, "warn", 8000);
+    if (activeServerId !== id) return;
+    beginViewSwitch();
+    // studio-exit: forced edge. The server's native session ended, so nothing could accept a Studio Save, and its Studio scope was retired above.
+    activeServerId = null;
+    clearServerView(); // studio-exit: forced edge (server gone, as above). Its messages must not stay on screen
+    // A new action. With the scope retired there is nothing of this server to save; if the Studio
+    // still refuses for other work, the app stays coherently on no server rather than a dead one.
+    if (servers.length) void switchServer(servers[0].id);
   }
 
   async function addChannel() {
     const name = newChannel.trim().replace(/^#/, "");
-    if (!name || activeServerId === null) return;
+    if (!name || activeServerId === null || windowCloseInFlight) return;
     newChannel = "";
+    const route = studioExit.begin(); // a newer action taken while the channel opens wins
+    const gen = viewGeneration, server = activeServerId;
     try {
-      const id = await invoke<string>("open_channel", { server: activeServerId, name });
+      const id = await invoke<string>("open_channel", { server, name });
+      // Opening may finish after switching groups, locking or a newer navigation. Its native
+      // effect belongs to the original server; it must not seed the replacement sidebar.
+      if (!unlockedViewCurrent(gen, server) || !route.current() || windowCloseInFlight) return;
       if (cur && !cur.channels.some((c) => c.id === id)) cur.channels.push({ id, name });
-      switchTo(id);
+      switchTo(id, false, route);
     } catch (e) {
-      error = String(e);
+      if (unlockedViewCurrent(gen, server) && route.current() && !windowCloseInFlight) error = String(e);
     }
   }
 
@@ -7173,9 +7475,16 @@
   }
 
   // `keepSearch` is set when the search itself is driving the move (jumping to a hit in another
-  // channel): everything else closes the search bar, as before.
-  async function switchTo(id: string, keepSearch = false) {
-    if (!cur) return;
+  // channel): everything else closes the search bar, as before. Resolves false when the channel
+  // never changed (no server, window closing, Studio Save refused or superseded), exactly as
+  // switchServer does; a caller that goes on to jump or edit there must check it. `route` is the
+  // action the move belongs to (a standalone call is its own); like switchServer it stays
+  // synchronous up to its first await unless the Studio has something to save.
+  async function switchTo(id: string, keepSearch = false, route: StudioRoute = studioExit.begin()): Promise<boolean> {
+    if (windowCloseInFlight) return false;
+    if (!cur) return false;
+    if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
+    if (!route.current() || windowCloseInFlight) return false;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
@@ -7202,6 +7511,7 @@
     await refresh(); // awaited so a search jump can address the target channel's loaded messages
     refreshTopic();
     refreshDelivery();
+    return true;
   }
 
   // The active channel's topic (a shared LWW scalar in the channel doc; any member may set it).
@@ -7650,10 +7960,11 @@
       // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
       // file embedded in a live page never drops out of circulation, whatever its expiry says. It
       // is a second round-trip, so it rides alongside the listing rather than after it.
-      const [listing, pinned, kept] = await Promise.allSettled([
+      const [listing, pinned, kept, savedDownloads] = await Promise.allSettled([
         invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
         invoke<string[]>("get_wiki_pinned_cids", { server }),
         invoke<KeptFiles>("get_kept_files", { server }),
+        invoke<unknown>("get_private_downloads", { server }).then(checkedPrivateDownloads),
       ]);
       if (!fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) return; // another group's shared files
       // Applied independently: a failing pin lookup must not blank the listing it only decorates.
@@ -7665,6 +7976,8 @@
       }
       if (pinned.status === "fulfilled") wikiPinned = new Set(pinned.value);
       keptFiles = kept.status === "fulfilled" ? kept.value : null;
+      privateDownloads = savedDownloads.status === "fulfilled" ? savedDownloads.value : [];
+      privateDownloadError = savedDownloads.status === "fulfilled" ? "" : "Download progress could not be read. Open Transfers again to retry.";
     } catch (e) {
       if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
@@ -8235,16 +8548,30 @@
       error = String(e);
     }
   }
-  async function postStatus() {
+  // One announcement post at a time: Enter and the video editor's "post now" can otherwise both
+  // post the same text while the first is still out. Set before the first await, so a caller can
+  // tell from it whether its own call started a post (see `postFromComposer`).
+  let statusPosting = false;
+  // Resolves to what the press came to (`SendOutcome`; an announcement is never "uncertain", and
+  // one that threw may still have posted), for "post now" to report; every other caller ignores it.
+  async function postStatus(): Promise<SendOutcome> {
     const text = statusDraft.trim();
-    if (!text || activeServerId === null) return;
+    if (!text || activeServerId === null || statusPosting || locked || !uiStateReady || windowCloseInFlight) return "refused";
+    const session = uiStateLoadGeneration, gen = viewGeneration, server = activeServerId;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && viewCurrent(gen, server);
+    statusPosting = true;
     // Kept until the invoke returns, not cleared on the way in: a member posting into a feed that
     // is closed to them is now refused natively, and clearing first would take the words with it.
+    // Cleared only if it is still what was posted: text typed meanwhile is the next announcement.
     try {
-      await invokeDebugged("post_status", { server: activeServerId, text });
-      statusDraft = "";
+      await invokeDebugged("post_status", { server, text });
+      if (current() && statusDraft.trim() === text) statusDraft = "";
+      return "sent";
     } catch (e) {
-      error = errorText(e);
+      if (current()) error = errorText(e);
+      return "failed";
+    } finally {
+      statusPosting = false;
     }
   }
   // Who may post here. The read rides the feed document, so a policy someone else changed arrives
@@ -8367,6 +8694,41 @@
   // Lock must clear the studio's in-memory session (views, held pixels, unsaved work) the same
   // instant it clears everything else; the chunk owns the reset, this keeps a handle to it.
   let studioReset: (() => void) | null = null;
+  let studioSnapshot: (() => string | null) | null = null;
+  let studioRestore: ((json: string | null) => void) | null = null;
+  let studioSave: (() => Promise<void>) | null = null;
+  let studioHasWork: (() => boolean) | null = null;
+  let studioWork: (() => { server: number; restored: boolean } | null) | null = null;
+  let retireStudioServer: ((server: number, keep: boolean) => "none" | "kept" | "partial" | "dropped") | null = null;
+  let studioClaimNavigation: (() => () => boolean) | null = null;
+  let studioBeginClose: (() => void) | null = null;
+  let studioEndClose: (() => void) | null = null;
+  let restoredStudioDraft: string | null = null;
+  let studioNavigation = 0;
+  // Every route that takes the main pane away from the Studio asks a route from this gate BEFORE it
+  // changes `view`, opens the inbox or enters DM home: `leaveStudioThen` for a synchronous
+  // action, `studioExit.begin()` for an awaiting action. It carries its route across every await and asks
+  // `route.leave()` again right before the screen changes (see studio-exit.ts for why a fresh
+  // claim there would be wrong), then rechecks currency/close in the mutation's own continuation.
+  // switchView, switchServer and switchTo take an optional route so
+  // a composite action stays one owner. studio-exit-routes.test.ts audits this file.
+  const studioExit = createStudioExit({
+    onStudio: () => view === "studio",
+    hasWork: () => studioHasWork?.() ?? false,
+    closing: () => windowCloseInFlight,
+    claim: () => {
+      const request = ++studioNavigation, generation = uiStateLoadGeneration;
+      const current = studioClaimNavigation?.() ?? (() => true);
+      return () => request === studioNavigation && generation === uiStateLoadGeneration && !locked && current();
+    },
+    // Supersession, lock and reload are the route's own current() check, made after this resolves.
+    save: async () => {
+      try { await studioSave?.(); return true; }
+      catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
+    },
+    exhausted: () => { if (!locked) toast("The Studio kept changing while it saved. Try again once you stop drawing.", "warn", 6000); },
+  });
+  const leaveStudioThen = studioExit.leaveThen;
   async function loadStudio() {
     if ((StudioSurface && StudioNav) || studioLoading) return;
     studioLoading = true;
@@ -8375,6 +8737,12 @@
       StudioSurface = s.default;
       StudioNav = n.default;
       studioReset = st.resetStudio;
+      studioSnapshot = st.studioDraftSnapshot; studioRestore = st.restoreStudioDraft;
+      studioSave = st.saveStudio; studioHasWork = st.studioHasPending;
+      studioWork = st.studioWork; retireStudioServer = st.retireStudioServer;
+      studioClaimNavigation = st.claimStudioNavigation;
+      studioBeginClose = st.beginStudioClose; studioEndClose = st.endStudioClose;
+      if (restoredStudioDraft) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
     } catch (cause) {
       toast(`The studio failed to load: ${String(cause)}`, "err");
     } finally {
@@ -8388,7 +8756,13 @@
     toast(text, kind === "error" ? "err" : kind, kind === "info" ? 3500 : 5000);
   }
 
-  function switchView(v: Tab) {
+  /// `route` is the action this tab change belongs to; a standalone call is its own action. A route
+  /// a newer action has retired changes nothing.
+  function switchView(v: Tab, route: StudioRoute = studioExit.begin()) {
+    if (windowCloseInFlight || !route.current()) return;
+    if (view === "studio" && v !== "studio" && studioHasWork?.()) {
+      void route.leave().then((released) => { if (released) switchView(v, route); }); return;
+    }
     menu = null;
     if (v === "moderation" && !canModerate) {
       toast("Moderation is available to this server's owner and admins", "info", 3500);
@@ -8404,7 +8778,7 @@
     }
     view = v;
     if (v === "wiki") refreshWiki();
-    if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
+    if (v === "files" || v === "downloads") refreshFiles(); // includes saved private progress after restart
     // The policy is read with the surface rather than with the server, because it is only ever
     // needed by the surface and a server switch already carries enough round-trips.
     if (v === "status") { refreshStatuses(); void refreshStatusPolicy(); } // a read that failed during the switch gets a retry here
@@ -8449,8 +8823,10 @@
       e.preventDefault();
       const page = el.getAttribute("data-wikilink") ?? "";
       if (page) {
+        const route = studioExit.begin();
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
         view = "wiki";
-        await openWikiPage(page);
+        await openWikiPage(page, {}, route);
       }
       return;
     }
@@ -9140,6 +9516,10 @@
   async function appendToDraft(text: string) {
     draft = draft ? `${draft} ${text}` : text;
     saveDraftFor(chanKey());
+    // The text is already in this channel's draft, so a refused Studio Save loses nothing: the
+    // member stays with the work Save could not confirm and finds the text in Chat later.
+    const route = studioExit.begin();
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     await tick();
     composerEl?.focus();
@@ -9263,9 +9643,11 @@
     return items;
   }
   function mentionInComposer(fp: string) {
-    insertTarget = "chat";
-    view = "chat";
-    insertAtCaret(`@[${mentionName(nameOf(fp))}] `);
+    leaveStudioThen(() => {
+      insertTarget = "chat";
+      view = "chat";
+      insertAtCaret(`@[${mentionName(nameOf(fp))}] `);
+    });
   }
 
   function fileMenu(f: UiFile): MenuItem[] {
@@ -9299,13 +9681,14 @@
       {
         label: "Rename page…",
         icon: "edit",
-        onSelect: () => void openWikiPage(p).then(() => startWikiRename()),
+        // Only on the page this request opened: a retired or failed open leaves another page shown.
+        onSelect: () => void openWikiPage(p).then((opened) => { if (opened && activeWikiPage === p) startWikiRename(); }),
       },
       {
         label: "Delete page…",
         icon: "trash",
         danger: true,
-        onSelect: () => void openWikiPage(p).then(() => armWikiDelete()), // confirmed in the page header
+        onSelect: () => void openWikiPage(p).then((opened) => { if (opened && activeWikiPage === p) armWikiDelete(); }), // confirmed in the page header
       },
     ];
   }
@@ -9347,15 +9730,27 @@
       { label: vn ? `Join voice · ${vn} in` : "Start voice here", icon: "vol", onSelect: () => void joinVoice(c.id, sv, c.name) },
     ];
   }
+  // As applyLoc: from the Studio the surface changes first (a channel moved under a mounted Studio
+  // ends the action's own lease); from anywhere else the channel moves first, so a refused move
+  // changes nothing. The topic editor and the search open only once the move landed.
   async function editTopicOf(id: string) {
-    if (cur?.active !== id) await switchTo(id);
+    const route = studioExit.begin();
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
+    if (view === "studio") view = "chat";
+    if (cur?.active !== id && !(await switchTo(id, false, route))) return; // never edit the channel left on screen
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     await tick();
+    if (!route.current()) return;
     topicDraft = channelTopic;
     editingTopic = true;
   }
   async function searchInChannel(id: string) {
-    if (cur?.active !== id) await switchTo(id);
+    const route = studioExit.begin();
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
+    if (view === "studio") view = "chat";
+    if (cur?.active !== id && !(await switchTo(id, false, route))) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     openSearch();
   }
@@ -9510,7 +9905,7 @@
       { label: "Quote in reply", icon: "quote", onSelect: () => appendToDraft(m ? `> ${nameOf(m.author)}: ${trimmed}` : `> ${trimmed}`) },
     ];
     if (activeServerId !== null && cur) {
-      items.push({ label: "Search for it", icon: "search", onSelect: () => { view = "chat"; openSearch(); searchQuery = trimmed; } });
+      items.push({ label: "Search for it", icon: "search", onSelect: () => leaveStudioThen(() => { view = "chat"; openSearch(); searchQuery = trimmed; }) });
     }
     items.push(...rowActions(el));
     return items;
@@ -9631,7 +10026,7 @@
       const page = el.getAttribute("data-wikilink") ?? "";
       openMenu(e, [
         { head: true, kind: "wiki", title: page },
-        { label: "Open page", icon: "ext", onSelect: () => { view = "wiki"; openWikiPage(page); } },
+        { label: "Open page", icon: "ext", onSelect: () => leaveStudioThen((route) => { view = "wiki"; openWikiPage(page, {}, route); }) },
         { label: "Post link to chat", icon: "reply", onSelect: () => appendToDraft(`[[${page}]]`) },
         { label: "Copy link", icon: "link", onSelect: () => copyText(`[[${page}]]`) },
         ...rowActions(el),
@@ -9745,8 +10140,13 @@
 
   async function openWikiHistory() {
     if (activeServerId === null || !activeWikiPage) return;
+    // Revisions carry page bodies: they land only in the pane they were read for, and never behind
+    // a lock that arrived while they were in flight.
+    const pane = wikiPane();
     try {
-      wikiHistory = await invoke<UiWikiRev[]>("get_wiki_history", { server: activeServerId, page: activeWikiPage });
+      const history = await invoke<UiWikiRev[]>("get_wiki_history", { server: pane.server, page: pane.page });
+      if (!unlockedViewCurrent(pane.gen, pane.server) || !wikiPaneCurrent(pane)) return;
+      wikiHistory = history;
       wikiHistorySel = wikiHistory.length ? wikiHistory[wikiHistory.length - 1].id : "";
       showWikiHistory = true;
       wikiEdit = false;
@@ -9757,14 +10157,17 @@
 
   async function restoreWikiRev(revId: string) {
     if (activeServerId === null || !activeWikiPage) return;
+    // The restore names the page it was chosen for; after the await, the toast names that page and
+    // only that pane's history view closes (a newer page's history, or another server's, stays).
+    const pane = wikiPane(), { server, gen, page } = pane;
     try {
-      const queued = await invoke<boolean>("restore_wiki_page", { server: activeServerId, page: activeWikiPage, rev: revId });
-      showWikiHistory = false;
-      await refreshWiki();
+      const queued = await invoke<boolean>("restore_wiki_page", { server, page, rev: revId });
+      if (wikiPaneCurrent(pane)) showWikiHistory = false;
+      if (viewCurrent(gen, server)) await refreshWiki();
       if (queued) {
         toast(`Restore submitted for review: it publishes when approved, or automatically in ${wikiReviewDays} day${wikiReviewDays === 1 ? "" : "s"}`, "info", 6000);
       } else {
-        toast(`Restored "${activeWikiPage}" to the selected revision`, "ok", 4000);
+        toast(`Restored "${page}" to the selected revision`, "ok", 4000);
       }
     } catch (e) {
       toast(`Restore failed: ${e}`, "err", 9000);
@@ -9831,10 +10234,27 @@
   // Unsaved page bodies survive navigation (in-memory, like per-channel chat drafts): following
   // a [[link]] away from a half-edited page stashes the draft; coming back restores it.
   const wikiDrafts = new Map<string, string>();
-  async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}) {
+  // The page in the wiki pane as a captured identity: server, view generation, and how many times a
+  // page has been put in the pane since. A wiki action that finishes after an await touches the
+  // pane (dirty flag, drafts, edit mode, its name) only while it is still this one. Name alone is
+  // not enough: two servers can both have "Shared", and one server can reopen a name (as an empty
+  // new page after a rename moved it away) in between. Native calls use the captured server and
+  // page, never whatever is on screen when they resume.
+  type WikiPane = { server: number | null; gen: number; serial: number; page: string };
+  function wikiPane(): WikiPane { return { server: activeServerId, gen: viewGeneration, serial: wikiPaneSerial, page: activeWikiPage }; }
+  function wikiPaneCurrent(p: WikiPane): boolean { return viewCurrent(p.gen, p.server) && p.serial === wikiPaneSerial && p.page === activeWikiPage; }
+  /// `route` is the action that asked for the page (a standalone call is its own). It is asked twice:
+  /// before the read, and again after it, right before the view changes, because the read takes
+  /// time in which a newer action (returning to the Studio, say) can retire this one, or the Studio,
+  /// still on screen, can gain work that this action must save before leaving it.
+  /// Resolves true only when it opened a page (`activeWikiPage` names what it opened, which a
+  /// redirect may have changed). A continuation that acts on "the open page" (rename, delete,
+  /// edit) must check that, or a retired request would arm it on whatever page is still shown.
+  async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}, route: StudioRoute = studioExit.begin()): Promise<boolean> {
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
     const gen = viewGeneration;
     const server = activeServerId;
-    if (server === null) return;
+    if (server === null) return false;
     if (wikiDirty && activeWikiPage && activeWikiPage !== name) wikiDrafts.set(activeWikiPage, wikiBody);
     if (showInsert && insertTarget === "wiki") closeInsert();
     try {
@@ -9848,17 +10268,21 @@
           if (!target || target === name || !wikiPages.includes(target)) break;
           from = from || name;
           name = target;
-          if (!viewCurrent(gen, server)) return; // do not follow one server's redirect into another
+          if (!viewCurrent(gen, server)) return false; // do not follow one server's redirect into another
           body = await invoke<string>("get_wiki_page", { server, name });
         }
       }
+      // The same action, asked again (never a fresh claim, which would revive a retired request);
+      // a superseded response is discarded here, before it can replace the screen.
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
       // The whole point of the guard: without it this page's text lands in the editor of whatever
       // server you moved to, and because that server's wikiPages lacks the name it opens in EDIT
       // mode, one Ctrl+S from publishing one server's wiki content into another's.
-      if (!viewCurrent(gen, server)) return;
+      if (!viewCurrent(gen, server)) return false;
       wikiRedirectedFrom = from;
       wikiBody = body;
       activeWikiPage = name;
+      wikiPaneSerial++;
       wikiDirty = false;
       wikiRenaming = false;
       wikiDeleteArmed = false;
@@ -9877,20 +10301,25 @@
       } else if (draft !== undefined) {
         wikiDrafts.delete(name); // draft caught up with the saved page
       }
+      return true;
     } catch (e) {
       error = String(e);
+      return false;
     }
   }
 
   // The per-page Markdown/Wikitext toggle: a shared page property (CRDT meta), not a local view.
   async function setWikiPageFormat(fmt: "md" | "wiki") {
     if (activeServerId === null || !activeWikiPage || wikiFormat === fmt) return;
+    // The format is set on the page it was chosen for: a shared setting every member sees, so a
+    // switch during the first Save must not move it onto another server's same-named page.
+    const server = activeServerId, gen = viewGeneration, page = activeWikiPage;
     try {
       // A brand-new page (opened via a red link) has nothing saved yet; save it so the meta
       // has a page to describe.
-      if (!wikiPages.includes(activeWikiPage)) await saveWikiPage();
-      await invoke("set_wiki_format", { server: activeServerId, name: activeWikiPage, format: fmt });
-      wikiMeta = { ...wikiMeta, [activeWikiPage]: fmt };
+      if (!wikiPages.includes(page)) await saveWikiPage();
+      await invoke("set_wiki_format", { server, name: page, format: fmt });
+      if (viewCurrent(gen, server)) wikiMeta = { ...wikiMeta, [page]: fmt };
       toast(`Page format set to ${fmt === "wiki" ? "wikitext" : "markdown"} for everyone`, "info", 2500);
     } catch (e) {
       toast(`Setting the page format failed: ${e}`, "err", 9000);
@@ -9905,13 +10334,29 @@
     const to = wikiRenameTo.trim();
     wikiRenaming = false;
     if (!to || to === activeWikiPage || activeServerId === null || !activeWikiPage) return;
+    // One action: if the member moved on while the rename and the page list ran, the renamed page
+    // does not pull them back (the rename itself has landed and the toast still says so).
+    const route = studioExit.begin(), from = activeWikiPage;
+    const gen = viewGeneration, server = activeServerId, pageGeneration = wikiPaneSerial;
+    // A retired navigation can still reconcile the exact original page's new name. It cannot
+    // adopt a same-name page opened later, another server or an authenticated replacement session.
+    const ownsPage = () => unlockedViewCurrent(gen, server) && !windowCloseInFlight &&
+      wikiPaneSerial === pageGeneration && activeWikiPage === from;
     try {
-      await invoke("rename_wiki_page", { server: activeServerId, from: activeWikiPage, to });
+      await invoke("rename_wiki_page", { server, from, to });
+      if (!ownsPage()) return;
       await refreshWiki();
-      await openWikiPage(to, { noRedirect: true });
-      toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
+      if (!ownsPage()) return;
+      // A retired open leaves the pane on a name that no longer exists, where Edit and Save would
+      // recreate the old page. Reconcile only the unchanged original page, preserving local edits.
+      if (!(await openWikiPage(to, { noRedirect: true }, route))) {
+        if (!ownsPage()) return;
+        activeWikiPage = to;
+        wikiPaneSerial++;
+      }
+      if (unlockedViewCurrent(gen, server) && !windowCloseInFlight) toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
     } catch (e) {
-      toast(`Rename failed: ${e}`, "err", 9000);
+      if (unlockedViewCurrent(gen, server) && !windowCloseInFlight) toast(`Rename failed: ${e}`, "err", 9000);
     }
   }
 
@@ -9921,11 +10366,17 @@
   }
   async function deleteWikiPage(name: string) {
     if (activeServerId === null) return;
+    // The delete names this server's page; after the await, only this server's pane on it is cleared
+    // (another server's "Shared" being edited meanwhile keeps its unsaved text).
+    const pane = wikiPane(), { server, gen } = pane;
     try {
-      await invoke("delete_wiki_page", { server: activeServerId, name });
+      await invoke("delete_wiki_page", { server, name });
+      if (!viewCurrent(gen, server)) { toast(`Deleted "${name}"`, "ok"); return; }
       wikiDeleteArmed = false;
-      if (activeWikiPage === name) {
-        activeWikiPage = "";
+      // Only the pane that showed the page when the delete began: a fresh reopen of the name during
+      // the round trip is a new (empty) page whose typing is the member's, not the deleted page's.
+      if (wikiPaneCurrent(pane) && activeWikiPage === name) {
+        activeWikiPage = ""; wikiPaneSerial++;
         wikiBody = "";
         wikiDirty = false;
         wikiEdit = false;
@@ -10047,6 +10498,7 @@
     const name = newWikiPage.trim();
     if (!name || activeServerId === null) return;
     newWikiPage = "";
+    const route = studioExit.begin();
     try {
       // With review on, a member's save queues as a proposal; creating the page eagerly here
       // would queue an EMPTY proposal that eventually auto-creates a blank page. So members
@@ -10055,8 +10507,8 @@
         await invokeDebugged("save_wiki_page", { server: activeServerId, name, body: "" });
         await refreshWiki();
       }
-      await openWikiPage(name);
-      wikiEdit = true;
+      // Edit mode only for the page this request opened, never for whatever page is still shown.
+      if ((await openWikiPage(name, {}, route)) && activeWikiPage === name) wikiEdit = true;
     } catch (e) {
       error = String(e);
     }
@@ -10083,49 +10535,97 @@
 
   // Embed media into the open wiki page: upload under wiki/<page>/, insert a marker at the caret.
   // Each file gets a live toast (uploading -> embedded / failed) so nothing happens silently.
-  async function wikiEmbed(fileList: FileList | null) {
-    if (!fileList || fileList.length === 0 || activeServerId === null || !activeWikiPage) return;
+  //
+  // Videos go through the editor first unless `asIs` (Shift held through the drop or the pick).
+  // The batch is bound to the page it was started on and to `videoEditorScope`, like
+  // `embedMedia`: a file uploaded after the person moved on is shared under the page it was meant
+  // for, but not inserted into whatever page is open now.
+  async function wikiEmbed(fileList: FileList | null, asIs = false) {
+    if (!fileList || !activeWikiPage || !canStartUpload(fileList.length)) return;
+    const files = Array.from(fileList);
+    const review = videoReviewPlan(files, asIs);
+    const pane = wikiPane(), page = pane.page;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
+    const scope = videoEditorScope;
+    const epoch = videoScopeEpoch;
+    // A page name can be opened again while a review waits. Only the original pane may receive it.
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch && wikiPaneCurrent(pane);
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const file of Array.from(fileList)) {
-        const tid = toast(`Uploading ${file.name}…`, "info", 0);
+      for (let i = 0; i < files.length; i++) {
+        if (!here()) { abandoned = files.length - i; break; }
+        const reviewed = await reviewForUpload(files[i], files[i].name, review(files[i]), scope, "wiki");
+        if (!here()) {
+          // A scope change closed the editor and the rescope effect reported this file; a page
+          // change alone (a rename or delete landing meanwhile) did not, so count it here.
+          const reported = videoEditorScope !== scope || videoScopeEpoch !== epoch;
+          abandoned = files.length - i - (reported && reviewed === null ? 1 : 0);
+          break;
+        }
+        if (!reviewed) continue;
+        const { upload, uploadName } = reviewed;
+        const tid = toast(`Uploading ${uploadName}…`, "info", 0);
         try {
-          const cid = await addSharedFile(file, `wiki/${activeWikiPage}`);
-          const alt = file.name.replace(/[[\]]/g, " ");
+          const cid = await addSharedFile(upload, `wiki/${page}`, uploadName);
+          if (!here()) {
+            if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}, not embedded: the page changed`, "info", 7000);
+            continue;
+          }
+          const alt = uploadName.replace(/[[\]]/g, " ");
           insertIntoWikiBody(`![${alt}](cid:${cid})`);
-          updateToast(tid, `Embedded ${file.name} · save the page to publish`, "ok", 5000);
+          updateToast(tid, `Embedded ${uploadName} · save the page to publish`, "ok", 5000);
         } catch (e) {
-          updateToast(tid, `Upload of ${file.name} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      await refreshFiles();
+      if (abandoned > 0 && sessionCurrent()) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not embedded: the page changed`, "info", 7000);
+      }
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
   }
   function onWikiDrop(e: DragEvent) {
+    // Text or a link dropped on the editor is the field's own native drop; only files are ours.
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     e.stopPropagation();
     dragOver = false;
-    wikiEmbed(e.dataTransfer?.files ?? null);
+    wikiEmbed(e.dataTransfer?.files ?? null, e.shiftKey);
   }
   async function saveWikiPage() {
     if (!activeWikiPage || activeServerId === null) return;
+    // What is saved is fixed now; the pane it came from may change while the save is out (another
+    // page opened, more typing, another server). Only what the saved bytes actually cover is
+    // marked clean: the same pane, and only if its text is still the text that was sent.
+    const pane = wikiPane(), { server, gen, page } = pane, body = wikiBody;
     try {
-      const { value: queued } = await invokeDebugged<boolean>("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
-      wikiDirty = false;
-      wikiDrafts.delete(activeWikiPage);
+      const { value: queued } = await invokeDebugged<boolean>("save_wiki_page", { server, name: page, body });
+      if (wikiPaneCurrent(pane)) {
+        if (wikiBody === body) {
+          wikiDirty = false;
+          wikiDrafts.delete(page); // the saved bytes cover both the pane and its older stash
+        } else {
+          // An outgoing page read may already have stashed newer typing while this pane remains
+          // visible. Preserve its current text now: that read can replace the pane as soon as
+          // this Save returns, without another opportunity to stash the edits it did not cover.
+          wikiDrafts.set(page, wikiBody);
+        }
+      } else if (viewCurrent(gen, server) && wikiDrafts.get(page) === body) wikiDrafts.delete(page);
       if (queued) {
         // Review mode: the save became a proposal. The page itself is unchanged until an
         // admin approves it (or the window lapses), so reload rather than pretend.
-        await refreshWiki();
-        wikiEdit = false;
+        if (viewCurrent(gen, server)) await refreshWiki();
+        if (wikiPaneCurrent(pane)) wikiEdit = false;
         toast(`Edit submitted for review: it publishes when approved, or automatically in ${wikiReviewDays} day${wikiReviewDays === 1 ? "" : "s"}`, "info", 6000);
       } else {
-        toast(`Saved "${activeWikiPage}"`, "ok", 2500);
+        toast(`Saved "${page}"`, "ok", 2500);
       }
     } catch (e) {
-      toast(`Saving "${activeWikiPage}" failed: ${e}`, "err", 9000);
+      toast(`Saving "${page}" failed: ${e}`, "err", 9000);
     }
   }
   const inviteRefreshGeneration = new Map<number, number>();
@@ -10507,33 +11007,58 @@
     }
   }
 
-  // Share a file into the Files-tab's current folder.
-  async function uploadFile(fileList: FileList | null) {
-    if (!fileList?.length || activeServerId === null) return;
+  // Share a file into the Files-tab's current folder. Videos go through the editor first unless
+  // `asIs` (Shift held through the drop or the pick).
+  //
+  // The batch is bound to the folder it was dropped into and to `videoEditorScope`, as
+  // `embedMedia` is: a review can take minutes, and a file should not land in whichever folder or
+  // server happens to be open by the time it uploads.
+  async function uploadFile(fileList: FileList | null, asIs = false) {
+    if (!fileList || !canStartUpload(fileList.length)) return;
+    const files = Array.from(fileList);
+    const review = videoReviewPlan(files, asIs);
+    const into = folder;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
+    const scope = videoEditorScope;
+    const epoch = videoScopeEpoch;
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch;
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const file of Array.from(fileList)) {
-        const tid = toast(`Sharing ${file.name}…`, "info", 0);
+      for (let i = 0; i < files.length; i++) {
+        if (!here()) { abandoned = files.length - i; break; }
+        const reviewed = await reviewForUpload(files[i], files[i].name, review(files[i]), scope, "files");
+        // A review the scope change closed was reported by the rescope effect; count the rest.
+        if (!here()) { abandoned = files.length - i - (reviewed === null ? 1 : 0); break; }
+        if (!reviewed) continue;
+        const { upload, uploadName } = reviewed;
+        const tid = toast(`Sharing ${uploadName}…`, "info", 0);
         try {
-          await addSharedFile(file, folder);
-          updateToast(tid, `Shared ${file.name}`, "ok");
+          await addSharedFile(upload, into, uploadName);
+          if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}`, "ok");
         } catch (e) {
-          updateToast(tid, `Sharing ${file.name} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Sharing ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      await refreshFiles();
+      if (abandoned > 0 && sessionCurrent()) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not shared: you moved elsewhere`, "info", 7000);
+      }
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
   }
 
   function onFilesDrop(e: DragEvent) {
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
-    void uploadFile(e.dataTransfer?.files ?? null);
+    void uploadFile(e.dataTransfer?.files ?? null, e.shiftKey);
   }
 
   function onEventDrop(e: DragEvent) {
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
     void pickEventImage(e.dataTransfer?.files ?? null);
@@ -10542,41 +11067,244 @@
   // Embed media (image/video/audio) into the chat/status composer: upload under this
   // member's embed folder, then insert a `![name](cid:HEX)` marker into the draft for the
   // shared renderer to resolve inline. Non-media files are shared as plain attachments.
-  async function embedFiles(target: "chat" | "status", fileList: FileList | null) {
-    if (!fileList) return;
-    await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })));
+  async function embedFiles(target: "chat" | "status", fileList: FileList | null, asIs = false) {
+    // Refuse before Array.from retains an arbitrarily large FileList for a waiting batch.
+    if (!fileList || !canStartUpload(fileList.length)) return;
+    await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })), asIs);
   }
 
   // Embed media that already knows what it wants to be called. A picked or dropped file brings its
   // own name; a pasted screenshot has no name of its own and is given one (see clipboard-media.ts).
-  async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[]) {
-    if (items.length === 0 || activeServerId === null) return;
+  //
+  // A video the editor can open goes through it first (see `reviewVideo`): the person may trim it,
+  // cut pieces out, send it untouched, or not send it at all. Only what they confirm is uploaded.
+  //
+  // Every item is bound to where the batch started (`videoEditorScope`: lock state, server and
+  // channel). Reviews and uploads take time, and the person can move in the meantime. Once they
+  // have, nothing more is reviewed or uploaded, and nothing lands in the draft now on screen,
+  // which belongs to somewhere else. `addSharedFile` reads the active server when it is called,
+  // so the check must come right before that call, with no await in between.
+  //
+  // `asIs` (Shift held through the drop or the picker click) skips the editor for the batch.
+  // "Post now" in the editor sends the message (or posts the announcement) as soon as that file is
+  // attached; files after it in the batch then attach to the emptied composer as usual. The batch
+  // waits for that send to settle first: until it does, the send owns the composer, and a file
+  // appended meanwhile would leave the sent text and video behind in the draft beside it.
+  async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[], asIs = false) {
+    if (!canStartUpload(items.length)) return;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
+    const review = videoReviewPlan(items.map(({ file }) => file), asIs);
+    const scope = videoEditorScope;
+    // The epoch catches a round trip (channel A, B, then A again, or a lock and unlock) that the
+    // key alone would miss: the batch was still interrupted, and its context may have changed.
+    const epoch = videoScopeEpoch;
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch;
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const { file, name } of items) {
-        const tid = toast(`Uploading ${name}…`, "info", 0);
+      for (let i = 0; i < items.length; i++) {
+        if (!here()) { abandoned = items.length - i; break; }
+        const { file, name } = items[i];
+        const reviewed = await reviewForUpload(file, name, review(file), scope, target);
+        // A lock or a server or channel switch while the editor was open (or while this review
+        // waited its turn) settled it as a skip. That file is counted in the rescope effect's
+        // message; count only the ones after it.
+        if (!here()) { abandoned = items.length - i - (reviewed === null ? 1 : 0); break; }
+        if (!reviewed) continue;
+        const { upload, uploadName, post } = reviewed;
+        // "Post now" means the message as it stood when the person pressed it. The upload can take
+        // a while, and the composer stays usable meanwhile: anything typed (or a reply target
+        // changed) in that time is a different message, which must not be sent on their behalf.
+        const pressed = post ? composerState(target) : "";
+        const tid = toast(`Uploading ${uploadName}…`, "info", 0);
         try {
-          const cid = await addSharedFile(file, myEmbedFolder, name);
+          const cid = await addSharedFile(upload, myEmbedFolder, uploadName);
+          if (!here()) {
+            // Shared where the batch started, but the composer on screen now belongs elsewhere.
+            if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}, not attached: you moved to another channel`, "info", 7000);
+            continue;
+          }
+          const unchanged = post && composerState(target) === pressed;
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
-          const alt = name.replace(/[[\]]/g, " ");
+          const alt = uploadName.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
           if (target === "chat") { draft = draft ? `${draft} ${marker}` : marker; saveDraftFor(chanKey()); }
           else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
-          updateToast(tid, `Attached ${name}`, "ok");
+          if (!post) {
+            updateToast(tid, `Attached ${uploadName}`, "ok");
+          } else if (!unchanged) {
+            updateToast(tid, `Attached ${uploadName}, not sent: the message changed while it uploaded`, "info", 7000);
+          } else {
+            const posted = postFromComposer(target);
+            if (!posted.started) {
+              updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
+            } else {
+              updateToast(tid, `Attached ${uploadName}, sending`, "ok");
+              // See the header: nothing more attaches until this send lets go of the composer, and
+              // a move away while it ran ends the batch as any other move does.
+              const outcome = await posted.settled;
+              // Reported from what the send itself came to, never guessed from the composer: a
+              // sent message's draft can stay (edited meanwhile, even back to the same words), and
+              // telling the person to press Send then would send it twice (found in review). An
+              // uncertain one must not be sent again either, and an announcement that threw may
+              // have posted (it has no retry token to make a second post safe). Reported before a
+              // move away ends the batch, since the outcome is known either way. The original
+              // UI session must still own the toast, including after a completed lock/unlock.
+              if (!sessionCurrent()) { /* the original session no longer owns this toast */ }
+              else if (outcome === "sent") updateToast(tid, `Attached ${uploadName}, sent`, "ok");
+              else if (outcome === "uncertain") updateToast(tid, `Attached ${uploadName}, not confirmed yet: don't send it again`, "info", 9000);
+              else if (outcome === "failed" && target === "status") updateToast(tid, `Attached ${uploadName}, may not have posted: check the feed before posting again`, "err", 9000);
+              else if (outcome === "failed") updateToast(tid, `Attached ${uploadName}, not sent`, "err", 9000);
+              else updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
+              if (!here()) { abandoned = items.length - i - 1; break; }
+            }
+          }
         } catch (e) {
-          updateToast(tid, `Upload of ${name} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      await refreshFiles();
+      if (abandoned > 0 && sessionCurrent()) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not attached: you moved to another channel`, "info", 7000);
+      }
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
   }
 
+  // The pre-upload video editor (VideoEditor.svelte). `VideoReviewQueue` holds the rules: one
+  // editor at a time with later requests waiting their turn, answers accepted only from the editor
+  // they were asked of, and every request settled (as `skip` once its scope is gone).
+  let videoEditor = $state.raw<OpenReview | null>(null);
+  const videoReviews = new VideoReviewQueue((open) => { videoEditor = open; });
+  // One batch owns `uploading` until its real finally runs, including across lock and close.
+  // Do not reset it at those boundaries: an old completion must not release a newer batch.
+  const MAX_UPLOAD_BATCH_FILES = 32;
+  function canStartUpload(count: number): boolean {
+    if (count === 0 || activeServerId === null || locked || !uiStateReady || windowCloseInFlight) return false;
+    if (uploading) { toast("Wait for the current upload to finish before adding more files.", "info", 5000); return false; }
+    if (count > MAX_UPLOAD_BATCH_FILES) { toast(`Choose at most ${MAX_UPLOAD_BATCH_FILES} files at a time.`, "warn", 5000); return false; }
+    return true;
+  }
+  // Everything a review is bound to, as one primitive so the effect below only reruns when it
+  // actually changes. Reading `cur?.active` straight from an effect would rerun it whenever the
+  // server list is replaced, and that would close an editor mid-edit for nothing.
+  const videoEditorScope = $derived(`${locked ? "locked" : windowCloseInFlight ? "closing" : !uiStateReady ? "loading" : "open"}|${uiStateLoadGeneration}|${activeServerId ?? ""}|${chanKey() ?? ""}`);
+  // The protocol ceiling on a single file (catcoms-app MAX_FILE_BYTES); the cap the editor uses
+  // while this server's own limit has not been read. The native side enforces the real one.
+  const VIDEO_EDITOR_FALLBACK_CAP = 1024 * 1024 * 1024;
+  // The clip maker's Music tab: this channel's Studio songs, read and resolved exactly as the
+  // Studio does (clip-music.ts). Only where there is a channel, and an identity to render takes as;
+  // elsewhere the tab offers music files from disk alone. The editor closes on any change of
+  // server or channel (`videoEditorScope`), so a review never reads another channel's songs.
+  const videoEditorMusic = $derived(activeServerId !== null && cur?.active && /^[0-9a-f]{64}$/.test(myIdentity)
+    ? studioMusic({ invoke, listen: (name, handler) => tauriListen(name, handler) }, { server: activeServerId, channel: cur.active }, myIdentity)
+    : null);
+  // Bumped by the effect below every time `videoEditorScope` changes; see `embedMedia`.
+  let videoScopeEpoch = 0;
+  function reviewVideo(file: File, position: ReviewPosition, scope: string, context: VideoEditorContext): Promise<VideoEditorResult> {
+    return videoReviews.request(file, position, scope, context);
+  }
+  // Which files of a batch go through the editor, and each one's "2 of 3" among them. None do with
+  // `asIs` (Shift), or in a window without WebCodecs, where every file uploads as it always did.
+  function videoReviewPlan(files: File[], asIs: boolean): (file: File) => ReviewPosition | null {
+    const reviewable = (file: File) => !asIs && webCodecsAvailable() && editableContainer(file.type) !== null;
+    const count = files.filter(reviewable).length;
+    let index = 0;
+    return (file) => reviewable(file) ? { index: ++index, count } : null;
+  }
+  // What a reviewed file uploads as, and whether "post now" asked for an immediate send.
+  type ReviewedUpload = { upload: File; uploadName: string; post: boolean };
+  // The composer as "post now" sees it: its text, and for chat the message being replied to.
+  function composerState(target: "chat" | "status"): string {
+    return target === "chat" ? `${replyingTo}\u0000${draft}` : statusDraft;
+  }
+  // Send the composer as its own Send does, and report whether a send actually started, and what
+  // it came to once settled. Both sends set their in-flight flag before their first await, so
+  // reading it straight after the call tells a started send from one their own guards refused (a
+  // send already under way, a lock, the pending-message manager open). `settled` never rejects: it
+  // resolves to the send's own `SendOutcome` (each send shows its own errors), "failed" if it threw.
+  // (A named type, not an inline one: video-embed-flow.test.ts runs this function's own text.)
+  type ComposerPost = { started: boolean; settled: Promise<SendOutcome> };
+  function postFromComposer(target: "chat" | "status"): ComposerPost {
+    const quiet = (run: Promise<SendOutcome>): Promise<SendOutcome> => run.then((outcome) => outcome, () => "failed");
+    if (target === "chat") {
+      const wasSending = sending;
+      const run = send();
+      return { started: !wasSending && sending, settled: quiet(run) };
+    }
+    const wasPosting = statusPosting;
+    const run = postStatus();
+    return { started: !wasPosting && statusPosting, settled: quiet(run) };
+  }
+  // One file's way to its upload: through the editor when `position` says it is reviewed, else
+  // unchanged. Null means the person chose not to upload it. An edited file takes its container's
+  // name (`clip.mov` re-encoded is `clip.mp4`).
+  async function reviewForUpload(
+    file: File,
+    name: string,
+    position: ReviewPosition | null,
+    scope: string,
+    context: VideoEditorContext,
+  ): Promise<ReviewedUpload | null> {
+    const container = editableContainer(file.type);
+    if (!position || !container) return { upload: file, uploadName: name, post: false };
+    const result = await reviewVideo(file, position, scope, context);
+    if (result.kind === "skip") return null;
+    if (result.kind === "edited") return { upload: result.file, uploadName: editedFileName(name, container), post: result.post === true };
+    return { upload: file, uploadName: name, post: result.post === true };
+  }
+  // Shift held through a picker click (the drop event carries its own `shiftKey`; paste has no
+  // Shift form); see upload-intent.ts for why each gesture is read where it is.
+  const uploadIntent = new ShiftIntent();
+  // With Tauri's own drop handling off (tauri.conf.json), drops from outside reach the page as a
+  // browser's would: nothing dropped outside a zone may navigate the window, and no file may be
+  // released into an embedded third-party frame. See drop-guard.ts.
+  $effect(() => installFileDropGuard(window, document));
+  $effect(() => {
+    const scope = videoEditorScope;
+    untrack(() => {
+      videoScopeEpoch++;
+      const { closedOpen, closedContext, dropped } = videoReviews.rescope(scope);
+      const lost = (closedOpen ? 1 : 0) + dropped;
+      // Not on lock: the lock screen is its own explanation, and a toast would sit behind it.
+      if (lost === 0 || !scope.startsWith("open|")) return;
+      toast(closedOpen && dropped === 0 && closedContext
+        ? `The video you were editing was not ${editorWords(closedContext).done}: you moved elsewhere`
+        : `${lost} videos were not added: you moved elsewhere`, "info", 7000);
+    });
+  });
+  // Keys the editor lets through to the app although it is modal: Lock, which must work from
+  // anywhere, and push-to-talk, so someone in a call can still speak while trimming a clip.
+  // Push-to-talk only matches its code, so a combination that merely contains that key (Ctrl+Z
+  // with push-to-talk on Z, Alt+Left with it on an arrow) stays with the editor: passed on, it
+  // would both skip the editor's own command and fire an app shortcut behind the dialog.
+  function videoEditorPassKey(e: KeyboardEvent): boolean {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "l") return true;
+    const modifierKey = /^(Control|Alt|Meta|Shift|OS)/.test(e.code);
+    if ((e.ctrlKey || e.metaKey || e.altKey) && !modifierKey) return false;
+    return pushToTalkEvent(pushToTalk, { code: e.code, typing: false, inCall });
+  }
+
+  // Every file drop zone's dragover. A zone takes files only: accepting any drag would swallow text
+  // or a link dragged into the composer or the wiki editor, which their own fields handle natively.
+  // The effect is pinned to "copy" so the source app (Explorer, a browser) never treats the drop as
+  // a move of its file.
+  function acceptFileDrag(e: DragEvent) {
+    if (!carriesFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    dragOver = true;
+  }
+
+  // Shift held as the files land: attach them as they are, without the video editor.
   function onComposerDrop(target: "chat" | "status", e: DragEvent) {
+    // Text or a link dropped on the composer is the textarea's own native drop; only files are ours.
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
-    embedFiles(target, e.dataTransfer?.files ?? null);
+    embedFiles(target, e.dataTransfer?.files ?? null, e.shiftKey);
   }
 
   // Paste a screenshot or a media file straight into the composer, the same way dropping one in
@@ -10584,7 +11312,9 @@
   // default on those would swallow ordinary text pastes, and copying a region of a web page puts
   // an HTML flavour on the clipboard beside the picture.
   function onComposerPaste(target: "chat" | "status", e: ClipboardEvent) {
-    const media = pastedMedia(e.clipboardData?.files);
+    const files = e.clipboardData?.files;
+    if (files?.length && !canStartUpload(files.length)) { e.preventDefault(); return; }
+    const media = pastedMedia(files);
     if (!media.length) return;
     e.preventDefault();
     // One instant for the whole paste, so a multi-image paste keeps its clipboard order in the
@@ -10605,11 +11335,10 @@
   }
 
   function mayAutoLoadSharedFile(file: UiFile, server: number | null = activeServerId): boolean {
-    // "Media" for the media-only mode is what the renderer would decode inline: a declared
-    // image, audio or video type the safe list admits. Anything else waits for a click. This is
-    // screening only; the native catcoms-media handler re-checks the declared type against the
-    // real container bytes and stays the authority on what gets a body.
-    const fileClass: PassiveFileClass = safeMime(file.mime) !== "" ? "validated-media" : "non-media";
+    // The media-only preference covers platform media and our bounded PIXA canvas decoder.
+    // This class is screening, not validation: the native media handler checks platform
+    // containers, while PixaFileReader applies the 9 MiB cap and strict PIXA/PIX/take validation.
+    const fileClass: PassiveFileClass = safeMime(file.mime) !== "" || mediaKind(file.name, file.mime) === "pixa" ? "validated-media" : "non-media";
     return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified, fileClass);
   }
 
@@ -10641,6 +11370,7 @@
    * so it must be returned to an inert button/text placeholder here as well as clearing caches.
    */
   function revokePassiveMedia() {
+    pixaPreviews?.reset();
     mediaUrls = {};
     emojiUrls = {};
     if (typeof document === "undefined" || activeServerId === null) return;
@@ -10827,6 +11557,10 @@
       span.setAttribute("data-resolved", "1");
       const mime = safeMime(file.mime);
       const alt = span.getAttribute("data-alt") || file.name || "";
+      if (mediaKind(file.name, file.mime) === "pixa") {
+        span.replaceWith(makePixaPreview(file));
+        continue;
+      }
       if (!mime) {
         span.replaceWith(downloadChip(file));
         continue;
@@ -11067,9 +11801,11 @@
   }
 
   // --- image lightbox: click an inline image to fill the screen with it ----------------------
-  // The viewer reuses the data: URL the embed already holds, so opening it never refetches the
-  // blob; `cid` is kept so Properties/Download can look the file up in the index.
-  let lightbox = $state<{ cid: string; url: string; alt: string } | null>(null);
+  // The viewer reuses the catcoms-media: address the embed already loads from, so opening it never
+  // refetches the blob; `cid` is kept so Properties/Download can look the file up in the index.
+  // `source` is the decoded <img> itself: LightboxPicture resamples its pixels once into the fit
+  // view's copy (an element, so the $state proxy stores it as is rather than wrapping it).
+  let lightbox = $state<{ cid: string; url: string; alt: string; source: HTMLImageElement } | null>(null);
   let lightboxZoom = $state(false); // false = fit the window, true = 1:1 and scrollable
   const lightboxFile = $derived.by(() => {
     const lb = lightbox;
@@ -11081,6 +11817,7 @@
       cid: (el.getAttribute("data-embed-cid") ?? "").toLowerCase(),
       url: el.currentSrc || el.src,
       alt: el.alt,
+      source: el,
     };
     lightboxZoom = false;
   }
@@ -11296,6 +12033,17 @@
     if (activeServerId === null) return;
     const server = activeServerId;
     const key = dlKey(server, f.cid);
+    if (saveInProgress(f.cid)) return;
+    const existing = privateDownloads.find(row => row.cid === f.cid);
+    if (existing) {
+      if (existing.status === "exhausted") { switchView("downloads"); return; }
+      await resumePrivateDownload(existing);
+      return;
+    }
+    const gen = viewGeneration;
+    const operation = `save-${crypto.randomUUID()}`;
+    error = "";
+    activeSaves[key] = operation;
     const started = Date.now();
     const held = Math.min(f.held, f.total);
     downloads[key] = {
@@ -11303,6 +12051,7 @@
       cid: f.cid,
       name: f.name,
       author: f.author,
+      operation,
       status: "queued",
       progress: f.total > 0 ? held / f.total : 0,
       done: held,
@@ -11317,25 +12066,94 @@
       ts: started,
     };
     try {
-      const saved = await saveGroupFile(invoke, server, f.cid, f.name);
-      if (downloads[key]) {
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation });
+      if (!unlockedViewCurrent(gen, server)) return;
+      if (downloads[key]?.operation === operation) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
       const notice = downloadSavedNotice(f.name, saved);
       toast(notice.text, notice.kind, notice.ms);
-      refreshFiles(); // the file's chunks are now held locally: update its availability
+      refreshFiles();
     } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
       error = String(e);
-      if (downloads[key]) {
+      if (downloads[key]?.operation === operation) {
         downloads[key].status = "failed";
         downloads[key].error = String(e);
         downloads[key].updatedAt = Date.now();
       }
+    } finally {
+      if (activeSaves[key] === operation) delete activeSaves[key];
+      if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
+      if (unlockedViewCurrent(gen, server)) void refreshFiles();
+    }
+  }
+
+  async function resumePrivateDownload(row: PrivateDownload) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || row.status === "receiving" || row.status === "removing") return;
+    const mutation = Symbol("private download");
+    error = "";
+    privateDownloadBusy = mutation;
+    privateDownloadSaves[row.id] = mutation;
+    fileInventoryGate.invalidate();
+    const operation = `save-${crypto.randomUUID()}`;
+    const key = dlKey(server, row.cid);
+    try {
+      if (row.status === "exhausted") {
+        await invoke("retry_private_download", { server, download: row.id, expectedGrant: row.grant,
+          request: crypto.randomUUID().replaceAll("-", "") });
+        if (!unlockedViewCurrent(gen, server)) return;
+      }
+      const name = filesByCid.get(row.cid)?.name ?? `download-${row.cid.slice(0, 12)}`;
+      const file = filesByCid.get(row.cid), started = Date.now();
+      activeSaves[key] = operation;
+      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "",
+        status: "queued", progress: row.verifiedChunks / row.totalChunks, done: row.verifiedChunks,
+        total: row.totalChunks, heldBefore: row.verifiedChunks, bytesDone: 0, bytesTotal: file?.size ?? 0,
+        networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
+      // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
+      // this separate token blocks only a duplicate Save of this same native owner.
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation);
+      if (!unlockedViewCurrent(gen, server)) return;
+      if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
+      const notice = downloadSavedNotice(name, saved);
+      toast(notice.text, notice.kind, notice.ms);
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) {
+        error = String(e);
+        if (downloads[key]?.operation === operation) Object.assign(downloads[key], { status: "failed", error: String(e), updatedAt: Date.now() });
+      }
+    } finally {
+      if (activeSaves[key] === operation) delete activeSaves[key];
+      if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadSaves[row.id] === mutation) delete privateDownloadSaves[row.id];
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  async function changePrivateDownload(row: PrivateDownload, remove: boolean) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || privateDownloadBusy) return;
+    const mutation = Symbol("private download intent");
+    privateDownloadBusy = mutation;
+    fileInventoryGate.invalidate();
+    try {
+      if (remove) await invoke("cancel_private_download", { server, download: row.id });
+      else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
+    } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
+    finally {
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
 
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
   let fileInfo = $state<UiFile | null>(null);
+  let fileInfoKeptCopy = $derived(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid));
+  let fileInfoKeptRecord = $derived(keptFiles?.transfers.find((copy) => copy.cid === fileInfo?.cid));
+  let fileInfoKeptTransfer = $derived(fileInfoKeptCopy ? undefined : fileInfoKeptRecord);
   let fileInfoAvail = $state<boolean | null>(null); // null = still checking
   let fileInfoPreview = $state<string>(""); // a data: URL for image/video/audio previews
   let fileInfoPreviewError = $state(false); // the preview fetch failed (so "Loading…" doesn't hang)
@@ -11425,6 +12243,7 @@
     cid: string;
     name: string;
     author: string; // the uploader (the file's source)
+    operation: string; // native progress correlation, never an authority token
     provider?: string; // the live serving peer's fingerprint, when bytes came over the network
     status: "queued" | "waiting" | "downloading" | "verifying" | "done" | "failed";
     progress: number; // 0..1
@@ -11444,7 +12263,13 @@
   // Keyed by `${server}:${cid}` so a download is scoped to its server (the same content cid can
   // exist on two servers, and switching servers must not show the other's transfers).
   let downloads = $state<Record<string, DownloadInfo>>({});
+  // Actual invocation ownership is independent of historical display status. A completion in
+  // another view must retire its own busy token without publishing a stale path or notice.
+  let activeSaves = $state<Record<string, string>>({});
   const dlKey = (server: number, cid: string) => `${server}:${cid}`;
+  function saveInProgress(cid: string): boolean {
+    return activeServerId !== null && !!activeSaves[dlKey(activeServerId, cid)];
+  }
   type UploadInfo = {
     server: number;
     id: string;
@@ -11583,6 +12408,102 @@
   // band). Never gates anything; driven by 'eclipse-changed'. Reset when switching servers.
   let eclipseCaution = $state(false);
 
+  let pixaPreviews: PixaPreviewManager | null = null;
+  function pixaPreviewScope(): PixaPreviewScope | null {
+    return activeServerId !== null && cur?.active ? { server: activeServerId, channel: cur.active,
+      generation: uiStateLoadGeneration, membership: studioMembership, surface: view } : null;
+  }
+  function makePixaPreview(file: UiFile, explicit = false): HTMLElement {
+    const scope = pixaPreviewScope();
+    if (!scope) return downloadChip(file);
+    if (!pixaPreviews) pixaPreviews = new PixaPreviewManager({
+      reader: new PixaFileReader(invoke, jamNonce()),
+      current: (target, expected) => {
+        const current = pixaPreviewScope(), listed = filesByCid.get(expected.cid);
+        return !locked && !!current && current.server === target.server && current.channel === target.channel &&
+          current.generation === target.generation && current.membership === target.membership && current.surface === target.surface &&
+          !!listed && listed.size === expected.size && mediaKind(listed.name, listed.mime) === "pixa";
+      },
+      autoLoad: (target, expected) => {
+        const listed = filesByCid.get(expected.cid);
+        return !!listed && mayAutoLoadSharedFile(listed, target.server);
+      },
+      renewScope: (previous, expected) => {
+        const current = pixaPreviewScope(), listed = filesByCid.get(expected.cid);
+        return !locked && current?.server === previous.server && current.channel === previous.channel &&
+          listed?.size === expected.size && mediaKind(listed.name, listed.mime) === "pixa" ? current : null;
+      },
+      startAudio: (token, value, target) => startStudioAudio("flipnote", async () => encodePixa(value), true, 0, { token, scope: target }),
+      stopAudio: token => { if (inlinePixaAudioOwner?.token === token) stopStudioAudio(); },
+      audioState: token => inlinePixaAudioOwner?.token === token && studioAudioState.state !== "stopped" ? studioAudioState : null,
+      // "open" on a card opens the global viewer for the listed file, only while the card's
+      // channel is still the one on screen: a card left in a detached log must not open a
+      // viewer for another server's share.
+      open: (file, target) => {
+        const current = pixaPreviewScope(), listed = filesByCid.get(file.cid);
+        // The whole scope, not only the place: a card that outlived a lock/unlock or a
+        // membership change is a stale request even when the channel on screen is the same.
+        if (!current || current.server !== target.server || current.channel !== target.channel ||
+          current.generation !== target.generation || current.membership !== target.membership || !listed) return;
+        void openPixaViewer(listed);
+      },
+      expiryText: file => { const listed = filesByCid.get(file.cid); return listed ? fileExpiryText(listed) : ""; },
+    });
+    return pixaPreviews.create(file, scope, explicit);
+  }
+  function filePixaPreview(node: HTMLElement, file: UiFile) {
+    let host = makePixaPreview(file, true); node.append(host);
+    return { update(next: UiFile) { host.remove(); host = makePixaPreview(next, true); node.append(host); }, destroy() { host.remove(); pixaPreviews?.reconcile(); } };
+  }
+  $effect(() => {
+    void locked; void activeServerId; void cur?.active; void view; void uiStateLoadGeneration; void studioMembership; void callDeafened;
+    untrack(() => pixaPreviews?.reset());
+  });
+  $effect(() => { void files; untrack(() => pixaPreviews?.reconcile()); });
+  onDestroy(() => pixaPreviews?.destroy());
+
+  // One global animation viewer works from Files and any chat/wiki file reference. Opening
+  // requests bytes explicitly; playback needs its own gesture and uses Studio's existing synth.
+  let pixaViewer = $state.raw<{ generation: number; server: number; file: UiFile; pixa: Pixa | null; error: string } | null>(null);
+  let pixaViewerGeneration = 0;
+  const pixaFileReader = new PixaFileReader(invoke, jamNonce());
+  function closePixaViewer() {
+    pixaViewerGeneration++; pixaFileReader.cancel(); pixaViewer = null; stopStudioAudio();
+  }
+  async function openPixaViewer(file: UiFile) {
+    const server = activeServerId;
+    if (locked || server === null) return;
+    closePixaViewer(); closeFileInfo();
+    const generation = pixaViewerGeneration;
+    pixaViewer = { generation, server, file, pixa: null, error: "" };
+    const current = () => !locked && activeServerId === server && pixaViewer?.generation === generation;
+    try {
+      const pixa = await pixaFileReader.read(server, file.cid, file.size, current);
+      if (current() && pixa) pixaViewer = { generation, server, file, pixa, error: "" };
+    } catch (e) { if (current()) pixaViewer = { generation, server, file, pixa: null, error: String(e) }; }
+  }
+  /// The viewer's Play: sound and frames from the held frame, looping when the viewer says so.
+  /// The same Studio audio session as everything else; a false result means it could not start
+  /// (Deafen, scope, cancellation) and the viewer shows its own line for that.
+  function playPixaViewerFrom(offsetMs: number, loop: boolean): Promise<boolean> {
+    const value = pixaViewer?.pixa;
+    if (!value) return Promise.resolve(false);
+    return studioAudioActions.start("flipnote", async () => encodePixa(value), loop, offsetMs)
+      .catch(e => { toast(String(e), "err"); return false; });
+  }
+  /// A listing's expiry as the card/viewer facts show it; empty when the share never recorded one.
+  function fileExpiryText(f: UiFile): string {
+    if (!f.expires_known) return "";
+    if (f.expires === null) return "keeps";
+    return `expires ${relDay(f.expires, nowTick)}`;
+  }
+  $effect(() => {
+    // Closing on both directions of these lifecycle edges prevents an old async read or
+    // playback from gaining currency when navigation, membership or Deafen returns to its value.
+    void locked; void activeServerId; void view; void cur?.active; void studioMembership; void callDeafened; void inCall; void callServer; void callChannel;
+    untrack(() => { if (pixaViewer) closePixaViewer(); });
+  });
+
   async function openFileInfo(f: UiFile) {
     if (activeServerId === null) return;
     cancelKeptTransfer();
@@ -11642,8 +12563,9 @@
   /** From Properties → "Used in": close the pane and open the wiki page that embeds the file. */
   async function openUsageWikiPage(name: string) {
     closeFileInfo();
-    switchView("wiki");
-    await openWikiPage(name);
+    const route = studioExit.begin();
+    switchView("wiki", route);
+    await openWikiPage(name, {}, route);
   }
 
   async function removeFile(f: UiFile) {
@@ -11945,7 +12867,7 @@
   }
   // Follow a `[…](status:ID)` chip: switch to the Status tab and flash the post.
   let flashStatusId = $state("");
-  async function openStatusRef(id: string) {
+  async function openStatusRef(id: string, route: StudioRoute = studioExit.begin()) {
     if (!id) return;
     // The one route to this surface that does not pass through switchView, so it carries the same
     // refusal: a `status:` chip pasted into a DM names a noticeboard a DM does not have, and
@@ -11954,6 +12876,7 @@
       toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
       return;
     }
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // nor through switchView's Studio Save, so it runs its own
     view = "status";
     void refreshStatusPolicy(); // this route reaches the surface without going through switchView
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
@@ -12111,15 +13034,20 @@
   function inboxChannelName(it: InboxEntry): string {
     return servers.find((s) => s.id === it.server)?.channels.find((c) => c.id === it.channel)?.name ?? "channel";
   }
-  function openInbox() {
-    inboxView = true;
-    dmHome = false;
-    if (newsUnseen) {
-      inboxMode = "news";
-      newsUnseen = false;
-      loadNews();
-    }
-    loadInbox();
+  /// The inbox replaces the main pane, so opening it takes the Studio off screen. `then` runs only
+  /// once the inbox actually opened (never after a refused Studio Save).
+  function openInbox(then: () => void = () => {}) {
+    leaveStudioThen(() => {
+      inboxView = true;
+      dmHome = false;
+      if (newsUnseen) {
+        inboxMode = "news";
+        newsUnseen = false;
+        loadNews();
+      }
+      loadInbox();
+      then();
+    });
   }
   // Open the server + channel an inbox entry points at and scroll to the message.
   async function jumpToInbox(it: InboxEntry) {
@@ -12127,17 +13055,20 @@
     // rather than walking you back out of it a step at a time.
     navStepStart();
     try {
+      const route = studioExit.begin();
       inboxView = false;
-      if (it.server !== activeServerId) await switchServer(it.server);
+      // A refused or superseded switch leaves another server on screen; never jump within it.
+      if (!(await arriveAtServer(it.server, route))) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // the switch awaited the server's load
       view = "chat";
       // The entry's channel was scanned (so it's open in the backend) but may not be in this UI's
       // sidebar list: register it so it renders + selects, then switch to it.
       if (cur && !cur.channels.some((c) => c.id === it.channel)) {
         cur.channels = [...cur.channels, { id: it.channel, name: inboxChannelName(it) }];
       }
-      if (cur && cur.active !== it.channel) switchTo(it.channel);
+      if (cur && cur.active !== it.channel) switchTo(it.channel, false, route);
       await refresh();
-      jumpToMessageId(it.message_id);
+      if (route.current()) jumpToMessageId(it.message_id);
     } finally {
       navStepEnd();
     }
@@ -12154,6 +13085,9 @@
     fp: string;
     server: number;
     channel: string;
+    // A channel name can be left and rejoined. RTC callbacks belong to this exact join,
+    // as well as this exact peer object; identity or room equality cannot renew them.
+    callLease: number;
     pc: RTCPeerConnection;
     dc: RTCDataChannel | null;
     polite: boolean;
@@ -12194,6 +13128,14 @@
   // Call-server members whose fingerprint another member shares, so call labels can say so.
   let callSharedIds = $state<ReadonlySet<string>>(new Set());
   let activeCallLease = 0; // binds async call-only caches to this exact room lifecycle
+  // Which signalling protocol owns the current join (voice-signaling.ts CallSignalMode). Pinned by
+  // joinVoice before anything is sent and reset only by leaveVoice, so a V2 join never falls back
+  // to legacy. V2 is not chosen yet (voiceV2Activation lists what is missing), so every call is
+  // legacy today and the V2 gates in handleCallSignal/sendSignal stay inert until activation.
+  let callSignalMode: CallSignalMode = "legacy";
+  // Legacy kinds already diagnosed as excluded in this join: each protocol word is recorded once,
+  // so legacy peers pinging a V2 room every five seconds cannot flood the diagnostics ring.
+  const legacyExcludedKinds = new Set<string>();
   // Names and avatars on the call surfaces MUST resolve against the room's server, never the
   // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
   // so reading it from the call bar re-labelled you and every peer the moment you clicked
@@ -12242,6 +13184,15 @@
   let localStream: MediaStream | null = null;
   const micCaptureSession = new MediaCaptureSession();
   const callLifecycleSession = new MediaCaptureSession();
+  const callMappingSession = new CallMappingSession(invoke);
+  function destroyVoiceOnUnmount() {
+    // HMR can replace this component without destroying the WebView. Revoke old callbacks
+    // before teardown, then close RTC/media and pending capture through the ordinary leave path.
+    callLifecycleSession.invalidate();
+    try { leaveVoice(); }
+    finally { callMappingSession.destroy(); }
+  }
+  onDestroy(destroyVoiceOnUnmount);
   const callPeers: Record<string, CallPeer> = {};
   // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
   // remote description instead of throwing it away and making the call depend on event timing.
@@ -12463,8 +13414,11 @@
     // wrote, so it is safe to record and it is what turns a wall of identical warnings into
     // "every ice candidate failed while the offer got through".
     const kind = typeof msg.type === "string" ? msg.type : "unknown";
+    // Nothing legacy leaves for a V2 join's room: a legacy hello or ping would invite older builds
+    // into the protected call, and a legacy bye is not how a V2 join leaves (the native end is).
+    if (legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: msg.callId }) === "suppress") return false;
     try {
-      const { value: delivered } = await invokeDebugged<boolean>("send_call_signal", {
+      const { value: submitted } = await invokeDebugged<boolean>("send_call_signal", {
         server,
         target,
         payload: b64enc(JSON.stringify(msg)),
@@ -12472,7 +13426,7 @@
       // The incident this whole section exists for: the roster shows a claimed path and the
       // transport has nowhere to send to. A run of these is a call that is about to die, and it
       // used to be a console.warn nobody had open.
-      if (!delivered) {
+      if (!submitted) {
         diagRecord({
           section: "voice",
           code: "VOICE.SIGNAL.NO_MEMBER_ROUTE",
@@ -12480,7 +13434,7 @@
           fields: { kind },
         });
       }
-      return delivered;
+      return submitted;
     } catch (e) {
       diagRecord({
         section: "voice",
@@ -12510,7 +13464,12 @@
   function broadcast(msg: Record<string, unknown>) {
     const server = callServer;
     const selfId = callSelfId;
-    if (server !== null && selfId) void broadcastOn(server, selfId, msg);
+    if (server === null || !selfId) return;
+    // Decide legacy egress now, for the join that created this message. broadcastOn awaits the
+    // roster first; by then teardown (or the next call) may have reset the global mode, and the
+    // final check in sendSignal would judge this old V2-room message by the new state.
+    if (legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: msg.callId }) === "suppress") return;
+    void broadcastOn(server, selfId, msg);
   }
   /**
    * Say goodbye, on every route at once, before the room is torn down.
@@ -12533,6 +13492,11 @@
    */
   function announceHangup(server: number, selfId: string, channel: string) {
     const farewell = { callId: channel, type: "bye" };
+    // Bind the legacy decision to the join being left, before the roster await below: leaveVoice
+    // resets callSignalMode synchronously after this returns, so a check at send time would let a
+    // V2 join's farewell out as a legacy bye. A V2 join leaves through its native end instead.
+    const legacyFarewell =
+      legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel }) === "send";
     const edges: string[] = [];
     for (const [id, peer] of Object.entries(callPeers)) {
       edges.push(id);
@@ -12540,6 +13504,7 @@
         try { peer.dc.send(JSON.stringify({ t: "bye" })); } catch { /* edge already gone */ }
       }
     }
+    if (!legacyFarewell) return;
     void (async () => {
       // Peers with an edge are told whatever the roster read does, including nothing at all: an
       // established edge is better evidence that someone is in this room than the online list is.
@@ -13066,25 +14031,31 @@
   let studioAudioState = $state<StudioAudioState>({ state: "stopped", elapsedMs: 0 });
   let studioAudioGeneration = 0;
   let studioMembership = $state(0);
+  let inlinePixaAudioOwner = $state.raw<{ token: object; scope: PixaPreviewScope } | null>(null);
   function stopStudioAudio() {
     studioAudioGeneration++;
     studioAudio?.stop();
     studioAudioState = { state: "stopped", elapsedMs: 0 };
+    inlinePixaAudioOwner = null;
   }
   function studioAudioScope() {
-    return !locked && view === "studio" && activeServerId !== null && cur?.active
+    return !locked && (view === "studio" || pixaViewer !== null || inlinePixaAudioOwner !== null) && activeServerId !== null && cur?.active
       ? { generation: studioAudioGeneration, server: activeServerId, channel: cur.active, membership: studioMembership } : null;
   }
-  const studioAudioActions: StudioAudioActions = {
-    start: async (kind, prepare, loop, offset) => {
+  async function startStudioAudio(kind: Parameters<StudioAudioActions["start"]>[0], prepare: Parameters<StudioAudioActions["start"]>[1], loop: boolean, offset = 0, owner: typeof inlinePixaAudioOwner = null): Promise<boolean> {
+      stopStudioAudio(); inlinePixaAudioOwner = owner;
       suppressCurrentTake();
       const engine = ensureJamEngine();
       if (studioAudioEngine !== engine) { studioAudio?.stop(); studioAudioEngine = engine; studioAudio = new StudioAudioSession(engine); }
       studioAudio!.setScope(studioAudioScope(), callDeafened);
       const pending = studioAudio!.start(kind, prepare, loop, offset);
       studioAudioState = studioAudio!.state;
-      const started = await pending; studioAudioState = studioAudio!.state; return started;
-    },
+      const started = await pending; studioAudioState = studioAudio!.state;
+      if (!started && inlinePixaAudioOwner === owner) inlinePixaAudioOwner = null;
+      return started;
+  }
+  const studioAudioActions: StudioAudioActions = {
+    start: (kind, prepare, loop, offset) => startStudioAudio(kind, prepare, loop, offset),
     stop: stopStudioAudio,
   };
   async function shareStudioScore(take: JamTake, server: number): Promise<void> {
@@ -13093,22 +14064,47 @@
     await addSharedFile(new File([JSON.stringify(take)], name, { type: JAM_TAKE_MIME }), "", name, JAM_TAKE_MIME);
     // Reuse the existing sealed file upload path and jukebox-compatible take, not another media
     // store. Upload custody is separate from any owner receipt for the original Score document.
-    toast("Score take saved to this server's share; the jukebox can queue it (normal expiry applies)", "ok", 6000);
+    toast("Music track added to Files.", "ok", 5000);
   }
   async function shareStudioPixa(bytes: Uint8Array, server: number): Promise<void> {
     if (locked || activeServerId !== server || view !== "studio") throw new Error("the animation share target changed");
     const name = "Mewtual-flipnote.pixa";
-    await addSharedFile(new File([new Uint8Array(bytes)], name, { type: "application/octet-stream" }), "", name, "application/octet-stream");
-    toast("Animation package saved to this server's share; shared-deck PIXA playback is not available yet", "ok", 6000);
+    await addSharedFile(new File([new Uint8Array(bytes)], name, { type: PIXA_MIME }), "", name, PIXA_MIME);
+    toast("Flipnote added to Files.", "ok", 5000);
+  }
+  let postStudioGeneration = 0;
+  $effect(() => {
+    void locked; void activeServerId; void cur?.active; void view; void uiStateLoadGeneration; void studioMembership; void windowCloseInFlight; void uiStateReady;
+    // A → B → A navigation must revoke an upload's right to edit the composer too.
+    untrack(() => { postStudioGeneration++; });
+  });
+  async function postStudioPixa(bytes: Uint8Array, server: number): Promise<void> {
+    const channel = cur?.active, generation = postStudioGeneration;
+    const studioCurrent = studioClaimNavigation?.() ?? (() => true);
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && studioCurrent() && generation === postStudioGeneration && activeServerId === server && cur?.active === channel && view === "studio";
+    if (!channel || !current()) throw new Error("Open the flipnote’s channel before posting.");
+    const name = "Mewtual-flipnote.pixa";
+    // A fileshare CID differs from the Studio blob CID. Keep the existing draft and let Send
+    // use its ordinary durable retry identity; this button never submits unrelated draft text.
+    const cid = await addSharedFile(new File([new Uint8Array(bytes)], name, { type: PIXA_MIME }), myEmbedFolder, name, PIXA_MIME);
+    if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
+    await refreshFiles();
+    if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
+    // appendToDraft opens Chat directly. Treat that transition like ordinary Studio navigation:
+    // preserve every working edit first, and recheck the shared navigation claim after the await.
+    await studioSave?.();
+    if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
+    await appendToDraft(fileMarker(name, cid, true));
+    toast("Flipnote attached. Press Send to post it.", "ok", 5000);
   }
   $effect(() => {
     // Reading these values makes every navigation/session/call ABA edge observable; no frame
     // tick or unrelated Studio redraw is itself a new playback scope.
-    void locked; void view; void activeServerId; void cur?.active; void inCall; void callServer; void callChannel; void callDeafened; void studioMembership;
+    void locked; void view; void activeServerId; void cur?.active; void inCall; void callServer; void callChannel; void callDeafened; void studioMembership; void pixaViewer?.generation;
     untrack(() => { stopStudioAudio(); studioAudio?.setScope(studioAudioScope(), callDeafened); });
   });
   $effect(() => {
-    if (view !== "studio") return;
+    if (view !== "studio" && !pixaViewer && !inlinePixaAudioOwner) return;
     let cancelled = false, timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
       if (cancelled) return;
@@ -13446,6 +14442,54 @@
   let jamSaved = $state(loadJamSaved());
   const studioPatchLibrary = $derived([...JAM_PRESETS.map((p) => ({ name: p.name, patch: p.patch })), ...jamSaved,
     ...(myPatch ? [{ name: myPatchName || "current creator recipe", patch: myPatch }] : [])]);
+  // --- The Studio rack's "from the share" shelf -------------------------------------------------
+  // `.jampatch` files of the active server's share, read while the Studio surface is open so a
+  // flipnote can audition and use a recipe a friend sealed into the share. Bounded on purpose:
+  // only files the share's trust rule already allows to auto-load (the same gate as media
+  // embeds), only patch-sized files (native-enforced 4 KiB cap), sixteen current candidates,
+  // one cancellable read at a time. Listing, trust and scope changes retire old continuations.
+  let studioSharedPatches = $state.raw<Map<string, { name: string; patch: JamPatch }>>(new Map());
+  const studioSharedShelf = new StudioSharedPatches(invoke, jamNonce(),
+    values => { studioSharedPatches = new Map(values); },
+    (server, candidate, scope) => !locked && uiStateReady && !windowCloseInFlight && view === "studio" && activeServerId === server &&
+      scope === `${server}:${cur?.active}:${studioMembership}` && files.some(f => f.cid === candidate.cid && f.name === candidate.name &&
+        JSON.stringify([f.size, f.mime, f.author_identity, f.author_verified]) === candidate.binding &&
+        isJamPatchFile(f.name, f.mime) && mayFetchJamPatch(f.size) && mayAutoLoadSharedFile(f, server)));
+  onDestroy(() => studioSharedShelf.update(null, null, []));
+  $effect(() => {
+    const server = activeServerId;
+    const scope = !locked && uiStateReady && !windowCloseInFlight && view === "studio" && server !== null
+      ? `${server}:${cur?.active}:${studioMembership}` : null;
+    const candidates = files.filter((f) => isJamPatchFile(f.name, f.mime) && mayFetchJamPatch(f.size) && mayAutoLoadSharedFile(f, server)).slice(0, STUDIO_SHARED_PATCH_LIMIT);
+    untrack(() => studioSharedShelf.update(scope, server, candidates.map(f => ({ cid: f.cid, name: f.name,
+      binding: JSON.stringify([f.size, f.mime, f.author_identity, f.author_verified]) }))));
+  });
+  const studioPatchShelves = $derived([
+    ...JAM_PRESETS.map((p) => ({ name: p.name, patch: p.patch, shelf: "preset" as const })),
+    ...jamSaved.map((p) => ({ name: p.name, patch: p.patch, shelf: "mine" as const })),
+    ...[...studioSharedPatches.values()].map((p) => ({ name: p.name, patch: p.patch, shelf: "share" as const })),
+  ]);
+  /// The soundfont popup's "save to my library": the call drawer's library, same cap, same rule
+  /// that a typed name you already have replaces that tile and nothing else is ever evicted.
+  async function saveStudioPatch(name: string, patch: JamPatch): Promise<void> {
+    const checked = validateJamPatch(JSON.parse(JSON.stringify(patch)));
+    if (!checked.ok) throw new Error(checked.error);
+    const typed = name.trim().slice(0, JAM_PATCH_NAME_MAX_CHARS).toUpperCase();
+    if (!jamKeepSaved(typed || jamUniqueSavedName("PATCH"), checked.patch)) {
+      throw new Error(`your patch library is full at ${JAM_SAVED_PATCHES_MAX}: delete one, or save over a name you already have`);
+    }
+  }
+  /// The popup's "share": the same sealed `.jampatch` the call drawer shares, into the flipnote's
+  /// server share. The Studio names the server it is scoped to; it must still be the active one,
+  /// because the upload path writes into the active server's share.
+  async function shareStudioPatch(name: string, patch: JamPatch, server: number): Promise<void> {
+    if (activeServerId !== server) throw new Error("switch to the flipnote's server first: the patch belongs in that share");
+    const checked = validateJamPatch(JSON.parse(JSON.stringify(patch)));
+    if (!checked.ok) throw new Error(checked.error);
+    const fileName = `${jamTakeSlug(name.trim() || "patch")}${JAM_PATCH_EXT}`;
+    await addSharedFile(new File([checked.canonical], fileName, { type: JAM_PATCH_MIME }), "", fileName, JAM_PATCH_MIME);
+    void refreshFiles();
+  }
   let jamSaveName = $state("");
   let jamCustomOpen = $state(false); // saved patches expand DOWN, never off the row's right edge
   function jamSavePatch() {
@@ -13745,9 +14789,11 @@
     // The adopted CID exists before approval/download/hash/transport seating. Capturing any
     // current file CID is conservative: only the archival take path consults this local gate.
     jamTakeSuppression.suppress(jamDeckPlaybackCid(), jukeNow?.cid || null);
+    jukeTakeLoads.invalidate();
+    jukeFetch = null;
     jamStopPlayback();
   }
-  async function jamStartTakePlayback(take: JamTake, offsetMs: number, localId: number | null, deckCid: string | null) {
+  async function jamStartTakePlayback(take: JamTake, offsetMs: number, localId: number | null, deckCid: string | null, pixa: Pixa | undefined = undefined) {
     if (deckCid && !jamTakeSuppression.allows(deckCid)) return;
     if (!inCall || callServer === null || !callChannel || callDeafened) return;
     if (!deckCid) suppressCurrentTake();
@@ -13760,19 +14806,24 @@
       callChannel === channel && !callDeafened && (!deckCid || (!!jukeNow && jukeNow.cid === deckCid && !jukeNow.paused && !jukeStale));
     const transport = new JamTakeTransport(engine, jamPlaybackPreparationQueue);
     transport.setLevel(deckCid ? jukeVol : 1);
-    const started = await transport.start(take, Math.max(0, offsetMs),
-      { generation: gen, server, channel, membership: studioMembership }, takePlaybackIsRemote(deckCid), current);
+    const scope = { generation: gen, server, channel, membership: studioMembership };
+    const offsetAtStart = deckCid && !jukeIsDj() ? () => Math.max(0, jukeTarget() * 1000) : undefined;
+    const started = pixa ? await transport.startPixa(pixa, Math.max(0, offsetMs), scope, takePlaybackIsRemote(deckCid), current, offsetAtStart)
+      : await transport.start(take, Math.max(0, offsetMs), scope, takePlaybackIsRemote(deckCid), current, offsetAtStart);
     if (!current() || !started) { transport.stop(); if (jamPendingPlay?.gen === gen) jamPendingPlay = null; return; }
     // A slider may move across hashing; this exact capability gets the latest receiver level,
     // including lazy lanes that have not constructed their first source bus yet.
     transport.setLevel(deckCid ? jukeVol : 1);
-    jamPlay = { id: localId, deckCid, transport, startMs: performance.now(), baseMs: Math.max(0, offsetMs),
+    jamPlay = { id: localId, deckCid, transport, startMs: performance.now(), baseMs: transport.elapsedMs,
       timer: setInterval(() => { void jamPlayTick(); }, 40), catchupTimer: undefined, done: false, draining: false };
     jamPendingPlay = null; jamPlayingId = localId;
+    // Re-announce the actual seated audio clock using the existing press sequence. Peers must
+    // not project the DJ's download/preparation wait as if it had already played.
+    if (deckCid && jukeIsDj()) jukeTick();
     void jamPlayTick();
   }
   function jamPlayTake(entry: { id: number; take: JamTake }) { void jamStartTakePlayback(entry.take, 0, entry.id, null); }
-  function jamPlayElapsed(): number { return jamPlay ? jamPlay.baseMs + performance.now() - jamPlay.startMs : 0; }
+  function jamPlayElapsed(): number { return jamPlay ? jamPlay.transport.elapsedMs : 0; }
   async function jamPlayTick() {
     const pl = jamPlay;
     if (!pl || !jamEngine) { jamStopPlayback(); return; }
@@ -14782,6 +15833,8 @@
     return m;
   });
   // A peer's chosen name colour, or the accent when their profile never set one.
+  // A member's colour can be any hex they picked, so text drawn on it takes its ink from inkOn
+  // (the accent fallback resolves to the accent's own ink).
   function instColor(key: string): string {
     return profiles[displayKey(key)]?.color?.trim() || "var(--accent-hi)";
   }
@@ -15879,12 +16932,15 @@
   // play); as a listener it is the DJ's offset aged on my own clock.
   function jukePos(): number {
     if (!jukeAdopted || !jukeNow) return 0;
-    // A take has no element clock: ageing the adopted offset on the local clock is the position
-    // for EVERYONE, the DJ included (the scheduler runs on the same clock, so they agree). A
+    // Archival playback has an actual synth clock once prepared. The DJ holds its pressed
+    // offset while fetching/preparing, then renders and announces that clock. A
     // linked video is the same shape of problem for a different reason: its clock lives in
     // another document and arrives late, so the projection is the base answer and the player's
     // own reading refines it when there is a fresh one.
-    const takeOnDeck = jukeKind === "take";
+    const takeOnDeck = jukeKind === "take" || jukeKind === "pixa";
+    if (takeOnDeck && jukeIsDj()) {
+      return archivalDjPosition(jukeAdopted.off, jamPlay?.deckCid === jukeNow.cid ? jamPlay.transport : null);
+    }
     const videoOnDeck = jukeKind === "linked-video" || jukeKind === "linked-audio";
     const projected = deckPosition({
       isDj: takeOnDeck || videoOnDeck ? false : jukeIsDj(),
@@ -15900,6 +16956,7 @@
   // offset by however long its own load took, or it starts behind the room.
   function jukeTarget(): number {
     if (!jukeAdopted) return 0;
+    if (jukeKind === "take" || jukeKind === "pixa") return jukePos();
     return jukeIsDj() ? jukeAdopted.off : jukePos();
   }
   // Queue order (added_ms, id as the tiebreak so every machine agrees), minus the unfetchable.
@@ -16084,7 +17141,13 @@
     const sameDeckLease = same && jukeAdopted?.seq === seq && jukeAdopted.fromFp === fromFp;
     // A pause/resume, replacement DJ or different track owns a new continuation epoch. The load
     // coordinator cancels the old native chunk operation before releasing its active slot.
-    if (!sameDeckLease) jukeTakeLoads.invalidate();
+    if (!sameDeckLease) {
+      jukeTakeLoads.invalidate();
+      // A new press owns the seek even for the same CID. Retiring the old synth also means
+      // jukePos holds the new pressed offset while its replacement prepares. Heartbeats keep
+      // their sequence and must not interrupt the currently seated audio clock.
+      if (jamDeckPlaybackCid()) jamStopPlayback();
+    }
     jukeAdopted = { seq, fromFp, off, at: performance.now() };
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
@@ -16092,6 +17155,7 @@
     if (!same) {
       jukeLocalFail = "";
       jukeTrustBlocked = "";
+      jukePixa = null;
     }
     jukeNow = entry || cid || link
       ? { entry, cid, src, link, name, paused, dj: fromFp === callSelfId ? "" : fromFp }
@@ -16129,9 +17193,10 @@
     const file = callFiles.find((candidate) => candidate.cid === cid);
     // A .jamtake is our own validated event-log format, replayed through the jam synth rather
     // than any platform media decoder; it passes the same availability and trust gates first.
-    const isTake = mediaKind(now.name, file?.mime ?? "") === "take";
+    const kind = mediaKind(now.name, file?.mime ?? "");
+    const isTake = kind === "take" || kind === "pixa";
     const mime = file ? safeMime(file.mime) : "";
-    if (!file || (isTake && !mayFetchJamTake(file.size)) || (!isTake && !(mime.startsWith("audio/") || mime.startsWith("video/")))) {
+    if (!file || (isTake && !(kind === "pixa" ? mayFetchPixa(file.size) : mayFetchJamTake(file.size))) || (!isTake && !(mime.startsWith("audio/") || mime.startsWith("video/")))) {
       jukeTrustBlocked = "unavailable";
       parkJukeboxMedia();
       if (jamDeckPlaybackCid()) jamStopPlayback();
@@ -16209,6 +17274,8 @@
   // The take deck: fetch the whole (bounded) file once, validate it with the one take validator,
   // then drive the jam playback scheduler from the room's transport. No element, no decoder.
   const jukeTakeCache = new JamTakeCache();
+  const jukePixaCache = new PixaMediaCache();
+  let jukePixa = $state.raw<Pixa | null>(null);
   const jukeTakeLoads = new JamTakeLoadCoordinator<void>();
   const jukeTakeCancellationNonce = jamNonce();
   let jukeTakeProgressLease: JamTakeProgressLease | null = null;
@@ -16219,7 +17286,8 @@
     const file = callFiles.find((candidate) => candidate.cid === cid);
     if (
       !now || now.cid !== cid || !file ||
-      mediaKind(now.name, file.mime) !== "take" || !mayFetchJamTake(file.size)
+      !["take", "pixa"].includes(mediaKind(now.name, file.mime)) ||
+      !(mediaKind(now.name, file.mime) === "pixa" ? mayFetchPixa(file.size) : mayFetchJamTake(file.size))
     ) return "unavailable";
     return mayLoadJukeboxFile(
       fileTrustFor(server), file.author_identity, file.author_verified,
@@ -16228,7 +17296,7 @@
   }
 
   function jukeTakeLeaseIsCurrent(lease: JamTakePlaybackLease, coordinatorCurrent: () => boolean): boolean {
-    return coordinatorCurrent() && callLifecycleSession.isCurrent(lease.callLease) &&
+    return !locked && !callDeafened && jamTakeSuppression.allows(lease.cid) && coordinatorCurrent() && callLifecycleSession.isCurrent(lease.callLease) &&
       jamTakePlaybackLeaseCurrent(lease, {
         inCall,
         callLease: activeCallLease,
@@ -16242,7 +17310,7 @@
     const server = callServer;
     const channel = callChannel;
     const callLease = activeCallLease;
-    if (!inCall || server === null || !channel || !callLifecycleSession.isCurrent(callLease)) return;
+    if (locked || callDeafened || !jamTakeSuppression.allows(cid) || !inCall || server === null || !channel || !callLifecycleSession.isCurrent(callLease)) return;
     parkJukeboxMedia(); // the media element never holds a take
     const lease = { callLease, server, channel, cid };
     jukeTakeCancellationSeq = (jukeTakeCancellationSeq % 1_000_000_000) + 1;
@@ -16286,7 +17354,9 @@
       jukeTrustBlocked = initialAdmission;
       return;
     }
-    let take = jukeTakeCache.get(cid);
+    const isPixa = mediaKind(jukeNow?.name ?? "", callFiles.find(f => f.cid === cid)?.mime ?? "") === "pixa";
+    let pixa = isPixa ? jukePixaCache.get(cid) : undefined;
+    let take = isPixa ? pixa?.take : jukeTakeCache.get(cid);
     if (!take) {
       const progressLease = { callLease: lease.callLease, server, cid, cancellation };
       jukeTakeProgressLease = progressLease;
@@ -16304,7 +17374,7 @@
         // operation that does not exist yet. If the deck changed during registration, `finally`
         // retires the permit without beginning a read.
         if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
-        ({ value: base64 } = await invokeDebugged<string>("download_file", { server, cid, cancellation }));
+        ({ value: base64 } = await invokeDebugged<string>("download_file", { server, cid, cancellation, maxBytes: isPixa ? PIXA_MAX_BYTES : 512 * 1024 }));
       } catch (e) {
         if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
         diagRecord({ section: "channels", code: "JUKEBOX.TAKE.FETCH_FAILED", level: "warn", fields: { failure: classifyInvokeFailure(e) } });
@@ -16329,6 +17399,10 @@
         jukeTrustBlocked = finalAdmission;
         return;
       }
+      if (isPixa) {
+        try { pixa = decodePixaBase64(base64); take = pixa.take; jukePixaCache.set(cid, pixa); }
+        catch { jukeFetch = null; jukeFail(cid); return; }
+      } else {
       const text = decodeJamTakeBase64(base64);
       if (text === null) {
         jukeFetch = null;
@@ -16345,13 +17419,16 @@
       }
       take = parsed.take;
       jukeTakeCache.set(cid, take);
+      }
     } else {
       // A cache hit owns no native operation, so invalidation can retire the coordinator slot now.
       markCancellationReady();
     }
     if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent) || jukeTakeAdmission(server, cid) !== "ok") return;
+    jukePixa = pixa ?? null;
     jukeFetch = null;
-    jukeDur = Math.max(1, Math.ceil(takeEndMs(take) / 1000));
+    const plan = pixa ? planJamArchivalPlayback(take, { fps: pixa.fps, frameCount: pixa.frames.length, sfx: pixa.sfx }) : null;
+    jukeDur = Math.max(1, Math.ceil((plan ? plan.endMs + archivalReleaseTailMs(plan) : takeEndMs(take)) / 1000));
     const live = jukeNow;
     if (!live || live.cid !== cid) return;
     if (live.paused || jukeStale) {
@@ -16359,17 +17436,15 @@
       return;
     }
     const targetMs = Math.max(0, jukeTarget() * 1000);
-    if (jamPlay?.deckCid === cid) {
-      if (jamPlay.done) return; // release tail / waiting for the DJ's next transport frame
-      if (Math.abs(jamPlayElapsed() - targetMs) <= 2000) return; // in step; a ping needs no restart
-    }
+    if (!archivalPlaybackNeedsStart(jamPendingPlay?.deckCid === cid,
+      jamPlay?.deckCid === cid ? { elapsedMs: jamPlayElapsed(), done: jamPlay.done } : null, targetMs)) return;
     diagRecord({
       section: "channels",
       code: "JUKEBOX.TAKE.STARTED",
       level: "debug",
       fields: { events: take.events.length, offset_ms: Math.round(targetMs), first_event_ms: take.events[0]?.ms ?? -1 },
     });
-    void jamStartTakePlayback(take, targetMs, null, cid);
+    void jamStartTakePlayback(take, targetMs, null, cid, pixa);
     // No media element means the "webview will not start audio" chip has nothing to watch; the
     // suspended-synth case is surfaced here instead, and every deck press tries a resume.
     if (jamEngine && jamEngine.context.state === "suspended") jukeBlocked = true;
@@ -16380,6 +17455,7 @@
     // covers a linked video too. It is the only way a linked video ever plays: nothing about one
     // is attested, so no trust mode can imply this click.
     jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeDeckAddress(jukeNow)));
+    jukeWakeSynth();
     jukeTrustBlocked = "";
     void jukeApply(false);
   }
@@ -16408,7 +17484,12 @@
   }
   /** The user's click, which is the one thing an autoplay policy is waiting for. */
   function jukeUnblock() {
-    jukeWakeSynth(); // a blocked take deck is a suspended synth, not a refusing element
+    if (jukeKind === "take" || jukeKind === "pixa") {
+      const cid = jukeNow?.cid, lease = activeCallLease;
+      void jukeWakeSynth(true).then(() => { if (activeCallLease === lease && jukeNow?.cid === cid && !locked && !callDeafened) void jukeApply(true); });
+      return;
+    }
+    void jukeWakeSynth();
     // A blocked video deck is a frame the webview would not let start. The click IS the gesture
     // it was waiting for, so the command can go straight out; the player answers with its state
     // and the chip clears itself.
@@ -16440,10 +17521,12 @@
    * a question nobody asked.
    */
   async function openCallDiagnostics() {
-    if (callServer !== null && callServer !== activeServerId) await switchServer(callServer);
+    // A refused switch would otherwise open the report of the server left on screen.
+    const route = studioExit.begin();
+    if (callServer !== null && !(await arriveAtServer(callServer, route))) return;
     void refreshCallTransport();
     void refreshConnectivity();
-    switchView("connectivity");
+    switchView("connectivity", route);
   }
 
   /**
@@ -16665,17 +17748,25 @@
     }
   }
 
-  function jukeHost(node: HTMLElement) {
+  function jukeHost(node: HTMLElement, kind: MediaKind) {
     // Whichever player is holding the current track: the one media element, or the video frame.
-    const el = jukeNow?.link ? jukeLinkEl(jukeNow.src, jukeNow.link, 0) : jukeEl();
-    node.appendChild(el);
+    let el: HTMLVideoElement | HTMLIFrameElement | null = null;
+    const mount = (next: MediaKind) => {
+      if (el?.parentElement === node) document.body.appendChild(el);
+      // PIXA owns a canvas, never a second empty media element underneath it. Updating the
+      // action also handles video → PIXA → video without remounting the shared call surface.
+      el = next === "pixa" ? null : jukeNow?.link ? jukeLinkEl(jukeNow.src, jukeNow.link, 0) : jukeEl();
+      if (el) node.appendChild(el);
+    };
+    mount(kind);
     return {
+      update: mount,
       destroy() {
         // Only if this node still holds it. Handing the film from the dock to the focus view (or
         // back) mounts the new host before the old one tears down, and a teardown that re-homed
         // unconditionally would snatch the element straight back out of the surface that had just
         // adopted it, leaving a black box behind.
-        if ((jukeAudio === el || jukeLinkFrame === el) && el.parentElement === node) {
+        if (el && (jukeAudio === el || jukeLinkFrame === el) && el.parentElement === node) {
           document.body.appendChild(el);
         }
       },
@@ -16715,6 +17806,7 @@
     else void jukeStart(el);
   }
   function jukeStop() {
+    jukePixa = null;
     jukeBlocked = false; // nothing is loaded: there is no playback being held back
     jukeLocalFail = "";
     // An invalidated native take fetch returns without touching current UI state. Clear its old
@@ -16732,16 +17824,19 @@
   // is what makes me the DJ.
   // Takes replay through the jam engine, whose AudioContext may still be suspended; presses are
   // user gestures, so they are exactly when a resume is allowed to succeed.
-  function jukeWakeSynth() {
+  function jukeWakeSynth(archival = jukeKind === "take" || jukeKind === "pixa"): Promise<void> {
     jamTakeSuppression.localGesture(); // a fresh local deck control, not a remote heartbeat
-    if (jamEngine && jamEngine.context.state === "suspended") {
-      void jamEngine.context.resume().then(() => { jukeBlocked = false; }).catch(() => { /* next press */ });
+    if (callDeafened) return Promise.resolve();
+    const engine = archival ? ensureJamEngine() : jamEngine;
+    if (engine && engine.context.state === "suspended") {
+      return engine.context.resume().then(() => { jukeBlocked = false; }).catch(() => { /* next press */ });
     }
+    return Promise.resolve();
   }
   function jukePlayEntry(id: string) {
     const e = jukeQueue.find((x) => x.id === id);
     if (!e) return;
-    jukeWakeSynth();
+    void jukeWakeSynth(["take", "pixa"].includes(mediaKind(e.name, callFiles.find(f => f.cid === e.cid)?.mime ?? "")));
     jukeFailed.delete(entryAddress(e)); // an explicit press is also a retry of a track that would not fetch
     jukeSend(e.id, e.cid, e.source ?? "", e.link ?? "", e.name, 0, false);
   }
@@ -16847,6 +17942,7 @@
     jukeStop();
     jukeTakeLoads.invalidate(); // queued/running whole-file continuations belong to the old call
     jukeTakeCache.clear(); // validated takes belong to the room's share, not the next room's
+    jukePixaCache.clear(); jukePixa = null;
     jukeAudio?.remove();
     jukeAudio = null;
     jukeFailed.clear();
@@ -16879,7 +17975,7 @@
   let jukePaint = $state(0);
   $effect(() => {
     if (!inCall || !jukeNow || jukeNow.paused || jukeStale) return;
-    const t = setInterval(() => (jukePaint = performance.now()), 500);
+    const t = setInterval(() => (jukePaint = performance.now()), jukeKind === "pixa" ? 40 : 500);
     return () => clearInterval(t);
   });
   // The queue as the DJ will actually play it, minus whatever is already on the deck.
@@ -16898,6 +17994,7 @@
     { key: "all", label: "ALL" },
     { key: "audio", label: "AUDIO" },
     { key: "video", label: "VIDEO" },
+    { key: "pixa", label: "FLIPNOTES" },
     { key: "take", label: "TAKES" },
     { key: "youtube", label: "LINK" },
   ];
@@ -16912,6 +18009,7 @@
     audio: mediaChoices(files, "audio").length,
     video: mediaChoices(files, "video").length,
     take: mediaChoices(files, "take").length,
+    pixa: mediaChoices(files, "pixa").length,
   });
   // `files` is the ACTIVE server's share, while the room is on callServer: they are the same list
   // only while you are looking at the server you are called into. Every share-derived chip (gone,
@@ -17604,11 +18702,22 @@
   );
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
+  // Account lock and call invalidation can precede map cleanup. Check both owners, including
+  // after every RTC await; only the state-change handler may retain a closed PC for cleanup.
+  function isCurrentCallJoin(lease: number, server: number, channel: string): boolean {
+    return !locked && inCall && callServer === server && callChannel === channel &&
+      lease === activeCallLease && callLifecycleSession.isCurrent(lease);
+  }
+  function isCurrentCallPeer(peer: CallPeer, allowClosed = false): boolean {
+    return isCurrentCallJoin(peer.callLease, peer.server, peer.channel) &&
+      callPeers[peer.fp] === peer && (allowClosed || peer.pc.signalingState !== "closed");
+  }
   async function negotiatePeer(peer: CallPeer) {
-    if (callPeers[peer.fp] !== peer || peer.pc.signalingState === "closed") return;
+    if (!isCurrentCallPeer(peer)) return;
     try {
       peer.makingOffer = true;
       await peer.pc.setLocalDescription();
+      if (!isCurrentCallPeer(peer)) return;
       if (peer.pc.localDescription?.type === "offer") {
         void sendSignal(peer.server, peer.fp, {
           callId: peer.channel,
@@ -17623,10 +18732,11 @@
     }
   }
   async function flushWaitingIce(peer: CallPeer) {
-    if (!peer.pc.remoteDescription) return;
+    if (!isCurrentCallPeer(peer) || !peer.pc.remoteDescription) return;
     const queued = waitingIce[peer.fp] ?? [];
     delete waitingIce[peer.fp];
     for (const candidate of queued) {
+      if (!isCurrentCallPeer(peer)) return;
       try {
         await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
@@ -17635,6 +18745,7 @@
     }
   }
   function recoverPeer(peer: CallPeer) {
+    if (!isCurrentCallPeer(peer)) return;
     const now = Date.now();
     if (now - peer.lastRetry < 4000) return;
     const action = heartbeatRecovery({
@@ -17664,9 +18775,12 @@
   // difference in what leaks and the room deserves to be told, so it is surfaced rather than
   // averaged away. Best-effort throughout: on any miss the badge stays unknown, which is an
   // honest answer, where guessing "direct" would not be.
-  async function sniffTransport(fp: string, pc: RTCPeerConnection) {
+  async function sniffTransport(peer: CallPeer) {
+    if (!isCurrentCallPeer(peer)) return;
+    const { fp, pc } = peer;
     try {
       const stats = await pc.getStats();
+      if (!isCurrentCallPeer(peer)) return;
       let codecId = "";
       stats.forEach((stat) => {
         const outbound = stat as RTCStats & {
@@ -17720,12 +18834,11 @@
   // UDP ports this call asked the router to open (bound-interface IGD on the native side, the
   // same path the invite reachability fix proved out). One mapping per local ICE port; the
   // granted public socket is signalled to the peer as an extra srflx candidate. A router mapping
-  // forwards from any source, so ONE mapped side connects the pair no matter how hostile the
-  // other side's NAT is: the same one-public-route-suffices shape as invites. `null` marks a
-  // port that was tried and refused, so renegotiations don't re-ask the router every time.
+  // forwards from any source, so ONE mapped side can help the pair traverse NAT. An empty
+  // grant marks a pending/refused attempt, so renegotiations do not repeatedly ask the router.
   // The eligibility rule, the candidate builder and the status phrasing live in callroutes.ts,
   // where they are unit-tested.
-  const mappedCallPorts = new Map<number, MappedPort | null>();
+  const mappedCallPorts = new Map<number, { granted: MappedPort | null; pending: Promise<MappedPort | null> | null }>();
   // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
   // plain Map mutation is invisible to $derived.
   let callMappedRoutes = $state(0);
@@ -17737,37 +18850,53 @@
   // silently, because a filter nobody can see is indistinguishable from a bug when a call fails.
   let suppressedIceCandidates = $state(0);
   async function refreshDefaultRoute() {
+    const lease = activeCallLease, server = callServer, channel = callChannel;
+    if (server === null || !channel || !isCurrentCallJoin(lease, server, channel)) return;
+    // A prior call's interface is not evidence for this one, especially after a network change.
+    // Unknown route signals all candidates while lookup awaits; suppressed ICE is not replayed.
+    defaultRouteIpv4 = null;
     try {
-      defaultRouteIpv4 = await invoke<string | null>("default_route_address");
+      const address = await invoke<string | null>("default_route_address");
+      if (isCurrentCallJoin(lease, server, channel)) defaultRouteIpv4 = address;
     } catch {
-      defaultRouteIpv4 = null; // unknown route: signal everything, as before
+      if (isCurrentCallJoin(lease, server, channel)) defaultRouteIpv4 = null;
     }
   }
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
+    if (!isCurrentCallPeer(peer)) return;
     if (!mappableIcePort(c)) return;
     const policy = mappingAddressPolicy(c.address);
     if (!policy.map) return; // an IPv6/hostname socket is not what an IPv4 mapping reaches
     const port = c.port as number;
-    if (!mappedCallPorts.has(port)) {
-      mappedCallPorts.set(port, null); // claim before the await so a concurrent candidate doesn't double-map
-      try {
-        const granted = await invoke<MappedPort>("map_call_port", { port, address: policy.claim });
-        mappedCallPorts.set(port, granted);
-        callMappedRoutes += 1;
-        console.info("voice: router mapped the media port", {
-          port,
-          via: granted.mechanism,
-          confirmed: granted.confirmed,
-        });
-      } catch (e) {
-        // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
-        console.warn("voice: router would not map the media port", { port, error: String(e) });
-        return;
-      }
+    const localSdp = peer.pc.localDescription?.sdp ?? null;
+    let owned = mappedCallPorts.get(port);
+    if (!owned) {
+      // Mapping custody is call-wide, not peer-wide: a replaced peer must not strand a live
+      // call's grant. The owned slot additionally rejects a same-port clear/replacement ABA.
+      const slot = { granted: null as MappedPort | null, pending: null as Promise<MappedPort | null> | null };
+      mappedCallPorts.set(port, slot);
+      owned = slot;
+      // Every current peer using this port waits on the same acquisition. Its completion owns
+      // only call-wide mapping custody; each waiter supplies its own candidate and ICE generation.
+      slot.pending = (async () => {
+        try {
+          const granted = await callMappingSession.map(peer.callLease, port, policy.claim);
+          if (!granted || !isCurrentCallJoin(peer.callLease, peer.server, peer.channel) || mappedCallPorts.get(port) !== slot) return null;
+          slot.granted = granted;
+          callMappedRoutes += 1;
+          console.info("voice: router mapped the media port", { port, via: granted.mechanism, confirmed: granted.confirmed });
+          return granted;
+        } catch (e) {
+          // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
+          console.warn("voice: router would not map the media port", { port, error: String(e) });
+          return null;
+        }
+      })();
     }
-    const ext = mappedCallPorts.get(port);
-    if (!ext) return;
+    const ext = await owned.pending;
+    if (!ext || mappedCallPorts.get(port) !== owned || !isCurrentCallPeer(peer)
+      || !mappedIceIsCurrent(c, localSdp, peer.pc.localDescription?.sdp ?? null)) return;
     void sendSignal(peer.server, peer.fp, {
       callId: peer.channel,
       type: "ice",
@@ -17776,9 +18905,8 @@
   }
 
   function releaseMappedCallPorts() {
-    for (const [port, granted] of mappedCallPorts) {
-      if (granted) void invoke("unmap_call_port", { port }).catch(() => {});
-    }
+    // Revoke the native owner, including acquisitions that have not returned a grant yet.
+    callMappingSession.endCall();
     mappedCallPorts.clear();
     callMappedRoutes = 0;
   }
@@ -17787,12 +18915,13 @@
     if (callPeers[fp]) return callPeers[fp];
     const server = callServer;
     const channel = callChannel;
-    if (server === null || !channel || !callSelfId) return null;
+    if (locked || !inCall || server === null || !channel || !callSelfId || !callLifecycleSession.isCurrent(activeCallLease)) return null;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     const peer: CallPeer = {
       fp,
       server,
       channel,
+      callLease: activeCallLease,
       pc,
       dc: null,
       polite: isPoliteTowards(callSelfId, fp),
@@ -17838,11 +18967,15 @@
       ensureJamEngine().setSourceLevel(fp, peerInstLevelFor(fp) / 100); // the trim you set for them last time
       const dc = peer.dc;
       dc.onopen = () => {
+        if (!isCurrentCallPeer(peer) || peer.dc !== dc || dc.readyState !== "open") return;
         pushInstState();
         void openJamOutboundEdge(dc); // publication barrier before this edge's first note/drum
         jamMetHello(dc); // and, if I anchor the grid, the running metronome
       };
-      dc.onmessage = (e) => handleJamFrame(fp, jamChan, jamDec, e.data);
+      dc.onmessage = (e) => {
+        if (!isCurrentCallPeer(peer) || peer.dc !== dc) return;
+        handleJamFrame(fp, jamChan, jamDec, e.data);
+      };
     } catch {
       /* data channels unavailable: voice still works */
     }
@@ -17851,7 +18984,7 @@
     const claims = drawClaims;
     if (claims) {
       peer.draw = openDrawEdge(pc, claims, fp, {
-        live: () => callPeers[fp] === peer,
+        live: () => isCurrentCallPeer(peer),
         changed: () => {
           if (drawClaims === claims) syncDrawClaims();
         },
@@ -17861,6 +18994,7 @@
     // later. The no-argument setLocalDescription picks offer/answer from the signaling state.
     pc.onnegotiationneeded = () => void negotiatePeer(peer);
     pc.onicecandidate = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
       if (e.candidate) {
         // A candidate on one of this machine's virtual adapters can never be reached from
         // outside, and sending it costs the far end a connectivity check before ICE settles.
@@ -17872,13 +19006,17 @@
         void signalMappedCandidate(peer, e.candidate);
       }
     };
-    pc.onicecandidateerror = (e) => console.warn("voice ICE server/candidate error", {
-      peer: displayKey(fp),
-      code: e.errorCode,
-      text: e.errorText,
-      url: e.url,
-    });
+    pc.onicecandidateerror = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
+      console.warn("voice ICE server/candidate error", {
+        peer: displayKey(fp),
+        code: e.errorCode,
+        text: e.errorText,
+        url: e.url,
+      });
+    };
     pc.ontrack = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
       const stream = e.streams[0];
       if (!stream) return;
       if (e.track.kind === "audio") {
@@ -17892,19 +19030,22 @@
       // that arrived first, in which case that audio moves to the share chain.
       if (remoteAudioRouter.noteVideo(fp, stream.id)) regroupRemoteAudio(fp, stream.id);
       remoteStreams = { ...remoteStreams, [fp]: stream };
-      e.track.onended = () => dropRemoteVideo(fp, stream);
+      e.track.onended = () => { if (isCurrentCallPeer(peer)) dropRemoteVideo(fp, stream); };
       stream.onremovetrack = () => {
+        if (!isCurrentCallPeer(peer)) return;
         if (!stream.getVideoTracks().length) dropRemoteVideo(fp, stream);
       };
     };
     pc.onconnectionstatechange = () => {
+      // A current closed PC still owns its cleanup. A retired PC owns no replacement state.
+      if (!isCurrentCallPeer(peer, true)) return;
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
       // Claims never outlive a dead link, and an unreachable peer is absent until this side sees
       // it "connected" again (draw-wiring.ts).
       if (claims && callPeers[fp] === peer && drawClaims === claims) {
         drawConnectionState(claims, fp, pc.connectionState, peer.draw, syncDrawClaims);
       }
-      if (pc.connectionState === "connected") void sniffTransport(fp, pc);
+      if (pc.connectionState === "connected") void sniffTransport(peer);
       if (pc.connectionState === "failed") recoverPeer(peer);
       else if (pc.connectionState === "closed") removePeer(fp);
     };
@@ -18144,6 +19285,9 @@
     // slow: nothing was set, so the button did nothing, no error appeared, and the only visible
     // fact was that leaving a call had cost the ability to join another one. So the room is entered
     // first and the microphone attaches to it when (and if) the device answers.
+    // Pin the protocol before the room becomes current and before the first hello, so no legacy
+    // signal is admitted into (or sent from) a V2 join in between.
+    callSignalMode = voiceV2Activation().available ? "v2" : "legacy";
     localStream = null;
     micOn = false;
     callServer = server;
@@ -18157,6 +19301,7 @@
     callServerName = servers.find((s) => s.id === server)?.name ?? "";
     inCall = true;
     activeCallLease = joinLease;
+    callMappingSession.start(joinLease, server, channel);
     ensureJamEngine(); // fresh engine, session nonce and sequence domain for this call
     void ensurePublishedJamPatch(); // local echo + every edge wait on the same verified recipe
     void refreshCallProfiles();
@@ -18190,7 +19335,7 @@
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
         // direct to relayed (or back) with no connection-state change to notice it by.
         for (const [fp, p] of Object.entries(callPeers)) {
-          if (p.pc.connectionState === "connected") void sniffTransport(fp, p.pc);
+          if (p.pc.connectionState === "connected") void sniffTransport(p);
         }
       }
     }, 5000);
@@ -18328,6 +19473,10 @@
     callSelfId = "";
     callSharedIds = new Set();
     activeCallLease = 0;
+    // After announceHangup above: a V2 room's legacy bye stays suppressed until the call is gone.
+    callSignalMode = "legacy";
+    legacyExcludedKinds.clear();
+    defaultRouteIpv4 = null;
     callProfiles = {};
     peerTransport = {};
     peerVideoCodec = {};
@@ -18485,9 +19634,24 @@
     } catch {
       return;
     }
-    const cid = msg.callId as string | undefined;
-    const type = msg.type as string | undefined;
-    if (!cid || !type) return;
+    // Validate the parsed shape before any gate or state. Room and type must be non-empty strings:
+    // presence keys are built with `${server}:${channel}`, which coerced other values into a real
+    // room (an array ["7"] or the number 7 became "7") after they had slipped past the V2 fence.
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
+    const cid = msg.callId;
+    const type = msg.type;
+    if (typeof cid !== "string" || !cid || typeof type !== "string" || !type) return;
+    // A V2 join's room has no legacy writer: no legacy presence, peer, SDP, ICE or bye may touch it,
+    // whatever capability fields are missing or whichever helper relayed it (VOICE-SIGNALLING-V2.md).
+    // This runs before the presence writes below. Other rooms keep their legacy presence meaning.
+    if (legacyCallSignalAdmission({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: cid }) === "exclude") {
+      const kind = legacyCallSignalKind(type);
+      if (!legacyExcludedKinds.has(kind)) {
+        legacyExcludedKinds.add(kind);
+        diagRecord({ section: "voice", code: "VOICE.V2.LEGACY_EXCLUDED", level: "info", fields: { kind } });
+      }
+      return;
+    }
     const currentRoom = inCall && isCurrentVoiceRoom(callServer, callChannel, server, cid);
     // Presence: both "hello" (a newcomer) and "voice-ping" (heartbeat) mean someone's in a room.
     if (type === "hello" || type === "voice-ping") {
@@ -18545,7 +19709,7 @@
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
     } else if (type === "offer") {
       const peer = callPeers[fromFp] ?? createPeer(fromFp);
-      if (!peer) return;
+      if (!peer || !isCurrentCallPeer(peer)) return;
       const pc = peer.pc;
       // Perfect negotiation, answer side: on a collision the impolite end ignores the incoming
       // offer (its own is in flight and will win); the polite end lets setRemoteDescription
@@ -18555,11 +19719,14 @@
       if (peer.ignoreOffer) return;
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+        if (!isCurrentCallPeer(peer)) return;
         for (const transceiver of pc.getTransceivers()) {
           if (transceiver.receiver.track.kind === "video") preferVideoCodecs(transceiver);
         }
         await flushWaitingIce(peer);
+        if (!isCurrentCallPeer(peer)) return;
         await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
+        if (!isCurrentCallPeer(peer)) return;
         void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
       } catch (e) {
         console.warn("voice offer handling failed", { peer: displayKey(fromFp), error: String(e) });
@@ -18568,9 +19735,10 @@
       const peer = callPeers[fromFp];
       const pc = peer?.pc;
       // Guard against a stale answer landing after a rollback settled the state.
-      if (peer && pc && pc.signalingState === "have-local-offer") {
+      if (peer && pc && isCurrentCallPeer(peer) && pc.signalingState === "have-local-offer") {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          if (!isCurrentCallPeer(peer)) return;
           await flushWaitingIce(peer);
         } catch (e) {
           console.warn("voice answer handling failed", { peer: displayKey(fromFp), error: String(e) });
@@ -18626,7 +19794,9 @@
     });
   }
 
-  async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined): Promise<SendMessageResult> {
+  // `onDispatch` is told just before the request leaves for the native side: from then on it may
+  // have committed whatever comes back (see `send`).
+  async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined, onDispatch: () => void = () => {}): Promise<SendMessageResult> {
     const draftKey = chatScopeKey(intent.server, intent.channel);
     const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
     let result: SendMessageResult;
@@ -18640,6 +19810,7 @@
       if (!(await saveUiStateImmediately()) || !pendingSubmissionCurrent(intent, session)) {
         throw new Error("Save the pending message in this vault before retrying it.");
       }
+      onDispatch();
       result = (await invokeDebugged<SendMessageResult>("send_message", {
         server: intent.server, channel: intent.channel, text: intent.text, replyTo: intent.replyTo,
         retryToken: intent.token, expectedContext: intent.expectedContext,
@@ -18769,10 +19940,12 @@
         if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
         if (automatic && intent.retryBlock) continue;
+        // A refusal now cannot establish absence of an older invocation whose reply was lost.
+        const priorMayHaveGone = intent.acceptance !== "not_accepted";
         try {
           const result = await submitPendingSend(intent, session);
           if (locked || session !== uiStateLoadGeneration) return;
-          const warning = persistenceWarning(result);
+          const warning = persistenceWarning(result, priorMayHaveGone);
           if (warning) error = warning;
         } catch (failure) {
           if (locked || session !== uiStateLoadGeneration) return;
@@ -18785,9 +19958,11 @@
     }
   }
 
-  async function send() {
+  // Resolves to what the press came to (`SendOutcome`), for "post now" to report; every other
+  // caller ignores it.
+  async function send(): Promise<SendOutcome> {
     const text = draft.trim();
-    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return;
+    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return "refused";
     const server = activeServerId;
     const channel = cur.active;
     const session = uiStateLoadGeneration;
@@ -18799,11 +19974,18 @@
     const operation = ++pendingSendNonce;
     const pendingId = `pending:${operation}`;
     let intent: PendingSend | undefined;
+    // Keep earlier-attempt uncertainty separately: a definite refusal of this press cannot
+    // disprove a previous invocation. Neither fact can be read from `pendingSends` after a
+    // failure: the pending-message manager can recover or stop the entry while the request is
+    // still out, and its absence then proves nothing about whether it committed (found in review).
+    let mayHaveGone = false;
+    let priorMayHaveGone = false;
     try {
       intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
+      if (intent) priorMayHaveGone = intent.acceptance !== "not_accepted";
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
-        if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return;
+        if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return "refused";
         intent = { token: crypto.randomUUID().replaceAll("-", ""), server, channel,
           text, replyTo: reply_to, expectedContext, acceptance: "not_accepted" };
         pendingSends = addPendingSend(pendingSends, intent);
@@ -18812,7 +19994,9 @@
       // barrier. A lock at either await captures the draft or this resumable intent.
       clearTimeout(uiStateSaveTimer);
       await queueUiStateSave(continuityJson);
-      if (!pendingSubmissionCurrent(intent, session)) return;
+      // The sealed identity was taken over (a lock, or the pending-message work): not submitted
+      // here, but no longer this press's to call unsent either.
+      if (!pendingSubmissionCurrent(intent, session)) return "uncertain";
       const sameDraft = !key || (draftRevisions[key] ?? 0) === draftRevision;
       if (sameDraft && activeServerId === server && cur?.active === channel && draft.trim() === text) {
         draft = "";
@@ -18833,17 +20017,34 @@
       }
       replyingToRow = undefined;
       const { result, refreshError } = await sendAndRefresh(
-        () => submitPendingSend(intent!, session, draftRevision),
+        () => submitPendingSend(intent!, session, draftRevision, () => { mayHaveGone = true; }),
         async () => {
           if (sessionCurrent() && activeServerId === server && cur?.active === channel) await refresh();
         },
       );
-      if (!sessionCurrent()) return;
-      const warning = persistenceWarning(result);
+      if (!sessionCurrent()) return sendOutcome(result, priorMayHaveGone);
+      const warning = persistenceWarning(result, priorMayHaveGone);
       if (warning) toast(warning, "warn", 12000);
       if (refreshError) error = `Message result saved, but the conversation could not refresh: ${errorText(refreshError)}`;
+      return sendOutcome(result, priorMayHaveGone);
     } catch (e) {
-      if (!sessionCurrent()) return;
+      // A throw is not "failed" when the message may still go or may already have gone: native
+      // errors do not prove absence. It is "uncertain" when its sealed identity stays pending
+      // without a retry block (the quiet retry sends it by itself), when a lock kept it in the
+      // vault to retry after unlock, or when it may have been dispatched (`mayHaveGone`) and the
+      // native side has not proved it unaccepted, even if the pending-message manager has since
+      // recovered or stopped the entry. The unaccepted classifier includes capacity refusals,
+      // which permit automatic retry while the entry remains. A prior ambiguous attempt still
+      // stays uncertain even when THIS attempt is proven unaccepted; otherwise a retry refusal
+      // could invite a duplicate send under a new token.
+      const kept = intent ? pendingSends[intent.token] : undefined;
+      const provenUnaccepted = sendRefusedUnaccepted(errorText(e));
+      const outcome: SendOutcome = !intent ? "failed"
+        : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain"
+        : priorMayHaveGone ? "uncertain"
+        : mayHaveGone && !provenUnaccepted ? "uncertain"
+        : "failed";
+      if (!sessionCurrent()) return outcome;
       error = String(e);
       if (activeServerId === server && cur?.active === channel && messages.some((m) => m.id === pendingId)) {
         messages = messages.filter((m) => m.id !== pendingId);
@@ -18856,6 +20057,7 @@
         scheduleUiStateSave();
         replyingTo = reply_to;
       }
+      return outcome;
     } finally {
       if (pendingSendNonce === operation) sending = false;
     }
@@ -19423,34 +20625,54 @@
 
   // Put the app back at a recorded place. Order matters: switching group resets the surface, the
   // wiki page and the folder, so the group has to land first.
-  async function applyLoc(loc: Loc) {
+  // Resolves false when a refusal (a Studio Save that could not confirm) stopped it part way, rather
+  // than landing the rest of the recorded place on whatever server or channel is still on screen.
+  // `refused` runs before recording resumes, so the cursor can be put back first.
+  async function applyLoc(loc: Loc, refused: () => void = () => {}): Promise<boolean> {
     navApplying = true;
+    let applied = false;
     try {
+      // One action from first step to last: each step after an await asks the same route again.
+      const route = studioExit.begin();
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
       if (loc.area === "inbox") {
         openInbox();
-        return;
+        return (applied = true);
       }
       if (loc.area === "dms") {
         enterDmHome();
-        return;
+        return (applied = true);
       }
       inboxView = false;
-      if (loc.server !== null && loc.server !== activeServerId) await switchServer(loc.server);
+      if (loc.server !== null && !(await arriveAtServer(loc.server, route))) return false;
       if (loc.view === "chat") {
-        if (loc.channel && cur?.active !== loc.channel) await switchTo(loc.channel);
-        switchView("chat"); // switchTo moves the channel; the surface is this call's job
+        // From the Studio, surface first, then channel. Moving the channel under a mounted Studio
+        // changes the Studio's scope, and that ends every navigation action's lease, this one's
+        // included: Back from the Studio to a chat in another channel would otherwise move the
+        // channel and then find itself retired before showing it. From anywhere else the channel
+        // moves first, so a refused move changes nothing on screen.
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
+        const fromStudio = view === "studio";
+        if (fromStudio) switchView("chat", route);
+        if (loc.channel && cur?.active !== loc.channel && !(await switchTo(loc.channel, false, route))) return false;
+        if (!fromStudio) switchView("chat", route);
       } else if (loc.view === "wiki" && loc.page) {
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false; // the server switch awaited its load
         menu = null;
         view = "wiki";
         // Awaited, not left to switchView: openWikiPage reads the page list to decide read vs
         // edit mode, so a page that arrived second would reopen in the editor.
         await refreshWiki();
-        await openWikiPage(loc.page, { noRedirect: true }); // you are going back TO the target
+        await openWikiPage(loc.page, { noRedirect: true }, route); // you are going back TO the target
       } else {
         if (loc.view === "files") folder = loc.folder;
-        switchView(loc.view);
+        switchView(loc.view, route);
       }
+      return (applied = route.current());
     } finally {
+      // While navApplying is still set: the recording effect runs as soon as it drops, and must not
+      // see the cursor on an entry this walk never reached.
+      if (!applied) refused();
       await tick(); // let the effect see the applied state before recording resumes
       navApplying = false;
     }
@@ -19460,14 +20682,20 @@
   // in flight just moves the cursor again, and the drain picks up wherever it ended: mashing the
   // thumb button walks the trail rather than being swallowed one press at a time.
   function navGo(i: number) {
+    const from = navAt;
     navAt = i;
     if (navApplying) return;
-    void navDrain();
+    void navDrain(from);
   }
-  async function navDrain() {
+  /** `from` is the entry on screen when the walk began. A refused step puts the cursor back on the
+   * last entry actually reached; left on the refused one, the recording effect would append the
+   * place still on screen after it and drop the forward trail. */
+  async function navDrain(from: number) {
     let target: Loc | null = navStack[navAt] ?? null;
     while (target) {
-      await applyLoc(target);
+      const at = navAt, back = from;
+      if (!(await applyLoc(target, () => { navAt = back; }))) return;
+      from = at;
       const landed: Loc | null = navStack[navAt] ?? null;
       target = landed && !sameLoc(landed, target) ? landed : null;
     }
@@ -19552,8 +20780,9 @@
   async function goSurface(server: number, v: Tab) {
     navStepStart();
     try {
-      if (server !== activeServerId) await switchServer(server);
-      switchView(v);
+      const route = studioExit.begin();
+      if (!(await arriveAtServer(server, route))) return; // never open the item's surface on another server
+      switchView(v, route);
     } finally {
       navStepEnd();
     }
@@ -19561,11 +20790,13 @@
   async function goWikiPage(server: number, page: string) {
     navStepStart();
     try {
-      if (server !== activeServerId) await switchServer(server);
+      const route = studioExit.begin();
+      if (!(await arriveAtServer(server, route))) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // the switch awaited the server's load
       menu = null;
       view = "wiki";
       await refreshWiki();
-      await openWikiPage(page, { noRedirect: true });
+      await openWikiPage(page, { noRedirect: true }, route);
     } finally {
       navStepEnd();
     }
@@ -19573,17 +20804,19 @@
   async function goTickerMessage(server: number, channel: string, messageId: string) {
     navStepStart();
     try {
+      const route = studioExit.begin();
       inboxView = false;
-      if (server !== activeServerId) await switchServer(server);
+      if (!(await arriveAtServer(server, route))) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
       view = "chat";
       // A channel update can arrive before its channel-list event. Register a readable fallback
       // so the click can still land instead of silently selecting an absent sidebar entry.
       if (cur && !cur.channels.some((c) => c.id === channel)) {
         cur.channels = [...cur.channels, { id: channel, name: channelNameFor(server, channel) }];
       }
-      if (cur?.active !== channel) await switchTo(channel);
+      if (cur?.active !== channel) { if (!(await switchTo(channel, false, route))) return; }
       else await refresh();
-      jumpToMessageId(messageId);
+      if (route.current()) jumpToMessageId(messageId);
     } finally {
       navStepEnd();
     }
@@ -19862,8 +21095,11 @@
   async function goMention(channel: string) {
     navStepStart();
     try {
-      switchView("chat");
-      await switchTo(channel);
+      // Save the Studio first; switchView's own deferred Save would otherwise race switchTo's.
+      const route = studioExit.begin();
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
+      switchView("chat", route);
+      await switchTo(channel, false, route);
     } finally {
       navStepEnd();
     }
@@ -19892,7 +21128,7 @@
     (uiStateJson) => invoke<NativeVaultLockOutcome>("lock_session", { uiStateJson }),
   );
   let winMaximized = $state(false);
-  let windowCloseInFlight = $state(false);
+  $effect(() => { if (!windowCloseInFlight) studioEndClose?.(); });
   // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
   // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
   let closeAfterContinuityError = false;
@@ -20135,6 +21371,14 @@
           return;
         }
         windowCloseInFlight = true;
+        // Cancel review ownership immediately, before Studio/native close can await or snapshot.
+        // A refused close cannot revive an earlier batch even if the derived key returns to open.
+        videoScopeEpoch++;
+        videoReviews.rescope(videoEditorScope);
+        if (!locked) {
+          try { studioBeginClose?.(); await studioSave?.(); }
+          catch (e) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
+        }
         pendingSendRetry.cancel();
         const closingGeneration = uiStateLoadGeneration;
         callLifecycleSession.invalidate();
@@ -20390,12 +21634,12 @@
             cancellation: e.payload.cancellation,
           }, activeCallLease);
         const currentMediaRead = e.payload.cancellation == null
-          && inCall && e.payload.server === callServer && jukeKind !== "take";
+          && inCall && e.payload.server === callServer && jukeKind !== "take" && jukeKind !== "pixa";
         if (jukeNow?.cid === e.payload.cid && (tokenizedTake || currentMediaRead)) {
           jukeFetch = fetchPhase(e.payload);
         }
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
-        if (!d) return; // only track explicitly-initiated downloads
+        if (!d || activeSaves[dlKey(e.payload.server, e.payload.cid)] !== d.operation || !acceptSaveProgress(d, e.payload)) return;
         const now = Date.now();
         if (e.payload.network_bytes_done > d.networkBytesDone) {
           d.speed = sampleRate(
@@ -20568,17 +21812,7 @@
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
       }),
-      listen<{ server: number }>("server-closed", (e) => {
-        servers = servers.filter((s) => s.id !== e.payload.server);
-        if (activeServerId === e.payload.server) {
-          if (servers.length) void switchServer(servers[0].id);
-          else {
-            beginViewSwitch();
-            activeServerId = null;
-            clearServerView();
-          }
-        }
-      }),
+      listen<{ server: number }>("server-closed", (e) => serverClosed(e.payload.server)),
     ];
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
     // tabs; Ctrl/Cmd+K opens the quick switcher.
@@ -20712,6 +21946,7 @@
         else if (showLinkDevice) closeLinkDevice();
         else if (verifyFor) verifyFor = null;
         else if (lightbox && fileInfo) closeFileInfo(); // Properties opened over the viewer
+        else if (pixaViewer) closePixaViewer();
         else if (lightbox) closeLightbox();
         else if (reactionPickerFor) reactionPickerFor = "";
         else if (replyingTo) replyingTo = "";
@@ -20761,8 +21996,7 @@
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && e.key.toLowerCase() === "f") {
         if (activeServerId !== null) {
           e.preventDefault();
-          view = "chat";
-          openSearch(true);
+          leaveStudioThen(() => { view = "chat"; openSearch(true); });
         }
         return;
       }
@@ -20786,8 +22020,7 @@
           // Search messages in the active conversation (no browser find in the webview).
           if (activeServerId !== null) {
             e.preventDefault();
-            view = "chat";
-            openSearch();
+            leaveStudioThen(() => { view = "chat"; openSearch(); });
           }
         }
       }
@@ -20829,6 +22062,9 @@
     const onMouseNav = (e: MouseEvent) => {
       if (e.button !== 3 && e.button !== 4) return;
       e.preventDefault();
+      // The pre-upload video editor is modal: a thumb button must not navigate out from under it
+      // (which would close it and discard the edit).
+      if (videoEditor) return;
       if (e.button === 3) navBack();
       else navForward();
     };
@@ -21051,7 +22287,7 @@
   {#if p?.avatar}
     <img class="avatar" src={imgSrc(p.avatar)} alt="" />
   {:else}
-    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+    <span class="avatar fallback" style={p?.color ? `background:${p.color};color:${inkOn(p.color)}` : ""}>
       {nameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
@@ -21101,7 +22337,7 @@
   {#if p?.avatar}
     <img class="avatar" src={imgSrc(p.avatar)} alt="" />
   {:else}
-    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+    <span class="avatar fallback" style={p?.color ? `background:${p.color};color:${inkOn(p.color)}` : ""}>
       {callNameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
@@ -21276,7 +22512,7 @@
                 {#if ident.avatar}
                   <img class="avatar" src={imgSrc(ident.avatar)} alt="" />
                 {:else}
-                  <span class="avatar fallback" style={`background:${ident.color}`}>{(ident.name || ident.label).slice(0, 1).toUpperCase()}</span>
+                  <span class="avatar fallback" style={`background:${ident.color};color:${inkOn(ident.color)}`}>{(ident.name || ident.label).slice(0, 1).toUpperCase()}</span>
                 {/if}
                 <span class="id-text">
                   {@render styledName(ident.name || ident.label, ident.color, ident.font, ident.effect)}
@@ -21303,7 +22539,7 @@
         {#if pAvatar}
           <img class="avatar lg" src={imgSrc(pAvatar)} alt="" />
         {:else}
-          <span class="avatar lg fallback" style={`background:${pColor}`}>
+          <span class="avatar lg fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>
             {(pName || displayName).slice(0, 1).toUpperCase()}
           </span>
         {/if}
@@ -21481,7 +22717,7 @@
               class:dragging={draggedNameEffect === active.id}
               role="group"
               aria-label={`${definition?.label ?? active.id} effect settings`}
-              ondragover={(e) => e.preventDefault()}
+              ondragover={(e) => { if (draggedNameEffect) e.preventDefault(); }}
               ondrop={(e) => { e.preventDefault(); dropNameEffect(active.id); }}
             >
               <div class="fx-settings-head">
@@ -21896,7 +23132,7 @@
           {#if pAvatar}
             <img class="avatar" src={imgSrc(pAvatar)} alt="" />
           {:else}
-            <span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+            <span class="avatar fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
           {/if}
         </span>
       </span>
@@ -21944,7 +23180,7 @@
           {#if pAvatar}
             <img class="avatar lg stx-pav" src={imgSrc(pAvatar)} alt="" />
           {:else}
-            <span class="avatar lg fallback stx-pav" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+            <span class="avatar lg fallback stx-pav" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
           {/if}
           <div class="stx-prof-body">
             <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
@@ -21970,7 +23206,7 @@
         <div class="stx-pcap">MEMBER LIST · COMPACT</div>
         <div class="stx-member-preview">
           <span class="presence online">●</span>
-          {#if pAvatar}<img class="avatar" src={imgSrc(pAvatar)} alt="" />{:else}<span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>{/if}
+          {#if pAvatar}<img class="avatar" src={imgSrc(pAvatar)} alt="" />{:else}<span class="avatar fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>{/if}
           <span class="stx-member-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
           <span class="you-badge">you</span>
         </div>
@@ -23327,7 +24563,7 @@
             type="button"
             class="jam-pad"
             class:hit={who === "me"}
-            style={who && who !== "me" ? `background:${instColor(who)};border-color:${instColor(who)};color:#131218` : ""}
+            style={who && who !== "me" ? `background:${instColor(who)};border-color:${instColor(who)};color:${inkOn(instColor(who))}` : ""}
             title={who && who !== "me" ? `${pad.name} · ${nameOf(who)}` : `${pad.name} (${padKeys[pad.id]})`}
             onpointerdown={() => jamPadHit(pad.id)}
           >
@@ -23350,7 +24586,7 @@
             class:sharp={PC_SHARP[pc]}
             class:held={callHeld.includes(note)}
             class:rheld={!!rfp}
-            style={rfp ? `background:${instColor(rfp)};border-color:${instColor(rfp)};color:#131218` : ""}
+            style={rfp ? `background:${instColor(rfp)};border-color:${instColor(rfp)};color:${inkOn(instColor(rfp))}` : ""}
             title={rfp ? `${noteName(note)} · ${nameOf(rfp)}` : noteName(note)}
             onpointerdown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); instNoteOn(note); }}
             onpointerup={() => instNoteOff(note)}
@@ -23361,7 +24597,7 @@
       {#if instEdges.below.length}
         <div class="inst-edge low">
           {#each instEdges.below.slice(0, 3) as ed (ed.note)}
-            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:#131218`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, below this register`}>
+            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:${inkOn(instColor(ed.fp))}`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, below this register`}>
               <svg class="inst-tri" viewBox="0 0 8 8" aria-hidden="true"><path d="M6.4 0.8 0.9 4l5.5 3.2z" fill="currentColor" /></svg>
               {noteName(ed.note)}
             </span>
@@ -23372,7 +24608,7 @@
       {#if instEdges.above.length}
         <div class="inst-edge high">
           {#each instEdges.above.slice(0, 3) as ed (ed.note)}
-            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:#131218`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, above this register`}>
+            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:${inkOn(instColor(ed.fp))}`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, above this register`}>
               {noteName(ed.note)}
               <svg class="inst-tri" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.6 0.8 7.1 4l-5.5 3.2z" fill="currentColor" /></svg>
             </span>
@@ -23581,7 +24817,8 @@
       transported, and it hands the element back to the focus view the moment that opens.
     -->
     {#if jukeScreen === "dock"}
-      <div class="juke-screen" use:jukeHost>
+      <div class="juke-screen" use:jukeHost={jukeKind}>
+        {#if jukeKind === "pixa" && jukePixa}<PixaCanvas pixa={jukePixa} elapsedMs={jukePaint >= 0 ? jukePos() * 1000 : 0} label={jukeNow?.name ?? "Flipnote"} />{/if}
         <button
           class="ghost juke-expand"
           title="Watch it full size: the call takes the window"
@@ -23683,6 +24920,7 @@
             {#if jukeFetch && jukeNow?.cid === e.cid}
               <span class="juke-chip info">{jukeFetch.percent}%</span>
             {/if}
+            {#if mediaKind(e.name) === "pixa"}<span class="juke-kind" title="Flipnote animation with authored music and sound">PIXA</span>{/if}
             {#if mediaKind(e.name) === "video"}
               <span class="juke-kind" title="A video: it plays on the deck's screen, and full size in the focus view">VID</span>
             {/if}
@@ -23900,9 +25138,9 @@
         <li><button onclick={() => enterFolder(sub)}>▸ {sub}</button></li>
       {/each}
     </ul>
-    <label class="upload-btn">
+    <label class="upload-btn shift-pick" title="Share a file here (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
       {uploading ? "Uploading…" : "＋ Share a file here"}
-      <input type="file" multiple disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
+      <input type="file" multiple disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }} />
     </label>
     <form class="new-folder" onsubmit={(e) => { e.preventDefault(); const n = newFolder.trim(); if (n) { enterFolder(n); newFolder = ''; } }}>
       <input bind:value={newFolder} placeholder="＋ new folder…" />
@@ -23948,7 +25186,7 @@
             class="channel-name"
             class:active={c.id === cur?.active && view === "chat"}
             class:unread={cur?.unread.includes(c.id)}
-            onclick={() => { switchTo(c.id); view = "chat"; }}
+            onclick={() => leaveStudioThen((route) => { switchTo(c.id, false, route); view = "chat"; })}
           >
             <span class="chan-hash">#</span>{c.name}
             {#if mentionChannels.has(c.id)}<span class="mention-badge" title="You were mentioned">@</span>{/if}
@@ -25101,7 +26339,7 @@
             class="server-icon inbox-circle"
             class:active={inboxView}
             title="Inbox: mentions, replies & server news"
-            onclick={openInbox}
+            onclick={() => openInbox()}
           >
             {@render icoInbox()}
             {#if inboxUnseenCount || newsUnseenNow}
@@ -25129,7 +26367,7 @@
               {/if}
             </button>
           {/each}
-          <button class="server-icon add" title="Add a server" onclick={() => (showAdd = true)}>+</button>
+          <button class="server-icon add" title="Add a server" onclick={() => leaveStudioThen(() => (showAdd = true))}>+</button>
         </div>
         <div class="rail-fixed rail-foot">
           <div class="rail-sep"></div>
@@ -25683,7 +26921,7 @@
             onloadcapture={chatMediaSettled}
             onpointermove={(e) => (logPointer = { x: e.clientX, y: e.clientY })}
             onpointerleave={() => (logPointer = null)}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragover={acceptFileDrag}
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
           >
@@ -25969,11 +27207,26 @@
                 <button type="button" disabled={sending || retryingPendingSends} onclick={() => retryPendingSends()}>Retry pending messages</button>
               </details>
             {/if}
+            {#if draftFlipnotes.length}
+              <!-- What the draft carries as flipnote embeds, as chips. The draft text stays the
+                   only source of truth (the durable send reads it as written); a chip's ✕ only
+                   edits that text, and a stale chip never cuts anything else (draft-attachments). -->
+              <div class="composer-attachments" aria-label="Attached flipnotes">
+                {#each draftFlipnotes as a (a.start)}
+                  <span class="composer-attach">
+                    <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="3" width="13" height="10" rx="1"></rect><path d="M4.5 3v10M11.5 3v10M1.5 6.5h3M11.5 6.5h3M1.5 9.5h3M11.5 9.5h3"></path></svg>
+                    <span>{a.file.name}</span>
+                    <span class="meta">attached · {fmtSize(a.file.size)}</span>
+                    <button type="button" aria-label={`Remove ${a.file.name} from the message`} onclick={() => (draft = removeDraftAttachment(draft, a))}>✕</button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <form
               class="composer"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={(e) => onComposerDrop("chat", e)}
               onsubmit={(e) => { e.preventDefault(); send(); }}
@@ -25987,14 +27240,14 @@
                 aria-expanded={showInsert && insertTarget === "chat"}
                 onclick={() => toggleInsert("chat")}
               >{@render icoPlus()}</button>
-              <label class="attach" title="Attach image / video / audio">
+              <label class="attach shift-pick" title="Attach image / video / audio (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                 📎
                 <input
                   type="file"
                   accept="image/*,video/*,audio/*"
                   multiple
                   disabled={uploading}
-                  onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
+                  onchange={(e) => { embedFiles("chat", e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }}
                 />
               </label>
               <div class="composer-entry">
@@ -26218,7 +27471,7 @@
               {@render connDetail(connectivity)}
               <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" disabled={manualRedialBusy || activeServerId === null} onclick={manualFallbackRedial}>{manualRedialBusy ? "Retrying…" : "Retry group routes now"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
               {#if manualRedialNote}<p class="muted small">{manualRedialNote}</p>{/if}
-            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Current member-path evidence below is still available.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Current member-path evidence below is still available.</p></div><button onclick={() => leaveStudioThen(() => (showAdd = true))}>Add or join a server</button></section>{/if}
             {@render memberRecoveryPanel()}
             <section class="connection-member-health" aria-labelledby="connection-member-health-title">
               <header>
@@ -26288,9 +27541,9 @@
               {#if callTransport}
                 <ul class="conn-facts">
                   <li>
-                    <span class="stage-label">DIRECT ROUTE</span>
-                    <span class={callTransport.public_direct ? "ok-t" : "fail-t"}>
-                      {callTransport.public_direct ? "this device is directly reachable" : "behind NAT"}
+                    <span class="stage-label">MESH ADDRESS</span>
+                    <span class="muted small">
+                      {callTransport.public_direct ? "public mesh address advertised" : "no public mesh address advertised"}
                     </span>
                   </li>
                   <li><span class="stage-label">AUTONAT</span><span class="muted small">{callTransport.autonat}</span></li>
@@ -26298,8 +27551,8 @@
                     <span class="stage-label">ROUTER</span>
                     <span class={callTransport.router_maps ? "ok-t" : "muted small"}>
                       {callTransport.router_maps
-                        ? "opens ports on request; each call's media socket is offered a mapped route"
-                        : "has not granted a mapping; calls rely on STUN hole punching or TURN"}
+                        ? "mesh mapping granted; calls can try a separate UDP mapping"
+                        : "no mesh mapping reported; calls can still try STUN or TURN"}
                     </span>
                   </li>
                   {#if callTransport.public_ipv6.length}
@@ -26309,7 +27562,7 @@
                     <li><span class="stage-label">PUBLIC IPV4</span><span class="muted small">{callTransport.public_ipv4.join(", ")}</span></li>
                   {/if}
                   <li>
-                    <span class="stage-label">RELAY HOSTS</span>
+                    <span class="stage-label">MESH HELPERS</span>
                     <span class={callTransport.bridges.length ? "ok-t" : "muted small"}>
                       {callTransport.bridges.length
                         ? `${callTransport.bridges.length} member(s) offering, ${callTransport.bridges.filter((b) => b.direct).length} with a public route`
@@ -26400,24 +27653,37 @@
           </div>
           {#if keptFiles?.supported}
             <details class="kept-copies-panel">
-              <summary>Kept on this device ? {keptFiles.files.length}/32 ? {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
+              <summary>Kept on this device · {keptAllocationCount(keptFiles)}/32 · {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
               <p class="muted small">These encrypted copies survive ordinary cache cleanup and shared-list removal. Export still requires a shared listing. Releasing a copy frees its reserved storage; other cached bytes may remain.</p>
               {#if keptFiles.error}<p role="alert">{keptFiles.error}</p>{/if}
               {#each keptFiles.files as copy (copy.cid)}
+                {@const saved = keptFiles.transfers.find(row => row.cid === copy.cid)}
                 <div class="kept-copy-row">
-                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}? (unlisted)`} ? {keptCopyLabel(copy)}</span>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => keepFileHere(copy.cid)}>Check and repair</button>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}… (unlisted)`} · {keptCopyLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => saved?.exhausted ? retryKeptFile(saved) : checkKeptFile(copy.cid)}>{saved?.exhausted ? "Retry check" : "Check and repair"}</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
                 </div>
               {/each}
-              {#if keptTransfer}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+              {#each keptTransferRows(keptFiles) as copy (copy.cid)}
+                <div class="kept-copy-row">
+                  <span>{files.find((file) => file.cid === copy.cid)?.name ?? copy.cid.slice(0, 16)} · {keptTransferLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || copy.running || copy.phase === "deleting" || !!keptFiles.error}
+                    onclick={() => copy.exhausted ? retryKeptFile(copy) : resumeKeptFile(copy)}>{copy.exhausted ? "Retry" : "Resume"}</button>
+                  {#if copy.running || (!copy.user_paused && !copy.exhausted && !copy.blocked && copy.phase === "paused")}
+                    <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => setKeptPaused(copy, true)}>Pause</button>
+                  {/if}
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || copy.phase === "deleting" || !!keptFiles.error}
+                    onclick={() => forgetKeptFile(copy.cid)}>Cancel transfer</button>
+                </div>
+              {/each}
+              {#if keptTransfer?.cancellation}<button class="ghost small" onclick={cancelKeptTransfer}>Stop checking</button>{/if}
             </details>
           {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <ul
             class="file-list tab-pane"
             class:drag-over={dragOver}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragover={acceptFileDrag}
             ondragleave={() => (dragOver = false)}
             ondrop={onFilesDrop}
           >
@@ -26560,19 +27826,19 @@
             <form
               class="composer"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={(e) => onComposerDrop("status", e)}
               onsubmit={(e) => { e.preventDefault(); postStatus(); }}
             >
-              <label class="attach" title="Attach image / video / audio">
+              <label class="attach shift-pick" title="Attach image / video / audio (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                 📎
                 <input
                   type="file"
                   accept="image/*,video/*,audio/*"
                   multiple
                   disabled={uploading}
-                  onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
+                  onchange={(e) => { embedFiles("status", e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }}
                 />
               </label>
               {@render textEffectButton("announcement", "Announcement text effects")}
@@ -26617,7 +27883,7 @@
           <div
             class="wiki"
             class:drag-over={dragOver}
-            ondragover={(e) => { if (activeWikiPage) { e.preventDefault(); dragOver = true; } }}
+            ondragover={(e) => { if (activeWikiPage) acceptFileDrag(e); }}
             ondragleave={() => (dragOver = false)}
             ondrop={onWikiDrop}
           >
@@ -26737,10 +28003,10 @@
                         {@render insertPanel()}
                       {/if}
                     </div>
-                    <label class="wiki-tb wiki-tb-attach" title="Upload an image / video / audio and embed it at the caret">
+                    <label class="wiki-tb wiki-tb-attach shift-pick" title="Upload an image / video / audio and embed it at the caret (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                       📎 attach
                       <input type="file" accept="image/*,video/*,audio/*" multiple disabled={uploading}
-                        onchange={(e) => { wikiEmbed(e.currentTarget.files); e.currentTarget.value = ''; }} />
+                        onchange={(e) => { wikiEmbed(e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }} />
                     </label>
                     <span class="wiki-tb-spacer"></span>
                     <button class="wiki-tb wide" class:active={wikiPreview} title="Live preview beside the editor" onclick={() => (wikiPreview = !wikiPreview)}>preview</button>
@@ -26750,7 +28016,7 @@
                     class="wiki-edit"
                     class:split={wikiPreview}
                     class:drag-over={dragOver}
-                    ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+                    ondragover={acceptFileDrag}
                     ondragleave={() => (dragOver = false)}
                     ondrop={onWikiDrop}
                   >
@@ -26867,7 +28133,7 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} patchShelves={studioPatchShelves} libraryCount={jamSaved.length} serverName={cur?.name ?? ""} onsavePatch={saveStudioPatch} onsharePatch={shareStudioPatch} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} />
           {:else}
             <h2>Studio</h2>
             <p class="muted">Loading the studio…</p>
@@ -26879,7 +28145,7 @@
             <form
               class="event-form"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={onEventDrop}
               onsubmit={(e) => { e.preventDefault(); createEvent(); }}
@@ -26966,6 +28232,25 @@
         {:else if view === "downloads"}
           <h2>Transfers</h2>
           <div class="downloads-tab tab-pane">
+            {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
+            {#if privateDownloads.length}
+              <h3>Saved download progress</h3>
+              <p class="muted small">If a save was interrupted, check Downloads before saving again. Saving again creates another copy.</p>
+              <ul class="dl-list">
+                {#each privateDownloads as saved (saved.id)}
+                  <li class="dl-item">
+                    <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
+                    <span>{privateDownloadLabel(saved)} · {saved.verifiedChunks}/{saved.totalChunks} chunks</span>
+                    <div>
+                      <button disabled={!!privateDownloadBusy || !!privateDownloadSaves[saved.id] || saveInProgress(saved.cid) || saved.status === "receiving" || saved.status === "removing"}
+                        onclick={() => resumePrivateDownload(saved)}>{saved.status === "exhausted" ? "Retry download" : saved.status === "ready" ? "Save to Downloads" : "Resume download"}</button>
+                      {#if saved.status === "receiving"}<button disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, false)}>Pause</button>{/if}
+                      <button class="ghost" disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, true)}>Remove progress</button>
+                    </div>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
             <button class="transfer-health" onclick={() => switchView("storage")}>
               {@render icoStorage()}
               {#if storageHealth}
@@ -27042,7 +28327,9 @@
         {/if}
       </section>
 
-      {#if !dmHome && cur && !cur.isDm && membersOpen}
+      <!-- Studio reserves this width for the drawing and its controls. The member-list
+           preference is preserved for chat; call frame claims remain in Studio's Art tab. -->
+      {#if !dmHome && cur && !cur.isDm && membersOpen && view !== "studio"}
         <aside class="members-col" aria-label="Members">
           <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}
@@ -27477,7 +28764,8 @@
         <!-- The shared screen: a video the room is watching together gets the top band, and the
              faces drop to a filmstrip underneath rather than competing with it. -->
         {#if jukeScreen === "focus"}
-          <div class="focus-deck" use:jukeHost>
+          <div class="focus-deck" use:jukeHost={jukeKind}>
+            {#if jukeKind === "pixa" && jukePixa}<PixaCanvas pixa={jukePixa} elapsedMs={jukePaint >= 0 ? jukePos() * 1000 : 0} label={jukeNow?.name ?? "Flipnote"} />{/if}
             {#if jukeFetch}
               <div class="focus-deck-load">
                 <span class="stage-label">
@@ -27816,7 +29104,7 @@
               {#if p?.avatar}
                 <img class="avatar lg" src={imgSrc(p.avatar)} alt="" />
               {:else}
-                <span class="avatar lg fallback" style={`background:${p?.color || "#4f8cff"}`}>{nameOf(fp).slice(0, 1).toUpperCase()}</span>
+                <span class="avatar lg fallback" style={`background:${p?.color || "#4f8cff"};color:${inkOn(p?.color || "#4f8cff")}`}>{nameOf(fp).slice(0, 1).toUpperCase()}</span>
               {/if}
               <div class="pc-id">
                 <div class="pc-name">{@render nameTag(fp)}</div>
@@ -29134,6 +30422,16 @@
                   <li><kbd>Esc</kbd><span>Close the topmost thing, one layer at a time</span></li>
                 </ul>
               </section>
+              <!-- The pre-upload video editor's keys, from the same list the editor's tests check
+                   against its real key handling (video-editor-ui.ts). -->
+              <section class="set-section" data-keybinds="video-editor">
+                <h3>Video editor</h3>
+                <ul class="stx-keys">
+                  {#each VIDEO_EDITOR_SHORTCUTS as shortcut (shortcut.keys)}
+                    <li><kbd>{shortcut.keys}</kbd><span>{shortcut.action}</span></li>
+                  {/each}
+                </ul>
+              </section>
               <section class="set-section text-fx-keybinds">
                 <div class="text-fx-keybind-head">
                   <div>
@@ -29590,6 +30888,9 @@
                 </div>
               </div>
               </section>
+            {:else if serverSettingsPage === "studio"}
+              <h1>Studio</h1>
+              {#if activeServerId !== null && cur}{#key activeServerId}<ServerStudioSettings server={activeServerId} channels={cur.channels} initialChannel={cur.active} owner={myRole === "owner"} />{/key}{/if}
             {:else if serverSettingsPage === "filetrust"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // FILE TRUST</div>
               <h1>File Trust</h1>
@@ -30050,16 +31351,36 @@
           role="presentation"
           use:dismissOnBackdrop={closeLightbox}
         >
-          <button
-            class="lightbox-img"
-            type="button"
-            title={lightboxZoom ? "Click to fit to the window" : "Click to view at actual size"}
-            onclick={() => (lightboxZoom = !lightboxZoom)}
-          >
-            <img src={lightbox.url} alt={lightbox.alt || lightboxFile?.name || "image"} />
-          </button>
+          <!-- Keyed on the opening: a new image gets a fresh picture and its own fit copy, and the
+               previous copy's buffer is released when its instance unmounts. -->
+          {#key lightbox}
+            <LightboxPicture
+              url={lightbox.url}
+              alt={lightbox.alt || lightboxFile?.name || "image"}
+              source={lightbox.source}
+              mime={lightboxFile?.mime ?? ""}
+              zoomed={lightboxZoom}
+              ontoggle={() => (lightboxZoom = !lightboxZoom)}
+            />
+          {/key}
         </div>
       </div>
+    {/if}
+
+    <!-- Keyed by review id: the editor reads its file once at mount, so every review gets a fresh
+         instance, and `open` stays that review's own object for as long as its instance lives. Its
+         answer is therefore always filed under its own id; a late answer from an instance being
+         torn down cannot be taken as the next review's (the queue ignores a stale id). -->
+    {#each videoEditor ? [videoEditor] : [] as open (open.id)}
+      <VideoEditor file={open.file} capBytes={fileSizeLimit?.limit ?? VIDEO_EDITOR_FALLBACK_CAP} position={open.position} context={open.context}
+        passKey={videoEditorPassKey} music={videoEditorMusic} onfinish={(result) => videoReviews.finish(open.id, result)} />
+    {/each}
+
+    {#if pixaViewer}
+      <PixaViewer name={pixaViewer.file.name} pixa={pixaViewer.pixa} error={pixaViewer.error} bytes={pixaViewer.file.size}
+        author={nameOf(pixaViewer.file.author)} place={cur ? `#${activeName()}` : ""} expiry={fileExpiryText(pixaViewer.file)}
+        audioState={studioAudioState} deafened={callDeafened}
+        onplay={playPixaViewerFrom} onstop={stopStudioAudio} ondownload={() => { if (pixaViewer) void downloadFile(pixaViewer.file); }} onclose={closePixaViewer} />
     {/if}
 
     {#if fileInfo}
@@ -30071,7 +31392,9 @@
             <button class="ghost" onclick={closeFileInfo}>✕</button>
           </header>
           <div class="overlay-body file-info">
-            {#if previewKind}
+            {#if mediaKind(fileInfo.name, fileInfo.mime) === "pixa"}
+              <div class="file-preview" use:filePixaPreview={fileInfo}></div>
+            {:else if previewKind}
               <div class="file-preview">
                 {#if fileInfoPreviewError}
                   <p class="muted small">Preview unavailable. The file may be missing, unreachable, unsupported, or unable to pass verification.</p>
@@ -30162,12 +31485,16 @@
               </dd>
               <dt>Kept copy</dt>
               <dd>
-                <span>{keptCopyLabel(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid))}</span>
+                <span>{fileInfoKeptTransfer ? keptTransferLabel(fileInfoKeptTransfer) : keptCopyLabel(fileInfoKeptCopy)}</span>
                 {#if keptFiles?.supported && !keptFiles.error}
-                  <button class="ghost small" disabled={!!keptTransfer} onclick={() => fileInfo && keepFileHere(fileInfo.cid)}>
-                    {keptFiles.files.some((copy) => copy.cid === fileInfo?.cid) ? "Check and repair copy" : "Keep on this device"}
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!fileInfoKeptTransfer?.running || fileInfoKeptTransfer?.phase === "deleting"}
+                    onclick={() => fileInfoKeptCopy && fileInfo ? (fileInfoKeptRecord?.exhausted ? retryKeptFile(fileInfoKeptRecord) : checkKeptFile(fileInfo.cid)) : fileInfoKeptTransfer ? (fileInfoKeptTransfer.exhausted ? retryKeptFile(fileInfoKeptTransfer) : resumeKeptFile(fileInfoKeptTransfer)) : fileInfo && keepFileHere(fileInfo.cid)}>
+                    {fileInfoKeptCopy ? (fileInfoKeptRecord?.exhausted ? "Retry check" : "Check and repair copy") : fileInfoKeptTransfer?.exhausted ? "Retry" : fileInfoKeptTransfer ? "Resume" : "Keep on this device"}
                   </button>
-                  {#if keptTransfer?.cid === fileInfo.cid}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+                  {#if keptTransfer?.cid === fileInfo.cid && keptTransfer.cancellation}<button class="ghost small" onclick={cancelKeptTransfer}>Stop checking</button>{/if}
+                  {#if fileInfoKeptTransfer && !fileInfoKeptTransfer.user_paused && !fileInfoKeptTransfer.exhausted && !fileInfoKeptTransfer.blocked && fileInfoKeptTransfer.phase === "paused"}
+                    <button class="ghost small" disabled={!!keptMutation || !!keptTransfer} onclick={() => fileInfoKeptTransfer && setKeptPaused(fileInfoKeptTransfer, true)}>Pause</button>
+                  {/if}
                   <p class="muted small">Stores a verified encrypted copy within this server's 1 GiB / 32-file limit. Checking may fetch missing chunks. Remote copies remain unconfirmed.</p>
                 {:else if keptFiles?.error}<p class="muted small">{keptFiles.error}</p>{/if}
               </dd>
@@ -30229,6 +31556,9 @@
               </label>
             {/if}
             <div class="file-info-actions">
+              {#if mediaKind(fileInfo.name, fileInfo.mime) === "pixa"}
+                <button class="primary" disabled={!mayFetchPixa(fileInfo.size)} onclick={() => fileInfo && openPixaViewer(fileInfo)}>Open flipnote</button>
+              {/if}
               <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
               {#if canSetExpiry}
                 <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>

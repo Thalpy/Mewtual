@@ -4,6 +4,7 @@
 import { encodePix } from "./pix.ts";
 import { legacyJamPatch } from "./jam-patch.ts";
 import { FLIPNOTE_H, FLIPNOTE_W, type PixPaletteEntry, type ScoreCell } from "./studio-contract.ts";
+import { DEFAULT_PALETTE } from "./studio-store.ts";
 import {
   bytesToBase64, parseFlipnoteView, parseIndexView, parseScoreView,
   type FlipnoteContent, type IndexContent, type IndexSource, type Register, type ScoreContent, type ScoreSlot,
@@ -24,23 +25,20 @@ const source = (n: number): IndexSource => ({ opId: id64(n), author: VISUAL_STUD
 const reg = <T>(value: T, n: number, conflicts: { value: T; source: IndexSource }[] = []): Register<T, IndexSource> => ({ selected: { value, source: source(n) }, conflicts });
 const slot = <T>(value: T | null, n: number, conflicts: { value: T | null; source: IndexSource }[] = []): ScoreSlot<T> => ({ removed: value === null || conflicts.some(v => v.value === null), register: reg(value, n, conflicts) });
 const patch = legacyJamPatch("triangle"); // Hash is pinned by the shared score-op golden vector.
-const PALETTE: PixPaletteEntry[] = [
-  { role: 1, r: 19, g: 18, b: 24 }, { role: 2, r: 232, g: 230, b: 240 },
-  { role: 3, r: 151, g: 125, b: 242 }, { role: 0, r: 224, g: 122, b: 184 },
-];
+const PALETTE: PixPaletteEntry[] = DEFAULT_PALETTE.map(entry => ({...entry}));
 
 /** A small deterministic cat scene at the real 192×144 frame size, encoded by the real codec. */
 function scene(frame: number): Uint8Array {
-  const pixels = new Uint8Array(FLIPNOTE_W * FLIPNOTE_H);
+  const pixels = new Uint8Array(FLIPNOTE_W * FLIPNOTE_H).fill(2);
   const dot = (x: number, y: number, color: number) => { if (x >= 0 && x < FLIPNOTE_W && y >= 0 && y < FLIPNOTE_H) pixels[y * FLIPNOTE_W + x] = color; };
   const box = (x: number, y: number, w: number, h: number, color: number) => { for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) dot(xx, yy, color); };
-  for (let x = 0; x < FLIPNOTE_W; x++) { dot(x, 115, 2); dot(x, 116, 2); }
-  for (let i = 0; i < 9; i++) { const x = 16 + i * 19, y = 16 + (i % 3) * 9; dot(x, y, 1); dot(x - 1, y, 1); dot(x + 1, y, 1); dot(x, y - 1, 1); dot(x, y + 1, 1); }
+  for (let x = 0; x < FLIPNOTE_W; x++) { dot(x, 115, 4); dot(x, 116, 4); }
+  for (let i = 0; i < 9; i++) { const x = 16 + i * 19, y = 16 + (i % 3) * 9; dot(x, y, 0); dot(x - 1, y, 0); dot(x + 1, y, 0); dot(x, y - 1, 0); dot(x, y + 1, 0); }
   const lift = frame === 1 ? -4 : 0, x = 68 + frame * 3, y = 66 + lift;
-  box(x, y, 48, 39, 2); box(x - 5, y + 10, 58, 23, 2); box(x, y - 10, 12, 15, 2); box(x + 36, y - 10, 12, 15, 2);
-  box(x + 5, y - 5, 4, 8, 3); box(x + 39, y - 5, 4, 8, 3); box(x + 10, y + 14, 5, frame === 2 ? 2 : 6, 0); box(x + 33, y + 14, 5, frame === 2 ? 2 : 6, 0);
-  box(x + 22, y + 24, 5, 3, 3); box(x + 24, y + 27, 1, 5, 0); box(x + 19, y + 31, 11, 1, 0);
-  box(x + 5, y + 37, 11, 10, 2); box(x + 33, y + 37, 11, 10, 2); box(x + 47, y + 28, 21, 5, 2); box(x + 63, y + 18, 5, 12, 2);
+  box(x, y, 48, 39, 9); box(x - 5, y + 10, 58, 23, 9); box(x, y - 10, 12, 15, 9); box(x + 36, y - 10, 12, 15, 9);
+  box(x + 5, y - 5, 4, 8, 8); box(x + 39, y - 5, 4, 8, 8); box(x + 10, y + 14, 5, frame === 2 ? 2 : 6, 1); box(x + 33, y + 14, 5, frame === 2 ? 2 : 6, 1);
+  box(x + 22, y + 24, 5, 3, 8); box(x + 24, y + 27, 1, 5, 1); box(x + 19, y + 31, 11, 1, 1);
+  box(x + 5, y + 37, 11, 10, 9); box(x + 33, y + 37, 11, 10, 9); box(x + 47, y + 28, 21, 5, 9); box(x + 63, y + 18, 5, 12, 9);
   return encodePix({ w: FLIPNOTE_W, h: FLIPNOTE_H, palette: PALETTE, pixels });
 }
 const frames = [0, 1, 2].map((frame) => ({ id: id32(100 + frame), cid: id64(100 + frame), bytes: scene(frame) }));
@@ -135,6 +133,10 @@ export function visualStudioFixtureResponse(command: string, args: Record<string
     case "studio_overlay_read": return { handled: true, value: { v: 1, kind: "absent", channel: VISUAL_STUDIO_CHANNEL, ...target } };
     case "studio_overlay_lifecycle": return { handled: true, value: { v: 1, kind: "overlayLifecycle", channel: VISUAL_STUDIO_CHANNEL, ...target, branch: null, prepared: false, eligibility: null, manualReason: null, handoffAttempt: null, unconfirmedState: null, archive: null, disposed: null, transferred: false } };
     case "studio_recovery_list": return { handled: true, value: { v: 1, kind: "recoveryList", channel: VISUAL_STUDIO_CHANNEL, ...target, source: { epochId, epoch: "3", phase: "open", provisional: true }, versions: [], evictionPending: null, pendingIntents: 0 } };
+    case "studio_fault_read": {
+      if (args.scope !== "source" && args.scope !== "registry") throw new Error("Visual Studio fixture refuses unknown repair scope.");
+      return { handled: true, value: { v: 1, kind: "fault", channel: VISUAL_STUDIO_CHANNEL, ...target, scope: args.scope === "source" ? { kind: "source" } : { kind: "registryBucket", bucket: 0 }, source: { epochId, epoch: "3", phase: "open" }, candidates: null, repair: null, mayDecide: false, blockedBy: "noFault", lastAttempt: null, waiting: 0, preservedOperations: 0 } };
+    }
     default: throw new Error(`Read-only visual Studio fixture does not implement Tauri command: ${command}`);
   }
 }

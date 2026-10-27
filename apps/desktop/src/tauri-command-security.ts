@@ -25,6 +25,25 @@ export const TAURI_COMMAND_GROUPS = {
       // Inline-download cancellation is also deliberately available while locked. It returns no
       // existence bit and can only destroy a bounded operation registration / actor future.
       "cancel_inline_download",
+      // Exact ephemeral revocation/settlement only. These must work after lock or remount;
+      // they expose no existence bit and never authorize fresh engine/network work.
+      "end_call_mapping_owner", "end_voice_owner", "settle_voice_crypto",
+      // Selected-key cleanup can close one paid selection before a delayed admission and
+      // waits for actual publication drainage; it never returns engine/network authority.
+      "settle_voice_join_key",
+      // Exact original-channel cleanup must survive lock, End and lost setup/final replies.
+      // It accepts no drain flag, private bytes or replacement generation; setup still gates
+      // the unlocked session and native selected owner before RNG or channel admission.
+      "setup_voice_channel", "settle_voice_channel_setup", "collect_voice_channel",
+      // Read existing original-channel work metadata after End/lock so unseen Pending can
+      // be cleaned up. It cannot admit work, fetch payloads or assert actual drainage.
+      "read_voice_channel_work",
+      // CAS lifecycle and bounded engine admission, independent of optional router grants.
+      // Selected-key admission recovers its original permit until settlement; publication
+      // installs only that accepted owner's frozen public point through the actual actor.
+      "admit_voice_join_key", "publish_voice_join_key",
+      "prepare_voice_controller", "prepare_voice_owner", "activate_voice_owner", "admit_voice_crypto",
+      "prepare_call_mapping_controller", "prepare_call_mapping_owner", "activate_call_mapping_owner",
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",
       // Emits a marked record and re-reads the sink's health, so Settings can report what the
       // writer is doing rather than what the preference asked for. Gated like the pair above.
@@ -81,7 +100,7 @@ export const TAURI_COMMAND_GROUPS = {
       // Exact actor's authenticated mode; fenced against lock and replacement, no authority write.
       "group_communication_mode",
       "get_files", "get_storage_health", "get_online_members", "get_delivery", "dm_stats",
-      "get_dm_requests", "file_available", "get_kept_files", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
+      "get_dm_requests", "file_available", "get_kept_files", "get_private_downloads", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
       // The server's upload cap, off the file index document every member already reads. The
@@ -139,6 +158,8 @@ export const TAURI_COMMAND_GROUPS = {
       // holds; none reaches the network, and the export bytes stay private until the same final
       // session-and-instance recheck every read here passes.
       "studio_recovery_list", "studio_recovery_read", "studio_recovery_export",
+      "studio_fault_read",
+      "studio_closing_overlay_save_begin",
       // Preview belongs with the reads because it is one: it recomputes a restore plan from saved
       // typed content and emits no settlement notice. It also hands back the canonical body the
       // caller would echo to `studio_recovery_apply`, which is not authority to save it. The actor
@@ -224,6 +245,12 @@ export const TAURI_COMMAND_GROUPS = {
       // nonce, so an exact retry is idempotent while a rewritten body is not a way to publish
       // history under someone else's authorship.
       "studio_recovery_apply",
+      // Owner-only decision over the actual current receipt pair. Actor/store derive tenure,
+      // signing and recovery under custody; scheduling never acknowledges completed repair.
+      "studio_fault_repair",
+      // Closing local-only draft Save derives the actual saved signed close under custody;
+      // exact terminal retries precede current source/tenure/media admission. No shared Apply.
+      "studio_closing_overlay_save",
       // The discoverability half of a restore, separately retryable because the save above can
       // land while this does not. It moves this device's Studio registry checkpoint pointer and
       // accepts no epoch from the webview: the actor chooses it, and refuses to rewind a pointer
@@ -252,7 +279,9 @@ export const TAURI_COMMAND_GROUPS = {
       "set_livery", "set_server_icon", "set_server_cursor", "set_server_banner", "set_member_badge",
       // Per-file local consent, reserved disk quota, full verification and native lock cancellation.
       // Forget only releases this device's separate copy; shared metadata grants no such authority.
-      "keep_file", "forget_kept_file",
+      "keep_file", "request_kept_file", "set_kept_paused", "forget_kept_file", "retry_kept_file",
+      // Private encrypted progress, independent of Keep; exact revision/grant CAS, no paths/keys.
+      "set_private_download_paused", "retry_private_download", "cancel_private_download",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",

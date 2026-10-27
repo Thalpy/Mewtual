@@ -1,6 +1,1980 @@
 # Mewtual; Architecture
 
-## Current Gate 6 composition (2026-10-14; candidate, not final acceptance)
+## Owned microphone device setting (27 October; inactive)
+
+The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after
+its original8KiB fee and before asynchronous SDK setup. Pending constraints cannot retain
+a large caller substring backing. Code units remain exact. Copy/join/SDK inventories are
+6080/6432/5664 bytes under the unchanged8192-byte capsule; fixed4KiB pool/caps are unchanged.
+End during copying prevents SDK admission, and proven pre-SDK copy refusal releases only
+the exact original capsule. Broker46/facade3 and native/wire formats are unchanged. V2 does
+not construct the helper yet; actual private media Current/PC provenance and audio wiring
+remain required. Logical owned graphs exclude borrowed synchronous input/opaque VM heaps.
+
+## Configuration storage ownership (27 October; Broker46, inactive)
+
+The configuration owner independently materializes admitted settings from bounded UTF16
+code units before URI parsing. It retains no caller-created substring backing. Canonical
+policy literals, snapshot/loan identity, before-constructor currentness and actual loan
+cleanup remain unchanged. Copy/rope metadata and serial scratch fit the existing64KiB fee:
+52,480/65,536 bytes. Retained45 requires reload for new calls; App V2 remains OFF.
+
+
+## Audio SDP validation before RTC (27 October; inactive)
+
+The Source admits remote bytes (at most 8 KiB), decodes UTF8, validates the supported audio
+shape and repeats currentness before HIGH's original constructor or remote SDK entry.
+LOW's answer must match the original offer. Local SDK output is byte-bounded and checked
+after gathering, before Begin can consume its plaintext. Only a detached, frozen MID/RTP
+record persists; the input string is never used as its substring backing. Close/transfer
+clear that record. The existing fixed SDP book covers its 224-byte inventory; temporary
+parser/answer scratch belongs to the serial text stage. Complete SDK negotiation, runtime
+receiver/direction checks and native authorization remain distinct boundaries. Broker45
+rejects retained44 for new calls while preserving existing cleanup. App stays OFF.
+
+
+## Answering RTC audio (27 October; Broker44, App OFF)
+
+Before answering under the same fresh native14 admission, the private RTC source now
+selects sendrecv on its exact single audio transceiver. A remote-created transceiver
+otherwise defaults recvonly; replaceTrack after negotiation cannot supply the missing
+send direction. No new m-line, round, native grant or async SDK worker is added. Actual
+negotiated direction remains the intersection with the remote offer. Original currentness
+checks surround SDK getters/setters; their synchronous scope ends before the description
+await. Broker43 retained code requires reload; original negative cleanup remains usable.
+
+A separate inactive audio helper owns one paid OS capture capsule through actual SDK
+return/track stop, including End/replacement and failed cleanup. Its fixed4KiB pool and
+lazy8KiB original-group capsule still need broker/payment integration. The audio-only SDP
+shape helper also remains unwired: enforce8KiB UTF8 first, then scan before HIGH's PC
+construction, repeat currentness and validate the actual receiver/transceiver at adoption.
+Its frontend profile supports UDP/TLS/RTP/SAVPF only; CompleteSdpV1 itself promises neither
+this media shape nor native URL/media policy. Mic clones, playback and relay remain open.
+
+## Device ICE configuration custody (27 October; Broker43, App inactive)
+
+The explicit configured App-call factory prepays a separate64KiB window inventory and
+binds it, together with the existing8KiB App inventory, to the accepted group before
+settings capture or key work. Existing frontend256KiB/group and2MiB/process limits remain;
+Root's independent512KiB/group limit is unchanged. The configured source is a stable,
+synchronous device adapter, never an invite/server TURN hint or an old call closure.
+
+One bounded immutable snapshot supplies at most17 opaque metadata loans (16 indexed plus
+one in-progress; not an allowance for17 peers). Only the exact App-created owner can
+borrow. Native14 authority still precedes actual PC construction. The SAME loan transfers
+with the SAME PC into independent media custody; source/media drainage returns it only
+after actual SDK closure. End fences the snapshot first and joins all loans before group
+unbinding; the retained window process inventory remains paid. Snapshot/configuration
+frames retain no old native/negotiation/Phase callback. Credentials stay private.
+
+This is local configuration enforcement, not native authorization of ICE URLs or a relay
+service. Opaque RTC/browser heaps are outside the conservative bounded JS inventory.
+App activation, microphone/remote audio, renewal, relay and actual WebView/physical
+acceptance remain open; V2 stays OFF.
+
+## Root history validation completed (27 October; source daf4ca91, App OFF)
+
+The terminal Root-history implementation below now passes complete validation: Root3691
+passed/24 existing ignores; native890 library+5 ACL passed; frontend3101 passed. Strict
+Root/native Clippy, both formatting checks, native cargo check, current-native construction
+scan, no-ambient, frontend static checks and production build35.22s pass. Root ran on the
+byte-identical runtime/Cargo/lock/toolchain inputs in the warm custody checkout. Native and
+Root gates ran serially; the full Root run finished27 October00:46 UTC. Read-only design,
+adversarial review and re-review have no remaining actionable finding.
+
+Fresh dependency audit still FAILS inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver.
+No setup/window/send/friend change was made, so startup/flow gates were not rerun for this
+inactive slice. Actual authenticated-facade WebView, production App/audio/renewal, member
+media relay and combined/physical acceptance remain open. One desktop is available.
+This supersedes the older pending-gate status below for source daf4ca91 only; later browser
+changes require their own checks. It does not enable V2 or complete the programme.
+
+
+## Certified Root history collection (26 October; inactive, gates pending)
+
+After exact native Plan-final issuance/ACK and actual native row destruction, a small
+original PlanBinding capability requests collection through existing Root maintenance.
+Callback-free try-Engine/try-input checks select only settled, non-preparing, ACKed Actions
+without input/permit/lender. Each map/cache Arc drops outside those guards. Last-field
+custody in the original fixed RecordFunding counts actual Action/delivery owners through
+complete credit destruction; native mode8 waits for that real return as well as native GC.
+No Actor await, new scheduling pool or Row/Workflow/Exchange/Phase backedge is added.
+
+Irreversible forget-in-progress may refuse registered historical recovery before the final
+positive collection receipt, while direct retained Action metadata remains readable.
+Original closed chain/intent/issuance stamps, serial/cursor, namespaces/replay/counters and
+Source attempts remain. SDP's cache clears without making its first namespace unused.
+Existing limits/reservation headroom and all independent lifetime bounds still apply.
+
+## Retained application bootstrap (26 October; inactive V2)
+
+Broker42 constructs one window-retained native-call facade under a separate8KiB process
+reservation, then binds that SAME reservation to the accepted native group before key work.
+One active/closing call owns bounded controller/candidate metadata, actual startup/End tasks
+and cadence. Same-room remounts reuse originals. The facade composes existing main-window
+public metadata commands and the private selected-key/channel/lifecycle path; generic crypto
+admission fails closed and no SDP, PC, key or mutable drainage flag is exposed.
+
+End fences browser adoption, issues exact native End before joining pending activation,
+repeats afterward and joins the broker's internally retained original owners outside the
+codec. Selected-key lookup and both fees persist through actual job/position return. Group
+payment ends only after native/broker/cadence/handle joins; the fixed process graph remains
+paid for the window lifetime. This module is not App activation or RTC/track integration.
+
+## Isolating an attached media failure (26 October; inactive V2)
+
+Broker41 permits failure retirement of the exact current un-compacted media allocation,
+bound to its Plan, negotiation generation and actual driver. Negative state is published
+before SDK/cancel callbacks. Cleanup joins that driver's real Current/history/SDK work and
+existing negotiation/compaction frames outside the shared codec. A compaction winner keeps
+its separately paid retained marker; otherwise the failed registry owner and current media
+references disappear before the driver's post-worker refund. Old chain/action history stays
+paid independently. End joins the same coalesced worker before clearing Session keys.
+
+The original native media Close/Release gates and original Plan-final/ACK still decide
+retirement. Ambiguous Phase intent is never relabelled; exact recovery and its authenticated
+refusal alone permit the existing Plan fallback. Independent indexed peers retain their
+Session and authenticated Current. This adds no wire field, native effect grant, attempt,
+capacity or deadline. Production App/RTC/tracks, renewal and member relay remain unfinished.
+
+## Whole-plan confirmation cache retirement (26 October; inactive V2)
+
+Explicit `ConfirmationControl::retire_all` now publishes a dedicated monotone whole-plan
+latch after successor closure. Key-only successor closure retains its narrower contract
+and does not set this latch. Ordinary LocalJoin maintenance removes only the exact plan's
+obsolete confirmation cache owners. Outgoing uses actual Workflow identity; incoming uses
+the existing full confirmation tuple and one-protected-plan-per-handshake invariant.
+Established pair pins/status, replay, sequence/token allocators and SDP/media remain.
+
+Source obsolescence AND final Source authority consult the same terminal latch. The latter
+prevents an old retained activity from recreating an attempt record between idle pruning
+and actual Control closure. Active Source/Lower/ACK and externally held Input keep their
+original payments and continue to delay real Workflow retirement until their actual Drop.
+No clock advance, attempt refund, final/drained assignment or protocol-format change is used.
+This fixes the actual pre-Ready cache pin found by the native early-fence regression.
+
+## Closing before ambiguous admission recovery (26 October; inactive, native gates pending)
+
+Broker40 extends failed attached-plan cleanup with an irreversible native Plan closing
+intent. Ordinary parent Return, closed children, original Session/selection and immutable
+final-kind checks still precede it. The native media/Source barrier must permit closure;
+a lost media reply does not make an admitted native Source absent. Only then does native
+atomically close the exact established-key successor binding and publish closing intent.
+Original control retirement and affine destruction run outside native guards.
+
+This intent retains every original Claim/key/storage/SDK obligation. Installed histories
+remain recoverable; unreleased Claim reports Closing with zero remaining time. Frozen
+missing history refuses before Actor preflight or new candidate construction. Final proof
+issuance still requires all original releases and actual Root/worker drainage. Closing
+intent, Pending, final proof and final ACK are distinct observations.
+
+The browser joins its actual failed work and ordinary Returns before requesting the same
+Plan intent. Only a correctly bound authenticated Pending/final response, after its entire
+framed finally returns, permits admission-shaped history recovery on the live Session.
+Lost/refused/wrong-kind replies keep recovery unreachable and retry the same intent.
+Independent indexed media and original Session counters remain. HMR39 requires reload.
+Any per-N media record, unknown parent publication, renewal, production App/real RTC/tracks,
+relay and physical acceptance remain open. The Broker39 section below records its earlier
+quarantine-only boundary; Broker40 replaces that restriction for the attached pre-media case.
+
+## Retiring a known failed negotiation (26 October; inactive)
+
+Broker39 separates a failed attached negotiation from its retained Session before any per-N
+media record exists. It fences that generation, joins its original work outside the codec,
+performs negative cleanup of observed obligations and uses original Plan final/ACK. Actual
+worker return precedes an explicit next-generation publication under the complete shared
+quiescence barrier. Old chain/action history stays paid; native/job/child adapters are severed
+before replacement so retained public history cannot keep an unpaid complete old N alive.
+
+Native outstanding-work projection and automatic parent admission share one exact indexed
+Plan-certificate predicate. It uses the immutable native-issued/ACKed full-retirement witness,
+not a fresh boolean Root observation which could report false on contention. Exact native
+row/child try-lock refusal remains Capacity. Rows are not removed; direct authenticated
+historical recovery is unchanged. Unknown children can be terminalized from the parent's
+certificate only after their actual local SDK/IO joins. This grants no fresh effect.
+
+Uncertain positive admissions need a new native negative fence before any recovery-shaped
+Admit can be safe on a live lease; this implementation quarantines them. Any per-N media
+record still uses whole-Session fallback. Operational renewal, App/RTC and relay remain open.
+
+## Session lifecycle scheduling (26 October; inactive)
+
+Broker38 adds one coalesced lifecycle per authenticated Session. Its prepaid 2 KiB graph
+retains only opaque generation/plan/stage observations while scheduling existing authorized
+leaves. It lives outside NativeWorkPump: handoff joins that pump, and history compaction
+must never wait for the pump while holding its own transition turn. Native identity/proof
+admission remains in each existing leaf. Successful history collection leaves an opaque
+advance marker, then the explicit next-negotiation operation replaces the generation.
+
+The loop owns one actual task and at most one cadence registration. A Clock which registers
+then throws cannot return that payment without its original callback. Failed cancellation
+retains the original timer debt until cancellation or callback really returns. No finite
+clock reading may silently round the next 250 ms cadence to the present. End joins actual
+work outside codec/ledger guards; its 2 KiB fee returns only with Session collection.
+Claim/adopt and storage/SDK sequences retain their original single-flight authority while
+yielding the physical codec between complete requests, allowing indexed media to refresh.
+App activation, failed-negotiation isolation, real RTC and relay remain separate work.
+
+## Prepaid variable voice progression (26 October; inactive, complete suites pass)
+
+Before a protected chain exposes Derive, it now prepays one192KiB core and independent32KiB
+Ready capacity. A direct96KiB escrow in the original Workflow leaves exactly its earlier96KiB
+lendable limit. Preparation borrows metadata from that same core without Workflow custody;
+refusal/abandonment preserves the original escrow and backing. Actual affine transfer moves
+capacity closing rights with the existing lane/packet owners before returning escrow outside
+guards. Old genuine loans retain Workflow custody and return directly to the shared core.
+Their last destruction still controls confirmation drainage; Exchange retains no Workflow.
+
+Ordinary close owns both reservations until transfer. A transferred ticket/Exchange owns their
+closure afterward, including abandoned construction and unwinding. Repeated old close cannot
+close successor backing. The512KiB group/2MiB process ceilings and96KiB confirmation loan
+limit are unchanged. This removes simultaneous reservation of separate96+192+32 variable
+peaks; it does not make fixed origin/member rows, history slots, later native storage, SDK,
+RTC or additional rounds universally admissible. Actual native second-peer acceptance and
+complete Root/native/frontend suites pass; HANDOVER records counts and the inherited
+dependency-audit failure. App V2 remains OFF.
+
+## Exact Input cancellation ownership (26 October; inactive)
+
+The shared Session records which original intake owns its actual physical controller.
+A different queued negotiation cannot cancel indexed media's Current. Every Input admission
+rechecks its captured intake/generation and negative flags after callbacks, including the
+last Clock/timer callback before transport. Aborting the correct signal does not substitute
+for that admission check. Existing byte/position/wire bounds are unchanged. HMR37 refuses
+older retained layouts. This is separate from peer-local failed-plan retirement.
+
+## Successful peer composition on a shared Session (26 October; inactive)
+
+Broker36 retains each compacted original media driver in an exact bounded record. Its next
+negotiation is published explicitly after the old compaction observer's actual return and
+all old effect/IPC gates are clear. Keys, counters and shared codec survive unchanged. Driver
+callbacks capture the exact record; compacted-peer expiry does not end another peer. Global
+End closes every actual driver before joins. Each media fee returns after real cleanup and
+its heavy worker return. Shared cleanup observers join one timer/Signal owner.
+
+A2KiB record marker transfers from old history; each driver retains its original8KiB. Sixteen
+records is only an upper bound. Root's unchanged32-Action lifetime budget can refuse earlier;
+mode8 reclaims native rows, not Root terminal history. Failed precompaction retirement and
+real native/TCP multi-peer acceptance remain unfinished. App V2 stays OFF; see HANDOVER.
+
+## Shared codec and independent browser SDK execution (26 October; inactive)
+
+Broker35 retains one per-negotiation state object and fences captured callbacks by that
+owner. Session keys/counters, global End and codec infrastructure stay separate. One bounded
+FIFO serializes actual codec work across retained Sessions; one independent SDK loan shares
+the existing two-position pool. Reservations form a union: codec plus SDK occupy2 even
+when another channel closes. Ordinary admission reserves before callback-bearing checks.
+Bootstrap and protected/SDP provider work never hold the codec; their exact admission and
+actual SDK/digest return bound the loan. End cancels only unstarted borrows. Cleanup takes
+individual physical turns and releases them before native waits/retry cadence. Existing
+original metadata prepayments cover queued closures; no cap, wire or authority changes.
+Two channels' SDK computations now serialize, while their control traffic can progress.
+Multi-peer admission and App activation remain disabled; HANDOVER records current gates.
+
+## Original-peer live browser compaction (26 October; inactive)
+
+Broker33 can retire browser negotiation history while indexed original media persists. Exact
+native history completion precedes an exclusive, coalesced browser disposal transaction. Old
+SDK/IO/action/intake and entered-cell joins precede its private metadata commit. Only a paid
+inert plan marker and the independently paid media driver survive; old final/selector history
+is cleared. A separate small completion scope refunds after heavy transaction frames actually
+return. Shared Session keys/counters stay unchanged. End closes the actual peer before joining
+compaction and cleanup. Another negotiation is still blocked; this is not multi-peer support.
+HANDOVER records passing extended HTTP/browser gates and the passing current full Native rerun. App V2 is OFF.
+
+## End-only browser terminal disposal (26 October; inactive)
+
+Broker32 wraps public negotiation handles and queued plan/intake callbacks in detachable cells.
+End waits for actual native/channel/SDK return before disposal; an entered synchronous dispatch
+keeps fixed history charged until its return. Actual transferred-intake ownership is published
+before Ready, independently of outcome/index retention. Final disposal erases adapters and old
+heavy graph edges. This is End cleanup, not live history compaction or shared-Session multiparty
+composition. HANDOVER records focused/review evidence and pending complete gates. App V2 is OFF.
+
+## Browser consumer for native history collection (26 October; inactive)
+
+Broker31 drives mode8 through the existing independent media driver and physical Session.
+Current freshness remains request-start bounded while historical cleanup waits. One coalesced
+observation is published before callbacks; actual IO and observer finally return before media
+payment can leave. Native collection does not refund browser fixed graphs. The same peer and
+Session remain intact. HANDOVER separates actual HTTP loss/recovery evidence from pending full
+gates and from still-unimplemented browser handle detachment/per-pair composition. V2 stays OFF.
+
+## Live-lease native history collection (26 October; inactive)
+
+An indexed media entry retains full Derive selector, original parent/Action/Session and an
+irreversible native Plan-final proof/ACK latch. Mode8 requests removal without keeping its own
+ResolvedRow. Canonical drained/root-ready rows with index-only ownership can leave while the
+lease remains live; uncertain work cannot. The compact original-purpose tombstone prevents
+re-admission and discovery starvation after removal. Session collection is a separate state.
+
+One affine collector ticket spans unlink, outside-guard destruction and completion. Concurrent
+or reentrant collectors return without marking absence. Ordinary service maintenance advances
+this bounded work independently of setup. Physical Session and media payment remain intact.
+This is native-row reclamation; browser handle/history detachment and composition remain open.
+HANDOVER records review, exact evidence and pending gates. App V2 remains OFF.
+
+## Independent native media index (25 October; inactive)
+
+Control28 mode7 Detach moves the SAME expired-negotiation media Root into 32 fixed native
+slots. Actual selected/Session and original parent/Action/proof survive without a strong
+Row/Phase/Intent backedge. Entry/candidate/index/GC storage is prepaid within existing caps.
+Broker30 retains old SDK/Source/Lower and physical IO through native Plan-final/ACK before
+64 KiB refund, while an independent 8 KiB monitor keeps the same peer current. Fixed history
+and shared Session keys/counters remain paid until End. This is variable negotiation
+retirement, not history reuse or multi-peer composition. Current mounted-state checks now
+run under UI commit before Coordinator. HANDOVER records tests, review and pending gates.
+App V2 stays OFF; renewal, App tracks, relay and combined/physical acceptance remain open.
+
+## Inactive one-pair media driver (25 October)
+
+Broker29 connects the original completed RTC round to authenticated Control28. A separate
+8 KiB browser record owns one acquisition/status flight, monitor and opaque destination.
+Fresh Current authorizes only synchronous same-peer transfer; historical admission and
+old Ready cannot substitute for it. The driver closes the real peer on End or freshness
+failure before waiting for IO, then joins all custody before native release/refund.
+
+The pilot deliberately retains its original channel/negotiation graph until End. Native
+media remains nested in the old parent record. Independent indexing, legitimate old-source
+retirement and shared Session/multiparty composition remain prerequisites for activation.
+HANDOVER records the passing tests and intermittent native acceptance failures still under
+diagnosis. The older leaf-only TODOs below are superseded only for this inactive pilot.
+
+## Browser affine RTC leaf and passive freshness (25 October; inactive)
+
+An inert same-original destination can take the exact completed RTC peer once, after
+provider/current checks and both owners' final private gates. The no-callback transfer
+tail clears the source peer and old current closure. Destination state is module-private
+and contains no old phase/channel/Clock graph. Failed synchronous SDK close retains the
+actual peer instead of claiming drained. This leaf still requires independently prepaid
+broker custody and fresh authenticated native media admission before use.
+
+A separate passive status gate holds only proof, one exact attempt token, numeric deadline
+and irreversible close metadata. Refresh validity is anchored before IPC; delayed replies
+and capacity cannot extend expired observations. The future shared driver must authenticate,
+schedule, close/join the real PC and retain its own payment. Neither leaf provides that
+driver, native index detachment, App activation or media/physical acceptance.
+
+## Native media obligation after canonical SDP (25 October; browser transfer open)
+
+The authenticated fixed Control service now has a distinct original-PC media obligation.
+Its native preparation/Actor/callback owners are prepaid before allocation and retained
+through actual callback return. A small placeholder precedes the irreversible media split;
+the same detached child is retained across local refusal rather than recreated on retry.
+First effect binds the actual original Session/key/SDK and both registered canonical drained
+rows under ordered native fences, then commits the sole Actor's borrowed Root admission.
+Close/release history remains usable after End without granting fresh effects. Never-admitted
+negative state does not invent a browser debt; admitted media needs its separate release.
+
+Ordinary negotiation cleanup must not cancel active Answer Source retries. The original
+native-clock expiry is observed without renewal, and actual Source/Lower custody stays
+paid until retirement. Native currentness outliving negotiation is not an automatic browser
+PC closer. Browser affine ownership transfer/status execution, op28 HTTP acceptance and
+App activation remain open. This supersedes the older native-media-command TODO below.
+
+## Root media custody transition (25 October; consumer not wired)
+
+The first-round SDP path can now prepare an independent finite media record and lend one
+scoped first-admission tail through the sole Actor. Original Ready/effect and native Session/
+row/key gates authorize FIRST publication; committed media then follows original call/pair/
+actor/session/policy/epoch plus its own close rather than the short negotiation timer. This
+record retains fixed paid provenance, not old variable phase/Exchange/Action graphs. Native
+media command/claim, browser actual-PC transfer and bounded revocation handling remain open;
+this is not a live media path. INTERFACES and HANDOVER state exact funding and acceptance.
+
+## Native service and original browser round connected (25 October)
+
+The authenticated service now chooses the existing SDP15-27 adapters explicitly. Original
+large-body permits and fixed Control remain separate, with MAC/wire checks before capacity
+or counters and typed full ownership after AEAD. The whole service infrastructure graph and
+physical codec use independent unchanged payments:27,632/32,768B and12,279/12,288B. Native
+Task/RPC/output retirement still remains distinct from SDK settlement and shared release.
+
+Two actual retained brokers complete8KiB Offer/Answer over real HTTP/BYOB/WebCrypto and
+blocked A-C TCP through unjoined B. Native canonical rows/Applied/drain establish completion;
+controlled RTC methods establish lifecycle ordering only. Exact-row reply-loss tests prevent
+aggregate counts from hiding an unexercised action. The Ready first-route correction is a
+separate commit and does not add arbitrary helper renewal. App activation, real WebRTC/media,
+operational renewed rounds, multi-peer, relay and combined/physical acceptance remain open.
+This supersedes older native-service/round-integration TODOs below.
+
+## Serial private Offer/Answer round (25 October)
+
+The retained channel now composes both directions on one original RTC peer. Before changing
+purpose it successfully finishes native24 for the first actual executor, clears that Action
+and ends its helper frame. The next Action reuses the existing paid rows/phase and original
+Ready/deadline; callback/buffer graphs do not overlap. HIGH Answer still needs new actual14,
+original applied Offer and same PC; LOW Answer still needs fresh false26 before RTC. Live
+Return preserves the PC, while End joins actual SDK work before shared release. Fixed serial
+composition fits the existing16KiB book/64KiB payment. Broker shape28 is incompatible with
+older retained HMR owners and refuses them.
+
+Controlled-provider tests establish both maximum-size directions and lifecycle/retry ordering.
+Actual full-round native/browser interoperability, renewed rounds, media tracks/TURN, App
+activation, multi-peer and relay remain open. Shipping15-27 stay refused. Older Answer TODOs
+below describe checkpoints and are superseded only by this private implementation.
+
+## Private retained-channel first-Offer RTC owner (25 October)
+
+One concrete RTC owner now lives under the original paid SDP phase. The composite flight
+is published before callback seams and excludes status/history through affine local-buffer
+adoption. Fresh actual14 and its physical finally precede LOW local SDK work; a void helper
+ends its UTF16 getter frame before crypto Begin. HIGH's fresh false26 similarly drains
+before consuming the private Open inbox. Actual SDK success is latched independently of
+uncertain true26 replies. End joins original SDK work outside SharedIpcExecution before
+Action/native custody release. CompleteSdpV1 uses bounded gathering at the original absolute
+deadline; no early-ICE queue is introduced.
+
+Serial local/remote stages inventory application buffers, UTF16 text, known SDK conversion
+copies and callbacks inside64KiB; opaque engine/OS heap remains outside this accounting.
+The first-Offer path has controlled RTC/native test providers. Answer, renewed rounds,
+production interoperability/activation, media tracks, multi-peer and relay remain open.
+Earlier sections describe checkpoints; their first-Offer RTC TODOs are superseded here.
+
+## Private scoped native SDP delivery26 (25 October)
+
+The actual Actor now lends a lifetime-bound delivery step after original Clock preparation.
+Fresh native admission repeats original Session/selected row/Action/intent/SDK/PC and Root
+current authority under lexical native guards followed by try Group/Policy. The paid App
+RPC and native Task/physical owners survive callback/output collection independently.
+Canonical history is read only after the callback retires, outside native guards.
+
+Already-Applied completion is immutable metadata, recoverable after End/Return on the
+original capability; it never grants another RTC execution. Stable original lease/scope,
+Root directory group, local device and Resources checks precede history/Clock access.
+Fresh false26 still needs current authority even if old history says Applied. Browser RTC,
+Answer/ICE/renewed rounds, multi-peer and relay remain separate. Production stays disabled.
+
+## Private first-Offer browser crypto owner (25 October)
+
+The retained encrypted channel now owns one serial first-Offer crypto job inside its
+original64KiB SDP phase. Two fixed global row claims precede unknown Begin. LOW Offer
+Seal and HIGH Offer Open use the original protected Pair, exact authenticated native18
+admission and one SDK-started latch. Native Result uncertainty retains the original output;
+it cannot execute WebCrypto again. Successful Open keeps its private paid plaintext inbox.
+No HIGH Answer can begin until a later fresh native delivery/RTC owner applies that Offer.
+
+Begin UTF8 survives a known Pending row until Action attachment. Input moves exactly once
+after read/cancel/timer cleanup and fresh original-PC currentness; its lexical descriptor
+scope ends before Result encoding. End joins the job outside SharedIpcExecution before
+native SDK/storage release, including close-first recovery of an unknown Begin. Fixed
+metadata/callbacks and stage buffers have separate terms within the same64KiB payment.
+The production dispatcher remains closed; this is not RTC or media-relay activation.
+
+## Separate browser SDP Input data boundary (25 October; reader-only checkpoint)
+
+A dedicated opcode17 BYOB response reader admits only authenticated direction1/class2
+Input or fixed Control. It shares the existing read/cancellation implementation while
+keeping generic2,064B ceilings unchanged. The v8/tag3 descriptor decoder checks the exact
+original row/Action/PC/SDK/storage/Ready bindings and returns borrowed AAD/body views from
+one fixed exact backing. It does not normalize AAD or grant engine/SDK/RTC authority.
+This reader-only checkpoint initially lacked an exclusive retained consumer. The
+first-Offer owner above now supplies the explicit paid backing transfer and serial
+SDK/Result/settlement integration. RTC composition remains open; production SDP stays disabled.
+
+## Original SDP cleanup controls (25 October; private)
+
+Native22 ACK and23 settlement use exact registered original Session/row/parent/purpose/
+Action provenance, then invoke trusted Root historical cleanup outside native guards.
+The actual receipt digest selects ACK; settlement is irreversible and grants no new
+engine/input/RTC permission. These controls survive End/PC closure. Same-Session physical
+custody fences native work; the browser separately owes its actual SDK/result-RPC join.
+No native observation of history, counter zero or closure substitutes for that join.
+Production SDP remains refused; this is not browser/RTC activation.
+
+## Original SDP Result publication (25 October; staged native path)
+
+Seal/Open prepare all fallible signature/hash/token/delivery work outside native guards,
+then lend one stack-only final Result tail on the actual Actor. Native checks the original
+indexed Action and exact output domain before UI/Coordinator/route/row admission; Root
+then holds Engine and current Group/Policy through infallible publication. Prepared owners
+stay outside the callback, including refusal/unwind. Native UI is lexical; post-hook
+history and cleanup never inherit it. A historical accepted/rejected terminal needs no
+new hook, input, engine or token, and is not fresh RTC authority.
+
+The eager original Body/metadata RPC has one channel and paid-last sender/observer ownership.
+Historical/hash frames are explicitly RPC-paid; pending scratch is checked against the
+retained original engine allowance. Native known-row Result intake transfers the same
+class2 allocation and attaches one-way Task/physical custody to Body or failure metadata.
+Canonical history can outlive observer wrappers while independent sender Work still owns
+its bytes/custody. Production SDP dispatch remains closed. HANDOVER records current gates
+and the remaining browser/SDK/RTC/composition/media boundaries.
+
+## Scoped actual-Actor SDP engine admission (25 October; private)
+
+Engine candidate payment precedes current Actor origin capture; the same original Action's
+time is observed last. A scoped synchronous step retains Engine then current Group/Policy
+through original permit insertion. Canonical terminal/settled history precedes current
+failures; an immutable PC/Ready intent or generic engine permit cannot replace actual MLS,
+room/watch/call/pair and registered Action checks. Unused candidate credit drops outside
+the native hook. The same serial/credit is reused on exact retries, without SDK reexecution.
+
+The separately paid App/native command binds the original row counter and actual Action
+allocation before effect. Its UI guard is lexical and ends before callback return; Root
+cleanup may then retire an unused candidate. Callback retirement precedes canonical history.
+Fixed metadata survives in original physical Control custody after native Task/Actor graphs
+are destroyed. Projection and serialization are separate stages to preserve the existing
+Control cap; current validation status is in HANDOVER. The version8/tag4 permit has a private
+browser decoder now consumed by the private first-Offer owner above. Production SDP and
+RTC/media remain disabled.
+
+## Scoped original SDP Begin publication (25 October; private)
+
+Original LOW Offer, HIGH Answer and Open factories now lend one stack-only prepared
+publication tail from the actual Actor. Original Clock/capacity/signing preparation occurs
+before native final fences. The affine Writer still enters once; the tail exposes only
+original Outcome identity, captured samples and consuming commit. Prepared owned graphs
+remain outside the hook so refusal/unwind cannot destroy their capacity under native guards.
+
+Native's short PreRoot mark-handoff gate ends before queueing. Final admission tries actual
+UI/store/resumable, Coordinator, route, indexed parent/row and original provenance before
+Root Group/Policy. Successful output retains actual UI/physical/Task custody. The original
+boxed Actor sender is paid by RPC, with a last same-Work anchor through completed backing
+destruction; it creates no new task, channel, copy or budget. Measured RPC sender3,608/4,096B,
+native worker2,248/4,096B and common Control12,279/12,288B fit unchanged limits.
+
+This fixes the Begin/Clock overlap described in earlier checkpoints below. It does not
+enable production SDP. Actual-Actor engine admission, native Result, browser staged
+WebCrypto/result/settlement and RTC remain next. Root Exchange, native Phase and browser
+sidecar accounts must each cover their own complete retained graphs; engine Exchange
+credit is not a native Phase allocation. Multi-peer, relay and physical acceptance remain open.
+
+## Concrete original SDP Input publication (25 October; private)
+
+The native Input adapter binds its actual Actor RPC, Task and response to the same original
+row counter. A scoped Root admission finishes Clock callbacks first; the consuming native
+publisher then tries UI/Coordinator/route/row fences, repeats mounted-store state, and
+commits Root admission. A non-Clone input loan reaches only an authenticated fixed-format
+response. An ordered narrow owner keeps actual UI, physical request and paid custody through
+collection, without retaining a whole Ledger or creating a response/funding cycle.
+
+Producer output delivery is distinct from sender retirement. The original Task observes
+its bound counter until all other same-row IO has actually retired, without Clock, while
+Registration and the sole physical request exclude new same-purpose IO. No generic refund,
+new authority or drainage assertion follows. Historical recovery occurs after publication
+release. The earlier Begin/factory path still overlaps UI custody with Clock callbacks;
+that separate admission boundary must be replaced before production SDP is enabled.
+
+Existing64KiB phase,4KiB Task,9,232-byte response and12KiB Control limits are unchanged.
+The private Input adapter is3,728B; common Control remains12,279/12,288B. Production refuses
+the entire SDP family. Browser/engine/result/RTC integration and maximum-size composition
+are still pending; this is not a live negotiation or media-relay architecture claim.
+
+## Scoped original SDP input reads (25 October; HTTP consumer pending)
+
+The actual ServerActor lends a synchronous Root input-admission step while ChannelSync
+remains exclusively borrowed. All original Clock callbacks precede native publication.
+Final Engine admission recovers known terminal/settled history first, otherwise checks
+registered Action/intent/call/room and current Group/Policy against the actual MLS context.
+Input loans are affine publication custody; they grant no engine, token, signing or RTC use.
+
+App's separate positive 4KiB Copy pays the bounded queue/callback graph, including the named
+Root inventory. An ordered argument/payment aggregate survives callback/refusal unwind.
+The concrete native publisher must independently prepay and measure its own graph, bind the
+same row counter and retain actual UI/physical/output custody. It is not implemented here;
+production SDP ingress remains closed. Existing budgets and wire formats are unchanged.
+
+## Staged original SDP controls (25 October)
+
+Original paid SDP Begin/Resolve/History/Return now have private framed adapters. Same-slot
+history precedes current admission; HIGH Seal requires actual applied Open and fresh time
+checks after history. A bounded read-only Actor preflight keeps only its actual receiver
+across await. Original pending work, fixed rows and detached publication retain their
+existing ownership boundaries and caps. The production SDP family remains refused until
+the Input/engine/result/delivery/ACK/settlement and original-key browser vertical is complete.
+
+## Original SDP historical projection (25 October; private)
+
+Root exposes metadata-only Open recovery from the actual terminal Engine record. Native
+observes it outside Index/State/UI guards, repeats original Session/Action identity and
+uses the same delivery Arc. A historical Snapshot retains only its actual paid Row/parent
+and fixed delivery, not the whole Ledger or another variable input. A distinct v8 codec
+and browser decoder represent published Pending and no-action collection honestly. Their
+complete synchronous metadata/reconciliation/SHA graph stays within the existing Control
+allowance; a future HTTP producer must separately inventory its actual enclosing future.
+The action-family HTTP/SDK/RTC path remains disabled and incomplete.
+
+## Paid original SDP producer (25 October; HTTP dispatch still closed)
+
+The native SDP producer now has an affine preparation and a separately paid detached task.
+Its canonical row can reclaim a worker only on original Idle/NeverEntered/Capacity history,
+under final current and deadline checks; uncertain or published work is recovered instead.
+Construction installs an ordered guard before any fallible snapshot/copy operation. Writer
+retires before Registration, which retires before physical custody and the final payment.
+The worker's original Copy keeps UI publication ordering through queued Actor work, even
+if its observer disappears. No task/abort handle escapes. Actual output stays paid until
+collection, and an actual Root Action is captured before fallible native attachment.
+
+SDP body transfer uses its distinct storage and original row IO counter. It never widens
+confirmation Data and restores identical opened backing on local construction refusal.
+The initial provenance snapshot belongs to the fixed row fee; native construction,
+admission and task/output graphs are inventoried as separate execution phases within the
+same task allowance. This is a private producer, not an enabled HTTP/SDK/RTC path.
+
+
+## Canonical native SDP outcomes (25 October; production vertical pending)
+
+The shared native Index installs one original Root outcome per parent/PC/purpose after
+exact candidate intent/fee/body checks and uniqueness. Pending/Live/Drained retain it on
+the original2304B fixed fee; the complete graph still fits without increasing64KiB storage.
+Its affine Writer is obtained only from the actual Registration. Final native handoff checks
+that same allocation and PreRoot state before calling the recorded Actor API.
+
+After worker loss, compaction recovers actual publication from the slot outside guards and
+reconciles Root engine history. Stable absence is reread under final Index/State after
+original IO closure/collection and worker/observer retirement; InFlight/Uncertain remain
+unresolved. The same outcome survives terminal compaction. Native variable owners leave
+guards before destruction. Production HTTP/SDK/RTC handlers remain closed. An async
+producer must keep Registration or paid IO until its Writer retires; the current bare
+Writer API is not a notification-only waiting mechanism.
+
+## Original SDP publication history (25 October; native row integration pending)
+
+A fixed original outcome survives Pair/LocalJoin pruning and lost Actor replies. Its
+affine Writer distinguishes never-entered work, explicit normal refusal, entered uncertainty
+and the actual published Action. LOW Seal, HIGH Seal and Open record that SAME Arc in
+their successful final tail, before packet activation or retired-input destruction.
+An irreversible intent profile separates recorded and unrecorded factories, including
+cached recovery; native still needs one canonical slot per original purpose.
+
+Recorded Actor APIs eagerly construct paid Command/Pending wrappers before returning a
+future. Writer lives in the command before Work; both channel halves retain Work. Explicit
+Actor paths retire Writer before completion, so final native IO notification cannot precede
+the negative observation. The original4KiB RPC inventory counts eager construction and
+actual returned futures. The outcome has no native Row/Phase/Copy/publication backedge;
+its Action retains separately paid Root input until real retirement. Production native row
+installation/reconciliation, SDP HTTP dispatch, private browser SDK and RTC remain open.
+
+## Concrete paid SDP Actor transport (24 October; endpoint integration pending)
+
+Typed Rust-only SDP commands now carry one original Buffer/Copy into the bounded Actor
+mailbox without copying its payload. Body construction validates range, actual backing
+capacity, original PC-intent/Phase identity and the extra4KiB RPC payment before allocating.
+Refusal returns the SAME Buffer. A single busy flight shares paid work through Command,
+Pending and Completion; observing a result does not collect it or permit another claim.
+
+The Copy can retain method-free native publication custody. That custody owns the actual
+UI commit, unique physical position and a separate original TaskCopy. TaskCopy cannot adopt
+bytes or receive a keepalive, preventing the direct self-funding cycle. Bytes zeroize and
+deallocate before their Copy releases its keepalive reference, then its own credit. The
+publication's actual last Drop remains paid by its separate TaskCopy; Phase drainage waits
+for every actual Copy, including a worker which outlives its body.
+All handlers retire argument owners before their final shared RPC work, including abandoned
+waiters. Root still repeats current authority. This supplies no native wire endpoint or SDK
+producer: their complete worker/dispatcher/response graphs still require measurement.
+
+## Root Answer production after applied Open (24 October)
+
+The original fixed delivery is a monotone Prepared/Admitted/Applied cell. Root's separate
+completion API requires the exact original accepted Open and current native owners; HIGH
+Answer resolves that SAME applied record and derives Offer/round internally. It borrows the
+existing Active packet/action claims and publishes action, draft and global counter together.
+Generic protected-round reservation is forbidden, including after header admission/Applied.
+This adds no permanent allocation or progress backedge. Native/browser SDK success and its
+paid Actor producers, complete ICE/RTC and later operational rounds still need integration; the
+Root Applied marker establishes causal ordering and exact recovery, not SDK execution.
+
+## Root SDP commit and delivery (24 October; native/browser integration pending)
+
+The original PC intent now binds typed SealSdp/OpenSdp actions and exact Offer/Answer
+admission. LOW uses a private original inactive preparation and reserves its future Answer
+position before activation. Root result transactions prepare copies/signatures outside
+Engine and capture native Clock observations before acquiring Engine -> try Group/Policy.
+Seal publishes the original signed cache and terminal before later Source work may run.
+Open consumes the original token and publishes terminal history plus one fixed delivery
+observation atomically. Rejected AEAD/UTF8 results retain history without delivery.
+
+Root retains no decrypted SDP. The future browser inbox keeps its separately paid bytes;
+native must retain the SAME delivery record and request fresh current admission before
+RTC. Admission is idempotent for one logical effect, so the original browser broker must
+also preserve one SDK-started latch across lost replies/remounts. The fixed record retains
+actual admission/PC provenance with a plain shared history fee, never Action/Exchange/Phase.
+Actual native SDP bodies/SDK/RTC consumers, HIGH Answer creation and later rounds remain open.
+
+## First SDP intent and queued work (24 October; integration in progress)
+
+The original protected Pair can retain one fixed `InitialSdpIntent`. It observes the exact
+original key/phase and native HIGH marker or LOW Ready receipt; it owns no Exchange or native
+row. Its generation is1, its deadline is the original Ready deadline, and exact recovery
+cannot change either. The effect-credit anchor drops last, after retained Ready observations.
+
+Control14 attaches this original Root observation to the same native KeyClaim/storage/SDK
+records. Its permanent identity does not mean a worker is still running. Each actual RPC
+prepays one Phase Copy before its Actor future, then shares that same custodian through the
+bounded Command, receiver and completion. Closure fences effects before reserve retirement;
+only actual last Drop can release queued/result custody. A synchronous receiver cannot refund
+an active sender. Browser ABI25 tracks its exact intent inside the separate64KiB SDK subtree,
+not old chain metadata. A latched attempt survives all failures until authenticated PC Close.
+One actual coalesced flight shares the existing IPC lane; End joins it outside that lane before
+PC Close, SDK Release, storage Release and key Release. New fixed and transient graph terms fit
+the existing phase4KiB and Control8KiB allowances. Native/browser SDP action and RTC consumers
+remain unfinished and disabled.
+
+## Initial Ready application scheduling (24 October)
+
+Actual KeyClaim adoption latches Pending on its original native parent. The existing paid
+native worker progresses HIGH core/Ready/Source or LOW native Ready/extraction. Canonical
+maintenance gives Ready urgent bounded turns while preserving an actual ordinary-worker
+opportunity across refusals. Fixed progress owns no Exchange/Workflow and grants no RTC use.
+Native64KiB storage waits for actual native core drainage. Exact KeyRelease closes original
+Root successor effects before its Released receipt, independently of the UI commit.
+
+Ready checks current Actor/MLS/directory authority without reconstructing a full roster on
+its small task payment. Mutation-time reconciliation remains unchanged and synchronous;
+validation compares actual epoch/policy/indirect/local-own-leaf against the paid Actor view.
+The bounded helper selector uses actual connection leases and current-member unique descriptor
+bindings, with no full connection snapshot/roster copy. This is initial finite progression;
+SDP/RTC, fresh rounds, multi-peer composition and relay remain unimplemented.
+
+## Separate native/browser SDK custody (24 October)
+
+Native opcode13 adds a fixed, independently released SDK obligation under the original
+Session/KeyClaim/storage phase. Its actual preparation and installed record gate both normal
+finalization and orphan GC; storage closure/KeyRelease/HTTP collection cannot substitute.
+Browser24 prepays a new64KiB subtree, publishes its pending intent before RPC, joins its actual
+admission flight outside the shared IPC lane, and releases SDK/storage before original keys
+and Final. ABI24 refuses retained23 without a replacement pool. close() includes lane/activity
+finally. This is custody only; native core composition and actual SDP/RTC effects remain open.
+INTERFACES records the closed13/version6 grammar; HANDOVER records the boundaries.
+
+## Native SDP storage (24 October; operational consumers pending)
+
+EstablishedKeyCustody now prepares a separate 64KiB storage phase from its actual Root
+PlanBinding. A paid fixed observer has no Phase/Workflow/Row backedge. Native KeyClaim tracks
+Preparing before allocation; real preparation/copy owners gate normal finalization and orphan
+GC. Atomic closure precedes guard-free affine cleanup. Unused bytes return on close; actual
+buffers retain their loans through destruction. Native opcode 12/version 5 exposes storage
+observations only; SDP actions, SDK admission and RTC delivery remain separate unfinished work.
+Core 192 KiB + Ready 32 KiB extraction and actual old 96 KiB drainage must precede this 64 KiB sidecar.
+HANDOVER and VOICE-NATIVE-RESULTS-NEXT record the composition and remaining integration.
+
+## Closed complete-SDP round grammar (24 October; runtime activation pending)
+
+Protected preparation now irreversibly selects CompleteSdpV1 in the native pair before
+capacity acquisition. Round retirement/refusal cannot restore ordinary SDP/ICE/Bye writers.
+A new signed Ready body6 carries that closed profile and a positive u64 native round sequence.
+Current factories fix/admit1 only; higher numbers cannot replace current one-shot custody. Its original native message ID becomes
+the round echo in new encrypted Offer8/Answer9 headers and AAD. Old body5 and kinds1-7 keep
+their original bytes; helpers may relay either Ready form, but protected endpoints require6.
+Only the original HIGH publication or actual LOW admission provides the expected round.
+Ordinary verification cannot bypass that comparison or spend the reserved Root namespace row.
+
+The maximum AAD is579B, with37B of new round/profile metadata. The complete declared exchange
+peak is188,521/196,608B, including two Lower owners, retained action inputs and maximum engine.
+Ready's maximum signed object is692B and declared peak32,644/32,768B. No group, row, action,
+reserve or stage-count limit increased. Confirmation history stores only its three-case role,
+so unrelated SDP enum payloads do not consume the original1536B confirmation row.
+
+This establishes wire/admission isolation only. Fresh rounds after old Finish expiry, typed
+native/browser SDP/RTC, operational scheduling, compaction, relay and acceptance remain open.
+Earlier size/status sections are historical checkpoints superseded by this section.
+
+
+## Retained original keys, separate from progress (24 October)
+
+EstablishedKeyCustody converts exact original native Finish custody while its finite window
+is current. It shares only the original independently paid PlanBinding. Its current predicate
+ignores normal old-phase closure but includes original call/pair/epoch/session/policy and
+whole-plan successor_closed. No new variable lane or authorization is created. Native nests a
+separately released KeyClaim in its original channel Claim; immutable recovery precedes old
+expiry checks. Both obligations gate normal retirement; physical orphan GC retains its stronger
+existing requirements. Browser23 quarantines the existing pair before RPC, compacts new receipt
+to state/proof and returns old variable work only after actual local drainage. The same keys,
+protected-key restrictions and nonce domain survive; first SDP/RTC permissions remain separate.
+
+## LOW Ready receipt and original-lane extraction (24 October)
+
+Root now classifies Ready in the same immutable public/encrypted identity namespace, then admits
+it through the actual protected LOW pair. Exact signed native Finish, epoch, joins, keys, frozen
+helpers and original room/native gates precede final origin publication. Fixed history owns an
+original paid plan observation and plain1600B history byte loan; it consumes no action position
+and retains no Workflow/Exchange/input/keys. Its1024B shared-node allowance includes keys, values,
+header and internal edges; the original fixed anchor drops after fee/reservation destruction.
+
+An allocation-free bounded peek selects the original Workflow verifier before transfer. A
+separate inactive-Exchange exact-ID/hash/route retry lender follows registered transfer, sharing
+the SAME Crypto quota/lane. Normal request work/authentication/admission is never bypassed. Native
+Ready stops/revokes old LOW Source/cache work outside final guards, without closing Await early.
+Native maintenance can retain/retry prepaid capacity and extract only after actual lane/handoff
+custody permits it. Old Workflow drainage remains a separate last-owner observation. Generic
+SDP/browser/RTC activation and automatic application progression are still pending.
+
+## Original Ready Source custody (24 October)
+
+The closed Source packet binding now distinguishes encrypted ledger authority from private
+Ready authority; an absent packet binding still means native public discovery. Only the
+original signed cache with installed receiver/intent and Root receipt position can issue the
+Ready variant. It retains Producer and receiver one way, exact ID/hash/signature/stamp and the
+actual stamping clock. No fresh authority allocation or ordinary capacity fallback occurs on
+queue retry. Helper selection uses this exact Exchange's frozen set.
+
+Source4267B includes its actual Packet/inline activity/effect and complete small map/set leaf
+allowances. The observer's lease/Arc is paid by Ready metadata before allocation. The total
+Ready peak is32,599/32,768B; no reserve/group/occupancy limit increased. Source preserves an
+exhausted live record; ACKs cannot mark it confirmed. Actual first-Offer publication consumes
+the reserved position and publishes activation; dedicated pending waits cancel Ready without
+using generic inactive Exchange revocation. Native clocks are sampled before Source admission
+and final ACK try-Group/Policy fences. Response-only ticket verification cannot bypass a bound
+incoming driver. Quiet collection releases only native records; real Lower/authority owners
+keep the original progress charged through actual last Drop. Automatic application scheduling,
+LOW adoption and browser SDP/RTC remain unfinished. Earlier preparation sections are historical.
+
+## Exact native first-Offer transaction (24 October)
+
+Root's trusted HIGH preparation first reserves a position in its shared public/encrypted
+receipt namespace. CacheCapacity owns that affine position and a plain1536B receipt fee,
+separate from Producer-backed progress custody. Ordinary admissions include held positions.
+The combined declared Ready peak is30,551B within32KiB; no stage or group limit was raised.
+
+The native first-Offer transaction borrows the original HighReceive slot/payment, stages an
+immutable receipt and native input, and performs actual current origin admission last. Its
+infallible tail installs replay/token/OfferId/role/event/history before publishing activation.
+Exchange never owns the receiver/event/receipt strongly. Permanent history retains original
+paid plan identity and fixed native gates, not Exchange or a progress loan. Initial admission
+and cached recovery both enforce the frozen Ready helpers, independently of verifier selection.
+Active cleanup removes native Pair/cache/input and ledger SDP owners outside native guards;
+real external input/verification/lower owners remain charged until actual Drop. A receipt
+cannot recreate consumed input. Work is capped by original Finish custody until a new native/
+browser SDP phase exists. No Ready Source, LOW Ready consumer or application activation is
+provided yet. Earlier preparation sections below describe preceding implementation stages.
+
+## Prepared native HIGH receive inbox (24 October; unscheduled)
+
+Pair's separately paid Ready cache now holds Arc<HighReceive>. The receiver owns the original
+incoming PacketSlot and full SDP RemotePacket credit, then Exchange LAST. Exchange retains
+only the exact receive lease and immutable Ready intent marker; it never owns the receiver,
+Producer or input. A preparation temporarily takes that SAME slot. Abandonment destroys old
+canonical buffers before returning it; retention spends it irreversibly. Neither route
+reacquires ordinary capacity. Receiver/credit/loan/lease/wrapper layouts fit existing4KiB SDP
+metadata; payloads use their original separate RemotePacket payment.
+
+SignedReadyStamp is an affine cache-produced token, preventing raw ID/hash/deadline substitution.
+Final native Group/Policy commits the intent marker after current checks; the marker has no
+packet origin debit. Later Source admission must perform that single debit. Runtime's bounded
+peek selects only exact first-Offer verification under the published marker and original
+current Finish/epoch. Generic Exchange remains inactive. Native Clock samples precede try-lock
+Group/Policy acquisition. No application scheduling, native Offer token/receipt, causal Ready
+Source, LOW adoption or browser SDP/RTC integration is supplied by this preparation leaf.
+
+## Independent Ready producer and inert signed cache (24 October)
+
+The native Pair now retains a separate Ready Producer and a boxed cache inside its existing
+32KiB payment. One irreversible Exchange latch permits construction; raw cache payment
+precedes that latch and infallible construction. The external cache retains Producer last,
+Producer retains Exchange last, and every actual Source/Lower/Crypto credit retains Producer.
+There is no cache/Producer/Exchange ownership cycle. Private affine payment and quota permits
+prevent bypassing the constructor or raw lender. Independent quotas share the original Crypto
+lane and two group Lower positions, without using SDP's Source quota.
+
+Native preparation checks actual endpoint/helper membership and prepays existing origin rows
+without resetting traffic buckets. After actual old-Workflow drainage, it can retain one
+unsigned/signed Ready artifact. The first ID, all signed fields, wall expiry and strict native
+monotonic deadline survive signing errors and final contention. Original announcement key
+and native Finish identity are mandatory. Clock/signing work stays outside final admission;
+final Group/Policy uses fresh samples and pure current-owner checks. The boxed cache body is
+paid before allocation; native Pair's original6KiB limit remains unchanged.
+
+This is still inert preparation. No Ready Source/publication marker, native receive inbox,
+LOW Ready admission, SDP action or RTC authority is issued. Generic Exchange lending remains
+Active-only. These are the next consumers, followed by multi-peer composition and relay.
+
+## Original packet closing rights (24 October)
+
+Affine extraction moves the original confirmation packet reservations with the Crypto lane.
+Old packet rows return their actual slots to those same parents. After obsolete HIGH caches
+are removed, the successor carves one incoming and one outgoing child and closes surplus;
+a partial split returns to the original parent without an ordinary-table refund. This also
+works when all three original Proof rows were retained before the successful third attempt.
+Abandoned tickets and capacity wrappers close unused claims explicitly. Successor PacketSlot
+keeps the exact Exchange last, independently of payload/event custody, so whole-plan drainage
+cannot precede the last actual packet slot. ICE requires separate capacity. Prepared claims
+remain unusable before native activation; this does not implement Ready or SDP admission.
+
+## Ready capacity and old confirmation cache retirement (24 October)
+
+Affine successor preparation now prepays a separate32KiB Ready reservation in addition to
+SDP's192KiB, before extraction. It moves unchanged through the original custody guard into
+inactive Exchange; closure returns unused Ready bytes and actual last-drop remains covered.
+It acquires no additional Crypto lane or outgoing positions. Maximum signed Ready is683B;
+the declared cache/Source/two-Lower/ACK peak is29,015B. Independent Producer quotas, wrapper
+accounting and native endpoint/helper row prepayment now exist as described above. Actual
+Ready Source/admission and receive installation remain absent.
+
+After actual HIGH Finish-open and irreversible old-phase closure, the exact native plan can
+discard obsolete confirmation cache owners. Source drops only idle matching HIGH records;
+actual Flight/Lower/ACK/input owners continue delaying old Workflow drainage. PacketLedger
+keeps pair sequences, replay and fixed native histories. Incoming cleanup depends on one
+permanent protected chain per handshake and its immutable binding; preserve that invariant.
+LOW Finish retry custody is unchanged until a future authenticated Ready transition exists.
+
+## Whole original-plan retirement (24 October)
+
+The fixed original PlanBinding now separately records permanent successor closure and one
+affine successor-capacity owner. Preparation publishes that owner under the same Control
+fence used by retirement, before reserving bytes. It moves through preparation, extracted
+ticket and inactive Exchange, and publishes drainage only after their actual fields and
+credits drop. No parent retains an Exchange or a large weak Exchange allocation.
+
+`retire_all` closes successor admission before retiring the old Workflow. Native Parent
+Final and abandoned-owner collection observe the combined PlanRetirement. Existing
+ConfirmationRetirement remains old-Workflow-only: causal Ready will need that observation
+while successor custody is still retained. This closes a cleanup boundary, not Ready,
+SDP receive installation, action admission or RTC activation.
+
+## High-side inert successor (24 October; not scheduled)
+
+After actual protected high-side Finish-open, LocalJoin can retain one original Reserved
+successor through busy-lane refusal and affinely move it into an inactive Exchange. Original
+reserve, Crypto lane, action claims and shared Lower owner move without reacquisition.
+The Pair stores Transferred before any fallible final native fence or registry operation;
+exact retries reuse it. Pending stays outside PacketLedger.sdp, whose active pruning cannot
+represent this phase. Pair's permission-independent housekeeping collects both states,
+including unregistered pending after a registry conflict. Pair Drop closes transferred
+capacity even when an opaque historical observation survives. Terminal expiry also removes
+native pending custody, allowing the sole registry to clear after actual external last-drop.
+No Runtime Exchange collector
+is claimed. Application scheduling and causal activation remain absent.
+
+LOW cannot call this factory: extracting on local Finish seal would revoke its original
+Finish Source before HIGH receives it. LOW must retain that retry authority until actual
+authenticated Ready. Fresh prepare_sdp_exchange also refuses protected pairs. Inactive
+Exchange denies all existing verifier, action, packet, Source, result and crypto lending.
+There is no activation method or SDP/RTC permission in this increment.
+
+## Exact phase resource indices (24 October)
+
+The Resources group registry tracks one actual retained Exchange and one Workflow. A closed
+owner or actual input/Lower still blocks another Exchange; liveness alone never establishes
+capacity retirement. Destructors remove only the matching weak identity before final metadata
+payment returns, outside Pool for weak destruction. The packet ledger can release its own
+closed handle before a retry without reconstructing any pair, sequence or replay state.
+
+## Native Finish custody window (24 October)
+
+Only successful application-bound Finish publication arms the original binding's one-shot
+Open/Await/Closed CAS and records its authenticated native signed ID/hash. Both pair and
+process collectors use that same atomic closure decision. Thirty seconds of transfer custody
+does not extend any old action/Source deadline or imply Ready, SDP, browser keys or RTC.
+Small original actor/session/policy cells revoke this custody without retaining whole actors
+or entering Group/Policy from a collector. Their complete retained graphs fit the unchanged
+fixed payment. Later successor/Ready preparation must check the original window at final
+native admission and retain its exact original owners; no such adoption is implemented yet.
+
+## Confirmation capacity extraction (24 October; integration in progress)
+
+The successor preparation splits two original protected action positions without returning
+them to the shared table. A unique weak preparation guard prevents competing envelopes and
+does not pin Workflow retirement. Under Control then WorkflowState, extraction checks the
+original lane idle, closes old adoption and takes that lane; cleanup runs outside these
+guards. Old Workflow no longer owns the moved lane. The opaque ticket retains fixed binding
+and successor payment, never Workflow. This is capacity closure only: causal Ready/native
+Exchange adoption, explicit browser key transfer and SDP/RTC authority remain open.
+
+## Automatic browser work consumption (24 October; validation in progress)
+
+The retained Broker21 can explicitly observe an authenticated Ready channel using its actual
+accepted selected key. One prepaid serial pump consumes native metadata and original action
+handles, preserving keys/counters/deadlines through Derive Return and confirmation. It pins
+one parent; historical results never reconstruct browser keys. End irreversibly stops adoption,
+joins actual metadata/attempt work outside the shared lane, clears its projections, and then
+drains original SDK/settlement owners before cleanup. Metadata/payment phases do not overlap.
+This is a single-pair work consumer, not the complete call/events/SDP/ICE/RTC adapter or relay.
+
+## Native close-first cleanup continuation (24 October; validation in progress)
+
+Channel first effects and final Control closure have separate irreversible fences. Native
+setup settlement holds the original UI commit while stopping first effects before inspecting
+the ledger; Capacity leaves cleanup routable. Automatic maintenance cannot create successors
+after that fence. Normal closure requires an attached parent's actual issued/ACKed final
+delivery even when Root has already retired its plan.
+
+After known browser SDK/RPC drainage, Broker21 retains Broker20's original public metadata and authenticated
+Begin(false) to discover unseen work, closes children before parent Plan-final2, and retains
+one deferred parent plus the current cleanup descriptor through uncertainty. It performs no
+Input, new admission or crypto. Metadata16KiB is prepaid before setup ACK, separately from
+encrypted control8KiB; native Session prepays the matching24KiB browser custody. Full gates
+are recorded in HANDOVER. Single-pair automatic consumption is implemented above; complete
+events/multi-peer orchestration, SDP/ICE/RTC and relay remain unfinished.
+
+## Application handoff dispatch and native production (24 October; validation in progress)
+
+The application-bound loopback service now dispatches the closed authenticated Derive and
+confirmation adapters in ordinary builds. Context-free construction remains Status-only.
+MAC, immutable operation/class/length/logical checks and original Phase lookup precede body
+allocation/counter debit; the decrypted version selects one exact grammar, never fallback.
+This changes the local handoff boundary, not the unavailable UI V2 activation switch or RTC.
+
+One Host maintenance future rotates canonical channel slots every250ms without awaiting an
+Actor. Setup ACK and the original live selection precede production. Each chosen channel
+has one separately paid8KiB native worker; discovery uses an affine4KiB peer/action snapshot
+from the same group/process pool. A parked old Actor therefore retains its real task/payment
+without blocking IO, End/replacement or another channel. Pending Derive/child publication is
+retried under its original identity, independently of a fresh discovery proof. Shutdown waits
+for actual native and physical ownership, including detached tasks and retained outputs.
+
+Native continuation chooses first Start only after actual Derived/ACK/settlement/Return,
+Respond only from the original accepted Opened trigger, and Incoming only from an actual Root
+action contained by the original plan. Browser `returnNativeDerivation` coalesces real SDK/
+settlement/Return under the original channel while preserving keys/counters/deadline. End
+drains that admitted flight outside its execution lane before final cleanup. Automatic new
+confirmation candidates are deliberately not inferred from delayed delivery or local sealing.
+
+Complete browser events/multi-peer orchestration, SDP/ICE factories and RTC authorization, causal
+Finish-to-SDP key/phase transfer, multi-peer history reclamation and member media relay remain
+unfinished. Earlier dated inactive-dispatch descriptions below are historical checkpoints.
+HANDOVER records the exact source/test scope; no physical two-device claim follows here.
+
+## Read-only existing work projection (24 October; inactive integration)
+
+Native work discovery is a synchronous bounded scan, separate from producers and the future
+VoiceV2Native event stream. The canonical channel registry loans its original selected owner
+and one serial metadata projection before a32-slot ledger scan returns at most one exact row.
+Full purpose/parent and Pending/attached metadata use a fixed JSON writer, sharing setup's
+existing8KiB payment and exclusion. The reply retains the paid Row/parent, not Arc<Ledger>.
+Clock, Actor, payload, grant upgrade and factory paths are absent. End/lock leave this exact
+history readable for cleanup. Slot hints and revision wakes are neither replayable cursors
+nor absence/drainage evidence. HANDOVER records validation and unimplemented orchestration.
+
+## Native pair observation (23 October; inactive integration)
+
+The bounded Actor exposes a fixed Confirming/Established query backed by the existing
+protected LocalJoin pair, not a crypto result or a new pair factory. The query validates
+the original participant/grant/watch and immutable peer/join/key/handshake/epoch, then
+uses the original Actor's short current-view fence. Callback-bearing time/expiry work
+stays outside Group/Policy. Existing validation, reconciliation and context eligibility retain
+their normal roster allocations; the query's member predicate copies only two booleans. No
+persistent owner, action, deadline renewal or healthy revision
+wake is introduced. Local Finish signing and remote Finish open establish independently.
+This observation grants no future SDP/RTC permission and does not enable work delivery.
+
+## Private native-origin work producer (23 October; draft)
+
+Native Derive production has a separate origin from browser-authenticated requests. It
+retains the canonical channel Route and one affine native Session position, paying8KiB
+for its complete preparation/task/output before any asynchronous work. The existing
+physical factory retains its4KiB publication payment and separately funded preparation.
+Shared process/group/work/row limits remain unchanged; native production reserves more
+ordinary capacity than that physical task alone.
+
+Shutdown fences and waits for both independently funded native and physical positions.
+The native task keeps current selection, grant and original UI commit through Actor
+publication; its completed output retains payment/Route/drain custody until collected.
+Its opaque observer supports await/detach, with no abort capability. Exact retries recover
+the original ledger purpose/publication. This private producer is not production work
+delivery, authenticated HTTP effect dispatch, a native/WebCrypto cycle or live RTC.
+HANDOVER records the draft's validation and remaining integration work.
+
+## Separate Plan-final continuation (23 October; validated inactive integration)
+
+After an ordinary action Return the parent retains its original Root plan, independently of
+the discarded variable Phase. A new Plan-final intent records the original native Session
+identity in the fixed paid Row and freezes further child adoption. The actual UI commit orders
+this transition against both normal channel closures. Before that Row custody exists, cleanup
+Admission retains the actual paid Session, including across forced process shutdown.
+
+The same affine Root retirement ticket supplies readiness outside native guards. Intent does
+not infer success from a missing control, dead lease, returned loan or renderer flag. Issuance
+and exact ACK remain separate, and forced GC still needs the original physical witness, late
+Root readiness and actual last metadata-owner collection. Existing Phase Return/Retire semantics
+remain unchanged. The new inactive mode2 Control adapter and explicit browser reply decoder are
+not production enablement;241 focused and724 complete native tests pass. Full child/browser/SDP/ICE/RTC composition
+and media remain open; see HANDOVER for the frozen checkpoint and current draft evidence.
+
+## Integrated V2 scheduling boundary (23 October)
+
+The target's V2 transport now coexists with native terminal-delivery state. Root routes kind 28
+and drives source/helper/endpoint work only through the local VoiceRouting switch; it defaults
+to Disabled, preserving the old empty response and no V2 scheduling. Forwarding serves bound
+member routes without granting endpoint participation or keys. Direct narrows policy and
+revokes the affected runtime lease; Disabled/Forwarding pauses preserve the native join.
+
+The renderer pins legacy/V2 mode before a join becomes current. V2 rooms exclude legacy
+writers, including delayed hangups, before presence or RTC mutation. Activation remains
+unavailable: the call driver is a contract-tested consumer of a native interface that is not
+implemented. Native loopback action/final dispatch is now application-bound as described above;
+this does not supply that complete call adapter. See VOICE-V2-CALL-DRIVER.md
+for exact contracts, retained risks and enablement gates; HANDOVER records combined validation.
+Older claims that kind 28 is undispatched describe the default, not the opt-in test seam.
+
+## Original-channel terminal delivery (23 October)
+
+The inactive adapter distinguishes returning an action's16KiB loan from retiring its whole
+original confirmation plan. First close mode is immutable, even while copies remain.
+PhaseClosure carries the actual original retirement ticket outside Row/Index/Phase guards
+before its destructor closes Root. Pending local closure cannot retire a possibly published
+Root pair or produce a final receipt.
+
+Terminal intent retains the SAME private SessionIdentity before closing Phase. Its transcript
+hash is metadata; native allocation equality establishes provenance. The separate fixed token
+retains no Session/key/Workflow. Live/Drained enum space holds delivery state within existing
+Row capacity. Guards count its allocation across Session, bootstrap and action-history lifetimes.
+
+After local compaction and actual original Root retirement, a bounded native visit stores one
+stable proof over original transcript, RowId, full purpose, action and terminal mode. Even the
+correct predicted proof cannot be ACKed before issuance. Normal setup/channel closure requires
+issuance and exact ACK. Independent GC may discard unACKed history only after dead lease,
+matching physical collection, Root readiness and last metadata-owner drainage, without setting
+ACK. Equal-label/identical-hash foreign Sessions do not supply that physical proof.
+
+A separate100B Control reply binds row/action/mode and distinguishes Pending/Issued/Acknowledged.
+The adapter retains actual Incoming through output collection; it never waits for Root or takes
+Work/Input which could block its own drainage. Production remains Status/read-only-history only.
+Browser post-End final exchange and action delivery remain unfinished.
+
+## Original final proof and retained cleanup cadence (22 October)
+
+A compacted final-intent native Row retains the same already-paid Arc<Phase>. Its drained
+state owns the original fixed Root observer, with no variable loan or Action/Input/Workflow.
+Ordinary continuation retains no Phase. Compaction drops Live outside native guards before
+requiring Root readiness; local compaction cannot imply whole Workflow retirement. Native
+snapshots borrow the same Phase under Row -> Phase without Root callbacks or allocation.
+
+Channel preflight and independent history GC additionally require a requested final proof to
+be ready. Dead lease, actual physical-session proof, sole indexed ownership and monotonic
+serials remain independent GC conditions. Existing fixed Row/Phase payments fund retention.
+
+Root provides no notification into Row/browser. Broker v12's exact setup/channel cleanup uses
+one injected-Clock timer per waiting original driver after an actual refused RPC. Timer and
+availability resolve one existing Signal; cancellation checks the original wait identity.
+Each refusal starts a fresh interval, so large jumps cannot create a catch-up burst. Actual
+SDK/read/linked drainage still precedes cleanup; no pending RPC is overlapped. General action
+retry behavior is unchanged. Older retained brokers refuse adoption.
+
+Final wire remains disabled. Authenticated post-End final exchange/issuance/ACK must retain
+original framing keys and compose with this cadence before normal cleanup closes routing.
+HANDOVER records source-specific tests and the remaining Actor/WebView/live V2 boundaries.
+
+
+## Original-session read-only action history (22 October)
+
+Production native loopback ingress accepts Status9 and, only with the original application
+Context, Begin8(retry=false) existing-history lookup. Exact MAC/session/Control/length/logical
+checks precede body admission. The opened full purpose selects the SAME original native
+allocation/executor/lease; reconciliation observes an existing Root action, never a factory,
+new grant/Work/Phase or actor effect. End/lock does not erase history. Missing history refuses.
+Status9 alone acknowledges original setup; its old grammar and no-Context behavior are preserved.
+
+Browser broker v11 retains the original established channel, keys, directional counters and
+shared paid driver for the one history query. Exact owner/handle identity precedes callbacks;
+purpose is copied/validated and original liveness rechecked before admission. Identical queries
+coalesce the same promise; competing purposes return busy, and Status returns uncertain while
+history occupies the driver. History cannot start setup/key construction. Authenticated replies
+bind the original request, MAC, RX and optional expected native RowId before strict metadata
+parsing. Refusals never close/refund the channel or acknowledge setup. End retains actual query,
+SDK/IO/cancellation and original keys/payment until the existing driver drains and cleanup finishes.
+
+One fixed242-byte status or3-byte refusal describes native history; exact u64s stay strings.
+localDrained is not whole96KiB Workflow retirement. Native Derive publishes only actual Derived;
+an actor error with no terminal result remains no receipt. Other generic codec outcomes confer
+no effect authority or implemented adapter. Factory/action execution, ACK/settlement/phase/final
+wiring, final issuance/retry coordination and normal production Actor/MLS success remain unfinished. Historical
+checkpoint claims below are scoped to their source; HANDOVER records current test provenance.
+
+## Original confirmation Workflow retirement observer (22 October)
+
+The inactive native handoff can now obtain ConfirmationRetirement by consuming the original
+HandoffLoan through retire_confirmation_observed. Ordinary loan Drop still returns the16KiB
+action phase to the OPEN96KiB Workflow; final retirement closes the whole original plan.
+Derive -> Hello/Proof/Finish continuation must not use final retirement between those steps.
+The existing unit-returning retire_confirmation remains a compatibility wrapper.
+
+The observer retains only the original already-paid PlanBinding, never Workflow or effect
+authority. A LAST Workflow field publishes readiness after actual reserve/lane/packet capacity
+fields destruct. Raw Weak strong_count zero is insufficient: it precedes value/field Drop.
+Delayed input/lower/copy credits retain Workflow through actual custody; Credit returns bytes
+and lane ownership before that custody can cause the last drop. This proves variable Workflow
+retirement, not disappearance of fixed history/action metadata or independent packet-table slots.
+
+The separate monotonic flag provides a snapshot only. There is no waiter, notification channel,
+or scheduling guarantee. The original fixed metadata credit already owns the exact Resources
+pool; Workflow and HistoryPlan borrow it through their original binding instead of retaining
+two redundant pool pointers. Payment precedes lease/binding allocation. The flag and LAST
+publisher must fit the unchanged2KiB retained graph; caller witness storage has a separate
+pointer-sized memory guard. Native must also fund its enclosing state/task/output in existing
+control capacity. The inactive native Phase stores the SAME returned witness before publishing local loan
+completion. Its ConfirmationStatus snapshot distinguishes NotRequested, Closing, Draining and
+Drained; local is_drained still means only16KiB return. Ordinary closure cannot be relabelled
+after returning the original loan. No production consumer or retry coordinator is wired yet.
+If existing ledger compaction drops Phase, its lost witness is NOT full-retirement evidence;
+final-proof capture/transfer remains future work.
+
+Native must retain the SAME witness across cancelled work; a missing witness is never drainage.
+Future progress needs a bounded existing driver or injected-Clock cadence, not a busy loop,
+per-query task or fresh reservation. Preserve Control until final delivery. Browser adapter/normal
+Actor handoff, phase transfer and live V2 remain unfinished; production ingress serves Status only.
+
+## App-owned status bootstrap and session collection (21 October)
+
+Source bac90cfa connects the retained browser channel to application-owned native bootstrap.
+The host binds its paid loopback socket before Tauri creates windows and adds only that exact
+numeric port to the existing CSP and devCSP. Origin selection follows Tauri custom-protocol
+mode and validated main-window configuration, including packaged debug builds. Setup explicitly
+enters Tauri's IO runtime; the Exit callback collects the actual task/socket before SDK cleanup
+or restart. Bind/start failure disables this channel while the rest of the app can start.
+
+The original IO state now retains a weak native action context. All nine references must
+upgrade before any ledger/factory admission. Ordinary IPC and the upgraded context borrow the
+same UI gate, including actual mounted-store presence, resumable-to-store lock order and the
+post-await lock/generation check. Three existing policy fields now use shared Arc ownership;
+no cached authorization snapshot or second commit mutex is introduced. The detached native
+worker retains only its actual actor, original selection/grant/commit and paid work owners.
+
+Weak references retain the original inline Arc allocations after their values drop. The fixed
+listener payment remains32KiB, up8KiB from24KiB. The original weak-context Windows native
+peak was32,256 bytes; retaining one fixed header allocation across stages reduces the current
+measured peak to19,984 bytes, including context allocations/control blocks and wrappers. This spends more of the
+same2MiB process cap, without changing group or engine limits. Context drops before the IO
+credit; completed/uncollected native output retains that same original payment. Other platform
+layouts still fail closed if their measured peak does not fit.
+
+Factory admission now accepts the actual original SelectedHandoffOwner Arc, not owner/executor
+strings from a request body. Pure early/final Coordinator predicates compare the already-cached
+original allocation and current grant/lease/binding/generation. Refusal creates no local snapshot.
+Actual channel closure must still be checked at final admission under the same UI commit before
+any action opcode is exposed; this context alone enables no byte-bearing operation.
+
+Three main-only commands expose fixed public setup and exact cleanup metadata. They carry no
+private key, seed, plaintext, SDP, ICE or action constructor. Ready, Pending and Closed replies
+share the original Row's serial projection guard and payment through body handoff. A capped
+2,304-byte JSON writer and 2,048-byte hex scratch fit the original 8 KiB Row envelope; arbitrary
+retained framework/WebView public-metadata copies after handoff are outside this copy bound.
+No private/action data may use this exception. The retained production metadata adapter has
+one immutable identity across component and module remounts.
+
+The v9 browser broker retains its selected key, original TX/RX counters and constructor promise.
+An original native 8 KiB Crypto credit stays paid through real browser setup/outgoing SDK work.
+Separate original control capacity remains within the existing group/process/eight-Crypto and
+two-browser-position limits. IO expiry aborts actual reads but never proves SDK/cancel drainage.
+
+Explicit setup-failure and final channel collection first acquire the original shared UI commit
+and check the action ledger using the actual retained selected owner. Every matching action
+must already be compacted or explicitly closed as a native Pending before routing closes.
+Open/Closing Pending or Live work returns Capacity with
+Control still open, so receipt ACK, settlement and phase cleanup remain reachable. Factory
+admission uses that same commit; the check and closure cannot race a new Pending factory.
+Only then does final collection detach native Session/public/setup owners after browser SDK/IO
+and buffers drain. Paid weak witnesses track independent headers, completed
+replies and public outputs. A slot is reusable only when its original lease is permanently dead,
+no setup is pending and every actual owner has drained. Serial IDs never reset. Housekeeping
+runs outside Coordinator before new controller/owner/key admission, including late last-owner
+drops after the collection reply. No uncertain history is evicted to make capacity.
+
+Physical channel collection transfers an opaque native-only original-Row witness to the action
+ledger, after releasing all bootstrap registry locks. It records original grant allocation,
+executor and lease provenance without upgrading current authority. The separate bounded32-slot
+sweep reclaims only actual compacted Body::Drained or explicitly ClosedPending records with
+this proof, a permanently dead
+lease and no other Row owner. Evidence persists through late metadata/cleanup handles; every
+ordinary collection hook sweeps even without a new channel witness. Resources drop outside all
+registry/ledger guards and both serial allocators remain monotonic. Root can independently retain
+its own history, lower work and input owners; this collection is not proof of full Workflow
+drainage. The inactive Pending closure adapter validates the actual opened Session, exact
+header RowId and complete original purpose. It refuses a live worker, publishes Closing while
+actual PreparedPhase/selected owners retire outside all guards, then records ClosedPending.
+Begin cannot restart a Closing/Closed row. This separate local terminal leaves action/receipt
+absent and engine.settled, acknowledged and drained FALSE: Root publication may be uncertain.
+Indexed slot/serial/Row pointer are rechecked even for a retained native handle, so orphaned
+unstarted records cannot be mutated after removal/reuse. The original physical request excludes
+uncollected factory work/output. Real browser SDK/RPC drainage remains a protocol precondition;
+the retained broker's authenticated Pending closure and production action dispatch remain open.
+
+Action lookup now produces a native-only ResolvedRow only after checking the actual original
+grant allocation, executor, lease and complete purpose. It retains the paid Row through delayed
+metadata/cleanup use, without upgrading the grant for historical recovery. All raw ID-taking
+operational helpers are module-private. Data admission tests the original lease under State;
+this lookup is not current UI/channel/Root effect authority. Actual physical callers still
+need to bound simultaneous handles and complete funding/drainage before serving action bytes.
+An independent bounded original-purpose lookup also recovers this native handle when a lost
+factory reply left the requester without a RowId. It checks the same native provenance and
+works after End/grant destruction, without charges, Clock callbacks or factory mutation.
+Missing history is not drainage evidence. Current-authority retry remains a separate path:
+pure historical lookup must not prevent an idle Pending worker from resuming on its original row.
+
+This service still handles authenticated Status only. Factory/action input, result, exact
+receipt ACK, settlement, phase closure and final delivery remain open. Starting the local
+listener does not enable V2 signalling, SDP/ICE/RTC or legacy-mode isolation. The action ledger's
+separate finite history now has physical collection of Drained or explicitly ClosedPending
+records; browser Pending closure remains open.
+Relay and combined/physical acceptance remain
+open. Earlier checkpoint sections below retain their historical scope; HANDOVER has current
+gate provenance and platform limits.
+
+## Internal immutable local-channel bootstrap (21 October)
+
+The disabled ECDH candidate retains Pending before native RNG, validates the actual selected
+browser P-256 point, and installs one Session under original UI-generation/selected-Arc checks.
+An injective versioned transcript binds both points, device/join, original group/room/policy,
+owner/executor and native session/slot. Exact retries share the original immutable paid public
+output; no seed is exported and counters cannot be recreated. The64-slot paid index has no
+uncertain-history eviction and still needs lifecycle collection before activation.
+
+This candidate has no renderer command, application listener/CSP change, browser Session or live
+dispatch. Its native-only computation credit does not pay for future browser crypto or prove
+provider drainage. Actual IO/copy custody, setup ACK, action delivery, SDP/RTC, legacy isolation
+and media relay remain separate work. Current full-gate provenance is in HANDOVER.md; historical
+pending/pass descriptions below do not supersede it.
+
+## Fixed native process infrastructure (21 October)
+
+`Resources::charge_process_retained` prepays fixed listener/router/task overhead against the
+existing2MiB process ceiling. Its distinct affine `ProcessRetainedCredit` creates no group
+record, work slot or reservation and cannot convert into a group budget. Real group payloads
+and bootstrap computation still require their ordinary group bytes and Crypto permits. The
+actual last worker/output owner releases this payment; group retirement does not release it.
+This primitive alone starts no listener and enables no V2 dispatch.
+
+## Disabled framed handoff continuation (21 October)
+
+The new native channel codec conserves a single paid physical position across header scratch,
+authenticated body and reply/completed-task custody. Fresh injected RNG creates directional
+keys; no renderer seed can reinstall a native session. Canonical framing and request-bound
+responses are pinned against independent WebCrypto vectors. Pure browser metadata helpers
+provide no keys, counter allocator, channel authentication or effect authority.
+
+Control/setup payments are independent of the original action Phase. This lets fixed terminal
+control replies remain possible after actual data drainage. Session/header authentication is
+local transport authority only; every Root action still needs its actual native selected owner,
+call, actor, member/room/epoch and original deadline. No listener/bootstrap/dispatch is enabled.
+Actual factory registration and the native/browser result protocol remain under integration.
+
+## Validated protected handoff capacity (21 October)
+
+An actual protected CryptoAction lends one chain-wide HandoffLoan from its existing96KiB
+Workflow. Retained copy capacity adds no Crypto slot; Clock sampling precedes Engine, followed
+by pure original gates and the Workflow fence. Actual loan owners keep an ended Workflow
+nonreplaceable. Fixed historical actions share the original paid PlanBinding, never Workflow.
+The adapter must retain the original action and separately prove real copy/worker drainage.
+
+The candidate browser reader follows actual BYOB transfers, caps a body at2064 bytes plus one
+EOF byte and awaits cancellation/release. It is not a complete flight/copy budget or a live
+transport. Focused/static review and a generated-data packaged Windows probe pass; complete
+current-source Root suite passes 3,226; native passes 496 library plus five ACL tests, check,
+executable build and actual startup. Full frontend (2,297), static/build and rendered
+flows pass. No application listener/CSP/dispatch is enabled.
+
+The disabled pilot's process-owned native ledger reserves row and phase metadata before
+factory handoff. Pending/live/drained rows share 32 slots, without uncertain-history eviction.
+Selected key snapshots keep Weak affine-grant identity; attachment still resolves the original
+Action and complete pair binding. Actual native data owners contribute to one shared Phase.
+Metadata-only terminal recovery and exact ACK/settlement need no new copy loan after closure.
+Compaction removes strong Action/Phase/selected snapshot owners outside native guards. The
+32-row lifetime limit is intentional for this disabled pilot. Actual Actor integration, physical
+control/reply custody and authenticated browser drainage remain required before enablement.
+
+## Selected native/browser key bootstrap (21 October)
+
+One retained WebCrypto broker selects one nonextractable key for an actual accepted native
+owner/executor. Native keeps a bounded paid generation with the original grant identity, join,
+permit and frozen public point. Exact replies can be recovered; closed/refused metadata cannot
+regenerate or adopt an earlier key. A typed foreign-executor refusal requires no computation or
+settlement by that executor. Settlement-first permanently closes a selected generation.
+
+Public-key publication uses the actual ServerActor endpoint API. Its native-owned task retains
+the UI commit guard across the actor reply even if the IPC caller disappears. Exact settlement
+waits for real publication drainage. Browser work shares the existing bounded queue; one retained
+wake identity covers End/remount during failed replies without creating an immediate retry loop.
+Private keys, confirmation plaintext, SDP and ICE do not use these three fixed-metadata commands.
+This is not the byte-bearing action IPC channel or a stock-framework allocation bound.
+
+Current native/frontend/check/build/startup/flow gates pass; the handover records exact counts
+and unchanged-root provenance. Earlier pending sections below are historical. Normal V2/RTC,
+protocol-mode isolation, member media relay and combined/physical acceptance remain open.
+
+## Native production pair selection (21 October, full gates pending)
+
+Root selects new pair evidence from the exact participant's implicit Watcher; the request binds
+peer device, remote join/key reference and current epoch. A fixed receipt is metadata only.
+Retained exact selector lookup precedes new discovery, preserving the independently pinned pair
+through presence expiry/renewal/newer-join proof. Final current native call/session/room/member/
+epoch/deadline checks remain required. Failed/retired records cannot recreate their allocator.
+Cached recovery emits no new revision, preventing a driver's ensure loop from waking itself.
+
+Transcript, original window, paid Pair/packet state and provisional origin pin are prepared before
+final Group/Policy publication. An unpublished reservation revokes its actual pin outside final guards; successful
+native publication moves both table owners and serial together. This uses existing 16-pair and
+eight-confirming limits and no traffic allowance. Protected creation epoch is permanent; a future
+driver needs explicit automatic join/phase replacement after epoch invalidation rather than
+silently adopting old pair authority. No wire/persistence format, IPC or dispatch enablement.
+
+The actual grant-validation path's source_context now samples Clock before nonblocking Group/
+Policy, then rechecks the original native owner. A later busy snapshot must leave earlier source
+jobs intact and the blocked packet unspent. Original Clock revocation and contention regressions
+pass within426 focused Root voice tests, zero failures (22.49s). All10 actor tests, external API
+test and2,268 frontend tests pass. Complete backend gates remain pending. The older frozen full
+run was interrupted for this correction.
+
+## Native actor controls and terminal voice retirement (21 October, full gates pending)
+
+ServerActor now carries fixed-size, native-only voice controls through its existing bounded
+mailbox. Root remains the only protocol state owner; commands retain original CallGrant,
+CryptoAction and watch allocations. The opaque envelope exposes no serialized constructor,
+plaintext, ciphertext, renderer projection or normal V2 dispatch. Mailbox capacity bounds
+admitted commands, not waiting producers; the future IPC adapter must separately bound/coalesce
+requests and account for every serialized copy. Actor loss is an uncertain result, not evidence
+that a first effect did not happen. Retry only the original request and owners.
+
+Terminal stop closes Root-local voice installation and queued command replies before its ACK,
+even when the Closed event sink is full. Once an open stop waiter is admitted, losing its ACK
+does not resume the actor. Already-canceled queued stops and canceled/failed saved freezes keep
+the original installation. Successful freeze, explicit shutdown and sync-error terminal paths
+retire before awaiting Closed. Shared Runtime groups and actual externally held engine/input/
+transport custody remain intact until their owners drain; retirement never refunds that work.
+
+Transport authority samples callback-bearing clocks/effects before its final pure route,
+connection and room checks. A clock that retires the Root, replaces a connection or closes a
+room cannot leave the pending forward authorized. This does not enable production IPC or RTC.
+
+## Root derivation and final deadlines (21 October, focused checks passed)
+
+Root now produces row zero and admits Derived metadata for its actual affine call, proven pair,
+original actor/session and directory room. Input, tag and action construction precede the short
+native fence. An outer unpublished History issue is borrowed into Group/Policy and try-History;
+refusal destroys its owners after those guards and permits the same pair to retry. Cached factory
+lookup returns the actual action allocation, including after ACK/input compaction; it cannot
+rebuild browser keys. First results retain the existing preparation loan through settlement and
+repeat original chain/deadline checks at the last native time observation. Root supplies the
+same original Runtime clock to the pair, action and native origin.
+
+First signed publication now respects the minimum construction/source/original SDP deadline.
+A late confirmation output can have construction time remaining after the pair expired; it
+must refuse before packet visibility or Finish promotion. Already-published lookup remains
+historical and separately requires current source authority to send. No new allowance, wire,
+persistence format, IPC command or live V2/RTC enablement is introduced by this increment.
+All 409 focused voice tests pass, with unchanged layout guards. Full frontend, strict Clippy,
+formatting, ambient and root dependency policy pass; complete Rust/native gates remain pending.
+
+## Prepared native confirmation results (21 October, validation pending)
+
+The next native increment splits sealing into Unsigned, private Prepared and source-visible
+Published stages in the original outgoing row. Local refusal retains one exact inert signature;
+changed ciphertext refuses before another signing call. All signing, hashing, copies, RNG,
+pruning and replacement-owner construction precede Engine and short nonblocking Group/Policy
+admission. An affine preparation loan retains the original admitted engine charge through actual
+work, including settlement/unwind. Settlement fences first effects immediately; drained status
+and permit/input release wait for the loan. No capacity or reusable permit is added.
+
+Root seal/open consumers recognize actual call/action allocations and current native room,
+participant and epoch. Final original actor/session checks follow the last Clock callback.
+Consumed token/slot/body custody, replaced signatures/actions/attempts and older promotion cleanup
+remain outside all final guards. Compatibility result APIs share the prepared packet seam.
+All 389 focused voice tests and unchanged layout guards pass; complete gates remain pending; production IPC, normal V2/RTC, authorized SDP phase transfer,
+member media relay and combined/physical acceptance remain open.
+
+## Protected browser confirmation (21 October, integration pending)
+
+The selected WebCrypto broker consumes protected native row projections after accepted derivation.
+Rows1..9 map the three Hello/Proof/Finish candidates and local role; row0 remains derivation.
+Twelve fixed claims and existing byte allowances are unchanged. A bounded private queue shares
+one prepaid execution position through actual crypto/result/settlement drainage, retaining it
+between flights. Retained input projections plus the maximum serial engine peak must fit before
+copying. Owned TypedArrays cannot alias caller subclasses. Exact lost result replies retry the
+same computed bytes without another AEAD/counter allocation. Historical admission replies are
+metadata and cannot settle earlier work. Tests use real WebCrypto with a fault adapter; production
+native IPC/Root/RTC and authorized confirmation-to-SDP key transfer remain open.
+
+## Protected three-flight continuation (21 October, awaiting validation)
+
+The continuation checkout generalizes protected intake to Hello/Proof/Finish and adds a native
+response factory. Proof (low endpoint) and Finish (high endpoint) use three independent incoming
+role positions, because their authenticated headers do not expose the echoed Hello nonce. A
+separate `ProtectedInbox` owner permits bounded opening across attempt replacement; closed
+plaintext must still match the current native nonces before any progression. This supersedes
+arrival-attempt cancellation for these protected role inboxes; ordinary compatibility is unchanged.
+
+High Proof output belongs to the accepted Hello intake lane (rows2/5/8); low Finish output belongs
+to the accepted Proof intake lane (rows3/6/9). First production recognizes the actual retained
+decrypt action and accepted terminal result, plus current native trigger/response/attempt. Exact
+produced output history precedes those current-trigger checks and recovers its original action
+without restoring authority. Unproduced superseded triggers refuse. No plaintext or Workflow is
+retained in fixed response history. All original limits remain unchanged; their growth guards
+pass in the 365-case focused run. Bounded follow-up links and each exact response pointer live
+in their paid input rows, keeping shared metadata within the original 2 KiB allowance. Complete
+combined gates remain pending. Normal kind28 dispatch, IPC/RTC and SDP transfer remain open.
+
+## Protected outgoing Hello (21 October, pending validation)
+
+The next worktree adds a native Root/local-join producer for the low side. Outgoing preparation
+retains the original call/pair/chain/resource/table owners but publishes no sequence or SDP
+identity. An exclusive ledger loan then participates in one local Group -> Policy -> try-History
+transaction that publishes the packet, nonce/attempt, crypto action and candidate receipt. No
+incoming ticket or origin allowance is manufactured for unsigned local work; signed source
+admission remains separate. Exact predecessor IDs distinguish the first request and each of its
+two possible successors, preventing lost replies from restarting confirmation.
+
+Three canonical Hello plaintext hashes in the existing Pair allowance prevent A -> B -> A nonce
+reuse. Protected high-side distinct IDs repeating an accepted nonce receive a closed rejection
+without replacing current progress. Exact signed-ID/action retries still recover original history.
+
+Low and high roles share three history positions, within the original fixed limits. Three pending
+crypto leases independently observe packet, action and chain cancellation. Sealed source packets
+retain chain cancellation after crypto settlement. Composite queued source checks sample every
+constituent's original clock before pure owner checks; deadlines are not moved between monotonic
+origins. A busy effect skips its untouched packet without discarding earlier prepared jobs.
+
+Read-only adversarial review is clear and all 352 focused voice tests pass, including the
+unchanged layout guards. Complete combined gates remain pending. Proof/Finish, SDP transfer,
+production IPC/browser/RTC integration and
+normal kind28 dispatch remain open. The following sections record earlier checkpoints.
+
+## Confirmation packet tables (20 October, inactive)
+
+Incoming and outgoing native V2 packets now each retain a position from their independent
+32-row pools. Preparing a confirmation workflow protects three candidate lanes within those
+same limits: low-side 3 input/6 output, high-side 6 input/3 output. Fixed action history does not
+retain these progress claims. Workflow close returns unused positions; actual rows/loans retain
+their own positions until retirement, independently of retained decrypt-event bytes. The first
+protected native consumer is high-side Hello below. Live V2 dispatch remains disabled.
+
+## Protected native Hello admission (20 October, inactive transport)
+
+High-side `ConfirmHello` now has a private Root intake consumer. Actual packet/token, decrypt
+event, inactive action and credited admission history are prepared before a single nonblocking
+Group -> Policy -> try-History publication. Clock samples precede the guards; contention refuses
+without origin quota, replay, token or candidate effects. Unpublished owners remain outside the
+callback so their destruction cannot reenter History while Group/Policy are held.
+
+Three candidate lanes remain spent after malformed decrypted results, independently of accepted
+confirmation nonces. A shared Root public/encrypted issuer/MessageId/hash classifier precedes
+token preparation; exact retries return original admission history without creating another
+decrypt. The fixed receipt owns original room/call/pair/chain/member/effect custody, without an
+action, input, engine or Workflow. Original Root reply-route authority independently fences epoch
+and connection changes. Consumed tokens and successful confirmation do not erase admission ACKs.
+The receipt and its actual effect allocation share the original 1,536-byte action row; the fixed
+metadata remains 2 KiB. These structural guards exclude allocator slack and framework copies.
+
+Protected mode is selected only for a pristine native pair and stays selected after a capacity
+refusal. Ordinary confirmation factories refuse selected pairs. First confirmation results check
+the original epoch before effects; exact accepted/rejected terminal history remains recoverable.
+At this checkpoint low-side start/encryption, Proof/Finish, SDP phase transfer, production IPC and RTC remained open.
+No normal kind28 dispatch, browser protected confirmation or whole-chain readiness is enabled.
+
+## Chat history and MLS epoch separation (20 October, continuation)
+
+Chat retains the original signed Automerge operations across key epochs; current-key catch-up
+merges that history rather than replacing a branch. Edits/deletes change the live projection while
+their earlier content remains retained. Causality, not wall-clock timestamps, controls these
+operations. The continuation corrects all-visible-list message addressing and failed-page cursor
+commit ordering, and binds modern 32-byte writer actors to their verified signer at ingress.
+Historical actor compatibility and the existing R6/group-binding/equivocation limits remain.
+The [chat history trace](communication-recovery/CHAT-HISTORY-CONVERGENCE.md) distinguishes those
+implemented boundaries from the stronger authenticated/moderator-only audit design still needed.
+
+## Protected browser derivation (19 October, inactive)
+
+The surviving browser broker v5 shares one closed derive/confirmation action driver. Protected
+derivation uses an opaque broker-generated join key, its exact accepted native join projection,
+and a frozen native pair setup. Its inactive plan protects twelve shared row claims (24 KiB),
+96 KiB variable custody, 8 KiB control metadata and one actual execution position before publication.
+Only derivation row0 has a consumer. Existing published records plus unused claims remain capped
+at32; ordinary queued work cannot occupy the protected position. These are conservative bounded
+payload/layout allowances, not a measurement or bound on WebCrypto/JavaScript implementation heap.
+
+Lost admission/commit replies reuse the original action and computation. Exact native terminal
+history without matching locally retained keys returns a historical receipt with no usable pair.
+The empty Derived marker never causes ECDH/HKDF reconstruction. Protected keys cannot enter the
+ordinary encrypt/open/confirmation APIs; their protected consumers are still unimplemented.
+Close clears key references and unused capacity, while real action and RPC promises retain their
+position and variable custody until drainage. Fixed history and closed pair stamps remain separate.
+The original browser-request deadline closes an idle plan; native monotonic timestamps are not
+compared with browser time. Production native registration/IPC and live V2 remain disabled.
+
+## Prepared confirmation token binding (19 October, transport disabled)
+
+LocalJoin binds an incoming confirmation's actual Hello floor or attempt and original pair
+deadline into the affine preparation before replay/token publication. The same binding follows
+the final origin checks and retained token. Generic application admission refuses all three
+confirmation kinds without that binding. This grants no engine/action or continuation readiness;
+the larger native/browser reservation and atomic intake boundaries remain open.
+
+## V2 action input retirement (19 October, transport disabled)
+
+Exchange-backed actions prepare fixed history bytes independently from variable input. Only
+input and an actual engine loan retain the exchange's phase owner; the pending engine lender
+is cleared permanently under the engine fence on settlement. A direction permit returns only
+after unpublished abandonment and is consumed at publication, so compaction never permits a
+second seal/open identity. Unstarted retirement also drops unused input; settlement without a
+terminal result drops input because the same fence permanently excludes a later first result.
+Installed terminal results still require their exact ACK. Borrowed readers retain actual bytes.
+
+Typed crypto actions split fixed history capacity from owned variable input capacity without
+changing the total pool charge. Native input readers hold an opaque Arc-backed lease. Under the
+original engine fence, exact receipt acknowledgement and actual settlement can remove the
+action's input reference; actual readers retain their buffers and credit through last drop.
+Engine-to-input is the sole nested lock order, and buffer/credit destruction runs outside both
+locks. The fixed action/history row remains through the join; this does not free protective IDs,
+complete the engine-to-RTC phase transfer or account for Tauri/browser serialization.
+
+## Private durable Download ownership (19 October, implementation in progress)
+
+`BlobStore` optionally exposes the native `DownloadStore` interface. `ProtectedBlobs` forwards
+that capability to the same encrypted retained engine; cache-only stores refuse it. Immutable
+Keep(CID) and Download(random saved ID) owners share reservations and persistence machinery,
+but have distinct paths, run tokens, public-serving eligibility and cleanup. The actor's
+`SavedRun` dispatch preserves purpose through each local/network/fallback/terminal effect.
+Native Save acquires/reverifies the whole encrypted copy before plaintext export. `DownloadReady`
+observes the ORIGINAL actor generation, Root and mounted storage generations. Native account/
+registry-row custody stays separate. Four whole-export slots follow queued plaintext replies and
+remain distinct from eight process-wide acquisition jobs/attempts. Renderer metadata exposes no
+saved manifests, keys, external destination authority or resource grants. Resume is explicit;
+there is no startup plaintext publication or persisted external path. See design-file-reliability.
+
+## Native MLS source catalog and explicit requester (19 October)
+
+`ServerGroup::member_count` now retains a fixed native observation of its committed epoch:
+member count, last occupied leaf and whether both copied OpenMLS key vectors have the supported
+32-byte shapes. Create, join and restore each have a fresh opaque instance identity. The cache is
+not serialized; a committed epoch change makes it unavailable until ordinary native observation.
+Staging/aborting a commit does not change the committed roster. Native loading and the first
+O(roster) observation remain outside the bounded request-page claim.
+
+An already observed catalog proposes at most four sorted distinct public signing keys while
+examining at most64 raw leaf positions, including holes and requester/helper exclusions. Before
+OpenMLS's indexed copying accessor, it checks the exact instance/epoch and attested key lengths,
+then checks the borrowed credential against4KiB. Empty incomplete pages mean yield, never absence.
+Catalogs expose public tree metadata on inactive groups too; they grant no active membership,
+Root, native session, file intent, connection or execution authority.
+
+The sync owner's native requester search uses these continuing pages, with independent
+positions for at most four helpers by four exact encrypted variants. A nonempty proposed page
+stays unconsumed across local pre-admission refusal. Helper replacement cannot reset its cursor;
+empty pages advance one bounded local turn. There is no permanent320/512-member source cutoff.
+The app's explicit native chunk/range and Keep reads now fall back to this search after direct
+providers. The captured native invocation and Root file authority remain mandatory. Root prepares
+an exact signed kind29 grant and reserves route custody before the actor's durable Keep debit;
+only subsequent commitment consumes that proposal. A helper forwards kind30 to at most four
+named sources, without gaining file keys or retaining their ciphertext. Each bridge page stays
+at64KiB and has its original12-second Root deadline, independently of B/A's service clocks.
+Signed Unavailable observations schedule at most two later helper/variant sweeps after fresh
+coverage. Ambiguous transport failures retry the same batch with fresh nonces and paid work.
+Stable-helper local pacing is a scheduling hint, not a guarantee about remote arrival rates.
+Finite read and Keep allowance can expire before complete coverage; this never proves absence.
+Four focused TCP/native end-to-end file scenarios pass; full programme and physical network
+acceptance remain separate.
+
+## Connected file source checkpoint (19 October)
+
+The native server actor installs an observing file-service attachment from its exact account/
+server-entry scope and current file actor generation. Kind30 is routed into a retained Root
+completion queue before any general request await. Authentication, current member/route/policy
+checks and signing stay on Root; only an affine bounded storage plan enters the blocking native
+executor. The source credit follows worker, pending metadata and actual response independently.
+File completions rotate as a fourth input in the existing owner selector. Final Present effects
+recheck captured scope, storage generation and the original two-second read deadline, excluding
+the reply wait that retires before a driver send. Source tests alone do not establish complete
+indirect Keep acceptance. Helper29 uses the same retained
+queue for one-hop source requests: its affine chain prepays all four lower attempts and five
+route records before admission. Original lower bytes, output bytes and actual driver sends own
+the same charge independently, including final-refusal paths. The selected A scope survives
+through final Found admission; unused sources do not retire the parent C scope.
+
+## Congested network dispatch (PR 48 revision)
+
+The driver owns bounded application payload and lifecycle reconciliation queues; it never awaits
+the application sink from a swarm callback. Actual payload/response/lower ownership carries a
+shared process byte credit, while dropped gossip requests ordinary anti-entropy. Automatic cached
+dials and reciprocal/probe forwarding prepare immutable exact authority on Root and wait in
+bounded detached jobs. Driver admission repeats ownership; completions return to the sole Root
+for current retry/accounting effects. Notifications have local ACKs and driver-discarded replies.
+See [the interface contract](INTERFACES.md#congested-transport-delivery-and-automatic-repair-submissions-pr-48-revision)
+for precise bounds, generation ordering and the still-immediate reconnect/manual paths.
+
+Document anti-entropy also has an owned monotonic 30-second wake in the sync network wait.
+It revisits quiet connected sources after a completed search without requiring UI activity,
+gossip or a discovery edge. Caller cancellation preserves the deadline and pending requests.
+Only active local members with open documents and an actually connected bound current source
+arm it; one bounded due turn precedes normal fair input rotation. Queue, cooldown and source
+rotation bounds remain unchanged. See [the message trace](MESSAGE-FLOW.md).
+
+Automatic delivery receipts now share detached notification ownership with repair forwarding.
+One persistent admission turn alternates successful classes, capped at four new notifications per
+owner turn; capacity denial does not skip the owed class. Local ACK waits participate in owned
+response/event/submission polling. Neither scheduling nor an ACK is remote delivery evidence.
+
+## Connected discovery maintenance (2026-10-18)
+
+The server actor queues connected-only membership-commit, PEX, member-finalization and
+switchboard-offer stages. Quiet discovery first polls the released commit catch-up protocol at
+its current epoch: a lost removal broadcast must not depend on future chat to expose the gap.
+Empty/failed probes still continue ordinary discovery and do not establish currency or PEX
+failure. Applied epochs publish member/role consequences, including equal-count replacement,
+and request the existing sealed snapshot worker before subsequent stages prepare fresh authority.
+Each stage prepares its authenticated request on the sole sync owner, waits in a detached worker,
+then commits only against that originating owner's current epoch, effective policy, descriptor
+generation and live connection. The networking generation is independent of UI lock and V2 call
+sessions. Legacy PEX remains unbound member evidence; finalization retains its stronger policy
+and both-endpoint transcript. Production transport connection leases revoke at aggregate close,
+before the sync owner consumes any event; same-peer reconnect cannot revive captured work. Old
+disconnect events cannot revoke a replacement lease. Unsupported legacy test transports retain
+event-driven fencing; upgraded voice refuses a transport without a live driver lease.
+Released wire encodings and public synchronous-owner async wrappers
+are unchanged. Explicit finalization commands use this same nonblocking actor scheduler.
+
+Historical dual-key bindings remain conflict pins across a disconnect. They do not establish
+that a restarted member remembers our identity. A separate session-only table (at most320 rows)
+records verified outbound kind26 completion for the original connection lease, member/device,
+epoch and policy. Same-peer reconnect owes a fresh exchange; a delayed old disconnect cannot
+erase completion on a replacement lease. Serving alone never settles our outbound obligation.
+Known current members on inbound-only connections are eligible without outbound dial evidence;
+unknown Noise endpoints are not. Native capture selects at most two fair repair targets per pass,
+through bounded connected-only maintenance independently of PEX backoff. Both endpoint orders
+pace the second attempt past the one-second serving rate limit. Only saving listener hints still
+requires actual successful outbound Noise observations; no repair query grants dial authority.
+Unsupported legacy transports retain event-fenced readiness rather than exact driver generations.
+
+Actual aggregate loss of a previously endpoint-bound current P2P member also sets one coalesced
+actor scheduling hint. Driver-live stale disconnect events do not clear replacement liveness.
+The actor owns two extra local-route retry opportunities, normally at +5s and +20s, inside one
+25-second window and a 60-second re-arm cooldown. Further losses do not extend/refill that window.
+Its absolute deadline participates in the existing fair timer source. Each due turn rechecks
+member-mesh eligibility and uses the existing sealed-route, current-roster and shared endpoint
+scheduler gates; unavailable budget stays unavailable. No file invocation grants a dial.
+A 250ms bounded local driver-acknowledgement wait prevents an indefinite owner stall. Unqueued
+permits may drop; an already queued driver command retains its actual permits and may complete
+once after that wait ends. No ambiguous submission is refunded. This starts no PEX, rendezvous,
+interface refresh or snapshot work; the native 45–75-second cadence remains the fallback.
+
+Two actual lower flights/server and four/process bound retained answers to 32 MiB/server and
+64 MiB/process for the released 16 MiB commit response; PEX remains capped at 512 KiB. Existing
+bounded signature/record decoding scratch is additional. Commit bundles have a separate 1024-
+record work ceiling (default retained log: 256); larger local logs serve successive epoch polls.
+A flight and its per-target occupancy survive timeout,
+worker cancellation and queued completion through the transport's actual last keepalive owner.
+At most sixteen peer chains and four explicit waiters/chain coalesce discovery; one bounded refresh
+handles state supersession without charging peer-health backoff. Queued actors wake on actual shared
+capacity release, while idle actors ignore unrelated releases. A sixth fair ready source consumes
+completions. Accepted raw signed-record changes request the existing core snapshot worker even in
+quiet legacy groups; native restore rebuilds its passive address cache from those saved records.
+Connectivity/duplicate records alone do not dirty that revision. Automatic cached dials and mesh
+repair now use the detached submission path above. Local reconnect, explicit manual redial and
+the bounded rendezvous drain retain separate waits; this is not a universal latency bound.
+
+## Voice V2 foundation in progress (2026-10-18)
+
+An inactive native confirmation plan now protects twelve fixed local history rows/slots and a
+provisional 96 KiB variable envelope, one Crypto lane and two Forward lanes. At this checkpoint,
+only derivation consumed a protected row. One weak process/group Workflow index remains occupied through
+actual input/engine/lower custody after End; fixed history and retained closed control metadata
+stay independently charged without pinning progress. LocalJoin permanently stamps successful
+preparation per pair, including after close. Original resources/slots, scope/epoch, both join/key
+identities, pair pin/generation, role and deadline bind the plan. Fresh native authority is still
+required at consumption and first effects. Process housekeeping closes unused capacity outside
+resource and action locks. This is not whole-chain/native/browser readiness or live dispatch.
+
+The reviewed [V2 decision](communication-recovery/VOICE-SIGNALLING-V2.md) is being implemented
+as separate foundation modules; live calls still use legacy signalling. Strict signed objects
+and route roles live in `catcoms-sync::voice_v2`;
+the standalone browser crypto broker uses non-extractable P-256/HKDF/AES-GCM keys. Native call
+ownership is distinct from optional mappings. A unique allocator claim on the shared native lease
+prevents packet-ledger recreation, and dropping that allocator revokes the join. Affine native
+resource credits survive uncertain engine work and share a process/group byte pool with packet
+caches. Native `Watcher`/`LocalJoin` now implement separate fresh observation/challenge proofs and
+immutable active-join renewal. Observations retain exact charges and revoke on replacement or
+membership loss; actor-owned origin limits keep key/renewal protection across watcher replacement.
+`LocalJoin` now owns initial three-flight confirmation, exact action/reservation Submit and
+atomic newer-pair promotion. Packet commit produces an opaque affine signed-flight receipt rather
+than a forgeable bare header. Capacity/engine failure preserves validated pending actions without
+resetting counters; roster observation refresh does not retire native pair authority.
+The desktop now shares one process Runtime/resource pool with attached product actors. Helper
+owners retain group limits/caches across actor replacement and
+capture irreversible session, actor, policy, member and directory-incarnation gates for deferred
+work. Transport RequestAuthority checks those gates synchronously at lower admission; lower
+keepalive ownership still survives waiter cancellation. V2 time advances with local monotonic
+elapsed time as well as forward wall observations, so rollback cannot outlive pruned protection.
+Helper flights share four group/eight process slots and the same declared-byte pool.
+An inert kind28 admission seam now enforces bound Noise identity, pre-signature work/byte budgets,
+exact frame tickets and role-bound typed ACKs. Prepared replies now retain original verification,
+first packet-admission and route custody through the driver's actual serialization/send. A cached
+helper packet cannot adopt replacement actor/room authority or a later longer permit to issue a
+positive ACK; protective identity and spend remain retained. Detached source/helper requests capture actual driver
+connection generations plus Root descriptor/proof/epoch owners, and retain lower flight custody.
+Source attempts preserve exact native cached packets/pairs/actions and share the helper flight
+pool, with separate typed settlement. Normal request dispatch, production source retry scheduling
+and native endpoint/UI delivery remain disabled. Root now owns bounded Watcher/LocalJoin lifecycle
+state and observes exact authenticated removals inside the current runtime membership transaction,
+before fallible additions or any await. It keeps weak call-grant identity, so losing the last native
+owner closes queued source activity. Watcher grants bind native controller/call parent consent before
+cloning; abandoned replies revoke observation. A coalesced metadata channel avoids awaited event
+sink backpressure. The trusted public-control intake now commits original allowance and bounded
+queue custody atomically; its pump derives challenges/proofs from actual native owners, and only
+fresh native challenge responses admit presence. Encrypted intake and recoverable payload/
+confirmation/negotiation pull remain next. Process and actor Clock housekeeping expire cold caches
+while locked without erasing membership, replay or allocator protection. Actual transport/payload
+owners retain their credits, and unresolved browser operations have no expiry refund. Confirmation
+source work captures the original handshake deadline; exact retries use immutable reservation time.
+Native entry custody revokes the exact actor on removal. Lock publishes a newer UI generation
+before revocation hooks; IPC requires the exact generation last committed by authenticated unlock.
+Unlock prepares fresh retained-actor owners outside native commit, then registers each exact row
+before activating the captured session ticket. Optional voice capacity or a stopped actor leaves
+that row without V2 authority and does not prevent chat/vault access. Duplicate unlock retains the
+same installed owner. Root directory observation sees newly authenticated deletions even within a
+compound change or prefix-applying error; duplicate/rejected operations grant no new revocation.
+The bounded reader always includes the permanent `general` room. Affine native call grants revoke
+on abandoned replies; production activation validates their exact scope and live child lease.
+Production grants also retain the exact room allocation and a 256-byte affine charge through
+actual last-owner drop; deletion/revocation alone cannot refund retained native work.
+No call keys or replayable call state are persisted. A standalone confirmation-only browser
+registry retains one computation through lost admission/commit replies under the surviving
+broker's combined byte/record/engine limits. It returns closed historical receipts without
+plaintext or fresh RTC/pair authority. Owner retirement wakes observers but does not refund
+actual pending work. An inert native typed-action queue now gives proven pairs and exact
+confirmation inputs continuing identities, immutable charged custody and one shared engine fence.
+The desktop registration/admit/settle model now compiles only for contract tests until its
+result owner and browser IPC adapter exist. It is not production native enforcement; the sync
+typed-action queue remains an inert production Rust seam. That model's registration matches
+the actual call lease, scope and process pool. Exact admission is
+idempotent, settlement permanently closes delayed admission, and first signing/confirmation
+effects use that same fence. End closes unstarted actions but leaves actual admitted work charged.
+The combined 32-record queue includes terminal identities; pulls rotate through at most four
+without dequeueing. Prepaid capacity can close unused bytes while retaining actual outstanding
+loan bytes and slots. The narrow SDP foundation now requires a 192 KiB native exchange reserve
+before the first local nonce or incoming positive admission. It prepays one Crypto lane, two
+Forward lanes, two action continuation slots and member records for the endpoints and at most
+two fixed helpers. One local and one remote SDP of at most 8 KiB share one OfferId and fixed
+initiator/responder role; crossed Offers refuse before admission. Packet, Source, verification,
+engine/action/result capacity loans retain actual custody. This is capacity enforcement, not
+completed SDP crypto-action factories or browser result delivery. Full-chain integrated progress
+remains a requirement. The inert native CryptoAction seam now retains small exact accepted and
+closed-rejected terminal receipts under the original engine fence, independently of consumed
+tokens and actual settlement. SHA-256 is recomputed over the native-input-selected bounded
+output; cached history uses the original clock and post-transition pair/attempt owners. History
+never grants fresh signalling or RTC authority. Live Endpoint confirmation/presence wiring, native action IPC adapters, helper ingress
+and UI V2/legacy separation are not yet enabled or accepted;
+the [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the scope.
+
+## Call lifecycle and optional router custody (2026-10-18)
+
+Call RTC callbacks and asynchronous SDP/stats/router continuations require the exact peer object
+and call-join lease. Component destruction explicitly leaves the old call, stops captured tracks
+and closes peers, including retained-WebView remounts. Native optional router mappings have a
+separate process-owned controller/call/grant coordinator: non-destructive prepare, revision-CAS
+activation, actor/group/UI-generation binding, exclusive port slots and detached acquisition/
+cleanup. The UI never owns a router effect merely by awaiting its command. Lock/leave/remount
+revoke ownership; uncertain cleanup stays charged until process exit. IGD cleanup addresses its
+original granting gateway. See [custody and limits](communication-recovery/CALL-MAPPINGS.md).
+These corrections do not add indirect voice signalling or media encryption; those remain in the
+separately tracked [communication programme](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md).
+
+## Studio working edits and five-second saves (2026-10-18)
+
+Production Studio edits update a separate volatile working projection immediately. Native views
+and raw registers remain the sole authority/evidence; local frame handles and display sources
+never become native CIDs, recovery choices or authoring authority. Ordinary pixels, timeline,
+sound, Score, header and Index operations wait for Save, normal close/navigation, or a fixed
+five-second deadline measured from the first change. Document creation and explicit historical
+recovery are themselves Save actions. Only never-submitted tail edits coalesce. A released Save
+contains a fixed set of queue identities; later edits wait for their own deadline. Failed and
+uncertain records remain visible and never automatically retry. First delivery preserves its
+admitted epoch/trust route across publication/ticket awaits; only explicit reauthor changes it.
+
+Normal document, channel, server, surface and window changes await definite Save receipts,
+including a new interrupted stroke drawn while the first revision was saving. Refusal or timeout
+keeps the old editor. Window close holds routes even after its Save drains, and every awaited navigation
+decision is rechecked in the continuation that changes the screen. Delayed wiki rename results
+also bind an exact displayed-page generation, so a same-name reopen or another server's page
+cannot become the stale write's target. Playback/export may use complete validated owned working
+inputs without writing; exact native group/channel/epoch and linked-Score checks still apply. Semantic media
+generation ignores delivery status and an ACK of identical content, so autosave does not stop
+playback. Data notices are re-read before content comparison; settlement, explicit invalidation,
+membership and lock still revoke playback ownership. A new editor Play begins at frame one.
+
+Orderly lock captures the owned queue in the existing atomic encrypted UI continuity envelope,
+then immediately revokes native authority and clears editor models, buffers and rasters. The
+existing lock coordinator retains the immutable continuity argument until unlock so a racing
+close/retry can reuse its exact bytes; this is not a RAM-zeroization guarantee. Capture failure cannot
+prevent lock and is disclosed; the previous sealed record remains intact. Restored work is held
+until explicit Save/retry in its original server/channel/group, never automatically replayed by
+a new edit. Limits are 512 queued records, 8 MiB of PIX file bytes and 12 MiB serialized Studio data;
+admission reserves frozen-request/diagnostic overhead and counts UTF-8 plus outer JSON escaping.
+The sealed envelope is capped at 16 MiB with the existing independent 1 MiB allowance for all
+non-Studio continuity. Physical reads are bounded before decryption. This is orderly lock/close
+recovery, not a write-ahead log or a claim of receipt recovery after a hard process/OS crash.
+Unlock restores that queue with no document open. Opening a document is never conditional on its
+held work saving first (a document switch saves only the document left), and the sidebar shows a
+row with an open button for documents holding unsaved edits (up to eight, then a count; an Index
+edit about one entry counts for that document, on every route; pending Creates keep their own
+rows), so their Save, Retry and discard controls stay
+reachable even for a document the Index does not list. Once open, those controls render whatever
+the document read did: a failing read shows its error beside them, never instead of them.
+
+## Studio Save, navigation and playback corrections (2026-10-18)
+
+Native document refreshes and Saves use separate latest-request lanes. A Save revokes older
+projection/Save results; a later read cannot hide its durable receipt. Session lock, cancellation
+and actor-incarnation checks still apply at delivery. Actual read-admission counters separately
+fence an ACK's projection: an overlapping later read preserves its newer state, and reconciliation
+finishes before dependent queued work runs. Navigation without a read never suppresses Create's
+initial projection. Editor selection flushes the original
+object/frame's dirty raster before replacing the document; a synchronous enqueue refusal vetoes
+the switch. Pending exact Saves retain their pixels and identity offscreen. Protocol Open phase
+and bounded maintenance watches are independent of the one currently open editor.
+
+Looping pictures wrap through long authored sound/release tails without shortening sound. Shared
+archival decks render and announce the DJ's actual synth clock after preparation; listeners sample
+their room seek after preparation as well as download.
+
+The shared sound shelf retains only sixteen currently eligible recipes. Native reads enforce the
+4 KiB patch cap, serialize replacement work and cancel after registration. Scope/listing generations
+and direct post-await trust, lock, readiness, close and membership checks reject stale results.
+
+Accepted Closing retries authenticate their scoped intent record and flush its existing ciphertext
+before acknowledging it. They neither rewrite metadata nor require an auxiliary owner journal.
+Fresh authoring and commits retain complete inventory/admission. Automatic receive supports up to
+1,024 cumulative metadata records, matching its directory ceiling, with the existing 8 MiB read and
+256 KiB cold-validation rails. Resumable inventory turns retain their deadline; legacy synchronous
+complete scans still have no measured custody-latency guarantee.
+
+## Studio UX and ordered sync observations (2026-10-18)
+
+Studio keeps Art, Sound, Music and History separate. Server settings owns fault inspection and
+explicit owner decisions through an independent typed target wrapper; it never resets the editor's
+shared session or manufactures a winning receipt. Normal owner maintenance and already chosen
+repair work continue automatically through the existing actor.
+
+Chat/wiki and file details share one App-owned inline PIXA manager: one serial native read,
+two retained encoded packages, 128 observed hosts, one repaint timer and only current rasters.
+Pictures loop silently under the existing file trust preference; sound requires a local click and
+uses the existing StudioAudioSession/JamEngine with token-owned cleanup. Membership, navigation,
+lock, visibility and trust edges retire reads/packages/consent. A retained same-channel host may
+renew its scope only on a fresh explicit Play. Package arrival uses the existing chat media-load
+capture listener; individual frame paints do not trigger scroll work.
+
+Post to chat exports the displayed composition, streams it through ordinary fileshare upload,
+then appends its returned file CID to the existing draft and opens chat. Ordinary Send retains
+durable retry ownership. Navigation (including A → B → A), membership, lock and window-close
+intent revoke the upload's permission to edit the composer, although a completed file may remain
+in Files. This does not create a Studio history reference or claim remote custody.
+
+Receiver pause/resume observations now carry actor-local sequence, bounded actual failure detail
+and native server incarnation. Successful whole explicit access emits current state; a failed
+access and read-only fault controls cannot resume receiving. StudioSession orders these lossless
+u64 labels and caches 128 recent local server observations across navigation, clearing them on
+lock/session reset. A cold/evicted scope refreshes Index to obtain current native state. This is
+diagnostic state only; no wire, persistence, authoring or settlement authority changes.
+
+## Gate 7 UI completion candidate (2026-10-17)
+
+PIXA now extends the existing Jukebox archival branch and global file details viewer, using the
+same JamEngine, call/DJ transport, authenticated file fetch, cancellation debt and local consent.
+Encoded package caches retain at most two per call; a canvas expands only the current frame.
+The global viewer owns one package, a separate cancellable read generation and explicit Play.
+
+Explicit document/Registry fault repair delegates to the existing detached durable-owner path.
+Separate Closing local-draft commands derive the saved signed close from the local sealed owner
+journal. Their failed lookup is carried to new-authoring admission, after accepted/terminal retry
+classification. A captured plan retains the exact verified close for the unchanged S3 rechecks.
+Fresh Closing authoring is generally available only on the journal-holding device; it remains
+local-only pending automatic handoff. No second synth, document owner, network protocol or
+persistence format is introduced. Current contracts are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
+
+## Gate 7 baseline (2026-10-17)
+
+The owner accepted Gate 6; PR #44 merged at `82631a81`. Gate 7 adds composed lifecycle
+acceptance and the [production UI handoff](GATE7-UI-HANDOFF.md), reusing the same actor, vault,
+receiver, transport and JamEngine. No wire, persistence or authorization contract changes.
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) separates adapter/TCP evidence from desktop/audio
+release observations. Dated Gate 6 checkpoints below remain historical.
+
+## Gate 6 composition checkpoint (2026-10-14; candidate at that date)
 
 The existing Studio/P1/vault/native/renderer stack now composes typed Score and complete Flipnote
 sound state with production Score/Sound/Music controls, actual-byte PIXA publication/readback,
@@ -255,7 +2229,7 @@ per paced pass gets the same Ready/lease/off-executor custody as Save. Current w
 and membership/MLS are rechecked before disk work; snapshot persistence precedes typed ingest.
 Only newly Accepted durable edits emit remote StudioUpdated; events recheck native incarnation.
 Automatic inventory uses the existing scanner with local limits (1024 directory entries,
-64 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
+1024 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
 LRU retains every family's pure accounting validation (and an Intents record's inventory facts),
 never a document, inventory or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
 the exact complete-wrapper digest/size. Ordinary complete scans warm it; remount starts cold.
@@ -656,6 +2630,12 @@ is broken. The load-bearing fixes:
   traffic; switchboards remain opt-in admission-only, while general circuit relay hosting remains
   a separate opt-in role. HyParView/CYCLON-like active/passive selection and local age/source
   metadata improve which peers are tried but cannot repair a partition with no surviving edge.
+  Indirect probing keeps one target per pass. Initial selection honors topology priority; later
+  passes traverse eligible full device IDs circularly across the complete bounded peer-record
+  set. A scalar session cursor advances immediately after each confirmed local admission, before
+  another helper can suspend. Local refusal, negative replies, descriptor refresh and disappearance
+  of the cursor's record do not rewind traversal. This is ordering only; every existing live
+  membership, descriptor, path, expiry and rate check still applies.
 - Pairwise route evidence is a bounded, session-only refinement of aggregate transport liveness.
   Libp2p reports a sorted/deduplicated IPv4/IPv6/DNS/memory + TCP/QUIC/WebSocket/circuit snapshot
   after connection edges, including relay-to-direct DCUtR upgrades and partial closes. The sync
@@ -705,7 +2685,8 @@ review (run before commit) hardened it:
 ## 4b. Membership commit propagation (6d-1a)
 
 The Add commit (previously discarded) is now captured and fanned out on a per-group
-**control topic**; every member applies it via `process_incoming` and advances to
+**control topic**; every member applies it via `ServerGroup::apply_commit` (which accepts only
+a commit for exactly the record's epoch; see `docs/design-mls-commit-log.md`) and advances to
 the same epoch; so a multi-member join converges and a non-admitting member can
 decrypt the new joiner's ops. A design+adversarial-review pass (verified against
 the openmls 0.8.1 source) showed the "safe by construction" claim was only *assumed*,
@@ -720,10 +2701,12 @@ staged fork-resolution path that a non-zero rank enables.
 A member that misses a control-topic commit (unreliable delivery / brief offline)
 self-heals: an out-of-order commit is buffered (`pending_commits`), a new
 `KIND_COMMIT_CATCHUP` request fetches the gap from any member's bounded `commit_log`,
-and the missed MLS commits are **replayed in epoch order** through `process_incoming`.
-Every retained buffer/queue is hard-bounded so an untrusted peer cannot force
-unbounded allocation; a forged future commit is gap- and size-capped and fails MLS
-verification at apply time (its only residual cost is one deduped catch-up request).
+and the missed MLS commits are **replayed in epoch order** through `apply_commit`, so only real
+commits are applied and logged. Every retained buffer/queue is hard-bounded so an untrusted peer
+cannot force unbounded allocation; a forged future commit is gap- and size-capped and fails at
+apply time. It is buffered before any authorization, though, and takes its epoch's slot, so a
+forged record labelled past the group's real head can keep a member's commit recovery
+re-queueing (THREAT-MODEL, 26 October; a follow-up).
 Separately, a bounded **past-epoch channel-key window** (`snapshot_epoch_keys` before
 each advance → `Zeroizing` keys, evicted past `max_past_epochs`) lets an op sealed
 just before an epoch boundary still decrypt (`ingest_with_key`, inner signature still
@@ -936,3 +2919,113 @@ network tasks, projects conflicting first file-index lists consistently, and add
 copies. Kept-copy ownership never comes from replicated expiry. One exact manifest is reserved and
 verified before durable visibility; normal cache deletion cannot remove it. UI availability reports
 local evidence and leaves remote copies unconfirmed.
+New retained transfers use a purpose-key-separated sealed successor journal in `transfers-v2`,
+with full native group/device scope, private partial chunks, persistent prepaid execution allowance
+and explicit idempotent Retry. Resumable, Completed and Deleting are distinct durable states.
+Legacy pending remains cleanup-only behind a permanent format barrier. Actor workers reverify the
+saved prefix and whole plaintext before completion; queued network work carries its original
+deadline and revocable run owner. An actor-owned paced scheduler resumes saved partial intents
+under an exact native unlock generation; persistent user Pause, budget exhaustion and deterministic
+integrity stops remain distinct. V2 canonical bytes reconcile before explicit V3 consent migration.
+Completed checks retain cancelable inline leases. New V4 multi-variant intents reserve their whole
+original compatible set with per-candidate progress and a separate committed winner. Fallback
+publishes a selection under a fresh opaque run, resets whole-file hashing and preserves all global
+allowance/intent. Public retained service exposes only the committed winner. V2/V3 remain exact-only
+with unchanged bytes and charges. Focused integration checks/review are ongoing; indirect blob
+service and combined acceptance remain open.
+
+
+### Native full-source read custody (19 October)
+
+The future connected file service has a separate opaque read task, independent of voice runtime
+and small ciphertext page sizes. `SourceReadRuntime` reserves a fixed 40 MiB before bounded store
+preparation, with a single process-static pool limiting two actual reads/results total and one per
+full group. Replacing a Root, runtime or executor cannot create fresh capacity while old workers
+remain alive. A task moves both plan and affine credit into the app's `spawn_blocking` closure;
+a completion keeps its result and that same credit. No owned-result extraction bypass exists.
+
+Store/winner fences and exact CID verification survive this handoff. Future service must separately
+recheck original group/membership/request/native-session/deadline authority before signing and
+transfer any outgoing page into response custody before dropping source completion. The executor
+factory starts no work by itself. New request dispatch, helper service, source cache, replay/rate
+admission and actor integration remain unfinished; this is no indirect file acceptance claim.
+
+
+### Existing file work: actor and Root ownership
+
+Detached file requests now observe both their original actor generation and Root/member/policy
+generation. The actor retires before stop acknowledgement or a blocking close-event wait. A
+reversible freeze retires before native custody waits and resumes with a fresh generation; old
+local jobs, retries and completed responses cannot adopt it. Root observations retire on actual
+epoch/member/policy changes even without voice attached. Its sole publisher is the first Root
+field, so Drop ends it before transport/MLS/store fields. Neither observer owns those publishers.
+Actual lower accounting remains held through transport retirement. This supplies no bridge peer
+standing or native entry consent; those additional scopes remain separate.
+
+### Native confirmation result ownership (22 October continuation)
+
+The inactive native action path now composes an original buffer with actor delivery without
+copying that buffer. A trusted `VoiceConfirmationBody` pins one prepaid owner with
+`Bytes::from_owner` outside native/Root guards. The pinned bytes implementation calls the
+owner's slice callback once at construction; the actor reads only the cached immutable slice.
+One private Flight per body covers queueing and completed-but-uncollected output. A lost caller
+does not release the original buffer/payment while the actual command or output remains alive.
+The existing Root seal/open methods still validate the actual grant, action and result tag.
+
+Native Phase reserves4KiB actor metadata from its ORIGINAL16KiB loan before taking a result
+buffer. Local refusal returns that exact buffer for retry. This payment is independent of a
+future detached dispatcher task; neither a queue slot nor a receipt proves Phase drainage.
+Explicit confirmation retirement consumes the original HandoffLoan to close its original plan,
+outside native locks. Ordinary loan return leaves the96KiB Workflow open. Actual input/lower/
+copy owners continue to retain the original Workflow after closure.
+
+Browser broker v10 can lend a Ready channel's existing execution position to its exact selected
+key/chain. Provider/digest work and same-channel IO share that lane; RPC waits occur outside
+provider ownership to avoid self-deadlock. Every row retains its original native adapter.
+These ownership primitives do not enable action opcodes: the application listener still serves
+Status only. Framed action dispatch, complete final ACK/collection, proven-pair actor ingress,
+SDP transfer, live V2 and physical acceptance remain separate unfinished work.
+
+### Native physical shutdown and private request grammar (22 October continuation)
+
+The application service now closes its listener, latches Registry shutdown under Index, and
+closes every original Row's first-effect fence. No later bootstrap or retained Route may create
+new work. It then closes header admission on each original Session and waits for that Session's
+actual physical position outside Index/Row/UIcommit/Coordinator guards. Retirement witnesses
+also find a Session whose only remaining owner is a detached worker or completed reply. A single
+in-place Notify waiter observes last-owner collection; socket loss, End and timeouts do not
+replace it. The service task/output retains its original process payment throughout this wait.
+SDK/actor cleanup follows Host completion. This is native physical collection, not proof that
+browser SDK work or the complete96KiB Workflow drained.
+
+An authenticated, opened Data request can transfer its original buffer into the Phase-funded
+actor body without copying it, leaving only an empty body placeholder with the same affine
+response nonce. Local range/foreign-Phase/capacity refusal restores that exact buffer. The
+eventual dispatcher still must resolve the complete decrypted purpose and original header RowId,
+fund detached task metadata separately, and retain the unique physical hold through real result
+work and output collection. The extraction primitive supplies no such effect authority itself.
+
+Private version1 action plaintext has a fixed full selector prefix and closed per-operation
+lengths. Native borrows at most528 output bytes; the browser constructs one prepaid bounded
+request. Shared public vectors pin full-width u64 fields. Receipt ACK digests bind the actual
+native transition and exclude observational retirement, matching Root's same_transition.
+This grammar is inert: production continues to serve Status only. Pending closure, native proof
+of final delivery, safe32-row purpose history collection and the complete action adapter remain
+required before enablement. FinalACK alone must never remove history from a still-live Session.
+
+The inactive derivation-result executor now consumes the actual opened Incoming and checks
+its Session allocation against Route before lookup. It resolves the authenticated header RowId,
+complete selector and native serial/version/input tag, and accepts only an empty Derive output
+with its actual empty-output hash. Historical receipt recovery precedes current eligibility and
+takes no additional Phase contribution, Work or task; the already-paid Data body remains owned.
+Current effects repeat original UI/selection/Route checks under UIcommit and call the actual
+ServerActor/Root method. Detached Worker and completed Response retain Work/task custody before
+Incoming in field-drop order, keeping shutdown behind real publication and output collection.
+The measured future/output/command envelope must fit8KiB from the original16KiB loan. Incoming
+stays inline; both future and output storage count. Its single fixed4KiB header-scratch backing
+allocation is explicitly counted/prepaid by the unchanged12KiB Session control envelope. Moving
+that affine scratch handle does not reserve another inline4KiB in each async state; its full
+backing storage is counted, zeroized and freed before physical idle can be published.
+This narrow empty-marker executor does not construct the separate seal/open body bridge. Its
+actor fixtures deliberately require rejection of a synthetic foreign pair; successful normal
+production-pair publication, listener dispatch and the browser action adapter remain unproved.

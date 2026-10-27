@@ -7,7 +7,7 @@
   import { PixRaster } from "./pix-canvas.ts";
   import { DEFAULT_PALETTE } from "./studio-store.ts";
   import { FLIPNOTE_H, FLIPNOTE_W } from "./studio-contract.ts";
-  import { reason, type KnownView, type SaveRecord } from "./studio-session.ts";
+  import { affectedObject, reason, type KnownView, type SaveRecord } from "./studio-session.ts";
   import { base64ToBytes, type NativeExpiry } from "./studio-native.ts";
 
   let { me, server, channel, onopen, onnotice } = $props<{
@@ -27,7 +27,7 @@
     untrack(() => setStudioScope(s, c));
   });
 
-  const model = $derived.by(() => { void studio.rev; return session.indexModel; });
+  const model = $derived.by(() => { void studio.rev; return session.workingIndex; });
   const indexView = $derived.by(() => { void studio.rev; return session.index; });
   const indexError = $derived.by(() => { void studio.rev; return session.indexError; });
   const indexOverlay = $derived.by(() => { void studio.rev; return session.indexOverlay; });
@@ -36,6 +36,36 @@
   const indexAttention = $derived.by(() => {
     void studio.rev;
     return session.pendingFor(null).filter((s) => s.status === "blocked" || s.status === "uncertain");
+  });
+  // Unsaved edits held for a document other than the one in the editor. Switching documents saves
+  // the document left, and sends (without awaiting) its Index records, which can show here until
+  // they land. A lock/unlock restore leaves work here, and so, until its deadline, does deleting a
+  // document whose edits are still queued. Their Save, Retry and discard controls live in that
+  // document's own editor. Each row opens it, so those
+  // controls stay one click away even for a document this list does not show (deleted from the
+  // Index, or past an unread listing). Records are grouped by the document they change, so an
+  // Index edit about one entry (an expiry, the Index half of a rename, on any route) counts for
+  // that document. A pending Create already has its own row below.
+  const heldElsewhere = $derived.by(() => {
+    void studio.rev;
+    const open = session.doc?.object ?? null;
+    const creating = new Set(session.saves.filter((s) => s.kind === "create").map((s) => s.object));
+    const byObject = new Map<string, SaveRecord[]>();
+    for (const s of session.saves) {
+      const object = affectedObject(s);
+      if (object === null || object === open || creating.has(object)) continue;
+      const list = byObject.get(object);
+      if (list) list.push(s); else byObject.set(object, [s]);
+    }
+    // The working Index first; the saved one names an entry whose pending delete hid it there.
+    const saved = session.indexModel;
+    const listed = [...(model?.entries ?? []), ...(model?.overflow ?? []), ...(saved?.entries ?? []), ...(saved?.overflow ?? [])];
+    return [...byObject].map(([object, saves]) => ({
+      object,
+      title: listed.find((e) => e.id === object)?.title || `untitled ${session.objectKind(object)}`,
+      status: saves.some((s) => s.status === "uncertain" || s.mayHaveCommitted) ? "save uncertain"
+        : saves.some((s) => s.status === "blocked") ? "save not written" : "unsaved edits",
+    }));
   });
   // Read through the revision, and first in the expression below: a non-reactive read that
   // short-circuits on the first render would leave the template never subscribed to the rest.
@@ -53,6 +83,13 @@
     const scope = session.scope;
     return scope && archive ? `${scope.server}:${scope.channel}:index:${archive}` : "";
   });
+  // A restored draft still waiting for its channel refuses every new edit. Its channel may never
+  // open again (a server that stopped takes nothing until Mewtual restarts; a channel can be
+  // deleted), so the member can discard it here. Armed per draft, so a different one never
+  // inherits a confirmation.
+  const waitingDraft = $derived.by(() => { void studio.rev; return session.waitingDraft; });
+  const waitingDraftKey = $derived(waitingDraft ? `${waitingDraft.server}:${waitingDraft.channel}:${waitingDraft.first}:${waitingDraft.edits}` : "");
+  let waitingDraftDiscardArmed = $state("");
   let indexDiscardArmed = $state("");
   let indexReleaseArmed = $state("");
   let indexSaveDiscardArmed = $state("");
@@ -129,13 +166,17 @@
     return session.known.get(id) ?? null;
   }
 
-  function chip(k: KnownView | null): { text: string; tone: "ok" | "warn" | "danger" | "" } {
+  function chip(id: string, k: KnownView | null): { text: string; tone: "ok" | "warn" | "danger" | "" } {
+    // The protocol's Open phase survives editor navigation. Only the current editor is open
+    // in the sidebar; retained phase observations still report actual faults/rotations below.
+    void studio.rev;
+    if (session.doc?.object === id) return { text: "open", tone: "ok" };
     if (!k) return { text: "", tone: "" };
     if (k.awaiting) return { text: "preview", tone: "warn" };
     if (k.phase === "fault") return { text: "fault", tone: "danger" };
     if (k.phase === "settled") return { text: "settled", tone: "ok" };
     if (k.phase === "closing") return { text: "rotating", tone: "warn" };
-    return { text: "open", tone: "ok" };
+    return { text: "", tone: "" };
   }
 
   function indexNote(): { text: string; tone: "warn" | "danger" | "" } {
@@ -151,16 +192,17 @@
     return { text: "", tone: "" };
   }
 
-  function open(id: string) {
-    studio.selected = id;
-    session.open(id);
-    onopen();
+  async function open(id: string) {
+    try {
+      await session.navigate(() => { session.open(id); studio.selected = id; onopen(); });
+    } catch (e) { onnotice?.(reason(e), "warn"); }
   }
 
-  function newFlipnote() {
+  async function newFlipnote() {
     if (!session.scope) return;
     if (indexView?.awaitingTenureReceipt) { onnotice?.("read-only preview: the current owner has not confirmed this channel's history yet", "warn"); return; }
     try {
+      await session.navigate(() => {
       const n = (model?.entries.length ?? 0) + (model?.overflow.length ?? 0) + 1;
       const id = session.createFlipnote(`flipnote ${n}`);
       session.open(id, { read: false });
@@ -169,6 +211,7 @@
       session.insertFrame(id, null, new PixRaster(FLIPNOTE_W, FLIPNOTE_H, DEFAULT_PALETTE.map((e) => ({ ...e }))).encode());
       studio.selected = id;
       onopen();
+      });
     } catch (e) {
       onnotice?.(reason(e), "warn");
     }
@@ -180,9 +223,9 @@
     const d = Math.ceil((e.ms - Date.now()) / 86_400_000);
     return d <= 0 ? "expired" : `expires ${d}d`;
   }
-  function newScore() {
+  async function newScore() {
     if (!session.scope) return;
-    try { const id = session.createScore(`score ${(model?.entries.filter((e) => e.kind === "score").length ?? 0) + 1}`); session.open(id, { read: false }); studio.selected = id; onopen(); }
+    try { await session.navigate(() => { const id = session.createScore(`score ${(model?.entries.filter((e) => e.kind === "score").length ?? 0) + 1}`); session.open(id, { read: false }); studio.selected = id; onopen(); }); }
     catch (e) { onnotice?.(reason(e), "warn"); }
   }
 </script>
@@ -193,6 +236,20 @@
 {/if}
 {#if indexError}
   <p class="studio-note danger">{indexError}</p>
+{/if}
+{#if waitingDraft}
+  <div class="studio-index-draft warn" data-waiting-draft>
+    <span><b>restored edits waiting</b> · {waitingDraft.edits} {waitingDraft.edits === 1 ? "edit" : "edits"} for another channel</span>
+    <span class="micro wrap">open that channel in the Studio to save them; until then new Studio edits are refused here{#if waitingDraft.uncertain} · {waitingDraft.uncertain} of them may already have been saved before they were interrupted, so discarding keeps whatever landed{/if}</span>
+    <span class="index-draft-actions">
+      {#if waitingDraftDiscardArmed === waitingDraftKey}
+        <button type="button" class="ghost small ctx-action danger" onclick={() => { if (waitingDraftDiscardArmed === waitingDraftKey) { session.discardWaitingDraft(); waitingDraftDiscardArmed = ""; } }}>discard restored edits for real</button>
+        <button type="button" class="ghost small ctx-action" onclick={() => (waitingDraftDiscardArmed = "")}>cancel</button>
+      {:else}
+        <button type="button" class="ghost small ctx-action" onclick={() => (waitingDraftDiscardArmed = waitingDraftKey)}>discard restored edits…</button>
+      {/if}
+    </span>
+  </div>
 {/if}
 {#if indexAttention.length}
   {@const save = indexAttention[0]}
@@ -212,6 +269,15 @@
       {/if}
     </span>
   </div>
+{/if}
+{#each heldElsewhere.slice(0, 8) as held (held.object)}
+  <div class="studio-index-draft warn" data-held-object={held.object}>
+    <span><b>{held.status}</b> · {held.title}</span>
+    <span class="index-draft-actions"><button type="button" class="ghost small ctx-action" onclick={() => open(held.object)}>open</button></span>
+  </div>
+{/each}
+{#if heldElsewhere.length > 8}
+  <p class="studio-note warn">and {heldElsewhere.length - 8} more with unsaved edits</p>
 {/if}
 {#if indexOverlay?.loading}
   <p class="studio-note">Checking this device for a local-only index draft…</p>
@@ -317,16 +383,16 @@
         </span>
         <span class="studio-obj-meta">
           <span class="micro">{o.kind}{#if expiryText(o.expiry)} · {expiryText(o.expiry)}{/if}{#if o.creations > 1} · created twice{/if}</span>
-          {#if chip(known(o.id)).text}<span class="studio-chip {chip(known(o.id)).tone}">{chip(known(o.id)).text}</span>{/if}
+          {#if chip(o.id, known(o.id)).text}<span class="studio-chip {chip(o.id, known(o.id)).tone}">{chip(o.id, known(o.id)).text}</span>{/if}
         </span>
       </button>
     </li>
   {/each}
   {#each pendingCreates as s (s.id)}
     <li>
-      <button type="button" class="studio-obj pending" class:active={studio.selected === s.object} onclick={() => { studio.selected = s.object; onopen(); }}>
+      <button type="button" class="studio-obj pending" class:active={studio.selected === s.object} onclick={() => open(s.object)}>
         <span class="studio-obj-name"><span class="nm">{s.kind === "create" ? s.request.title : ""}</span></span>
-        <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : "creating…"}</span></span>
+        <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : s.status === "blocked" ? "create not written · retry in the editor" : session.awaitsExplicitSave(s.id) ? "create not saved yet · open to save" : "creating…"}</span></span>
       </button>
     </li>
   {/each}
@@ -354,7 +420,6 @@
 {/if}
 <button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newFlipnote}>+ new flipnote</button>
 <button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newScore}>+ new score</button>
-<p class="muted small">Any member can edit. The owner settles history.</p>
 
 <style>
   .studio-nav .studio-obj {

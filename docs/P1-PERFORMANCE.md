@@ -196,8 +196,10 @@ including native lifecycle and whole-server snapshot ordering—not another reco
 The complete scanner now reuses pure Registry/Studio footprint validation only after a fresh
 authenticated full-wrapper digest/size match. A mount-local 64-entry LRU retains metadata, not
 CRDTs or a completed inventory/budget. Reference scans still enumerate actual CIDs. Automatic
-receive permits 8 MiB of authenticated metadata, at most 256 KiB cold validation and 64 records;
-its active mutable Studio target separately remains limited to 256 KiB before reconstruction.
+receive permits 8 MiB of authenticated metadata and at most 256 KiB cold validation. Its cumulative
+record ceiling was raised from 64 to 1024 on 2026-10-18, aligned with the existing directory rail;
+the measurements below predate that correction and do not establish worst-case scan latency.
+Its active mutable Studio target separately remains limited to 256 KiB before reconstruction.
 Explicit Save/full scans warm this cache; Read alone retries and remount starts cold.
 
 Two existing release probes were run separately on the same machine, without other builds/tests

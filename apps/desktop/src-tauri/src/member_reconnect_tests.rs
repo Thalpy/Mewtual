@@ -5,6 +5,7 @@ mod member_reconnect_regressions {
     use rand_core::SeedableRng;
 
     include!("member_shutdown_tests.rs");
+    include!("member_capture_race_tests.rs");
 
     #[test]
     fn duplicate_address_families_do_not_hide_another_member_finalization_target() {
@@ -93,19 +94,32 @@ mod member_reconnect_regressions {
             assert!(owner.finalized_member_peers().is_empty());
             if first_two_proven {
                 for member in members.iter_mut().take(2) {
-                    let peer = member.member_finalization_candidates()[0];
-                    assert_eq!(peer, owner_peer);
+                    let peer = member.sync().local_peer();
                     tokio::select! {
-                        done = member.finalize_member_connection(owner_peer) => assert!(done.unwrap()),
-                        _ = async { loop { owner.sync_once().await.unwrap(); } } => unreachable!(),
+                        done = owner.finalize_member_connection(peer) => assert!(done.unwrap()),
+                        _ = async { loop { member.sync_once().await.unwrap(); } } => unreachable!(),
                     }
                 }
                 let proven: HashSet<_> = owner.finalized_member_peers().into_iter().collect();
                 assert_eq!(proven, member_peers[..2].iter().copied().collect());
+                let ready: HashSet<_> = owner.member_finalization_ready_peers().into_iter().collect();
+                assert_eq!(ready, proven, "this owner's outbound exchanges completed on its current connections");
             }
             let healthy = members.pop().unwrap();
-            // Closed Hub request receivers fail immediately; the native observation is still
-            // real, retained successful Noise evidence. These two cannot complete kind 26.
+            // Keep actual actor-transport registrations connected while withholding service.
+            // Merely retaining independent TCP evidence after closing a Hub registration would
+            // correctly make that member ineligible for connected-only work, hiding rotation.
+            let mut blackholes = Vec::new();
+            for member in &members {
+                let transport = member.sync().transport().clone();
+                blackholes.push(tokio::spawn(async move {
+                    while let Some(event) = transport.next_event().await {
+                        drop(event); // dropping its original Responder yields NoResponse
+                    }
+                }));
+            }
+            assert!(member_peers.iter().all(|peer|
+                owner.sync().transport().connection_snapshot().iter().any(|row| row.peer == *peer)));
             drop(members);
             let (healthy_actor, mut healthy_events, healthy_task) = spawn(healthy);
             let healthy_drain = tokio::spawn(async move { while healthy_events.recv().await.is_some() {} });
@@ -128,12 +142,12 @@ mod member_reconnect_regressions {
                             SystemClock.sleep(Duration::from_millis(100)).await;
                             if net(&state).await.reconnect_policy == ReconnectPolicy::MemberMesh { break; }
                         }
-                        assert!(!running.actor.finalized_member_peers().await.unwrap().contains(&member_peers[2]));
+                        assert!(!running.actor.member_finalization_ready_peers().await.unwrap().contains(&member_peers[2]));
                         wake.send(1).unwrap();
                     }
                     loop {
                         SystemClock.sleep(Duration::from_millis(300)).await;
-                        if running.actor.finalized_member_peers().await.unwrap().contains(&member_peers[2]) { break; }
+                        if running.actor.member_finalization_ready_peers().await.unwrap().contains(&member_peers[2]) { break; }
                     }
                 } => {}
             }
@@ -146,12 +160,14 @@ mod member_reconnect_regressions {
             healthy_actor.shutdown().await;
             healthy_task.await.unwrap();
             healthy_drain.await.unwrap();
+            for task in blackholes { task.abort(); let _ = task.await; }
             drop(tcp_members);
         }).await.expect("three-member finalization worker progresses within bounded passes");
     }
 
     #[tokio::test]
-    async fn capture_worker_skips_two_finalized_members_before_spending_its_work_budget() {
+    async fn capture_worker_skips_two_current_connection_finalizations_before_spending_its_work_budget(
+    ) {
         capture_worker_three_members(true).await;
     }
 
