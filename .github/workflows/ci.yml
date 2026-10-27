@@ -29,6 +29,14 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all --all-features
+      # WMI accepts independent broad windows/windows-core ranges. A valid lock resolution
+      # can mix their incompatible COM interfaces while all Linux builds still pass. Check
+      # that native dependency on Windows without compiling the entire WebView application.
+      - name: Native Windows COM binding compatibility
+        if: runner.os == 'Windows'
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -p wmi
+        env:
+          CARGO_TARGET_DIR: target
       - name: Ambient-dependency gate
         if: runner.os == 'Linux'
         shell: bash
