@@ -13,6 +13,67 @@ mod pending;
 mod retirement;
 
 #[test]
+fn pure_sdp_observation_waits_for_index_and_revalidates_original_row() {
+    use std::sync::mpsc;
+    // These real-time bounds are failure watchdogs only. Channel handshakes, not elapsed
+    // time or sleeps, prove that the observer encountered the held actual Index.
+    let bound = std::time::Duration::from_secs(5);
+    for remove_original in [false, true] {
+        let (_coordinator, selected, selector) = selection();
+        let ledger = Arc::new(Ledger::default());
+        let registration = ticket(&ledger, selected.clone(), selector);
+        let id = registration.id();
+        let observer = ledger
+            .resolve(&selected, Purpose::Derive(selector), id)
+            .unwrap();
+        let admission = ledger
+            .resolve(&selected, Purpose::Derive(selector), id)
+            .unwrap();
+        let before = selected.resources().counts();
+        let mut index = ledger.index.lock().unwrap();
+        let (contended, observed) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            // Keep even this nonblocking-contract probe off the lock-owning thread.
+            // If production regresses to blocking, main's watchdog still releases Index.
+            let production_refused =
+                matches!(admission.transition_index(), Err(VoiceError::Capacity));
+            let result = observer.sdp_test_phase_with_contention(|| {
+                contended.send(()).unwrap();
+                released.recv_timeout(bound).unwrap();
+            });
+            (production_refused, result)
+        });
+        let contention = observed.recv_timeout(bound);
+        // Defer assertions until all guards and threads are released. A regression must
+        // fail promptly instead of deadlocking, including a blocking production probe.
+        let removed = if remove_original {
+            index.rows[id.slot].take()
+        } else {
+            None
+        };
+        drop(index);
+        let _ = release.send(());
+        let (production_refused, result) = worker.join().unwrap();
+        drop(removed); // Never destroy a removed Row while holding the Index.
+        contention.expect("observer reached the actual Index contention boundary");
+        assert!(
+            production_refused,
+            "production admission still refuses contention"
+        );
+        if remove_original {
+            assert!(matches!(result, Err(VoiceError::Unauthorized)));
+        } else {
+            assert!(matches!(result, Ok(None)), "pending row has no SDP phase");
+        }
+        assert_eq!(selected.resources().counts(), before);
+        // Keep the real factory registration alive through observation: no factory,
+        // admission, settlement or retirement was manufactured by the snapshot.
+        assert_eq!(registration.id(), id);
+    }
+}
+
+#[test]
 fn derivation_diagnostics_do_not_create_or_retire_original_pending_and_refuse_contention() {
     let (_coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());

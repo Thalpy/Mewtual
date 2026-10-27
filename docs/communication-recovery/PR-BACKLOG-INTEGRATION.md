@@ -3,8 +3,8 @@
 [PR #74](https://github.com/Thalpy/Mewtual/pull/74) is a draft integration candidate,
 not a completed communication programme. Runtime source at the initial combined checkpoint:
 `2babf97e3162de2bb4212ad044c76c0c6e15f8d3`. Current runtime/configuration checkpoint:
-`c4aa9064c078440652e69ddb7aaac4346d2f041c`, followed by the fixture-only expiry
-ordering correction below. Earlier results do not validate the changed native graph.
+`c4aa9064c078440652e69ddb7aaac4346d2f041c`, followed by the fixture-only corrections
+below. Earlier results do not validate the changed native graph.
 
 ## Landed and prepared work
 
@@ -54,8 +54,12 @@ graph. The first native run was interrupted to correct the fixture ordering belo
 its partial result is not a full-suite pass. The fresh local Windows `121ad952` native run passes all
 899 library tests in 2,186.57 seconds and all six ACL/parser tests. Fresh native formatting
 and strict Clippy pass too. Native build and real application startup also pass; the app
-was not unlocked. Hosted Linux native validation still fails at the separate Begin-reply
-observer below. Fresh Root validation remains required.
+was not unlocked. Hosted Linux native validation later fails at the separate observer
+boundaries below. Fresh Root validation remains required. The intermediate `8e2e7aaf`
+Linux desktop job `122422109228` passes 3,201 frontend tests, Svelte checks, all 899
+native library tests in 2,700.78 seconds, six ACL/parser tests, native check and strict
+Clippy. That earlier pass does not validate the later native fixture edits or clear
+`04e20ed3`'s failure.
 Through `121ad952`, Root Rust/Cargo/toolchain inputs are byte-identical to the initial
 combined source tested by hosted Windows/Linux jobs. The Root observer change below
 requires new execution; the earlier Root result cannot validate it. Runtime manifests record
@@ -158,9 +162,10 @@ The corrected actual test passes 1/1 in 10.75 seconds. A missing-await mutation 
 at the intended ordering invariant, 0/1 in 10.01 seconds; the correct source was restored
 byte-for-byte with a fresh timestamp and rebuilt before the positive run. A read-only
 review of the actual restored diff found no actionable findings. The complete local
-native suite now passes 899 library and six ACL tests, including this case. The hosted
-Linux rerun remains required; the original focused pass alone did not clear the old CI
-failure.
+native suite now passes 899 library and six ACL tests, including this case. Hosted Linux
+at `8e2e7aaf` also passes the complete native suite including this correction. The later
+observer failures below are separate; the original focused pass alone did not establish
+this full result.
 
 ## Later Linux native Begin-reply failure
 
@@ -194,12 +199,45 @@ The test passes in 11.89 seconds; removing Capacity classification fails at the 
 `[1,3,7]` refusal in 6.87 seconds. Exact source restoration with a fresh timestamp is
 hash-verified, then the rebuilt test passes in 10.50 seconds. Re-review resolves the
 maintenance ordering finding with no remaining actionable findings. Native format,
-strict Clippy and check pass; the complete native rerun is in progress.
+strict Clippy and check pass. The `04e20ed3` complete local native rerun passes all
+899 library tests in 2,210.67 seconds and all six ACL/parser tests. Both full dependency
+audits pass on that exact unchanged graph. Linux found the separate pure-observer
+failure below; local Windows success does not clear it.
 
 This corrects a confirmed fixture assumption without attributing the historical refusal
 to Capacity. The hosted Linux rerun is still required. Dedicated known-Incoming/attachment
 negative-history probes retain their previous observer windows; this change converts
 ordinary Begin observation only.
+
+## Pure SDP/media observer contention
+
+At `04e20ed3`, Linux job `122436188831` reports 872 library tests passed and 27
+failed. Its first real failure is
+`native_ready_is_automatic_over_blocked_tcp_member_bridge_after_browser_confirmation_returns`:
+`sdp_test_phase` unwraps `Capacity` from the ledger's nonblocking Index acquisition.
+The other 26 failures are the closed native fixture admission gate.
+
+Production final admission intentionally refuses lock contention after sampling its
+Clock; waiting could issue a stale deadline. Seven **test-only**, pure SDP/media
+snapshot methods incorrectly reused that acquisition and unwrapped its result. Their
+correction waits only in the observer path, using the existing validated blocking
+accessor. After waiting it rechecks slot, serial and actual Row allocation. A removed
+row remains `Unauthorized`, never a successful absent/drained snapshot. Production
+admission, deadlines, authorization and wire/persistence formats are unchanged.
+
+The deterministic regression holds the actual Index, observes a real contention refusal
+on a worker, then releases it with either the original row retained or removed. It also
+checks production still refuses contention and that resource counts do not change.
+Channel handshakes establish ordering; five-second bounds are failure watchdogs only.
+The lock-owning thread releases its guard before joining even if the production
+acquisition regresses to blocking. The new regression passes; removing only the
+contention fallback fails at its intended pending-row assertion. Restoration is
+SHA-256 verified with a fresh timestamp, and the rebuilt regression passes again.
+The exact previously failing Ready real-TCP scenario passes in 18.46 seconds. Native
+formatting passes. Read-only review found one watchdog-cleanup weakness in the test;
+the corrected worker ordering has no remaining actionable findings after re-review.
+Strict Clippy/check and the fresh complete native suite are in progress. A fresh
+hosted Linux pass is required before acceptance.
 
 ## Held PRs and remaining implementation
 

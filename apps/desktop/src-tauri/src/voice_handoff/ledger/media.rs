@@ -891,7 +891,7 @@ impl ResolvedRow {
         &self,
         session: &Arc<SessionIdentity>,
     ) -> Begin<'static> {
-        let _index = self.transition_index().unwrap();
+        let _index = self.test_observation_index(|| {}).unwrap();
         let state = self.row.state.lock().unwrap();
         let (serial, version, input_tag) = state.status.action.unwrap();
         let plan = state.plan().unwrap();
@@ -925,7 +925,7 @@ impl ResolvedRow {
     }
     /// The SAME retained child is required across local retryable refusals.
     pub(in crate::voice_handoff) fn media_test_root(&self) -> Option<Arc<SdpMedia>> {
-        let _index = self.transition_index().unwrap();
+        let _index = self.test_observation_index(|| {}).unwrap();
         let state = self.row.state.lock().unwrap();
         state
             .plan()
@@ -982,7 +982,7 @@ impl ResolvedRow {
             .is_some_and(|media| media.migrated && media.root.is_none())
     }
     pub(in crate::voice_handoff) fn media_test_transition_proof(&self) -> [u8; 32] {
-        let _index = self.transition_index().unwrap();
+        let _index = self.test_observation_index(|| {}).unwrap();
         self.row
             .state
             .lock()

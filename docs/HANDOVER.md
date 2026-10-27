@@ -7,8 +7,10 @@ combines the reviewed recovery/V2 stack, dependency upgrade and newer Gate7 send
 including the original upload/lock repair. Fresh frontend/MLS/flow checks pass, as do
 899 native library and six ACL tests on Windows. The crossing-range fixture correction
 passes all 48 file-transfer tests locally and in both hosted OS jobs; complete Root suites
-are running. Linux native found a separate Begin-refusal observer defect; its corrected
-original-deadline retry passes positive/mutation/restoration tests and is in full validation.
+are running. The Begin-refusal observer's corrected original-deadline retry passes
+positive/mutation/restoration tests and the complete local native suite. Linux then
+found a pure SDP observer unwrapping legitimate Index contention; its test-only fix is
+in validation. Production admission remains nonblocking. Hosted Linux is not yet green.
 Native build/startup pass. Both dependency audits now pass after the separate
 native follow-up, with a documented and constrained GTK build-time maintenance decision.
 [PR-BACKLOG-INTEGRATION](communication-recovery/PR-BACKLOG-INTEGRATION.md) records exact

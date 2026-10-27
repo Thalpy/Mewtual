@@ -410,17 +410,25 @@ impl ResolvedRow {
         });
     }
     pub(in crate::voice_handoff) fn sdp_test_phase(&self) -> Option<Arc<Phase>> {
-        let _index = self.transition_index().unwrap();
+        self.sdp_test_phase_with_contention(|| {}).unwrap()
+    }
+    /// Expose the actual contention boundary to the deterministic observer regression.
+    /// This remains a read-only fixture path and cannot grant native/browser work.
+    pub(super) fn sdp_test_phase_with_contention(
+        &self,
+        on_contention: impl FnOnce(),
+    ) -> Result<Option<Arc<Phase>>, VoiceError> {
+        let _index = self.test_observation_index(on_contention)?;
         let state = self.row.state.lock().unwrap();
-        state
+        Ok(state
             .plan()
             .and_then(|plan| plan.transition.as_ref())
             .and_then(|claim| claim.key.as_ref())
             .and_then(|key| key.sdp.as_ref())
-            .and_then(|sdp| sdp.phase.clone())
+            .and_then(|sdp| sdp.phase.clone()))
     }
     pub(in crate::voice_handoff) fn sdp_test_whole_drained(&self) -> bool {
-        let _index = self.transition_index().unwrap();
+        let _index = self.test_observation_index(|| {}).unwrap();
         let state = self.row.state.lock().unwrap();
         state
             .plan()
@@ -430,12 +438,12 @@ impl ResolvedRow {
             .is_none_or(Claim::whole_drained)
     }
     pub(in crate::voice_handoff) fn sdk_test_orphan_gate(&self) -> bool {
-        let _index = self.transition_index().unwrap();
+        let _index = self.test_observation_index(|| {}).unwrap();
         let state = self.row.state.lock().unwrap();
         Ledger::root_retirement_ready(&state)
     }
     pub(in crate::voice_handoff) fn sdp_test_drained(&self) -> bool {
-        let _index = self.transition_index().unwrap();
+        let _index = self.test_observation_index(|| {}).unwrap();
         let state = self.row.state.lock().unwrap();
         state
             .plan()

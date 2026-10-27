@@ -374,6 +374,25 @@ pub(crate) struct ResolvedRow {
     row: Arc<Row>,
 }
 impl ResolvedRow {
+    /// Pure fixture snapshots may wait for the Index; they neither sample a Clock nor
+    /// admit work. Production final admission must keep using `transition_index` and
+    /// refuse contention, so a sampled deadline cannot become stale while waiting.
+    /// The hook runs only after an actual contention refusal, with no guards held.
+    #[cfg(test)]
+    fn test_observation_index(
+        &self,
+        on_contention: impl FnOnce(),
+    ) -> Result<std::sync::MutexGuard<'_, Index>, VoiceError> {
+        match self.transition_index() {
+            Err(VoiceError::Capacity) => {
+                on_contention();
+                // Waiting must revalidate slot, serial AND allocation identity. A
+                // removed/replaced row is an error, never an empty successful snapshot.
+                self.indexed()
+            }
+            result => result,
+        }
+    }
     /// Hold original indexed ownership through a metadata mutation. Slot+serial alone is
     /// insufficient for a retained orphan; native allocation equality is checked as well.
     fn indexed(&self) -> Result<std::sync::MutexGuard<'_, Index>, VoiceError> {
