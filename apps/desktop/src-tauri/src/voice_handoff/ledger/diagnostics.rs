@@ -3,6 +3,75 @@
 use super::*;
 
 impl Ledger {
+    /// Bounded failure oracle for unscripted multi-peer composition. Only fixed
+    /// selector/state metadata is copied; never ask a possibly parked Actor or keep
+    /// Row/Action/Grant owners alive while formatting the failure.
+    pub(in crate::voice_handoff) fn fixture_coordinator_diagnostic(
+        &self,
+        selected: &SelectedHandoffOwner,
+        peers: &[(catcoms_crypto::DeviceId, u8)],
+    ) -> String {
+        let observed = (|| {
+            let index = self.index.try_lock().map_err(|_| "ledger contended")?;
+            let mut rows = [None; ROWS];
+            let mut used = 0;
+            for row in index.rows.iter().flatten() {
+                let Purpose::Derive(selector) = row.key.purpose else {
+                    continue;
+                };
+                if !row.key.matches(selected, row.key.purpose) {
+                    continue;
+                }
+                let peer = peers
+                    .iter()
+                    .find(|(id, _)| *id == selector.peer)
+                    .map(|(_, label)| *label);
+                let state = row.state.try_lock().ok().map(|state| {
+                    let kind = match &state.body {
+                        Body::Pending(_) => "pending",
+                        Body::Live(_) => "live",
+                        Body::Drained(..) => "drained",
+                        Body::ClosingPending => "closing",
+                        Body::ClosedPending => "closed",
+                        _ => "other",
+                    };
+                    (
+                        kind,
+                        state.status.action.is_some(),
+                        state.status.engine.settled,
+                        state.status.acknowledged,
+                        state.status.drained,
+                        state.final_phase.is_some(),
+                        state.final_delivery().map(|delivery| {
+                            (
+                                delivery.kind,
+                                delivery.issued.is_some(),
+                                delivery.acknowledged,
+                            )
+                        }),
+                    )
+                });
+                rows[used] = Some((peer, selector.epoch, state));
+                used += 1;
+            }
+            let mut media = [None; ROWS];
+            for (slot, entry) in index.media.iter().enumerate() {
+                if let Some((peer, collected)) = entry
+                    .as_ref()
+                    .and_then(|entry| entry.fixture_history_diagnostic(selected))
+                {
+                    let label = peers
+                        .iter()
+                        .find(|(id, _)| *id == peer)
+                        .map(|(_, label)| *label);
+                    media[slot] = Some((label, collected));
+                }
+            }
+            Ok::<_, &'static str>((rows, media))
+        })();
+        format!("native (parent peer/epoch/cached_state/action/settled/ack/drained/final_phase/final_delivery, media peer/actual_history_collected)={observed:?}")
+    }
+
     pub(in crate::voice_handoff) fn fixture_derivation_diagnostic(
         &self,
         selected: &SelectedHandoffOwner,

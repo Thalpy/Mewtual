@@ -37,6 +37,45 @@ fn derivation_diagnostics_do_not_create_or_retire_original_pending_and_refuse_co
     ));
 }
 
+#[test]
+fn coordinator_diagnostics_are_non_creating_owner_bound_and_refuse_contended_guards() {
+    let (_coordinator, selected, selector) = selection();
+    let (_foreign_coordinator, foreign, _) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let peers = [(selector.peer, 7)];
+    let before = selected.resources().counts();
+    let empty = ledger.fixture_coordinator_diagnostic(&selected, &peers);
+    assert!(!empty.contains("Some("));
+    assert_eq!(selected.resources().counts(), before);
+    assert!(!ledger.derivation_known(&selected, selector));
+
+    let registration = ticket(&ledger, selected.clone(), selector);
+    registration.mark_handoff().unwrap();
+    let before = selected.resources().counts();
+    let observed = ledger.fixture_coordinator_diagnostic(&selected, &peers);
+    assert!(observed.contains("Some((Some(7), 1, Some((\"pending\""));
+    assert_eq!(selected.resources().counts(), before);
+    // Equal public selector labels from another native allocation disclose no row.
+    assert!(!ledger
+        .fixture_coordinator_diagnostic(&foreign, &peers)
+        .contains("Some("));
+    let index = ledger.index.lock().unwrap();
+    assert!(ledger
+        .fixture_coordinator_diagnostic(&selected, &peers)
+        .contains("ledger contended"));
+    let row = index.rows.iter().flatten().next().unwrap().clone();
+    drop(index);
+    let state = row.state.lock().unwrap();
+    let observed = ledger.fixture_coordinator_diagnostic(&selected, &peers);
+    assert!(observed.contains("Some((Some(7), 1, None))"));
+    drop(state);
+    assert_eq!(selected.resources().counts(), before);
+    assert!(matches!(
+        ledger.status(registration.id()).unwrap().pending,
+        PendingStatus::Open
+    ));
+}
+
 fn noop_waker() -> std::task::Waker {
     struct Idle;
     impl std::task::Wake for Idle {

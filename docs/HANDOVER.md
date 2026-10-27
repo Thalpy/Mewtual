@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Automatic three-peer composition remains blocked (27 October; App OFF)
+
+The new unscripted real-TCP/native/browser test currently FAILS. One run reaches a pair
+selection cycle (1->3->2->1, then reversed), all original windows expire and no endpoint
+reaches RTC. Other runs complete one peer on two endpoints and none on the third. Plans
+retire safely but cannot restart under the same failed selector. Causal evidence is scoped
+to each observed run; not every earlier failure is assigned to that cycle. Do not infer
+automatic all-three progress from the passing selected/two-peer fixtures. The reproduction,
+immutable-history boundaries and required pre-admission/round work are recorded in
+[VOICE-MULTIPEER-ADMISSION-NEXT](communication-recovery/VOICE-MULTIPEER-ADMISSION-NEXT.md).
+The original two-peer positive passes40.19s; the new all-three scenario remains red.
+Full frontend3,205, Svelte check and36.04s build pass, including all11 diagnostic helper
+regressions. The non-creating native diagnostic unit passes. Final all-three run remains
+red60.67s; a scheduling stage alone is never presented as a terminal failure receipt. Published Broker45 has a
+separate green897-library/5-ACL gate. Broker46's complete native gate was interrupted across the restart;
+neither validates this new test. Production V2/audio/relay/physical acceptance remain open.
+
 ## Owned RTC setting strings (27 October; Broker46, App OFF)
 
 RTC configuration now copies admitted URL/credential strings from bounded UTF16 code-unit

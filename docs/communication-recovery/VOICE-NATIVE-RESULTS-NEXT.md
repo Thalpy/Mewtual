@@ -1,5 +1,18 @@
 # Next voice milestone: native result recovery
 
+## Current boundary: automatic composition and audio wiring (27 October)
+
+Broker45's Source audio-profile gate is now wired and its combined native897-library/5-ACL
+checkpoint passes. Broker46 owns bounded RTC setting strings; its full native run was interrupted across the restart.
+The older dated sections below describe their historical checkpoints, including formerly
+unwired helpers. Current handover/acceptance entries supersede those pending-gate notes.
+
+A new three-coordinator positive acceptance test fails before every endpoint has two peers.
+See [the reproduction and required admission/round design](VOICE-MULTIPEER-ADMISSION-NEXT.md).
+Do not clear failed history, renew an old handshake or enable V2 to bypass that gap. Capture/
+playback and App wiring/renewal, member relay and combined/physical acceptance remain open.
+Only one desktop exists; the programme is not ready for V2 two-computer acceptance.
+
 ## Real RTC direction fixed; audio cells and App still next (27 October)
 
 Actual Edge showed the remote-created HIGH transceiver was recvonly. The Source now

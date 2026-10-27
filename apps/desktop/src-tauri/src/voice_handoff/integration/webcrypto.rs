@@ -341,6 +341,26 @@ impl Endpoint {
             peers
         );
     }
+    pub(crate) fn assert_coordinated_peer_ids(&self, mut expected: [catcoms_crypto::DeviceId; 2]) {
+        expected.sort_unstable();
+        assert_eq!(
+            self.state
+                .voice_handoff
+                .collected_media_peer_ids(&self.selected()),
+            expected,
+            "completed histories must name both other actual devices"
+        );
+    }
+
+    pub(crate) fn coordinator_diagnostic(
+        &self,
+        peers: &[(catcoms_crypto::DeviceId, u8)],
+    ) -> String {
+        self.state
+            .voice_handoff
+            .fixture_coordinator_diagnostic(&self.selected(), peers)
+    }
+
     pub(crate) async fn end_coordinated_peers(&mut self, peers: usize) {
         assert_eq!(
             self.step(json!({"tag":"step", "name":"coordinator-end", "peers":peers}))
