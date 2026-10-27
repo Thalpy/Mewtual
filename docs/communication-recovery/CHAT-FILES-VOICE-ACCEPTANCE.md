@@ -57,9 +57,14 @@ that gate nor the controlled exact-8-KiB SDK fixtures establish native authoriza
 WebView, captured/audible audio, ICE connectivity or physical-network acceptance.
 
 Read-only review corrected the MID-retention and accounting Mediums; re-review has no
-remaining blocker/high/medium. Native checks on these changed browser imports remain pending. Frozen parent3742fe96
-has passed895 library+5 ACL; the merged fixture and these imports need the combined897-test gate. Earlier Root 3,691 passed/24 existing ignores apply
-to unchanged Root Rust/Cargo inputs. The inherited dependency audit is red; no waiver.
+remaining blocker/high/medium. The frozen combined checkpoint ecfd3cd3 passed all897
+native library tests plus5 ACL tests (library2199.58s; finished27 October04:48:39 UTC).
+Native formatting, cargo check, strict Clippy and the current-native construction scan pass.
+The warm validation checkout used35 explicitly SHA-checked mirrored inputs;733 Root/Cargo
+inputs matched the reviewed checkpoint byte-for-byte. This includes the corrected discovery
+fixture and Broker45 imports, not later Broker46 changes. Earlier Root3,691 passed/24 existing
+ignores apply to those unchanged Root Rust/Cargo inputs. The inherited dependency audit is
+red; no waiver.
 No setup or live App/send/friend path changed, so startup/flow gates were not rerun.
 
 Next: paid audio cells/capture, sender clones and mute/PTT, playback and SDK promise joins,
@@ -68,7 +73,7 @@ media relay and combined/physical acceptance. Only one desktop is available; V2 
 External download resume and dependency upgrades remain separately owned.
 
 
-## Native discovery ordering regression (27 October; App OFF, combined gates pending)
+## Native discovery ordering regression (27 October; App OFF, combined gate passed)
 
 The second-peer preservation fixture no longer assumes a newcomer selects the lowest-ID
 member first. An admitted discovery can refuse locally before its snapshot and still rotate
@@ -99,7 +104,8 @@ zero failures (library2143.43s), native check/strict lint and the current-native
 scan. The earlier850/40 failure remains recorded: one second-pair Derive timeout plus39
 intentional admission-gate cascades. Its historical cause is unproven; the invalid ordering
 assumption is independently demonstrated rather than retroactively assigned as its cause.
-The new897-test native input and PR70's changed browser imports still need combined gates.
+The merged ecfd3cd3 checkpoint now passes the complete897-library/5-ACL native gate,
+including this fixture and PR70's changed imports; see the dated evidence above.
 Earlier full Root3691/24 existing ignores apply to unchanged Root Rust/Cargo inputs.
 
 Read-only review corrected an unbounded observer wait and required the alternate branch;
