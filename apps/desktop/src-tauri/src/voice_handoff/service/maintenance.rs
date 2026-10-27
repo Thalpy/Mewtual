@@ -141,21 +141,39 @@ impl Cursor {
         route: &Route,
         index: usize,
     ) -> (bool, Option<catcoms_sync::voice_v2::presence::PairSelector>) {
+        let (admitted, selected, waiter) = self.ordinary_work(context, route, index);
+        // Production observes admission only. Dropping this observer detaches the real
+        // task; custody remains in its actual worker/completion. Tests may instead join
+        // this exact observer to distinguish an admitted local refusal from no admission.
+        drop(waiter);
+        (admitted, selected)
+    }
+    fn ordinary_work(
+        &mut self,
+        context: &Context,
+        route: &Route,
+        index: usize,
+    ) -> (
+        bool,
+        Option<catcoms_sync::voice_v2::presence::PairSelector>,
+        Option<native::NativeWaiter>,
+    ) {
         let stage = self.stage[index];
         #[cfg(test)]
         route
             .session()
             .fixture_maintenance_turn(stage, self.peers[index]);
-        let (admitted, selected) = if matches!(stage, 1 | 3) {
+        let (admitted, selected, waiter) = if matches!(stage, 1 | 3) {
             let cursor = self.continuations[index];
-            let admitted = native::produce_confirmation(context, route, cursor, stage == 3).is_ok();
+            let waiter = native::produce_confirmation(context, route, cursor, stage == 3).ok();
+            let admitted = waiter.is_some();
             if admitted {
                 self.continuations[index] = (cursor + 1) % 32;
             }
-            (admitted, None)
+            (admitted, None, waiter)
         } else {
             let Some(live) = context.upgrade() else {
-                return (false, None);
+                return (false, None, None);
             };
             // Discovery never consumes the exact-Pending cursor. The original native row
             // remains the authority; no asynchronous factory is selected by a renderer hint.
@@ -168,27 +186,29 @@ impl Cursor {
             };
             drop(live);
             if let Some(selector) = pending {
-                let admitted = native::produce_derivation(context, route, selector).is_ok();
+                let waiter = native::produce_derivation(context, route, selector).ok();
+                let admitted = waiter.is_some();
                 // Busy Ready work must not consume every other original selection.
                 // Commit rotation only when its actual native worker acquired the slot.
                 if admitted {
                     self.pending[index] = proposed;
                 }
-                (admitted, admitted.then_some(selector))
+                (admitted, admitted.then_some(selector), waiter)
             } else {
                 let cursor = self.peers[index];
-                let admitted = native::discover_derivation(context, route, cursor).is_ok();
+                let waiter = native::discover_derivation(context, route, cursor).ok();
+                let admitted = waiter.is_some();
                 if admitted {
                     self.peers[index] = (cursor + 1) % 64;
                 }
-                (admitted, None)
+                (admitted, None, waiter)
             }
         };
         if admitted {
             self.stage[index] = (stage + 1) % 4;
             self.ready_first[index] = true;
         }
-        (admitted, selected)
+        (admitted, selected, waiter)
     }
 }
 
@@ -231,4 +251,4 @@ pub(super) async fn run(context: Option<&Context>, registry: &Registry, clock: &
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

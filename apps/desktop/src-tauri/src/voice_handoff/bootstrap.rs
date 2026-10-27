@@ -622,6 +622,11 @@ pub(super) struct Route {
     public: Arc<SetupOutput>,
 }
 impl Route {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_slot(&self) -> u8 {
+        self.row.slot
+    }
+
     /// Start automatic native work only after the original authenticated setup ACK has
     /// retired browser setup custody. A bound socket/Ready projection alone is insufficient;
     /// starting the15s pair budget during a stalled WebView bootstrap would strand it.
