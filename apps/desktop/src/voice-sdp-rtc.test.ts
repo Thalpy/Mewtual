@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { VoiceSdpRtcOwner } from "./voice-sdp-rtc.ts";
+import { VoiceSdpRtcOwner, type VoiceSdpRtcClock } from "./voice-sdp-rtc.ts";
+import { VoiceRtcConfigurationOwner, voiceRtcConfigurationCurrent,
+  type VoiceRtcConfigurationLease } from "./voice-rtc-configuration.ts";
 const gate = () => { let release!: () => void; const promise = new Promise<void>(yes => { release = yes; }); return { promise, release }; };
 async function turn() { await new Promise<void>(yes => setImmediate(yes)); }
-function fixture(low = true) {
+function fixture(low = true, configuration: VoiceRtcConfigurationLease | null = null) {
   const old = globalThis.RTCPeerConnection;
   let owner!: VoiceSdpRtcOwner, now = 1000, live = true, complete = true;
   let localHeld: ReturnType<typeof gate> | null = null, remoteHeld: ReturnType<typeof gate> | null = null;
@@ -14,8 +16,9 @@ function fixture(low = true) {
   const calls = { created: 0, local: 0, remote: 0, closed: 0, audio: 0 };
   const listeners = new Set<() => void>(), timers = new Map<object, { run: () => void; deadline: number }>();
   let incoming: RTCSessionDescriptionInit | null = null;
+  const configurations: RTCConfiguration[] = [];
   class Peer {
-    constructor() { calls.created++; createHook?.(); }
+    constructor(configuration: RTCConfiguration) { configurations.push(configuration); calls.created++; createHook?.(); }
     get iceGatheringState() { return complete ? "complete" : "gathering"; }
     get localDescription() { return { type: low ? "offer" : "answer", sdp: local }; }
     addTransceiver() { calls.audio++; }
@@ -29,12 +32,13 @@ function fixture(low = true) {
     close() { calls.closed++; closeHook?.(); }
   }
   globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
-  owner = new VoiceSdpRtcOwner(low, () => { currentHook?.(); return live; }, {
+  const clock: VoiceSdpRtcClock = {
     now: () => now,
     schedule(run, milliseconds) { const handle = {}; timers.set(handle, { run, deadline: now + milliseconds }); return handle; },
     cancel(handle) { timers.delete(handle as object); },
-  });
-  return { owner, calls, timers, listeners, incoming: () => incoming,
+  };
+  owner = new VoiceSdpRtcOwner(low, () => { currentHook?.(); return live; }, clock, configuration);
+  return { owner, clock, calls, configurations, timers, listeners, incoming: () => incoming,
     restore() { globalThis.RTCPeerConnection = old; }, local(text: string) { local = text; }, time(value: number) { now = value; },
     onRegistration(run: () => void) { registrationHook = run; },
     onClose(run: () => void) { closeHook = run; },
@@ -44,6 +48,58 @@ function fixture(low = true) {
     failRemote() { remoteFails = true; }, onCreate(run: () => void) { createHook = run; }, onCurrent(run: () => void) { currentHook = run; },
   };
 }
+
+function configured() {
+  const owner = new VoiceRtcConfigurationOwner();
+  owner.capture(() => ({ stun: "stun:device.example.test", turn: "turns:relay.example.test?transport=tcp",
+    username: "device-user", credential: "device-secret", policy: "relay" }), () => true);
+  return owner;
+}
+
+test("configured private constructor still waits for native14 and retains the loan through held admission End", async t => {
+  const settings = configured(), lease = settings.borrow(), f = fixture(true, lease); t.after(f.restore);
+  const held = gate(), work = f.owner.prepareLocal(async () => { await held.promise; return 30_000; }, "offer");
+  await turn(); assert.equal(f.calls.created, 0); f.stop();
+  assert.throws(() => settings.reset()); let joined = false;
+  const cleanup = f.owner.drain().then(() => { joined = true; });
+  await turn(); assert.equal(joined, false); held.release(); await work.catch(() => {}); await cleanup;
+  settings.reset(); assert.equal(f.calls.created, 0);
+});
+
+test("End inside the configured constructor closes its actual returned peer before returning configuration custody", async t => {
+  const settings = configured(), f = fixture(true, settings.borrow()); t.after(f.restore);
+  f.onCreate(() => { f.stop(); assert.throws(() => settings.reset()); });
+  await assert.rejects(f.owner.prepareLocal(async () => 30_000, "offer"));
+  assert.equal(f.calls.created, 1); assert.equal(f.calls.closed, 1); assert.equal(f.calls.local, 0);
+  assert.deepEqual(f.configurations[0].iceServers, [{ urls: "turns:relay.example.test?transport=tcp", username: "device-user", credential: "device-secret" }]);
+  await f.owner.drain(); settings.reset();
+});
+
+test("the SAME configuration lease transfers with the PC and failed media SDK close retains it", async t => {
+  const settings = configured(), f = fixture(true, settings.borrow()); t.after(f.restore);
+  await f.owner.prepareLocal(async () => 30_000, "offer"); f.owner.takeLocal().fill(0);
+  await f.owner.applyRemote(new TextEncoder().encode("v=0\r\n"), "answer");
+  const peer = f.owner.prepareMediaDestination(); f.owner.transferInto(peer);
+  assert.equal(peer.adopted, true); await f.owner.drain();
+  let fail = true; f.onClose(() => { if (fail) throw new Error("held SDK close"); });
+  assert.throws(() => peer.close(), /held SDK close/); assert.equal(peer.drained, false);
+  assert.throws(() => settings.reset());
+  fail = false; await peer.drain(); assert.equal(peer.drained, true); settings.reset();
+});
+
+test("one original peer failure returns only its configuration loan while the sibling remains usable", async t => {
+  const settings = configured(), first = settings.borrow(), second = settings.borrow();
+  const f = fixture(true, first); t.after(f.restore);
+  const sibling = new VoiceSdpRtcOwner(true, () => true, f.clock, second);
+  await f.owner.prepareLocal(async () => 30_000, "offer"); f.owner.takeLocal().fill(0);
+  await sibling.prepareLocal(async () => 30_000, "offer"); sibling.takeLocal().fill(0);
+  f.stop(); await f.owner.drain();
+  assert.equal(voiceRtcConfigurationCurrent(first), false); assert.equal(voiceRtcConfigurationCurrent(second), true);
+  await sibling.applyRemote(new TextEncoder().encode("v=0\r\n"), "answer");
+  const peer = sibling.prepareMediaDestination(); sibling.transferInto(peer); assert.equal(peer.adopted, true);
+  await sibling.drain(); await peer.drain(); settings.reset();
+  assert.equal(f.calls.created, 2); assert.equal(f.calls.closed, 2);
+});
 
 test("original RTC local preparation awaits fresh admission and real gathering; observers carry no description", async t => {
   const f = fixture(); t.after(f.restore); f.gathering(); f.local("x".repeat(8192)); const admitted = gate();

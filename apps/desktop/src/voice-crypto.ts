@@ -18,6 +18,8 @@ import { decodeVoiceTransition, encodeVoiceTransition, type VoiceTransitionReque
 import { decodeVoiceKeySession, encodeVoiceKeySession, type VoiceKeySessionRequest } from "./voice-ipc-key-session.ts";
 import { VoiceKeyCustody } from "./voice-key-custody.ts";
 import { VoiceSdpRtcOwner } from "./voice-sdp-rtc.ts";
+import { VoiceRtcConfigurationOwner, VOICE_RTC_CONFIGURATION_BYTES, releaseVoiceRtcConfiguration,
+  type VoiceRtcConfigurationLease, type VoiceRtcDeviceSettingsSource } from "./voice-rtc-configuration.ts";
 import { VoiceNativeMedia, VOICE_NATIVE_MEDIA_BYTES, type VoiceNativeMediaContext } from "./voice-native-media.ts";
 import { decodeVoiceMedia } from "./voice-ipc-media.ts";
 import { VoiceSdpSdkCustody, VOICE_SDP_SDK_BYTES } from "./voice-sdp-sdk-custody.ts";
@@ -487,7 +489,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 42;
+  readonly version = 43;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -500,7 +502,11 @@ export class VoiceCryptoBroker {
   private readonly joinKeys = new WeakMap<VoiceJoinKeyHandle, JoinKeyRecord>();
   private readonly keys = new Set<JoinKeyRecord>();
   private readonly selectedKeys = new Map<string, SelectedKeyRecord>();
-  private appSession: { native: VoiceAppNative; selected: VoiceSelectedKeyNative; ipc: VoiceIpcNative; transport: typeof fetch; handle: VoiceAppCalls } | null = null;
+  private appSession: { native: VoiceAppNative; selected: VoiceSelectedKeyNative; ipc: VoiceIpcNative; transport: typeof fetch;
+    configurationSource: VoiceRtcDeviceSettingsSource | null; handle: VoiceAppCalls } | null = null;
+  // Actual App-created native owner allocation only. Equal token/group labels cannot
+  // install settings on a manual channel. Values contain no owner/Call/N backedge.
+  private readonly appConfigurations = new WeakMap<VoiceCryptoOwner, VoiceRtcConfigurationOwner>();
   private readonly ownerRetirements = new WeakMap<VoiceCryptoOwner, Promise<void>>();
   private selectedExecutor: string | null = null;
   private readonly ipcChannels = new Map<string, RetainedIpcChannel>();
@@ -641,40 +647,83 @@ export class VoiceCryptoBroker {
    * BEFORE construction/invoke and stays process-paid for this broker/window lifetime.
    * A call binds the SAME reservation to its native group before key admission; only
    * actual outer/native/broker cleanup can remove that group charge. No other fee or
-   * execution allowance is enlarged, and this fa?ade never exposes generic crypto APIs. */
+   * execution allowance is enlarged. Optional device ICE settings have their separate
+   *64KiB configuration inventory, not spare bytes borrowed from this8KiB graph. */
   nativeAppCalls(native: VoiceAppNative, selected: VoiceSelectedKeyNative, ipc: VoiceIpcNative,
     transport: typeof fetch = globalThis.fetch): VoiceAppCalls {
+    return this.appCalls(native, selected, ipc, transport, null);
+  }
+  /** Explicit local-device configuration factory. An older retained broker cannot
+   * silently ignore an extra argument and construct direct peers for relay-only intent. */
+  nativeConfiguredAppCalls(native: VoiceAppNative, selected: VoiceSelectedKeyNative, ipc: VoiceIpcNative,
+    configurationSource: VoiceRtcDeviceSettingsSource, transport: typeof fetch = globalThis.fetch): VoiceAppCalls {
+    if (typeof configurationSource !== "function") throw new Error("invalid voice RTC settings source");
+    return this.appCalls(native, selected, ipc, transport, configurationSource);
+  }
+  private appCalls(native: VoiceAppNative, selected: VoiceSelectedKeyNative, ipc: VoiceIpcNative,
+    transport: typeof fetch, configurationSource: VoiceRtcDeviceSettingsSource | null): VoiceAppCalls {
     const previous = this.appSession;
     if (previous) {
-      if (previous.native !== native || previous.selected !== selected || previous.ipc !== ipc || previous.transport !== transport)
+      if (previous.native !== native || previous.selected !== selected || previous.ipc !== ipc || previous.transport !== transport ||
+          previous.configurationSource !== configurationSource)
         throw new Error("voice application transport changed; reload required");
       return previous.handle;
     }
-    if (this.bytes + VOICE_APP_SESSION_BYTES > MAX_BYTES) throw new Error("voice application capacity reached");
-    this.bytes += VOICE_APP_SESSION_BYTES;
+    if (configurationSource !== null && typeof configurationSource !== "function") throw new Error("invalid voice RTC settings source");
+    const metadataBytes = VOICE_APP_SESSION_BYTES + (configurationSource ? VOICE_RTC_CONFIGURATION_BYTES : 0);
+    if (this.bytes + metadataBytes > MAX_BYTES) throw new Error("voice application capacity reached");
+    this.bytes += metadataBytes; // Both separate inventories paid BEFORE either constructor/callback.
+    const configuration = configurationSource ? new VoiceRtcConfigurationOwner() : null;
+    let configuredOwner: VoiceCryptoOwner | null = null;
+    let configurationRetirement: Promise<void> | null = null;
     let group: string | null = null;
     const session = new VoiceAppSession(native, {
       clock: this.ipcClock,
       bindGroup: value => {
         if (group !== null || !/^[0-9a-f]{64}$/.test(value)) throw new Error("voice application group changed");
         const bytes = this.groupBytes.get(value) ?? 0;
-        if (bytes + VOICE_APP_SESSION_BYTES > MAX_GROUP_BYTES) throw new Error("voice application group capacity reached");
-        this.groupBytes.set(value, bytes + VOICE_APP_SESSION_BYTES); group = value;
+        if (bytes + metadataBytes > MAX_GROUP_BYTES) throw new Error("voice application group capacity reached");
+        this.groupBytes.set(value, bytes + metadataBytes); group = value;
       },
       unbindGroup: () => {
         if (group === null) return;
-        const bytes = this.groupBytes.get(group)! - VOICE_APP_SESSION_BYTES;
+        // All actual broker/RTC/media joins precede this tail. A busy snapshot keeps
+        // its original group fee; never refund while a failed SDK close still owns it.
+        configuration?.reset();
+        if (configuredOwner) this.appConfigurations.delete(configuredOwner);
+        configuredOwner = null;
+        configurationRetirement = null;
+        const bytes = this.groupBytes.get(group)! - metadataBytes;
         if (bytes) this.groupBytes.set(group, bytes); else this.groupBytes.delete(group);
         group = null;
       },
       owner: createVoiceCryptoOwner,
-      select: owner => this.selectJoinKey(owner, selected),
+      select: owner => {
+        if (configuration && configurationSource) {
+          if (group === null || owner.group !== group || configuredOwner !== null)
+            throw new Error("original voice RTC settings owner required");
+          configuration.capture(configurationSource, () => owner.isCurrent());
+          configuredOwner = owner;
+          this.appConfigurations.set(owner, configuration);
+        }
+        return this.selectJoinKey(owner, selected);
+      },
       channel: (owner, key) => this.nativeChannel(owner, key, ipc, transport),
       observe: (owner, channel, key) => this.observeNativeLifecycle(owner, channel, key),
-      retire: owner => this.retireNativeOwner(owner),
+      retire: owner => {
+        if (!configuration) return this.retireNativeOwner(owner);
+        configuration.close(); // Before native/SDK callbacks, including capture reentry.
+        if (configurationRetirement) return configurationRetirement;
+        let resolve!: () => void, reject!: (reason: unknown) => void;
+        const completion = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+        configurationRetirement = completion; // BEFORE owner retirement can reenter.
+        try { void this.retireNativeOwner(owner).then(() => configuration.join()).then(resolve, reject); }
+        catch (error) { reject(error); }
+        return completion;
+      },
       resume: () => this.retrySelectedJoinKeys(),
     });
-    this.appSession = { native, selected, ipc, transport, handle: session.handle };
+    this.appSession = { native, selected, ipc, transport, configurationSource, handle: session.handle };
     return session.handle;
   }
 
@@ -739,6 +788,7 @@ export class VoiceCryptoBroker {
     this.ipcPositions++; selected.channelUsers++;
     let setupPaid = true, position = true, historyPaid = true, compactPaid = 0, lifecyclePaid = false;
     const channel = new RetainedIpcChannel(selected, native, transport, this.subtle, this.ipcClock, {
+      rtcConfiguration: () => this.appConfigurations.get(owner)?.borrow() ?? null,
       execute: work => this.ipcExecution.run(work),
       reserveSdk: () => this.sdkPositions.request(),
       lifecyclePrepared: () => {
@@ -2249,6 +2299,7 @@ function compactionReturned(work: Promise<boolean>, peer: RetainedNativePeer): P
   return work.then(result => { if (result) peer.compactionReturned = true; return result; });
 }
 type IpcCustody = Readonly<{
+  rtcConfiguration(): VoiceRtcConfigurationLease | null;
   execute<T>(work: () => Promise<T>): Promise<T>;
   reserveSdk(): VoiceSdkPositionRequest;
   lifecyclePrepared(): void;
@@ -2262,6 +2313,16 @@ type IpcCustody = Readonly<{
   sdpUnlinked(chain: BrowserChain, phase: VoiceSdpSdkCustody): void;
   mediaPrepared(): () => void;
 }>;
+/** Inert source construction ends its configuration argument frame before any SDP
+ * await. No SDK exists on a constructor refusal, so the original loan returns here. */
+function preparedRtcOwner(low: boolean, current: () => boolean, clock: VoiceIpcClock,
+  configuration: VoiceRtcConfigurationLease | null): VoiceSdpRtcOwner {
+  try { return new VoiceSdpRtcOwner(low, current, clock, configuration); }
+  catch (error) {
+    if (configuration) releaseVoiceRtcConfiguration(configuration);
+    throw error;
+  }
+}
 // Separate factory: returning a provider position must not retain SDK inputs/results.
 function enginePositionReturn(channel: RetainedIpcChannel, pairState: RetainedNativeNegotiation,
   request: VoiceSdkPositionRequest, release: () => void): () => void {
@@ -3187,12 +3248,13 @@ class RetainedIpcChannel {
     pairState.rtcCreating = true; pairState.actionBusy = true; this.beginActivity();
     const flight = Promise.resolve().then(async () => {
       const pc = phase.pc.cryptoBinding(this.clock.now());
+      let rtc = pairState.sdpRtc;
       const current: () => boolean = () => {
         if (!this.negotiationCurrent(pairState)) return false;
         // This synchronous window exists ONLY after actual op28 Current has physically
         // joined for this exact peer. It permits media adoption after old Ready expiry;
         // it never authorizes another crypto action or retires the original Source.
-        const mediaCurrent = pairState.media?.transferCurrent(rtc);
+        const mediaCurrent = rtc ? pairState.media?.transferCurrent(rtc) : null;
         if (mediaCurrent !== null && mediaCurrent !== undefined) return mediaCurrent;
         try {
           const next = phase.pc.cryptoBinding(this.clock.now());
@@ -3202,7 +3264,7 @@ class RetainedIpcChannel {
         } catch { return false; }
       };
       if (!current()) throw new Error("original RTC custody unavailable");
-      const rtc = pairState.sdpRtc ??= new VoiceSdpRtcOwner(pc.localIsLow, current, this.clock);
+      if (!rtc) rtc = pairState.sdpRtc = preparedRtcOwner(pc.localIsLow, current, this.clock, this.custody.rtcConfiguration());
       await this.runRtcAction(chain, rtc, current, pairState);
       if (completeRound && pairState.sdpRoundStage === "offer" && await this.finishRtcAction(pairState)) {
         if (!current()) return;
@@ -4357,7 +4419,7 @@ export function windowVoiceCryptoBroker(
   // null or swapped slots cannot publish a second pool beside its unresolved original.
   if (expected !== undefined && previous !== expected) throw new Error("voice crypto broker changed; reload required");
   if (previous) {
-    if (previous.version !== 42 || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 43 || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

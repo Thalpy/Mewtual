@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Configured RTC checkpoint (27 October; Broker43/facade3, App OFF)
+
+The explicit configured factory now carries an immutable, bounded local-device ICE snapshot
+from the retained App call into the original native-authorized RTC peer. The SAME opaque
+loan transfers with that PC to media custody and returns after actual SDK drainage. End
+fences before callbacks and joins loans before group refund. A separate64KiB window inventory
+plus the existing8KiB App inventory is charged before capture/key work; existing frontend
+256KiB/group and2MiB/process caps remain.17 metadata slots are not a supported-peer count.
+Native14 binds PC/Ready/profile, not ICE URLs; invite/server TURN hints are excluded.
+
+Complete frontend3127 passes94.10s and Svelte checks report zero diagnostics. Production
+build passes83s. Configured real-WebCrypto/framed-IPC fixture tests complete LOW and HIGH RTC
+rounds, refuse PC construction on fresh14 refusal, and preserve one snapshot across two
+indexed peers. Native authority and RTC are controlled stand-ins in those tests: this is
+not Rust/WebView, audible, selected-candidate or physical-network evidence. Read-only review
+finds no blocker/high/medium; its retained bundle2 compatibility regression is added.
+Strict changed-helper TypeScript passes. The large IPC fixture has8 inherited standalone
+strict diagnostics, unchanged against the parent; the added typed bootstrap is clean.
+Current final native checks of these changed browser inputs remain pending. The preceding
+Root-history source daf4ca91 has native890+5 ACL, native check and Root/native strict Clippy
+green; its complete Root suite is still running serially. Dependency audit remains red on
+inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver or dependency changes here.
+
+Still open: private mic/remote audio/data-channel ownership, production App lock/room/unmount
+adoption, operational renewal, actual authenticated-facade WebView acceptance, member media
+relay, combined acceptance and independent physical network/audio testing. Only one desktop
+is available. External download resume and dependency remediation are separately owned.
+The dated entries below retain prior source-specific results and pending-state history.
+
 ## Root terminal history retirement (26 October; implementation, validation pending)
 
 Native mode8 now captures one small exact `PlanActionHistory` from the original protected
@@ -705,7 +734,7 @@ Focused real native/browser cases pass normal/lost-positive Detach, retained act
 Lower ownership, full-index rollback, foreign same-byte Session/Ledger and Release before
 final admission. The final 356-test handoff run passes after the Drop-oracle correction.
 Browser focused tests pass 250 framed plus 22 driver/5 codec; the full frontend passes
-2,927 tests, Svelte reports zero errors/warnings and the production build passes. These use actual HTTP/WebCrypto
+2,927 tests, Svelte reports zero errors/warnings and the production build passes83s. These use actual HTTP/WebCrypto
 and blocked A-C TCP through an unjoined B, with controlled RTC. Full final index gates are
 pending in target/media-index-* logs. One heavy Rust suite runs at a time.
 
@@ -2954,7 +2983,7 @@ Focused browser handoff/adapter tests pass159, including lost-before-fence then 
 unseen Pending-to-attached work, held actual metadata read, lost final ACK and changed-proof/
 Pending-ACK rejection. Root paid-peer snapshot1 and Actor snapshot4 passed earlier; current
 Root strict Clippy, formatting, ambient gate and dependency audit passed. Complete frontend
-passes2,656 (72.52s), Svelte reports zero errors/warnings and production build passes. Current
+passes2,656 (72.52s), Svelte reports zero errors/warnings and production build passes83s. Current
 native handoff focus passes302, reconnect capture passes both regressions, and all8 TCP
 voice cases pass65.12s. Native strict Clippy/check/build pass. Current complete Root/native
 suites remain pending; the real application startup gate also passes. No current all-green

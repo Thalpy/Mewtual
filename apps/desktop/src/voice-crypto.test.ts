@@ -191,7 +191,7 @@ test("decrypted results stay charged and private until exact native confirmation
   await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(f.broker.counts().bytes, 0);
 });
 
-for (const version of [2, 3, 39, 40, 41]) test("incompatible retained broker v" + version + " refuses without replacing its unresolved pool", async () => {
+for (const version of [2, 3, 39, 40, 41, 42]) test("incompatible retained broker v" + version + " refuses without replacing its unresolved pool", async () => {
   const f = fixture(), window = {}, gate = deferred<number>();
   const broker = windowVoiceCryptoBroker(f.admission, window, subtle);
   const pending = broker.run(f.owner, "derive", 64, () => gate.promise);
@@ -202,6 +202,17 @@ for (const version of [2, 3, 39, 40, 41]) test("incompatible retained broker v" 
   assert.equal(broker.counts().active, 1); assert.equal(broker.counts().bytes, 64);
   gate.resolve(1); assert.equal(await pending, 1);
   await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(broker.counts().bytes, 0);
+});
+
+test("retained broker must implement the explicit configured factory before it can serve a new facade", async () => {
+  const f = fixture(), host = {}, broker = windowVoiceCryptoBroker(f.admission, host, subtle), held = deferred<number>();
+  const running = broker.run(f.owner, "generate", 64, () => held.promise);
+  await new Promise<void>(yes => setImmediate(yes));
+  Object.defineProperty(broker, "nativeConfiguredAppCalls", { value: undefined });
+  assert.throws(() => windowVoiceCryptoBroker(f.admission, host, subtle), /reload required/);
+  assert.equal((host as Record<symbol, unknown>)[Symbol.for("mewtual.voice.crypto-broker.v2")], broker);
+  assert.equal(broker.counts().bytes, 64); held.resolve(1); assert.equal(await running, 1);
+  await new Promise<void>(yes => setImmediate(yes)); assert.equal(broker.counts().bytes, 0);
 });
 
 test("explicit owner retirement wakes every observer once and cannot be resurrected", () => {

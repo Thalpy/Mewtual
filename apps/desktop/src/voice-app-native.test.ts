@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { voiceAppNative, windowVoiceAppCalls } from "./voice-app-native.ts";
 import { VoiceCryptoBroker, createVoiceCryptoOwner, windowVoiceCryptoBroker, type VoiceCryptoAdmission, type VoiceIpcNative } from "./voice-crypto.ts";
-import { VOICE_APP_SESSION_BYTES } from "./voice-app-session.ts";
+import { VOICE_APP_SESSION_BYTES, type VoiceAppCall } from "./voice-app-session.ts";
 import { voiceJoinKeyNative } from "./voice-join-native.ts";
 import { voiceIpcNative } from "./voice-ipc-native.ts";
+import { VOICE_RTC_CONFIGURATION_BYTES, releaseVoiceRtcConfiguration, voiceRtcConfigurationCurrent,
+  type VoiceRtcConfigurationLease } from "./voice-rtc-configuration.ts";
 const hash = (n: number) => n.toString(16).padStart(64, "0");
 const controller = "voice-0000000000000001", owner = "voice-0000000000000002";
 function gate() { let release!: () => void; const promise = new Promise<void>(yes => { release = yes; }); return { promise, release }; }
@@ -111,6 +113,22 @@ test("unknown or incompatible retained application sessions fail without replaci
   }
 });
 
+test("retained bundle2 refuses configuration upgrade without replacing its paid owner or cleanup", async () => {
+  const invoke = async <T>() => { assert.fail("unstarted cleanup must not invoke"); return undefined as T; };
+  const originalHost = {}, calls = windowVoiceAppCalls(invoke, originalHost);
+  const broker = windowVoiceCryptoBroker(unavailable, originalHost), call = calls.prepare(1, "2");
+  const slot = Symbol.for("mewtual.voice.app-session.v1"), brokerSlot = Symbol.for("mewtual.voice.crypto-broker.v2");
+  const original = (originalHost as Record<symbol, object>)[slot];
+  const bundle2 = Object.freeze({ ...original, version: 2 });
+  const host = { [slot]: bundle2, [brokerSlot]: broker };
+  const before = broker.counts();
+  assert.throws(() => windowVoiceAppCalls(invoke, host), /reload required/);
+  assert.equal(host[slot], bundle2); assert.equal(host[brokerSlot], broker);
+  assert.deepEqual(broker.counts(), before, "refusal must keep the original fixed payment");
+  await call.close(); assert.equal(call.snapshot().phase, "closed");
+  assert.equal(broker.counts().bytes, VOICE_APP_SESSION_BYTES, "window graph remains paid after original cleanup");
+});
+
 test("owner join finds a published channel even when constructor subscription throws before returning its handle", async () => {
   const broker = new VoiceCryptoBroker(unavailable), held = gate();
   let subscriptions = 0, setups = 0, collections = 0;
@@ -167,9 +185,126 @@ test("accessor-backed retained metadata cannot turn expected-allocation validati
   const invoke = async <T>() => undefined as T, originalHost = {};
   const calls = windowVoiceAppCalls(invoke, originalHost), broker = windowVoiceCryptoBroker(unavailable, originalHost);
   const call = calls.prepare(1, "2"); let reads = 0;
-  const host = { [Symbol.for("mewtual.voice.app-session.v1")]: Object.freeze({ version: 2, invoke, calls,
+  const host = { [Symbol.for("mewtual.voice.app-session.v1")]: Object.freeze({ version: 3, invoke, calls, configurationSource: null,
     get broker() { return ++reads === 1 ? broker : undefined; } }) };
   assert.throws(() => windowVoiceAppCalls(invoke, host), /reload required/);
   assert.equal(reads, 1); assert.equal(Object.hasOwn(host, Symbol.for("mewtual.voice.crypto-broker.v2")), false);
   assert.equal(broker.counts().bytes, VOICE_APP_SESSION_BYTES); await call.close();
+});
+
+test("configured facade prepays both inventories and retains group payment through an actual held configuration loan", async t => {
+  const host = {}, held = gate(), events: string[] = [], fee = VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES;
+  let broker!: VoiceCryptoBroker, captures = 0;
+  const source = () => {
+    captures++; events.push("device-settings"); assert.equal(broker.counts().bytes, fee);
+    return { stun: "stun:device.example.test", turn: "turns:relay.example.test", username: "device-user", credential: "device-secret", policy: "relay" };
+  };
+  const invoke = async <T>(command: string, args: Record<string, unknown>): Promise<T> => {
+    events.push(command);
+    assert.equal(JSON.stringify(args).includes("device-secret"), false);
+    assert.equal(JSON.stringify(args).includes("relay.example.test"), false, "ICE settings never enter ordinary IPC");
+    let result: unknown;
+    switch (command) {
+      case "prepare_voice_controller": result = controller; break;
+      case "prepare_voice_owner": result = owner; break;
+      case "activate_voice_owner": result = { owner: args.candidate,
+        group: args.candidate === controller ? null : hash(1), join: args.candidate === controller ? null : hash(2) }; break;
+      case "admit_voice_join_key": result = { owner, executor: args.executor, permit: "original-permit", join: hash(2), kind: "admitted" }; break;
+      case "publish_voice_join_key": result = { owner, executor: args.executor, permit: args.permit, join: hash(2), keyRef: hash(3) }; break;
+      case "setup_voice_channel": await held.promise; result = { owner, executor: args.executor, kind: "pending" }; break;
+      case "settle_voice_join_key": case "end_voice_owner": case "settle_voice_channel_setup": case "collect_voice_channel": break;
+      default: assert.fail("unexpected ordinary IPC command " + command);
+    }
+    return result as T;
+  };
+  const calls = windowVoiceAppCalls(invoke, host, source); broker = windowVoiceCryptoBroker(unavailable, host);
+  assert.equal(broker.counts().bytes, fee); assert.equal(captures, 0);
+  assert.equal(windowVoiceAppCalls(invoke, host, source), calls);
+  assert.throws(() => windowVoiceAppCalls(invoke, host, () => source()), /reload required/);
+  assert.equal(broker.counts().bytes, fee);
+  const call = calls.prepare(1, "2"); let loan: VoiceRtcConfigurationLease | null = null;
+  t.after(async () => { held.release(); if (loan) releaseVoiceRtcConfiguration(loan); await call.close(); });
+  const started = call.start();
+  await until(() => events.includes("setup_voice_channel"));
+  assert.equal(captures, 1); assert.ok(events.indexOf("device-settings") < events.indexOf("admit_voice_join_key"));
+  // Retain an actual opaque loan from this exact privately selected App channel. No
+  // production getter/test-selected identity is added to the public facade for this.
+  const channel = (broker as unknown as { ipcChannels: Map<string, { custody: { rtcConfiguration(): VoiceRtcConfigurationLease | null } }> }).ipcChannels.get(owner)!;
+  loan = channel.custody.rtcConfiguration()!; assert.ok(loan);
+  const closing = call.close(); let returned = false; void closing.then(() => { returned = true; });
+  assert.equal(voiceRtcConfigurationCurrent(loan), false);
+  held.release(); assert.equal(await started, "stopped");
+  await until(() => events.includes("collect_voice_channel") && broker.counts().bytes === fee);
+  assert.equal(returned, false, "native cleanup alone cannot return the configuration group fee");
+  const probe = createVoiceCryptoOwner("configuration-pressure", hash(1), () => true);
+  const bytes = 256 * 1024 - fee + 1;
+  await assert.rejects(broker.run(probe, "generate", bytes, async () => undefined), /capacity/);
+  releaseVoiceRtcConfiguration(loan); loan = null; await closing;
+  assert.equal(call.snapshot().phase, "closed"); assert.equal(returned, true);
+  await assert.rejects(broker.run(probe, "generate", bytes, async () => undefined), /unavailable/);
+  await until(() => broker.counts().active === 0);
+  assert.deepEqual(broker.counts(), { active: 0, queued: 0, bytes: fee });
+});
+
+test("configured process/group refusal precedes its settings callback and all key work", async () => {
+  const fee = VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES;
+  for (const pressure of ["process", "group"] as const) {
+    const held = gate(), commands: string[] = []; let captures = 0;
+    const broker = new VoiceCryptoBroker({ async admit() { return "token"; }, async settle() {}, async commitInbound() {} });
+    const source = () => { captures++; assert.fail("configuration capture must follow capacity admission"); };
+    const invoke = async <T>(command: string, args: Record<string, unknown>): Promise<T> => {
+      commands.push(command);
+      if (command === "prepare_voice_controller") return controller as T;
+      if (command === "prepare_voice_owner") return owner as T;
+      if (command === "activate_voice_owner") return { owner: args.candidate,
+        group: args.candidate === controller ? null : hash(1), join: args.candidate === controller ? null : hash(2) } as T;
+      assert.equal(command, "end_voice_owner"); return undefined as T;
+    };
+    if (pressure === "process") {
+      const work = Array.from({ length: 8 }, (_, n) => broker.run(createVoiceCryptoOwner("load-" + n, hash(n + 1), () => true), "generate", 256 * 1024, () => held.promise));
+      assert.throws(() => broker.nativeConfiguredAppCalls(voiceAppNative(invoke), voiceJoinKeyNative(invoke), voiceIpcNative(invoke), source), /capacity/);
+      assert.equal(captures, 0); assert.equal(commands.length, 0);
+      held.release(); await Promise.all(work); await until(() => broker.counts().active === 0);
+      assert.equal(broker.counts().bytes, 0);
+    } else {
+      const occupants = Array.from({ length: 64 }, (_, n) => createVoiceCryptoOwner("occupant-" + n, hash(1), () => true));
+      const keys = voiceJoinKeyNative(async <T>() => { assert.fail("no key admission"); return undefined as T; });
+      for (const original of occupants) broker.selectJoinKey(original, keys);
+      const calls = broker.nativeConfiguredAppCalls(voiceAppNative(invoke), keys, voiceIpcNative(invoke), source);
+      const call = calls.prepare(1, "2"); assert.equal(await call.start(), "unavailable"); await call.close();
+      assert.equal(captures, 0); assert.equal(commands.includes("admit_voice_join_key"), false);
+      await Promise.all(occupants.map(original => broker.retireNativeOwner(original)));
+      assert.equal(broker.counts().bytes, fee);
+    }
+  }
+});
+
+test("End from the last device-settings getter cannot publish a key or SDK and still releases its group payment", async () => {
+  const host = {}, commands: string[] = []; let call!: VoiceAppCall;
+  const invoke = async <T>(command: string, args: Record<string, unknown>): Promise<T> => {
+    commands.push(command);
+    if (command === "prepare_voice_controller") return controller as T;
+    if (command === "prepare_voice_owner") return owner as T;
+    if (command === "activate_voice_owner") return { owner: args.candidate,
+      group: args.candidate === controller ? null : hash(1), join: args.candidate === controller ? null : hash(2) } as T;
+    assert.equal(command, "end_voice_owner"); return undefined as T;
+  };
+  const source = () => ({ stun: "", turn: "", username: "", credential: "", get policy() { void call.close(); return "all"; } });
+  const calls = windowVoiceAppCalls(invoke, host, source), broker = windowVoiceCryptoBroker(unavailable, host);
+  call = calls.prepare(1, "2"); assert.equal(await call.start(), "stopped"); await call.close();
+  assert.equal(commands.includes("admit_voice_join_key"), false);
+  assert.equal(broker.counts().bytes, VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES);
+});
+
+test("malformed configured sources never become an unconfigured direct call", () => {
+  const invoke = async <T>() => { assert.fail("no native call"); return undefined as T; };
+  for (const source of [0, false, "", {}, null, undefined]) {
+    const broker = new VoiceCryptoBroker(unavailable);
+    assert.throws(() => broker.nativeConfiguredAppCalls(voiceAppNative(invoke), voiceJoinKeyNative(invoke), voiceIpcNative(invoke), source as never), /settings source/);
+    assert.equal(broker.counts().bytes, 0);
+    if (source === null || source === undefined) continue; // Explicit optional unconfigured API.
+    const host = {};
+    assert.throws(() => windowVoiceAppCalls(invoke, host, source as never), /settings source/);
+    assert.equal(Object.hasOwn(host, Symbol.for("mewtual.voice.crypto-broker.v2")), false);
+  }
 });

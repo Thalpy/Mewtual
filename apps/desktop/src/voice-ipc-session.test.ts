@@ -13,7 +13,10 @@ import {
   VoiceCryptoBroker, createVoiceCryptoOwner, windowVoiceCryptoBroker, voicePacketIv,
   type VoiceIpcNative, type VoiceSelectedKeyNative, type VoiceCryptoChainBinding,
   type VoiceDerivationInput, type VoiceDerivationNative,
+  type VoiceCryptoOwner, type VoiceSelectedKeyOutcome,
 } from "./voice-crypto.ts";
+import { VOICE_APP_SESSION_BYTES, type VoiceAppCall, type VoiceAppNative } from "./voice-app-session.ts";
+import { VOICE_RTC_CONFIGURATION_BYTES, type VoiceRtcDeviceSettingsSource } from "./voice-rtc-configuration.ts";
 import {
   decodeVoiceIpcAdmission, encodeVoiceIpcAdmission,
   voiceIpcNonce, type VoiceIpcHeader,
@@ -45,7 +48,8 @@ const historyVector = (name: string) => {
 
 /** Independent actual-WebCrypto native endpoint fixture. It consumes only the published
  * selected point, never this broker's private key or its Session internals/counters. */
-async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identitySeed = 1) {
+async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identitySeed = 1,
+    deviceSettings: VoiceRtcDeviceSettingsSource | null = null) {
   const cleanups: Array<() => void> = [];
   let ordinary = 0, setups = 0, settlements = 0, loseSetup = false, loseSettle = false;
   let setupClosed = false, published: Uint8Array | null = null, executor = "";
@@ -86,7 +90,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     };
   } });
   let ownerHook: (() => void) | null = null;
-  const owner = createVoiceCryptoOwner(`voice-${identitySeed.toString(16).padStart(16, "0")}`, hash(identitySeed), () => {
+  let owner = createVoiceCryptoOwner(`voice-${identitySeed.toString(16).padStart(16, "0")}`, hash(identitySeed), () => {
     const hook = ownerHook; ownerHook = null; hook?.(); return true;
   });
   const admission = { async admit() { ordinary++; return "ordinary"; }, async settle() {}, async commitInbound() {} };
@@ -102,6 +106,36 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     async publish(owner, executor, permit, point) { published = point.slice(); return { owner, executor, permit, join: hash(2), keyRef: hash(3) }; },
     async settle() {},
   };
+  let appCall: VoiceAppCall | null = null, appStarted: Promise<"ready" | "stopped" | "unavailable"> | null = null;
+  let bootNative: VoiceIpcNative | null = null, bootTransport: typeof fetch | null = null;
+  if (deviceSettings) {
+    // This branch simulates ONLY public App activation metadata, just as the rest
+    // of this fixture simulates native authority. The actual broker creates its own
+    // owner, captures/pays settings and publishes the key/channel; no setter is added
+    // to production to associate configuration with a manually labelled owner.
+    const token = owner.token, group = owner.group, controller = "voice-ffffffffffffffff";
+    let bootClosed = false;
+    bootNative = {
+      async setup(value, execution) { return bootClosed
+        ? { owner: value, executor: execution, kind: "closed", nativeSetupDrained: true }
+        : { owner: value, executor: execution, kind: "pending" }; },
+      async settleSetup() { bootClosed = true; }, async collectChannel() {},
+      async readWork() { assert.fail("pending bootstrap has no work channel"); },
+    };
+    bootTransport = (input, init) => nativeTransport(input, init);
+    const metadata: VoiceAppNative = {
+      async prepareController() { return controller; }, async prepareOwner() { return token; },
+      async activate(candidate) { return { owner: candidate, group: candidate === controller ? null : group,
+        join: candidate === controller ? null : hash(2) }; }, async end() {},
+    };
+    const calls = broker.nativeConfiguredAppCalls(metadata, selectedNative, bootNative, deviceSettings, bootTransport);
+    appCall = calls.prepare(1, "2"); appStarted = appCall.start();
+    const originals = (broker as unknown as { selectedKeys: Map<string, { owner: VoiceCryptoOwner; outcome: VoiceSelectedKeyOutcome | null }> }).selectedKeys;
+    await until(() => originals.has(token));
+    // Inspect only actual owner provenance, NOT private CryptoKey/session data. The
+    // selected point below is still obtained through the independent native adapter.
+    owner = originals.get(token)!.owner;
+  }
   const selected = await broker.selectJoinKey(owner, selectedNative).attempt();
   assert.equal(selected.kind, "accepted");
   if (selected.kind !== "accepted") throw new Error("selection failed");
@@ -128,7 +162,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   const requestBody = await real.deriveKey(parameters("v1 c2n body AES-256-GCM"), material, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
   const responseMac = await real.deriveKey(parameters("v1 n2c header HMAC-SHA256"), material, { name: "HMAC", hash: "SHA-256", length: 256 }, false, ["sign"]);
   const responseBody = await real.deriveKey(parameters("v1 n2c body AES-256-GCM"), material, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
-  const native: VoiceIpcNative = {
+  const actualNative: VoiceIpcNative = {
     async readWork(value, execution, _fromSlot) {
       assert.equal(value, owner.token); assert.equal(execution, executor);
       return { kind: "snapshot", owner: value, executor: execution, nextSlot: 32, work: null };
@@ -150,8 +184,9 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       if (loseCollection) { loseCollection = false; throw new Error("collection reply lost"); }
     },
   };
+  const native = bootNative ? Object.assign(bootNative, actualNative) : actualNative;
   let responseHook: ((header: VoiceIpcHeader, mode: number) => Promise<void>) | null = null;
-  const transport: typeof fetch = async (input, init) => {
+  const nativeTransport: typeof fetch = async (input, init) => {
     assert.equal(input, "http://127.0.0.1:43210/voice/v2");
     assert.equal(init!.credentials, "omit"); assert.equal(init!.redirect, "error");
     assert.equal(init!.keepalive, false); assert.equal(init!.cache, "no-store");
@@ -210,18 +245,35 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     if (responseHook) await responseHook(request.header,requestMode);
     return result;
   };
+  const transport = bootTransport ?? nativeTransport;
+  if (appCall) {
+    // The pending bootstrap exposed no Session/body. Now both independent endpoints
+    // exist, resume that SAME paid original instead of constructing another channel.
+    appCall.resume(); assert.equal(await appStarted, "ready");
+  }
   engineEnabled = true;
   t.after(async () => {
     for (const cleanup of cleanups) cleanup();
-    held?.release(); cancelGate?.release(); fetchCancel?.release(); owner.retire(); broker.retrySelectedJoinKeys();
+    held?.release(); cancelGate?.release(); fetchCancel?.release();
+    if (appCall) await appCall.close(); else owner.retire(); broker.retrySelectedJoinKeys();
     await until(() => broker.counts().active === 0);
     // Entered terminal-handle dispatch can finish after the last IPC activity. Join
     // its queued disposal tail too; End alone is never proof of that stack's return.
     await flush();
-    assert.equal(broker.counts().bytes, 0);
+    assert.equal(broker.counts().bytes, deviceSettings ? VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES : 0);
   });
   return {
-    owner, broker, native, transport, key: selected.key, admission,
+    owner, broker, native, transport, key: selected.key, admission, appCall,
+    handoffReady(plan: Parameters<VoiceCryptoBroker["prepareNativeSdpHandoff"]>[2]): boolean {
+      // The real App lifecycle keeps channel activity nonzero even with no codec
+      // work. Observe the SAME scheduler's joined key/variable-state predicate; a
+      // global activity count cannot certify a particular live App phase's drainage.
+      const channel = (broker as unknown as { ipcChannels: Map<string, {
+        lifecycleObservation(): { plan: unknown; stage: string };
+      }> }).ipcChannels.get(owner.token);
+      const observed = channel?.lifecycleObservation();
+      return observed?.plan === plan && observed.stage === "handoff";
+    },
     onOwnerCheck(hook: () => void) { ownerHook = hook; },
     onResponse(hook: (header: VoiceIpcHeader, mode: number) => Promise<void>) { responseHook=hook; },
     cleanup(work: () => void) { cleanups.push(work); },
@@ -2669,7 +2721,9 @@ async function establishedSdpFixture(t: TestContext, localIsLow = true,
     original: Awaited<ReturnType<typeof fixture>> | null = null, serial = 1) {
   const f = original ?? await fixture(t), child = await framedConfirmation(f, true, localIsLow, serial), custody = custodyReplies(f, child);
   await child.derive(); await child.handle().attempt();
-  await until(() => custody.keyCounts().adopted && f.broker.counts().active === 0);
+  await until(() => custody.keyCounts().adopted && (f.appCall ? f.handoffReady(child.ready.chain) : f.broker.counts().active === 0)).catch(error => {
+    throw new Error("key adoption did not settle: " + JSON.stringify({ key: custody.keyCounts(), broker: f.broker.counts(), handoffReady: f.handoffReady(child.ready.chain) }), { cause: error });
+  });
   const prepare = () => f.broker.prepareNativeSdpHandoff(f.owner, child.channel, child.ready.chain);
   return { f, child, custody, prepare };
 }
@@ -3040,8 +3094,9 @@ function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void
   const calls = { created: 0, local: 0, remote: 0, closed: 0 };
   let held: ReturnType<typeof gate> | null = null, localHeld: ReturnType<typeof gate> | null = null;
   let descriptor: RTCSessionDescriptionInit | null = null;
+  const configurations: RTCConfiguration[] = [];
   class Peer {
-    constructor() { calls.created++; }
+    constructor(configuration: RTCConfiguration) { configurations.push(configuration); calls.created++; }
     iceGatheringState = "complete";
     get localDescription() { onDescription(); return { type: localIsLow ? "offer" : "answer", sdp: "s".repeat(8192) }; }
     addTransceiver() {}
@@ -3055,13 +3110,43 @@ function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void
   }
   globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
   t.after(() => { globalThis.RTCPeerConnection = old; held?.release(); localHeld?.release(); });
-  return { calls, descriptor: () => descriptor, hold() { held = gate(); return held; }, holdLocal() { localHeld = gate(); return localHeld; } };
+  return { calls, configurations, descriptor: () => descriptor, hold() { held = gate(); return held; }, holdLocal() { localHeld = gate(); return localHeld; } };
 }
+
+for (const low of [true, false]) test(`actual App-created broker channel supplies its private device snapshot through the complete RTC round; LOW=${low}`, async t => {
+  let captures = 0;
+  const original = await fixture(t, undefined, 1, () => { captures++; return { stun: "stun:device.example.test",
+    turn: "turns:relay.example.test", username: "device-user", credential: "device-secret", policy: "relay" }; });
+  const clone = createVoiceCryptoOwner(original.owner.token, original.owner.group, () => true);
+  assert.throws(() => original.broker.nativeChannel(clone, original.key, original.native, original.transport), /selected voice key required/);
+  const pc = await establishedPcFixture(t, low, original);
+  const f = await framedSdpRound(t, low, false, pc);
+  const before = f.custody.effectOrder().filter(step => step === "pc-admit").length;
+  const sdk = sdpRtcProvider(t, low, () => assert.equal(f.custody.effectOrder().filter(step => step === "pc-admit").length, before + 1));
+  await f.round(); await f.round();
+  assert.equal(captures, 1); assert.equal(sdk.calls.created, 1); assert.equal(sdk.calls.local, 1); assert.equal(sdk.calls.remote, 1);
+  assert.deepEqual(sdk.configurations[0], { bundlePolicy: "max-bundle", rtcpMuxPolicy: "require", iceCandidatePoolSize: 0,
+    iceTransportPolicy: "relay", iceServers: [{ urls: "turns:relay.example.test", username: "device-user", credential: "device-secret" }] });
+  assert.ok(original.broker.counts().bytes <= 256 * 1024, "configured maximum-SDP progression fits the original frontend group cap");
+  await original.appCall!.close(); assert.equal(sdk.calls.closed, 1);
+  assert.equal(original.broker.counts().bytes, VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES);
+});
+
+test("configured App channel cannot construct a PC after an authoritative fresh14 refusal", async t => {
+  const original = await fixture(t, undefined, 1, () => ({ stun: "stun:device.example.test", turn: "", username: "", credential: "", policy: "all" }));
+  const pc = await establishedPcFixture(t, true, original); await pc.admitPc();
+  const f = await framedSdpOffer(t, true, 8192, false, pc), sdk = sdpRtcProvider(t, true);
+  f.custody.refusePc(); await f.rtc();
+  assert.equal(sdk.calls.created, 0); assert.equal(sdk.calls.local, 0);
+  await original.appCall!.close();
+  assert.equal(original.broker.counts().bytes, VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES);
+});
 
 test("LOW concrete RTC local preparation gets a fresh14 and retires getter text before maximum crypto", async t => {
   const f = await framedSdpOffer(t); const before = f.custody.effectOrder().filter(step => step === "pc-admit").length;
   const sdk = sdpRtcProvider(t, true, () => assert.equal(f.custody.effectOrder().filter(step => step === "pc-admit").length, before + 1));
   const pending = f.rtc(); assert.equal(f.rtc(), pending); assert.equal(await pending, undefined);
+  assert.deepEqual(sdk.configurations, [{ bundlePolicy: "max-bundle" }], "manual channels do not inherit another App owner's settings");
   assert.equal(sdk.calls.local, 1); assert.equal(f.counts.begin, 1); assert.equal(f.counts.result, 1);
   assert.equal(f.counts.deliveryAdmit, 0); assert.equal(f.counts.deliveryApplied, 0);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(sdk.calls.closed, 1); assert.equal(f.f.broker.counts().bytes, 0);
@@ -3913,9 +3998,11 @@ test("a queued SDK grant cannot publish a loan into a replacement negotiation", 
 });
 
 
-test("two sequential framed RTC peers share one Session and close independently after compaction", async t => {
+async function twoFramedPeers(t: TestContext, deviceSettings: VoiceRtcDeviceSettingsSource | null = null) {
   const originalRtc = globalThis.RTCPeerConnection;
-  const first = await framedMedia(t), f = first.f;
+  const configured = deviceSettings ? await fixture(t, undefined, 1, deviceSettings) : null;
+  const preparedFirst = configured ? await establishedPcFixture(t, true, configured) : null;
+  const first = await framedMedia(t, true, preparedFirst), f = first.f;
   // Restore the real initial constructor after both providers' individual fixture hooks.
   t.after(() => { globalThis.RTCPeerConnection = originalRtc; });
   await first.media(); first.remaining(0); await first.retireNegotiation();
@@ -3945,7 +4032,26 @@ test("two sequential framed RTC peers share one Session and close independently 
   assert.equal(first.sdk.calls.closed, 1, "expired first peer closes synchronously");
   assert.equal(second.sdk.calls.closed, 0, "first peer failure cannot close another indexed peer");
   assert.equal(f.owner.isCurrent(), true); await second.media();
-  f.owner.retire(); assert.equal(second.sdk.calls.closed, 1); await first.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+  if (deviceSettings) {
+    for (const peer of [first, second]) assert.deepEqual(peer.sdk.configurations[0], {
+      bundlePolicy: "max-bundle", rtcpMuxPolicy: "require", iceCandidatePoolSize: 0, iceTransportPolicy: "relay",
+      iceServers: [{ urls: "turns:relay.example.test", username: "device-user", credential: "device-secret" }],
+    });
+    await f.appCall!.close();
+  } else f.owner.retire();
+  assert.equal(second.sdk.calls.closed, 1); await first.child.channel.close();
+  assert.equal(f.broker.counts().bytes, deviceSettings ? VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES : 0);
+}
+
+test("two sequential framed RTC peers share one Session and close independently after compaction", async t => {
+  await twoFramedPeers(t);
+});
+
+test("configured App snapshot and original group budget compose across two indexed RTC peers", async t => {
+  let captures = 0;
+  await twoFramedPeers(t, () => { captures++; return { stun: "stun:device.example.test", turn: "turns:relay.example.test",
+    username: "device-user", credential: "device-secret", policy: "relay" }; });
+  assert.equal(captures, 1, "the second peer borrows the original call snapshot");
 });
 
 

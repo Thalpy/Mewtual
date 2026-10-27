@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Local ICE settings and exact SDK custody (27 October; inactive)
+
+Untrusted invite/server relay hints must not enter the configured factory. It accepts only
+a trusted local device adapter; native14 authenticates PC/Ready/profile, not URLs, credentials
+or relay selection. This slice makes no native URL/SSRF or member-relay authorization claim.
+Closed bounded STUN/TURN grammar,8-token/4096-unit limits and field-only reads precede
+configuration copies; errors omit credentials. Caller and SDK mutation cannot change the
+private snapshot or another peer's constructor dictionary. Relay-only never falls back.
+
+Exact App-owner allocation controls loans; equal labels/manual channels cannot inherit
+settings. Reentrant End during capture/admission/constructor fences publication and closes
+any actually returned peer. The same PC and loan move atomically after joined native media
+admission. Failed SDK close or a held original loan keeps group payment and cleanup pending;
+source drainage cannot return a transferred loan. Separate64KiB configuration payment and
+existing8KiB App payment precede use; no cap is raised. Retained broker43/facade3 checks
+prevent old code silently ignoring relay settings. Opaque RTC/GC heap and real network/media
+behavior remain outside this JS proof; App/renewal/audio/relay acceptance is still open.
+
 ## Root history certification versus real return (26 October; inactive, gates pending)
 
 Whole closure, map absence, Arc counts, ordinary Return and elapsed time are insufficient

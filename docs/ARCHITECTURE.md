@@ -1,5 +1,26 @@
 # Mewtual; Architecture
 
+## Device ICE configuration custody (27 October; Broker43, App inactive)
+
+The explicit configured App-call factory prepays a separate64KiB window inventory and
+binds it, together with the existing8KiB App inventory, to the accepted group before
+settings capture or key work. Existing frontend256KiB/group and2MiB/process limits remain;
+Root's independent512KiB/group limit is unchanged. The configured source is a stable,
+synchronous device adapter, never an invite/server TURN hint or an old call closure.
+
+One bounded immutable snapshot supplies at most17 opaque metadata loans (16 indexed plus
+one in-progress; not an allowance for17 peers). Only the exact App-created owner can
+borrow. Native14 authority still precedes actual PC construction. The SAME loan transfers
+with the SAME PC into independent media custody; source/media drainage returns it only
+after actual SDK closure. End fences the snapshot first and joins all loans before group
+unbinding; the retained window process inventory remains paid. Snapshot/configuration
+frames retain no old native/negotiation/Phase callback. Credentials stay private.
+
+This is local configuration enforcement, not native authorization of ICE URLs or a relay
+service. Opaque RTC/browser heaps are outside the conservative bounded JS inventory.
+App activation, microphone/remote audio, renewal, relay and actual WebView/physical
+acceptance remain open; V2 stays OFF.
+
 ## Certified Root history collection (26 October; inactive, gates pending)
 
 After exact native Plan-final issuance/ACK and actual native row destruction, a small

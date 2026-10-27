@@ -1,5 +1,26 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Configured App-call factory (27 October; Broker43, facade3, inactive)
+
+`nativeConfiguredAppCalls(native, selected, ipc, source, transport?)` explicitly selects
+configuration support; the existing `nativeAppCalls` keeps its unconfigured contract.
+`windowVoiceAppCalls(invoke, host?, source?)` retains the exact source/broker allocation.
+Older broker APIs and retained facade bundle2 require reload; invalid source values
+refuse without falling back to direct ICE. A source must read only local device settings
+and must not capture old call/native/negotiation state. App does not yet instantiate it.
+
+The synchronous source returns `stun`, `turn`, `username`, `credential`, and `policy`
+(`all` or `relay`). Capture reads only these fields once, bounds their combined strings
+to4096 UTF16 units, admits at most8 URI tokens, and never retains the returned graph.
+Relay-only requires TURN and omits STUN. Bad settings refuse with credential-free errors.
+Native14 still controls the PC/Ready/profile boundary; it does not authenticate URLs.
+
+The separate64KiB fee is charged before constructors/callbacks, bound to the accepted group
+before capture, and retained through actual lease/SDK/native/cadence cleanup. Fixed process
+payment remains for window lifetime. Frontend256KiB/group and2MiB/process caps are unchanged.
+Internal opaque leases expose no settings or PC. Loan return is negative custody release,
+not a present-time native/media grant. Source-to-media transfer preserves the same PC/loan.
+
 ## Original Plan Root history collection (26 October; inactive, gates pending)
 
 Trusted Rust `ProtectedCryptoPlan::action_history(&PlanRetirement)` captures an opaque

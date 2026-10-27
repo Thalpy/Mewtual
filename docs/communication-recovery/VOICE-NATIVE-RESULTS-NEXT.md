@@ -1,5 +1,29 @@
 # Next voice milestone: native result recovery
 
+## Configured RTC composed; private audio and App adoption next (27 October)
+
+Broker43's explicit configured factory snapshots only bounded local device settings under
+its own64KiB inventory, before key work and after accepted-group binding. Native admission
+still precedes PC construction. The SAME private loan transfers with the SAME peer and joins
+actual SDK cleanup before group unbinding. Facade3/HMR checks refuse incompatible old code
+instead of silently ignoring relay-only intent. Existing frontend256KiB/group caps remain;
+17 metadata positions do not establish17 supported peers. Native does not authorize URLs.
+
+Frontend3126/static/build pass. Actual WebCrypto/framed IPC with controlled native/RTC fixtures
+covers complete LOW/HIGH rounds, fresh14 refusal and two configured indexed peers. Read-only
+review has no blocker/high/medium. Final native execution of changed TS inputs remains pending;
+the previous Root-history source has native895/check/strict lint green and its full Root run
+continues serially. Fresh dependency audit remains red on inherited crypto-bigint0.5.5.
+
+Next implement shared microphone and independently owned per-peer sender clones, remote audio
+including streamless track events, and actual SDK-promise drainage. Global mute/End must gate
+every clone as well as the master; stopping/muting a master alone does not gate its clones.
+One peer's failure must preserve siblings. An uncancellable old getUserMedia result must stay
+paid and be stopped on late return, never adopted by a replacement call. Capture requires
+actual adopted/current media, not historical bootstrap-ready. App lock/room/unmount integration,
+renewal, authenticated WebView, member relay and combined/physical acceptance still follow.
+App V2 remains OFF; only one desktop exists. Older sections below are checkpoint history.
+
 ## Broker42 bootstrap composed; App/RTC adoption next (26 October)
 
 The retained production metadata/controller facade now composes native activation, selected

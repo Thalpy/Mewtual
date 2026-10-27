@@ -1,5 +1,23 @@
 # Chat, files and voice implementation evidence
 
+## Configured RTC evidence (27 October; inactive, final native gates pending)
+
+Broker43/facade3 adds explicit local-device ICE configuration with a separately prepaid64KiB
+window inventory. Exact App-owner provenance, native14 admission and original PC/loan transfer
+remain enforced. Group payment survives actual SDK/loan cleanup; existing caps remain.
+Native does not authorize configuration URLs. Relay-only policy is local device intent;
+member media relay is not implemented by this change.
+
+Full frontend3127 passes94.10s; static checks have zero diagnostics; production build passes83s.
+Controlled native/RTC fixtures using actual WebCrypto and framed IPC complete configured LOW
+and HIGH rounds, refuse construction after fresh14 denial, and exercise two indexed peers
+on one configured Session. They do not prove actual native WebView ICE/media. Read-only review
+has no actionable blocker/high/medium; bundle2 compatibility coverage is added. Final native
+checks with the changed TS imports remain pending. Frozen daf4ca91 native895/check/strict lint
+pass; its complete Root run remains in progress. Fresh inherited dependency audit is red.
+App activation, mic/audio/data channels, renewal, WebView, member relay and combined/physical
+acceptance remain open. One desktop is available; V2 stays OFF.
+
 ## Root history extension under validation (26 October; inactive)
 
 Exact original Plan/native final ACK plus actual row collection now schedules Root terminal

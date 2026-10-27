@@ -3,6 +3,8 @@
  * supplies fresh native admission and joins its void observers before releasing native custody.
  * Application text/copies are bounded here; opaque browser RTC/GC heap is outside that proof. */
 import { voiceSdpUtf8 } from "./voice-sdp-action.ts";
+import { voiceRtcConfigurationCurrent, voiceRtcConfiguredPeer, releaseVoiceRtcConfiguration,
+  type VoiceRtcConfigurationLease } from "./voice-rtc-configuration.ts";
 
 export type VoiceSdpRtcClock = Readonly<{
   now(): number;
@@ -15,19 +17,20 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 type MediaState = {
   identity: object; peer: RTCPeerConnection | null; adopted: boolean;
   stopped: boolean; closing: boolean; closeComplete: boolean;
+  configuration: VoiceRtcConfigurationLease | null;
 };
 // Runtime-private ownership, not a public setter or a renderer-supplied peer/capability.
 // The identity is a fixed inert token, with no old owner/phase/clock/callback backedge.
 const mediaOwners = new WeakMap<MediaRtcOwner, MediaState>();
 class MediaRtcOwner {
   constructor(identity: object) {
-    mediaOwners.set(this, { identity, peer: null, adopted: false, stopped: false, closing: false, closeComplete: false });
+    mediaOwners.set(this, { identity, peer: null, adopted: false, stopped: false, closing: false, closeComplete: false, configuration: null });
   }
   get adopted(): boolean { return mediaOwners.get(this)!.adopted; }
   get closed(): boolean { return mediaOwners.get(this)!.stopped; }
   get drained(): boolean {
     const state = mediaOwners.get(this)!;
-    return state.stopped && state.closeComplete && state.peer === null;
+    return state.stopped && state.closeComplete && state.peer === null && state.configuration === null;
   }
   /** Negative-only execution by the separately paid media/status owner. No current
    * callback, negotiation clock, native receipt or old SDK graph is retained here.
@@ -51,6 +54,10 @@ class MediaRtcOwner {
     const state = mediaOwners.get(this)!;
     if (!state.closeComplete || state.closing) throw new Error("voice media close still running");
     state.peer = null;
+    if (state.configuration) {
+      releaseVoiceRtcConfiguration(state.configuration);
+      state.configuration = null;
+    }
   }
 }
 /** Opaque custody only: no actual PC, description or media/key handle is exposed. */
@@ -58,6 +65,7 @@ export type VoiceMediaRtcOwner = MediaRtcOwner;
 
 export class VoiceSdpRtcOwner {
   #peer: RTCPeerConnection | null = null;
+  #configuration: VoiceRtcConfigurationLease | null;
   #stopped = false;
   #peerClosed = false;
   #peerClosing = false;
@@ -74,14 +82,17 @@ export class VoiceSdpRtcOwner {
   readonly #mediaIdentity = {};
   #mediaDestination: MediaRtcOwner | null = null;
   #transferChecking = false;
-  constructor(localIsLow: boolean, current: () => boolean, clock: VoiceSdpRtcClock) {
+  constructor(localIsLow: boolean, current: () => boolean, clock: VoiceSdpRtcClock,
+    configuration: VoiceRtcConfigurationLease | null = null) {
+    this.#configuration = configuration;
     this.localIsLow = localIsLow; this.#current = current; this.clock = clock;
   } // Inert: no getter, Clock, constructor or SDK callback before publication.
 
   private live(): boolean {
     const observe = this.#current;
     const current = !this.#stopped && observe !== null && observe();
-    return current && !this.#stopped && this.#current === observe; // injected code may End.
+    return current && !this.#stopped && this.#current === observe &&
+      (this.#configuration === null || voiceRtcConfigurationCurrent(this.#configuration)); // injected code may End.
   }
 
   /** Inert one-shot destination for this EXACT SDK peer identity. The trusted retained
@@ -109,7 +120,7 @@ export class VoiceSdpRtcOwner {
     } finally { this.#transferChecking = false; }
     const target = mediaOwners.get(destination);
     if (!finished || !target || target.identity !== this.#mediaIdentity || this.#mediaDestination !== destination ||
-        target.adopted || target.stopped || target.peer !== null || target.closing || target.closeComplete ||
+        target.adopted || target.stopped || target.peer !== null || target.configuration !== null || target.closing || target.closeComplete ||
         this.#stopped || this.#peerClosed || this.#peerClosing || !this.#peer) return unavailable();
 
     // COMMIT: private state writes only. No getter, method/provider/Clock callback,
@@ -117,8 +128,10 @@ export class VoiceSdpRtcOwner {
     // peer moves once; old close/drain loses all authority over it. Clear the old current
     // closure so retaining this stopped source cannot pin its channel/chain/phase graph.
     target.peer = this.#peer;
+    target.configuration = this.#configuration;
     target.adopted = true;
     this.#peer = null;
+    this.#configuration = null;
     this.#peerClosed = true;
     this.#stopped = true;
     this.#current = null;
@@ -130,7 +143,9 @@ export class VoiceSdpRtcOwner {
     const Constructor = globalThis.RTCPeerConnection;
     if (!this.live() || typeof Constructor !== "function") return unavailable();
     try {
-      const peer = new Constructor({ bundlePolicy: "max-bundle" });
+      const peer = this.#configuration
+        ? voiceRtcConfiguredPeer(this.#configuration, Constructor, () => this.live())
+        : new Constructor({ bundlePolicy: "max-bundle" });
       this.#peer = peer; // Publish actual identity before another provider callback.
       if (!this.live()) { this.close(); return unavailable(); }
       return peer;
@@ -305,5 +320,9 @@ export class VoiceSdpRtcOwner {
     if (this.#peer && (!this.#peerClosed || this.#peerClosing)) throw new Error("voice RTC close still running");
     this.#peer = null;
     this.#current = null;
+    if (this.#configuration) {
+      releaseVoiceRtcConfiguration(this.#configuration);
+      this.#configuration = null;
+    }
   }
 }
