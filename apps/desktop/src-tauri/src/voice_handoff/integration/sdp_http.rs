@@ -9,11 +9,32 @@ use std::sync::atomic::Ordering;
 /// A fixture-only clock with ONE scoped task trigger. It wraps production SystemClock,
 /// advances monotonically for every original runtime after firing, and cannot be consumed
 /// by Actor/maintenance tasks. No handler hook or replacement runtime supplies authority.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ExpiryClock {
     offset: std::sync::atomic::AtomicU64,
     trigger: std::sync::Mutex<Option<(tokio::task::Id, usize, u64)>>,
     fired: std::sync::atomic::AtomicBool,
+    // Fixture sequencing only: these observations grant no native/Root authority. The shared
+    // clock's negative probe must not revoke the other endpoint's unfinished positive work.
+    low_parked: tokio::sync::Barrier,
+    resume_low: tokio::sync::Barrier,
+    positive_complete: tokio::sync::Barrier,
+    low_positive_done: std::sync::atomic::AtomicBool,
+    high_observed_wait: std::sync::atomic::AtomicBool,
+}
+impl Default for ExpiryClock {
+    fn default() -> Self {
+        Self {
+            offset: 0.into(),
+            trigger: std::sync::Mutex::new(None),
+            fired: false.into(),
+            low_parked: tokio::sync::Barrier::new(2),
+            resume_low: tokio::sync::Barrier::new(2),
+            positive_complete: tokio::sync::Barrier::new(2),
+            low_positive_done: false.into(),
+            high_observed_wait: false.into(),
+        }
+    }
 }
 impl ExpiryClock {
     pub(crate) fn new() -> Arc<Self> {
@@ -21,9 +42,89 @@ impl ExpiryClock {
     }
     fn arm(&self, delta: u64) {
         assert!(!self.fired.load(Ordering::Acquire));
+        assert!(
+            self.low_positive_done.load(Ordering::Acquire)
+                && self.high_observed_wait.load(Ordering::Acquire),
+            "shared expiry cannot precede actual LOW positive work and HIGH's pending wait"
+        );
         let mut trigger = self.trigger.lock().unwrap();
         assert!(trigger.is_none());
         *trigger = Some((tokio::task::id(), 2, delta));
+    }
+
+    /// Bounded fixture observations, not a currentness or drainage certificate.
+    fn observations(&self) -> (bool, u64, bool, bool) {
+        (
+            self.fired.load(Ordering::Acquire),
+            self.offset.load(Ordering::Acquire),
+            self.low_positive_done.load(Ordering::Acquire),
+            self.high_observed_wait.load(Ordering::Acquire),
+        )
+    }
+
+    async fn within_original<T>(
+        &self,
+        deadline: u64,
+        stage: &'static str,
+        work: impl std::future::Future<Output = T>,
+    ) -> T {
+        let observed = catcoms_rt::Clock::monotonic_ms(self);
+        let remaining = deadline
+            .checked_sub(observed)
+            .filter(|remaining| *remaining > 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expiry fixture exceeded original deadline at {stage}: mono={observed}, deadline={deadline}, observations={:?}",
+                    self.observations()
+                )
+            });
+        tokio::time::timeout(std::time::Duration::from_millis(remaining), work)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "expiry fixture original deadline elapsed at {stage}: observations={:?}",
+                    self.observations()
+                )
+            })
+    }
+
+    /// Force the ordering that exposed the race: HIGH reaches its negative-test boundary
+    /// while LOW has not submitted its first Begin. The original intent keeps ageing.
+    async fn park_low(&self, deadline: u64) {
+        self.within_original(deadline, "LOW parked", self.low_parked.wait())
+            .await;
+        self.within_original(deadline, "LOW resume", self.resume_low.wait())
+            .await;
+    }
+
+    async fn before_expiry(&self, seal: bool, deadline: u64) {
+        if seal {
+            // Called only after genuine Input/provider/physical/Actor work has returned.
+            self.low_positive_done.store(true, Ordering::Release);
+            self.within_original(
+                deadline,
+                "LOW positive completion",
+                self.positive_complete.wait(),
+            )
+            .await;
+        } else {
+            self.within_original(deadline, "HIGH observes parked LOW", self.low_parked.wait())
+                .await;
+            // Tokio barriers are not cancellation-safe. Retain THIS pinned wait after the
+            // pending poll; replacing it with another wait could count HIGH twice.
+            let mut joining = std::pin::pin!(self.positive_complete.wait());
+            let polled = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(joining.as_mut(), cx))
+            })
+            .await;
+            assert!(matches!(polled, std::task::Poll::Pending));
+            assert!(!self.fired.load(Ordering::Acquire));
+            self.high_observed_wait.store(true, Ordering::Release);
+            self.within_original(deadline, "HIGH releases LOW", self.resume_low.wait())
+                .await;
+            self.within_original(deadline, "HIGH positive completion", joining.as_mut())
+                .await;
+        }
     }
 }
 impl catcoms_rt::Clock for ExpiryClock {
@@ -189,9 +290,27 @@ pub(super) async fn exercise(
         );
     }
     let clock = crate::voice_runtime(state).clock();
-    let remaining = intent
-        .remaining_at(clock.now_ms(), clock.monotonic_ms())
-        .unwrap();
+    let wall = clock.now_ms();
+    let mono = clock.monotonic_ms();
+    let expiry_clock = EXPIRY_CLOCK.try_with(Arc::clone).ok();
+    let remaining = intent.remaining_at(wall, mono).unwrap_or_else(|error| {
+        panic!(
+            "original SDP authority unavailable before Begin: seal={seal}, effect={effect}, wall={wall}, mono={mono}, expiry={:?}: {error:?}",
+            expiry_clock.as_ref().map(|clock| clock.observations())
+        )
+    });
+    let original_deadline = mono.checked_add(remaining).expect("original SDP deadline");
+    if seal {
+        if let Some(clock) = &expiry_clock {
+            clock.park_low(original_deadline).await;
+        }
+    }
+    // Parking cannot restart even the test observer's window. Every actual request still
+    // repeats its original native/Root checks; the shared clock is not advanced yet.
+    let remaining = original_deadline
+        .checked_sub(clock.monotonic_ms())
+        .filter(|remaining| *remaining > 0)
+        .expect("original SDP deadline before first Begin");
     let first = tokio::time::timeout(std::time::Duration::from_millis(remaining), async {
         loop {
             let reply = exchange(
@@ -332,6 +451,11 @@ pub(super) async fn exercise(
             ))
             .await;
         }
+    }
+    // Both roles have completed their positive work before HIGH's global expiry probe.
+    // In particular, LOW must have actually joined its Input/worker path, not just Begin.
+    if let Some(clock) = &expiry_clock {
+        clock.before_expiry(seal, original_deadline).await;
     }
     if !seal {
         if let Ok(clock) = EXPIRY_CLOCK.try_with(Arc::clone) {

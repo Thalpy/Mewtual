@@ -3,8 +3,8 @@
 [PR #74](https://github.com/Thalpy/Mewtual/pull/74) is a draft integration candidate,
 not a completed communication programme. Runtime source at the initial combined checkpoint:
 `2babf97e3162de2bb4212ad044c76c0c6e15f8d3`. Current runtime/configuration checkpoint:
-`c4aa9064c078440652e69ddb7aaac4346d2f041c`, after the current connectivity extraction
-and native dependency fixes. Earlier results do not validate the changed native graph.
+`c4aa9064c078440652e69ddb7aaac4346d2f041c`, followed by the fixture-only expiry
+ordering correction below. Earlier results do not validate the changed native graph.
 
 ## Landed and prepared work
 
@@ -48,8 +48,11 @@ On the final frontend inputs, the repeated full suite passes 3,201 tests in 64.9
 check, build and all ten rendered flows pass. Both formatting checks pass. The new native
 dependency graph and policy pass both audits, including all four categories. Fourteen
 upload/session regressions passed before the native dependency follow-up. The WMI-only
-Windows check passes after its ABI correction; the complete fresh native pipeline is
-running serially. Root Rust/Cargo/toolchain inputs are byte-identical to the initial
+Windows check passes after its ABI correction. Six actual native authority/parser
+regressions, strict native Clippy and the separate native check also pass on the new
+graph. The complete native run was interrupted to correct the fixture ordering below;
+its partial result is not a full-suite pass. Fresh native gates are running serially.
+Root Rust/Cargo/toolchain inputs are byte-identical to the initial
 combined source being tested by hosted Windows/Linux jobs. Runtime manifests record
 1,477 file hashes; documentation updates do not change those inputs.
 
@@ -71,8 +74,8 @@ unmaintained proc-macro-error/UNIC advisories. The follow-up at `c4aa9064` updat
 removes unused ZIP extraction, updates the Tauri utility/parser graph to remove UNIC,
 and replaces a newly yanked native arithmetic release. Both audits now pass. One new
 build-only maintenance decision has exact stable-version/parent fences and tested
-positive/negative controls. The actual native authority/parser regressions and full
-gates still need execution on this changed graph. See
+positive/negative controls. All six actual native authority/parser regressions pass;
+the full native gates still need completion on this changed graph. See
 [NATIVE-DEPENDENCY-AUDIT](NATIVE-DEPENDENCY-AUDIT.md) for the source analysis and limits.
 
 The upgrade's existing crypto-bigint exception remains the reviewed, constrained policy:
@@ -81,6 +84,30 @@ X25519/Ed25519 suite and dependency bans. This is not removal of every old crate
 New OpenMLS 0.9-created/joined group records do not safely downgrade to older builds.
 Use isolated validation profiles; the compatibility limits are in
 [the upgrade design](../design-crypto-bigint-upgrade.md).
+
+## Shared expiry-clock fixture ordering
+
+The initial combined Linux native job failed first in
+`native_v2_pc_intent_original_http_begin_history_return_and_premature_high_refusal`:
+the original SDP intent was already unauthorized before Begin. Thirteen later failures
+were the fixture's fail-closed admission gate, not independent diagnoses. The old log
+does not establish which endpoint advanced the clock, so historical causation remains
+unproven.
+
+Inspection confirmed a possible fixture race: both endpoints share one expiry clock,
+and HIGH's negative expiry probe could advance it before LOW finished positive work.
+The correction deliberately parks LOW before its first Begin, proves HIGH is waiting,
+then allows LOW's genuine Input/provider/worker path to finish before advancing time.
+One retained barrier future avoids counting HIGH twice. Every wait uses the original
+intent deadline; no timeout, attempt, history or production authority is renewed.
+Additional diagnostics contain only fixed roles/stages, times and atomic observations.
+
+The corrected actual test passes 1/1 in 10.75 seconds. A missing-await mutation fails
+at the intended ordering invariant, 0/1 in 10.01 seconds; the correct source was restored
+byte-for-byte with a fresh timestamp and rebuilt before the positive run. A read-only
+review of the actual restored diff found no actionable findings. The complete native
+suite and hosted Linux rerun remain required; a focused pass does not clear the old CI
+failure by itself.
 
 ## Held PRs and remaining implementation
 
