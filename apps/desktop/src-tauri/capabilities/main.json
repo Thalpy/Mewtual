@@ -237,6 +237,8 @@
     "allow-forget-saved-file",
     "allow-reset-saved-files",
     "allow-reveal-saved-file",
+    "allow-get-saved-files-limit",
+    "allow-set-saved-files-limit",
 
     "allow-call-media-key",
     "allow-begin-inline-download",

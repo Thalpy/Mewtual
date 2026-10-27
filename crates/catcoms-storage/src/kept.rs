@@ -51,7 +51,7 @@ pub use record::{
 pub use saved::{
     drop_first_name, replace_older_copy, saved_file_location, saved_file_presence, FirstNameDrop,
     NoCandidate, ReplaceOutcome, ReplaceRefusal, ReplaceRequest, SavedFile, SavedFileId,
-    SavedFiles, SavedListError, SavedLocation, MAX_SAVED_FILES, MAX_SAVED_LIST_BYTES,
+    SavedFiles, SavedLimit, SavedListError, SavedLocation, SAVED_ENTRY_ALLOWANCE,
     SAVED_LIST_VERSION,
 };
 

@@ -18992,7 +18992,9 @@ pub fn run() {
             saved_files::check_saved_files,
             saved_files::reveal_saved_file,
             saved_files::forget_saved_file,
-            saved_files::reset_saved_files
+            saved_files::reset_saved_files,
+            saved_files::get_saved_files_limit,
+            saved_files::set_saved_files_limit
         ])
         .build(context)
         .expect("error while building the Mewtual desktop app");

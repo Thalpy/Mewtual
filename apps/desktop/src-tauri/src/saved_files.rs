@@ -22,11 +22,11 @@
 //!   stops between entries once its wait is over. A replace holds one cleanup slot and stops at
 //!   its deadline.
 use super::*;
-use catcoms_app::{DownloadReady, SavedFilesLoad};
+use catcoms_app::{DownloadReady, SavedFilesLoad, SavedLimitLoad};
 use catcoms_storage::kept::{
     drop_first_name, replace_older_copy, saved_file_location, saved_file_presence, ExportJournal,
     FirstNameDrop, NoCandidate, ReplaceOutcome, ReplaceRefusal, ReplaceRequest, SavedFile,
-    SavedFileId, SavedFiles, SavedLocation, SavedPresence,
+    SavedFileId, SavedFiles, SavedLimit, SavedLocation, SavedPresence,
 };
 use private_downloads::{SavedCheck, SAVED_CHECK_WAIT};
 
@@ -48,6 +48,10 @@ pub(super) const ENTRY_GONE: &str = "This saved file is no longer listed. Open T
 /// "Start a new list" found a record that is not damaged (any more).
 pub(super) const RESET_REFUSED: &str =
     "The list of saved files is not damaged, so Mewtual left it as it is.";
+/// A lower "Remember saved files" setting while the list cannot be read: lowering trims the list
+/// first, and an unreadable list cannot be trimmed (nor may its read bound shrink under it).
+pub(super) const LIMIT_LIST_UNREADABLE: &str =
+    "Mewtual could not read its list of saved files right now, so it kept the current setting.";
 
 // "Replace my older saved copy" notes (design section 5). None claims a copy exists unless the
 // sequence saw it.
@@ -141,6 +145,98 @@ pub(super) struct UiSavedFiles {
     files: Vec<UiSavedFile>,
 }
 
+/// The "Remember saved files" setting for the renderer (Server settings, Storage).
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UiSavedFilesLimit {
+    /// `"ok"`, or `"unreadable"` when the stored setting cannot be read: no save is listed until
+    /// the user chooses one again.
+    state: &'static str,
+    /// The setting in force (the default when none was chosen); `None` while unreadable.
+    limit: Option<u32>,
+    /// Entries the list holds now; `None` while the list cannot be read.
+    listed: Option<usize>,
+    min: u32,
+    max: u32,
+    default: u32,
+}
+
+/// What choosing a setting would do (`applied: false`) or did.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UiSavedLimitChange {
+    /// The setting, clamped into the range.
+    limit: u32,
+    /// How many of the oldest list entries it forgets (or forgot). Files are never touched.
+    forgets: usize,
+    applied: bool,
+}
+
+/// The setting as stored, with the list's size. Read-only.
+pub(super) fn limit_view(store: &ServerStore, server: u64, owner: &[u8]) -> UiSavedFilesLimit {
+    let limit = store.load_saved_files_limit(server, owner).limit();
+    UiSavedFilesLimit {
+        state: if limit.is_some() { "ok" } else { "unreadable" },
+        limit: limit.map(SavedLimit::get),
+        listed: load_list(store, server, owner)
+            .ok()
+            .map(|list| list.entries().len()),
+        min: SavedLimit::MIN,
+        max: SavedLimit::MAX,
+        default: SavedLimit::DEFAULT.get(),
+    }
+}
+
+/// Choose the setting: `requested` is clamped into the range. With `apply` false nothing changes
+/// and the answer says how many of the oldest entries it would forget; with `apply` it changes.
+///
+/// Lowering forgets the oldest entries from the list (never a file): the trimmed list is written
+/// first and the setting second, so the list always fits what the stored setting lets a reader
+/// read, and a failure in between leaves the earlier, larger setting over a shorter list. A
+/// setting that would narrow the read bound is refused while the list cannot be read (a newer
+/// build's record, or an I/O error): it could not be trimmed, and a narrower bound could make it
+/// read as damaged. Raising keeps every entry and writes only the setting.
+pub(super) fn change_limit(
+    store: &ServerStore,
+    server: u64,
+    owner: &[u8],
+    requested: u64,
+    apply: bool,
+) -> Result<UiSavedLimitChange, String> {
+    let limit = SavedLimit::clamped(requested);
+    let current = store.load_saved_files_limit(server, owner);
+    let mut forgets = 0;
+    match store.load_saved_files(server, owner) {
+        SavedFilesLoad::Found(mut list) => {
+            forgets = list.trimmed_by(limit);
+            if apply && forgets > 0 {
+                list.trim(limit);
+                store
+                    .save_saved_files(server, owner, &list, &mut OsCryptoRng)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        // Nothing to trim: no list yet, or a damaged one (which only "Start a new list" or
+        // leaving replaces; its size says nothing).
+        SavedFilesLoad::Missing | SavedFilesLoad::Damaged => {}
+        SavedFilesLoad::Newer | SavedFilesLoad::Unavailable => {
+            if limit.read_bound() < current.read_bound() {
+                return Err(LIMIT_LIST_UNREADABLE.into());
+            }
+        }
+    }
+    if apply && current != SavedLimitLoad::Found(limit) {
+        store
+            .save_saved_files_limit(server, owner, limit, &mut OsCryptoRng)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(UiSavedLimitChange {
+        limit: limit.get(),
+        forgets,
+        applied: apply,
+    })
+}
+
 /// One answer of a whole-list check, for the entry and name it was made for.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -190,50 +286,80 @@ pub(super) enum Loaded<'a> {
     Unreadable(&'static str),
 }
 
-/// Run `change` on server `server`'s list under the store lock and then the registry lock, for
-/// incarnation `instance` only, and write the result if `change` asks to and the list was
-/// readable. `Ok(None)`: the server is not that incarnation any more (or the vault is not
-/// mounted), so nothing was read or written. The session commit guard is never taken in here.
+/// Run `act` with the store and server `server`'s owner binding under the store lock and then the
+/// registry lock, for incarnation `instance` only. `None`: the server is not that incarnation any
+/// more (or the vault is not mounted), so nothing was read or written. The session commit guard
+/// is never taken in here.
+async fn with_owner<T>(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    act: impl FnOnce(&ServerStore, &[u8]) -> T,
+) -> Option<T> {
+    let guard = state.store.lock().await;
+    let store = guard.as_ref()?;
+    let servers = state.servers.lock().await;
+    let entry = servers
+        .get(&server)
+        .filter(|entry| entry.instance == instance)?;
+    // The group, then this device's member id in it: a later membership (leave and join again)
+    // has another member id, so a record that survived a leave never applies to it.
+    let owner = [entry.group_id.as_slice(), entry.device_id.as_bytes()].concat();
+    let value = act(store, &owner);
+    drop(servers);
+    Some(value)
+}
+
+/// The list as loaded, or why it cannot be written over.
+fn load_list(store: &ServerStore, server: u64, owner: &[u8]) -> Result<SavedFiles, &'static str> {
+    match store.load_saved_files(server, owner) {
+        SavedFilesLoad::Found(list) => Ok(list),
+        SavedFilesLoad::Missing => Ok(SavedFiles::new(owner)),
+        SavedFilesLoad::Newer => Err("newer"),
+        SavedFilesLoad::Damaged => Err("damaged"),
+        SavedFilesLoad::Unavailable => Err("unavailable"),
+    }
+}
+
+/// Run `change` on server `server`'s list (see [`with_owner`] for the locks and the incarnation),
+/// with the "Remember saved files" setting in force (`None` when it cannot be read), and write
+/// the result if `change` asks to and the list was readable. `Ok(None)`: nothing was read or
+/// written.
+async fn with_list_at<T>(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    change: impl FnOnce(Loaded<'_>, Option<SavedLimit>) -> (T, bool),
+) -> Result<Option<T>, String> {
+    with_owner(state, server, instance, |store, owner| {
+        let limit = store.load_saved_files_limit(server, owner).limit();
+        let mut list = load_list(store, server, owner);
+        let (value, write) = match &mut list {
+            Ok(list) => change(Loaded::Readable(list), limit),
+            Err(why) => change(Loaded::Unreadable(why), limit),
+        };
+        if write {
+            if let Ok(list) = &list {
+                store
+                    .save_saved_files(server, owner, list, &mut OsCryptoRng)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(value)
+    })
+    .await
+    .transpose()
+}
+
+/// [`with_list_at`] for changes that never grow the list (forget, rename, lookups), which need no
+/// setting.
 async fn with_list<T>(
     state: &AppState,
     server: u64,
     instance: u64,
     change: impl FnOnce(Loaded<'_>) -> (T, bool),
 ) -> Result<Option<T>, String> {
-    let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
-        return Ok(None);
-    };
-    let servers = state.servers.lock().await;
-    let Some(entry) = servers
-        .get(&server)
-        .filter(|entry| entry.instance == instance)
-    else {
-        return Ok(None);
-    };
-    // The group, then this device's member id in it: a later membership (leave and join again)
-    // has another member id, so a record that survived a leave never applies to it.
-    let owner = [entry.group_id.as_slice(), entry.device_id.as_bytes()].concat();
-    let mut list = match store.load_saved_files(server, &owner) {
-        SavedFilesLoad::Found(list) => Ok(list),
-        SavedFilesLoad::Missing => Ok(SavedFiles::new(&owner)),
-        SavedFilesLoad::Newer => Err("newer"),
-        SavedFilesLoad::Damaged => Err("damaged"),
-        SavedFilesLoad::Unavailable => Err("unavailable"),
-    };
-    let (value, write) = match &mut list {
-        Ok(list) => change(Loaded::Readable(list)),
-        Err(why) => change(Loaded::Unreadable(why)),
-    };
-    if write {
-        if let Ok(list) = &list {
-            store
-                .save_saved_files(server, &owner, list, &mut OsCryptoRng)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    drop(servers);
-    Ok(Some(value))
+    with_list_at(state, server, instance, |list, _| change(list)).await
 }
 
 /// What a save published, for its entry.
@@ -307,8 +433,10 @@ pub(super) async fn record_save(
         saved_at_ms: SystemClock.now_ms(),
         location: save.location,
     };
-    let written = with_list(state, server, instance, move |list| {
-        let Loaded::Readable(list) = list else {
+    let written = with_list_at(state, server, instance, move |list, limit| {
+        // An unreadable setting records nothing: recording trims to the setting, and guessing it
+        // could forget entries the user chose to keep.
+        let (Loaded::Readable(list), Some(limit)) = (list, limit) else {
             return (None, false);
         };
         let choice = match replace {
@@ -333,7 +461,7 @@ pub(super) async fn record_save(
                 })),
             },
         };
-        if list.record(entry) {
+        if list.record(entry, limit) {
             (Some(choice), true)
         } else {
             (None, false)
@@ -979,6 +1107,48 @@ pub(super) async fn reset_saved_files(
     } else {
         Err(RESET_REFUSED.into())
     }
+}
+
+/// This server's "Remember saved files" setting on this device, with how many files the list
+/// holds now (Server settings, Storage).
+#[tauri::command]
+pub(super) async fn get_saved_files_limit(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<UiSavedFilesLimit, String> {
+    let generation = keep_session::invocation_generation(&state).await?;
+    let (_, instance) = actor_instance_of(&state, server).await?;
+    let view = with_owner(&state, server, instance, |store, owner| {
+        limit_view(store, server, owner)
+    })
+    .await
+    .ok_or_else(|| "server changed".to_string())?;
+    if !still_current(&state, server, instance, generation).await {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    Ok(view)
+}
+
+/// Choose this server's "Remember saved files" setting, clamped into 16 to 4096. With `apply`
+/// false it only says how many of the oldest entries the choice would forget, so the renderer can
+/// ask first; with `apply` it changes the setting, forgetting those entries (never files).
+#[tauri::command]
+pub(super) async fn set_saved_files_limit(
+    state: State<'_, AppState>,
+    server: u64,
+    limit: u64,
+    apply: bool,
+) -> Result<UiSavedLimitChange, String> {
+    let generation = keep_session::invocation_generation(&state).await?;
+    let (_, instance) = actor_instance_of(&state, server).await?;
+    // The session must still be the one that asked. Checked, not held: the guard is never held
+    // across the store lock, so this cannot wait behind (or hold up) Lock.
+    drop(require_ui_session_generation(&state, generation).await?);
+    with_owner(&state, server, instance, |store, owner| {
+        change_limit(store, server, owner, limit, apply)
+    })
+    .await
+    .ok_or_else(|| "server changed".to_string())?
 }
 
 #[cfg(test)]

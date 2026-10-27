@@ -16,6 +16,33 @@ use std::rc::Rc;
 const OWNER: [u8; 64] = [3; 64];
 const CONTENT: [&[u8]; 2] = [b"saved file, first part", b" and its second part"];
 
+/// Recording at the default setting, which most rules here are about.
+trait RecordDefault {
+    fn record_default(&mut self, entry: SavedFile) -> bool;
+}
+impl RecordDefault for SavedFiles {
+    fn record_default(&mut self, entry: SavedFile) -> bool {
+        self.record(entry, SavedLimit::DEFAULT)
+    }
+}
+
+/// Entry `n` (its own ID, CID, time and name), optionally with a folder of `folder_bytes` bytes.
+fn numbered(n: u32, folder_bytes: Option<usize>) -> SavedFile {
+    let mut location = plain_location(&format!("f{n}.txt"));
+    if let Some(bytes) = folder_bytes {
+        location.folder = vec![b'a'; bytes];
+    }
+    let mut id = [0u8; 16];
+    id[..4].copy_from_slice(&n.to_be_bytes());
+    SavedFile {
+        id: SavedFileId::from_bytes(id),
+        cid: Cid::of(&n.to_be_bytes()),
+        size: 1,
+        saved_at_ms: u64::from(n),
+        location,
+    }
+}
+
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(56)
 }
@@ -91,8 +118,8 @@ fn a_list_round_trips_with_and_without_identities() {
     let dir = downloads(&root);
     let (_, journal) = published(&dir, "report.pdf", &[b"hello"]);
     let mut list = SavedFiles::new(&OWNER);
-    assert!(list.record(entry(1, b"a", SavedLocation::from_journal(&journal))));
-    assert!(list.record(entry(2, b"b", plain_location("plain.txt"))));
+    assert!(list.record_default(entry(1, b"a", SavedLocation::from_journal(&journal))));
+    assert!(list.record_default(entry(2, b"b", plain_location("plain.txt"))));
     let bytes = list.encode();
     let decoded = SavedFiles::decode(&bytes).unwrap();
     assert_eq!(decoded, list);
@@ -121,23 +148,23 @@ fn debug_output_never_shows_a_path_or_name() {
 fn each_saved_copy_has_its_own_entry_and_a_place_holds_one() {
     // Design review M1: two saves of one file are two copies, so both stay listed.
     let mut list = SavedFiles::new(&OWNER);
-    assert!(list.record(entry(1, b"a", plain_location("a.txt"))));
-    assert!(list.record(entry(2, b"a", plain_location("a (1).txt"))));
+    assert!(list.record_default(entry(1, b"a", plain_location("a.txt"))));
+    assert!(list.record_default(entry(2, b"a", plain_location("a (1).txt"))));
     assert_eq!(list.entries().len(), 2);
     // A newer save at the same place (the user deleted a.txt, a later save took the name) means
     // the older entry's file is not there: it is replaced, never listed twice.
-    assert!(list.record(entry(3, b"a", plain_location("a.txt"))));
+    assert!(list.record_default(entry(3, b"a", plain_location("a.txt"))));
     let ids: Vec<_> = list.entries().iter().map(|e| e.id.as_bytes()[0]).collect();
     assert_eq!(ids, [2, 3]);
     // Windows names ignore case, so a Windows entry at "A.TXT" is the same place.
     if external::CURRENT_PLATFORM == external::PLATFORM_WINDOWS {
-        assert!(list.record(entry(4, b"b", plain_location("A.TXT"))));
+        assert!(list.record_default(entry(4, b"b", plain_location("A.TXT"))));
         let ids: Vec<_> = list.entries().iter().map(|e| e.id.as_bytes()[0]).collect();
         assert_eq!(ids, [2, 4]);
     }
     // An ID already in use is refused, changing nothing.
     let before = list.clone();
-    assert!(!list.record(entry(2, b"c", plain_location("c.txt"))));
+    assert!(!list.record_default(entry(2, b"c", plain_location("c.txt"))));
     assert_eq!(list, before);
 }
 
@@ -147,74 +174,217 @@ fn the_same_file_identity_is_one_place_even_under_another_name() {
     let dir = downloads(&root);
     let (_, journal) = published(&dir, "report.pdf", &[b"hello"]);
     let mut list = SavedFiles::new(&OWNER);
-    assert!(list.record(entry(1, b"a", SavedLocation::from_journal(&journal))));
+    assert!(list.record_default(entry(1, b"a", SavedLocation::from_journal(&journal))));
     // "Replace my older saved copy" renames entries; a second entry for the same object (under
     // another name) can never exist.
     let mut renamed = SavedLocation::from_journal(&journal);
     renamed.leaf = "other.pdf".into();
-    assert!(list.record(entry(2, b"a", renamed)));
+    assert!(list.record_default(entry(2, b"a", renamed)));
     assert_eq!(list.entries().len(), 1);
     assert_eq!(list.entries()[0].id, SavedFileId::from_bytes([2; 16]));
 }
 
 #[test]
-fn the_list_keeps_at_most_256_entries_dropping_the_oldest() {
+fn the_default_list_keeps_256_entries_dropping_the_oldest() {
+    assert_eq!(SavedLimit::DEFAULT.get(), 256);
     let mut list = SavedFiles::new(&OWNER);
-    for n in 0..(MAX_SAVED_FILES as u32 + 10) {
-        let mut id = [0u8; 16];
-        id[..4].copy_from_slice(&n.to_be_bytes());
-        assert!(list.record(SavedFile {
-            id: SavedFileId::from_bytes(id),
-            cid: Cid::of(&n.to_be_bytes()),
-            size: 1,
-            saved_at_ms: u64::from(n),
-            location: plain_location(&format!("f{n}.txt")),
-        }));
+    for n in 0..266 {
+        assert!(list.record_default(numbered(n, None)));
     }
-    assert_eq!(list.entries().len(), MAX_SAVED_FILES);
+    assert_eq!(list.entries().len(), 256);
     assert_eq!(list.entries()[0].saved_at_ms, 10, "the ten oldest went");
+    assert_eq!(list.entries().last().unwrap().saved_at_ms, 265);
+    let bytes = list.encode();
     assert_eq!(
-        list.entries().last().unwrap().saved_at_ms,
-        u64::from(MAX_SAVED_FILES as u32 + 9)
+        bytes[4 + b"mewtual/saved-files".len()],
+        1,
+        "a default list stays version 1"
     );
-    assert!(SavedFiles::decode(&list.encode()).is_ok());
+    assert!(SavedFiles::decode(&bytes).is_ok());
+}
+
+#[test]
+fn the_setting_is_clamped_into_16_to_4096() {
+    for (asked, kept) in [
+        (0, 16),
+        (15, 16),
+        (16, 16),
+        (300, 300),
+        (4096, 4096),
+        (4097, 4096),
+        (u64::MAX, 4096),
+    ] {
+        assert_eq!(SavedLimit::clamped(asked).get(), kept, "{asked}");
+    }
+    assert_eq!(SavedLimit::LARGEST.get(), SavedLimit::MAX);
+    // The byte bound scales with the setting at 4 KiB per entry, and a reader never reads less
+    // than version 1's 1 MiB or more than 16 MiB.
+    assert_eq!(SavedLimit::DEFAULT.max_bytes(), 1024 * 1024);
+    assert_eq!(SavedLimit::clamped(16).max_bytes(), 64 * 1024);
+    assert_eq!(SavedLimit::clamped(16).read_bound(), 1024 * 1024);
+    assert_eq!(SavedLimit::LARGEST.read_bound(), 16 * 1024 * 1024);
+}
+
+#[test]
+fn lowering_the_setting_forgets_the_oldest_entries_and_raising_keeps_all() {
+    let mut list = SavedFiles::new(&OWNER);
+    for n in 0..100 {
+        assert!(list.record_default(numbered(n, None)));
+    }
+    // Raising keeps every entry, and a raised list grows past the default.
+    let larger = SavedLimit::clamped(4096);
+    assert_eq!(list.trimmed_by(larger), 0);
+    for n in 100..300 {
+        assert!(list.record(numbered(n, None), larger));
+    }
+    assert_eq!(list.entries().len(), 300);
+    assert_eq!(list.entries()[0].saved_at_ms, 0, "nothing was forgotten");
+    // Lowering forgets the oldest: the preview and the trim agree, and the newest stay.
+    let smaller = SavedLimit::clamped(16);
+    assert_eq!(list.trimmed_by(smaller), 284);
+    let before = list.clone();
+    assert_eq!(list.trim(smaller), 284);
+    assert_eq!(list.entries(), &before.entries()[284..]);
+    assert_eq!(list.entries()[0].saved_at_ms, 284);
+    // Already within the setting: nothing more goes.
+    assert_eq!(list.trim(smaller), 0);
 }
 
 #[test]
 fn very_long_folders_are_capped_by_bytes_not_count() {
-    let long = |n: u32| {
-        let mut location = plain_location(&format!("f{n}.txt"));
-        location.folder = vec![b'a'; super::external::MAX_FOLDER_BYTES];
-        let mut id = [0u8; 16];
-        id[..4].copy_from_slice(&n.to_be_bytes());
-        SavedFile {
-            id: SavedFileId::from_bytes(id),
-            cid: Cid::of(&n.to_be_bytes()),
-            size: 1,
-            saved_at_ms: u64::from(n),
-            location,
-        }
-    };
+    let long = |n| numbered(n, Some(super::external::MAX_FOLDER_BYTES));
     let mut list = SavedFiles::new(&OWNER);
     for n in 0..200 {
-        assert!(list.record(long(n)));
+        assert!(list.record_default(long(n)));
     }
     assert!(list.entries().len() < 100, "{}", list.entries().len());
-    assert!(list.encode().len() <= MAX_SAVED_LIST_BYTES);
+    assert!(list.encode().len() <= SavedLimit::DEFAULT.max_bytes());
     assert_eq!(list.entries().last().unwrap().saved_at_ms, 199);
     assert!(SavedFiles::decode(&list.encode()).is_ok());
+    // Even the smallest setting keeps one maximal entry (and the newest).
+    let mut list = SavedFiles::new(&OWNER);
+    for n in 0..20 {
+        assert!(list.record(long(n), SavedLimit::clamped(16)));
+    }
+    assert!(!list.entries().is_empty());
+    assert_eq!(list.entries().last().unwrap().saved_at_ms, 19);
+    assert!(list.encode().len() <= SavedLimit::clamped(16).max_bytes());
+}
+
+#[test]
+fn the_largest_setting_stays_within_16_mib_and_writes_version_2() {
+    // Long paths at the largest setting: the byte bound, not the count, caps the list, and the
+    // record never passes 16 MiB, the most any reader reads.
+    // (Built directly and trimmed once: recording thousands of saves one by one re-measures the
+    // whole list each time, which is right for one save but slow for a test.)
+    let largest = SavedLimit::LARGEST;
+    let mut list = SavedFiles::new(&OWNER);
+    list.entries = (0..1099)
+        .map(|n| numbered(n, Some(super::external::MAX_FOLDER_BYTES)))
+        .collect();
+    list.trim(largest);
+    assert!(list.record(
+        numbered(1099, Some(super::external::MAX_FOLDER_BYTES)),
+        largest
+    ));
+    let bytes = list.encode();
+    assert!(bytes.len() <= largest.max_bytes(), "{}", bytes.len());
+    assert!(bytes.len() > 1024 * 1024, "past version 1's bound");
+    assert!(list.entries().len() < 1100);
+    assert_eq!(list.entries().last().unwrap().saved_at_ms, 1099);
+    assert_eq!(bytes[4 + b"mewtual/saved-files".len()], SAVED_LIST_VERSION);
+    assert_eq!(SavedFiles::decode(&bytes).unwrap(), list);
+    // Many short entries: the count caps it at exactly 4096.
+    let mut list = SavedFiles::new(&OWNER);
+    list.entries = (0..4099).map(|n| numbered(n, None)).collect();
+    assert!(list.record(numbered(4099, None), largest));
+    assert_eq!(list.entries().len(), 4096);
+    assert_eq!(list.entries()[0].saved_at_ms, 4, "the four oldest went");
+    let bytes = list.encode();
+    assert_eq!(bytes[4 + b"mewtual/saved-files".len()], SAVED_LIST_VERSION);
+    assert_eq!(SavedFiles::decode(&bytes).unwrap(), list);
+}
+
+#[test]
+fn version_1_is_written_within_its_bounds_and_neither_version_reads_past_its_own() {
+    let mut list = SavedFiles::new(&OWNER);
+    for n in 0..257 {
+        assert!(list.record(numbered(n, None), SavedLimit::LARGEST));
+    }
+    let version_at = 4 + b"mewtual/saved-files".len();
+    let bytes = list.encode();
+    assert_eq!(bytes[version_at], 2, "257 entries need version 2");
+    // The same 257 entries labelled version 1 exceed what version 1 may hold.
+    let mut as_v1 = bytes.clone();
+    as_v1[version_at] = 1;
+    assert_eq!(SavedFiles::decode(&as_v1), Err(SavedListError::Malformed));
+    // Version 2 holds at most 4096 entries.
+    let count_at = version_at + 1 + 4 + OWNER.len();
+    let mut over = bytes.clone();
+    over[count_at..count_at + 4].copy_from_slice(&4097u32.to_be_bytes());
+    assert_eq!(SavedFiles::decode(&over), Err(SavedListError::Malformed));
+    // One fewer entry fits version 1 again.
+    list.trim(SavedLimit::DEFAULT);
+    assert_eq!(list.encode()[version_at], 1);
+    // The preview's length arithmetic matches the encoding exactly.
+    assert_eq!(
+        list.header_len()
+            + list
+                .entries()
+                .iter()
+                .map(SavedFile::encoded_len)
+                .sum::<usize>(),
+        list.encode().len()
+    );
+}
+
+#[test]
+fn the_setting_record_round_trips_and_refuses_anything_else() {
+    let limit = SavedLimit::clamped(1024);
+    let bytes = limit.encode_for(&OWNER);
+    assert_eq!(SavedLimit::decode(&bytes), Ok((OWNER.to_vec(), limit)));
+    let version_at = 4 + b"mewtual/saved-files-limit".len();
+    let mut newer = bytes.clone();
+    newer[version_at] = 2;
+    assert_eq!(SavedLimit::decode(&newer), Err(SavedListError::Version(2)));
+    // Out of range (a record is never clamped on read), trailing bytes, a list's plaintext.
+    let limit_at = bytes.len() - 4;
+    for value in [0u32, 15, 4097] {
+        let mut out = bytes.clone();
+        out[limit_at..].copy_from_slice(&value.to_be_bytes());
+        assert_eq!(
+            SavedLimit::decode(&out),
+            Err(SavedListError::Malformed),
+            "{value}"
+        );
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert_eq!(
+        SavedLimit::decode(&trailing),
+        Err(SavedListError::Malformed)
+    );
+    assert_eq!(
+        SavedLimit::decode(&SavedFiles::new(&OWNER).encode()),
+        Err(SavedListError::Malformed)
+    );
+    assert_eq!(
+        SavedFiles::decode(&bytes),
+        Err(SavedListError::Malformed),
+        "and the other way round"
+    );
 }
 
 #[test]
 fn an_unknown_version_or_a_foreign_record_is_refused_not_misread() {
     let mut list = SavedFiles::new(&OWNER);
-    list.record(entry(1, b"a", plain_location("a.txt")));
+    list.record_default(entry(1, b"a", plain_location("a.txt")));
     let bytes = list.encode();
     let version_at = 4 + b"mewtual/saved-files".len();
-    assert_eq!(bytes[version_at], SAVED_LIST_VERSION);
+    assert_eq!(bytes[version_at], 1);
     let mut newer = bytes.clone();
-    newer[version_at] = 2;
-    assert_eq!(SavedFiles::decode(&newer), Err(SavedListError::Version(2)));
+    newer[version_at] = 3;
+    assert_eq!(SavedFiles::decode(&newer), Err(SavedListError::Version(3)));
     // Another sealed record's plaintext (the cache setting's shape) is not a list.
     let mut other = catcoms_wire::Encoder::new();
     other.put_u8(1);
@@ -232,8 +402,8 @@ fn an_unknown_version_or_a_foreign_record_is_refused_not_misread() {
 #[test]
 fn every_malformed_shape_is_refused() {
     let mut list = SavedFiles::new(&OWNER);
-    list.record(entry(1, b"a", plain_location("a.txt")));
-    list.record(entry(2, b"b", plain_location("b.txt")));
+    list.record_default(entry(1, b"a", plain_location("a.txt")));
+    list.record_default(entry(2, b"b", plain_location("b.txt")));
     let good = list.encode();
     let mut trailing = good.clone();
     trailing.push(0);
@@ -268,7 +438,7 @@ fn every_malformed_shape_is_refused() {
     };
     let mut over = good.clone();
     let count_at = 4 + b"mewtual/saved-files".len() + 1 + 4 + OWNER.len();
-    over[count_at..count_at + 4].copy_from_slice(&(MAX_SAVED_FILES as u32 + 1).to_be_bytes());
+    over[count_at..count_at + 4].copy_from_slice(&257u32.to_be_bytes());
     assert_eq!(SavedFiles::decode(&over), Err(SavedListError::Malformed));
     for bytes in [
         encode(&|list| list.owner.clear()),
@@ -288,7 +458,7 @@ fn every_malformed_shape_is_refused() {
         assert_eq!(SavedFiles::decode(&bytes), Err(SavedListError::Malformed));
     }
     assert_eq!(
-        SavedFiles::decode(&vec![0; MAX_SAVED_LIST_BYTES + 1]),
+        SavedFiles::decode(&vec![0; 16 * 1024 * 1024 + 1]),
         Err(SavedListError::Malformed)
     );
 }
@@ -300,8 +470,8 @@ fn forget_rename_and_journal_lookups_touch_only_the_named_entry() {
     let (_, first) = published(&dir, "first.txt", &[b"one"]);
     let (_, second) = published(&dir, "second.txt", &[b"two"]);
     let mut list = SavedFiles::new(&OWNER);
-    list.record(entry(1, b"a", SavedLocation::from_journal(&first)));
-    list.record(entry(2, b"b", SavedLocation::from_journal(&second)));
+    list.record_default(entry(1, b"a", SavedLocation::from_journal(&first)));
+    list.record_default(entry(2, b"b", SavedLocation::from_journal(&second)));
     let id = SavedFileId::from_bytes([1; 16]);
     assert!(!list.rename(id, "wrong.txt", "first (2).txt"));
     assert!(!list.rename(id, "first.txt", "bad/name"));
@@ -332,10 +502,10 @@ fn the_replace_candidate_is_the_newest_older_copy_in_the_same_folder() {
     let (_, new) = published(&dir, "report.pdf", &CONTENT);
     let new_entry = entry(9, b"file", SavedLocation::from_journal(&new));
     let mut list = SavedFiles::new(&OWNER);
-    list.record(entry(1, b"file", SavedLocation::from_journal(&older)));
-    list.record(entry(2, b"file", SavedLocation::from_journal(&newer_here)));
-    list.record(entry(3, b"file", SavedLocation::from_journal(&there)));
-    list.record(entry(4, b"other", plain_location("x.txt")));
+    list.record_default(entry(1, b"file", SavedLocation::from_journal(&older)));
+    list.record_default(entry(2, b"file", SavedLocation::from_journal(&newer_here)));
+    list.record_default(entry(3, b"file", SavedLocation::from_journal(&there)));
+    list.record_default(entry(4, b"other", plain_location("x.txt")));
     assert_eq!(
         list.replace_candidate(&new_entry).map(|e| e.id),
         Ok(SavedFileId::from_bytes([2; 16])),
@@ -343,14 +513,14 @@ fn the_replace_candidate_is_the_newest_older_copy_in_the_same_folder() {
     );
     // Only a copy elsewhere: no candidate, and the note can say why.
     let mut only_elsewhere = SavedFiles::new(&OWNER);
-    only_elsewhere.record(entry(3, b"file", SavedLocation::from_journal(&there)));
+    only_elsewhere.record_default(entry(3, b"file", SavedLocation::from_journal(&there)));
     assert_eq!(
         only_elsewhere.replace_candidate(&new_entry),
         Err(NoCandidate::Elsewhere)
     );
     // An older copy that cannot be proven (no identity on either side).
     let mut plain = SavedFiles::new(&OWNER);
-    plain.record(entry(5, b"file", plain_location("report.pdf")));
+    plain.record_default(entry(5, b"file", plain_location("report.pdf")));
     assert_eq!(
         plain.replace_candidate(&new_entry),
         Err(NoCandidate::Unprovable)
@@ -362,14 +532,14 @@ fn the_replace_candidate_is_the_newest_older_copy_in_the_same_folder() {
     );
     // Nothing of this file listed (another file only, or nothing at all): nothing to say.
     let mut others = SavedFiles::new(&OWNER);
-    others.record(entry(4, b"other", plain_location("x.txt")));
+    others.record_default(entry(4, b"other", plain_location("x.txt")));
     assert_eq!(
         others.replace_candidate(&new_entry),
         Err(NoCandidate::NoneSaved)
     );
     // The new entry's own place is never its own candidate (the name already holds it).
     let mut same = SavedFiles::new(&OWNER);
-    same.record(entry(6, b"file", SavedLocation::from_journal(&new)));
+    same.record_default(entry(6, b"file", SavedLocation::from_journal(&new)));
     assert_eq!(
         same.replace_candidate(&new_entry),
         Err(NoCandidate::NoneSaved)
@@ -896,7 +1066,7 @@ fn renaming_onto_an_old_entrys_place_keeps_the_list_readable() {
     // must keep one entry per place, or it would decode as damaged afterwards.
     let fx = second_save("report.pdf");
     let mut list = SavedFiles::new(&OWNER);
-    list.record(fx.request.old.clone());
+    list.record_default(fx.request.old.clone());
     let new = SavedFile {
         id: SavedFileId::from_bytes([2; 16]),
         cid: fx.request.old.cid,
@@ -904,7 +1074,7 @@ fn renaming_onto_an_old_entrys_place_keeps_the_list_readable() {
         saved_at_ms: 2,
         location: fx.request.new.clone(),
     };
-    list.record(new);
+    list.record_default(new);
     assert_eq!(list.entries().len(), 2);
     assert!(list.rename(
         SavedFileId::from_bytes([2; 16]),

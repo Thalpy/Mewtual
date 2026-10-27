@@ -218,5 +218,7 @@
   { "command": "check_saved_files", "risk": "account-read", "surfaces": ["main"] },
   { "command": "forget_saved_file", "risk": "account-write", "surfaces": ["main"] },
   { "command": "reset_saved_files", "risk": "account-write", "surfaces": ["main"] },
-  { "command": "reveal_saved_file", "risk": "os-facing", "surfaces": ["main"] }
+  { "command": "reveal_saved_file", "risk": "os-facing", "surfaces": ["main"] },
+  { "command": "get_saved_files_limit", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "set_saved_files_limit", "risk": "account-write", "surfaces": ["main"] }
 ]

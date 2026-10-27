@@ -12,6 +12,16 @@ fn store_in(dir: &Path) -> ServerStore {
     ServerStore::open(dir, b"saved files", &mut ChaCha20Rng::seed_from_u64(56)).unwrap()
 }
 
+/// Recording at the default setting, which most rules here are about.
+trait RecordDefault {
+    fn record_default(&mut self, entry: SavedFile) -> bool;
+}
+impl RecordDefault for SavedFiles {
+    fn record_default(&mut self, entry: SavedFile) -> bool {
+        self.record(entry, SavedLimit::DEFAULT)
+    }
+}
+
 /// A real journaled save of `name` (its content is the name itself) in `dir`, through the
 /// storage crate's own export primitives: what a finished one-click save leaves behind.
 pub(crate) fn published_journal(dir: &Path, name: &str) -> (PathBuf, ExportJournal) {
@@ -83,8 +93,8 @@ fn the_projection_is_display_data_only_newest_first() {
     let downloads = root.path().join("Downloads");
     let other = root.path().join("Secret Projects");
     let mut list = SavedFiles::new(b"owner");
-    list.record(entry(1, b"a", &downloads, "a.txt", 10));
-    list.record(entry(2, b"b", &other, "b (1).txt", 20));
+    list.record_default(entry(1, b"a", &downloads, "a.txt", 10));
+    list.record_default(entry(2, b"b", &other, "b (1).txt", 20));
     let ui = project(&list, Some(&downloads));
     assert_eq!(ui.state, "ok");
     assert_eq!(
@@ -281,6 +291,164 @@ async fn a_rename_after_a_failed_forget_keeps_the_list_readable() {
     drain.await.unwrap();
 }
 
+/// Server 1's owner binding in `state` (the group, then this device's member id).
+async fn owner_of(state: &AppState) -> Vec<u8> {
+    let servers = state.servers.lock().await;
+    let entry = servers.get(&1).expect("server 1");
+    [entry.group_id.as_slice(), entry.device_id.as_bytes()].concat()
+}
+
+/// "Remember saved files": a save is recorded within the stored setting, and with a setting that
+/// cannot be read nothing is recorded (guessing it could forget entries the user chose to keep).
+#[tokio::test]
+async fn a_save_is_recorded_within_the_stored_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Downloads");
+    let state = AppState::default();
+    *state.store.lock().await = Some(store_in(dir.path()));
+    let (entry, task, drain) = crate::leaving::tests::running(565);
+    let actor = entry.actor.clone();
+    state.servers.lock().await.insert(1, entry);
+    let owner = owner_of(&state).await;
+    state
+        .store
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .save_saved_files_limit(1, &owner, SavedLimit::clamped(16), &mut OsCryptoRng)
+        .unwrap();
+    for n in 0..20u8 {
+        let save = plain(&[n], &format!("f{n}.txt"), &folder);
+        assert!(matches!(
+            record_save(&state, 1, 565, save, None).await,
+            Recorded::Yes { .. }
+        ));
+    }
+    let SavedFilesLoad::Found(list) = stored(&state).await else {
+        panic!("list");
+    };
+    let names: Vec<_> = list.entries().iter().map(|e| e.location.leaf()).collect();
+    assert_eq!(names.len(), 16);
+    assert_eq!(names[0], "f4.txt", "the four oldest were forgotten");
+    assert_eq!(names[15], "f19.txt");
+
+    // A damaged setting: nothing is recorded, the user hears so, and the list stays as it was.
+    let setting = dir.path().join("servers").join("1.saved-limit");
+    std::fs::write(&setting, b"damaged").unwrap();
+    let refused = record_save(&state, 1, 565, plain(b"x", "x.txt", &folder), None).await;
+    assert!(
+        matches!(refused, Recorded::No { tell: true }),
+        "{refused:?}"
+    );
+    assert_eq!(stored(&state).await, SavedFilesLoad::Found(list));
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
+
+#[test]
+fn choosing_the_setting_previews_clamps_and_forgets_only_the_oldest() {
+    const OWNER: &[u8] = b"group+member";
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Downloads");
+    let store = store_in(dir.path());
+    let view = limit_view(&store, 1, OWNER);
+    assert_eq!(
+        view,
+        UiSavedFilesLimit {
+            state: "ok",
+            limit: Some(256),
+            listed: Some(0),
+            min: 16,
+            max: 4096,
+            default: 256,
+        }
+    );
+    let mut list = SavedFiles::new(OWNER);
+    for n in 0..40u8 {
+        assert!(list.record_default(entry(n, &[n], &folder, &format!("f{n}.txt"), u64::from(n))));
+    }
+    store
+        .save_saved_files(1, OWNER, &list, &mut OsCryptoRng)
+        .unwrap();
+
+    // A preview changes nothing; a request below the range is clamped to 16.
+    let preview = change_limit(&store, 1, OWNER, 1, false).unwrap();
+    assert_eq!(
+        preview,
+        UiSavedLimitChange {
+            limit: 16,
+            forgets: 24,
+            applied: false,
+        }
+    );
+    assert_eq!(
+        store.load_saved_files(1, OWNER),
+        SavedFilesLoad::Found(list.clone())
+    );
+    assert_eq!(
+        store.load_saved_files_limit(1, OWNER),
+        SavedLimitLoad::Missing
+    );
+
+    // Applied: the 24 oldest entries are forgotten, the 16 newest stay, the setting is stored.
+    let applied = change_limit(&store, 1, OWNER, 1, true).unwrap();
+    assert_eq!(
+        (applied.limit, applied.forgets, applied.applied),
+        (16, 24, true)
+    );
+    let SavedFilesLoad::Found(trimmed) = store.load_saved_files(1, OWNER) else {
+        panic!("list");
+    };
+    assert_eq!(trimmed.entries(), &list.entries()[24..]);
+    assert_eq!(
+        store.load_saved_files_limit(1, OWNER),
+        SavedLimitLoad::Found(SavedLimit::clamped(16))
+    );
+
+    // Raising (above the range: clamped to 4096) keeps every entry.
+    let raised = change_limit(&store, 1, OWNER, 100_000, true).unwrap();
+    assert_eq!((raised.limit, raised.forgets), (4096, 0));
+    assert_eq!(
+        store.load_saved_files(1, OWNER),
+        SavedFilesLoad::Found(trimmed.clone())
+    );
+
+    // Across a restart (a new mount), the setting and the list read back.
+    drop(store);
+    let store = store_in(dir.path());
+    let view = limit_view(&store, 1, OWNER);
+    assert_eq!((view.limit, view.listed), (Some(4096), Some(16)));
+}
+
+#[test]
+fn an_unreadable_setting_or_list_is_never_guessed_at() {
+    const OWNER: &[u8] = b"group+member";
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let servers = dir.path().join("servers");
+    // A damaged setting reads as unreadable; choosing one again writes over it.
+    std::fs::write(servers.join("1.saved-limit"), b"damaged").unwrap();
+    let view = limit_view(&store, 1, OWNER);
+    assert_eq!((view.state, view.limit), ("unreadable", None));
+    change_limit(&store, 1, OWNER, 300, true).unwrap();
+    assert_eq!(
+        store.load_saved_files_limit(1, OWNER),
+        SavedLimitLoad::Found(SavedLimit::clamped(300))
+    );
+    // A damaged list is never trimmed or written; only its setting changes.
+    std::fs::write(servers.join("1.saved"), b"damaged list").unwrap();
+    let view = limit_view(&store, 1, OWNER);
+    assert_eq!(view.listed, None);
+    let lowered = change_limit(&store, 1, OWNER, 16, true).unwrap();
+    assert_eq!((lowered.limit, lowered.forgets), (16, 0));
+    assert_eq!(
+        std::fs::read(servers.join("1.saved")).unwrap(),
+        b"damaged list"
+    );
+}
+
 #[tokio::test]
 async fn a_replace_plan_comes_from_the_same_locked_read_that_records_the_save() {
     let dir = tempfile::tempdir().unwrap();
@@ -366,7 +534,7 @@ async fn a_replace_plan_comes_from_the_same_locked_read_that_records_the_save() 
     );
     let (_, there) = published_journal(&elsewhere, "report.pdf");
     let mut list = SavedFiles::new(b"o");
-    list.record(SavedFile {
+    list.record_default(SavedFile {
         id: SavedFileId::from_bytes([7; 16]),
         cid,
         size: 10,
@@ -735,7 +903,7 @@ fn identified_list(folder: &Path) -> (SavedFiles, SavedFileId, SavedFileId) {
         SavedFileId::from_bytes([2; 16]),
     ];
     for (id, cid, journal) in [(ids[0], &b"a"[..], &a), (ids[1], &b"b"[..], &b)] {
-        assert!(list.record(SavedFile {
+        assert!(list.record_default(SavedFile {
             id,
             cid: catcoms_storage::Cid::of(cid),
             size: 5,

@@ -14,9 +14,11 @@
 //!   newer save at the same place) only forgets it. The only code here that changes an external
 //!   file is [`replace_older_copy`] and [`drop_first_name`], and both act only through the
 //!   verified-object primitives in `external.rs`.
-//! - **Bounded.** At most [`MAX_SAVED_FILES`] entries and [`MAX_SAVED_LIST_BYTES`] of plaintext;
-//!   a decode refuses anything larger, so a damaged or hostile record cannot make a reader
-//!   allocate without bound.
+//! - **Bounded.** At most [`SavedLimit`] entries (the per-server "Remember saved files" setting,
+//!   16 to 4096, 256 by default) and [`SAVED_ENTRY_ALLOWANCE`] bytes of plaintext per allowed
+//!   entry. A decode refuses anything over its version's bounds, and the reader reads at most
+//!   [`SavedLimit::read_bound`] for the stored setting, so a damaged or hostile record cannot make
+//!   a reader allocate without bound.
 //! - **One entry per saved copy.** Two saves of one file are two copies and two entries. No two
 //!   entries name the same place (the same file identity, or the same folder and name), because a
 //!   name holds one file: a newer entry at a place replaces the older one there.
@@ -29,21 +31,110 @@
 use super::external::{self, FileIdentity, HeldName, Unchanged, Verified};
 use super::*;
 
-/// Most entries one server's list keeps. It matches the file index's own 256-row cap; older
-/// entries are dropped first.
-pub const MAX_SAVED_FILES: usize = 256;
-/// Largest encoded plaintext of one list. 256 entries of maximal folder paths would be about
-/// 4.5 MiB, so for very long paths this bound, not the count, caps the list (typical entries are
-/// about 200 bytes). Readers read at most this plus the seal overhead.
-pub const MAX_SAVED_LIST_BYTES: usize = 1024 * 1024;
+/// Plaintext bytes allowed per entry the setting allows: a list may encode to at most
+/// `limit * SAVED_ENTRY_ALLOWANCE` bytes ([`SavedLimit::max_bytes`]). Typical entries are about 200
+/// bytes, so the count binds; only very long folder paths (an entry can reach about 17.5 KiB with
+/// a 16 KiB folder) make the byte bound drop older entries early. 4 KiB keeps the default list's
+/// bound at exactly the 1 MiB of version 1, and even the smallest setting fits one maximal entry.
+pub const SAVED_ENTRY_ALLOWANCE: usize = 4096;
+/// Bounds of a version 1 record: what every build before the setting reads and writes. A list
+/// within them is still written as version 1, so those builds keep reading it.
+const V1_MAX_ENTRIES: usize = 256;
+const V1_MAX_BYTES: usize = V1_MAX_ENTRIES * SAVED_ENTRY_ALLOWANCE;
+/// Largest plaintext of any list (the largest setting): no decode accepts more.
+const LARGEST_LIST_BYTES: usize = SavedLimit::MAX as usize * SAVED_ENTRY_ALLOWANCE;
 /// Exact domain string at the start of the plaintext. A different sealed record copied over this
 /// one (all vault records share the `db_key`) decodes as unreadable instead of being misread.
 const DOMAIN: &[u8] = b"mewtual/saved-files";
-/// The only version this build reads and writes.
-pub const SAVED_LIST_VERSION: u8 = 1;
+/// The newest version this build reads and writes. Version 2 has version 1's layout with the
+/// larger bounds of a raised setting, and is written only for a list over version 1's bounds.
+/// A build before the setting then reads "written by a newer Mewtual" and leaves it alone, as
+/// long as the record is within the 1 MiB that build reads at all; a larger one (more than 256
+/// entries of long paths) it reads as damaged and would offer to start anew. No released build
+/// predates the setting while opening this file (the list and the setting ship together).
+pub const SAVED_LIST_VERSION: u8 = 2;
+/// Byte offset of the version byte (after the length-prefixed domain).
+const VERSION_AT: usize = 4 + DOMAIN.len();
+/// Domain and version of the setting's own record (`servers/<id>.saved-limit`).
+const LIMIT_DOMAIN: &[u8] = b"mewtual/saved-files-limit";
+const LIMIT_VERSION: u8 = 1;
 /// The owner binding is the group id (at most 256 bytes, as in the cache setting record) followed
 /// by this device's member id in that group.
 const MAX_OWNER_BYTES: usize = 512;
+
+/// How many saved files one server's list remembers: the per-server, per-device "Remember saved
+/// files" setting, sealed in its own record beside the list (`servers/<id>.saved-limit`). Always
+/// within [`Self::MIN`]..=[`Self::MAX`]; a request outside is clamped, never refused.
+///
+/// The range: below 16 the list stops being useful for the chat mark and for replacing an older
+/// copy; 4096 (16 times the default) keeps the worst-case record at 16 MiB, which is read and
+/// rewritten whole on a save, while ordinary paths keep even a full list under 1 MiB. Lowering it
+/// forgets the oldest entries (never a file); raising it keeps every entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SavedLimit(u32);
+impl SavedLimit {
+    pub const MIN: u32 = 16;
+    pub const MAX: u32 = 4096;
+    /// The default, and what a server without the setting uses (the file index's own row cap).
+    pub const DEFAULT: Self = Self(V1_MAX_ENTRIES as u32);
+    /// The largest setting, whose bound a reader uses when the stored setting cannot be read.
+    pub const LARGEST: Self = Self(Self::MAX);
+
+    /// `requested` clamped into the range.
+    pub fn clamped(requested: u64) -> Self {
+        Self(requested.clamp(u64::from(Self::MIN), u64::from(Self::MAX)) as u32)
+    }
+    pub fn get(self) -> u32 {
+        self.0
+    }
+    /// Largest plaintext a list kept at this setting may encode to.
+    pub fn max_bytes(self) -> usize {
+        self.0 as usize * SAVED_ENTRY_ALLOWANCE
+    }
+    /// How much a reader reads of a list stored at this setting: [`Self::max_bytes`], but never
+    /// less than version 1's 1 MiB, because a build before the setting may have written (and a
+    /// lowered setting does not shrink) a version 1 list of up to that size. The caller adds the
+    /// seal overhead. Always bounded: at most 16 MiB.
+    pub fn read_bound(self) -> usize {
+        self.max_bytes().max(V1_MAX_BYTES)
+    }
+
+    /// The setting's plaintext for `owner`: domain, version, owner (as the list's own binding,
+    /// so a setting left behind by an earlier membership never applies), the limit.
+    pub fn encode_for(self, owner: &[u8]) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.put_bytes(LIMIT_DOMAIN).expect("fixed domain");
+        e.put_u8(LIMIT_VERSION);
+        e.put_bytes(owner).expect("bounded owner");
+        e.put_u32(self.0);
+        e.finish()
+    }
+
+    /// Strict decode into `(owner, limit)`. A limit outside the range, trailing bytes or another
+    /// record's shape is [`SavedListError::Malformed`]; an unknown version is
+    /// [`SavedListError::Version`]. Either way the caller treats the setting as unreadable.
+    pub fn decode(bytes: &[u8]) -> Result<(Vec<u8>, Self), SavedListError> {
+        let bad = |_| SavedListError::Malformed;
+        let mut d = Decoder::new(bytes);
+        if d.get_bytes().map_err(bad)? != LIMIT_DOMAIN {
+            return Err(SavedListError::Malformed);
+        }
+        let version = d.get_u8().map_err(bad)?;
+        if version != LIMIT_VERSION {
+            return Err(SavedListError::Version(version));
+        }
+        let owner = d.get_bytes().map_err(bad)?.to_vec();
+        if owner.is_empty() || owner.len() > MAX_OWNER_BYTES {
+            return Err(SavedListError::Malformed);
+        }
+        let limit = d.get_u32().map_err(bad)?;
+        d.finish().map_err(bad)?;
+        if !(Self::MIN..=Self::MAX).contains(&limit) {
+            return Err(SavedListError::Malformed);
+        }
+        Ok((owner, Self(limit)))
+    }
+}
 
 /// Random handle of one entry, the renderer's only way to name it for an action. It is not a
 /// capability by itself: every command re-reads the sealed list and acts only on an entry that is
@@ -238,6 +329,12 @@ impl SavedFile {
             }
         }
     }
+    /// This entry's share of [`SavedFiles::encode`].
+    fn encoded_len(&self) -> usize {
+        let mut e = Encoder::new();
+        self.encode(&mut e);
+        e.finish().len()
+    }
     fn decode(d: &mut Decoder<'_>) -> Option<Self> {
         let id = SavedFileId(d.get_bytes().ok()?.try_into().ok()?);
         let cid = Cid::from_bytes(d.get_bytes().ok()?.try_into().ok()?);
@@ -320,20 +417,42 @@ impl SavedFiles {
 
     /// Record a finished save as the newest entry. An older entry at the same place (see
     /// [`SavedLocation::same_place`]) is removed, then the oldest entries are dropped until the
-    /// list fits [`MAX_SAVED_FILES`] and [`MAX_SAVED_LIST_BYTES`]. A single entry always fits: its
-    /// fields are bounded far below the byte limit. Returns `false` for an invalid entry or an ID
+    /// list fits `limit` (see [`Self::trim`]). A single entry always fits: its fields are bounded
+    /// far below even the smallest setting's bytes. Returns `false` for an invalid entry or an ID
     /// already in use (nothing changes then).
-    pub fn record(&mut self, entry: SavedFile) -> bool {
+    pub fn record(&mut self, entry: SavedFile, limit: SavedLimit) -> bool {
         if !entry.valid() || self.entries.iter().any(|other| other.id == entry.id) {
             return false;
         }
         self.entries
             .retain(|other| !other.location.same_place(&entry.location));
         self.entries.push(entry);
-        while self.entries.len() > MAX_SAVED_FILES || self.encoded_len() > MAX_SAVED_LIST_BYTES {
-            self.entries.remove(0);
-        }
+        self.trim(limit);
         true
+    }
+
+    /// Drop the oldest entries until at most `limit` remain and the list encodes to at most
+    /// [`SavedLimit::max_bytes`]. Only list entries go, never a file. Returns how many went.
+    pub fn trim(&mut self, limit: SavedLimit) -> usize {
+        let dropping = self.trimmed_by(limit);
+        self.entries.drain(..dropping);
+        dropping
+    }
+
+    /// How many of the oldest entries [`Self::trim`] would drop at `limit`, without changing
+    /// anything: what lowering the setting would forget. Linear in the list's size (each entry is
+    /// encoded once), so a preview of a full list stays cheap.
+    pub fn trimmed_by(&self, limit: SavedLimit) -> usize {
+        let lengths: Vec<usize> = self.entries.iter().map(SavedFile::encoded_len).collect();
+        let mut total = self.header_len() + lengths.iter().sum::<usize>();
+        let mut dropping = 0;
+        while dropping < lengths.len()
+            && (lengths.len() - dropping > limit.get() as usize || total > limit.max_bytes())
+        {
+            total -= lengths[dropping];
+            dropping += 1;
+        }
+        dropping
     }
 
     /// The copy "Replace my older saved copy" may act on when `new` is recorded: the newest older
@@ -421,11 +540,14 @@ impl SavedFiles {
         true
     }
 
-    fn encoded_len(&self) -> usize {
-        self.encode().len()
+    /// The encoded size of everything before the entries (domain, version, owner, count).
+    fn header_len(&self) -> usize {
+        VERSION_AT + 1 + 4 + self.owner.len() + 4
     }
 
-    /// The version 1 plaintext (see the design document for the layout).
+    /// The plaintext: version 1 while the list is within version 1's bounds (256 entries, 1 MiB),
+    /// so builds before the setting keep reading it; otherwise version 2, the same layout, which
+    /// those builds leave alone as newer. See the design document for the layout.
     pub fn encode(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.put_bytes(DOMAIN).expect("fixed domain");
@@ -435,15 +557,21 @@ impl SavedFiles {
         for entry in &self.entries {
             entry.encode(&mut e);
         }
-        e.finish()
+        let mut bytes = e.finish();
+        if self.entries.len() <= V1_MAX_ENTRIES && bytes.len() <= V1_MAX_BYTES {
+            bytes[VERSION_AT] = 1;
+        }
+        bytes
     }
 
-    /// Strict decode. Anything other than a canonical version 1 record within every bound is an
-    /// error: an unknown version is [`SavedListError::Version`], everything else
-    /// [`SavedListError::Malformed`].
+    /// Strict decode of a version 1 or 2 record within its version's bounds (version 1: 256
+    /// entries and 1 MiB; version 2: 4096 entries and 16 MiB). An unknown version is
+    /// [`SavedListError::Version`], everything else wrong [`SavedListError::Malformed`]. The
+    /// stored setting does not narrow a decode: a list longer than a lowered setting (a version 1
+    /// list an older build grew) reads, and the next recorded save trims it.
     pub fn decode(bytes: &[u8]) -> Result<Self, SavedListError> {
         let bad = |_| SavedListError::Malformed;
-        if bytes.len() > MAX_SAVED_LIST_BYTES {
+        if bytes.len() > LARGEST_LIST_BYTES {
             return Err(SavedListError::Malformed);
         }
         let mut d = Decoder::new(bytes);
@@ -451,15 +579,20 @@ impl SavedFiles {
             return Err(SavedListError::Malformed);
         }
         let version = d.get_u8().map_err(bad)?;
-        if version != SAVED_LIST_VERSION {
-            return Err(SavedListError::Version(version));
+        let (max_entries, max_bytes) = match version {
+            1 => (V1_MAX_ENTRIES, V1_MAX_BYTES),
+            SAVED_LIST_VERSION => (SavedLimit::MAX as usize, LARGEST_LIST_BYTES),
+            _ => return Err(SavedListError::Version(version)),
+        };
+        if bytes.len() > max_bytes {
+            return Err(SavedListError::Malformed);
         }
         let owner = d.get_bytes().map_err(bad)?.to_vec();
         if owner.is_empty() || owner.len() > MAX_OWNER_BYTES {
             return Err(SavedListError::Malformed);
         }
         let count = d.get_u32().map_err(bad)? as usize;
-        if count > MAX_SAVED_FILES {
+        if count > max_entries {
             return Err(SavedListError::Malformed);
         }
         let mut entries: Vec<SavedFile> = Vec::with_capacity(count);

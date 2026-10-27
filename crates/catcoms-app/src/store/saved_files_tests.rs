@@ -3,7 +3,7 @@
 //! non-destructive handling of records this build cannot read, "Start a new list" for a damaged
 //! one only, and removal on leave.
 use super::*;
-use catcoms_storage::kept::{SavedFile, SavedFileId, SavedFiles, SavedLocation};
+use catcoms_storage::kept::{SavedFile, SavedFileId, SavedFiles, SavedLimit, SavedLocation};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
@@ -13,14 +13,43 @@ const OWNER: &[u8] = b"group+member-1";
 
 fn list(owner: &[u8], leaf: &str) -> SavedFiles {
     let mut list = SavedFiles::new(owner);
-    assert!(list.record(SavedFile {
-        id: SavedFileId::from_bytes([1; 16]),
-        cid: catcoms_storage::Cid::of(b"file"),
-        size: 4,
-        saved_at_ms: 1_700_000_000_000,
-        location: SavedLocation::unidentified(&std::env::temp_dir().join(leaf)).unwrap(),
-    }));
+    assert!(list.record(
+        SavedFile {
+            id: SavedFileId::from_bytes([1; 16]),
+            cid: catcoms_storage::Cid::of(b"file"),
+            size: 4,
+            saved_at_ms: 1_700_000_000_000,
+            location: SavedLocation::unidentified(&std::env::temp_dir().join(leaf)).unwrap(),
+        },
+        SavedLimit::DEFAULT
+    ));
     list
+}
+
+/// A list of `count` entries, each in its own 4 KiB folder, recorded at the largest setting:
+/// about 4.2 KiB an entry, so 300 of them pass version 1's 1 MiB.
+fn long_list(count: u32) -> SavedFiles {
+    let mut list = SavedFiles::new(OWNER);
+    let base = std::env::temp_dir().join("b".repeat(4000));
+    for n in 0..count {
+        let mut id = [0u8; 16];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        assert!(list.record(
+            SavedFile {
+                id: SavedFileId::from_bytes(id),
+                cid: catcoms_storage::Cid::of(&n.to_be_bytes()),
+                size: 1,
+                saved_at_ms: u64::from(n),
+                location: SavedLocation::unidentified(&base.join(format!("f{n}.txt"))).unwrap(),
+            },
+            SavedLimit::LARGEST,
+        ));
+    }
+    list
+}
+
+fn limit_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join("servers").join(format!("{id}.saved-limit"))
 }
 
 fn record_path(dir: &Path, id: u64) -> PathBuf {
@@ -98,16 +127,12 @@ fn records_this_build_cannot_read_are_told_apart_and_left_alone() {
         .unwrap();
     std::fs::copy(dir.path().join("servers").join("9.storage"), &path).unwrap();
     assert_eq!(store.load_saved_files(7, OWNER), SavedFilesLoad::Damaged);
-    std::fs::write(
-        &path,
-        vec![0u8; catcoms_storage::kept::MAX_SAVED_LIST_BYTES + 41],
-    )
-    .unwrap();
+    std::fs::write(&path, vec![0u8; SavedLimit::DEFAULT.read_bound() + 41]).unwrap();
     assert_eq!(store.load_saved_files(7, OWNER), SavedFilesLoad::Damaged);
-    // A version 2 record, as a newer build would write it, sealed with this vault's key.
+    // A version 3 record, as a newer build would write it, sealed with this vault's key.
     let mut newer = list(OWNER, "a.txt").encode();
     let version_at = 4 + b"mewtual/saved-files".len();
-    newer[version_at] = 2;
+    newer[version_at] = 3;
     let sealed = seal(&store.keys.db_key().unwrap(), &newer, &mut rng).unwrap();
     store.write_saved_files_record(7, &frame(&sealed)).unwrap();
     let before = std::fs::read(&path).unwrap();
@@ -174,4 +199,84 @@ fn leaving_removes_the_list_whatever_it_holds() {
         store.load_saved_files(8, OWNER),
         SavedFilesLoad::Found(_)
     ));
+    // The setting goes with its list.
+    store
+        .save_saved_files_limit(8, OWNER, SavedLimit::clamped(1024), &mut rng)
+        .unwrap();
+    store.remove_server(8).unwrap();
+    assert!(!limit_path(dir.path(), 8).exists());
+    assert_eq!(
+        store.load_saved_files_limit(8, OWNER),
+        SavedLimitLoad::Missing
+    );
+}
+
+#[test]
+fn the_setting_defaults_to_256_and_survives_a_restart_sealed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(56);
+    {
+        let store = ServerStore::open(dir.path(), PASS, &mut rng).unwrap();
+        let missing = store.load_saved_files_limit(7, OWNER);
+        assert_eq!(missing, SavedLimitLoad::Missing);
+        assert_eq!(missing.limit(), Some(SavedLimit::DEFAULT));
+        assert_eq!(missing.read_bound(), 1024 * 1024);
+        store
+            .save_saved_files_limit(7, OWNER, SavedLimit::clamped(2048), &mut rng)
+            .unwrap();
+    }
+    let raw = std::fs::read(limit_path(dir.path(), 7)).unwrap();
+    assert!(!raw
+        .windows(b"mewtual/saved-files-limit".len())
+        .any(|w| w == b"mewtual/saved-files-limit"));
+    // A process restart (new mount) reads it back; another membership gets the default.
+    let store = ServerStore::open(dir.path(), PASS, &mut rng).unwrap();
+    assert_eq!(
+        store.load_saved_files_limit(7, OWNER),
+        SavedLimitLoad::Found(SavedLimit::clamped(2048))
+    );
+    assert_eq!(
+        store.load_saved_files_limit(7, b"group+member-2"),
+        SavedLimitLoad::Missing
+    );
+    // A damaged setting is unreadable: no limit to record with, the largest bound to read with.
+    std::fs::write(limit_path(dir.path(), 7), b"damaged").unwrap();
+    let unreadable = store.load_saved_files_limit(7, OWNER);
+    assert_eq!(unreadable, SavedLimitLoad::Unreadable);
+    assert_eq!(unreadable.limit(), None);
+    assert_eq!(unreadable.read_bound(), 16 * 1024 * 1024);
+}
+
+#[test]
+fn the_read_bound_follows_the_stored_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(56);
+    let store = ServerStore::open(dir.path(), PASS, &mut rng).unwrap();
+    let long = long_list(300);
+    assert!(long.encode().len() > 1024 * 1024, "past version 1's bound");
+    // At the default setting such a list can never be written: a reader would not read it.
+    assert!(store.save_saved_files(7, OWNER, &long, &mut rng).is_err());
+    assert!(!record_path(dir.path(), 7).exists());
+    // Raised, it is written and read back whole.
+    store
+        .save_saved_files_limit(7, OWNER, SavedLimit::clamped(1024), &mut rng)
+        .unwrap();
+    store.save_saved_files(7, OWNER, &long, &mut rng).unwrap();
+    assert_eq!(
+        store.load_saved_files(7, OWNER),
+        SavedFilesLoad::Found(long.clone())
+    );
+    // A setting that cannot be read still reads the list, under the largest bound.
+    std::fs::write(limit_path(dir.path(), 7), b"damaged").unwrap();
+    assert_eq!(
+        store.load_saved_files(7, OWNER),
+        SavedFilesLoad::Found(long.clone())
+    );
+    // The reader reads no more than the stored setting allows: a setting lowered without the list
+    // being trimmed first (native always trims first) leaves a list too large to read, which is
+    // never read past its bound.
+    store
+        .save_saved_files_limit(7, OWNER, SavedLimit::DEFAULT, &mut rng)
+        .unwrap();
+    assert_eq!(store.load_saved_files(7, OWNER), SavedFilesLoad::Damaged);
 }
