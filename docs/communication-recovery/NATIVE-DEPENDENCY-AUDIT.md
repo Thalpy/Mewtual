@@ -27,10 +27,11 @@ cryptographic proof or a claim that every dependency is maintained.
   classified at runtime or establish process isolation.
 - The native arithmetic graph moves from newly yanked `crypto-bigint` 0.7.7 to compatible
   non-yanked 0.7.10, with `ctutils` 0.4.6. Native P-256 remains 0.14 and the injected RNG,
-  transcript and encoding contracts remain required. The fresh `121ad952` full native
+  transcript and encoding contracts remain required. The fresh Windows `121ad952` full native
   run passes 899 library tests, including its vectors/layout guards, and six ACL tests.
   Native strict Clippy/check, build and real application startup pass. Root validation
-  remains pending after its separate fixture-setup failure.
+  remains pending after its separate fixture-setup failure. Linux native's subsequent
+  Begin-refusal fixture failure and current correction are recorded in the integration handover.
 - A Windows build exposed WMI 0.18.4 selecting `windows` 0.62.2 with an incompatible
   direct `windows-core` 0.61.2. Its published ranges permit both independently. Only
   WMI's core edge is restored to 0.62.2; other legitimate 0.61 users remain. Locked

@@ -5,10 +5,11 @@
 PRs #26/#54 have landed in main; #57 has landed in the chat-recovery branch. Draft #74
 combines the reviewed recovery/V2 stack, dependency upgrade and newer Gate7 send fixes,
 including the original upload/lock repair. Fresh frontend/MLS/flow checks pass, as do
-899 native library and six ACL tests. Root validation is blocked by the crossing-range
-observer failure; the newer focused CI failure identifies fixture setup, before the
-range starts. Its setup-watchdog correction is under validation. Native build/startup
-pass. Both dependency audits now pass after the separate
+899 native library and six ACL tests on Windows. The crossing-range fixture correction
+passes all 48 file-transfer tests locally and in both hosted OS jobs; complete Root suites
+are running. Linux native found a separate Begin-refusal observer defect; its corrected
+original-deadline retry passes positive/mutation/restoration tests and is in full validation.
+Native build/startup pass. Both dependency audits now pass after the separate
 native follow-up, with a documented and constrained GTK build-time maintenance decision.
 [PR-BACKLOG-INTEGRATION](communication-recovery/PR-BACKLOG-INTEGRATION.md) records exact
 sources, current results and held PR findings. Older dated evidence below retains its

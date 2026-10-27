@@ -54,11 +54,10 @@ fn resolve(
 async fn outgoing(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
-    parent: &ledger::ResolvedRow,
+    parent: &DerivationParent,
     request: ledger::ConfirmationPurpose,
 ) -> ledger::ResolvedRow {
-    let bytes = begin_frame(state, selected, parent, request).await;
-    assert_eq!(bytes.len(), replies::STATUS_BYTES);
+    let bytes = original_begin_status(state, selected, parent, request, true).await;
     let id = ledger::RowId::from_logical(bytes[2..18].try_into().unwrap()).unwrap();
     resolve(state, selected, parent, request, id)
 }
@@ -98,15 +97,198 @@ async fn begin_frame_on_route(
     let selector = parent.confirmation_selector().unwrap();
     let mut body = confirmation_prefix(parent.id(), purpose, selector);
     body.push(1); // exact original factory/attachment retry, never a replacement purpose
+    begin_body_on_route(state, public, route, &body).await
+}
+
+async fn begin_body_on_route(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    body: &[u8],
+) -> Vec<u8> {
     let header = (route.session().fixture_counts().1 + 1, 8, 0, [0; 16]);
     let reply = confirmation_begin::begin(
         &context::Context::new(state),
         route,
-        opened_frame(public, route, header, &body, None),
+        opened_frame(public, route, header, body, None),
     )
     .await
     .unwrap();
-    opened_reply(public, header, &body, &reply)
+    let bytes = opened_reply(public, header, body, &reply);
+    // Actual collection precedes observing the next sequence/position. A refusal cannot
+    // justify resetting a counter, discarding uncertain work or replacing the purpose.
+    drop(reply);
+    bytes
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BeginFailure {
+    Expired { attempts: u32 },
+    Refused { reply: [u8; 3], attempts: u32 },
+    Malformed { length: usize, attempts: u32 },
+}
+
+/// Must run inside the original caller's single watchdog, including all awaits/sleeps.
+/// Capacity does not identify where admission stopped: exact native retry/recovery owns
+/// that distinction. Keep the same channel, parent, purpose, predecessor and body.
+async fn observe_begin(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    clock: &dyn Clock,
+    deadline: u64,
+    body: &[u8],
+    mut capacity_observed: impl FnMut(),
+) -> Result<Vec<u8>, BeginFailure> {
+    let mut attempts = 0u32;
+    loop {
+        if clock.monotonic_ms() >= deadline {
+            return Err(BeginFailure::Expired { attempts });
+        }
+        attempts += 1;
+        let bytes = begin_body_on_route(state, public, route, body).await;
+        if clock.monotonic_ms() >= deadline {
+            return Err(BeginFailure::Expired { attempts });
+        }
+        if bytes.len() == replies::STATUS_BYTES && bytes[..2] == [1, 0] {
+            return Ok(bytes);
+        }
+        let Ok(reply) = <[u8; 3]>::try_from(bytes.as_slice()) else {
+            return Err(BeginFailure::Malformed {
+                length: bytes.len(),
+                attempts,
+            });
+        };
+        if reply != replies::refused(factory::Refused::Protocol(VoiceError::Capacity)) {
+            return Err(BeginFailure::Refused { reply, attempts });
+        }
+        capacity_observed();
+        eprintln!(
+            "native confirmation Begin Capacity; attempt {attempts}; remaining original ms {}",
+            deadline.saturating_sub(clock.monotonic_ms())
+        );
+        clock.sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// One original deadline covers bootstrap, negative probes, every exact retry and sleep.
+/// No refusal is success; only the authenticated status resolves an actual ledger child.
+async fn original_begin_status(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    parent: &DerivationParent,
+    purpose: ledger::ConfirmationPurpose,
+    prove_preflight: bool,
+) -> Vec<u8> {
+    let clock = crate::voice_runtime(state).clock();
+    let deadline = parent.original_deadline;
+    let remaining = deadline
+        .checked_sub(clock.monotonic_ms())
+        .filter(|remaining| *remaining != 0)
+        .expect("original Derive deadline before confirmation Begin");
+    tokio::time::timeout(Duration::from_millis(remaining), async {
+        let bootstrap::Status::Ready(public) = bootstrap::ensure(
+            state,
+            selected.id(),
+            selected.executor(),
+            &mut catcoms_rt::OsCryptoRng,
+        )
+        .await
+        .unwrap() else {
+            panic!("original confirmation channel")
+        };
+        let route = state.voice_channels.route(public.public().slot).unwrap();
+        let selector = parent.confirmation_selector().unwrap();
+        let mut body = confirmation_prefix(parent.id(), purpose, selector);
+        body.push(1);
+        let original = parent.status().unwrap();
+        if prove_preflight {
+            let sequence = route.session().fixture_counts().1;
+            assert_eq!(
+                observe_begin(state, &public, &route, clock.as_ref(), 0, &body, || {}).await,
+                Err(BeginFailure::Expired { attempts: 0 }),
+            );
+            assert_eq!(route.session().fixture_counts().1, sequence);
+
+            // A real authenticated mismatched selector must refuse once, without retry.
+            // Its rejection precedes native child/factory creation and leaves this parent.
+            let wrong = PairSelector {
+                epoch: selector.epoch.wrapping_add(1),
+                ..selector
+            };
+            let mut invalid = confirmation_prefix(parent.id(), purpose, wrong);
+            invalid.push(1);
+            assert_eq!(
+                observe_begin(
+                    state,
+                    &public,
+                    &route,
+                    clock.as_ref(),
+                    deadline,
+                    &invalid,
+                    || {}
+                )
+                .await,
+                Err(BeginFailure::Refused {
+                    reply: replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized)),
+                    attempts: 1,
+                }),
+            );
+            assert_eq!(route.session().fixture_counts().1, sequence + 1);
+            assert!(parent.status().unwrap() == original);
+        }
+        // Real maintenance may already have published this exact child. Freeze native
+        // publication in shipping UI-commit -> servers order before observing its history.
+        // Never assume an earlier valid producer lost the race to the fixture.
+        let mut boundary = if prove_preflight {
+            Some(state.ui_session_commit.clone().lock_owned().await)
+        } else {
+            None
+        };
+        let mut pressure = if prove_preflight {
+            Some(state.servers.lock().await)
+        } else {
+            None
+        };
+        let original = parent.status().unwrap();
+        let child_before = state
+            .voice_handoff
+            .lookup_child(selected, parent, purpose, None)
+            .ok()
+            .map(|child| (child.id(), child.status().unwrap()));
+        let bytes = observe_begin(
+            state,
+            &public,
+            &route,
+            clock.as_ref(),
+            deadline,
+            &body,
+            || {
+                if pressure.is_some() {
+                    // This first Capacity is deterministically preflight-only because THIS
+                    // guard is still held. Other Capacity replies carry no such guarantee.
+                    let child_after = state
+                        .voice_handoff
+                        .lookup_child(selected, parent, purpose, None)
+                        .ok()
+                        .map(|child| (child.id(), child.status().unwrap()));
+                    assert!(child_after == child_before);
+                    assert!(parent.status().unwrap() == original);
+                    drop(pressure.take());
+                    drop(boundary.take());
+                }
+            },
+        )
+        .await
+        .expect("original confirmation Begin returned a nonretryable refusal");
+        assert!(
+            pressure.is_none() && boundary.is_none(),
+            "actual forced Capacity must pass through retry classification"
+        );
+        bytes
+    })
+    .await
+    .expect("original Derive deadline exhausted during confirmation Begin")
 }
 
 /// Known lost-input publications must reach the exact permanent refusal even when local
@@ -319,28 +501,12 @@ pub(crate) async fn confirmation_alias_claims(
 async fn incoming(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
-    parent: &ledger::ResolvedRow,
+    parent: &DerivationParent,
     role: u8,
 ) -> ledger::ResolvedRow {
-    let start = SystemClock.monotonic_ms();
     let request = ledger::ConfirmationPurpose::Incoming(role);
-    let id = loop {
-        // The HANDLER does one bounded observation. Only this test harness retries while
-        // real network ingress is progressing; no fifteen-second loop enters the listener.
-        let bytes = begin_frame(state, selected, parent, request).await;
-        if bytes.len() == replies::STATUS_BYTES {
-            break ledger::RowId::from_logical(bytes[2..18].try_into().unwrap()).unwrap();
-        }
-        assert_eq!(
-            bytes,
-            replies::refused(factory::Refused::Protocol(VoiceError::Capacity))
-        );
-        assert!(
-            SystemClock.monotonic_ms().saturating_sub(start) < 15_000,
-            "authenticated native confirmation did not arrive through the permitted TCP bridge"
-        );
-        SystemClock.sleep(Duration::from_millis(25)).await;
-    };
+    let bytes = original_begin_status(state, selected, parent, request, false).await;
+    let id = ledger::RowId::from_logical(bytes[2..18].try_into().unwrap()).unwrap();
     resolve(state, selected, parent, request, id)
 }
 
@@ -1219,10 +1385,10 @@ async fn recover_child_history(
 pub(crate) async fn confirmation_round_trip(
     low_state: &AppState,
     low: &Arc<SelectedHandoffOwner>,
-    low_parent: &ledger::ResolvedRow,
+    low_parent: &DerivationParent,
     high_state: &AppState,
     high: &Arc<SelectedHandoffOwner>,
-    high_parent: &ledger::ResolvedRow,
+    high_parent: &DerivationParent,
 ) {
     confirmation_round_trip_inner(
         low_state,
@@ -1242,10 +1408,10 @@ pub(crate) async fn confirmation_round_trip(
 pub(crate) async fn confirmation_framed_round_trip(
     low_state: &AppState,
     low: &Arc<SelectedHandoffOwner>,
-    low_parent: &ledger::ResolvedRow,
+    low_parent: &DerivationParent,
     high_state: &AppState,
     high: &Arc<SelectedHandoffOwner>,
-    high_parent: &ledger::ResolvedRow,
+    high_parent: &DerivationParent,
     orphan_low: bool,
     pc_cases: Option<u8>,
     fence_cases: Option<u8>,
@@ -1276,10 +1442,10 @@ pub(crate) async fn confirmation_framed_round_trip(
 pub(crate) async fn confirmation_rejected_result(
     low_state: &AppState,
     low: &Arc<SelectedHandoffOwner>,
-    low_parent: &ledger::ResolvedRow,
+    low_parent: &DerivationParent,
     high_state: &AppState,
     high: &Arc<SelectedHandoffOwner>,
-    high_parent: &ledger::ResolvedRow,
+    high_parent: &DerivationParent,
 ) {
     let hello = outgoing(
         low_state,
@@ -1323,10 +1489,10 @@ pub(crate) async fn confirmation_rejected_result(
 pub(crate) async fn confirmation_known_incoming_retry(
     low_state: &AppState,
     low: &Arc<SelectedHandoffOwner>,
-    low_parent: &ledger::ResolvedRow,
+    low_parent: &DerivationParent,
     high_state: &AppState,
     high: &Arc<SelectedHandoffOwner>,
-    high_parent: &ledger::ResolvedRow,
+    high_parent: &DerivationParent,
 ) {
     let hello = outgoing(
         low_state,
@@ -1439,10 +1605,10 @@ enum ConfirmationMode {
 async fn confirmation_round_trip_inner(
     low_state: &AppState,
     low: &Arc<SelectedHandoffOwner>,
-    low_parent: &ledger::ResolvedRow,
+    low_parent: &DerivationParent,
     high_state: &AppState,
     high: &Arc<SelectedHandoffOwner>,
-    high_parent: &ledger::ResolvedRow,
+    high_parent: &DerivationParent,
     mode: ConfirmationMode,
 ) {
     let framed_results = !matches!(mode, ConfirmationMode::Legacy);

@@ -57,6 +57,20 @@ pub(crate) async fn derivation(
     let _ = derivation_cycle(state, selected, selector, false).await;
 }
 
+/// Fixture metadata retained beside the actual original row after Derive compaction.
+/// The captured deadline only bounds test observation; it grants no native authority.
+/// Keeping it here avoids adding a production API or enlarging paid ledger rows.
+pub(crate) struct DerivationParent {
+    row: ledger::ResolvedRow,
+    original_deadline: u64,
+}
+impl std::ops::Deref for DerivationParent {
+    type Target = ledger::ResolvedRow;
+    fn deref(&self) -> &Self::Target {
+        &self.row
+    }
+}
+
 /// Test-only native continuation. The same real Input/admit/Actor-result/ACK/settlement
 /// path returns its original loan instead of Ending. This does NOT run browser WebCrypto
 /// or prove browser key transfer; it supplies the actual paid parent to factory tests.
@@ -64,7 +78,7 @@ pub(crate) async fn derivation_returned(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
     selector: PairSelector,
-) -> ledger::ResolvedRow {
+) -> DerivationParent {
     derivation_cycle(state, selected, selector, true)
         .await
         .unwrap()
@@ -171,7 +185,7 @@ async fn derivation_cycle(
     selected: &Arc<SelectedHandoffOwner>,
     selector: PairSelector,
     return_for_confirmation: bool,
-) -> Option<ledger::ResolvedRow> {
+) -> Option<DerivationParent> {
     let bootstrap::Status::Ready(public) = bootstrap::ensure(
         state,
         selected.id(),
@@ -462,7 +476,10 @@ async fn derivation_cycle(
         );
         drop(reply);
         assert!(selected.lease().is_live());
-        return Some(row);
+        return Some(DerivationParent {
+            row,
+            original_deadline,
+        });
     }
     crate::end_voice_owner_inner(state, selected.id()).await;
     assert!(!selected.lease().is_live());

@@ -175,9 +175,31 @@ Begin legitimately returns three-byte Closed, Stopped or Protocol refusals, incl
 Capacity under transient local contention. The fixture must distinguish them, retain
 the same channel/parent/purpose/body and original deadline, and retry only exact Capacity.
 Capacity can also follow reservation/publication: it never proves no attempt occurred
-and must not trigger a refund, replacement or renewed authority. The correction and
-deterministic contention/rejection tests remain pending. Local Windows success does not
-clear this Linux failure.
+and must not trigger a refund, replacement or renewed authority. Local Windows success
+does not clear this Linux failure.
+
+The corrected ordinary outgoing/incoming observer retains the actual Derive deadline
+before Return in a fixture-only wrapper beside the real row. No production row, layout
+or public authority API is added. One watchdog covers bootstrap, guard waits, authenticated
+attempts and sleeps. The same setup, channel, parent, purpose/predecessor and body survive
+each retry, and each actual reply is collected before observing the next sequence.
+Only exact authenticated `[1,3,7]` Capacity retries; other refusals fail immediately.
+
+The regression takes the real UI commit then server-map guard. It snapshots whichever
+exact child/history exists, allowing native maintenance to have won earlier. The forced
+Capacity goes through retry classification, proves that snapshot unchanged, then releases
+both guards before retrying. A real authenticated wrong-selector refusal submits once;
+an exhausted original bound submits nothing and does not advance the channel counter.
+The test passes in 11.89 seconds; removing Capacity classification fails at the forced
+`[1,3,7]` refusal in 6.87 seconds. Exact source restoration with a fresh timestamp is
+hash-verified, then the rebuilt test passes in 10.50 seconds. Re-review resolves the
+maintenance ordering finding with no remaining actionable findings. Native format,
+strict Clippy and check pass; the complete native rerun is in progress.
+
+This corrects a confirmed fixture assumption without attributing the historical refusal
+to Capacity. The hosted Linux rerun is still required. Dedicated known-Incoming/attachment
+negative-history probes retain their previous observer windows; this change converts
+ordinary Begin observation only.
 
 ## Held PRs and remaining implementation
 
