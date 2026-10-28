@@ -152,6 +152,67 @@ derivation would leave the current terminal-handshake problem intact.
    existing canonical bytes and fail closed with old endpoints. Legacy traffic must never
    write into an upgraded round or become an automatic downgrade path.
 
+## Candidate implementation shape reviewed on 28 October
+
+This is a design direction, not an implemented wire contract or activation approval.
+The following resolves the incarnation/replay and ownership questions; measured capacity,
+failed-round collection and the end-to-end protocol still need implementation and tests.
+
+- Derive `RoundRef32` with a new domain from the canonical COMPLETE bilateral agreement:
+  group/policy/room/epoch/profile, both DeviceIds/joins/key references, both public admission
+  incarnations and generations, independent LOW/HIGH nonces, the exact Request digest and
+  the fixed validity contract. Root Derive/KDF uses a distinct upgraded domain/profile
+  together with RoundRef; a control nonce cannot renew the legacy transcript.
+  It is never a caller-chosen label. Replace the upgraded native selector with this reference;
+  do not append it. Prefixes105/122/123/138/154 become33/50/51/66/82 bytes, and the largest
+  ACK is82+80+16=178 ciphertext bytes. This arithmetic does not establish the whole12KiB
+  handler graph, allocation overlap or Source inventory.
+- Root mints an unpredictable public admission-session incarnation using its sanctioned RNG.
+  Actual native Session/selected-Grant registration owns its private current gate. Restart or
+  replacement gets a fresh incarnation; remount/lost replies recover the same original
+  registration. A reset generation integer alone is insufficient. Never advertise channel
+  secrets or raw private Session identity. Signed capability/generation publication is a new
+  explicit endpoint/helper profile; existing presence renewal does not promise free capacity.
+  The native-owned generation advances monotonically on cancellation/terminal closure before
+  slot reuse. EVERY upgraded creation requires the exact current local incarnation,
+  generation and stored pending agreement; labels or a previous grant alone cannot recreate it.
+- The actual Actor candidate supplies identity/orientation. LOW reserves affine inert capacity
+  before Request; HIGH does so before Grant. Request carries LOW's nonce, Grant adds HIGH's
+  independent nonce and the exact Request digest, and Commit binds both. One original slot
+  retains one agreement. A definite unstarted Busy is distinct from ambiguous committed work;
+  a refillable group/process admission budget bounds new attempts independently of each
+  original Source submission allowance. A bounded fair cursor/cooldown policy is still needed.
+- Capacity includes actual claims for the group progress cell,12 Action positions,
+  role-specific packet/pair positions, crypto/lower lanes and native row position, as well as
+  bytes. Consume the SAME claims at Commit. Do not install a dummy Workflow or begin the
+  transcript clock while waiting. Another trusted same-group owner must be unable to take a
+  reserved cell. Weak strong-count zero does not establish actual old-owner return.
+- Commit consumes the original agreement/backing once under the original native/Root fence
+  and creates an immutable committed `RoundGate`. Later free-slot generation advancement
+  must leave established sibling media live. Old close/finally handlers compare original
+  slot identity, generation and committed round before changing the slot. Full End revokes
+  admission and established rounds; peer-targeted closure affects only that original round.
+- Cancellation fences the original preclaim before browser/native refund and retains Closing
+  ownership until actual return. Lost Commit recovers the same committed round or a permanent
+  original cancelled/expired refusal; it never reconstructs an expired Grant. Upgraded Root
+  creation requires a consumed current agreement and cannot fall back to legacy
+  `admit_protected_pair` recovery/creation. Keep legacy cleanup separately compatible.
+- Explicit failed-round Forget needs a paid terminal anchor and actual collection, including
+  Source/Lower/IO/SDK owners. Retain exact accepted/rejected results until explicit Forget
+  acknowledgement. Unknown old RoundRef after that boundary is always refusal, never
+  collected success inferred from a generation floor. Canonical agreement hashing prevents
+  reference reuse without a lifetime RoundRef set. Held actual owners may prevent reuse;
+  more than32 sequential retired rounds must progress when those owners/callers return.
+
+The minimum seam is `register_admission_session` -> `admission_candidate` ->
+`reserve_round_capacity` -> `accept_request`/`grant` -> `commit_round`, with separate
+`cancel_preclaim`, `terminal_status`, `collect_failed_round` and `forget_ack` paths.
+These names describe the proposed ownership boundaries, not APIs already present.
+Prepay agreement storage separately and carry a small affine/Arc handle through the Actor:
+current AppCommand/Envelope are336/352 bytes, whole Control12,244/12,288 bytes, Root
+metadata2KiB, Ready metadata4KiB and Source bookkeeping16,360/16,384 bytes. Hidden boxes,
+large inline messages or extra pools are not a substitute for measured payment.
+
 An alternative early Source-retirement path needs an authenticated, exact peer-bound native
 Applied acknowledgement and actual lower-owner joins. Local media Current, SDK connected,
 a renderer flag and helper receipt are insufficient. Faster retirement alone does not solve
@@ -230,6 +291,15 @@ it cannot hide an unresolved first-attempt failure. Do not change the original p
 window or the existing two-peer bound. Actual RTC/audio and physical tests remain separate.
 
 ## Validation status
+
+The later combined integration at `fa3107d2` passes complete local native validation:
+1,011 library tests plus six ACL tests, with both earlier fixture failures corrected.
+Root passes 3,960 / 25 existing ignores on unchanged compiled Root inputs; the current
+native-source construction scan passes separately. Frontend passes 3,539, and native
+check/strict Clippy/build/startup pass. This does not include #73's deliberately red
+all-three reproduction or implement the admission/Forget design above. V2 remains OFF.
+Both refreshed dependency audits now pass on the combined candidate; the older red
+audit statements below describe their earlier checkpoints only. Hosted CI is pending.
 
 - Published Broker45 checkpoint ecfd3cd3:897 native library+5 ACL pass; native format/check/
   strict Clippy/construction scan pass. Complete Root3,691/24 existing ignores apply to its

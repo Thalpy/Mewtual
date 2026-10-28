@@ -32,8 +32,9 @@ class FakeEngine implements StudioPlaybackEngine {
   /** What dispatch resolves to; `sync` returns it directly, as the engine does for note events. */
   outcome: JamPlayResult = { ok: true };
   sync = false;
-  async prepareArchivalPlayback(input: unknown, animation: JamArchivalAnimation | undefined): Promise<JamArchivalPlayback> {
-    this.prepared++;
+  documents: boolean[] = [];
+  async prepareArchivalPlayback(input: unknown, animation: JamArchivalAnimation | undefined, _current?: () => boolean, opts?: { document?: boolean }): Promise<JamArchivalPlayback> {
+    this.prepared++; this.documents.push(opts?.document === true);
     const plan = planJamArchivalPlayback(input, animation);
     if (this.preparing) await this.preparing;
     this.plan = plan;
@@ -77,6 +78,16 @@ test("explicit local Play resumes immediately and late/seek attacks use remainin
   assert.equal(await controller.tick(), 0);
   assert.equal(controller.state, "stopped");
   assert.equal(controller.completed, true);
+});
+
+test("only a start the caller marks as the Studio's own document asks the engine for the document voice cap", async () => {
+  const { engine, controller } = setup();
+  assert.equal(await controller.startTake(take()), true);
+  controller.document = true;
+  assert.equal(await controller.startTake(take()), true);
+  controller.document = false;
+  assert.equal(await controller.startTake(take()), true);
+  assert.deepEqual(engine.documents, [false, true, false]);
 });
 
 test("only natural completion marks EOF; manual, revoked and render-failed ownership never does", async () => {
@@ -270,6 +281,45 @@ test("caller mutation while preparation is queued cannot change admitted content
   assert.equal(await start, true);
   assert.equal(engine.plan?.events[0].note, 60);
   assert.equal(engine.plan?.events[0].holdMs, 600_000);
+});
+
+// Review of e7250d48, LOW 1: only an attack the allocator had no voice for is a lost note.
+test("capacity refusals of attacks are counted once each; releases and sequencing refusals are not", async () => {
+  const { engine, controller, now } = setup(); engine.sync = true;
+  const input = take();
+  input.events = [60, 61, 62, 63].map((n, q) => ({ ms: 0, lane: 0, n, on: 1 as const, w: "sine" as const, q }));
+  input.events.push({ ms: 100, lane: 0, n: 60, on: 0, q: 4 }, { ms: 600_000, lane: 0, n: 61, on: 0, q: 5 });
+  const answer: Record<string, JamPlayResult> = {
+    "on:60": { ok: false, reason: "source-held" }, "on:61": { ok: false, reason: "duplicate" },
+    "on:62": { ok: false, reason: "room-held" }, "on:63": { ok: false, reason: "sequence" },
+    "off:60": { ok: false, reason: "source-held" },
+  };
+  engine.playArchivalEvent = (_capability, index) => { const event = engine.plan!.events[index]; return answer[`${event.kind}:${event.note}`] ?? { ok: true }; };
+  assert.equal(await controller.startTake(input), true);
+  await controller.tick();
+  assert.equal(controller.refused, 2, "source-held and room-held attacks");
+  now.value = 200; await controller.tick();
+  assert.equal(controller.refused, 2, "a refused release is not a lost note");
+  assert.equal(controller.state, "playing");
+  controller.stop();
+  assert.equal(controller.refused, 2, "a stop keeps the count for whoever restarts a loop");
+  assert.equal(await controller.startTake(take()), true);
+  assert.equal(controller.refused, 0, "every start counts afresh");
+});
+
+test("an old playback's refusal resolving after a replacement never counts against the new one", async () => {
+  const { engine, controller } = setup();
+  const gate = deferred<void>(); engine.rendering = gate.promise;
+  assert.equal(await controller.startTake(take()), true);
+  const old = controller.tick(); // the attack is out, awaiting the renderer
+  await Promise.resolve();
+  engine.rendering = null;
+  assert.equal(await controller.startTake(take()), true); // replaced meanwhile
+  engine.outcome = { ok: false, reason: "source-held" };
+  gate.resolve(); await old; // the old attack resolves as a capacity refusal
+  assert.equal(controller.refused, 0);
+  await controller.tick();
+  assert.equal(controller.refused, 1, "the new playback's own refusal is counted");
 });
 
 test("completion reserves a zero-release custom note's possible legacy fallback tail", async () => {

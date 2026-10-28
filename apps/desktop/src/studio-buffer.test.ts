@@ -130,6 +130,49 @@ test("snapshot rejects malformed retry identity and preserves full u128 scope, U
   h.session.reset();
 });
 
+// Design review M4: a retained draft is rejected whole on any unknown shape, so a lock snapshot
+// holding one layered edit or one layered recovery would lose every edit beside it.
+test("retained drafts carry layered note edits and layered recovery choices, and refuse malformed layers", () => {
+  const p = "ab".repeat(32);
+  validateDraftOperation({ op: "set_note", step: 255, row: 24, value: { k: "n", p, len: 1, vol: 100 } }, "score");
+  validateDraftOperation({ op: "clear_note", step: 0, row: 0, layer: "d" }, "score");
+  validateDraftOperation({ op: "clear_note", step: 3, row: 2, layer: p }, "score");
+  for (const bad of [{ op: "clear_note", step: 0, row: 0, layer: "D" }, { op: "clear_note", step: 0, row: 0, layer: p.slice(2) },
+    { op: "clear_note", step: 256, row: 0, layer: "d" }, { op: "set_note", step: 0, row: 0, value: { k: "n", p, len: 0 } }]) {
+    assert.throws(() => validateDraftOperation(bad, "score"), JSON.stringify(bad));
+  }
+  assert.throws(() => validateDraftOperation({ op: "set_note", step: 0, row: 0, value: { k: "d", pad: 0 } }, "flipnote"), "a Flipnote never holds a note");
+  const body = canonicalJson({ op: "set_note", row: 2, step: 4, value: { k: "n", p } });
+  const recovery = (layer: string) => JSON.stringify({ version: 1, scope: { server: SERVER, channel: CHANNEL }, group, records: [{
+    kind: "recoveryApply", id: 1, label: "note", status: "queued", attempts: 0, error: "", mayHaveCommitted: false, epochChanged: false, object, objectKind: "score",
+    edit: { snapshot: id64(1), choice: { kind: "scoreNote", step: 4, row: 2, layer, value: id64(2) }, mode: "restore", epochId: id32(3), expectedProjection: id64(4), nonce: id32(5), body },
+    applied: null }] });
+  const decoded = decodeStudioDraft(recovery(p));
+  assert.equal(decoded.records[0].kind, "recoveryApply");
+  assert.equal(encodeStudioDraft(decoded), recovery(p));
+  for (const layer of ["D", "", p.toUpperCase(), `${p}0`]) assert.throws(() => decodeStudioDraft(recovery(layer)), layer);
+});
+
+// Review L7: the working projection copied the base's header conflict even while a queued header
+// edit resolved it, so the readback of that very edit (one value) looked like a source change.
+test("a queued header edit resolves that header's conflict in the working projection, and only that header's", () => {
+  const source = (n: number) => ({ opId: id64(n), author: ME, nonce: id32(n) });
+  const conflicted = (field: "bpm" | "title") => scoreModel(parseScoreView({ ...ordinaryView({ kind: "score", title: field === "title" ? { selected: { value: "a", source: source(1) }, conflicts: [{ value: "b", source: source(2) }] } : null,
+    bpm: field === "bpm" ? { selected: { value: 120, source: source(3) }, conflicts: [{ value: 126, source: source(4) }] } : null, bpb: null, steps: null,
+    cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: true } }), group }).content);
+  const queued = (field: string, value: unknown) => ({ kind: "apply", id: 1, label: "", status: "queued", attempts: 0, error: "", mayHaveCommitted: false, epochChanged: false, object,
+    request: { object, objectKind: "score", epochId: id32(1), nonce: id32(1), body: "" }, op: { op: "set_header", field, value } }) as unknown as SaveRecord;
+  const base = conflicted("bpm");
+  assert.equal(base.readiness.headerConflicts, true);
+  assert.equal(workingScore(base, [queued("bpm", 130)]).readiness.headerConflicts, false, "the queued tempo is the one value once it lands");
+  const working = workingScore(base, [queued("bpm", 130)]);
+  assert.deepEqual([working.headers.bpm?.selected.value, working.headers.bpm?.conflicts.length], [130, 0], "so no \"another value by\" chip waits for the readback");
+  assert.equal(working.headers.bpm?.selected.source.opId, base.headers.bpm?.selected.source.opId, "a display value, never a fabricated operation");
+  assert.equal(workingScore(base, [queued("bpb", 3)]).readiness.headerConflicts, true, "another header's edit leaves the tempo conflict");
+  assert.equal(workingScore(conflicted("title"), [queued("title", "c")]).readiness.headerConflicts, false);
+  assert.equal(workingScore(base, []).readiness.headerConflicts, true, "with nothing queued it is native's flag");
+});
+
 test("sound and music use their effective draft, preserving raw evidence and permanent removals", async () => {
   const h = await harness(), vector = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
   h.session.setSoundPatch(object, vector.patchId, vector.patch);
@@ -147,7 +190,10 @@ test("sound and music use their effective draft, preserving raw evidence and per
     { kind: "apply", op: { op: "set_cell", step: 2, row: 0, value: { k: "n", p: vector.patchId } } },
   ] as unknown as SaveRecord[];
   const working = workingScore(base, saves); assert.equal(working.ready, false); assert.equal(working.readiness.cells["0:0"].overlap, true);
-  assert.equal(workingScore(base, saves.slice(0, 2)).ready, true); assert.deepEqual(base.cells, {});
+  const clean = workingScore(base, saves.slice(0, 2)); assert.equal(clean.ready, true); assert.deepEqual(base.cells, {});
+  // Sparse like native: a clean slot has no readiness entry, so a readback of the same score
+  // fingerprints identically and cannot stop a playback that was started from the projection.
+  assert.deepEqual(clean.readiness, { cells: {}, patches: {}, headerConflicts: false });
   assert.equal(workingFlipnote(h.session.doc!.model!, h.session.saves, ME).sound.sfx.length, 0);
   h.session.reset();
 });
@@ -199,6 +245,10 @@ test("failed Create preserves a long exact title, and Score pads8/9 round-trip w
   assert.equal(decodeStudioDraft(h.session.draftSnapshot()!).records.length, 2); h.session.reset();
 });
 
+// [desync fixes]: a document navigation no longer waits for the document's Save, so there is no
+// waiting window in which a newer navigation could supersede it. Each lands at once, in order, and
+// the edit it left is already sent. (The earlier contract, "the older of two navigations waiting on
+// one Save does nothing", described that window.)
 test("sidebar and Music share latest navigation ownership across a deferred Save", async () => {
   const h = await harness(), ack = deferred<unknown>(); h.ipc.on("studio_apply", () => ack.promise);
   h.session.setTitle(object, "draft"); const opened: string[] = [];
@@ -274,7 +324,7 @@ test("navigation saves only the document it leaves; another document's held work
   assert.equal(h.session.doc?.object, other, "the uncertain edit of the target cannot veto opening it");
   assert.deepEqual(applied(), [object], "leaving the first document saved exactly its own held edit");
   assert.deepEqual(h.session.saves.map(s => [s.object, s.status]), [[other, "uncertain"]]);
-  await assert.rejects(h.session.saveBeforeLeaving(), /Could not confirm the save/, "leaving the Studio still requires every edit");
+  await assert.rejects(h.session.saveBeforeLeaving(), /is not confirmed\. Retry or discard it/, "closing the window still requires every edit, and says what the member can do");
   h.session.reset();
 });
 
@@ -320,6 +370,8 @@ test("leaving a restored, renamed document sends both halves on the ordinary, Cl
 
 // Review of 5bc43d2c: departure released the Index half before the document's own Save, and the one
 // save worker then waited on the Index receipt, so a slow Index response held the navigation.
+// Departure awaits the document Save, then releases its independent Index half without waiting
+// for that half's receipt. The document still saves before the editor switches.
 test("with the worker free, leaving a document saves it, navigates, and only then sends its Index half", async () => {
   const h = await harness(), other = id32(9), third = id32(10), indexAck = deferred<unknown>();
   const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }), [other]: indexEntry({ title: "other" }), [third]: indexEntry({ title: "third" }) } })), group });
@@ -352,6 +404,7 @@ test("with the worker free, leaving a document saves it, navigates, and only the
 // Several save workers, one per lane at a time: an Index delivery in flight (from the deadline, an
 // earlier departure, or a sidebar retry) no longer holds a document's departure behind it. This
 // was the pinned single-worker limit, and the timing variant of the review of 64fed24b.
+// An edit made while awaiting the document receipt must join the next drain round as well.
 test("a departure never waits on an Index delivery already in flight", async () => {
   for (const edit of ["before leaving", "while leaving"] as const) {
     const h = await harness(), other = id32(9), titleAck = deferred<unknown>(), indexAck = deferred<unknown>();
@@ -395,8 +448,9 @@ test("several workers never run two saves of one lane at once", async () => {
 });
 
 // Review of the 5bc43d2c fix, L1 and L2: a refused departure sends nothing of the Index half, which
-// stays recoverable; a superseded one that did drain still sends it, so a drained departure does
-// not split the rename.
+// stays recoverable; one that drains sends it, so a departure never splits the rename. A failed
+// document Save also vetoes the switch. Retained uncertainty does not authorize closing this
+// editor, and the original Index request is released only after the document half lands.
 test("a refused departure holds the restored Index half; a superseded one that drained sends it", async () => {
   for (const ending of ["refused", "superseded"] as const) {
     const h = await harness(), other = id32(9), docAck = deferred<unknown>();
@@ -412,7 +466,8 @@ test("a refused departure holds the restored Index half; a superseded one that d
     const leaving = h.session.navigate(() => h.session.open(other)).then(() => "navigated", e => String(e));
     const indexWrites = () => h.ipc.calls.filter(c => c.cmd === "studio_apply_index").length;
     if (ending === "refused") {
-      assert.match(await leaving, /Could not confirm the save/);
+      assert.match(await leaving, /is not confirmed/);
+      assert.equal(h.session.doc?.object, object, "an unconfirmed save vetoes the replacement");
       const half = h.session.saves.find(s => s.kind === "applyIndex")!;
       assert.equal(indexWrites(), 0); assert.equal(h.session.awaitsExplicitSave(half.id), true, "held, not sent");
       assert.equal(h.session.pendingFor(object).length, 2, "both halves still show in the open document");

@@ -22,15 +22,16 @@
 export type StudioExitHost = {
   /** The main pane's view is the Studio (a superset of "the editor is mounted"). */
   onStudio: () => boolean;
-  /** The Studio session holds edits, staging an in-progress stroke first. A staging refusal
-   * must report true: the awaited Save then refuses with the reason instead of leaving. */
+  /** The session retains any edits, including in-flight/uncertain work, after staging its
+   * mounted drawing. A staging refusal reports true so Save can veto departure with its reason. */
   hasWork: () => boolean;
   /** The window-close sequence owns the Studio Save; no route may race it. */
   closing: () => boolean;
   /** Take the navigation claim (App's route counter and the session lease). The returned check
    * is still true only if no newer route, lock or reload has claimed since. */
   claim: () => () => boolean;
-  /** The awaited Save of every retained edit. Resolves false on refusal; the host says why. */
+  /** Wait for definite save receipts. Failure resolves false and keeps the editor available;
+   * the host reports the reason. Currency is rechecked after the wait and before mutation. */
   save: () => Promise<boolean>;
   /** A departure gave up after MAX_SAVE_ROUNDS because new work kept arriving; say so. */
   exhausted?: () => void;
@@ -41,10 +42,11 @@ export type StudioRoute = {
   /** Still the newest action: no newer route, lock or reload has claimed since `begin()`. */
   current: () => boolean;
   /** Leaving the Studio surface: resolves true when this action may change the main pane now,
-   * saving first if the Studio is on screen with work. Ask again after every await. */
+   * handing work to the Save first if the Studio is on screen with work. Ask again after every await. */
   leave: () => Promise<boolean>;
-  /** Changing the channel or server under the Studio: as `leave`, but any retained edit counts,
-   * on screen or not, because the Studio session's scope changes with it. */
+  /** Changing the channel or server under the Studio: as `leave`, but any unhanded edit counts,
+   * on screen or not. The Studio session itself stays on its channel until those edits land
+   * (studio-state's `setStudioScope`), so nothing here waits for them. */
   scope: () => Promise<boolean>;
 };
 
@@ -54,8 +56,8 @@ export type StudioExit = {
   /** `begin().leave()`, for an action whose only await is this one. */
   release: () => Promise<boolean>;
   /** For synchronous routes (key handlers, menu items, rail buttons): `go` runs in this turn when
-   * nothing needs saving, otherwise only after the Save succeeds and the action is still current.
-   * It receives the action's route to hand to any switch it starts. */
+   * nothing needs handing over, otherwise only after `save` resolves true and the action is still
+   * current. It receives the action's route to hand to any switch it starts. */
   leaveThen: (go: (route: StudioRoute) => void) => void;
 };
 
@@ -72,7 +74,7 @@ export function createStudioExit(host: StudioExitHost): StudioExit {
         if (!needsSave()) return true;
         if (round >= MAX_SAVE_ROUNDS) { host.exhausted?.(); return false; }
         if (!(await host.save())) return false;
-        // Loop: a stroke drawn while Save awaited its receipt is new work and needs its own Save.
+        // Loop: a stroke drawn while `save` was out is new work and is handed over in its own round.
       }
     }
     return {

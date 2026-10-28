@@ -65,6 +65,25 @@ pub(in crate::voice_handoff) struct NativeObservation {
     missed: bool,
 }
 impl NativeObservation {
+    /// Last completed native worker, without needing an expected peer selector. A
+    /// caller holding that completion still owns the channel's native position, so
+    /// another native worker cannot replace these completion fields before sampling.
+    /// Missing/contended observations remain absence of evidence, never permission.
+    pub(in crate::voice_handoff) fn describe_last_native(self) -> String {
+        let last = self.diagnostic.map(|diagnostic| {
+            (
+                diagnostic.finished_kind,
+                diagnostic.finished_stage,
+                diagnostic.last_error,
+                diagnostic.finished,
+            )
+        });
+        // Even a refused competing admission may update this cursor while the
+        // completed output still owns NativeHold. It is not completion correlation.
+        let latest_admission_cursor = self.diagnostic.map(|diagnostic| diagnostic.attempt_cursor);
+        format!("closed/physical/native={:?}; last_completed(kind,stage,error,counts)={last:?}; latest_admission_cursor={latest_admission_cursor:?}; global_missed={}; pool counts not sampled", self.flags, self.missed)
+    }
+
     pub(in crate::voice_handoff) fn sdp_refusal(
         self,
     ) -> Option<(u8, [u8; 16], Option<VoiceError>)> {

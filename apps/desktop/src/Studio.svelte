@@ -49,13 +49,17 @@
   import { paletteGroups, paletteColorLabel } from "./studio-palette.ts";
   import { base64ToBytes, type FrameConflictValue, type FrameView, type NativeExpiry, type RecoveryMode, type RecoveryVersion } from "./studio-native.ts";
   import { reason, type RecoveryItem, type SaveRecord } from "./studio-session.ts";
-  import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
+  import { ensureStudio, setStudioScope, studio, studioScopeWaiting } from "./studio-state.svelte.ts";
+  import { retryText, saveHeadline, saveProblemText } from "./studio-save-words.ts";
   import { frameClaimState, type ClaimView, type StudioClaimActions, type StudioClaimSnapshot } from "./draw-claims.ts";
   import ScoreEditor from "./ScoreEditor.svelte";
+  import type { ScoreSelectionScope } from "./score-selection.ts";
+  import StudioScoreSelection from "./StudioScoreSelection.svelte";
   import StudioSound from "./StudioSound.svelte";
   import StudioMusic, { type MusicTrack } from "./StudioMusic.svelte";
   import StudioSoundfont from "./StudioSoundfont.svelte";
-  import { auditionPlayback } from "./studio-audition.ts";
+  import { auditionPadPlayback, auditionPlayback } from "./studio-audition.ts";
+  import type { ScorePlayback } from "./studio-export.ts";
   import { instrumentName, noteName } from "./studio-sound-ui.ts";
   import { JAM_SAVED_PATCHES_MAX, type JamPatch, type JamTake } from "./jam-contract.ts";
   import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
@@ -65,7 +69,7 @@
 
   let { me, server, channel, nameOf, colorOf, adapt = true, onnotice, claims = null, claimActions = null,
     patchLibrary = [], patchShelves = [], libraryCount = 0, serverName = "", onsavePatch, onsharePatch,
-    audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa, onpostPixa } = $props<{
+    audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa, onpostPixa, onpostScore, onnavigate } = $props<{
     me: string;
     server: number | null;
     channel: string;
@@ -94,6 +98,11 @@
     onshareScore?: (take: JamTake, server: number) => Promise<void>;
     onsharePixa?: (bytes: Uint8Array, server: number) => Promise<void>;
     onpostPixa?: (bytes: Uint8Array, server: number) => Promise<void>;
+    /// Attach the score's .jamtake to the chat composer, the way a flipnote's .pixa is posted.
+    onpostScore?: (take: JamTake, server: number) => Promise<void>;
+    /// Called the moment this surface decides to navigate to another document (the Music tab's
+    /// open/create), before the departure Save can wait: see StudioNav's prop of the same name.
+    onnavigate?: () => void;
   }>();
 
   // Built once per mount (state may be written during init, never inside a derived); the
@@ -102,8 +111,13 @@
   const session = ensureStudio(me);
   // Imperative session calls run untracked: an effect must depend on what selects the work
   // (props, the selection), never on the revision the work itself bumps.
+  // While the previous channel's edits are still saving, the session stays on that channel and this
+  // surface shows their progress instead of an editor. `scopeWaiting` flips back once they have
+  // landed, which re-runs the effect and makes the switch.
+  const scopeWaiting = $derived.by(() => { void studio.rev; return studioScopeWaiting(server, channel); });
+  const waitTally = $derived.by(() => { void studio.rev; return scopeWaiting ? session.saveTally() : null; });
   $effect(() => {
-    const s = server, c = channel;
+    const s = server, c = channel; void scopeWaiting;
     untrack(() => setStudioScope(s, c));
   });
   // The sidebar selects; the surface follows the selection (and re-opens after a remount).
@@ -128,10 +142,43 @@
   });
   const isScore = $derived(doc?.objectKind === "score" || (!doc && entry?.kind === "score"));
   const score = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.buffering ? session.workingScore : session.doc.score : null; });
+  const selectionOwner = $derived.by(() => {
+    void studio.rev;
+    const scope = session.scope, group = session.doc?.object === objectId ? session.doc.view?.group : undefined;
+    return isScore && scope && group ? {
+      scope: { server: scope.server, group, channel: scope.channel, object: objectId },
+      generation: session.generation,
+    } : null;
+  });
+  // A primitive key is stable across ordinary edits/readbacks. Those must preserve the
+  // mounted editor's gesture/undo state instead of revoking/remounting on every revision.
+  const selectionOwnerKey = $derived(selectionOwner ? JSON.stringify([
+    selectionOwner.generation, selectionOwner.scope.server, selectionOwner.scope.group,
+    selectionOwner.scope.channel, selectionOwner.scope.object,
+  ]) : `unscoped:${objectId}`);
+  function selectionCurrent(scope: ScoreSelectionScope, generation: number): boolean {
+    const now = session.scope, document = session.doc;
+    return !session.closing && server === scope.server && channel === scope.channel &&
+      session.generation === generation && now?.server === scope.server &&
+      now.channel === scope.channel && document?.object === scope.object && document.view?.group === scope.group;
+  }
   const sourceGeneration = $derived.by(() => { void studio.rev; return session.editorMediaGeneration; });
+  // Which object and source generation the current audio was started against. Playback is
+  // stopped when the source it was prepared from is no longer the one on screen (a navigation, a
+  // lock, a flipnote's or an audition's document edited meanwhile) and never because of the
+  // generation its own gesture produced: placing a note bumps the generation and then auditions
+  // that note, and the audition must survive it. A Score document playing is the exception: its
+  // edits, local or remote, do not stop it; a loop takes them into its next pass (the audio
+  // session's `refresh`) and a one-shot play finishes the pass it began.
+  let audioOwner = { object: "", generation: -1 };
+  function claimAudio() { audioOwner = { object: objectId, generation: untrack(() => session.editorMediaGeneration) }; }
   $effect(() => {
-    void objectId; void sourceGeneration;
-    untrack(() => { audioActions?.stop(); });
+    const object = objectId, generation = sourceGeneration;
+    untrack(() => {
+      if (audioOwner.object === object && audioOwner.generation === generation) return;
+      if (audioOwner.object === object && isScore && playing) audioActions?.refresh?.();
+      else audioActions?.stop();
+    });
   });
   $effect(() => { void objectId; untrack(() => { mediaReceipt = ""; savedPreview = null; }); });
   const readOnlyWhy = $derived.by(() => { void studio.rev; return objectId ? session.editRefusal(objectId) : ""; });
@@ -678,8 +725,10 @@
   }
 
   // --- Timeline actions ------------------------------------------------------------------------
-  function guard(fn: () => void) {
-    try { fn(); } catch (e) { onnotice(reason(e), "warn"); }
+  /// Runs a session call and turns its refusal into a notice; the boolean lets a caller that
+  /// has a follow-up (the score composer auditions a note it just placed) skip it on refusal.
+  function guard(fn: () => void): boolean {
+    try { fn(); return true; } catch (e) { onnotice(reason(e), "warn"); return false; }
   }
 
   function blankPix(): Uint8Array {
@@ -728,7 +777,9 @@
     }
   });
 
-  function toggleStudioPlay() {
+  /// `offsetMs` lets the score composer start from its selected step. Button handlers pass a
+  /// MouseEvent here, and the space hotkey nothing: both read as "from the start".
+  function toggleStudioPlay(offsetMs: number | Event | undefined = undefined) {
     if (playing) { audioActions?.stop(); return; }
     if (!audioActions || !objectId) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
     if (!commit()) return;
@@ -738,11 +789,16 @@
     auditioning = false; auditionRequest++;
     savedPreview = null;
     const object = objectId, kind = isScore ? "score" : "flipnote";
-    const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object);
+    // Play is local listening: it plays what is on screen, saved yet or not (see mediaSource).
+    const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object, { playback: true });
+    const from = typeof offsetMs === "number" && Number.isFinite(offsetMs) && offsetMs > 0 ? Math.floor(offsetMs) : 0;
+    claimAudio();
     // The App adapter resumes its existing context immediately, before prepare fetches/hashes.
-    // Editor Play is the whole composition. Stop leaves a frame selected for editing, which
-    // must not turn the next Play into an implicit seek that skips the first sound marker.
-    void audioActions.start(kind, prepare, loop, 0)
+    // Editor Play is the whole composition unless the composer asked for a start step. Stop
+    // leaves a frame selected for editing, which must not turn the next Play into an implicit
+    // seek that skips the first sound marker.
+    // `document`: this is the open document's own playback (a layered score may hold more notes).
+    void audioActions.start(kind, prepare, loop, from, true)
       .then((started: boolean) => { if (!started) onnotice("playback was cancelled or audio is unavailable; press Play to try again", "warn"); })
       .catch((e: unknown) => onnotice(reason(e), "warn"));
   }
@@ -759,16 +815,24 @@
   // --- Sound: audition and the soundfont popup ---------------------------------------------------
   /// Play one note of a recipe through the Studio's own audio session. No second synth path: the
   /// note is a one-event take, so it inherits the session's gesture, scope and Deafen gates.
-  function auditionSound(patch: JamPatch, note: number, durationMs: number) {
+  function auditionSound(patch: JamPatch, note: number, durationMs: number, volume: number | undefined = undefined) {
+    playAudition((group) => auditionPlayback({ group, exporter: me }, patch, note, durationMs, volume));
+  }
+  /// One pad hit through the same path, so a placed or chosen drum is heard like a placed note.
+  function auditionPad(pad: number) {
+    playAudition((group) => auditionPadPlayback({ group, exporter: me }, pad));
+  }
+  function playAudition(build: (group: string) => ScorePlayback) {
     if (!audioActions) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
     const group = view?.group;
-    if (!group) { onnotice("reopen this flipnote before auditioning: its group is not known yet", "warn"); return; }
+    if (!group) { onnotice("reopen this document before listening: its group is not known yet", "warn"); return; }
     let playback;
-    try { playback = auditionPlayback({ group, exporter: me }, patch, note, durationMs); } catch (e) { onnotice(reason(e), "warn"); return; }
+    try { playback = build(group); } catch (e) { onnotice(reason(e), "warn"); return; }
     // Raised before start: the session reports "preparing"/"playing" for this note and the
     // editor must already know it is not document playback when that lands.
     auditioning = true;
     const request = ++auditionRequest;
+    claimAudio();
     void audioActions.start("score", async () => playback, false)
       .then((started: boolean) => { if (!started && request === auditionRequest) { auditioning = false; onnotice("audition unavailable; check Deafen and try again", "warn"); } })
       .catch((e: unknown) => { if (request === auditionRequest) { auditioning = false; onnotice(reason(e), "warn"); } });
@@ -835,7 +899,10 @@
     // successful OS save; the native GIF route above deliberately has a different result.
     mediaReceipt = `Download started: ${filename}`;
   }
-  async function downloadMedia(share = false) {
+  /// Prepare the open document's package once and hand it where asked: a browser download, the
+  /// server share (score only) or the chat composer. The preparation is checked against the
+  /// document and session it started from before any callback sees it.
+  async function downloadMedia(how: "download" | "share" | "post" = "download") {
     if (mediaBusy || !objectId) return;
     if (!commit()) return;
     const object = objectId, gen = session.generation, target = session.scope; mediaBusy = true;
@@ -843,12 +910,13 @@
       if (isScore) {
         const take = await session.prepareScoreTake(object);
         if (gen !== session.generation || objectId !== object || !target) throw new Error("the export target changed");
-        if (share) { if (!onshareScore) throw new Error("sharing is unavailable on this surface"); await onshareScore(take, target.server); }
+        if (how === "share") { if (!onshareScore) throw new Error("sharing is unavailable on this surface"); await onshareScore(take, target.server); }
+        else if (how === "post") { if (!onpostScore) throw new Error("Chat attachments are unavailable."); await onpostScore(take, target.server); }
         else browserDownload(new TextEncoder().encode(JSON.stringify(take)), "Mewtual-score.jamtake", JAM_TAKE_MIME);
       } else {
         const bytes = await session.prepareFlipnotePixa(object);
         if (gen !== session.generation || objectId !== object || !target) throw new Error("The flipnote changed. Try again.");
-        if (share) {
+        if (how === "post") {
           if (!onpostPixa) throw new Error("Chat attachments are unavailable.");
           await onpostPixa(bytes, target.server);
         } else browserDownload(bytes, "Mewtual-flipnote.pixa", "application/x-mewtual-pixa");
@@ -867,6 +935,7 @@
     if (action === "play") {
       if (!audioActions) return;
       auditioning = false; auditionRequest++; // a saved version is document playback, never an audition
+      claimAudio();
       void audioActions.start("flipnote", prepare, loop).catch((e: unknown) => onnotice(reason(e), "warn"));
       return;
     }
@@ -910,11 +979,71 @@
   // discard of something that may now have committed.
   let discardArmed = $state("");
   const armKey = (s: SaveRecord) => `${s.id}:${s.status}:${s.mayHaveCommitted}`;
+  /** The armed confirmation. A Score write takes the rest of its gesture with it (the clear of the
+   *  note's old place, the phrase's other notes), so the button says how many edits go. */
+  const discardConfirm = (s: SaveRecord) => { const n = session.discardCount(s.id); return n > 1 ? `Discard ${n} edits?` : "Really discard?"; };
   function discardSave(s: SaveRecord) {
     if (discardArmed !== armKey(s)) { discardArmed = armKey(s); return; }
     discardArmed = "";
     session.discard(s.id);
     if (s.kind === "frame" && s.frame === frameId) { rasterRef = ""; loadRaster(); }
+  }
+  // How a failed save is moving: a countdown to its next automatic resend, "now" while it is being
+  // sent again, or nothing when only the member can move it. `tick` redraws the countdown each second.
+  function retryState(s: SaveRecord): { retrying: boolean; next: string } {
+    void tick; void studio.rev;
+    if (s.status === "queued" || s.status === "inflight" || session.resaving(s.id)) return { retrying: true, next: "Trying again now" };
+    const at = session.autoRetryAt(s.id);
+    return at === null ? { retrying: false, next: "" } : { retrying: true, next: retryText(at, session.now()) };
+  }
+  // While the Studio waits to switch channel: the previous channel's edits that will not save on
+  // their own. Retry and discard act on all of them at once, the discard behind one confirmation
+  // that lapses if that set changes.
+  function stuckRecords(): SaveRecord[] {
+    void studio.rev;
+    return session.saves.filter(s => (s.status === "blocked" || s.status === "uncertain") && session.autoRetryAt(s.id) === null && !session.resaving(s.id));
+  }
+  function heldScopeRecords(): SaveRecord[] {
+    void studio.rev;
+    return session.saves.filter(s => session.awaitsExplicitSave(s.id));
+  }
+  let heldScopePanelLive = true;
+  let heldScopeOperation: object | null = null;
+  let heldScopeBusy = $state(false);
+  async function saveHeldScope(scope: { server: number; channel: string } | null, generation: number,
+    destination: { server: number | null; channel: string }) {
+    // The waiting panel names the ORIGINAL session, not the newly requested channel.
+    // An old click must never release a replacement queue after Lock/reset/scope change.
+    const current = () => heldScopePanelLive && !!scope && scopeWaiting && !session.closing &&
+      server === destination.server && channel === destination.channel && session.generation === generation &&
+      session.scope?.server === scope.server && session.scope.channel === scope.channel;
+    if (heldScopeOperation || !current()) return;
+    // Publish busy before calling Save: staging/change listeners can reenter synchronously.
+    // The original operation returns its own token only after its actual waiter completes.
+    const token = {}; heldScopeOperation = token; heldScopeBusy = true;
+    try { await session.save(); }
+    catch (error) { if (current()) onnotice(reason(error), "error"); }
+    finally { if (heldScopeOperation === token) { heldScopeOperation = null; heldScopeBusy = false; } }
+  }
+  const stuckArmKey = () => `stuck:${stuckRecords().map(armKey).join(",")}`;
+  // Only what a retry can move: a spent local-draft ticket or a changed history would be a no-op.
+  function retryStuck() { for (const s of stuckRecords()) if (session.canRetry(s.id)) retrySave(s); }
+  function discardStuck() {
+    const key = stuckArmKey();
+    if (discardArmed !== key) { discardArmed = key; return; }
+    discardArmed = "";
+    for (const s of stuckRecords()) {
+      session.discard(s.id);
+      if (s.kind === "frame" && s.frame === frameId) { rasterRef = ""; loadRaster(); } // as discardSave
+    }
+  }
+  // A lock snapshot restored for another channel (see StudioSession.pendingRestoredScope).
+  const restoredElsewhere = $derived.by(() => { void studio.rev; return session.pendingRestoredScope; });
+  const restoredArmKey = () => `restored:${restoredElsewhere?.server}:${restoredElsewhere?.channel}`;
+  function discardRestored() {
+    if (discardArmed !== restoredArmKey()) { discardArmed = restoredArmKey(); return; }
+    discardArmed = "";
+    session.discardRestoredDraft();
   }
 
   // --- Index entry: expiry and deletion are Index operations ------------------------------------
@@ -1091,10 +1220,13 @@
     const t = setInterval(() => { tick++; }, 1000);
     return () => clearInterval(t);
   });
-  onDestroy(() => { removeCloseHandler(); removeSaveHandler(); auditionRequest++; audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
+  onDestroy(() => { heldScopePanelLive = false; removeCloseHandler(); removeSaveHandler(); auditionRequest++; audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
+    // While the wait panel shows, the raster and document still belong to the last channel: an
+    // undo or a Play here would act on something not on screen.
+    if (scopeWaiting) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     const k = e.key;
@@ -1141,17 +1273,24 @@
      typing in one of its inputs is exempt inside onKey. -->
 {#snippet pendingSaves()}
     {#if attention.length}
-      <div class="st-banner warn st-save">
-        <span><b>{attention[0].mayHaveCommitted || attention[0].status !== "blocked" ? "save uncertain" : "local save not written"}</b> · {attention[0].label}{#if attention.length > 1} · and {attention.length - 1} more{/if}</span>
-        <span class="micro wrap">{attention[0].error}{#if attention[0].status === "blocked" && !attention[0].mayHaveCommitted} · the backend confirmed that this attempt wrote nothing{:else if attention[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {attention[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
-        {#if attention[0].status === "uncertain" || attention[0].status === "blocked"}<span class="st-card-acts">
-          {#if overlayRetryOf(attention[0]) !== "newTicket" && overlayRetryOf(attention[0]) !== "none"}
-            <button type="button" class="st-btn primary" onclick={() => retrySave(attention[0])}>{overlayRetryOf(attention[0]) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
+      {@const head = attention[0]}
+      {@const motion = retryState(head)}
+      <!-- One line for what happened, one for why and what happens next. The exact native text stays
+           in the tooltip for diagnostics; the words come from studio-save-words.ts. A save the
+           session is resending on its own is shown quietly; one only the member can move is a warning. -->
+      <div class="st-banner st-save" class:warn={!motion.retrying} title={head.error}>
+        <span><b>{saveHeadline(head.label, { retrying: motion.retrying, uncertain: head.mayHaveCommitted, others: attention.length - 1 + blockedCount })}</b></span>
+        <span class="micro wrap">{saveProblemText(head.error, head.mayHaveCommitted)}{motion.next ? ` ${motion.next}.` : ""}</span>
+        {#if (head.status === "uncertain" || head.status === "blocked") && !session.resaving(head.id)}<span class="st-card-acts">
+          <!-- Retry only where a resend can change the outcome; after a changed history the way
+               forward is a new edit (primary then), since the old request can no longer land. -->
+          {#if session.canRetry(head.id)}
+            <button type="button" class="st-btn primary" onclick={() => retrySave(head)}>{overlayRetryOf(head) === "afterExplicitAccess" ? "Reload and retry" : "Retry now"}</button>
           {/if}
-          {#if attention[0].kind === "frame" || attention[0].kind === "apply" || attention[0].kind === "applyIndex" || attention[0].kind === "overlayApply"}
-            <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!refusalFor(attention[0]) || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
+          {#if (head.kind === "frame" || head.kind === "apply" || head.kind === "applyIndex" || head.kind === "overlayApply") && !refusalFor(head) && overlayRetryOf(head) !== "none" && session.canReauthor(head.id)}
+            <button type="button" class="st-btn" class:primary={!session.canRetry(head.id)} onclick={() => reauthorSave(head)}>Save as a new edit</button>
           {/if}
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === armKey(attention[0]) ? "discard for real" : "discard"}</button>
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(head)}>{discardArmed === armKey(head) ? discardConfirm(head) : "Discard"}</button>
         </span>{/if}
       </div>
     {/if}
@@ -1162,14 +1301,15 @@
      retry identity and the armed discard are the same as in pendingSaves. -->
 {#snippet heldWork()}
         {#each attention.slice(0, 8) as s (s.id)}
-          <div class="st-card warn" data-held-save={s.id}>
-            <span>{s.label} · {s.mayHaveCommitted || s.status !== "blocked" ? "uncertain" : "not written"}</span>
-            <span class="micro wrap">{s.error}{#if session.blockedBehind(s.id)} · {session.blockedBehind(s.id)} later {session.blockedBehind(s.id) === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
+          {@const motion = retryState(s)}
+          <div class="st-card" class:warn={!motion.retrying} data-held-save={s.id} title={s.error}>
+            <span>{saveHeadline(s.label, { retrying: motion.retrying, uncertain: s.mayHaveCommitted, others: session.blockedBehind(s.id) })}</span>
+            <span class="micro wrap">{saveProblemText(s.error, s.mayHaveCommitted)}{motion.next ? ` ${motion.next}.` : ""}{session.needsDecision(s.id) && session.canReauthor(s.id) ? " It can be saved as a new edit once this document loads." : ""}</span>
             {#if s.status === "uncertain" || s.status === "blocked"}<span class="st-card-acts">
-              {#if overlayRetryOf(s) !== "newTicket" && overlayRetryOf(s) !== "none"}
-                <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>{overlayRetryOf(s) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
+              {#if session.canRetry(s.id)}
+                <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>{overlayRetryOf(s) === "afterExplicitAccess" ? "Reload and retry" : "Retry now"}</button>
               {/if}
-              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === armKey(s) ? "discard for real" : "discard"}</button>
+              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === armKey(s) ? discardConfirm(s) : "Discard"}</button>
             </span>{/if}
           </div>
         {/each}
@@ -1182,7 +1322,7 @@
         <span>{heldQueued.length} restored {heldQueued.length === 1 ? "edit" : "edits"} not saved yet · {heldQueued[0].label}</span>
         <span class="st-card-acts">
           <button type="button" class="st-btn primary" onclick={() => void session.saveDocument(objectId).catch(e => onnotice(reason(e), "warn"))}>Save</button>
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(heldQueued[0])}>{discardArmed === armKey(heldQueued[0]) ? "discard for real" : "discard"}</button>
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(heldQueued[0])}>{discardArmed === armKey(heldQueued[0]) ? discardConfirm(heldQueued[0]) : "Discard"}</button>
         </span>
       </div>
     {/if}
@@ -1195,6 +1335,11 @@
               </p>
               {#if view.phase === "fault"}<p>Ask the owner to check Studio in Server settings.</p>{/if}
             {/if}
+{/snippet}
+<!-- The score composer's history tab: the same status line and rail the flipnote inspector shows. -->
+{#snippet scoreHistory()}
+  {@render historyStatus()}
+  {@render historyRail()}
 {/snippet}
 <!-- Retained local drafts, retained versions and recovery walks: everything below the status. -->
 {#snippet historyRail()}
@@ -1309,7 +1454,7 @@
                   {#if inspected === v.snapshot}
                     {#if inspectedVersion}
                       {@const c = inspectedVersion.content}
-                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else if c.kind === "score"}score "{c.title?.selected.value ?? ""}" · {c.bpm?.selected.value ?? 120} BPM · {Object.keys(c.cells).length} retained cell slots{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
+                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else if c.kind === "score"}score "{c.title?.selected.value ?? ""}" · {c.bpm?.selected.value ?? 120} BPM · {Object.keys(c.cells).length + Object.keys(c.layers ?? {}).length} retained note slots{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
                     {:else}
                       <p class="micro wrap">reading…</p>
                     {/if}
@@ -1352,7 +1497,46 @@
 <svelte:window onkeydown={(e) => { if (rootEl && rootEl.contains(document.activeElement)) onKey(e); }} />
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div class="studio" bind:this={rootEl} role="application" aria-label="Studio editor" tabindex="0">
-  {#if !objectId || (!model && !doc)}
+  {#if restoredElsewhere}
+    <!-- A lock snapshot restored for a channel that is not this one. Until that channel opens, the
+         session refuses new edits everywhere; if it can no longer be opened, this is the way out. -->
+    <div class="st-card warn" data-restored-elsewhere>
+      <span>Unsaved edits from another channel are waiting. Open that channel to save them.</span>
+      <span class="st-card-acts">
+        <button type="button" class="st-btn ghost" onclick={discardRestored}>{discardArmed === restoredArmKey() ? "Really discard?" : "Discard them"}</button>
+      </span>
+    </div>
+  {/if}
+  {#if scopeWaiting}
+    <!-- Keep the old scope until its work lands. Restored held records need an explicit
+         Save; merely mounting this panel must neither send them nor claim they are saving. -->
+    {@const stuck = stuckRecords()}
+    {@const held = heldScopeRecords()}
+    {@const heldScope = session.scope ? { ...session.scope } : null}
+    {@const heldGeneration = session.generation}
+    {@const heldDestination = { server, channel }}
+    <div class="studio-empty" data-scope-wait>
+      <!-- "Need you" once nothing will resend on its own: what is left queued behind a stuck edit
+           cannot run either. -->
+      <p>{held.length ? "Unsaved edits from the previous channel are waiting." : waitTally && waitTally.stuck > 0 && waitTally.retrying === 0 ? "Your edits from the last channel need you." : "Saving your edits from the last channel."}</p>
+      {#if waitTally?.left}<p class="micro">{waitTally.left} left</p>{/if}
+      {#if held.length}
+        <p class="micro">Open that channel to review them, or save them before continuing.</p>
+        <button type="button" class="st-btn primary" data-save-held-scope disabled={heldScopeBusy}
+          onclick={() => saveHeldScope(heldScope, heldGeneration, heldDestination)}>Save edits</button>
+      {/if}
+      {#if stuck.length}
+        <p class="micro">{stuck.slice(0, 4).map(s => s.label).join(", ")}{stuck.length > 4 ? `, ${stuck.length - 4} more` : ""}</p>
+        <!-- No bulk "save as a new edit" here: the document changed under those edits, and saving them
+             again unseen could overwrite newer work. They are reviewed in their own channel. -->
+        {#if stuck.some(s => session.canReauthor(s.id))}<p class="micro">Edits the document changed under can be saved again from the last channel.</p>{/if}
+        <span class="st-card-acts">
+          {#if stuck.some(s => session.canRetry(s.id))}<button type="button" class="st-btn primary" onclick={retryStuck}>Retry</button>{/if}
+          <button type="button" class="st-btn ghost" onclick={discardStuck}>{discardArmed === stuckArmKey() ? "Really discard?" : "Discard"}</button>
+        </span>
+      {/if}
+    </div>
+  {:else if !objectId || (!model && !doc)}
     <div class="studio-empty">
       {#if !hasScope}
         <p class="muted">Open a channel to see its studio.</p>
@@ -1361,20 +1545,25 @@
       {/if}
     </div>
   {:else if isScore}
+    <!-- The score composer owns the whole surface below the surface strip: header, grid,
+         inspector (whose history tab renders this component's history rail) and transport.
+         Pending-save and media banners stay here because the session, not the composer, owns them. -->
     <div class="st-score">
       {@render pendingSaves()}{@render heldQueuedCard()}
-      <div class="st-itabs"><button class="st-itab" class:on={inspectorTab !== "history"} onclick={() => inspectorTab = "music"}>Music</button><button class="st-itab" class:on={inspectorTab === "history"} onclick={() => inspectorTab = "history"}>History</button></div>
-      {#if inspectorTab === "history"}{@render historyStatus()}{@render historyRail()}{:else}
-      <label class="micro st-score-loop"><input type="checkbox" aria-label="Loop whole authored score" bind:checked={loop} disabled={playing} /><span>loop whole authored score</span></label>
-      <span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .jamtake</button><button class="st-btn" disabled={mediaBusy || playing || !onshareScore} onclick={() => downloadMedia(true)}>share .jamtake</button></span>
       {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
-      {#key objectId}
-        <ScoreEditor model={score} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary}
-          onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onaddpatch={addStudioPatch}
-          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing}
-          onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
+      {#key selectionOwnerKey}
+        <StudioScoreSelection scope={selectionOwner?.scope ?? null} generation={selectionOwner?.generation ?? session.generation} current={selectionCurrent}>
+          {#snippet children(writer)}
+        <ScoreEditor model={score} readonlyReason={readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary} library={patchShelves} {who} {tint}
+          onop={(op, gesture) => guard(() => session.applyScoreOp(objectId, op, gesture))} onroom={() => session.draftRoom()} onaddpatch={addStudioPatch}
+          selection={writer?.recall() ?? null} onselection={writer?.remember}
+          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} nextPass={playing && !!audioState.nextPass} refused={playing ? audioState.refused ?? 0 : 0} positionMs={playing ? audioState.elapsedMs : null}
+          {loop} onloop={(next) => { loop = next; }} onaudition={audioActions ? auditionSound : undefined} onauditionpad={audioActions ? auditionPad : undefined} onnew={openSoundfont}
+          onexport={() => downloadMedia()} onshare={onshareScore ? () => downloadMedia("share") : undefined} onpost={onpostScore ? () => downloadMedia("post") : undefined} {mediaBusy}
+          history={scoreHistory} onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
+          {/snippet}
+        </StudioScoreSelection>
       {/key}
-      {/if}
     </div>
   {:else if !model}
     <div class="studio-empty">
@@ -1403,7 +1592,7 @@
       <button type="button" class="st-btn" onclick={() => void session.saveDocument(objectId).catch(e => onnotice(reason(e), "warn"))}>Save</button>
       <span class="grow"></span>
       <button type="button" class="st-btn" disabled={!audioActions} onclick={toggleStudioPlay}>{playing ? "stop" : "play"}</button>
-      <button type="button" class="st-btn" title="Attach this flipnote to a chat message" disabled={mediaBusy || playing || !onpostPixa} onclick={() => downloadMedia(true)}>
+      <button type="button" class="st-btn" title="Attach this flipnote to a chat message" disabled={mediaBusy || playing || !onpostPixa} onclick={() => downloadMedia("post")}>
         <svg viewBox="0 0 16 16" style="width: 11px; height: 11px"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>
         Post to chat
       </button>
@@ -1468,7 +1657,7 @@
               <div class="st-veil"><span>fetching {fmtKib(frameRec.bytes)}</span><span class="micro">bounded by the declared size · validated before it is shown</span></div>
             {/if}
           {:else if pendingHere}
-            <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "this frame's save is uncertain · see the card above" : pendingHere.status === "blocked" ? "this frame was not written · see the card above" : "saving this frame…"}</span></div>
+            <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "This frame's save is not confirmed yet." : pendingHere.status === "blocked" ? "This frame is not saved yet." : "Saving this frame…"}</span></div>
           {/if}
           <span class="st-readout left">{hover ? `${hover[0]},${hover[1]}` : ""}{#if tool === "shape"} · {shape}{/if}</span>
           <span class="st-readout right">layer · {LAYER_NAMES[layer]}{#if dirty} · unsaved{:else if rasterRef === "unsaved"} · saving{/if}</span>
@@ -1588,7 +1777,7 @@
             {/if}
             {#if pendingHere}
               <div class="st-card accent">
-                <span>New frame{#if pendingHere.mayHaveCommitted || pendingHere.status === "uncertain"} · save uncertain{:else if pendingHere.status === "blocked"} · not written{:else} · saving{/if}</span>
+                <span>New frame: {#if pendingHere.mayHaveCommitted || pendingHere.status === "uncertain"}not confirmed{:else if pendingHere.status === "blocked"}not saved{:else}saving{/if}</span>
                 <span class="micro it">it joins the timeline when the save lands</span>
               </div>
             {:else if frameRec}
@@ -1632,8 +1821,8 @@
             <StudioMusic model={model.sound} frameCount={frames.length} fps={model.fps} tracks={musicTracks} {patchLibrary} {who} {tint}
               readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy}
               onlink={(id) => guard(() => session.linkScore(objectId, id))}
-              onopen={(id) => { void session.navigate(() => { session.open(id); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }}
-              oncreate={() => { void session.navigate(() => { const id = session.createScore("New music track"); session.open(id, { read: false }); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }} />
+              onopen={(id) => { onnavigate?.(); void session.navigate(() => { session.open(id); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }}
+              oncreate={() => { onnavigate?.(); void session.navigate(() => { const id = session.createScore("New music track"); session.open(id, { read: false }); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }} />
           {:else}
             <!-- History reads top to bottom as one story: what this flipnote is, the immutable
                  versions it has been saved as, the retained edits recovery can bring back, the
@@ -1752,7 +1941,7 @@
           </button>
         {/each}
         {#each pendingInserts as s (s.id)}
-          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.mayHaveCommitted || s.status === "uncertain" ? `save uncertain: ${s.error}` : s.status === "blocked" ? `save not written: ${s.error}` : "saving this new frame"}>
+          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.mayHaveCommitted || s.status === "uncertain" ? `Not confirmed: ${saveProblemText(s.error, true)}` : s.status === "blocked" ? `Not saved: ${saveProblemText(s.error)}` : "Saving this new frame"}>
             <span class="ix">{s.status === "uncertain" || s.status === "blocked" ? "?" : "…"}</span>
             <span class="fr pending" class:uncertain={s.status === "uncertain" || s.status === "blocked"}>
               <canvas width="64" height="48" use:thumbBytes={{ bytes: s.pix, rev: studio.rev }}></canvas>
@@ -1775,17 +1964,14 @@
   {#if soundfont}
     <StudioSoundfont name={soundfont.name} initial={soundfont.initial} startFrom={patchLibrary} {libraryCount} libraryMax={JAM_SAVED_PATCHES_MAX}
       targetName={model?.title || "this flipnote"} recipeCount={model?.sound.patchSlots.filter((s) => !s.removed).length ?? 0} recipeMax={FLIPNOTE_MAX_PATCHES} shareName={onsharePatch ? serverName : ""}
-      onaudition={(patch, note) => auditionSound(patch, note, 400)} onuse={useSoundfont} onsave={onsavePatch ?? refusePatch} onshare={shareSoundfont} {onnotice} onclose={() => (soundfont = null)} />
+      bpm={score?.bpm ?? 120} onaudition={(patch, note, ms) => auditionSound(patch, note, ms)} onuse={useSoundfont} onsave={onsavePatch ?? refusePatch} onshare={shareSoundfont} {onnotice} onclose={() => (soundfont = null)} />
   {/if}
 </div>
 
 <style>
-  .st-score { flex: 1; overflow: auto; min-height: 0; padding: 10px; }
-  /* The application-wide input width is for text fields. A full-width checkbox pushed its
-     visible consent label outside the 900px desktop viewport, leaving an unexplained square. */
-  .st-score-loop { display: flex; align-items: center; gap: 6px; margin: 6px 0; white-space: normal; }
-  .st-score-loop input { width: auto; flex: none; margin: 0; }
-  .st-score-loop span { min-width: 0; }
+  /* The composer fills the column like the flipnote editor does; it scrolls as a whole when the
+     window is shorter than its 25 rows plus transport. */
+  .st-score { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   /* History folds: the summary IS the section rule, so a closed fold reads like a heading. */
   .st-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; }
   .st-fold > summary::-webkit-details-marker { display: none; }

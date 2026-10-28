@@ -78,6 +78,7 @@
     recipeCount = 0,
     recipeMax = 64,
     shareName = "",
+    bpm = 120,
     onaudition,
     onuse,
     onsave,
@@ -99,8 +100,11 @@
     recipeMax?: number;
     /** The server whose share SHARE seals into. Empty hides the button. */
     shareName?: string;
-    /** Play one note of this recipe. The host gates it (Deafen etc.) and owns the synth. */
-    onaudition: (patch: JamPatch, note: number) => void;
+    /** Play one note of this recipe, held for `durationMs` (the chosen preview length). The host
+     *  gates it (Deafen etc.) and owns the synth. */
+    onaudition: (patch: JamPatch, note: number, durationMs: number) => void;
+    /** The tempo the "beat" and "bar" preview lengths follow; the open score's, else 120. */
+    bpm?: number;
     /** Add to the flipnote. Success closes the dialog. */
     onuse: (name: string, patch: JamPatch) => Promise<void>;
     /** Keep on this device. Success keeps the dialog open. */
@@ -270,13 +274,40 @@
   // --- Audition ---------------------------------------------------------------------------------
   // Only ever called from an explicit gesture: a key press, a piano key, never a knob change or
   // mount. The host plays the note; the dialog does not own an AudioContext.
+  // How long a played key is held. "beat" and "bar" follow the host's tempo so a preview is the
+  // length a note of that value will actually have in the score; the envelope graph is drawn on
+  // this time scale, with the key-up marked, so a slow attack cut short is visible before it is
+  // heard.
+  const PREVIEWS = ["short", "beat", "bar", "long"] as const;
+  type Preview = (typeof PREVIEWS)[number];
+  let preview = $state<Preview>("short");
+  const previewMs = $derived(previewLength(preview, bpm));
+  function previewLength(kind: Preview, tempo: number): number {
+    const beat = 60_000 / (Number.isFinite(tempo) && tempo > 0 ? tempo : 120);
+    return kind === "short" ? 400 : kind === "beat" ? Math.round(beat) : kind === "bar" ? Math.round(beat * 4) : 2000;
+  }
   function audition(semitone: number) {
     const result = validateJamPatch(clonePatch(patch));
     if (!result.ok) {
       onnotice(`This soundfont cannot be played: ${result.error}`, "error");
       return;
     }
-    onaudition(result.patch, base + semitone);
+    onaudition(result.patch, base + semitone, previewMs);
+  }
+  /**
+   * The loudness curve on a real time axis: attack, decay, the shelf until the key-up at
+   * `holdMs`, then the release. A key let go during the attack or decay releases from the level
+   * it had reached, which is what the engine does and what a short preview of a slow sound hides.
+   */
+  function envelopePath(e: JamPatch["e"], holdMs: number): { points: [number, number][]; keyUp: number } {
+    const level = (t: number) => t < e.a ? (e.a > 0 ? t / e.a : 1) : t < e.a + e.d ? 1 - (1 - e.s / 100) * ((t - e.a) / Math.max(1, e.d)) : e.s / 100;
+    const total = Math.max(1, holdMs + e.r);
+    const x = (t: number) => (t / total) * 100, y = (l: number) => 26 - l * 20;
+    const points: [number, number][] = [[0, 26]];
+    if (holdMs > e.a) points.push([x(e.a), y(1)]);
+    if (holdMs > e.a + e.d) points.push([x(e.a + e.d), y(e.s / 100)]);
+    points.push([x(holdMs), y(level(holdMs))], [100, 26]);
+    return { points, keyUp: x(holdMs) };
   }
   function shiftRegister(direction: number) {
     register = Math.min(SOUNDFONT_REGISTER_MAX, Math.max(SOUNDFONT_REGISTER_MIN, register + direction));
@@ -428,19 +459,18 @@
   axes are not calibrated. Ported from the call drawer unchanged.
 -->
 
-<!-- Loudness over time: attack up, decay down to the sustain shelf, a fixed hold so the shelf is
-     always visible, then the release. The dashed rule is the key-up. -->
+<!-- Loudness over time, on the preview's own time axis: attack up, decay down to the sustain
+     shelf, the shelf until the key is let go (the dashed rule, at the chosen preview length),
+     then the release. Unlike the other scopes this one is calibrated, so a slow attack that a
+     short preview cuts off is visible as a peak that never arrives. -->
 {#snippet scopeEnv(e: JamPatch["e"])}
-  {@const x1 = (e.a / PATCH_PARAM.e.a.max) * 30}
-  {@const x2 = x1 + (e.d / PATCH_PARAM.e.d.max) * 25}
-  {@const x3 = x2 + 18}
-  {@const x4 = x3 + (e.r / PATCH_PARAM.e.r.max) * 27}
-  {@const sy = 26 - (e.s / PATCH_PARAM.e.s.max) * 20}
-  <svg class="sf-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+  {@const shape = envelopePath(e, previewMs)}
+  {@const line = shape.points.map(([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`).join(" L")}
+  <svg class="sf-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" data-sf-keyup={shape.keyUp.toFixed(1)}>
     <path class="grid" d="M0 26H100" />
-    <path class="fill" d={`M0 26 L${x1} 6 L${x2} ${sy} L${x3} ${sy} L${x4} 26 Z`} />
-    <path class="trace" d={`M0 26 L${x1} 6 L${x2} ${sy} L${x3} ${sy} L${x4} 26`} />
-    <path class="mark" d={`M${x3} ${sy} V26`} />
+    <path class="fill" d={`M${line} Z`} />
+    <path class="trace" d={`M${line}`} />
+    <path class="mark" d={`M${shape.keyUp.toFixed(2)} 4 V26`} />
   </svg>
 {/snippet}
 
@@ -566,6 +596,14 @@
       <button type="button" class="sf-mb" aria-label="Register down" title="One octave down" disabled={register <= SOUNDFONT_REGISTER_MIN} onclick={() => shiftRegister(-1)}>−</button>
       <span class="mono strong sf-reg" title="The two octaves the keyboard and the home row cover">{registerLabel(register)}</span>
       <button type="button" class="sf-mb" aria-label="Register up" title="One octave up" disabled={register >= SOUNDFONT_REGISTER_MAX} onclick={() => shiftRegister(1)}>＋</button>
+      <span class="micro sf-lbl sf-hold">length</span>
+      <div class="sf-modes" role="group" aria-label="Preview length">
+        {#each PREVIEWS as kind (kind)}
+          <button type="button" class="sf-mb" class:on={preview === kind} aria-pressed={preview === kind} data-sf-preview={kind}
+            title={kind === "short" ? "a quick tap: 0.4 s" : kind === "beat" ? `one beat at ${bpm} bpm` : kind === "bar" ? `one bar of four beats at ${bpm} bpm` : "a long hold: 2 s"} onclick={() => { preview = kind; }}>{kind}</button>
+        {/each}
+      </div>
+      <span class="mono sf-reg" data-sf-preview-ms={previewMs} title="How long a played key is held; the envelope's dashed rule is where it lets go">{(previewMs / 1000).toFixed(previewMs % 1000 ? 2 : 1)}s</span>
     </div>
 
     <div class="sf-body">
@@ -755,6 +793,7 @@
   .sf-row.shelf { border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; row-gap: 6px; }
   .sf-row.hear { border-bottom: 1px solid var(--border); }
   .sf-lbl { width: 64px; flex: none; }
+  .sf-lbl.sf-hold { width: auto; margin-left: 10px; }
   .sf-rk { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; padding: 3px 7px; border: 1px solid var(--border); border-radius: var(--r); background: transparent; color: var(--text-2); cursor: pointer; }
   .sf-rk:hover { background: var(--bg-elev); border-color: var(--accent); color: var(--text); }
   .sf-rk svg { width: 26px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }

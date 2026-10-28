@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { base64ToBytes } from "./studio-native.ts";
 import { StudioSession } from "./studio-session.ts";
+import { STUDIO_BUSY_RETRY_MS } from "./studio-busy.ts";
 import {
   CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, id32, id64, indexContent, indexEntry, ordinaryView, pixBytes, recoveryListing, settle, version,
 } from "./studio-testkit.ts";
@@ -241,13 +242,16 @@ test("FETCH-002: an explicit retry asks again after unavailable, and a busy fail
   assert.equal(h.calls("request_blob_bounded").length, 1, "a repaint does not re-ask");
   h.ipc.on("request_blob_bounded", () => { throw new Error("Studio storage busy; retry the same request"); });
   h.session.retryBlob(cid, pix.length);
-  await h.sync();
-  assert.equal(h.calls("request_blob_bounded").length, 2, "the explicit retry asked again");
+  // Every native call of the session repeats a storage-busy refusal itself (busyRetrying in
+  // studio-busy.ts), so the explicit retry is one request plus the wrapper's bounded repeats. Let
+  // all of them run out before asking what the blob's state is.
+  for (let i = 0; i < 4; i++) await h.sync();
+  assert.equal(h.calls("request_blob_bounded").length, 2 + STUDIO_BUSY_RETRY_MS.length, "the explicit retry asked again, and the busy repeats stayed bounded");
   assert.equal(h.session.blobState(cid), "failed", "a busy rejection is transient, not invalid content");
   assert.match(h.session.blobProblem(cid), /busy/);
   h.ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: pix.length }));
   h.session.want(cid, pix.length, 0);
-  assert.equal(h.calls("request_blob_bounded").length, 2, "failed holds until an invalidation or retry");
+  assert.equal(h.calls("request_blob_bounded").length, 2 + STUDIO_BUSY_RETRY_MS.length, "failed holds until an invalidation or retry");
   h.session.retryBlob(cid, pix.length);
   await h.sync();
   assert.equal(h.session.blobState(cid), "held");

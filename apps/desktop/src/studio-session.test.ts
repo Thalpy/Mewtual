@@ -1029,6 +1029,53 @@ test("a frame save publishes then applies with the view's epoch, and an uncertai
   assert.equal(applies, 1);
 });
 
+test("a storage-busy refusal is repeated silently with the identical request, and lands when storage frees up", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView());
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  let applies = 0;
+  h.ipc.on("studio_apply", () => { if (++applies <= 2) throw new Error("Studio storage busy; retry the same request"); return docView([{ id: F1, cid: id64(1), bytes: pixBytes(1).length }], { epochId: id32(0xe1) }); });
+  h.session.setTitle(OBJ, "quiet please");
+  await h.sync();
+  assert.equal(applies, 3, "two refusals, then the write");
+  const sent = h.calls("studio_apply").map((c) => c.args);
+  assert.deepEqual(sent[0], sent[1]); assert.deepEqual(sent[1], sent[2]);
+  assert.equal(h.session.saves.length, 0, "nothing was ever shown as failed");
+});
+
+test("a storage-busy refusal that outlasts every pause is known not written, not uncertain", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView());
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  let applies = 0;
+  h.ipc.on("studio_apply", () => { applies++; throw new Error("Studio storage busy; retry the same request"); });
+  h.session.setTitle(OBJ, "still busy");
+  // Each pass fires one pause of the chain: the wrapper's five per send, the session's three resends.
+  for (let pass = 0; pass < 12; pass++) await h.sync();
+  const rec = h.session.saves[0];
+  assert.equal(rec.status, "blocked", "native refuses before executing, so nothing was written");
+  assert.equal(rec.mayHaveCommitted, false);
+  assert.match(rec.error, /busy/);
+  // Two bounded layers (see BUSY_BACKOFF_MS): the session sends four times (one plus three
+  // resends), and the wrapper repeats each send five times before the session sees the refusal.
+  assert.equal(applies, 4 * 6, "four session sends, each one attempt plus the five bounded repeats");
+  assert.equal(h.session.canReauthor(rec.id), true, "a known-no-write save may be re-authored or discarded");
+  // The same holds for the overlay status reads: the banner's error is the refusal itself, and
+  // only after the same bounded repeats (the read is left running while the pauses are fired).
+  let reads = 0;
+  h.ipc.on("studio_overlay_read", () => { reads++; throw new Error("Studio storage busy; retry the same request"); });
+  void h.session.refreshOverlay(OBJ);
+  await h.sync(); await h.sync();
+  assert.equal(reads, 6);
+  assert.match(h.session.overlay?.error ?? "", /busy/);
+});
+
 test("a later read cannot re-author over an ambiguous save; its exact identity stays frozen", async () => {
   const h = await harness();
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));

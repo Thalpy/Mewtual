@@ -9,9 +9,32 @@ App V2 remains OFF; the unfinished programme work is listed below.
 
 28 October status: #74 merged into `main` at `85b345cf`; its tree matches the tested
 integration head. The incorporated stacked PRs were closed with their source history
-preserved. Five PRs remain open: #47, #51, #55, #56 and #73. A new isolated
-`communication-gap-completion` candidate preserves #51/#55/#56 on that main and fixes
-the native Lock/Leave write findings. Combined validation is still pending; historical
+preserved. Seven PRs remain open: #47, #51, #55, #56, #73 and the two draft integration
+candidates #75/#76. #75 (`communication-gap-completion`, runtime `3e598b50`) preserves
+#51/#55/#56 on that main and fixes native Lock/Leave write and reveal races. #76
+(`score-backlog-integration`, tested runtime `fa3107d2`) adds #47 while preserving Save-before-switch,
+and includes the latest #75 diagnostics. It is stacked on #75. Close the original
+feature PRs only after their integration candidate passes and lands.
+
+Current local Score evidence: the full Root suite at `c27e7694` passes 3,960 tests
+with 25 existing ignores; compiled Root sources/locks are unchanged through `fa3107d2`.
+Its current-native-source construction scan was separately rerun after the corrections and passes.
+Complete native passes 1,011 library plus six ACL tests (2,336.29s library runtime),
+including both previous causal failures and both original/alternate media cases.
+Complete frontend passes 3,539 tests, all 379 native handoff checks pass, and all four
+actual native batch/reopen/lock/lost-reply regressions pass (1.57s). Both refreshed
+dependency audits and ambient/Store raw-fs gates pass. Native check, strict Clippy,
+final build (5m59s) and real startup pass. Hosted CI remains pending.
+
+#75 also passes its focused storage controls, the original media scenario (77.33s)
+and a new forced-alternate-peer media scenario (77.54s), plus native check/strict
+Clippy and 3,314 frontend tests. Linux's earlier `c3877704` native run still has an
+unresolved second-pair storage Capacity failure after genuine confirmation/Ready.
+The new exact-parent/boundary diagnostics are running in current CI. Local passes
+do not explain that earlier refusal. The overlay job at `3e598b50` passed all seven
+negative/restored pairs but was cancelled at its 30-minute aggregate limit; its
+follow-up allows 45 minutes with no case-bound or assertion change. That cancelled
+job is not green. Neither draft is ready to merge until hosted evidence is reconciled. Historical
 passes below must not be reused as acceptance of these newly combined features.
 
 The separate #74 store-repair follow-up is now complete on both hosted OSes at
@@ -45,7 +68,7 @@ refusal proves this attempt unaccepted after its pending entry is resolved. It c
 erase possible acceptance of an earlier attempt with the same identity. Tests exercise
 both facts through the actual App functions and kept/recovered/cancelled entries.
 
-## Current combined evidence
+## Merged #74 evidence
 
 | Check | Latest verified result and source |
 | --- | --- |

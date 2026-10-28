@@ -251,15 +251,25 @@ fn validate_take(bytes: &[u8]) -> Result<usize> {
             keys(e, &["ms", "lane", "n", "on", "q"])?;
             num(e, "n", 127)?;
         } else {
+            // `v` is the optional note volume (1..=100, percent of the recipe's own level) a Score
+            // note with `vol` exports since jam-score:v1 gained it; the renderer's validator
+            // (`validateTakeEvent` in jam-recorder.ts) accepts the same four key sets. Without it
+            // here a flipnote linked to such a score could not be published.
+            let mut expected = vec!["ms", "lane", "n", "on", "w", "q"];
             if e.contains_key("p") {
-                keys(e, &["ms", "lane", "n", "on", "w", "p", "q"])?;
+                expected.push("p");
                 if patch_count == 0 {
                     return Err(invalid("event recipe"));
                 }
                 num(e, "p", (patch_count - 1) as u64)?;
-            } else {
-                keys(e, &["ms", "lane", "n", "on", "w", "q"])?;
             }
+            if e.contains_key("v") {
+                expected.push("v");
+                if num(e, "v", 100)? < 1 {
+                    return Err(invalid("event volume"));
+                }
+            }
+            keys(e, &expected)?;
             if num(e, "on", 1)? != 1 {
                 return Err(invalid("event on"));
             }

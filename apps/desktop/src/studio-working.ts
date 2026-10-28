@@ -1,10 +1,11 @@
 // Volatile editor projections. These are never native views, causal evidence, recovery choices,
 // or authorization. Keep the native model's raw registers intact; only effective display values
 // change until an acknowledged Save replaces the native base.
-import type { FlipnoteModel, ScoreModel, IndexModel, FrameSource } from "./studio-native.ts";
+import { scoreReadinessClear, scoreVoiceSlots, type FlipnoteModel, type ScoreModel, type IndexModel, type FrameSource, type IndexSource } from "./studio-native.ts";
 import type { SaveRecord } from "./studio-session.ts";
 import type { JamPatch } from "./jam-contract.ts";
-import { FLIPNOTE_MAX_FRAMES, FLIPNOTE_FRAME_BYTES_PROMISE, FLIPNOTE_MAX_SFX, FLIPNOTE_MAX_PATCHES, FLIPNOTE_MAX_EXPORTS_VISIBLE } from "./studio-contract.ts";
+import { FLIPNOTE_MAX_FRAMES, FLIPNOTE_FRAME_BYTES_PROMISE, FLIPNOTE_MAX_SFX, FLIPNOTE_MAX_PATCHES, FLIPNOTE_MAX_EXPORTS_VISIBLE, SCORE_MAX_PATCHES, canonicalJson, layerOf, noteKey, parseNoteKey, type ScoreCell } from "./studio-contract.ts";
+import { admittedSounds, scoreVoices } from "./score-voices.ts";
 
 export function workingFlipnote(base: FlipnoteModel, records: readonly SaveRecord[], me: string): FlipnoteModel {
   const model: FlipnoteModel = { ...base, frames: base.frames.map(f => ({ ...f })), sound: { ...base.sound,
@@ -60,7 +61,12 @@ export function workingFlipnote(base: FlipnoteModel, records: readonly SaveRecor
 }
 
 export function workingScore(base: ScoreModel, records: readonly SaveRecord[]): ScoreModel {
-  const model = { ...base, cells: { ...base.cells }, patches: { ...base.patches } };
+  const model = { ...base, cells: { ...base.cells }, notes: { ...base.notes }, patches: { ...base.patches } };
+  // A queued edit is causally after everything this view holds, so it replaces a slot's every
+  // alternative when it lands: one value for a set, none for a clear. `pending` records that per
+  // note key; slots it does not name keep their native evidence (including concurrent values).
+  const pending = new Map<string, ScoreCell | null>();
+  const headersSet = new Set<string>();
   for (const save of records) {
     if (save.kind !== "apply" && save.kind !== "overlayApply") continue;
     const op = save.op;
@@ -68,29 +74,57 @@ export function workingScore(base: ScoreModel, records: readonly SaveRecord[]): 
       case "set_header":
         if (op.field === "title") model.title = String(op.value);
         else if (op.field === "bpm" || op.field === "bpb" || op.field === "steps") model[op.field] = Number(op.value);
+        headersSet.add(op.field);
         break;
-      case "set_cell": model.cells[`${op.step}:${op.row}`] = op.value; break;
-      case "clear_cell": delete model.cells[`${op.step}:${op.row}`]; break;
+      case "set_cell": { const key = noteKey(op.step, op.row, null); model.cells[key] = model.notes[key] = op.value; pending.set(key, op.value); break; }
+      case "clear_cell": { const key = noteKey(op.step, op.row, null); delete model.cells[key]; delete model.notes[key]; pending.set(key, null); break; }
+      case "set_note": { const key = noteKey(op.step, op.row, layerOf(op.value)); model.notes[key] = op.value; pending.set(key, op.value); break; }
+      case "clear_note": { const key = noteKey(op.step, op.row, op.layer); delete model.notes[key]; pending.set(key, null); break; }
       case "set_patch": model.patches[op.patch] = op.descriptor as JamPatch; break;
       case "remove_patch": delete model.patches[op.patch]; break;
     }
   }
-  // Raw slots/headers above remain native evidence. Readiness for a local preview is computed
-  // from its effective cells/recipes; the export validator independently checks the full input.
-  const cells: ScoreModel["readiness"]["cells"] = {}, patches: ScoreModel["readiness"]["patches"] = {};
-  const notes = new Map<number, { end: number; key: string }>();
-  const ordered = Object.entries(model.cells).sort(([a], [b]) => Number(a.split(":")[0]) - Number(b.split(":")[0]) || a.localeCompare(b));
-  ordered.forEach(([key, cell], i) => {
-    const [step, row] = key.split(":").map(Number), end = step + (cell.k === "n" ? cell.len ?? 1 : 1), prior = notes.get(row);
-    const overlap = cell.k === "n" && !!prior && step < prior.end;
-    cells[key] = { count: i >= 4096, extent: end > model.steps, recipe: cell.k === "n" && !model.patches[cell.p], overlap,
-      conflict: !!base.cellSlots[key]?.register.conflicts.length };
-    if (overlap) cells[prior!.key].overlap = true;
-    if (cell.k === "n" && (!prior || end > prior.end)) notes.set(row, { end, key });
+  // Readiness and voices come from score-voices.ts, the one implementation Rust readiness mirrors
+  // (studio-score-readiness-v1.json pins both). Native readiness is sparse, and so is this: a
+  // readback of the very score projected here must fingerprint identically in the editor's media
+  // snapshot, or it is mistaken for a source change and stops playback or an audition.
+  const slots = scoreVoiceSlots(base.cellSlots, base.layerSlots).filter((slot) => !pending.has(slot.key));
+  for (const [key, value] of pending) {
+    const parsed = parseNoteKey(key);
+    if (parsed && value) slots.push({ key, step: parsed.step, row: parsed.row, layer: parsed.layer, values: [value] });
+  }
+  model.voices = scoreVoices(slots, model.steps, admittedSounds(Object.keys(model.patches)));
+  const cells: ScoreModel["readiness"]["cells"] = {}, layers: ScoreModel["readiness"]["cells"] = {};
+  for (const [key, issues] of Object.entries(model.voices.issues)) (key.includes("/") ? layers : cells)[key] = issues;
+  // A sound's issues: over the 64-sound cap by id, or (never in practice: an id is its descriptor's
+  // hash) more than one distinct descriptor retained under one id.
+  const densePatches: ScoreModel["readiness"]["patches"] = {};
+  Object.keys(model.patches).sort().forEach((id, i) => {
+    const slot = base.patchSlots[id], distinct = slot ? new Set([slot.register.selected, ...slot.register.conflicts].filter((a) => a.value !== null).map((a) => canonicalJson(a.value))).size : 0;
+    densePatches[id] = { count: i >= SCORE_MAX_PATCHES, conflict: distinct > 1 };
   });
-  Object.keys(model.patches).sort().forEach((id, i) => { patches[id] = { count: i >= 64, conflict: !!base.patchSlots[id]?.register.conflicts.length }; });
-  model.readiness = { cells, patches, headerConflicts: base.readiness.headerConflicts };
-  model.ready = !model.readiness.headerConflicts && !Object.values(cells).some(v => Object.values(v).some(Boolean)) && !Object.values(patches).some(v => Object.values(v).some(Boolean));
+  const patches = Object.fromEntries(Object.entries(densePatches).filter(([, v]) => Object.values(v).some(Boolean)));
+  const layered = Object.keys(base.layerSlots).length > 0 || [...pending.keys()].some((key) => key.includes("/"));
+  // A queued set of a header is causally after every value its register holds, so once it lands
+  // the header has one value. The projection shows it so: its register becomes that one value (the
+  // prior winner's source, or a local display-only source for a header never set), and a header
+  // conflict (more than one DISTINCT value, the rule native and the DTO parser use) is computed on
+  // that. Projecting the base's flag instead made the readback look like a source change and
+  // stopped playback, and kept "another value by" chips up while the edit saved (review L7).
+  if (headersSet.size && base.headers) {
+    const local: IndexSource = { opId: "", author: "", nonce: "" };
+    const headers = { ...base.headers } as Record<string, ScoreModel["headers"]["title"] | ScoreModel["headers"]["bpm"]>;
+    for (const field of headersSet) {
+      const value = field === "title" ? model.title : model[field as "bpm" | "bpb" | "steps"];
+      headers[field] = { selected: { value, source: base.headers[field as "title"]?.selected.source ?? local }, conflicts: [] } as never;
+    }
+    model.headers = headers as ScoreModel["headers"];
+  }
+  const distinct = (header: ScoreModel["headers"]["title"] | ScoreModel["headers"]["bpm"]) =>
+    !!header && new Set([header.selected, ...header.conflicts].map((alternative) => JSON.stringify(alternative.value))).size > 1;
+  const headerConflicts = (["title", "bpm", "bpb", "steps"] as const).some((field) => distinct(model.headers?.[field] ?? null));
+  model.readiness = { cells, patches, headerConflicts, ...(layered ? { layers } : {}) };
+  model.ready = scoreReadinessClear(model.readiness);
   return model;
 }
 
@@ -118,6 +152,7 @@ export function workingSlot(save: SaveRecord): string | null {
   switch (op.op) {
     case "set_header": return `header:${op.field}`;
     case "set_cell": return `cell:${op.step}:${op.row}`;
+    case "set_note": return `note:${noteKey(op.step, op.row, layerOf(op.value))}`;
     case "set_sfx": return `sfx:${op.sfx}`;
     case "set_patch": return `patch:${op.patch}`;
     case "set_title": return `title:${op.object}`;

@@ -2683,6 +2683,170 @@ These handles are not serialized or supplied by the webview. The trusted Rust `C
 adapter adds custody only; it is not a membership authorization factory. Production IPC obtains
 grants from the actual product actor. Voice attachment failures leave that row unavailable for
 V2 and retry on a later unlock, while ordinary authenticated vault/chat access continues.
+## Score layers and additive merging (2026-10-20)
+
+Owner decisions: one note per sound per cell; concurrent edits merge by adding and nothing blocks
+playback; every sound (and the drum kit) can be shown, ghosted or hidden in the composer. The full
+contract is `docs/design-score-layers.md`; this is the interface summary.
+
+- Wire: two new Score operations, `{"op":"set_note","row","step","value"}` and
+  `{"layer":"d"|<64 hex>,"op":"clear_note","row","step"}`, stored at `n/{step}:{row}/{layer}`
+  (`MAX_KEY_BYTES` 73). A note's layer is its sound id; every drum is in layer `d`. Older builds
+  refuse them as malformed and pause Studio sync for that server: everyone editing together must
+  update first. New builds author only these for notes; `clear_cell` still removes a legacy note.
+- Merge: legacy `c/` cells and sounds keep removal wins and a live legacy cell plays only its
+  selected value. Layer slots are add wins: every distinct live value plays, a concurrent clear
+  removes only what its author saw. A slot's shown value is the selected one when live, else the
+  live alternative with the lowest source op id (`layerShownValue`).
+- What plays (`score-voices.ts`, mirrored by Rust readiness and pinned by
+  `studio-score-readiness-v1.json`): candidates, clipped to the grid (`len` written only above 1),
+  identical voices collapsed across slots, canonical order, then skips (after the 4096th, a sound not
+  among the first 64, a start at or past the end). Readiness flags are diagnostics only: `conflict`
+  means distinct values, `overlap` only within one row and one sound, computed by an O(n) sweep.
+  Nothing refuses Play, download, share or post. `ScorePlayback.skipped` counts what does not sound.
+- Bridge DTO: a score with layer slots adds `layers: {"S:R/L": {cleared, register}}` and
+  `readiness.layers`; a score without them keeps the exact earlier shape. The renderer refuses a
+  view whose `readiness.layers[key].conflict` disagrees with that slot's distinct live values
+  (absent counts as false), since the composer's several-versions guard reads that flag.
+- Exporter input: `notes: {step,row,value}[]` (or the older `cells` record). Overlapping holds of
+  one pitch each take the lowest free lane (lane `k >= 1` nonce from `catcoms-score-voice:v1`);
+  a clean score exports byte-identically.
+- Studio playback of a document may hold 48 notes at once (`JAM_DOCUMENT_HELD_MAX`); jukebox decks
+  and received takes keep 16 per performer. Under the 64-voice ceiling that leaves 16 held voices
+  for all live performers together while a document plays locally. Attacks refused for want of a
+  voice (`source-held`, `room-held`) are counted once each per start
+  (`StudioPlaybackController.refused`); `StudioAudioState.refused` is the larger of the pass under
+  way and the one before it (0 when nothing plays), and `ScoreEditor`'s `refused` prop shows it as
+  "N not played" (`data-score-refused`) while the score plays.
+- A Flipnote's linked Score resolves the same additive way: its PIXA carries what the score plays
+  instead of refusing on the score's readiness (declared change; the Flipnote's own frames and
+  sound still refuse on conflicts).
+- Recovery: `RecoveryChoice` gains `{kind:"scoreNote",step,row,layer,value}`; native restores the
+  version's shown value with `set_note` (or `clear_note`).
+- Composer: the grid edits one shown note per cell (the chosen sound's first) and
+  `scoreSurfaceOps` turns each gesture into layered ops, writes before clears and each note's new
+  place before its old key is overwritten, so a refusal part way never deletes a note. `onop`
+  carries a gesture id (`scoreGestureId`); `applyScoreOp(object, op, gesture)` links the records
+  (session-private, never persisted), and discarding a refused write removes the gesture's later
+  records in that lane, writes and clears alike. After a restore the links are gone, so discarding
+  a restored note write instead holds the restored note edits behind it as `blocked` cards for the
+  member. Phrase moves emit their sets against the direction of travel. Editing a legacy note
+  moves it into its layer (`set_note`, then
+  `clear_cell`); undo restores a legacy cell where it was (`set_cell`). Visibility is per viewer,
+  never written, and hiding does not mute. Only a shown sound takes new notes; a ghosted sound is
+  outlines that other sounds can be written over. Every write, undo, redo and review action
+  included, reaches only shown sounds. A layered slot with several different live values is not
+  moved, resized, rewritten, undone or redone over (`scoreOpSeveralValues`, read from readiness
+  `conflict`); choosing a version in the review list (which exempts only that key) or erasing it on
+  the grid is how it changes. A hold past the end is not edited until it is shortened (one Shorten
+  press brings it to the end) or the score is lengthened; an undo or redo that would write a hold
+  past the current end is refused before it is queued (native refuses it too) and waits for a
+  longer score. A legacy `set_cell` counts as reaching both the sound it writes and the sound the
+  cell holds now.
+
+## Score additions re-saved after an epoch move (2026-10-20)
+
+Owner decision. A queued Score addition (`set_cell`, `set_note`, `set_patch`) whose document history moved
+under it is saved again on its own: "Shared history changed" at admission, or native's
+"epoch studio: edit belongs to a retired epoch". It is saved into the current epoch as a fresh edit
+with a new nonce, in its lane position, with its label, and no card. This is an exception to the
+`NEEDS_DECISION` rule below for these Score records only (`scheduleAutoReauthor`).
+
+- It applies only to an ordinary Score Apply proven not written (`canReauthor`) while the
+  document's current route is ordinary.
+- After the native refusal it re-reads the document first.
+- One job per document collects every record refused in the same turn (a refused batch), shares
+  that one read, re-saves them in lane order and pumps once, so they leave as one batch again.
+- It is bounded to `AUTO_REAUTHOR_MAX` (3) per edit chain. After that the record is the member's,
+  with "Save as a new edit".
+- While it is pending, `resaving(id)` is true: `saveTally()` counts the record as retrying,
+  `needsDecision` is false, and the banner offers no buttons.
+- Clears (`clear_cell`, `clear_note`), header changes and sound removals keep their card.
+  Re-authored on a newer history, they could remove or override a collaborator's addition unseen.
+  A legacy note moved into its layer is a `set_note` (re-saved) and a `clear_cell` (kept): until
+  the member decides, the note plays from both places.
+- Flipnote and Index records keep their card.
+- A reset, lock or scope change drops pending jobs.
+
+## Studio automatic retries and saved departure (28 October integration)
+
+Automatic exact retries from the19 October proposal are retained. Departure keeps the
+accepted definite-Save barrier described below; it does not close the editor on uncertainty.
+Retries add no wire or persistence format. Batched IPC also needs its native ACL grant:
+`studio_apply_batch` is now in `security/command-policy.json` (account-write, main),
+`capabilities/main.json` and the reviewed ledger. Before that, Tauri refused every batch with
+"studio_apply_batch not allowed. Command not found".
+
+- **Automatic exact resend.** A Save that failed (`uncertain` or `blocked`) is resent by
+  `StudioSession` itself after 1, 2, 4, 8, 15, 30 and 60 s (`AUTO_RETRY_MS`), through the same
+  `retry(id)` the member's "Retry now" uses: the same nonce, epoch and body, in lane order. It runs in
+  production only (`autosaveMs > 0`). It covers Create, document and Index Applies, and
+  ordinary-route frames. Some failures stay with the member: restored work until something sends it,
+  the local-draft and recovery routes, and refusals no resend can change (`NEEDS_DECISION`).
+  Restored work is sent by an explicit Save or retry, or by the Save barrier before leaving its
+  document/Studio, changing channel or posting to chat. An external channel-prop change alone
+  never sends restored held work. Once explicitly released it is resent like any other save. The
+  refusals that need a decision are "Shared history changed", "The server for these saved edits
+  changed", "edit belongs to a retired epoch", "object already exists", "already occurs in the
+  index", "Studio requires current membership", "local device is not a current member" and
+  "unknown Studio channel". `retry(id)` refuses those too, because an exact resend after a changed
+  history would skip admission and could then never be saved as a new edit. A new no-write class,
+  `NATIVE_REFUSED_BEFORE_WRITE`, covers two refusals that native makes ahead of its intent barrier,
+  so they settle known not written and can be saved as a new edit. One is exactly
+  "epoch studio: edit belongs to a retired epoch". The other is a batch whose first item met that
+  refusal. Any other wording, a later batch item, or a record already uncertain stays uncertain.
+  studio-native-no-write.test.ts pins the texts and the ordering to the Rust sources. `needsDecision(id)` and `canRetry(id)` tell surfaces whether to offer
+  Retry; "Save as a new edit" becomes the primary action when Retry is not offered. After the last
+  pause the record stays failed and is shown as the member's. `autoRetryAt(id)` (a `now()` timestamp or null) and `saveTally()`
+  (`{left, retrying, stuck}`) are display only. A reset, lock or scope change cancels every pending
+  resend. Exact resend is safe because native answers an operation it already holds as saved
+  (`validate_local_edit`'s held check), and a request refused before dispatch never ran.
+- **Batches.** A record that was already sent once (`attempts !== 0` or `mayHaveCommitted`) never
+  rides a batch, as head or member. A batch refused as a whole therefore resolves item by item.
+- **Leaving a document** (`navigate`) stages the drawing and awaits definite Saves for its
+  document lane, including edits made while waiting. Refusal keeps the original editor. After
+  that lane drains, its shared Index halves may be released without awaiting their independent
+  receipts. Original navigation ownership is checked again before opening the next document.
+- **Leaving the Studio.** `studioHasPending()` stages the drawing and includes every retained
+  record, including inflight and uncertain work. App's exit host awaits `studioSave`; failed Save
+  vetoes departure. Posting to chat also awaits Save and rechecks its original scope afterward.
+  The explicit `sendBeforeLeaving()`/`sendStudio()` utility still releases records without
+  waiting, but the App departure/post paths do not use it. `trackStudioSaves()` displays remaining
+  background work as a toast with a progress bar that ends "Studio edits saved", or warns
+  when an edit needs the member. A lock, a reset, or a queue emptied by the member's own discards
+  (`saveTally().discarded`) ends it silently, so an emptied queue is never claimed as saved. Any
+  change of view away from the Studio can track remaining saves. Window close also awaits every
+  receipt (`saveBeforeLeaving`) and refuses at the first failure.
+- **Changing channel under queued work.** `setStudioScope` no longer changes scope while the session
+  `retainsWork`. It returns false without releasing held work. `studioScopeWaiting(server, channel)` drives a
+  `data-scope-wait` panel in both surfaces: the sidebar hides the old channel's list and its "new"
+  buttons, and the editor shows the count left and names the edits that will not save on their own,
+  with Retry (only where it can move them) and Discard. It has no bulk "save as a new edit": edits
+  the document changed under are reviewed in their own channel, never re-saved unseen. The surfaces re-ask on every change, and the switch happens when the last record lands.
+  Held queued work is labelled as waiting and has an explicit Save action; that action uses the
+  original request identities and never retries/reauthors a blocked request. One operation-owned
+  token bounds Save waiters. Source generation/scope, displayed destination and panel lifetime
+  fence late clicks/notices. A new actual scope advances the ordinary navigation generation;
+  an old App route cannot become current again when the switch lands. Window close (`closing`)
+  also defers the switch.
+- **A restored snapshot for another channel** (`pendingRestoredScope`) refuses every new edit until
+  its channel opens. The editor shows a card that says so, with `discardRestoredDraft()` behind a
+  confirmation, for a channel that can no longer be opened.
+- **Playback is never refused by save status.** `prepareScorePlayback(object)` defaults to playback;
+  `prepareScoreTake` (download, share, chat) passes `playback: false`. `prepareFlipnotePixa(object,
+  {playback})` defaults to false; Play passes true. Playback of a flipnote whose linked Score still
+  has queued edits builds the take from that Score's working projection. Exports still refuse while a
+  save of the document has failed ("This document has an edit that did not save…") or the linked
+  Score is still saving.
+- **Words.** `studio-save-words.ts` decides what a person reads: `saveProblemText(error, uncertain)`,
+  `saveHeadline(label, {retrying, uncertain, others})` ("Not confirmed yet: score recipe, 5 more
+  waiting", "Not saved: fps"), `retryText`, and `saveToast(tally, total, discardedSince)`. The exact
+  native text stays on the record and in the banner's tooltip. Buttons: "Retry now", "Reload and
+  retry", "Save as a new edit" (rendered only when allowed), "Discard" / "Really discard?". The
+  awaited-Save rejections are "A Studio edit is not saved yet (or not confirmed yet). The Studio is
+  trying again on its own.", "A Studio edit is not confirmed. Retry or discard it in the Studio."
+  and "A Studio edit was not saved. Retry or discard it in the Studio.". A stuck edit's words claim
+  neither saved nor failed ("needs you").
 
 ## Optional desktop invite refresh (2026-10-18)
 
@@ -2696,6 +2860,9 @@ Explicit `mint_invite_fresh` remains owner/admin gated, and join-time authorizat
 Roles on non-owner devices still have the existing published-roster freshness limitations.
 
 ## Studio departure scope, restored-work reach and App exit routes (2026-10-18)
+
+(The28 October integration preserves this departure barrier. Bounded automatic retries and
+the independent Index lane continue as described above; they do not authorize an early switch.)
 
 `StudioSession.navigate(action)` (sidebar and Music) saves only the document being left: records
 in that document's lane must reach a definite receipt or the open is vetoed. With no document open
@@ -2733,11 +2900,18 @@ no lease and so does not execute.)
 `nativeNoWrite` classifies exactly these. A queued Save, or the plain document or Index read
 (`refreshDoc`, `refreshIndex`), refused this way is resent automatically, the same request after
 250, 500 and 1000 ms, without counting the visit unless an earlier attempt was already uncertain
-(see below). The overlay, recovery, fault and blob reads are
-not resent; a refusal there shows as their ordinary read error until the next refresh. The
+(see below). Beneath that layer, every native call the Studio session makes first repeats a
+storage-busy refusal itself, with the identical request, five times after 40, 80, 160, 320 and
+640 ms (`busyRetrying`, `studio-busy.ts`). The other two texts are not repeated there. The overlay,
+recovery, fault and blob reads get only that storage-busy repeat and are not resent by the session.
+A refusal that outlasts it shows as their ordinary read error until the next refresh. The
 backoffs total 1.75 s, but "Studio actor busy" itself arrives only after its 5 s rendezvous, so a
 Save refused that way four times takes about 22 s and a departure's 10 s timeout reports it as
-still saving. Only when the resends are used up does the Save settle. It settles as not written
+still saving. A Save that stays storage-busy makes 4 × 6 calls of its request over about 6.7 s. Only
+when the resends are used up does the Save settle. A batched Score Save (`studio_apply_batch`)
+refused this way is resent whole: its members wait queued and uncounted behind the head, and
+settle with it only when the resends are used up. Each item keeps its nonce and body across the
+resends, but a resent batch can also carry edits queued while it waited. It settles as not written
 only when no earlier attempt of it was uncertain. It then stays uncounted, so the member's retry is
 admitted afresh against the current history, and reauthor is available subject to the record
 kind's usual restrictions. A record whose earlier attempt was uncertain (it failed after dispatch,
@@ -4079,6 +4253,7 @@ nonce and complete request across retries; do not generate another operation on 
 | `studio_create` | `object`, `nonce`, `title`, `createdAtMs` | Saved Flipnote view. Creates its title then puts the Index entry with actual full author and unrecorded expiry. |
 | `studio_apply` | `object`, `epochId`, `nonce`, `body` | Updated Flipnote view. `body` is the canonical JSON **string**, not an Automerge change or object. |
 | `studio_apply_index` | `epochId`, `nonce`, `body` | Updated Index view using canonical IndexOp JSON string. |
+| `studio_apply_batch` | `object`, `epochId`, `objectKind:"score"`, `operations:[{nonce, body}, …]` | Updated Score view after ONE transaction for 1..64 Score operations (256 KiB of bodies in all, distinct nonces). Each item is its own signed operation, so an exact retry reseals accepted items. Not atomic: a refused item names itself ("item k of n") and the items before it are saved. Score targets only. |
 
 Create's `createdAtMs` must be a nonnegative JS-safe integer. Both complete operation envelopes
 must fit the existing 64 KiB limit, not just their title/body alone. Create currently targets
@@ -7228,12 +7403,16 @@ The four `on`/`ask` combinations:
 `studioPatchUnion`. Inputs are resolved export views, not native admission capabilities.
 Score input is `{id,bpm,bpb,steps,patches,cells}`: object id is 32 lowercase hex, headers use
 the creative design ranges, cell keys are canonical `step:row`, and values are exactly
-`{k:"n",p:<patch id>,len?:<sixteenth steps>}` or `{k:"d",pad:0..9}`. Note length is 1 through
-the remaining score steps; absent `len` preserves the original one-step draft. Same-row note
-overlap refuses rather than silently shortening authored holds. Patch keys must equal the existing
-jam recipe hashes. Up to 4096 cells and 64 recipes are accepted. Cells beyond the requested score length
-refuse; the connected native projection consumer refuses unresolved overflow/conflicts before
-exporting, without silently dropping frames or notes.
+`{k:"n",p:<patch id>,len?:<sixteenth steps>,vol?:1..100}` or `{k:"d",pad:0..9}`. Note length is 1 through
+the remaining score steps; absent `len` preserves the original one-step draft. `vol` is the note's
+authored level in percent of its recipe; absent means full level and is kept absent (the exported
+take's note-on carries it as `v`). Superseded 2026-10-20 (see "Score layers and additive merging"
+at the top): input may instead be `notes: {step,row,value}[]`, overlapping holds play on their own
+lanes instead of refusing, and the connected consumer no longer refuses on readiness; it exports
+what `score-voices.ts` plays and counts the rest as skipped. Patch keys must equal the existing
+jam recipe hashes. Up to 4096 notes and 64 recipes are accepted. Notes beyond the requested score
+length refuse at this leaf (callers clip or skip them first). Flipnote frames still refuse on
+unresolved overflow/conflicts.
 
 Context carries `{group,exporter}`. `group` must come from the stable backend group identifier,
 not a local numeric server alias; the helper can enforce only scalar-text/UTF-8 size bounds.
@@ -7291,7 +7470,8 @@ Optional authored title/BPM/BPB/step registers preserve complete winner/alternat
 values default to empty/120/4/16 without invented provenance. Cell/recipe slots retain a raw
 register of optional values; any live removal makes effective presence false. Clear and remove
 on absent slots record intent. Later Sets supersede exact observed same-property predecessors,
-not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow.
+not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow
+(diagnostics only since 2026-10-20; layered notes are add wins, see the top section).
 Score snapshots use explicit payload prefix2, and score restart units require trailing family2
 even when pristine. Existing Index/art bytes are unchanged. See `GATE6-STATE-DESIGN.md`.
 The native diagnostic shape `kind:"score"` uses optional header registers and cell/patch maps

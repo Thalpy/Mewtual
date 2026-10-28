@@ -81,6 +81,7 @@
   { "command": "studio_create", "risk": "account-write", "surfaces": ["main"] },
   { "command": "studio_apply", "risk": "account-write", "surfaces": ["main"] },
   { "command": "studio_apply_index", "risk": "account-write", "surfaces": ["main"] },
+  { "command": "studio_apply_batch", "risk": "account-write", "surfaces": ["main"] },
   { "command": "studio_overlay_archive", "risk": "account-write", "surfaces": ["main"] },
   { "command": "studio_overlay_archive_release", "risk": "account-write", "surfaces": ["main"] },
   { "command": "studio_overlay_copy_apply", "risk": "account-write", "surfaces": ["main"] },

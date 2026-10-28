@@ -112,6 +112,19 @@ pub enum StudioRequest {
         nonce: [u8; 16],
         body: Vec<u8>,
     },
+    /// Several Score operations in ONE transaction: one durable server snapshot, one storage
+    /// scan, one publication window and one update event instead of one of each per edit, which
+    /// is what made the composer save "step by step". The operations are applied in order, each
+    /// as its own signed operation with its own nonce, so an exact retry of the whole batch is as
+    /// safe as retrying each edit (accepted items reseal, they are never applied twice). The
+    /// batch is NOT atomic: an item refused after earlier items were written leaves those items
+    /// durable, and the error names the item so the caller can retry exactly or drop it. Score
+    /// only: flipnote and Index bodies need per-request admission (blob custody, link evidence).
+    ApplyBatch {
+        target: StudioTarget,
+        epoch_id: u128,
+        operations: Vec<StudioBatchOperation>,
+    },
     /// Object header first, index second. This is retryable, not a cross-document transaction:
     /// failure can leave an unlisted object. The caller must retry these EXACT fields.
     Create {
@@ -136,10 +149,26 @@ impl std::fmt::Debug for StudioRequest {
         f.write_str("StudioRequest { .. }")
     }
 }
+/// One member of [`StudioRequest::ApplyBatch`]: the same nonce/body pair a single Apply carries.
+pub struct StudioBatchOperation {
+    pub nonce: [u8; 16],
+    pub body: Vec<u8>,
+}
+impl std::fmt::Debug for StudioBatchOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StudioBatchOperation { .. }")
+    }
+}
+/// Bounds of one batched Apply, checked before the actor queue. The renderer mirrors both in
+/// `studio-native.ts`; an autosave that gathers more edits sends several batches.
+pub const STUDIO_BATCH_MAX_OPERATIONS: usize = 64;
+pub const STUDIO_BATCH_MAX_BYTES: usize = 256 * 1024;
 impl StudioRequest {
     pub fn target(&self) -> StudioTarget {
         match self {
-            Self::Read { target } | Self::Apply { target, .. } => *target,
+            Self::Read { target }
+            | Self::Apply { target, .. }
+            | Self::ApplyBatch { target, .. } => *target,
             Self::Create {
                 channel, object, ..
             } => StudioTarget::Flipnote {
@@ -182,6 +211,37 @@ impl StudioRequest {
                     .encode()
                     .map(|_| ())
                     .map_err(invalid)
+            }
+            Self::ApplyBatch {
+                target, operations, ..
+            } => {
+                if !matches!(target, StudioTarget::Score { .. }) {
+                    return Err(invalid("batched Apply is limited to Score targets"));
+                }
+                if operations.is_empty() || operations.len() > STUDIO_BATCH_MAX_OPERATIONS {
+                    return Err(invalid(format!(
+                        "batched Apply holds 1 to {STUDIO_BATCH_MAX_OPERATIONS} operations"
+                    )));
+                }
+                let mut nonces = std::collections::BTreeSet::new();
+                let mut total = 0usize;
+                for operation in operations {
+                    // Two items with one nonce would be one operation id: the second could only
+                    // ever reseal the first, silently dropping an edit the author made.
+                    if !nonces.insert(operation.nonce) {
+                        return Err(invalid("batched Apply repeats a nonce"));
+                    }
+                    total = total.saturating_add(operation.body.len());
+                    if total > STUDIO_BATCH_MAX_BYTES {
+                        return Err(invalid("batched Apply exceeds its byte bound"));
+                    }
+                    ScoreOp::decode(&operation.body).map_err(invalid)?;
+                    domain(*target, operation.nonce, operation.body.clone())
+                        .encode()
+                        .map(|_| ())
+                        .map_err(invalid)?;
+                }
+                Ok(())
             }
             Self::Create { title, ts, .. } | Self::CreateScore { title, ts, .. } => {
                 if title.len() > 64 * 1024 {
@@ -515,6 +575,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             let logical = target.document(&self.group_id()).map_err(invalid)?;
             store.hold_creative_operation(&logical, &domain(*target, *nonce, body.clone()));
         }
+        if let StudioRequest::ApplyBatch {
+            target, operations, ..
+        } = &request
+        {
+            let logical = target.document(&self.group_id()).map_err(invalid)?;
+            for operation in operations {
+                store.hold_creative_operation(
+                    &logical,
+                    &domain(*target, operation.nonce, operation.body.clone()),
+                );
+            }
+        }
         // New local pixel references require exact already-held bytes in this mounted vault.
         // No network fetch or silent reference to a placeholder hash. The pre-hold above and
         // durable write hooks protect these bytes from same-mount cache reclamation; this
@@ -626,6 +698,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 while !scan.step()?.complete {}
                 let inventory = scan.finish()?;
                 let mut budget = store.studio_storage_budget(server, group, &inventory)?;
+                // A single request seals at most two packets (Create: object then Index); a
+                // batch seals one per operation, bounded by its validated item count.
+                let packet_cap = match &request {
+                    StudioRequest::ApplyBatch { operations, .. } => operations.len(),
+                    _ => 2,
+                };
                 let mut apply =
                     |target: StudioTarget, epoch_id, nonce, body| -> Result<(), AppError> {
                         let logical = target.document(&group.group_id()).map_err(invalid)?;
@@ -638,7 +716,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         // Only actual saved output can enter the private batch. No second mutation
                         // or reconstructed body is needed for the initial publication. The full
                         // signed log and intent remain the durable retry authority, not this packet.
-                        if packets.len() >= 2 {
+                        if packets.len() >= packet_cap {
                             return Err(invalid("Studio save packet cap"));
                         }
                         let (sealed, _) = store.edit_studio_epoch(
@@ -666,6 +744,30 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         nonce,
                         body,
                     } => apply(target, epoch_id, nonce, body)?,
+                    StudioRequest::ApplyBatch {
+                        target,
+                        epoch_id,
+                        operations,
+                    } => {
+                        // In order, each under the same epoch check and causal validation a
+                        // lone Apply gets. The items before a refused one are already durable
+                        // (their intents are journalled and their edits saved), so the error
+                        // says which item stopped the batch: an exact retry reseals the saved
+                        // items and meets the same refusal, which is the caller's cue to drop it.
+                        let count = operations.len();
+                        for (index, operation) in operations.into_iter().enumerate() {
+                            apply(target, epoch_id, operation.nonce, operation.body).map_err(
+                                |error| {
+                                    invalid(format!(
+                                        "batched Apply item {} of {count} was refused ({error}); \
+                                         the items before it are saved, so retry the same batch \
+                                         exactly or discard that item",
+                                        index + 1
+                                    ))
+                                },
+                            )?;
+                        }
+                    }
                     StudioRequest::Create {
                         channel,
                         object,
@@ -711,7 +813,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             })?;
         // A partial Create or failed final read returns Err above: none of its temporary packets
         // escape for automatic publication. Already saved local content/intents remain retryable.
+        // A batch's packets all name one (target, epoch); the watch it establishes is one watch.
         let mut observed: Vec<_> = packets.iter().map(|p| (p.target, p.epoch_id)).collect();
+        observed.dedup();
         if observed.is_empty() {
             let logical = target.document(&self.group_id()).map_err(invalid)?;
             observed.push((

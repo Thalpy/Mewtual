@@ -23,6 +23,7 @@ import process from "node:process";
 import { gate7FlowExpression } from "./gate7-flow.mjs";
 import { keptFlowExpression } from "./kept-flow.mjs";
 import { privateDownloadFlowExpression } from "./private-download-flow.mjs";
+import { scoreFlowExpression } from "./score-flow.mjs";
 
 const PORT = Number(process.env.FLOW_PORT ?? 5177);
 const URL_UNDER_TEST = `http://localhost:${PORT}/?fixture=chat`;
@@ -676,6 +677,15 @@ try {
     });
     const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
     if (capture.result?.data) writeFileSync(new URL("../../../target/pr48-kept-copies.png", import.meta.url), Buffer.from(capture.result.data, "base64"));
+  } else if (process.env.FLOW_SCENARIO === "score") {
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+    await cdp.navigate(URL_UNDER_TEST + "&studio=1");
+    await cdp.waitReady();
+    const result = await cdp.eval(scoreFlowExpression);
+    failed |= !assertEqual("Score grid, loop default and layered recovery document", result,
+      { cleanGrid: true, explicitLoopOff: true, layeredScoreOpens: true });
+    const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
+    if (capture.result?.data) writeFileSync(new URL("../../../target/score-integration.png", import.meta.url), Buffer.from(capture.result.data, "base64"));
   } else if (process.env.FLOW_SCENARIO === "gate7") {
     await cdp.send("Runtime.addBinding", { name: "gate7Click" });
     await cdp.send("Runtime.addBinding", { name: "gate7Capture" });

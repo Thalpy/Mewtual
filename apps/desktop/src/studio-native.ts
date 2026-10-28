@@ -10,7 +10,8 @@
 // on both and is never the read-only discriminator.
 
 import type { NativeInvoker } from "./native-download.ts";
-import { PIX_MAX_BYTES, SCORE_MAX_STEPS, SCORE_ROWS, type ScoreCell, type FlipnoteOp } from "./studio-contract.ts";
+import { PIX_MAX_BYTES, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, layerOf, parseNoteKey, type ScoreCell, type FlipnoteOp } from "./studio-contract.ts";
+import { admittedSounds, distinctCells, scoreVoices, type ScoreVoices, type ScoreVoiceSlot } from "./score-voices.ts";
 import { PIXA_MAX_BYTES } from "./pixa.ts";
 import type { JamPatch } from "./jam-contract.ts";
 import { validateJamPatch } from "./jam-patch.ts";
@@ -89,9 +90,13 @@ export type FlipnoteContent = {
 };
 /** Raw Automerge winner and effective remove-wins state are deliberately separate evidence. */
 export type ScoreSlot<T> = { removed: boolean; register: Register<T | null, IndexSource> };
+/** A layered note slot (`n/S:R/L`, docs/design-score-layers.md): add wins, so it is `cleared` only
+ * when no alternative holds a value; every distinct value it holds plays. */
+export type ScoreLayerSlot = { cleared: boolean; register: Register<ScoreCell | null, IndexSource> };
 export type ScoreCellIssues = { count: boolean; extent: boolean; recipe: boolean; overlap: boolean; conflict: boolean };
 export type ScorePatchIssues = { count: boolean; conflict: boolean };
-export type ScoreReadiness = { cells: Record<string, ScoreCellIssues>; patches: Record<Hex64, ScorePatchIssues>; headerConflicts: boolean };
+/** `layers` is present only when the score has layered notes (native omits it otherwise). */
+export type ScoreReadiness = { cells: Record<string, ScoreCellIssues>; patches: Record<Hex64, ScorePatchIssues>; headerConflicts: boolean; layers?: Record<string, ScoreCellIssues> };
 export type ScoreContent = {
   kind: "score";
   title: Register<string, IndexSource> | null;
@@ -99,6 +104,8 @@ export type ScoreContent = {
   bpb: Register<number, IndexSource> | null;
   steps: Register<number, IndexSource> | null;
   cells: Record<string, ScoreSlot<ScoreCell>>;
+  /** Keyed `"S:R/L"`; present only when the score has layered notes. */
+  layers?: Record<string, ScoreLayerSlot>;
   patches: Record<Hex64, ScoreSlot<JamPatch>>;
   readiness: ScoreReadiness;
 };
@@ -147,6 +154,9 @@ export type RecoveryMode = "restore" | "copy";
 export type RecoveryChoice =
   | { kind: "soundRecord"; value: Hex64 }
   | { kind: "scoreCell"; step: number; row: number; value: Hex64 }
+  /** A layered note slot (docs/design-score-layers.md section 6): `layer` is "d" or the sound id;
+   * native restores it with `set_note` (or `clear_note` for a chosen clear). */
+  | { kind: "scoreNote"; step: number; row: number; layer: string; value: Hex64 }
   | { kind: "scorePatch"; patch: Hex64; value: Hex64 }
   | { kind: "scoreHeader"; field: "title" | "bpm" | "bpb" | "steps"; value: Hex64 }
   | { kind: "frame"; id: Hex32; value: Hex64 }
@@ -615,12 +625,20 @@ function closedDataList(value: unknown, what: string): unknown[] {
 function scoreCell(v: unknown, what: string, step: number): ScoreCell {
   const r = closedDataRecord(v, what), keys = Object.keys(r).sort().join(",");
   if (r.k === "n") {
-    if (keys !== "k,p" && keys !== "k,len,p") fail(`${what} has unknown note fields`);
+    if (keys !== "k,p" && keys !== "k,len,p" && keys !== "k,p,vol" && keys !== "k,len,p,vol") fail(`${what} has unknown note fields`);
     const p = hex64(r.p, `${what}.p`);
-    if (!("len" in r)) return { k: "n", p };
-    const len = count(r.len, `${what}.len`);
-    if (len < 1 || len > SCORE_MAX_STEPS - step) fail(`${what}.len is outside its global extent`);
-    return { k: "n", p, len };
+    const cell: ScoreCell = { k: "n", p };
+    if ("len" in r) {
+      const len = count(r.len, `${what}.len`);
+      if (len < 1 || len > SCORE_MAX_STEPS - step) fail(`${what}.len is outside its global extent`);
+      cell.len = len;
+    }
+    if ("vol" in r) {
+      const vol = count(r.vol, `${what}.vol`);
+      if (vol < SCORE_VOLUME_MIN || vol > SCORE_VOLUME_MAX) fail(`${what}.vol is outside ${SCORE_VOLUME_MIN}..${SCORE_VOLUME_MAX}`);
+      cell.vol = vol;
+    }
+    return cell;
   }
   if (r.k === "d" && keys === "k,pad") {
     const pad = count(r.pad, `${what}.pad`);
@@ -632,7 +650,10 @@ function scoreCell(v: unknown, what: string, step: number): ScoreCell {
 
 /** Preserve all values, while checking the native effective flag against the removal evidence. */
 export function parseScoreContent(v: unknown, what = "content"): ScoreContent {
-  const r = closedDataRecord(v, what, ["kind", "title", "bpm", "bpb", "steps", "cells", "patches", "readiness"]);
+  // `layers` appears only for a score with layered notes, so a score without them is the exact DTO
+  // older builds received (docs/design-score-layers.md section 4).
+  const hasLayers = typeof v === "object" && v !== null && Object.hasOwn(v, "layers");
+  const r = closedDataRecord(v, what, ["kind", "title", "bpm", "bpb", "steps", "cells", ...(hasLayers ? ["layers"] : []), "patches", "readiness"]);
   if (r.kind !== "score") fail(`${what}.kind is not score`);
   // Matches the typed snapshot's value rail; malformed native replies cannot allocate arbitrary
   // conflict vectors or let a tiny displayed winner hide an unbounded evidence collection.
@@ -681,7 +702,29 @@ export function parseScoreContent(v: unknown, what = "content"): ScoreContent {
     if (!result.ok) fail(`${name}: ${result.error}`);
     return result.patch;
   }));
-  const ready = closedDataRecord(r.readiness, `${what}.readiness`, ["cells", "patches", "headerConflicts"]);
+  // Layered notes: add wins, so a slot is `cleared` exactly when none of its alternatives holds a
+  // value, and every value it holds must belong to the slot's own layer (the key's sound, or `d`).
+  let layers: Record<string, ScoreLayerSlot> | undefined;
+  if (hasLayers) {
+    const rawLayers = closedDataRecord(r.layers, `${what}.layers`);
+    const count = Object.keys(rawLayers).length;
+    if (count === 0) fail(`${what}.layers is present but empty`);
+    if (count > 68_192) fail("score layer collection exceeds its bound");
+    layers = mapOf(rawLayers, `${what}.layers`, (key) => {
+      const parsed = parseNoteKey(key);
+      if (!parsed || parsed.layer === null) fail("score layer address is not canonical");
+      return key;
+    }, (value, w) => {
+      const key = w.slice(w.lastIndexOf(".") + 1), { step, layer } = parseNoteKey(key)!;
+      const raw = closedDataRecord(value, w, ["cleared", "register"]), cleared = flag(raw.cleared, `${w}.cleared`);
+      const result = checkedRegister<ScoreCell | null>(raw.register, `${w}.register`, (x, name) => x === null ? null : scoreCell(x, name, step));
+      const values = [result.selected, ...result.conflicts].map((alternative) => alternative.value);
+      if (values.some((cell) => cell !== null && layerOf(cell) !== layer)) fail(`${w} holds a note of another layer`);
+      if (cleared !== values.every((cell) => cell === null)) fail(`${w}.cleared disagrees with the values it holds`);
+      return { cleared, register: result };
+    });
+  }
+  const ready = closedDataRecord(r.readiness, `${what}.readiness`, ["cells", "patches", "headerConflicts", ...(hasLayers ? ["layers"] : [])]);
   const issueMap = <T>(input: unknown, w: string, keys: readonly string[], present: Record<string, unknown>, key: (v: string) => string): Record<string, T> =>
     mapOf(closedDataRecord(input, w), w, key, (value, name) => {
       const address = name.slice(name.lastIndexOf(".") + 1);
@@ -696,11 +739,25 @@ export function parseScoreContent(v: unknown, what = "content"): ScoreContent {
   const bpb = nullable(r.bpb, (x) => checkedRegister(x, `${what}.bpb`, boundedNumber(1, 8)));
   const steps = nullable(r.steps, (x) => checkedRegister(x, `${what}.steps`, boundedNumber(1, SCORE_MAX_STEPS)));
   const headerConflicts = flag(ready.headerConflicts, `${what}.readiness.headerConflicts`);
-  if (headerConflicts !== [title, bpm, bpb, steps].some((header) => (header?.conflicts.length ?? 0) > 0)) fail("score header readiness disagrees with retained conflicts");
-  return { kind: "score", title, bpm, bpb, steps, cells, patches, readiness: {
-    cells: issueMap<ScoreCellIssues>(ready.cells, `${what}.readiness.cells`, ["count", "extent", "recipe", "overlap", "conflict"], cells, (key) => { scoreAddress(key); return key; }),
+  // A header conflict is more than one DISTINCT value (identical concurrent values are not one).
+  const distinctHeader = (header: Register<unknown, IndexSource> | null) =>
+    !!header && new Set([header.selected, ...header.conflicts].map((alternative) => JSON.stringify(alternative.value))).size > 1;
+  if (headerConflicts !== [title, bpm, bpb, steps].some(distinctHeader)) fail("score header readiness disagrees with retained conflicts");
+  const issueKeys = ["count", "extent", "recipe", "overlap", "conflict"] as const;
+  const layerIssues = layers ? issueMap<ScoreCellIssues>(ready.layers, `${what}.readiness.layers`, issueKeys, layers, (key) => key) : undefined;
+  // The composer refuses to move or rewrite a layered slot whose `conflict` says it holds several
+  // different live values (score-editor.ts `scoreOpSeveralValues`), so that flag must agree with
+  // the slot's own evidence, as `headerConflicts` must above: an under-reported flag would let a
+  // grid edit drop versions the member never saw (re-review of e7250d48, LOW-2).
+  if (layers) for (const [key, slot] of Object.entries(layers)) {
+    const several = distinctCells([slot.register.selected.value, ...slot.register.conflicts.map((c) => c.value)]).length > 1;
+    if (several !== (layerIssues![key]?.conflict ?? false)) fail(`${what}.readiness.layers conflict disagrees with the values ${key} holds`);
+  }
+  return { kind: "score", title, bpm, bpb, steps, cells, ...(layers ? { layers } : {}), patches, readiness: {
+    cells: issueMap<ScoreCellIssues>(ready.cells, `${what}.readiness.cells`, issueKeys, cells, (key) => { scoreAddress(key); return key; }),
     patches: issueMap<ScorePatchIssues>(ready.patches, `${what}.readiness.patches`, ["count", "conflict"], patches, (key) => hex64(key, "score patch issue id")),
     headerConflicts,
+    ...(layerIssues ? { layers: layerIssues } : {}),
   } };
 }
 
@@ -1197,6 +1254,23 @@ export async function studioApply<K extends StudioObjectKind = "flipnote">(ipc: 
   return parseObjectView(raw, req.objectKind);
 }
 
+/** Native's bounds for one batched Score Apply (`StudioRequest::ApplyBatch`): operations and body bytes. */
+export const STUDIO_APPLY_BATCH_MAX = 64;
+export const STUDIO_APPLY_BATCH_MAX_BYTES = 256 * 1024;
+export type ApplyBatchRequest = { object: Hex32; epochId: Hex32; operations: readonly { nonce: Hex32; body: string }[] };
+/// Several Score edits in ONE native transaction (one durable server snapshot, one storage scan,
+/// one publication window, one update event) instead of one of each per edit. Every operation
+/// keeps its own nonce, so an exact retry of the whole batch is as safe as retrying each edit:
+/// accepted items are recognised and resealed, never applied twice. The batch is not atomic; an
+/// item native refuses leaves the items before it saved, and the error names it. Score only.
+export async function studioApplyBatch(ipc: StudioIpc, target: StudioTargetArgs, req: ApplyBatchRequest): Promise<ScoreView> {
+  if (req.operations.length < 1 || req.operations.length > STUDIO_APPLY_BATCH_MAX) fail(`studio_apply_batch holds 1 to ${STUDIO_APPLY_BATCH_MAX} operations`);
+  const raw = await ipc.invoke<unknown>("studio_apply_batch", { server: target.server, channel: target.channel, object: req.object, epochId: req.epochId,
+    objectKind: "score", operations: req.operations.map((o) => ({ nonce: o.nonce, body: o.body })) });
+  if (raw === null || raw === undefined) fail("studio_apply_batch returned nothing");
+  return parseScoreView(raw);
+}
+
 export type ApplyIndexRequest = { epochId: Hex32; nonce: Hex32; body: string };
 export async function studioApplyIndex(ipc: StudioIpc, target: StudioTargetArgs, req: ApplyIndexRequest): Promise<IndexView> {
   const raw = await ipc.invoke<unknown>("studio_apply_index", { server: target.server, channel: target.channel, epochId: req.epochId, nonce: req.nonce, body: req.body });
@@ -1345,24 +1419,79 @@ export type ScoreModel = {
   title: string; bpm: number; bpb: number; steps: number;
   /** Every raw slot, including clear/remove winners and losing alternatives. */
   cellSlots: ScoreContent["cells"]; patchSlots: ScoreContent["patches"];
-  /** Effective values only; a selected setter does not defeat a concurrent removal. */
+  /** Layered note slots keyed `"S:R/L"` (add wins); empty for a score without layers. */
+  layerSlots: Record<string, ScoreLayerSlot>;
+  /** Legacy effective values only; a selected setter does not defeat a concurrent removal. */
   cells: Record<string, ScoreCell>; patches: Record<Hex64, JamPatch>;
+  /** Every note the composer draws, one per note key: legacy cells at `"S:R"` (their effective
+   * value) and layered notes at `"S:R/L"` (`layerShownValue`). A layer slot's other distinct values
+   * still play (`voices`) and its `conflict` flag says there is more than one. */
+  notes: Record<string, ScoreCell>;
+  /** What plays, from every slot (score-voices.ts). Nothing refuses playback; issues are review. */
+  voices: ScoreVoices;
+  /** Diagnostics only: true when there is nothing to review. Never gates playback or export. */
   readiness: ScoreReadiness; ready: boolean;
   headers: Pick<ScoreContent, "title" | "bpm" | "bpb" | "steps">;
 };
 
+/** The voice slots of a score's raw evidence, every alternative selected first. Which of them play
+ * (removal wins for legacy cells, add wins for layers) is decided in score-voices.ts alone. */
+export function scoreVoiceSlots(cellSlots: ScoreContent["cells"], layerSlots: Record<string, ScoreLayerSlot>): ScoreVoiceSlot[] {
+  const out: ScoreVoiceSlot[] = [];
+  const add = (key: string, register: Register<ScoreCell | null, IndexSource>) => {
+    const parsed = parseNoteKey(key);
+    if (parsed) out.push({ key, step: parsed.step, row: parsed.row, layer: parsed.layer, values: [register.selected.value, ...register.conflicts.map((c) => c.value)] });
+  };
+  for (const [key, slot] of Object.entries(cellSlots)) add(key, slot.register);
+  for (const [key, slot] of Object.entries(layerSlots)) add(key, slot.register);
+  return out;
+}
+
+/**
+ * The one value a layer slot shows and edits from (docs/design-score-layers.md section 2): the
+ * selected value when it is live, else the live alternative with the lowest source op id, the same
+ * rule compaction uses to promote a value over a clear. `null` only for a cleared slot. Never use
+ * the removal-wins helpers on a layer slot: a clear winning the register does not remove the note.
+ */
+export function layerShownValue(slot: ScoreLayerSlot): ScoreCell | null {
+  return layerShownAlternative(slot)?.value ?? null;
+}
+
+/** The alternative `layerShownValue` takes its value from, with the source a restore names. */
+export function layerShownAlternative(slot: ScoreLayerSlot): Valued<ScoreCell, IndexSource> | null {
+  const selected = slot.register.selected;
+  if (selected.value !== null) return { value: selected.value, source: selected.source };
+  let best: Valued<ScoreCell, IndexSource> | null = null;
+  for (const alternative of slot.register.conflicts) {
+    if (alternative.value !== null && (!best || alternative.source.opId < best.source.opId)) best = { value: alternative.value, source: alternative.source };
+  }
+  return best;
+}
+
+/** Whether a readiness has anything to review (diagnostics; nothing gates on it). */
+export function scoreReadinessClear(readiness: ScoreReadiness): boolean {
+  const none = (issues: Record<string, Record<string, boolean>>) => !Object.values(issues).some((flags) => Object.values(flags).some(Boolean));
+  return !readiness.headerConflicts && none(readiness.cells) && none(readiness.patches) && none(readiness.layers ?? {});
+}
+
 /** Defaults are display fallback, never a fabricated operation/source or authority to save. */
 export function scoreModel(content: ScoreContent): ScoreModel {
-  const cells: Record<string, ScoreCell> = {}, patches: Record<Hex64, JamPatch> = {};
-  for (const [key, slot] of Object.entries(content.cells)) if (!slot.removed && slot.register.selected.value !== null) cells[key] = slot.register.selected.value;
+  const cells: Record<string, ScoreCell> = {}, patches: Record<Hex64, JamPatch> = {}, notes: Record<string, ScoreCell> = {};
+  for (const [key, slot] of Object.entries(content.cells)) if (!slot.removed && slot.register.selected.value !== null) cells[key] = notes[key] = slot.register.selected.value;
+  const layerSlots = content.layers ?? {};
+  for (const [key, slot] of Object.entries(layerSlots)) {
+    const shown = layerShownValue(slot);
+    if (shown) notes[key] = shown;
+  }
   for (const [key, slot] of Object.entries(content.patches)) if (!slot.removed && slot.register.selected.value !== null) patches[key] = slot.register.selected.value;
+  const steps = content.steps?.selected.value ?? 16;
   return {
     title: content.title?.selected.value ?? "", bpm: content.bpm?.selected.value ?? 120,
-    bpb: content.bpb?.selected.value ?? 4, steps: content.steps?.selected.value ?? 16,
-    cellSlots: content.cells, patchSlots: content.patches, cells, patches,
+    bpb: content.bpb?.selected.value ?? 4, steps,
+    cellSlots: content.cells, patchSlots: content.patches, layerSlots, cells, notes, patches,
+    voices: scoreVoices(scoreVoiceSlots(content.cells, layerSlots), steps, admittedSounds(Object.keys(patches))),
     readiness: content.readiness,
-    ready: !content.readiness.headerConflicts && !Object.values(content.readiness.cells).some((issues) => Object.values(issues).some(Boolean)) &&
-      !Object.values(content.readiness.patches).some((issues) => Object.values(issues).some(Boolean)),
+    ready: scoreReadinessClear(content.readiness),
     headers: { title: content.title, bpm: content.bpm, bpb: content.bpb, steps: content.steps },
   };
 }
