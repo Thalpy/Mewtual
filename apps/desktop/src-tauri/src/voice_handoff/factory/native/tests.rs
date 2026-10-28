@@ -5,6 +5,10 @@ use std::future::{poll_fn, Future};
 use std::task::Poll;
 
 fn worker(context: &Context, route: &Route, selector: PairSelector) -> Worker {
+    selected_worker(context, route, Selection::Exact(selector))
+}
+
+fn selected_worker(context: &Context, route: &Route, selector: Selection) -> Worker {
     let selected = route.selected();
     let credit = selected
         .resources()
@@ -16,12 +20,98 @@ fn worker(context: &Context, route: &Route, selector: PairSelector) -> Worker {
         .unwrap();
     Worker {
         context: Some(context.clone()),
-        selector: Selection::Exact(selector),
+        selector,
+        discovery_refusal: None,
+        fixture_late_contention: false,
         custody: NativeCustody {
             _credit: credit,
             route: route.clone(),
             _native: route.session().native_hold().unwrap(),
         },
+    }
+}
+
+/// Run inside the real two-peer integration fixture's original observer bound and
+/// deferred first cadence. No selector or positive Root state is fabricated here.
+/// Actual discovery and its Actor preflight must pass before the real UI wait. A
+/// worker-local negative-only seam holds Index AFTER the blocking known lookup and
+/// immediately before its genuine nonblocking final admission check. The later
+/// Capacity MUST NOT become discovery-retry evidence.
+pub(in crate::voice_handoff) async fn prove_discovery_late_refusal(
+    context: &Context,
+    route: &Route,
+    clock: &dyn catcoms_rt::Clock,
+) {
+    let live = context.upgrade().unwrap();
+    let actor = {
+        let servers = live.servers.lock().await;
+        let binding = route.selected().binding();
+        servers.get(&binding.server).unwrap().actor.clone()
+    };
+    loop {
+        let boundary = live.commit.clone().lock_owned().await;
+        let permit = PeerSnapshotPermit::new(
+            &route.selected().resources(),
+            route.selected().binding().scope,
+        )
+        .unwrap();
+        let mut worker = selected_worker(context, route, Selection::Discover { cursor: 0, permit });
+        worker.fixture_late_contention = true;
+        let mut producing = Box::pin(run_native(worker));
+        let mut refused = false;
+        for _ in 0..3 {
+            let poll = poll_fn(|cx| Poll::Ready(producing.as_mut().poll(cx))).await;
+            match poll {
+                Poll::Ready(completion) => {
+                    assert!(
+                        completion.refused_before_selection(0),
+                        "negative control failed before reaching UI: {:?}",
+                        completion.result()
+                    );
+                    drop(completion);
+                    refused = true;
+                    break;
+                }
+                Poll::Pending => {
+                    // The first FIFO joins the genuine peer snapshot, the second
+                    // joins preflight. Only the held original UI guard can park the
+                    // third poll: there are exactly those two Actor awaits before it.
+                    actor.member_count().await;
+                }
+            }
+        }
+        if refused {
+            drop(boundary);
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+            continue;
+        }
+        drop(boundary);
+        let completion = producing.await;
+        assert_eq!(
+            completion.result(),
+            Err(Refused::Protocol(VoiceError::Capacity))
+        );
+        assert!(
+            !completion.refused_before_selection(0),
+            "a genuine discovery followed by late Capacity is not retryable discovery work"
+        );
+        drop(completion);
+        drop(
+            route
+                .session()
+                .native_hold()
+                .expect("actual native custody returned"),
+        );
+        loop {
+            match live.ledger.automatic_parent_available(route.selected()) {
+                Ok(true) => break,
+                Err(VoiceError::Capacity) => {
+                    clock.sleep(std::time::Duration::from_millis(10)).await
+                }
+                result => panic!("late pre-Begin refusal created a parent: {result:?}"),
+            }
+        }
+        return;
     }
 }
 
@@ -113,6 +203,10 @@ async fn automatic_parent_admission_rechecks_after_the_actual_ui_wait() {
     assert_eq!(
         completion.result(),
         Err(Refused::Protocol(VoiceError::Capacity))
+    );
+    assert!(
+        !completion.refused_before_selection(0),
+        "a refusal after selection must not be retried as discovery-only work"
     );
     assert!(
         f.state
