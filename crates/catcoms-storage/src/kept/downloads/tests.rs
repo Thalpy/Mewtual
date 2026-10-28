@@ -453,3 +453,92 @@ fn private_owner_and_scope_are_validated_before_pending_journal_reconciliation()
     assert_eq!(recovered.state.remaining.requests, 131_072 - 16);
     assert!(!path.join("next").exists());
 }
+
+/// An encoded manifest whose chunks declare `sizes` plaintext bytes.
+fn manifest_of(sizes: &[u64]) -> Vec<u8> {
+    let chunk = |size: u64| crate::FileRef {
+        plaintext_cid: Cid::of(b"p"),
+        ciphertext_cid: Cid::of(b"c"),
+        wrapped_key: catcoms_crypto::SealedBlob {
+            nonce: [0; 24],
+            ciphertext: vec![0; 48],
+        },
+        size,
+        mime: String::new(),
+    };
+    crate::FileManifest {
+        plaintext_cid: Cid::of(b"whole"),
+        total_size: sizes.iter().sum(),
+        mime: String::new(),
+        chunks: sizes.iter().map(|size| chunk(*size)).collect(),
+    }
+    .encode()
+}
+
+#[test]
+fn transfer_rows_count_declared_plaintext_bytes() {
+    // Transfers UX (PR #51): received is the declared size of every verified chunk (in any
+    // order), saved is the journal's written bytes, total the manifest's declared size. Layouts
+    // are uniform (every chunk full but the last), which decoding enforces.
+    let full = crate::CHUNK_PAD_CEILING as u64;
+    let total = 2 * full + 500;
+    let manifest = manifest_of(&[full, full, 500]);
+    assert_eq!(
+        DownloadBytes::of(&manifest, &[false, false, false], 0),
+        Some(DownloadBytes {
+            received: 0,
+            saved: 0,
+            total
+        })
+    );
+    assert_eq!(
+        DownloadBytes::of(&manifest, &[true, false, true], full),
+        Some(DownloadBytes {
+            received: full + 500,
+            saved: full,
+            total
+        })
+    );
+    let all = DownloadBytes::of(&manifest, &[true, true, true], total).unwrap();
+    assert_eq!((all.received, all.saved), (total, total));
+    // A journal can never claim more than the file: clamped, not trusted.
+    assert_eq!(
+        DownloadBytes::of(&manifest, &[true; 3], u64::MAX).map(|bytes| bytes.saved),
+        Some(total)
+    );
+    // An empty file is one empty chunk: a known total of 0.
+    let empty = DownloadBytes::of(&manifest_of(&[0]), &[true], 0);
+    assert_eq!(empty, Some(DownloadBytes::default()));
+    // Unreadable, an invalid layout, or a bitmap of another length: unknown, never a guess.
+    assert_eq!(
+        DownloadBytes::of(b"opaque manifest", &[true, true], 11),
+        None
+    );
+    assert_eq!(
+        DownloadBytes::of(&manifest_of(&[5, 6]), &[true, true], 0),
+        None
+    );
+    assert_eq!(DownloadBytes::of(&manifest, &[true, true], 0), None);
+}
+
+#[test]
+fn the_download_listing_carries_the_byte_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = open(dir.path());
+    let full = crate::CHUNK_PAD_CEILING as u64;
+    let plan = KeepPlan {
+        manifest: manifest_of(&[full, 6]),
+        ..plan()
+    };
+    let run = store.begin_download(vec![plan], 0, [9; 32]).unwrap();
+    store.put_download(run, b"first").unwrap();
+    let listed = store.downloads().unwrap().remove(0);
+    assert_eq!(
+        listed.bytes,
+        Some(DownloadBytes {
+            received: full,
+            saved: 0,
+            total: full + 6
+        })
+    );
+}

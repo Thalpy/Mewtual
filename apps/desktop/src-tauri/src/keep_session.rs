@@ -478,7 +478,7 @@ mod read_tests {
                     if edge == 3 {
                         register_ui_lock_request(&state);
                     }
-                    None
+                    std::future::ready(None)
                 },
                 |_| {
                     revealed.set(true);
@@ -498,6 +498,162 @@ mod read_tests {
                 "publication is not rolled back"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_recovered_save_returns_its_path_only_if_still_authorized_after_cleanup() {
+        // Review U-M4: the preflight found an already linked, verified file. Cleanup is blocked
+        // while Lock, an entry retirement or an actor/Root change completes; the stale response
+        // must be refused and the published file kept.
+        for edge in 0..4 {
+            let state = AppState::default();
+            let directory = tempfile::tempdir().unwrap();
+            *state.store.lock().await =
+                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.session_resumable.lock().await = true;
+            let path = directory.path().join("recovered.bin");
+            std::fs::write(&path, b"verified file").unwrap();
+            let entry = EntryOwner::new();
+            let origin = entry.scope(current(&state, 0).unwrap());
+            let actor_current = std::cell::Cell::new(true);
+            let (cleanup_done, cleanup_wait) = tokio::sync::oneshot::channel::<bool>();
+            let mut response = Box::pin(private_downloads::finish_recovered_save(
+                &state,
+                0,
+                &origin,
+                &path,
+                || actor_current.get(),
+                |_| Ok(()),
+                async {
+                    match cleanup_wait.await {
+                        Ok(true) => Ok(()),
+                        _ => Err("cleanup failed".to_string()),
+                    }
+                },
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(response.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            match edge {
+                0 => {
+                    register_ui_lock_request(&state);
+                }
+                1 => entry.retire(),
+                2 => actor_current.set(false),
+                _ => {} // still authorized; the cleanup itself fails
+            }
+            cleanup_done.send(edge != 3).unwrap();
+            let outcome = response.await;
+            if edge == 3 {
+                let saved = outcome.expect("a live session still gets its saved file");
+                assert!(
+                    saved.warning.is_some(),
+                    "a failed cleanup is reported, not discarded"
+                );
+            } else {
+                assert!(
+                    outcome.is_err(),
+                    "edge {edge}: no path into a retired invocation"
+                );
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), b"verified file");
+        }
+    }
+
+    /// Picker re-review MEDIUM 1: the media check reads the file just published, on whatever share
+    /// the user saved to. It must run on the blocking pool and without the process-wide commit
+    /// guard, so a stalled share pins neither a runtime worker nor Lock and every other save. On a
+    /// single-threaded runtime the releasing task below can only run, and can only take the commit
+    /// guard, if both hold; otherwise the parked inspection times out and reports "blocked".
+    #[test]
+    fn the_saved_file_check_runs_off_the_runtime_and_outside_the_commit_guard() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let state = AppState::default();
+            let directory = tempfile::tempdir().unwrap();
+            *state.store.lock().await =
+                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.session_resumable.lock().await = true;
+            let path = directory.path().join("published.png");
+            std::fs::write(&path, b"verified file").unwrap();
+            let entry = EntryOwner::new();
+            let origin = entry.scope(current(&state, 0).unwrap());
+            let (parked, parked_seen) = tokio::sync::oneshot::channel::<()>();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let releaser = async {
+                if parked_seen.await.is_ok() {
+                    // Taking the commit guard proves the inspection does not hold it.
+                    let guard = require_ui_session_generation(&state, 0).await.unwrap();
+                    drop(guard);
+                    let _ = release.send(());
+                }
+            };
+            let saving = finish_saved_read(
+                &state,
+                0,
+                &origin,
+                &path,
+                "image/png",
+                |path, mime| {
+                    inspect_published_with(path, mime, move |_, _| {
+                        let _ = parked.send(());
+                        match released.recv_timeout(std::time::Duration::from_secs(10)) {
+                            Ok(()) => None,
+                            Err(_) => Some("blocked".into()),
+                        }
+                    })
+                },
+                |_| Ok(()),
+            );
+            let (saved, ()) = tokio::join!(saving, releaser);
+            let saved = saved.expect("a live session gets its saved file");
+            assert_eq!(
+                saved.content_validation, None,
+                "the inspection was not blocked"
+            );
+        });
+    }
+
+    /// Picker review L1: a failed ciphertext cleanup adds its warning to what the save already
+    /// reported. Overwriting it hid the "old partial left behind" and "cannot resume" notices,
+    /// so plaintext could stay on disk without the user being told.
+    #[tokio::test]
+    async fn a_failed_cleanup_keeps_the_warnings_the_save_already_carried() {
+        let state = AppState::default();
+        let directory = tempfile::tempdir().unwrap();
+        *state.store.lock().await =
+            Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let entry = EntryOwner::new();
+        let origin = entry.scope(current(&state, 0).unwrap());
+        let earlier = "An earlier partial file stays on disk.";
+        let saved = finish_download_response(
+            &state,
+            0,
+            &origin,
+            SavedFileResult {
+                path: "saved.bin".into(),
+                displayed: true,
+                warning: Some(earlier.into()),
+                content_validation: None,
+                in_downloads: false,
+            },
+            || true,
+            async { Err("cleanup failed".to_string()) },
+        )
+        .await
+        .expect("a live session still gets its saved file");
+        let warning = saved.warning.expect("both notices are reported");
+        assert!(warning.contains(earlier), "earlier notice kept: {warning}");
+        assert!(
+            warning.contains("encrypted download copy could not be removed"),
+            "cleanup notice added: {warning}"
+        );
     }
 
     #[tokio::test]
@@ -523,6 +679,7 @@ mod read_tests {
                     displayed: true,
                     warning: None,
                     content_validation: None,
+                    in_downloads: false,
                 },
                 || actor_current.get(),
                 async { cleanup_wait.await.map_err(|_| "cleanup stopped".into()) },

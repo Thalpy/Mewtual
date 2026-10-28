@@ -13,6 +13,12 @@ const RECORD_V4: &[u8] = b"mewtual/kept-transfer/v4";
 // Download is a distinct sealed purpose, never an upgrade of an existing Keep record. It reuses
 // the bounded V4 body but its original transfer identity also names the private Download owner.
 const RECORD_DOWNLOAD_V1: &[u8] = b"mewtual/download-transfer/v1";
+// The V1 body plus a closed export journal and an optional planned "Save as" destination
+// (`export.rs`). Only the edge that starts an export or remembers a choice upgrades a V1 record,
+// so a record that never had either stays readable by the released reader; an older reader
+// refuses this domain without deleting it. v2 was amended (planned destination) before it was
+// ever pushed or released, so no v3 exists.
+const RECORD_DOWNLOAD_V2: &[u8] = b"mewtual/download-transfer/v2";
 #[path = "variants.rs"]
 mod variants;
 use variants::Variants;
@@ -29,10 +35,24 @@ pub(super) enum RecordEncoding {
     V3,
     V4,
     DownloadV1,
+    DownloadV2,
 }
 impl RecordEncoding {
+    /// Exhaustive on purpose: a new encoding must decide explicitly whether it carries the V4
+    /// candidate body. A missed arm would let `successor()` rewrite a private record as Keep V3.
     pub(in crate::kept) fn has_variants(self) -> bool {
-        matches!(self, Self::V4 | Self::DownloadV1)
+        match self {
+            Self::V4 | Self::DownloadV1 | Self::DownloadV2 => true,
+            Self::V2 | Self::V3 => false,
+        }
+    }
+    /// Private Download purpose. Exhaustive so that no future encoding silently becomes a public
+    /// Keep owner (served through `get`, `has`, `cids` and source preparation).
+    pub(in crate::kept) fn is_download(self) -> bool {
+        match self {
+            Self::DownloadV1 | Self::DownloadV2 => true,
+            Self::V2 | Self::V3 | Self::V4 => false,
+        }
     }
 }
 /// A restart spends the complete already-issued slice. Process-monotonic timestamps never go
@@ -152,16 +172,22 @@ pub(super) struct Record {
     pub last_retry: Option<KeepRetryReceipt>,
     /// V2/V3 never infer alternatives from today's index. V4 owns its complete saved set.
     pub variants: Option<Variants>,
+    /// External export journal; only DownloadV2 may carry anything but None.
+    pub export: super::export::Export,
+    /// "Save as" choice remembered until Begin turns it into the journal; DownloadV2 only, and
+    /// only while `export` is None.
+    pub planned: Option<super::export::PlannedDestination>,
 }
 impl Record {
     pub(super) fn owner(&self) -> Owner {
-        match self.encoding {
-            RecordEncoding::DownloadV1 => Owner::Download(DownloadId::from_bytes(self.transfer)),
-            _ => Owner::Keep(self.plan.cid),
+        if self.encoding.is_download() {
+            Owner::Download(DownloadId::from_bytes(self.transfer))
+        } else {
+            Owner::Keep(self.plan.cid)
         }
     }
     pub(super) fn public_retained(&self) -> bool {
-        !matches!(self.encoding, RecordEncoding::DownloadV1)
+        !self.encoding.is_download()
     }
     pub(super) fn initial(
         scope: KeepScope,
@@ -191,6 +217,8 @@ impl Record {
             grant: 1,
             last_retry: None,
             variants: None,
+            export: super::export::Export::None,
+            planned: None,
         })
     }
     pub(super) fn successor(&self) -> Result<Self, StorageError> {
@@ -225,7 +253,11 @@ impl Record {
                 RecordEncoding::V3 | RecordEncoding::V4 | RecordEncoding::DownloadV1 => {
                     !self.user_paused && self.intent == 1
                 }
+                // V2 Download records exist only as successors that started an export.
+                RecordEncoding::DownloadV2 => false,
             }
+            && self.export == super::export::Export::None
+            && self.planned.is_none()
             && !self.blocked
             && self.phase == KeepPhase::Resumable
             && self.grant == 1
@@ -241,12 +273,14 @@ impl Record {
         self.scope.validate()?;
         self.plan.charge()?;
         self.validate_variants()?;
+        self.validate_export()?;
         if self.revision == 0
             || match self.encoding {
                 RecordEncoding::V2 => !self.user_paused || self.intent != 0 || self.blocked,
-                RecordEncoding::V3 | RecordEncoding::V4 | RecordEncoding::DownloadV1 => {
-                    self.intent == 0 || self.intent > self.revision
-                }
+                RecordEncoding::V3
+                | RecordEncoding::V4
+                | RecordEncoding::DownloadV1
+                | RecordEncoding::DownloadV2 => self.intent == 0 || self.intent > self.revision,
             }
             || self.grant == 0
             || self.grant > self.revision
@@ -279,7 +313,9 @@ impl Record {
                 .checked_add(1)
                 .ok_or(StorageError::Malformed)?
             || next.predecessor != self.digest()
-            || (self.encoding != RecordEncoding::V2 && next.encoding != self.encoding)
+            || (self.encoding != RecordEncoding::V2
+                && next.encoding != self.encoding
+                && !self.upgrades_for_export(next))
             || (self.encoding == RecordEncoding::V2 && next.encoding.has_variants())
             || next.owner() != self.owner()
             || if self.encoding == RecordEncoding::V2 && next.encoding == RecordEncoding::V2 {
@@ -311,6 +347,7 @@ impl Record {
             return Err(StorageError::Malformed);
         }
         self.validate_variant_successor(next)?;
+        self.validate_export_successor(next)?;
         if next.grant == self.grant {
             if !next.remaining.at_most(self.remaining)
                 || next.last_retry != self.last_retry
@@ -326,6 +363,11 @@ impl Record {
             || next.exhausted
             || next.verified != self.verified
             || next.variants != self.variants
+            // A network Retry grant never moves the external export, the remembered "Save as"
+            // choice or the encoding.
+            || next.export != self.export
+            || next.planned != self.planned
+            || next.encoding != self.encoding
             || next
                 .last_retry
                 .is_none_or(|receipt| receipt.request.expected_grant != self.grant)
@@ -380,6 +422,7 @@ impl Record {
             RecordEncoding::V3 => RECORD_DOMAIN,
             RecordEncoding::V4 => RECORD_V4,
             RecordEncoding::DownloadV1 => RECORD_DOWNLOAD_V1,
+            RecordEncoding::DownloadV2 => RECORD_DOWNLOAD_V2,
         })
         .expect("fixed domain");
         e.put_bytes(&self.scope.group).expect("bounded group");
@@ -424,6 +467,19 @@ impl Record {
         if let Some(variants) = &self.variants {
             variants.encode(&mut e);
         }
+        if self.encoding == RecordEncoding::DownloadV2 {
+            self.export.encode(&mut e);
+            // Amendment to the unreleased v2 body: a presence byte and the planned destination.
+            match &self.planned {
+                None => {
+                    e.put_u8(0);
+                }
+                Some(planned) => {
+                    e.put_u8(1);
+                    planned.encode(&mut e);
+                }
+            }
+        }
         e.finish()
     }
     pub(super) fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
@@ -437,6 +493,9 @@ impl Record {
             RECORD_DOMAIN => RecordEncoding::V3,
             RECORD_V4 => RecordEncoding::V4,
             RECORD_DOWNLOAD_V1 => RecordEncoding::DownloadV1,
+            RECORD_DOWNLOAD_V2 => RecordEncoding::DownloadV2,
+            // An unknown (for example newer) domain is refused, never reinterpreted. The caller
+            // faults the retained store without deleting the directory or its external partial.
             _ => return Err(bad()),
         };
         if bytes.len() + 40
@@ -541,14 +600,21 @@ impl Record {
             false
         };
         let variants = if encoding.has_variants() {
-            let minimum = if encoding == RecordEncoding::DownloadV1 {
-                1
-            } else {
-                2
-            };
+            let minimum = if encoding.is_download() { 1 } else { 2 };
             Some(Variants::decode(&mut d, minimum)?)
         } else {
             None
+        };
+        let (export, planned) = if encoding == RecordEncoding::DownloadV2 {
+            let export = super::export::Export::decode(&mut d)?;
+            let planned = match d.get_u8().map_err(|_| bad())? {
+                0 => None,
+                1 => Some(super::export::PlannedDestination::decode(&mut d)?),
+                _ => return Err(bad()),
+            };
+            (export, planned)
+        } else {
+            (super::export::Export::None, None)
         };
         d.finish().map_err(|_| bad())?;
         let record = Self {
@@ -569,6 +635,8 @@ impl Record {
             grant,
             last_retry,
             variants,
+            export,
+            planned,
         };
         record.validate()?;
         Ok(record)

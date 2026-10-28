@@ -81,6 +81,53 @@ pub(crate) mod tests {
             "test",
         )
         .unwrap();
+        entry_for(instance, server)
+    }
+
+    /// A running server whose actor has the session's encrypted disk store attached (so it can
+    /// keep private Downloads) and one shared file of its own, for native tests that need a real
+    /// Download record. Returns the file's content address as raw bytes.
+    pub(crate) async fn running_with_file(
+        instance: u64,
+        state: &AppState,
+        data: &[u8],
+    ) -> (
+        ServerEntry,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    ) {
+        let mut server = Server::found(
+            Hub::new().join(PeerId::from_u64(instance)),
+            MlsDevice::generate().unwrap(),
+            OsCryptoRng,
+            Box::new(ManualClock::new(1_000)),
+            "test",
+        )
+        .unwrap();
+        crate::attach_blob_store(state, &mut server).await;
+        server.subscribe_control().await.unwrap();
+        server.open_files().await.unwrap();
+        let cid = server
+            .add_file("test.bin", "application/octet-stream", "", data)
+            .await
+            .unwrap();
+        let (entry, task, drain) = entry_for(instance, server);
+        (entry, task, drain, cid.as_bytes().to_vec())
+    }
+
+    fn entry_for<T, R>(
+        instance: u64,
+        server: Server<T, R>,
+    ) -> (
+        ServerEntry,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    )
+    where
+        T: MeshTransport + Send + 'static,
+        R: catcoms_rt::CryptoRngCore + Send + 'static,
+    {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);

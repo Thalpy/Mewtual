@@ -117,11 +117,7 @@ impl Record {
         rng: &mut dyn CryptoRngCore,
         encoding: RecordEncoding,
     ) -> Result<Self, StorageError> {
-        let minimum = if encoding == RecordEncoding::DownloadV1 {
-            1
-        } else {
-            2
-        };
+        let minimum = if encoding.is_download() { 1 } else { 2 };
         if !(minimum..=MAX_VARIANTS).contains(&plans.len()) || selected >= plans.len() {
             return Err(StorageError::Malformed);
         }
@@ -205,11 +201,7 @@ impl Record {
                 Ok(())
             };
         };
-        let minimum = if self.encoding == RecordEncoding::DownloadV1 {
-            1
-        } else {
-            2
-        };
+        let minimum = if self.encoding.is_download() { 1 } else { 2 };
         if !self.encoding.has_variants()
             || !(minimum..=MAX_VARIANTS).contains(&v.candidates.len())
             || v.selected >= v.candidates.len()

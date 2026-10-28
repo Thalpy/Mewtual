@@ -527,6 +527,67 @@ The **Files** tab is a folder browser:
 **Custom emoji** live in the `emoji/` folder. Add one in **Server settings → Emoji & Stickers**:
 type a `code`, choose its display size and upload an image. Then anyone types `:code:` to use it.
 
+### Saving a file to your computer
+
+**Download** saves into your Downloads folder; **Save as** lets you pick the folder and name. While
+a file is being written it sits beside its final name as `<name>.mewtual-part` (or `<name>.part`),
+and only a fully verified file ever gets the real name. On most local drives an interrupted save
+(Lock, Pause, closing the app) can be **resumed** later from the Transfers list.
+
+In **Transfers**, each file you are downloading or saving has one row, grouped as **Needs you**
+(something stopped and waits for your choice), **In progress** and **Saved**. A row shows how much
+has arrived or been written, such as "3.1 MB / 12.4 MB" and "12 of 40 chunks", and a short
+sentence when it needs you (elsewhere that sentence is the tooltip of the small symbol before the
+name). Its controls sit on the name line: the main action as an icon (green play to resume, pause,
+retry or save, or a folder to **Show in folder** on a saved file), a **⋯** button with every other
+action (Save as, Save new copy, Save another copy, Keep), and a red **✕** to **Remove** (or
+**Clear** a saved row). Every icon has a tooltip and a name for screen readers, and the ⋯ menu
+works from the keyboard. **Remove** asks you to confirm first, because it deletes the progress and
+any partly saved file Mewtual created; on a row that is already being removed, ✕ simply tries
+again.
+
+Where it works:
+
+- **Resumable:** NTFS on Windows (ReFS also works but is not verified); ext4, xfs, btrfs, f2fs and
+  tmpfs on Linux when they record file creation times; local APFS or HFS+ drives on macOS (not
+  verified yet).
+- **Saved, but not resumable:** network folders (SMB shares, mapped drives, NFS) and other
+  filesystems Mewtual cannot identify. An interrupted save there starts again. On Linux and macOS
+  a network or FUSE folder that cannot make hard links fails only at the end of the save.
+- **Refused before anything is written:** FAT and exFAT drives (many USB sticks and SD cards),
+  because they cannot make the link Mewtual publishes a finished file with. On Linux, saving also
+  needs `/proc`, which every normal desktop has.
+- **Cloud folders** (OneDrive, Dropbox and similar) work, but the provider uploads the partly
+  saved file as it is written.
+
+Mewtual only ever deletes a partly saved file it can prove is its own. On Linux and macOS it
+deletes nothing automatically in a folder that other accounts on the computer can change, nor on a
+network or FUSE drive; it says so, and you can delete the leftover `.mewtual-part` or `.part` file
+yourself. A folder that gives your own per-user group write access (a umask of 002) still counts
+as yours on Linux when the system's account files show that nobody else is in that group and no
+access list gives anyone else write access; if that cannot be shown (for example accounts that
+come from a directory service, or Mewtual running in a container), and always on macOS, Mewtual
+treats the folder as shared.
+
+Usually a finished save leaves nothing behind in Transfers: once the file is saved, Mewtual drops
+its private encrypted copy and the row goes. A **Saved** row stays only when that tidy-up did not
+finish, for example when the temporary `.mewtual-part` name could not be removed yet, or the app
+was locked or closed at that moment. Such a row keeps its private copy until you clear it. When
+Transfers is open, Mewtual checks the file of each Saved row. If it is no longer there, or a
+different file now has its name, the row says so and offers **Save again**, which saves a new copy
+from that private copy under a free name. If the file could not be checked (the drive is unplugged,
+for example), the row still says Saved and adds that it could not check. **Show in folder** opens
+your file manager with the saved file selected (on Linux, its folder), after the same check.
+**Clear** on a Saved row checks the file once more first: it clears at once only when the file is
+still there, and otherwise asks you to confirm, because the private copy may then be the only one
+left. If Mewtual cannot finish removing a file it created for a save (the folder is unplugged,
+for example), its ⋯ menu offers **Keep the file** when every part of that file had been written,
+or **Keep partly saved file** when not; either leaves the file where it is and drops the row.
+
+If you choose **Save as** for a file and its save has not started yet, Mewtual remembers that
+place. The file's save item in the chat and file menus, the image viewer and the file pane then
+reads **Save to chosen place** instead of **Download** until that save begins.
+
 ### What loads by itself, and how big it may be
 
 **Server settings → File Trust** carries two separate things that both answer "what may files do

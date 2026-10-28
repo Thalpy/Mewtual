@@ -461,6 +461,42 @@ test("the frontend invokes only registered, security-classified literal commands
   }
 });
 
+test("save_group_file's signature cannot carry a path from the renderer", () => {
+  // "Save as" must keep the native side as the only source of a destination: the dialog runs in
+  // native code and the renderer sends only a flag. Pin the exact parameter list so a path,
+  // folder or destination parameter cannot be added unnoticed.
+  const source = readFileSync(bridgePath, "utf8");
+  const start = source.indexOf("async fn save_group_file(");
+  assert.ok(start > 0, "save_group_file is declared in lib.rs");
+  const close = source.indexOf(") -> Result<SavedFileResult, String>", start);
+  assert.ok(close > start, "save_group_file's signature parses");
+  // Split on top-level commas only: `State<'_, AppState>` carries one inside its generics.
+  const list = source.slice(start + "async fn save_group_file(".length, close);
+  const parts: string[] = [];
+  let depth = 0, current = "";
+  for (const char of list) {
+    if (char === "<") depth += 1;
+    if (char === ">") depth -= 1;
+    if (char === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+    } else current += char;
+  }
+  parts.push(current);
+  const params = parts
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.split(":")[0].trim());
+  assert.deepEqual(params, [
+    "app", "state", "server", "cid", "name", "resume", "expected_intent", "operation", "fresh_copy", "save_as",
+  ]);
+  for (const param of params) {
+    assert.doesNotMatch(param, /path|folder|dir|destination|location|target/i, param);
+  }
+  const saveAs = source.slice(start, close);
+  assert.match(saveAs, /save_as:\s*Option<bool>/, "Save as is a flag, never a value");
+});
+
 test("every non-bootstrap native command visibly crosses the unlocked-session gate", () => {
   const segments = commandSegments(nativeSources());
   // Commands that must work before, or without, an unlocked session. The log_ui pair is here for
