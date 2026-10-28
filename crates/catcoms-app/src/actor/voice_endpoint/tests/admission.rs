@@ -34,9 +34,10 @@ impl Sink {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let slot = self.slot.lock().unwrap();
-            let ready = slot.staged.is_some() || slot.unstarted.is_some() || slot.uncertain;
-            drop(slot);
+            let ready = {
+                let slot = self.slot.lock().unwrap();
+                slot.staged.is_some() || slot.unstarted.is_some() || slot.uncertain
+            };
             if ready {
                 return;
             }
