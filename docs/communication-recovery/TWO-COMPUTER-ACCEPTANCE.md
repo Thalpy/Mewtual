@@ -53,7 +53,9 @@ Do not record microphone content unless both participants consent.
 
 The primary voice implementation still owns operational Ready/admission and negotiation
 retirement, production App/native/RTC composition, peer-local failure recovery, member media
-relay and combined acceptance. Native two-peer TCP acceptance is under active validation.
+relay and combined acceptance. The corrected combined candidate at `fa3107d2` passes
+complete local native acceptance (1,011 library plus six ACL tests), Root/frontend gates,
+native build and actual startup. This remains controlled-fixture evidence; hosted CI is pending.
 External-download resume is now included in draft #75 and its stacked Score candidate #76;
 their combined gates/merge are still pending. The refreshed dependency audits pass on that
 candidate. Verify the tested binary's ancestry rather than assuming another branch changes

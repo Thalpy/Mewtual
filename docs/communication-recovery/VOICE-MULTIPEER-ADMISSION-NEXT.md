@@ -292,6 +292,15 @@ window or the existing two-peer bound. Actual RTC/audio and physical tests remai
 
 ## Validation status
 
+The later combined integration at `fa3107d2` passes complete local native validation:
+1,011 library tests plus six ACL tests, with both earlier fixture failures corrected.
+Root passes 3,960 / 25 existing ignores on unchanged compiled Root inputs; the current
+native-source construction scan passes separately. Frontend passes 3,539, and native
+check/strict Clippy/build/startup pass. This does not include #73's deliberately red
+all-three reproduction or implement the admission/Forget design above. V2 remains OFF.
+Both refreshed dependency audits now pass on the combined candidate; the older red
+audit statements below describe their earlier checkpoints only. Hosted CI is pending.
+
 - Published Broker45 checkpoint ecfd3cd3:897 native library+5 ACL pass; native format/check/
   strict Clippy/construction scan pass. Complete Root3,691/24 existing ignores apply to its
   unchanged Root Rust/Cargo inputs. This does not cover this new composition test.
