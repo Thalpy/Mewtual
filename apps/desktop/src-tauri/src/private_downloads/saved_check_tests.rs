@@ -175,7 +175,6 @@ async fn download_reveal_rejects_lock_registered_during_the_final_registry_wait(
     assert_eq!(reveal.await, Err(RevealError::Stale));
     lock.await.unwrap();
     assert!(!called.load(AtomicOrdering::Acquire));
-    drop(request);
     case.finish().await;
 }
 
@@ -211,7 +210,6 @@ async fn download_reveal_holds_commit_and_masks_platform_errors() {
         .await,
         Err(RevealError::Stale)
     );
-    drop(request);
     case.finish().await;
 }
 

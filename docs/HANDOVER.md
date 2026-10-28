@@ -40,6 +40,37 @@ Older builds reject the new bodies/seeds; clearing current notes does not make r
 operation history and recovery archives safe to downgrade. Root/native validation,
 browser flow evidence and final review of the completed merge remain required.
 
+## Shared actor Control inventory correction (28 October; under validation)
+
+The complete combined native suite finished with 1,001 passes and one failure: the
+unchanged 12,288-byte physical Control guard measured 12,327 bytes. The largest graph
+was KeySession, not ChainTransition; its diagnostic label had omitted KeySession.
+The nested native preflight reaches the ordinary actor command sender, so growth in
+an unrelated command can enlarge that async graph. The combined Root test inventory
+measured AppCommand336, Envelope352, DownloadReady264, ExportJournal152 and the
+voice-context future1264 bytes before correction.
+
+CommandSender now reserves the existing FIFO mailbox capacity before constructing
+the traced envelope. This is Tokio's existing send sequence moved into the wrapper:
+it avoids retaining another full envelope in a nested send future, without a new heap
+allocation, cloned command, different queue or additional authority. The original
+payload/custody is moved exactly once, including the exact closed-channel error.
+Three focused ownership regressions pass, pinning waiting cancellation, traced error
+ownership and queued custody after the sender future ends. The diagnostic voice-context
+future shrinks from1,264 to880 bytes; command/envelope sizes stay unchanged. The temporary
+diagnostic is removed; the unchanged whole-Control guard remains the regression.
+Static re-review has no blocker/high/medium finding. At `c3877704`, all375 native
+handoff tests pass and the actual whole-Control graph is12,244 bytes. Complete gates
+still need a successful run; the original failed suite is not sign-off evidence.
+No memory bound has been raised.
+
+Windows CI at `c499228d` also stopped in strict Clippy before Root tests: the Windows
+path codec used a manual remainder check. The equivalent `is_multiple_of(2)` form is
+now used, without changing the odd-length rejection. Its exact codec regression and
+Root strict Clippy must pass on the corrected source. Both formatting checks and the
+ambient-dependency/Store raw-fs gates pass; both dependency audits passed before this
+dependency-neutral correction.
+
 ## Recovery gap completion candidate (28 October)
 
 PR #74 merged into `main` at `85b345cf`. The `communication-gap-completion` branch
@@ -67,7 +98,10 @@ findings in that scoped review. Broader integration review then found the regist
 deadlock above and a Show-in-folder race. Its new registration-shaped test fails before
 the correction. The follow-up passes 16 cache, 27 saved-file and eight saved-download
 check/reveal tests; re-review has no remaining blocker/high/medium finding. Expanded
-seven-case negative/restored controls and complete backend gates are pending.
+seven-case negative/restored controls all pass after exact restoration and a fresh
+build, as do the three complete focused modules. Strict native Clippy passes after
+removing redundant non-Drop markers in the tests; review confirms no guard/assertion
+or cleanup change. Complete combined backend gates remain pending.
 The original #51 hostile six-client scenario now passes on the combined stack in
 228.48 seconds, including bridge/reunion and independent sealed reopens. That validates
 the current graceful-close path; it does not establish the cause of the old Linux failure

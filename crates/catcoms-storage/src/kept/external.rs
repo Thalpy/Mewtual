@@ -501,7 +501,7 @@ pub(super) fn decode_os(platform: u8, bytes: &[u8]) -> Option<OsString> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStringExt;
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return None;
         }
         let units: Vec<u16> = bytes

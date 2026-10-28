@@ -433,12 +433,24 @@ struct CommandSender {
 
 impl CommandSender {
     async fn send(&self, command: AppCommand) -> Result<(), mpsc::error::SendError<Envelope>> {
-        self.tx
-            .send(Envelope {
+        // Keep only the original command across the capacity wait. Calling send(Envelope)
+        // here also retains the whole envelope in a nested async frame; unrelated large
+        // command variants then inflate every caller, including the fixed V2 Control lane.
+        // Tokio's send uses this same FIFO reservation. There is no suspension between
+        // capacity admission and moving the original trace/payload into the mailbox.
+        match self.tx.reserve().await {
+            Ok(permit) => {
+                permit.send(Envelope {
+                    trace: self.trace,
+                    command,
+                });
+                Ok(())
+            }
+            Err(_) => Err(mpsc::error::SendError(Envelope {
                 trace: self.trace,
                 command,
-            })
-            .await
+            })),
+        }
     }
 }
 
@@ -7184,6 +7196,127 @@ mod tests {
     use tokio::time::timeout;
 
     const GENERAL: u128 = 1;
+
+    /// A real command's original cancellation custody, without running any publication.
+    fn tracked_command(
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> (tokio::sync::watch::Sender<bool>, AppCommand) {
+        #[derive(Debug)]
+        struct Hold(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Hold {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let (signal_tx, signal) = tokio::sync::watch::channel(false);
+        let (reply, _receiver) = oneshot::channel();
+        (
+            signal_tx,
+            AppCommand::PublishPix {
+                bytes: vec![3, 1, 4],
+                cancellation: Some(RequestCancellation::new(
+                    signal,
+                    Some(Arc::new(Hold(dropped))),
+                )),
+                reply,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn command_sender_waiting_cancellation_drops_original_custody_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Waker};
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Envelope {
+            trace: Trace(1),
+            command: AppCommand::CacheProtectionChanged,
+        })
+        .unwrap();
+        let sender = CommandSender {
+            tx,
+            trace: Trace(2),
+        };
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (_signal, command) = tracked_command(dropped.clone());
+        let mut waiting = Box::pin(sender.send(command));
+        assert!(matches!(
+            std::future::Future::poll(waiting.as_mut(), &mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(waiting);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(rx.try_recv().unwrap().trace, Trace(1));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn command_sender_closed_error_retains_exact_trace_payload_and_custody() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let sender = CommandSender {
+            tx,
+            trace: Trace(19),
+        };
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (_signal, command) = tracked_command(dropped.clone());
+        let AppCommand::PublishPix { bytes, .. } = &command else {
+            unreachable!()
+        };
+        let original = bytes.as_ptr();
+        let error = sender.send(command).await.unwrap_err();
+        assert_eq!(error.0.trace, Trace(19));
+        let AppCommand::PublishPix {
+            bytes,
+            cancellation,
+            ..
+        } = &error.0.command
+        else {
+            panic!("original command")
+        };
+        assert_eq!(bytes, &[3, 1, 4]);
+        assert_eq!(
+            bytes.as_ptr(),
+            original,
+            "move the original payload, never reconstruct it"
+        );
+        assert!(cancellation.as_ref().unwrap().keepalive().is_some());
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(error);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn command_sender_admitted_custody_outlives_completed_sender_future() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Waker};
+        let (tx, rx) = mpsc::channel(1);
+        let sender = CommandSender {
+            tx,
+            trace: Trace(23),
+        };
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (_signal, command) = tracked_command(dropped.clone());
+        let mut sending = Box::pin(sender.send(command));
+        assert!(matches!(
+            std::future::Future::poll(sending.as_mut(), &mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        ));
+        drop(sending);
+        drop(sender);
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            0,
+            "the mailbox still owns the admitted work"
+        );
+        drop(rx);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn voice_housekeeping_wakes_quiet_actor_and_reclaims_watchers_even_while_locked() {

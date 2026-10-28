@@ -35,8 +35,8 @@ private locations and raw path-containing errors never cross IPC.
 These are local session and lifecycle boundaries, with no wire or persistence format
 change. The 39 focused cache/saved tests and five negative/restored controls pass at
 `5340c04a`. The registration/reveal follow-up passes all 51 focused tests and has no
-remaining blocker/high/medium review finding; expanded mutation controls and complete
-combined validation remain pending.
+remaining blocker/high/medium review finding. All seven expanded negative/restored
+controls and strict native Clippy pass; complete combined validation remains pending.
 
 ## Native dependency follow-up (27 October; candidate)
 
