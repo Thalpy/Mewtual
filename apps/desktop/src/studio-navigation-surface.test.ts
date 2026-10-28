@@ -69,7 +69,7 @@ test("an external scope request cannot submit restored held work without an expl
 
 test("a held-scope Save completion cannot notify a new destination, reset or destroyed panel", async () => {
   const { default: Harness } = await import("../scripts/fixtures/StudioDestinationHarness.svelte");
-  for (const replacement of ["destination", "reset", "unmount"] as const) {
+  for (const replacement of ["destination", "reset", "unmount", "close"] as const) {
     const ipc = fakeIpc(), notices: string[] = [], ack = deferred<unknown>();
     const view = () => ({ ...ordinaryView(flipnoteContent({ frames: [] })), group: "deadbeef" });
     ipc.on("studio_list", () => ({ ...ordinaryView(indexContent({ objects: { [a]: indexEntry({ title: "A" }) } })), group: "deadbeef" }));
@@ -91,12 +91,16 @@ test("a held-scope Save completion cannot notify a new destination, reset or des
         const generation = session.generation;
         (mounted as unknown as { destination(server: number, channel: string): void }).destination(SERVER, "88888888888888888");
         flushSync(); assert.equal(session.generation, generation, "target-only change leaves the source generation intact");
-      } else if (replacement === "reset") resetStudio();
+      } else if (replacement === "reset") {
+        const continuity = studioDraftSnapshot(); assert.ok(continuity);
+        resetStudio(); restoreStudioDraft(continuity); setStudioScope(SERVER, CHANNEL);
+        assert.equal(session.scope?.channel, CHANNEL, "same source restored under a fresh generation");
+      } else if (replacement === "close") beginStudioClose();
       else { await unmount(mounted); mounted = null; }
       ack.reject(new Error("late save failure")); await settle();
       assert.deepEqual(notices, [], `${replacement}: the old waiter cannot publish into a replacement surface`);
       assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply").length, 1, "no new nonce or automatic replacement Save");
-    } finally { if (mounted) await unmount(mounted); disposeStudio(); target.remove(); }
+    } finally { if (replacement === "close") endStudioClose(); if (mounted) await unmount(mounted); disposeStudio(); target.remove(); }
   }
 });
 
