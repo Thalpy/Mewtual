@@ -126,49 +126,6 @@ async fn retry_capacity(
     }
 }
 
-#[cfg(test)]
-mod pressure_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn pressure_setup_retries_a_real_charge_race_without_losing_either_owner() {
-        let pool = Arc::new(Resources::default());
-        let group = [81; 32];
-        let mut other = None;
-        let mut samples = 0;
-        let pressure = hold_pressure(&pool, group, || {
-            samples += 1;
-            if other.is_none() {
-                // A genuine paid owner wins precisely between snapshot and charge.
-                other = Some(pool.charge(group, 1, ResourceKind::Retained).unwrap());
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(samples, 2);
-        assert_eq!(pool.counts(), (GROUP_BYTES, 0));
-        drop(pressure);
-        assert_eq!(pool.counts(), (1, 0));
-        drop(other);
-        assert_eq!(pool.counts(), (0, 0));
-    }
-
-    #[tokio::test]
-    async fn pressure_setup_stops_after_eight_actual_losses_and_refunds_only_its_owners() {
-        let pool = Arc::new(Resources::default());
-        let group = [82; 32];
-        let mut winners = Vec::new();
-        let result = hold_pressure(&pool, group, || {
-            winners.push(pool.charge(group, 1, ResourceKind::Retained).unwrap());
-        })
-        .await;
-        assert!(matches!(result, Err(VoiceError::Capacity)));
-        assert_eq!(winners.len(), 8);
-        assert_eq!(pool.counts(), (8, 0));
-        drop(winners);
-        assert_eq!(pool.counts(), (0, 0));
-    }
-}
 // Keep original endpoint/parent/proof owners explicit across these independent race modes.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn exercise(
@@ -394,5 +351,49 @@ pub(super) async fn exercise(
         assert_eq!(&closed[..2], &[5, 3]);
         assert_eq!(&closed[138..170], &proof);
         (None, None)
+    }
+}
+
+#[cfg(test)]
+mod pressure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pressure_setup_retries_a_real_charge_race_without_losing_either_owner() {
+        let pool = Arc::new(Resources::default());
+        let group = [81; 32];
+        let mut other = None;
+        let mut samples = 0;
+        let pressure = hold_pressure(&pool, group, || {
+            samples += 1;
+            if other.is_none() {
+                // A genuine paid owner wins precisely between snapshot and charge.
+                other = Some(pool.charge(group, 1, ResourceKind::Retained).unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(samples, 2);
+        assert_eq!(pool.counts(), (GROUP_BYTES, 0));
+        drop(pressure);
+        assert_eq!(pool.counts(), (1, 0));
+        drop(other);
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn pressure_setup_stops_after_eight_actual_losses_and_refunds_only_its_owners() {
+        let pool = Arc::new(Resources::default());
+        let group = [82; 32];
+        let mut winners = Vec::new();
+        let result = hold_pressure(&pool, group, || {
+            winners.push(pool.charge(group, 1, ResourceKind::Retained).unwrap());
+        })
+        .await;
+        assert!(matches!(result, Err(VoiceError::Capacity)));
+        assert_eq!(winners.len(), 8);
+        assert_eq!(pool.counts(), (8, 0));
+        drop(winners);
+        assert_eq!(pool.counts(), (0, 0));
     }
 }
