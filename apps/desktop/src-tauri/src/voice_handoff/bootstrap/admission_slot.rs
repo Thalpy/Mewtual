@@ -437,6 +437,21 @@ impl Route {
         context: &crate::voice_handoff::context::Context,
         request: CapacityRequest,
     ) -> Result<Snapshot, Refused> {
+        let generation = request.generation;
+        self.apply_capacity(context, request)?;
+        self.capacity_snapshot(generation)
+    }
+
+    /// Apply the exact admitted request before observing its reply. Worker
+    /// collection may run between these two real production stages: a valid
+    /// cancellation reply must preserve registration on BOTH sides of return.
+    /// Keeping the stages separate also permits deterministic tests of that
+    /// interleaving without installing a production callback or fake outcome.
+    fn apply_capacity(
+        &self,
+        context: &crate::voice_handoff::context::Context,
+        request: CapacityRequest,
+    ) -> Result<(), Refused> {
         {
             let state = self
                 .row
@@ -484,7 +499,7 @@ impl Route {
                 self.row.admission_changed.notify_waiters();
             }
         }
-        self.capacity_snapshot(request.generation)
+        Ok(())
     }
 
     fn capacity_snapshot(&self, requested: u64) -> Result<Snapshot, Refused> {
@@ -503,6 +518,11 @@ impl Route {
         let slot = &mut state.admission_slot;
         slot.require_observable(requested)?;
         let invalid_reserved = slot.phase == Phase::Reserved
+            // The exact ordinal's negative fence intentionally makes its Root
+            // capacity noncurrent. That is Closing, not registration failure.
+            // Genuine call/watch/epoch/registration revocation still closes via
+            // the unconditional original-registration/currentness gates below.
+            && slot.cancelled_through < slot.generation
             && (slot.reclaiming
                 || slot.recovery_active
                 || !slot.parent.as_ref().is_some_and(|parent| {

@@ -8,6 +8,7 @@ use catcoms_sync::voice_v2::admission::ADMISSION_RPC_BYTES;
 use catcoms_sync::voice_v2::resources::{ResourceKind, GROUP_BYTES};
 use std::future::Future;
 mod parent_claim;
+mod reserved_cancel;
 
 fn capacity(
     route: &Route,
