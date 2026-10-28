@@ -9,6 +9,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NATIVE_NO_WRITE, StudioSession, nativeNoWrite } from "./studio-session.ts";
+import { STUDIO_BUSY_RETRY_MS, STUDIO_STORAGE_BUSY } from "./studio-busy.ts";
 import { CHANNEL, ME, SERVER, fakeIpc, flipnoteContent, id32, indexContent, ordinaryView, settle } from "./studio-testkit.ts";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -63,8 +64,49 @@ test("the storage-busy refusal comes from authorize, which the renderer path cal
   assert.ok(authorizing > 0 && executing > authorizing, "authorize runs before the lease is handed to the actor");
 });
 
-/** A session on a fake clock: `runTimers` advances it 3 s in 50 ms steps, firing timers in due
- * order (the backoffs, 1.75 s in all, well before any 10 s Save deadline). */
+// [desync fixes], re-review medium 1: a first delivery refused in a retired epoch settled uncertain,
+// which left Discard as the only control. It is refused ahead of native's intent barrier, so the
+// renderer now treats exactly that text (and a batch whose first item met it) as not written.
+const crate = (file: string) => readFileSync(join(root, "crates/catcoms-app/src", file), "utf8");
+test("the retired-epoch refusal is raised before the intent barrier, with exactly the text the renderer matches", () => {
+  const epochStudio = crate("store/epoch_studio.rs");
+  const refusal = epochStudio.indexOf('return Err(invalid("edit belongs to a retired epoch"));');
+  const barrier = epochStudio.indexOf("self.prepare_epoch_intent_with_io(", refusal);
+  assert.ok(refusal > 0 && barrier > refusal, "the refusal precedes the intent barrier");
+  assert.equal(epochStudio.slice(epochStudio.lastIndexOf("fn ", refusal), refusal).includes("prepare_epoch_intent_with_io"), false, "nothing is journalled before it in that function");
+  assert.match(epochStudio, /fn invalid\(error: impl std::fmt::Display\) -> AppError \{\s*AppError::Invalid\(format!\("epoch studio: \{error\}"\)\)/, "its prefix");
+  assert.match(crate("lib.rs"), /#\[error\("\{0\}"\)\]\s*Invalid\(String\)/, "AppError::Invalid displays its text unchanged");
+  assert.equal(sourcesOf('"edit belongs to a retired epoch"').reduce((n, s) => n + s.count, 0), 1, "one producer");
+  const studio = crate("studio.rs");
+  // Rust joins `\`-continued lines without their leading spaces, which is the text the renderer sees.
+  assert.match(studio, /"batched Apply item \{\} of \{count\} was refused \(\{error\}\); \\\r?\n\s*the items before it are saved, so retry the same batch \\\r?\n\s*exactly or discard that item",/, "the batch wrapper's wording");
+  assert.match(studio, /for \(index, operation\) in operations\.into_iter\(\)\.enumerate\(\) \{\s*apply\(/, "batch items are applied in order, so item 1 refused means none ran");
+  assert.match(studio, /fn invalid\(error: impl std::fmt::Display\) -> AppError \{\s*AppError::Invalid\(format!\("Studio: \{error\}"\)\)/);
+  // The two refusals NEEDS_DECISION names for a removed member or channel exist as written.
+  assert.ok(studio.includes('invalid("Studio requires current membership")') && studio.includes('invalid("unknown Studio channel")'));
+});
+
+test("a retired-epoch refusal of a first delivery, alone or as a batch's first item, settles not written", async () => {
+  const lone = "epoch studio: edit belongs to a retired epoch";
+  const batch = `Studio: batched Apply item 1 of 3 was refused (${lone}); the items before it are saved, so retry the same batch exactly or discard that item`;
+  const later = batch.replace("item 1 of 3", "item 2 of 3");
+  for (const [error, status] of [[lone, "blocked"], [batch, "blocked"], [later, "uncertain"], [`Studio: ${lone}`, "uncertain"]] as const) {
+    const h = harness();
+    h.ipc.on("studio_apply", () => { throw error; });
+    h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); h.session.open(h.object); await settle(8);
+    h.session.setFps(h.object, 7); await settle(8);
+    const [record] = h.session.saves;
+    assert.equal(record.status, status, error);
+    assert.equal(h.session.canReauthor(record.id), status === "blocked", `${error}: only a proven no-write may become a new edit`);
+    assert.equal(h.session.canRetry(record.id), false, `${error}: the same request is refused in a retired epoch every time`);
+    h.session.reset();
+  }
+});
+
+/** A session on a fake clock: `runTimers` advances it 3 s (by default) in 50 ms steps, firing timers
+ * in due order (the backoffs, 1.75 s in all, well before any 10 s Save deadline). The storage-busy
+ * text is also repeated inside every send by the IPC wrapper (busyRetrying, 1.24 s of pauses per
+ * send), so its exhaustion needs the longer `STORAGE_BUSY_MS` window and makes `SENDS * 6` calls. */
 function harness(autosaveMs = 0) {
   const ipc = fakeIpc(), object = id32(1), timers = new Set<{ due: number; fn: () => void }>();
   let epoch = id32(0xe1), now = 0;
@@ -72,8 +114,8 @@ function harness(autosaveMs = 0) {
   ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ frames: [] }), { epochId: epoch }), group: "deadbeef" }));
   const session = new StudioSession({ ipc, me: ME, autosaveMs, now: () => now,
     schedule: (fn, ms) => { const timer = { due: now + ms, fn }; timers.add(timer); return () => { timers.delete(timer); }; } });
-  const runTimers = async () => {
-    for (const end = now + 3000; now < end;) {
+  const runTimers = async (ms = 3000) => {
+    for (const end = now + ms; now < end;) {
       now += 50;
       for (const timer of [...timers].sort((a, b) => a.due - b.due)) if (timers.has(timer) && timer.due <= now) { timers.delete(timer); timer.fn(); }
       await settle(2);
@@ -81,6 +123,14 @@ function harness(autosaveMs = 0) {
   };
   return { ipc, session, object, runTimers, rotate: () => { epoch = id32(0xe2); } };
 }
+/** One send plus three resends, at the session layer. */
+const SENDS = 4;
+/** The wrapper repeats only this text, five times per send. */
+const STORAGE_BUSY = STUDIO_STORAGE_BUSY;
+/** Native calls per session send of `error`. */
+const callsPerSend = (error: string) => error === STORAGE_BUSY ? 1 + STUDIO_BUSY_RETRY_MS.length : 1;
+/** Enough fake time for SENDS sends of storage-busy (about 6.7 s, more with 50 ms rounding). */
+const STORAGE_BUSY_MS = 10_000;
 
 test("a pre-dispatch refusal is resent automatically and lands without counting the visit", async () => {
   const h = harness(); let applies = 0;
@@ -99,11 +149,11 @@ test("exhausted resends settle as not written, uncounted; any other native error
     const h = harness();
     h.ipc.on("studio_apply", () => { throw error; }); // Tauri rejects with the bridge's string
     h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); h.session.open(h.object); await settle(8);
-    h.session.setFps(h.object, 7); await settle(8); await h.runTimers();
+    h.session.setFps(h.object, 7); await settle(8); await h.runTimers(error === STORAGE_BUSY ? STORAGE_BUSY_MS : undefined);
     const [record] = h.session.saves;
     assert.equal(record.status, expected, error); assert.equal(record.mayHaveCommitted, expected === "uncertain", error);
     assert.equal(record.attempts, expected === "blocked" ? 0 : 1, `${error}: a refused send is not a delivery`);
-    assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, expected === "blocked" ? 4 : 1);
+    assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, expected === "blocked" ? SENDS * callsPerSend(error) : 1, error);
     assert.equal(nativeNoWrite(error), expected === "blocked");
     h.session.reset();
   }
@@ -115,15 +165,19 @@ test("a retry after an exhausted pre-dispatch refusal is admitted afresh against
   h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); h.session.open(h.object); await settle(8);
   h.session.setFps(h.object, 7);
   const saving = h.session.save().then(() => "saved", e => String(e));
-  await settle(8); await h.runTimers();
-  assert.match(await saving, /Could not confirm the save/, "the explicit Save reports the refusal once the resends are used up");
+  // The three resends take 1.75 s; the first automatic retry (scheduleAutoRetry) is due 1 s later.
+  await settle(8); await h.runTimers(1800);
+  assert.match(await saving, /not saved yet\. The Studio is trying again on its own/, "the explicit Save reports the refusal once the resends are used up");
   const [record] = h.session.saves;
   assert.deepEqual([record.status, record.attempts], ["blocked", 0]);
+  assert.notEqual(h.session.autoRetryAt(record.id), null, "a busy refusal is resent on its own");
   h.rotate(); await h.session.refreshDoc(h.object); // the document moved to a newer epoch meanwhile
   const sends = h.ipc.calls.filter(c => c.cmd === "studio_apply").length;
   h.session.retry(record.id); await settle(8);
   assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, sends, "nothing was sent into the changed history");
   assert.match(h.session.saves[0].error, /Shared history changed/);
+  assert.equal(h.session.autoRetryAt(record.id), null, "a changed history is the member's decision; it is never resent on its own");
+  await h.runTimers(); assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, sends, "and nothing fires later");
   h.session.reset();
 });
 
@@ -137,8 +191,8 @@ test("exhausted pre-execution refusals after an uncertain attempt leave the exac
     h.session.setFps(h.object, 7); await settle(8);
     const [first] = h.session.saves; // surfaces get copies, so read the record afresh after the retry
     assert.equal(first.status, "uncertain", `${busy}: the post-dispatch failure may have committed`);
-    h.session.retry(first.id); await settle(8); await h.runTimers();
-    assert.equal(applies, 5, `${busy}: the exact retry and its three resends were all refused`);
+    h.session.retry(first.id); await settle(8); await h.runTimers(busy === STORAGE_BUSY ? STORAGE_BUSY_MS : undefined);
+    assert.equal(applies, 1 + SENDS * callsPerSend(busy), `${busy}: the exact retry and its three resends were all refused`);
     const [record] = h.session.saves;
     assert.deepEqual([record.id, record.status, record.mayHaveCommitted], [first.id, "uncertain", true], busy);
     assert.ok(record.attempts >= 1, `${busy}: an uncertain record keeps a counted attempt, as the draft decoder requires`);

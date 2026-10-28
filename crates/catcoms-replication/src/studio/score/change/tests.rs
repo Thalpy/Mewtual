@@ -1,6 +1,9 @@
 use super::*;
 use automerge::{transaction::Transactable, ActorId};
 
+/// Layered `n/` notes: add wins, voices, the snapshot trailer and compaction.
+mod layers;
+
 const CHANNEL: ElementId = [7; 16];
 fn logical() -> LogicalDocument {
     score_document(b"score-state-tests", [9; 16]).unwrap()
@@ -43,6 +46,7 @@ fn note(step: u16, row: u8, len: Option<u16>) -> ScoreOp {
         value: ScoreCell::Note {
             patch: patch().id(),
             len,
+            volume: None,
         },
     }
 }
@@ -288,7 +292,8 @@ fn score_cells_and_recipes_are_reusable_after_observed_removal() {
         p.cells[&(0, 0)].value(),
         Some(&ScoreCell::Note {
             patch: patch().id(),
-            len: Some(4)
+            len: Some(4),
+            volume: None,
         })
     );
     assert!(p.cells[&(0, 0)].register.conflicts.is_empty());
@@ -465,6 +470,36 @@ fn score_exact_expansion_rejects_omitted_duplicate_and_cross_key_predecessors() 
 }
 
 #[test]
+fn score_snapshot_and_projection_carry_an_authored_volume_unchanged() {
+    let base = edit(&empty(), &set_patch(), 1, 1);
+    let quiet = ScoreCell::Note {
+        patch: patch().id(),
+        len: Some(2),
+        volume: Some(60),
+    };
+    let doc = edit(
+        &base,
+        &ScoreOp::SetCell {
+            step: 0,
+            row: 0,
+            value: quiet.clone(),
+        },
+        2,
+        2,
+    );
+    let p = read(&doc);
+    assert_eq!(p.cells[&(0, 0)].value(), Some(&quiet));
+    assert!(p.readiness().unwrap().ready());
+    let bytes = p
+        .encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+        .unwrap();
+    assert_eq!(
+        ScoreProjection::decode_snapshot(&logical(), CHANNEL, 0, &bytes).unwrap(),
+        p
+    );
+}
+
+#[test]
 fn score_snapshot_retains_removal_and_seed_omits_whole_slot_without_resurrection() {
     let base = edit(&empty(), &set_patch(), 1, 1);
     let (_, clear, _) = raw(&base, 0, &ScoreOp::ClearCell { step: 0, row: 0 }, 2, 2);
@@ -507,6 +542,62 @@ fn score_snapshot_retains_removal_and_seed_omits_whole_slot_without_resurrection
     ));
     // Reusing the old physical epoch graph is not a seed/receipt installation.
     assert!(ScoreProjection::read(&logical(), CHANNEL, 1, &merged).is_err());
+}
+
+/// A layer-free score: two legacy notes (one with a volume and a hold), a drum, a concurrent
+/// header conflict and a removed slot. Its seed and recovery payload were pinned BEFORE layers
+/// existed (docs/design-score-layers.md section 5), so these values prove that a score without
+/// layer slots still encodes and compacts byte-identically. Change them only for an intentional,
+/// documented format change.
+fn layer_free_golden_projection() -> ScoreProjection {
+    let base = edit(&empty(), &set_patch(), 1, 1);
+    let base = edit(
+        &base,
+        &ScoreOp::SetCell {
+            step: 2,
+            row: 3,
+            value: ScoreCell::Note {
+                patch: patch().id(),
+                len: Some(4),
+                volume: Some(60),
+            },
+        },
+        2,
+        1,
+    );
+    let base = edit(&base, &note(8, 0, None), 3, 1);
+    let base = edit(&base, &drum(5), 4, 1);
+    let base = edit(&base, &ScoreOp::ClearCell { step: 9, row: 9 }, 5, 1);
+    let a = edit(&base, &ScoreOp::SetHeader(ScoreHeader::Bpm(100)), 6, 2);
+    let b = edit(&base, &ScoreOp::SetHeader(ScoreHeader::Bpm(140)), 7, 3);
+    let mut merged = a;
+    merged.merge(&mut b.clone()).unwrap();
+    read(&merged)
+}
+
+#[test]
+fn score_layer_free_seed_and_recovery_bytes_are_pinned() {
+    let p = layer_free_golden_projection();
+    assert!(p.layers.is_empty());
+    let seed = p.checkpoint([4; 32]).unwrap();
+    let recovery = p
+        .encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+        .unwrap();
+    // Captured from the pre-layer build (HEAD 2f0b7837) before any layer code existed.
+    assert_eq!(
+        (
+            seed.bytes().len(),
+            hex(&seed.change_hash()),
+            recovery.len(),
+            hex(blake3::hash(&recovery).as_bytes())
+        ),
+        (
+            970,
+            "40b52b8ded11504617246791f3cd8247534ec342c5eec682e09448900366976b".to_string(),
+            852,
+            "8c52c6b86d520130c011572738d37a16b11985e46aa36039eb848b96c543c993".to_string()
+        )
+    );
 }
 
 #[test]

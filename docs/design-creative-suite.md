@@ -432,7 +432,7 @@ steps at sixteenth-note resolution. A scale is an editor view.
 ```
 { v:1, kind:"score", id, channel, epoch, title, bpm:40..240, bpb:1..8, steps:1..256,
   patches: { <patch id>: <jam-patch:v1 descriptor> },        at most 64 entries
-  cells:   { "<step>:<row>": {k:"n", p:<patch id>, len?:<sixteenth steps>} | {k:"d", pad:0..9} } }
+  cells:   { "<step>:<row>": {k:"n", p:<patch id>, len?:<sixteenth steps>, vol?:1..100} | {k:"d", pad:0..9} } }
 ```
 
 Caps: 64 patches and 4096 filled cells (the review measured 473,903 bytes for the maximal export
@@ -443,7 +443,8 @@ metadata never lives inside a cell value.
 Authored duration amendment (2026-10-14, before the first sound/export implementation ships):
 note `len` is an integer from 1 through `steps - step`; omission preserves the original draft's
 one-step note. Same-row notes may be adjacent but overlapping holds must be shown as a conflict,
-not silently shortened or merged. A resolved export refuses such overlap. Drums remain the
+not silently shortened or merged. A resolved export refused such overlap until 2026-10-20; it now
+plays each overlapping hold on its own lane (docs/design-score-layers.md). Drums remain the
 receiver-owned one-shot recipes. Persistent admission/projection support is still Gate 6 work.
 
 Export. Let `T = 15000`. Header: `group` = the stable group id the jam recorder uses; `call` =

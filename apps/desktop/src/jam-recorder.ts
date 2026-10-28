@@ -3,6 +3,8 @@ import {
   JAM_MET_BPB_MIN,
   JAM_MET_BPM_MAX,
   JAM_MET_BPM_MIN,
+  JAM_NOTE_VOLUME_MAX,
+  JAM_NOTE_VOLUME_MIN,
   JAM_SEQUENCE_MAX,
   JAM_SESSION_NONCE_HEX_CHARS,
   JAM_TAKE_COMMITMENT_DOMAIN,
@@ -464,6 +466,9 @@ export function validateJamTake(value: unknown): TakeValidation {
   return { ok: true, take };
 }
 
+/** The closed key sets a note-on may have: optional recipe index `p`, optional authored level `v`. */
+const NOTE_ON_KEYS = new Set(["lane,ms,n,on,q,w", "lane,ms,n,on,p,q,w", "lane,ms,n,on,q,v,w", "lane,ms,n,on,p,q,v,w"]);
+
 function validateTakeEvent(candidate: unknown, lanes: number, patches: number): JamTakeEvent | null {
   const event = plainRecord(candidate);
   if (!event) return null;
@@ -480,9 +485,10 @@ function validateTakeEvent(candidate: unknown, lanes: number, patches: number): 
   }
   const keys = Object.keys(event).sort().join(",");
   if (
-    event.on !== 1 || (keys !== "lane,ms,n,on,q,w" && keys !== "lane,ms,n,on,p,q,w") ||
+    event.on !== 1 || !NOTE_ON_KEYS.has(keys) ||
     (event.n as number) < 0 || (event.n as number) > 127 || !validWave(event.w as string) ||
-    (event.p !== undefined && (!Number.isInteger(event.p) || (event.p as number) < 0 || (event.p as number) >= patches))
+    (event.p !== undefined && (!Number.isInteger(event.p) || (event.p as number) < 0 || (event.p as number) >= patches)) ||
+    (event.v !== undefined && (!Number.isInteger(event.v) || (event.v as number) < JAM_NOTE_VOLUME_MIN || (event.v as number) > JAM_NOTE_VOLUME_MAX))
   ) return null;
   return {
     ms: event.ms as number,
@@ -492,6 +498,7 @@ function validateTakeEvent(candidate: unknown, lanes: number, patches: number): 
     w: event.w as LegacyWave,
     ...(event.p === undefined ? {} : { p: event.p as number }),
     q: event.q as number,
+    ...(event.v === undefined ? {} : { v: event.v as number }),
   };
 }
 

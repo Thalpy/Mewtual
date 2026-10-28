@@ -624,6 +624,76 @@ pub(crate) async fn studio_apply_index(
     .await
 }
 
+/// One renderer-supplied member of a batched Score Apply; the same shape a lone Apply sends.
+#[derive(serde::Deserialize)]
+pub(crate) struct StudioBatchOperationArgs {
+    nonce: String,
+    body: String,
+}
+
+/// Several Score edits as one actor visit (`StudioRequest::ApplyBatch`). The count is bounded
+/// before any body is decoded, and every body meets the same per-operation cap as `studio_apply`;
+/// `validate()` then applies the batch's own byte bound, nonce distinctness and Score-only rule.
+fn apply_batch_request(
+    channel: &str,
+    object: &str,
+    object_kind: Option<&str>,
+    epoch_id: &str,
+    operations: Vec<StudioBatchOperationArgs>,
+) -> Result<StudioRequest, String> {
+    use catcoms_app::studio::{StudioBatchOperation, STUDIO_BATCH_MAX_OPERATIONS};
+    if operations.is_empty() || operations.len() > STUDIO_BATCH_MAX_OPERATIONS {
+        return Err(format!(
+            "batched Apply holds 1 to {STUDIO_BATCH_MAX_OPERATIONS} operations"
+        ));
+    }
+    let target = recovery::target_with_kind(channel, Some(object), object_kind)?;
+    let operations = operations
+        .into_iter()
+        .map(|operation| {
+            if operation.body.len() > 64 * 1024 {
+                return Err("Studio body exceeds 64 KiB".to_string());
+            }
+            Ok(StudioBatchOperation {
+                nonce: id(&operation.nonce)?,
+                body: operation.body.into_bytes(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let request = StudioRequest::ApplyBatch {
+        target,
+        epoch_id: u128::from_be_bytes(id(epoch_id)?),
+        operations,
+    };
+    request.validate().map_err(|e| e.to_string())?;
+    Ok(request)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn studio_apply_batch(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: String,
+    epoch_id: String,
+    object_kind: Option<String>,
+    operations: Vec<StudioBatchOperationArgs>,
+) -> Result<Option<Value>, String> {
+    invoke(
+        &state,
+        server,
+        apply_batch_request(
+            &channel,
+            &object,
+            object_kind.as_deref(),
+            &epoch_id,
+            operations,
+        )?,
+    )
+    .await
+}
+
 // This bridge representation intentionally retains all conflict/deletion/overflow evidence.
 // It is not the old fixture's lossy root or a synthetic "settled" label. Expiry is discriminated:
 // absent, never and timestamp zero remain three different values at this boundary.
@@ -709,23 +779,55 @@ fn projection_content(projection: &StudioProjection) -> Result<Value, String> {
         StudioProjection::Score(p) => {
             let ready = p.readiness().map_err(|e| e.to_string())?;
             let cell = |v: &ScoreCell| match v {
-                ScoreCell::Note { patch, len } => {
+                ScoreCell::Note { patch, len, volume } => {
                     let mut value = json!({"k":"n","p":hex::encode(patch)});
                     if let Some(len) = len {
                         value["len"] = json!(len);
+                    }
+                    // Absent means full level; the renderer must not read a missing key as 0.
+                    if let Some(volume) = volume {
+                        value["vol"] = json!(volume);
                     }
                     value
                 }
                 ScoreCell::Drum { pad } => json!({"k":"d","pad":pad}),
             };
-            json!({"kind":"score","title":p.title.as_ref().map(|v|ireg(v,|v|json!(v))),
+            let issues = |v: &ScoreCellIssues| json!({"count":v.count,"extent":v.extent,"recipe":v.recipe,"overlap":v.overlap,"conflict":v.conflict});
+            let mut content = json!({"kind":"score","title":p.title.as_ref().map(|v|ireg(v,|v|json!(v))),
                 "bpm":p.bpm.as_ref().map(|v|ireg(v,|v|json!(v))),"bpb":p.bpb.as_ref().map(|v|ireg(v,|v|json!(v))),
                 "steps":p.steps.as_ref().map(|v|ireg(v,|v|json!(v))),
                 "cells":p.cells.iter().map(|((step,row),slot)|(format!("{step}:{row}"),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(cell)))}))).collect::<std::collections::BTreeMap<_,_>>(),
                 "patches":p.patches.iter().map(|(id,slot)|(hex::encode(id),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(|v|v.value())))}))).collect::<std::collections::BTreeMap<_,_>>(),
                 "readiness":{"headerConflicts":ready.header_conflicts,
-                    "cells":ready.cells.iter().map(|((step,row),v)|(format!("{step}:{row}"),json!({"count":v.count,"extent":v.extent,"recipe":v.recipe,"overlap":v.overlap,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>(),
-                    "patches":ready.patches.iter().map(|(id,v)|(hex::encode(id),json!({"count":v.count,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>()}})
+                    "cells":ready.cells.iter().map(|((step,row),v)|(format!("{step}:{row}"),issues(v))).collect::<std::collections::BTreeMap<_,_>>(),
+                    "patches":ready.patches.iter().map(|(id,v)|(hex::encode(id),json!({"count":v.count,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>()}});
+            // Layered notes (docs/design-score-layers.md section 4) are ADD WINS: `cleared` is
+            // "no live value", never the removal-wins `removed`. Both `layers` and
+            // `readiness.layers` appear exactly when layer slots exist (the latter possibly `{}`),
+            // so a score without layers keeps the exact DTO older renderers parse. Keys are
+            // `"S:R/L"` with `L` = `d` or the 64-hex sound id; registers use the cells' shape and
+            // the renderer's shared evidence bound, which the projection's own bound covers.
+            if !p.layers.is_empty() {
+                content["layers"] = json!(p
+                    .layers
+                    .iter()
+                    .map(|((step, row, layer), slot)| {
+                        (
+                            format!("{step}:{row}/{}", layer.key()),
+                            json!({"cleared":slot.cleared(),"register":ireg(slot.register(),|v|json!(v.as_ref().map(cell)))}),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>());
+                content["readiness"]["layers"] = json!(ready
+                    .layers
+                    .iter()
+                    .map(|((step, row, layer), v)| (
+                        format!("{step}:{row}/{}", layer.key()),
+                        issues(v)
+                    ))
+                    .collect::<std::collections::BTreeMap<_, _>>());
+            }
+            content
         }
     })
 }

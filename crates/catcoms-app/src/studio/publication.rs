@@ -37,8 +37,9 @@ impl StudioSavedTransaction {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
-    /// Consume at most two already-durable packets under the SAME source/Server/native custody
-    /// as Save. No receipt, membership, gate or snapshot mutation can interleave. Current full
+    /// Consume already-durable packets under the SAME source/Server/native custody as Save:
+    /// up to two for a single edit, or the bounded ApplyBatch's up to64 packets. No receipt,
+    /// membership, gate or snapshot mutation can interleave. Current full
     /// author/MLS/routing checks still run inside the existing one-shot sender for every packet.
     ///
     /// The aggregate two-second injected-clock window bounds added network waiting, not the

@@ -42,7 +42,7 @@ const { default: StudioFaultControls } = await import("./StudioFaultControls.sve
 const { default: ServerStudioSettings } = await import("./ServerStudioSettings.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 
-function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[]; onpostPixa: (bytes: Uint8Array, server: number) => Promise<void> }> = {}) {
+function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[]; patchShelves: readonly { name: string; patch: import("./jam-contract.ts").JamPatch; shelf: "preset" | "mine" | "share" }[]; onpostPixa: (bytes: Uint8Array, server: number) => Promise<void>; onpostScore: (take: import("./jam-contract.ts").JamTake, server: number) => Promise<void> }> = {}) {
   state.useStudioIpc(ipc);
   const notices: string[] = [];
   const target = document.createElement("div");
@@ -142,9 +142,9 @@ test("G7-UI: Closing FPS controls save locally and retain their exact request on
     state.studio.selected = OBJ; flushSync(); await settled(350);
     const fps = m.target.querySelector<HTMLInputElement>('label.st-chip input[type="number"]');
     assert.ok(fps && !fps.disabled); fps.value = "17"; fps.dispatchEvent(new Event("change", { bubbles: true })); await settled();
-    assert.equal(m.count("studio_closing_overlay_save"), 1); assert.match(m.text(), /local save not written/);
+    assert.equal(m.count("studio_closing_overlay_save"), 1); assert.match(m.text(), /Not saved: fps/);
     const first = ipc.calls.find(c => c.cmd === "studio_closing_overlay_save")!.args;
-    m.click("button.st-btn", "retry same request"); await settled();
+    m.click("button.st-btn", "Retry now"); await settled();
     assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_closing_overlay_save")[1].args, first);
     assert.equal(m.count("studio_closing_overlay_save_begin"), 1); assert.equal(m.count("studio_apply"), 0); assert.equal(m.count("studio_unconfirmed_overlay_save"), 0);
     m.click("button.st-itab", "history"); await settled(); assert.match(m.text(), /Updating shared history/);
@@ -316,7 +316,7 @@ test("UI-002: a pending read becomes the editor, a landed save changes the shown
 test("UI-003: a sidebar row rendered while a create is in flight changes when that create goes uncertain", async () => {
   // A failure after dispatch may have committed: uncertain. The bridge's actor-busy refusal comes
   // before dispatch, so it is truthfully "not written" (see nativeNoWrite), never "creating…".
-  for (const [error, label] of [["Studio transaction expired, cancelled or server stopped", /create uncertain · retry in the editor/], ["Studio actor busy; retry", /create not written · retry in the editor/]] as const) {
+  for (const [error, label] of [["Studio transaction expired, cancelled or server stopped", /not confirmed\s*$/], ["Studio actor busy; retry", /not saved\s*$/]] as const) {
     const ipc = fakeIpc();
     const create = deferred<unknown>();
     ipc.on("studio_list", () => ordinaryView(indexContent()));
@@ -377,8 +377,10 @@ test("UI-003: a pending frame's thumbnail rendered while its publish is in fligh
     await settled();
     assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save is uncertain");
     assert.ok(pendingThumb()?.querySelector(".fr.pending.uncertain"));
-    assert.match(m.text(), /save uncertain/);
-    assert.match(m.text(), /Studio transaction expired/);
+    assert.match(m.text(), /Not confirmed: new frame/);
+    // The exact native text is kept for diagnostics, in the banner's tooltip, not in its words.
+    assert.match(m.target.querySelector(".st-save")?.getAttribute("title") ?? "", /Studio transaction expired/);
+    assert.doesNotMatch(m.text(), /Studio transaction expired/);
   } finally {
     m.done();
   }
@@ -435,10 +437,11 @@ test("UI-004: an awaiting-tenure edit is visibly local-only and its retained dra
     await settled(500);
     assert.equal(m.count("studio_unconfirmed_overlay_save_begin"), 1);
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 1);
-    assert.match(m.text(), /local save not written/);
-    assert.doesNotMatch(m.text(), /save uncertain/);
-    assert.match(m.text(), /backend confirmed that this attempt wrote nothing/);
-    m.click("button.st-btn", "retry same request");
+    assert.match(m.text(), /Not saved: fps/);
+    assert.doesNotMatch(m.text(), /Not confirmed/);
+    // Proven not written, so (and only so) it may be saved again as a new edit.
+    assert.match(m.text(), /Save as a new edit/);
+    m.click("button.st-btn", "Retry now");
     await settled(500);
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 2);
     assert.match(m.text(), /local-only draft/);
@@ -510,12 +513,12 @@ test("UI-005: a local-only Index draft exposes export, archive, release and disp
     assert.match(m.text(), /local-only index draft/);
     state.ensureStudio(ME).setEntryExpiry(OBJ, { kind: "never" });
     await settled(300);
-    assert.match(m.text(), /index save not written/);
-    assert.match(m.text(), /backend confirmed that this attempt wrote nothing/);
-    m.click("retry exact index save");
+    assert.match(m.text(), /Not saved: expiry/);
+    assert.match(m.text(), /Save as a new edit/, "proven not written, so it may be saved again as a new edit");
+    m.click("Retry now");
     await settled(400);
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 2);
-    assert.doesNotMatch(m.text(), /index save not written/);
+    assert.doesNotMatch(m.text(), /Not saved: expiry/);
 
     m.click("export index draft");
     await settled();
@@ -973,19 +976,22 @@ test("G6-UI-001: native Score composer routes real drum edits and retains exact 
   try {
     await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
     assert.ok(m.target.querySelector('[aria-label="Score composer"]'));
-    m.click("button.st-itab", "History");
+    // The composer's inspector carries the shared history rail as its third tab.
+    m.click("button.st-itab", "history");
     m.click("button", "copy");
     assert.match(m.text(), /Score copy may replace same-coordinate cells and recipes, title, BPM, beats per bar and Steps/);
     assert.match(m.text(), /not an atomic restore/);
     assert.doesNotMatch(m.text(), /copy replaces the current title and fps/);
     assert.equal(ipc.calls.find(c => c.cmd === "studio_read")?.args.objectKind, "score");
-    m.click("button.st-itab", "Music");
-    m.click("button", "drum"); m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
+    m.click("button.st-itab", "sounds");
+    m.target.querySelector<HTMLButtonElement>('[data-score-mode="drum"]')!.click(); flushSync();
+    m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
     const first = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
-    assert.equal(first.objectKind, "score"); assert.equal(JSON.parse(String(first.body)).op, "set_cell");
-    assert.match(m.text(), /save uncertain/); m.click("button", "retry same request"); await settled(300);
+    // New builds author every placement as a layered note (docs/design-score-layers.md).
+    assert.equal(first.objectKind, "score"); assert.equal(JSON.parse(String(first.body)).op, "set_note");
+    assert.match(m.text(), /Not confirmed: /); m.click("button", "Retry now"); await settled(300);
     assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_apply")[1].args, first);
-    assert.match(m.text(), /History/); assert.equal(m.count("studio_recovery_list"), 1);
+    assert.match(m.text(), /history/); assert.equal(m.count("studio_recovery_list"), 1);
     assert.equal(m.count("publish_pix"), 0);
   } finally { m.done(); }
 });
@@ -1035,6 +1041,33 @@ test("G7-UI: document Play after a sounding audition lowers the audition flag, s
     assert.deepEqual(kinds, ["score", "flipnote"]);
     assert.ok(target.querySelector('[title="stop [space]"]'), "document playback after an audition must read stop");
   } finally { unmount(app); target.remove(); state.disposeStudio(); }
+});
+
+test("G7-UI: a library tile adds a Score set_patch through the session and selects the recipe once the view holds it", async () => {
+  const ipc = fakeIpc();
+  const { legacyJamPatch, jamPatchId } = await import("./jam-patch.ts");
+  const patch = legacyJamPatch("sine"), id = await jamPatchId(patch);
+  let current: Record<string, unknown> = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(current), group: "deadbeef" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  ipc.on("studio_apply", (args) => {
+    const body = JSON.parse(String(args.body)) as { op: string; patch: string };
+    assert.equal(body.op, "set_patch"); assert.equal(body.patch, id);
+    current = { ...current, patches: { [id]: { removed: false, register: { selected: { value: patch, source: { opId: id64(0x51), author: ME, nonce: id32(0x51) } }, conflicts: [] } } } };
+    return { ...ordinaryView(current), group: "deadbeef" };
+  });
+  const m = mountStudio(ipc, { patchLibrary: [{ name: "LANDING", patch }], patchShelves: [{ name: "LANDING", patch, shelf: "preset" }] });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    assert.ok(m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.classList.contains("off"), "no recipe, no note placement");
+    m.target.querySelector<HTMLButtonElement>('[data-lib-patch="LANDING"]')!.click(); flushSync(); await settled(400);
+    const apply = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
+    assert.equal(apply.objectKind, "score");
+    assert.equal(m.target.querySelector(`[data-doc-patch="${id}"]`)?.getAttribute("aria-pressed"), "true", "the added recipe is the one notes are placed with");
+    assert.equal(m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.classList.contains("off"), false);
+    assert.match(m.target.querySelector(".sc-foot")!.textContent!, /LANDING/);
+  } finally { m.done(); }
 });
 
 // Review of 149e7321, finding 5. A second note cancels the first while it is still preparing.
@@ -1100,7 +1133,58 @@ test("G7-UI: a superseded audition's late completion cannot turn the newer note 
   } finally { audio.stop(); unmount(app); target.remove(); state.disposeStudio(); }
 });
 
-test("G6-UI-003: Score loop has an explicit labelled checkbox and forwards only the local choice", async () => {
+// Review of 87ab2d89, finding 1. Placing a note queues an edit (which bumps the editor's media
+// generation) and then auditions the note. The generation change used to stop every playback,
+// including the audition that same gesture had just started. Audio now belongs to the object and
+// generation it was started against; only a change from elsewhere stops it.
+test("G7-UI: placing a note keeps the audition it started; a source change from elsewhere still stops playback", async () => {
+  const { legacyJamPatch, jamPatchId } = await import("./jam-patch.ts");
+  const patch = legacyJamPatch("sine"), id = await jamPatchId(patch);
+  const ipc = fakeIpc();
+  const source = { opId: id64(0x52), author: ME, nonce: id32(0x52) };
+  let score: Record<string, unknown> = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {},
+    patches: { [id]: { removed: false, register: { selected: { value: patch, source }, conflicts: [] } } },
+    readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  // A faithful backend echoes the applied note, so the readback equals the working projection and
+  // bumps nothing; a fake that forgot the note would read as a source change and stop the audition.
+  // A placement is a layered note: native's DTO then carries `layers` and `readiness.layers`.
+  ipc.on("studio_apply", (args) => {
+    const body = JSON.parse(String(args.body)) as { op: string; step: number; row: number; value: { k: string; p?: string } };
+    const register = { selected: { value: body.value, source: { opId: id64(0x53), author: ME, nonce: id32(0x53) } }, conflicts: [] };
+    if (body.op === "set_cell") score = { ...score, cells: { ...(score.cells as object), [`${body.step}:${body.row}`]: { removed: false, register } } };
+    if (body.op === "set_note") {
+      const key = `${body.step}:${body.row}/${body.value.k === "d" ? "d" : body.value.p}`;
+      score = { ...score, layers: { ...(score.layers as object ?? {}), [key]: { cleared: false, register } },
+        readiness: { ...(score.readiness as object), layers: {} } };
+    }
+    return { ...ordinaryView(score), group: "deadbeef" };
+  });
+  const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>();
+  const audio = new StudioAudioSession({ context: { state: "running", resume: async () => {} },
+    prepareArchivalPlayback: async (take, animation) => { const capability = {} as JamArchivalPlayback; plans.set(capability, planJamArchivalPlayback(take, animation)); return capability; },
+    archivalPlaybackPlan: capability => plans.get(capability) ?? null,
+    playArchivalEvent: () => ({ ok: true }),
+    revokeArchivalPlayback: capability => plans.delete(capability),
+  }, () => 0);
+  audio.setScope({ generation: 1, server: SERVER, channel: CHANNEL, membership: 1 }, false);
+  let stops = 0;
+  const m = mountStudio(ipc, { patchLibrary: [{ name: "LANDING", patch }], audioActions: { start: (kind, prepare, loop, offset) => audio.start(kind, prepare, loop, offset), stop: () => { stops++; audio.stop(); } } });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    const before = stops;
+    m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:12"]')!.click(); flushSync(); await settled(300);
+    assert.equal(audio.state.state, "playing", "the note placed is still sounding");
+    assert.equal(stops, before, "the edit's own generation bump did not stop its audition");
+    assert.ok(!m.notices.some((n) => /audition unavailable/.test(n)), m.notices.join("; "));
+    state.ensureStudio(ME).invalidate({ objects: [OBJ] }); flushSync(); await settled(30);
+    assert.ok(stops > before, "a source change from elsewhere still stops playback");
+  } finally { audio.stop(); m.done(); }
+});
+
+test("G6-UI-003: Score loop is an explicit transport toggle, off by default, and forwards only the local choice", async () => {
   const ipc = fakeIpc();
   const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
   ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
@@ -1110,11 +1194,29 @@ test("G6-UI-003: Score loop has an explicit labelled checkbox and forwards only 
   const m = mountStudio(ipc, { audioActions: { stop: () => {}, start: async (_kind, _prepare, loop) => { loops.push(loop); return true; } } });
   try {
     await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
-    const checkbox = m.target.querySelector<HTMLInputElement>('input[aria-label="Loop whole authored score"]');
-    assert.ok(checkbox); assert.equal(checkbox.type, "checkbox"); assert.equal(checkbox.checked, false);
-    assert.match(checkbox.closest("label.st-score-loop")?.textContent ?? "", /loop whole authored score/);
-    m.click("button", "play locally"); await settled(50); assert.deepEqual(loops, [false]);
-    checkbox.checked = true; checkbox.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
-    m.click("button", "play locally"); await settled(50); assert.deepEqual(loops, [false, true]);
+    const toggle = m.target.querySelector<HTMLButtonElement>('button[aria-label="Loop playback"]');
+    assert.ok(toggle); assert.equal(toggle.getAttribute("aria-pressed"), "false");
+    const play = () => { m.target.querySelector<HTMLButtonElement>('[title="play [space]"]')!.click(); flushSync(); };
+    play(); await settled(50); assert.deepEqual(loops, [false]);
+    toggle.click(); flushSync(); assert.equal(toggle.getAttribute("aria-pressed"), "true");
+    play(); await settled(50); assert.deepEqual(loops, [false, true]);
+  } finally { m.done(); }
+});
+
+test("a score posts to chat through its own attachment callback with the take the share button would seal", async () => {
+  const ipc = fakeIpc();
+  const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
+  const posted: { server: number; events: number }[] = [];
+  const m = mountStudio(ipc, { onpostScore: async (take, server) => { posted.push({ server, events: take.events.length }); } });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    const post = m.target.querySelector<HTMLButtonElement>("[data-score-post]")!;
+    assert.ok(post, "the composer offers post to chat when the host can attach");
+    assert.equal(post.disabled, false);
+    post.click(); await settled(300);
+    assert.deepEqual(posted, [{ server: SERVER, events: 0 }]);
+    assert.equal(m.count("publish_pixa"), 0);
   } finally { m.done(); }
 });

@@ -222,6 +222,7 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
                 value: ScoreCell::Note {
                     patch,
                     len: Some(1),
+                    volume: None,
                 },
             },
         ),

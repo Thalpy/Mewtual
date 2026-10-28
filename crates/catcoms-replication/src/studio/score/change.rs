@@ -108,8 +108,11 @@ pub fn validate_score_change(
     Ok(())
 }
 
+/// Stateful checks at the sender's causal frontier. A legacy `SetCell` and a layered `SetNote`
+/// face the SAME checks (the hold fits the current header length; a note's sound is an active
+/// recipe), so moving a note between the families never relaxes admission.
 fn check_cell(projection: &ScoreProjection, operation: &ScoreOp) -> Result<(), ReplError> {
-    if let ScoreOp::SetCell { step, value, .. } = operation {
+    if let ScoreOp::SetCell { step, value, .. } | ScoreOp::SetNote { step, value, .. } = operation {
         let end = *step
             + match value {
                 ScoreCell::Note { len, .. } => len.unwrap_or(1),
@@ -129,8 +132,9 @@ fn check_cell(projection: &ScoreProjection, operation: &ScoreOp) -> Result<(), R
             }
         }
     }
-    // Clear/Remove deliberately accept absent or overflow slots: cleanup must remain possible.
-    // Concurrent overlap/cap/header conflicts are projection readiness, not receiver admission.
+    // Clear/Remove (ClearCell, ClearNote, RemovePatch) deliberately accept absent or overflow
+    // slots and a gone sound: cleanup must remain possible. Concurrent overlap/cap/header
+    // conflicts are projection readiness, not receiver admission.
     Ok(())
 }
 

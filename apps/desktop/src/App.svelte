@@ -146,6 +146,7 @@
   import { soundcloudDeckUrl } from "./providers-audio";
   import { StudioAudioSession, type StudioAudioActions, type StudioAudioState } from "./studio-audio.ts";
   import { createStudioExit, type StudioRoute } from "./studio-exit.ts";
+  import { saveToast } from "./studio-save-words.ts";
   import { vimeoFrameUrl } from "./providers-video";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
@@ -7739,9 +7740,18 @@
     // having read it: a failed `get_messages` used to leave the channel selected, empty and
     // marked read. `settleReadState` inside refresh clears them once the rows are actually up.
     await refresh(); // awaited so a search jump can address the target channel's loaded messages
+    // The read took real time. If the channel is no longer the one on screen (or the vault locked),
+    // nothing here is current. If it is on screen, its topic and delivery ticks must be refreshed
+    // whatever else happened meanwhile: they were cleared above and nothing else restores them.
+    if (cur?.active !== id || locked) return false;
     refreshTopic();
     refreshDelivery();
-    return true;
+    // A newer route (another channel, a surface, a server, a Studio exit) claims the same counter.
+    // The caller is about to act on "the switch committed": that is only true while this action's
+    // route is still the newest, so a superseded Search or Edit-topic does nothing. Callers handed a
+    // route already ask it again right after this resolves; the answer matters most to a caller on
+    // the default route (a search hit), which has no other way to learn it was superseded.
+    return route.current();
   }
 
   // The active channel's topic (a shared LWW scalar in the channel doc; any member may set it).
@@ -8936,6 +8946,9 @@
   let studioSnapshot: (() => string | null) | null = null;
   let studioRestore: ((json: string | null) => void) | null = null;
   let studioSave: (() => Promise<void>) | null = null;
+  let studioSend: (() => void) | null = null;
+  let studioSaveTally: (typeof import("./studio-state.svelte.ts"))["studioSaveTally"] | null = null;
+  let onStudioChange: ((fn: () => void) => () => void) | null = null;
   let studioHasWork: (() => boolean) | null = null;
   let studioWork: (() => { server: number; restored: boolean } | null) | null = null;
   let retireStudioServer: ((server: number, keep: boolean) => "none" | "kept" | "partial" | "dropped") | null = null;
@@ -8944,6 +8957,14 @@
   let studioEndClose: (() => void) | null = null;
   let restoredStudioDraft: string | null = null;
   let studioNavigation = 0;
+  // A Studio document navigation (sidebar open, new flipnote, the Music tab's open/create) is a
+  // route like any other and claims the counter the moment it is decided, before its departure
+  // Save can wait. An App route (Back, a channel, a server) that was already waiting on its own
+  // Save then finds the counter moved (its `route.current()` below compares it) and does nothing,
+  // instead of landing on top of the newer choice; the Studio surfaces call this through their
+  // `onnavigate` prop. Their `session.navigate` also takes the session's navigation lease, which
+  // the claim checks too; the counter keeps the supersession visible to App without relying on it.
+  function noteStudioNavigation() { studioNavigation++; }
   // Every route that takes the main pane away from the Studio asks a route from this gate BEFORE it
   // changes `view`, opens the inbox or enters DM home: `leaveStudioThen` for a synchronous
   // action, `studioExit.begin()` for an awaiting action. It carries its route across every await and asks
@@ -8961,6 +8982,8 @@
       return () => request === studioNavigation && generation === uiStateLoadGeneration && !locked && current();
     },
     // Supersession, lock and reload are the route's own current() check, made after this resolves.
+    // A route waits for definite receipts, then rechecks its original claim. Failure
+    // keeps the editor and original retry records available to the member.
     save: async () => {
       try { await studioSave?.(); return true; }
       catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
@@ -8968,23 +8991,90 @@
     exhausted: () => { if (!locked) toast("The Studio kept changing while it saved. Try again once you stop drawing.", "warn", 6000); },
   });
   const leaveStudioThen = studioExit.leaveThen;
+  // The background-save toast: at most one, following the Studio session's queue after the member
+  // left the Studio, its bar running from the count at the start to zero (saveToast in
+  // studio-save-words.ts). It ends on "saved", or on a warning that stays when an edit will not
+  // save on its own. A lock or reset ends it silently: the queue was snapshotted, not saved, and
+  // "saved" would be untrue. Dismissing it hides the progress; only that warning comes back.
+  let stopStudioSaveWatch: (() => void) | null = null;
+  function trackStudioSaves() {
+    if (stopStudioSaveWatch || !studioSaveTally || !onStudioChange) return;
+    const start = studioSaveTally();
+    if (!start || start.tally.left === 0) return;
+    let total = start.tally.left, shown = "";
+    const first = saveToast(start.tally, total);
+    const id = toast(first.text, first.kind, 0, first.progress);
+    const update = () => {
+      const now = studioSaveTally?.();
+      if (!now || now.generation !== start.generation || locked) { stop(); dismissToast(id); return; }
+      total = Math.max(total, now.tally.left);
+      // A queue emptied by the member's own discards was not saved: end without a word.
+      const next = saveToast(now.tally, total, now.tally.discarded - start.tally.discarded), key = `${next.kind}:${next.text}:${next.progress}`;
+      if (next.dismiss) { stop(); dismissToast(id); return; }
+      if (next.done) stop();
+      if (key === shown) return; // session changes are frequent; redraw only what changed
+      shown = key;
+      const visible = toasts.some((t) => t.id === id);
+      if (!visible && !(next.done && next.kind === "warn")) return;
+      updateToast(id, next.text, next.kind, next.done && next.kind === "ok" ? 2500 : 0, next.progress);
+    };
+    // Coalesced to a microtask, like studio-state's revision bump: a session change can happen
+    // inside a Svelte effect, and the toast is App state that must not be written from there.
+    let queued = false;
+    const unsubscribe = onStudioChange(() => {
+      if (queued) return;
+      queued = true;
+      queueMicrotask(() => { queued = false; if (stopStudioSaveWatch === stop) update(); });
+    });
+    const stop = () => { unsubscribe(); stopStudioSaveWatch = null; };
+    stopStudioSaveWatch = stop;
+    update();
+  }
+  // Every route out of the Studio surface starts the toast while saves are outstanding, including
+  // saves already sent and retrying on their own, which leave the exit gate nothing to hand over
+  // (so its `save` never runs). trackStudioSaves keeps it to one at a time.
+  let viewLeftFrom: Tab | null = null;
+  $effect(() => {
+    const now = view;
+    untrack(() => {
+      if (viewLeftFrom === "studio" && now !== "studio" && !locked) trackStudioSaves();
+      viewLeftFrom = now;
+    });
+  });
+  // How long the current load has been running, for the placeholder's readout: a module import
+  // reports no progress, so the bar is indeterminate and the seconds say it is still moving.
+  let studioLoadSeconds = $state(0);
+  const studioModules = () => Promise.all([import("./Studio.svelte"), import("./StudioNav.svelte"), import("./studio-state.svelte.ts")]);
+  // Warm the chunk shortly after unlock so the first visit does not pay the cold import (in
+  // development, Vite's first transform of the editor graph) under the user's click. Only the
+  // modules are fetched; nothing restores a draft or touches the session until the tab opens.
+  $effect(() => {
+    if (locked || (StudioSurface && StudioNav)) return;
+    const timer = setTimeout(() => { void studioModules().catch(() => {}); }, 6000);
+    return () => clearTimeout(timer);
+  });
   async function loadStudio() {
     if ((StudioSurface && StudioNav) || studioLoading) return;
     studioLoading = true;
+    const startedAt = Date.now();
+    studioLoadSeconds = 0;
+    const ticker = setInterval(() => { studioLoadSeconds = Math.round((Date.now() - startedAt) / 1000); }, 500);
     try {
-      const [s, n, st] = await Promise.all([import("./Studio.svelte"), import("./StudioNav.svelte"), import("./studio-state.svelte.ts")]);
+      const [s, n, st] = await studioModules();
       StudioSurface = s.default;
       StudioNav = n.default;
       studioReset = st.resetStudio;
       studioSnapshot = st.studioDraftSnapshot; studioRestore = st.restoreStudioDraft;
       studioSave = st.saveStudio; studioHasWork = st.studioHasPending;
       studioWork = st.studioWork; retireStudioServer = st.retireStudioServer;
+      studioSend = st.sendStudio; studioSaveTally = st.studioSaveTally; onStudioChange = st.onStudioChange;
       studioClaimNavigation = st.claimStudioNavigation;
       studioBeginClose = st.beginStudioClose; studioEndClose = st.endStudioClose;
       if (restoredStudioDraft) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
     } catch (cause) {
       toast(`The studio failed to load: ${String(cause)}`, "err");
     } finally {
+      clearInterval(ticker);
       studioLoading = false;
     }
   }
@@ -13603,27 +13693,29 @@
   }
 
   // --- toasts: visible feedback for otherwise-silent work (uploads, saves, renames) --------------
-  type Toast = { id: number; kind: "info" | "ok" | "warn" | "err"; text: string };
+  /** `progress` (0..1) draws a bar along the toast's bottom edge, for work that reports how far it is. */
+  type Toast = { id: number; kind: "info" | "ok" | "warn" | "err"; text: string; progress?: number };
   let toasts = $state<Toast[]>([]);
   let toastSeq = 0;
   const toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
   /** Show a toast; `ms` 0 = sticky until updated/dismissed. Returns an id for updateToast. */
-  function toast(text: string, kind: Toast["kind"] = "info", ms = 3500): number {
+  function toast(text: string, kind: Toast["kind"] = "info", ms = 3500, progress: number | null = null): number {
     const id = ++toastSeq;
-    toasts = [...toasts, { id, kind, text }];
+    toasts = [...toasts, { id, kind, text, ...(progress === null ? {} : { progress }) }];
     if (ms > 0) toastTimers.set(id, setTimeout(() => dismissToast(id), ms));
     return id;
   }
-  /** Morph an existing toast in place (e.g. "Uploading…" -> "Embedded"). */
-  function updateToast(id: number, text: string, kind: Toast["kind"], ms = 3500) {
+  /** Morph an existing toast in place (e.g. "Uploading…" -> "Embedded"). A toast the member already
+   * dismissed comes back, which is right for a final outcome they still need to hear. */
+  function updateToast(id: number, text: string, kind: Toast["kind"], ms = 3500, progress: number | null = null) {
     const timer = toastTimers.get(id);
     if (timer) clearTimeout(timer);
     toastTimers.delete(id);
     if (!toasts.some((t) => t.id === id)) {
-      toast(text, kind, ms);
+      toast(text, kind, ms, progress);
       return;
     }
-    toasts = toasts.map((t) => (t.id === id ? { ...t, text, kind } : t));
+    toasts = toasts.map((t) => (t.id === id ? { id, kind, text, ...(progress === null ? {} : { progress }) } : t));
     if (ms > 0) toastTimers.set(id, setTimeout(() => dismissToast(id), ms));
   }
   function dismissToast(id: number) {
@@ -14946,21 +15038,24 @@
     return !locked && (view === "studio" || pixaViewer !== null || inlinePixaAudioOwner !== null) && activeServerId !== null && cur?.active
       ? { generation: studioAudioGeneration, server: activeServerId, channel: cur.active, membership: studioMembership } : null;
   }
-  async function startStudioAudio(kind: Parameters<StudioAudioActions["start"]>[0], prepare: Parameters<StudioAudioActions["start"]>[1], loop: boolean, offset = 0, owner: typeof inlinePixaAudioOwner = null): Promise<boolean> {
+  async function startStudioAudio(kind: Parameters<StudioAudioActions["start"]>[0], prepare: Parameters<StudioAudioActions["start"]>[1], loop: boolean, offset = 0, owner: typeof inlinePixaAudioOwner = null, document = false): Promise<boolean> {
       stopStudioAudio(); inlinePixaAudioOwner = owner;
       suppressCurrentTake();
       const engine = ensureJamEngine();
       if (studioAudioEngine !== engine) { studioAudio?.stop(); studioAudioEngine = engine; studioAudio = new StudioAudioSession(engine); }
       studioAudio!.setScope(studioAudioScope(), callDeafened);
-      const pending = studioAudio!.start(kind, prepare, loop, offset);
+      const pending = studioAudio!.start(kind, prepare, loop, offset, document);
       studioAudioState = studioAudio!.state;
       const started = await pending; studioAudioState = studioAudio!.state;
       if (!started && inlinePixaAudioOwner === owner) inlinePixaAudioOwner = null;
       return started;
   }
   const studioAudioActions: StudioAudioActions = {
-    start: (kind, prepare, loop, offset) => startStudioAudio(kind, prepare, loop, offset),
+    // Only the Studio surface's own Play says `document` (see StudioAudioActions.start); this
+    // file's viewers call startStudioAudio without it.
+    start: (kind, prepare, loop, offset, document) => startStudioAudio(kind, prepare, loop, offset, null, document === true),
     stop: stopStudioAudio,
+    refresh: () => { studioAudio?.refresh(); if (studioAudio) studioAudioState = studioAudio.state; },
   };
   async function shareStudioScore(take: JamTake, server: number): Promise<void> {
     if (locked || activeServerId !== server || view !== "studio") throw new Error("the Score share target changed");
@@ -14995,11 +15090,31 @@
     await refreshFiles();
     if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
     // appendToDraft opens Chat directly. Treat that transition like ordinary Studio navigation:
-    // preserve every working edit first, and recheck the shared navigation claim after the await.
+    // hand every working edit to the background Save (a drawing that cannot be staged refuses here,
+    // before Chat opens), and recheck the shared navigation claim.
     await studioSave?.();
     if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
     await appendToDraft(fileMarker(name, cid, true));
     toast("Flipnote attached. Press Send to post it.", "ok", 5000);
+  }
+  /// The score's counterpart of postStudioPixa: the same jukebox-compatible .jamtake the share
+  /// button seals, uploaded to this member's embed folder and attached to the composer draft
+  /// exactly as the Files pane's own "Post to chat" attaches a file. Every await re-checks the
+  /// channel, server, view and navigation claim it started under.
+  async function postStudioScore(take: JamTake, server: number): Promise<void> {
+    const channel = cur?.active, generation = postStudioGeneration;
+    const studioCurrent = studioClaimNavigation?.() ?? (() => true);
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && studioCurrent() && generation === postStudioGeneration && activeServerId === server && cur?.active === channel && view === "studio";
+    if (!channel || !current()) throw new Error("Open the score’s channel before posting.");
+    const name = `Mewtual-score${JAM_TAKE_EXT}`;
+    const cid = await addSharedFile(new File([JSON.stringify(take)], name, { type: JAM_TAKE_MIME }), myEmbedFolder, name, JAM_TAKE_MIME);
+    if (!current()) throw new Error("Score saved in Files. Open it there to share.");
+    await refreshFiles();
+    if (!current()) throw new Error("Score saved in Files. Open it there to share.");
+    await studioSave?.(); // same definite-save departure gate as postStudioPixa
+    if (!current()) throw new Error("Score saved in Files. Open it there to share.");
+    await appendToDraft(fileMarker(name, cid, true));
+    toast("Score attached. Press Send to post it.", "ok", 5000);
   }
   $effect(() => {
     // Reading these values makes every navigation/session/call ABA edge observable; no frame
@@ -26073,10 +26188,13 @@
     <button class="ghost small ctx-action" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
   {:else if view === "studio"}
     {#if StudioNav}
-      <StudioNav me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} onopen={() => (view = "studio")} onnotice={studioNotice} />
+      <StudioNav me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} onopen={() => (view = "studio")} onnavigate={noteStudioNavigation} onnotice={studioNotice} />
     {:else}
       <h3><span>Studio</span></h3>
-      <p class="muted small">Loading the studio…</p>
+      <div class="studio-loading" role="status" aria-live="polite">
+        <div class="studio-loading-bar"><i></i></div>
+        <span class="micro">loading the editor<span aria-hidden="true">{studioLoadSeconds >= 2 ? ` · ${studioLoadSeconds} s` : ""}</span></span>
+      </div>
     {/if}
   {:else if view === "events"}
     <h3><span>Upcoming</span></h3>
@@ -29060,10 +29178,13 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} patchShelves={studioPatchShelves} libraryCount={jamSaved.length} serverName={cur?.name ?? ""} onsavePatch={saveStudioPatch} onsharePatch={shareStudioPatch} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} patchShelves={studioPatchShelves} libraryCount={jamSaved.length} serverName={cur?.name ?? ""} onsavePatch={saveStudioPatch} onsharePatch={shareStudioPatch} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} onpostScore={postStudioScore} onnavigate={noteStudioNavigation} />
           {:else}
             <h2>Studio</h2>
-            <p class="muted">Loading the studio…</p>
+            <div class="studio-loading wide" role="status" aria-live="polite">
+              <div class="studio-loading-bar"><i></i></div>
+              <span class="micro">loading the editor<span aria-hidden="true">{studioLoadSeconds >= 2 ? ` · ${studioLoadSeconds} s` : ""}</span></span>
+            </div>
           {/if}
         {:else if view === "events"}
           <h2>Events</h2>
@@ -32949,9 +33070,10 @@
           </div>
         {/if}
         {#each toasts as t (t.id)}
-          <div class="toast {t.kind}" role="status">
+          <div class="toast {t.kind}" class:has-progress={t.progress !== undefined} role="status">
             <span class="toast-text">{t.text}</span>
             <button class="toast-x" aria-label="Dismiss" title="Dismiss" onclick={() => dismissToast(t.id)}>✕</button>
+            {#if t.progress !== undefined}<span class="toast-bar" style="--p: {t.progress}" aria-hidden="true"></span>{/if}
           </div>
         {/each}
       </div>

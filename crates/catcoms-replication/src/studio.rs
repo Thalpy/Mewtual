@@ -19,8 +19,9 @@ pub use patch::StudioPatch;
 mod score;
 pub use score::{
     score_document, validate_score_change, ScoreAddress, ScoreCell, ScoreCellIssues, ScoreHeader,
-    ScoreOp, ScorePatchIssues, ScoreProjection, ScoreReadiness, ScoreRegister, ScoreSlot,
-    ScoreSource, ScoreValue, SCORE_MAX_CELLS, SCORE_MAX_PATCHES, SCORE_MAX_STEPS, SCORE_ROWS,
+    ScoreLayer, ScoreLayerSlot, ScoreNoteAddress, ScoreOp, ScorePatchIssues, ScoreProjection,
+    ScoreReadiness, ScoreRegister, ScoreSlot, ScoreSource, ScoreValue, ScoreVoice, ScoreVoices,
+    SCORE_MAX_CELLS, SCORE_MAX_PATCHES, SCORE_MAX_STEPS, SCORE_ROWS,
 };
 mod index;
 pub use index::{

@@ -44,6 +44,13 @@ export const JAM_SEQUENCE_MAX = 0xffff_ffff;
 // global oldest), else the new note is rejected.
 export const JAM_HELD_PER_PEER = 16;
 export const JAM_VOICES_GLOBAL = 64;
+/**
+ * Held notes the Studio's own playback of a document may keep at once (a layered score sounds
+ * several sounds' chords together). Only that playback gets it: a jukebox deck or a shared take
+ * keeps the per-performer 16, because held voices are never stolen and one take must not starve a
+ * call's live performers. 48 always leaves a live performer its 16 under the 64-voice ceiling.
+ */
+export const JAM_DOCUMENT_HELD_MAX = JAM_VOICES_GLOBAL - JAM_HELD_PER_PEER;
 export const JAM_RELEASE_CAP_MS = 8_000; // receiver-enforced ceiling, above any patch value
 export const JAM_REMOTE_HOLD_MAX_MS = 30_000; // watchdog: a lost note-off may never drone
 
@@ -333,7 +340,16 @@ export interface JamTakeNoteOn {
   w: LegacyWave;
   p?: number; // index into patches
   q: number; // gaps are surfaced, never silently smoothed
+  /**
+   * Authored level of this one note, 1..100 percent of the recipe's own level; absent is full
+   * level. A score note's `vol` travels here unchanged, so an exported take plays the composer's
+   * dynamics. Live performances never carry it; an older player ignores nothing, it rejects the
+   * event, so a take with levels needs this build or newer.
+   */
+  v?: number;
 }
+export const JAM_NOTE_VOLUME_MIN = 1;
+export const JAM_NOTE_VOLUME_MAX = 100;
 export interface JamTakeNoteOff {
   ms: number;
   lane: number;

@@ -1,4 +1,4 @@
-import { JAM_KIT, PATCH_OSC_WAVES, TAKE_MAX_BYTES, TAKE_MAX_DURATION_MS, TAKE_MAX_EVENTS, type JamTake } from "./jam-contract.ts";
+import { JAM_KIT, JAM_NOTE_VOLUME_MAX, PATCH_OSC_WAVES, TAKE_MAX_BYTES, TAKE_MAX_DURATION_MS, TAKE_MAX_EVENTS, type JamTake } from "./jam-contract.ts";
 import { validateJamTake } from "./jam-recorder.ts";
 import { legacyJamPatch } from "./jam-patch.ts";
 import { FLIPNOTE_FPS_MAX, FLIPNOTE_MAX_FRAMES, FLIPNOTE_MAX_SFX } from "./studio-contract.ts";
@@ -19,6 +19,8 @@ export type JamArchivalEvent = Readonly<{
   holdMs?: number;
   /** An attack's absolute closing time, used to reject expired delayed attacks. */
   offMs?: number;
+  /** The note's authored level as a 0..1 multiplier (from the take event's `v`); absent is 1. */
+  level?: number;
   /** Original take event or SFX index, retained as a stable diagnostic key. */
   index: number;
 }>;
@@ -128,7 +130,8 @@ export function planJamArchivalPlayback(takeInput: unknown, animationInput?: Jam
       if (held.has(key)) continue;
       held.set(key, events.length);
       events.push({ ms: event.ms, lane: event.lane, kind: "on", sequence: event.q, note: event.n, wave: event.w,
-        ...(event.p === undefined ? {} : { patch: event.p }), holdMs: takeEnd - event.ms, offMs: takeEnd, index });
+        ...(event.p === undefined ? {} : { patch: event.p }), ...(event.v === undefined ? {} : { level: event.v / JAM_NOTE_VOLUME_MAX }),
+        holdMs: takeEnd - event.ms, offMs: takeEnd, index });
     } else {
       const on = held.get(key);
       if (on !== undefined) {

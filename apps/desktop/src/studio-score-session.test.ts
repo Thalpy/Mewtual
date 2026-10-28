@@ -89,6 +89,30 @@ test("Score recovery choices put recipes first and keep explicit removals Copy-o
   ]);
 });
 
+// Design review M2: the removal-wins choice rule, applied to a layer, would leave a live note out of
+// a whole-version restore (a clear won its register) or Copy that clear and delete it.
+test("Score recovery offers layered notes by their shown value, never a clear that won the register", async () => {
+  const { session } = await harness();
+  const raw = scoreContent() as unknown as import("./studio-native.ts").ScoreContent;
+  const source = (n: number) => ({ opId: id64(n), author: ME, nonce: id32(n) });
+  const p = "ab".repeat(32);
+  raw.layers = {
+    // A clear won the register; two live values remain, and the lower op id is the shown one.
+    [`4:2/${p}`]: { cleared: false, register: { selected: { value: null, source: source(9) },
+      conflicts: [{ value: { k: "n", p, len: 2 }, source: source(7) }, { value: { k: "n", p }, source: source(5) }] } },
+    "1:0/d": { cleared: true, register: { selected: { value: null, source: source(6) }, conflicts: [{ value: null, source: source(4) }] } },
+  };
+  const version = { v: 1 as const, kind: "recoveryVersion" as const, historical: true as const, channel: CHANNEL,
+    version: { snapshot: id64(4), epoch: "0", staged: false, bytes: 1, reason: "rewound" as const }, content: raw };
+  assert.deepEqual(session.choicesFor(version, "restore").map((choice) => choice.choice), [
+    { kind: "scoreNote", step: 4, row: 2, layer: p, value: id64(5) },
+  ]);
+  assert.deepEqual(session.choicesFor(version, "copy").map((choice) => choice.choice).filter((choice) => choice.kind === "scoreNote"), [
+    { kind: "scoreNote", step: 1, row: 0, layer: "d", value: id64(4) },
+    { kind: "scoreNote", step: 4, row: 2, layer: p, value: id64(5) },
+  ]);
+});
+
 test("a deferred Score ACK cannot be redirected by reopening a known object as another family", async () => {
   const { ipc, session, sync, calls } = await harness();
   session.open(object); await sync();
