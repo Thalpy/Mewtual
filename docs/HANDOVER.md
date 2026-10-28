@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Native media logical inventory (28 October; browser checks passed)
+
+An executable guard now itemizes full-original setup, compact adopted state, cleanup
+waiting for actual work and joined cleanup:7,600 /6,144 /6,848 /5,952 bytes under the
+unchanged8KiB payment. It includes queued caller RPC storage independently of the
+physical Control envelope, two timer generations, history and actual cleanup/drain
+frames. Registry and outer refund ownership keep their original history/compacted2KiB
+payment. The model covers logical application owners, not VM/SDK heaps or RSS.
+
+All45 focused encoding/native-media tests,3,563 frontend tests, static checks (zero
+errors/warnings) and production build (41.94s) pass. Read-only review has no blocker,
+high or medium; the drain-funding clarification is recorded beside the formula.
+No audio partition, new group limit, audio factory or activation is implemented here.
+The ten ordinary Edge flows passed on identical runtime logic before this metric-only
+guard. The first flow invocation lost CDP before any test; its owned-browser rerun passed.
+
 ## Compact native media encoding (28 October; browser checks passed)
 
 The browser media driver now prepares a private canonical226-byte template only after

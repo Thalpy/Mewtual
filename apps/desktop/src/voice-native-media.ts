@@ -4,7 +4,7 @@
  * paid through actual peer/native/IO cleanup and does not admit another pair. The opaque destination and
  * passive status contain no driver/old-chain callbacks; only this paid driver does. */
 import type { encodeVoiceMediaOriginal, VoiceMediaReceipt } from "./voice-ipc-media.ts";
-import { VoiceMediaEncoding } from "./voice-media-encoding.ts";
+import { VoiceMediaEncoding, VOICE_MEDIA_ENCODING_BYTES } from "./voice-media-encoding.ts";
 import type { VoiceSdpOriginal } from "./voice-ipc-sdp-actions.ts";
 import { VoiceMediaStatus, voiceMediaDeadline } from "./voice-media-status.ts";
 import type { VoiceMediaRtcOwner, VoiceSdpRtcOwner, VoiceSdpRtcClock } from "./voice-sdp-rtc.ts";
@@ -12,6 +12,41 @@ import type { VoiceMediaRtcOwner, VoiceSdpRtcOwner, VoiceSdpRtcClock } from "./v
 /** Fixed strings, one peer wrapper, one flight/monitor/callback cell and overlap with
  * the existing physical Control codec. Opaque browser RTC heap is outside this bound. */
 export const VOICE_NATIVE_MEDIA_BYTES = 8 * 1024;
+
+/** Conservative logical application-owned graph, not VM/SDK heap or RSS. Keep this
+ * synchronized with fields and asynchronous owners below. The shared physical Control
+ * envelope separately pays framing/crypto/read buffers, never this queued caller graph.
+ * Original history, then its transferred2KiB compact marker, pays registry/outer refund
+ * ownership. It cannot subsidize native RPC or a future audio worker.
+ *
+ * Setup's full original/copy ends before adoption; it cannot overlap future audio.
+ * RPC, history, timer replacement and cleanup CAN overlap and are additive. No audio
+ * partition is granted by these numbers; audio needs its own prepaid inventory. */
+export function voiceNativeMediaInventory(): Readonly<{
+  setup: number; adopted: number; closingWait: number; closingJoined: number;
+}> {
+  const common = 384 // driver fields/wrapper
+    + 512 // context and bounded shared-channel callback environments
+    + VOICE_MEDIA_ENCODING_BYTES
+    + 192 // private RTC owner/state and inert identity
+    + 320 // passive status, SAME persistent proof, flight token
+    + 512; // shared timer cell plus old executing AND new scheduled generations
+  const start = 5 * 64 + 3 * 128 + 128 + 64; // Promises, closures, run, adoption reaction.
+  const rpc = 1792; // Request370 + frames256 + Promises128 + queued closure128 +
+    // reactions128 + encode scratch256 + two temporary receipts480; rounded up.
+  const historyOrDrain = Math.max(3 * 64 + 128 + 128 + 64, 64 + 320);
+  // History must actually return BEFORE MediaRtcOwner.drain begins. Its retained
+  // fulfilled observer64 + drain Promise/frame320 share that serial512 allowance.
+  // Removing history must not accidentally remove the independent drain inventory.
+  const cleanup = 4 * 64 + 2 * 128 + 128 + 64;
+  const negative = 3 * 128; // Close/cancel and executing timer/provider return frames.
+  return Object.freeze({
+    setup: 1520 + 2560 + (384 + 512 + VOICE_MEDIA_ENCODING_BYTES + 192) + start + 512 + negative,
+    adopted: common + start + rpc + historyOrDrain + negative,
+    closingWait: common + start + rpc + historyOrDrain + cleanup + negative,
+    closingJoined: common + rpc + historyOrDrain + cleanup + negative,
+  });
+}
 type Request = ReturnType<typeof encodeVoiceMediaOriginal>;
 export type VoiceNativeMediaContext = Readonly<{
   clock: VoiceSdpRtcClock;

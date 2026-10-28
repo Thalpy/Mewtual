@@ -2,7 +2,7 @@ import { VOICE_AUDIO_FIXTURE_SDP } from "../scripts/voice-audio-sdp-fixture.ts";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { VoiceNativeMedia, VOICE_NATIVE_MEDIA_BYTES } from "./voice-native-media.ts";
+import { VoiceNativeMedia, VOICE_NATIVE_MEDIA_BYTES, voiceNativeMediaInventory } from "./voice-native-media.ts";
 import { VoiceSdpRtcOwner } from "./voice-sdp-rtc.ts";
 import type { VoiceSdpOriginal } from "./voice-ipc-sdp-actions.ts";
 import type { VoiceMediaReceipt } from "./voice-ipc-media.ts";
@@ -10,6 +10,14 @@ const original = JSON.parse(readFileSync(new URL("../src-tauri/src/voice_handoff
 const gate = () => { let release!: () => void; const promise = new Promise<void>(yes => { release = yes; }); return { promise, release }; };
 async function turn() { await new Promise<void>(yes => setImmediate(yes)); }
 async function until(condition: () => boolean) { for (let n = 0; n < 200; n++) { if (condition()) return; await turn(); } assert.fail("fixture did not progress"); }
+
+test("native media payment covers setup and simultaneous RPC/history/timer/cleanup owners", () => {
+  const inventory = voiceNativeMediaInventory();
+  for (const [stage, bytes] of Object.entries(inventory))
+    assert.ok(bytes <= VOICE_NATIVE_MEDIA_BYTES, `${stage} requires ${bytes} bytes`);
+  assert.ok(inventory.closingWait > inventory.adopted, "cleanup overlaps a still-running request");
+  assert.ok(inventory.closingJoined < inventory.closingWait, "only actual run return removes its pipeline");
+});
 
 test("End during compact metadata creation prevents native admission and retains payment until cleanup", async t => {
   const f = await fixture(t), OriginalBytes = globalThis.Uint8Array;
