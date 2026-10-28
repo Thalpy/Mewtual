@@ -1,5 +1,23 @@
 # Mewtual; Handover
 
+## Combined admission/audio checkpoint (28 October; native gates passed)
+
+Frozen `56122a4f` passes the complete native suite:1,011 library tests and six ACL
+tests, with no failures (library2,303.45s). This includes the corrected discovery
+fixture, actual Node/native/HTTP/TCP handoff and indexed media regressions. Native
+`cargo check` and strict all-target/all-feature Clippy pass; both workspace format
+checks, the frontend production build,3,563 frontend tests and ten Edge flows pass.
+These are controlled RTC fixtures on one desktop, not microphone/WebView or physical
+network acceptance.
+
+The earlier complete Root run at `d55fa0db` failed its one exact-return accounting
+expectation (3,915 passes, one failure,25 existing ignores). `62be0add` corrects the
+expected original20KiB return; the complete affected sync crate then passes1,383
+tests. A clean complete Root command on the corrected source is still required;
+neither that focused success nor this native pass turns the earlier failure green.
+Operational native admission, bilateral agreement, audio composition, relay and
+combined/physical acceptance remain open. Production V2 remains OFF.
+
 ## Native media logical inventory (28 October; browser checks passed)
 
 An executable guard now itemizes full-original setup, compact adopted state, cleanup
