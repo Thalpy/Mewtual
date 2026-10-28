@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## Compact native media encoding (28 October; browser checks passed)
+
+The browser media driver now prepares a private canonical226-byte template only after
+its driver/flight is published. It independently materializes the parent row, repeats
+the close fence and clears the full textual original in one callback-free tail before
+native RPC. Every original/current request gets fresh bytes; request zeroing cannot
+damage later cleanup. Disposal follows actual IO/SDK/timer retirement. A separate static
+timer-forwarder environment retains only the driver, not its constructor arguments.
+Repeated equal native proofs preserve the original retained value shared with status.
+
+All44 focused encoding/native-media tests pass, including every canonical mode and
+maximum integer, independent request clearing, disposal and End during compaction.
+An additional second-copy regression closes after template creation and before Admit:
+positive RPC repeats its close check after copying/provider lookup, while original
+Close/Release recovery remains available and paid. Adversarial review and re-review
+have no remaining finding. All3,562 frontend tests and static checks (zero errors or
+warnings) pass; production build passes40.78s with the existing chunk-size warning.
+The compact record's itemized640-byte component is not a whole-driver or audio partition
+proof. Combined native RPC/timer/history/sender/playback accounting remains required;
+no new audio allowance, factory, Current authority or activation is claimed here.
+Native and final combined gates remain pending, including the parent's known failures.
+
 ## Detached capture funding (28 October; browser composition in progress)
 
 The isolated `communication-v2-audio-composition` branch separates byte accounting from

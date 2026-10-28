@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Compact local media encoding (28 October; App V2 inactive)
+
+`VoiceMediaEncoding` stores a private canonical226-byte original request and an
+independently materialized parent row. Its methods preserve Control28/version9 bytes
+and return fresh226/82-byte bodies; disposal invalidates only that private template.
+The media driver creates it after publication, repeats End's close fence, then clears
+full-original ownership before RPC. Its timer forwarder has a separate lexical scope.
+This is local storage/encoding only: fresh authenticated Current, exact PC adoption,
+actual cleanup joins and the unchanged8KiB media payment remain required. The640-byte
+component inventory grants no extra capacity or audio partition.
+
 ## Detached capture payment (28 October; inactive composition)
 
 The internal capture budget returns `release`, one-shot `trackTask(actualFinalizer)` and
