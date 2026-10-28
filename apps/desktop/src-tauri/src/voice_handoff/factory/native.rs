@@ -40,6 +40,11 @@ struct NativeCustody {
 }
 pub(in crate::voice_handoff) struct NativeCompletion {
     result: Result<RowId, Refused>,
+    // Negative test evidence belongs to this actual worker/output, never the lossy
+    // global diagnostic table. A discovery that returned before selecting a peer
+    // cannot have entered execute_selected, Begin, or publication.
+    #[cfg(test)]
+    discovery_refusal: Option<u8>,
     _custody: NativeCustody,
 }
 impl NativeCompletion {
@@ -48,10 +53,20 @@ impl NativeCompletion {
     pub(in crate::voice_handoff) fn result(&self) -> Result<RowId, Refused> {
         self.result
     }
+
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn refused_before_selection(&self, cursor: u8) -> bool {
+        self.discovery_refusal == Some(cursor)
+            && self.result == Err(Refused::Protocol(VoiceError::Capacity))
+    }
 }
 struct Worker {
     context: Option<Context>,
     selector: Selection,
+    #[cfg(test)]
+    discovery_refusal: Option<u8>,
+    #[cfg(test)]
+    fixture_late_contention: bool,
     custody: NativeCustody,
 }
 
@@ -187,6 +202,10 @@ fn spawn_inner(
     let future = run_native(Worker {
         context: Some(context.clone()),
         selector,
+        #[cfg(test)]
+        discovery_refusal: None,
+        #[cfg(test)]
+        fixture_late_contention: false,
         custody: NativeCustody {
             _credit: credit,
             route: route.clone(),
@@ -276,13 +295,22 @@ async fn run_native(mut worker: Worker) -> NativeCompletion {
         .fixture_native_finished(result.as_ref().err().copied());
     NativeCompletion {
         result,
+        #[cfg(test)]
+        discovery_refusal: worker.discovery_refusal,
         _custody: worker.custody,
     }
 }
 async fn execute(worker: &mut Worker) -> Result<RowId, Refused> {
     let selector = match std::mem::replace(&mut worker.selector, Selection::Consumed) {
         Selection::Exact(selector) => selector,
-        Selection::Discover { cursor, permit } => discover(worker, cursor, permit).await?,
+        Selection::Discover { cursor, permit } => {
+            let result = discover(worker, cursor, permit).await;
+            #[cfg(test)]
+            if result == Err(Refused::Protocol(VoiceError::Capacity)) {
+                worker.discovery_refusal = Some(cursor);
+            }
+            result?
+        }
         Selection::Confirmation { cursor, incoming } => {
             return execute_confirmation(worker, cursor, incoming).await;
         }
@@ -505,9 +533,23 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
     // Recheck AFTER the Actor/UI waits, before any new counted Pending or Root
     // publication. Competing native/browser factories share this same UI commit.
     // Classify exact known work first: do not strand its original attachment/retry.
-    if !context.ledger.derivation_known(&selected, selector)
-        && !context.ledger.automatic_parent_available(&selected)?
-    {
+    let known = context.ledger.derivation_known(&selected, selector);
+    // Negative-only fixture pressure must come AFTER the blocking known lookup.
+    // With !known, the very next production check is the nonblocking Index check;
+    // this guard can only cause Capacity, then drops before Begin. In particular
+    // never hold Index through a known-work path or any blocking Index acquisition.
+    let available = known || {
+        #[cfg(test)]
+        let _pressure = if worker.fixture_late_contention {
+            Some(context.ledger.fixture_try_hold_index()?)
+        } else {
+            None
+        };
+        // Keep the test guard in this synchronous block: no MutexGuard can
+        // survive into Begin or an asynchronous publication future.
+        context.ledger.automatic_parent_available(&selected)?
+    };
+    if !available {
         return Err(VoiceError::Capacity.into());
     }
     #[cfg(test)]
@@ -534,3 +576,5 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
 mod ready;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(in crate::voice_handoff) use tests::prove_discovery_late_refusal;

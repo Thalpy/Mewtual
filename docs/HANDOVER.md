@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## Linux alternate-discovery fixture correction (28 October; validation pending)
+
+The hosted Linux native run at `fa3107d2` failed with973 passes and39 failures.
+The causal failure was the forced-alternate discovery fixture expecting the first
+worker after one local refusal to publish successfully; the other38 tests hit the
+fixture's fail-closed admission gate. The log reports Capacity without its exact
+completed stage. Server-map contention is plausible, not an established cause.
+
+Production rotates discovery on worker admission, before asynchronous local checks.
+The corrected fixture retains one Cursor and one original10s observer deadline,
+forces repeated real server-map pressure, and permits only an exact worker's
+pre-selection Capacity to continue. A test-only completion field records that
+negative boundary; lossy global diagnostics never authorize a retry. Even discovery
+cursors remain refused so eventual success must still select the alternate peer.
+No selector, grant, cursor reset, new intent, attempt refund or larger bound is added.
+Failures after selection/publication remain failures. Focused/native gates are pending.
+
+PR #76 is back in draft until this correction passes. PR #75 is ready for review;
+its corrected Linux native run passed1,008 library tests plus six ACL tests. Its
+overlay rerun with the45-minute aggregate allowance also passed. Other hosted gates
+remain in progress. These results do not clear #76's separate failed run.
+
 ## Corrected combined validation passed locally (28 October)
 
 The stacked Score candidate at `fa3107d2` passes the complete native command:

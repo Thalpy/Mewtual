@@ -26,6 +26,16 @@ impl ResolvedRow {
 }
 
 impl Ledger {
+    /// A negative fixture barrier on the real production Index. The opaque guard
+    /// exposes no rows or mutation; holding it can only cause a genuine try-lock
+    /// refusal. Never replace this with an injected successful admission result.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_try_hold_index(
+        &self,
+    ) -> Result<impl Drop + '_, VoiceError> {
+        super::transition::try_lock(&self.index)
+    }
+
     /// A complete original Plan certificate closes this subtree permanently. This is
     /// only an outstanding-work/admission filter, never browser advancement authority or
     /// permission to remove history. Call under Index; direct Control recovery remains

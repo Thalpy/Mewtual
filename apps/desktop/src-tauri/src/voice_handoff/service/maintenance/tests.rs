@@ -6,35 +6,38 @@ use catcoms_sync::voice_v2::presence::PairSelector;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn discovery_cursor_rotates_after_admitted_worker_refuses_before_peer_snapshot() {
+async fn discovery_cursor_rotates_after_repeated_workers_refuse_before_peer_snapshot() {
     let f = Fixture::new().await;
     let context = Context::new(&f.state);
     let (_, selected, selector) = selection(&f).await;
     let route = channel_route(&f, &selected).await;
     route.acknowledge_setup().unwrap();
     let mut cursor = Cursor::new();
-    let servers = f.state.servers.lock().await;
-    let (admitted, _, waiter) = cursor.ordinary_work(&context, &route, 0);
-    assert!(admitted);
-    assert_eq!(cursor.peers[0], 1);
-    let completed = bounded_native_outcome(waiter.unwrap()).await;
-    assert_eq!(
-        completed.result(),
-        Err(crate::voice_handoff::factory::Refused::Protocol(
-            catcoms_sync::voice_v2::VoiceError::Capacity
-        ))
-    );
-    drop(completed);
-    assert!(f
-        .state
-        .voice_handoff
-        .lookup_original(&selected, Purpose::Derive(selector))
-        .is_none());
-    drop(servers);
-    assert!(cursor.turn(&context, &f.state.voice_channels).is_none());
-    idle(&route).await;
-    assert_eq!(cursor.stage[0], 2);
-    assert_eq!(cursor.peers[0], 1);
+    for peer in 0..3 {
+        let servers = f.state.servers.lock().await;
+        let stage = cursor.stage[0];
+        let (admitted, _, waiter) = cursor.ordinary_work(&context, &route, 0);
+        assert!(admitted);
+        assert_eq!(cursor.peers[0], peer + 1);
+        assert_eq!(cursor.stage[0], (stage + 1) % 4);
+        let completed = bounded_native_outcome(waiter.unwrap()).await;
+        assert!(completed.refused_before_selection(peer));
+        assert!(!completed.refused_before_selection(peer + 1));
+        drop(completed);
+        assert!(f
+            .state
+            .voice_handoff
+            .lookup_original(&selected, Purpose::Derive(selector))
+            .is_none());
+        drop(servers);
+        let (admitted, _, waiter) = cursor.ordinary_work(&context, &route, 0);
+        assert!(admitted);
+        let completed = bounded_native_outcome(waiter.unwrap()).await;
+        assert!(!completed.refused_before_selection(peer));
+        drop(completed);
+        assert_eq!(cursor.stage[0], (stage + 2) % 4);
+        assert_eq!(cursor.peers[0], peer + 1);
+    }
     f.close().await;
 }
 
@@ -102,9 +105,12 @@ async fn bounded_native_outcome(waiter: native::NativeWaiter) -> native::NativeC
         .expect("original native worker task panicked")
 }
 
-/// Exercise the SAME production Cursor across an admitted, proven local refusal and
-/// its ordinary continuation/discovery turns. The native snapshot chooses the peer;
-/// no supplied expected selector, cursor reset or fabricated grant enters any producer.
+/// Exercise the SAME production Cursor across genuine local refusals and its ordinary
+/// continuation/discovery turns. Refuse even discovery cursors with the actual Servers
+/// guard, so only the alternate peer can be the eventual positive in this two-peer
+/// fixture. Also refuse the first odd turn, deterministically exercising consecutive
+/// local refusals. That extra refusal must not silently change the positive oracle.
+/// No supplied selector, cursor reset, new intent or fabricated grant enters a producer.
 pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
     context: &Context,
     route: &Route,
@@ -114,47 +120,83 @@ pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
         route.native_ready(),
         "actual setup ACK must precede automatic production"
     );
-    clock.sleep(Duration::from_millis(CADENCE_MS)).await;
-    let live = context.upgrade().expect("original mounted context");
-    let servers = live.servers.lock().await;
+    let started = clock.monotonic_ms();
+    let deadline = started
+        .checked_add(10_000)
+        .expect("fixture observer deadline");
     let mut cursor = Cursor::new();
-    let (admitted, _, waiter) =
-        cursor.ordinary_work(context, route, usize::from(route.fixture_slot() - 1));
-    assert!(admitted);
-    let completed = bounded_native_outcome(waiter.unwrap()).await;
-    assert_eq!(
-        completed.result(),
-        Err(crate::voice_handoff::factory::Refused::Protocol(
-            catcoms_sync::voice_v2::VoiceError::Capacity
-        ))
-    );
-    drop(completed);
-    assert!(
-        live.ledger
-            .automatic_parent_available(route.selected())
-            .unwrap(),
-        "pre-snapshot refusal created no parent"
-    );
-    drop(servers);
-    drop(live);
     let index = usize::from(route.fixture_slot() - 1);
-    assert_eq!(cursor.peers[index], 1);
-    clock.sleep(Duration::from_millis(CADENCE_MS)).await;
-    let (admitted, _, waiter) = cursor.ordinary_work(context, route, index);
-    assert!(admitted);
-    drop(bounded_native_outcome(waiter.unwrap()).await); // ordinary local confirmation
-    assert_eq!(cursor.stage[index], 2);
-    assert_eq!(cursor.peers[index], 1);
-    clock.sleep(Duration::from_millis(CADENCE_MS)).await;
-    let (admitted, _, waiter) = cursor.ordinary_work(context, route, index);
-    assert!(admitted);
-    let completed = bounded_native_outcome(waiter.unwrap()).await;
-    assert!(
-        completed.result().is_ok(),
-        "real next native snapshot/publication failed: {:?}",
-        completed.result()
-    );
-    drop(completed);
+    let progression = async {
+        // A genuine successful Discover followed by a later local refusal must not
+        // acquire the pre-selection marker used below. This barrier creates no row
+        // or protocol effect, so the SAME normal Cursor can still start afterwards.
+        native::prove_discovery_late_refusal(context, route, clock).await;
+        loop {
+            clock.sleep(Duration::from_millis(CADENCE_MS)).await;
+            let stage = cursor.stage[index];
+            let peer = cursor.peers[index];
+            let discovery = matches!(stage, 0 | 2);
+            let live = context.upgrade().expect("original mounted context");
+            let servers = if discovery && (peer.is_multiple_of(2) || peer == 1) {
+                Some(live.servers.lock().await)
+            } else {
+                None
+            };
+            let (admitted, selected, waiter) = cursor.ordinary_work(context, route, index);
+            if !admitted {
+                // Admission refusal does not advance either cursor. The SAME finite
+                // observer bounds these ordinary busy turns; no authority is refreshed.
+                assert_eq!((cursor.stage[index], cursor.peers[index]), (stage, peer));
+                continue;
+            }
+            assert!(
+                selected.is_none(),
+                "a new original Pending appeared unexpectedly"
+            );
+            let completed = waiter
+                .unwrap()
+                .await
+                .expect("original native worker panicked");
+            if !discovery {
+                drop(completed); // ordinary confirmation; no selector is supplied
+                continue;
+            }
+            assert_eq!(cursor.peers[index], (peer + 1) % 64);
+            assert_eq!(cursor.stage[index], (stage + 1) % 4);
+            if !peer.is_multiple_of(2) && peer != 1 && completed.result().is_ok() {
+                drop(completed);
+                return;
+            }
+            assert!(
+                completed.refused_before_selection(peer),
+                "native discovery failed beyond its proven pre-selection boundary: {:?}; cursor/stage {peer}/{stage} -> {}/{}; elapsed/remaining {}/{}ms; {}",
+                completed.result(), cursor.peers[index], cursor.stage[index],
+                clock.monotonic_ms().saturating_sub(started),
+                deadline.saturating_sub(clock.monotonic_ms()),
+                route.session().fixture_native_snapshot().describe_last_native()
+            );
+            drop(completed); // actual NativeHold and8KiB payment retire before another turn
+            drop(servers);
+            loop {
+                match live.ledger.automatic_parent_available(route.selected()) {
+                    Ok(true) => break,
+                    Err(catcoms_sync::voice_v2::VoiceError::Capacity) => {
+                        clock.sleep(Duration::from_millis(10)).await;
+                    }
+                    result => panic!("pre-selection refusal created a parent: {result:?}"),
+                }
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = super::super::expire_at(clock, deadline) => panic!(
+            "native alternate discovery exceeded its original10s observer bound; elapsed={}ms; {}",
+            clock.monotonic_ms().saturating_sub(started),
+            route.session().fixture_native_snapshot().describe_last_native()
+        ),
+        _ = progression => {},
+    }
 }
 
 #[tokio::test]
