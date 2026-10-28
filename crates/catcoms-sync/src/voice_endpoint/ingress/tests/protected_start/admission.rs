@@ -3,6 +3,84 @@ use super::*;
 use voice_v2::admission::REGISTRATION_METADATA_BYTES;
 
 #[tokio::test]
+async fn admission_step_preserves_the_minted_registration_when_high_capacity_is_full() {
+    use voice_v2::admission::AdmissionRpcPermit;
+    let (mut root, _remote, runtime, clock, grant) = low_discovery_fixture(1).await;
+    clock.advance_ms(60_000);
+    runtime.collect_expired();
+    let resources = runtime.resources();
+    let payment = AdmissionRpcPermit::reserve(&resources, grant.scope()).unwrap();
+    let before = resources.counts();
+    let pressure = resources
+        .charge(
+            grant.scope().group,
+            voice_v2::resources::GROUP_BYTES - before.0 - REGISTRATION_METADATA_BYTES,
+            voice_v2::resources::ResourceKind::Retained,
+        )
+        .unwrap();
+    let prepared = root
+        .prepare_voice_admission_step(&grant, None, 1, &payment)
+        .unwrap();
+    let (registration, capacity) = prepared.into_parts();
+    assert_eq!(capacity.err(), Some(VoiceError::Capacity));
+    let registration = registration.expect("the original mint survives HIGH refusal");
+    let incarnation = registration.incarnation();
+    drop(pressure);
+    let observed = registration.observer();
+    let retry = root
+        .prepare_voice_admission_step(&grant, Some(&observed), 1, &payment)
+        .unwrap();
+    let (replacement, capacity) = retry.into_parts();
+    assert!(
+        replacement.is_none(),
+        "capacity retry cannot mint another registration"
+    );
+    let capacity = capacity.unwrap();
+    assert!(capacity.belongs_to(&registration));
+    assert_eq!(registration.incarnation(), incarnation);
+    drop(capacity);
+    drop(observed);
+    drop(registration);
+    assert_eq!(resources.counts(), before);
+}
+
+#[tokio::test]
+async fn admission_step_refuses_foreign_rpc_pool_scope_and_zero_before_any_mint() {
+    use voice_v2::admission::AdmissionRpcPermit;
+    let (mut root, _remote, runtime, _clock, grant) = low_discovery_fixture(1).await;
+    let resources = runtime.resources();
+    let before = resources.counts();
+    let foreign = Arc::new(voice_v2::resources::Resources::default());
+    let payment = AdmissionRpcPermit::reserve(&foreign, grant.scope()).unwrap();
+    assert_eq!(
+        root.prepare_voice_admission_step(&grant, None, 1, &payment)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(resources.counts(), before);
+    assert_eq!(
+        root.prepare_voice_admission_step(&grant, None, 0, &payment)
+            .err(),
+        Some(VoiceError::Bounds)
+    );
+    assert_eq!(resources.counts(), before);
+    drop(payment);
+    assert_eq!(foreign.counts(), (0, 0));
+    let mut scope = grant.scope();
+    scope.room += 1;
+    let payment = AdmissionRpcPermit::reserve(&resources, scope).unwrap();
+    let held = resources.counts();
+    assert_eq!(
+        root.prepare_voice_admission_step(&grant, None, 1, &payment)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(resources.counts(), held);
+    drop(payment);
+    assert_eq!(resources.counts(), before);
+}
+
+#[tokio::test]
 async fn admission_registration_identity_is_stable_and_observers_keep_actual_metadata_paid() {
     let (mut root, _remote, runtime, _clock, grant) = low_discovery_fixture(1).await;
     let pool = runtime.resources();

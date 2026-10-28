@@ -32,7 +32,9 @@ impl std::error::Error for VoiceEndpointError {}
 
 type Reply<T> = oneshot::Sender<Result<T, VoiceError>>;
 
+mod admission;
 mod body;
+pub use admission::{voice_admission_rpc_bytes, VoiceAdmissionPublisher, VoiceAdmissionWork};
 mod context;
 pub use context::{voice_context_queue_bytes, VoiceContextPending};
 mod sdp_body;
@@ -139,6 +141,7 @@ impl VoiceEndpointCommand {
 }
 
 enum Command {
+    Admission(admission::Command),
     Sdp(sdp_ops::Command),
     SdpInput(sdp_input::Command),
     SdpEngine(sdp_engine::Command),
@@ -263,6 +266,7 @@ impl Command {
         // the actual action; terminal metadata survives for exact result recovery. A lost Watch
         // reply instead drops its affine grant and closes precisely that abandoned observer.
         match self {
+            Self::Admission(command) => admission::apply(command, server),
             Self::Sdp(command) => sdp_ops::apply(command, server),
             Self::SdpInput(command) => sdp_input::apply(command, server),
             Self::SdpEngine(command) => sdp_engine::apply(command, server),

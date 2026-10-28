@@ -8,6 +8,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::poll_fn;
 
+mod admission;
 mod peer_snapshot;
 mod results;
 mod snapshot;

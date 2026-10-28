@@ -1,5 +1,18 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Actor admission staging draft (28 October; not activated)
+
+The fixed RPC payer is opaque, exact-pool/scope checked and independent of registration
+and native worker payments. Root returns the actual registration even under HIGH pressure
+so capacity retry cannot refresh its public incarnation. Actor removes the consuming
+publisher before Root entry: only a still-unused queued publisher proves never-entered
+destruction. Entered unwind or unstaged result remains uncertain. Accepted Work is passed
+to native before enqueue; queued-drop refusal retains that same retirement witness.
+Actual callback retirement is not output collection or publication absence. No native
+canonical Slot/Session/generation authority or readiness is implemented by this draft.
+Concrete native graph inventories, integration barriers and full verification remain
+pending. Byte/group/process ceilings and production V2 activation remain unchanged.
+
 ## Root admission registration (28 October; draft capacity-only leaf)
 
 The new original registration binds actual Actor/local identity, scope, join/key,

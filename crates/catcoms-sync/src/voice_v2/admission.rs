@@ -14,6 +14,65 @@ use std::sync::Arc;
 /// the supported Windows inventory is2168B, which does not fit a2KiB payment.
 pub const REGISTRATION_METADATA_BYTES: usize = 3 * 1024;
 
+/// Separate ordinary payment for the actual Actor queue/publisher/retirement graph.
+/// It is not registration, protocol capacity or the native worker's payment. Native
+/// must measure its concrete publisher before Box construction within this allowance.
+pub const ADMISSION_RPC_BYTES: usize = 4 * 1024;
+
+/// Opaque fixed contribution. A caller cannot substitute a small arbitrary Credit,
+/// another group, or a newly created pool for the selected Root's actual pool.
+pub struct AdmissionRpcPermit {
+    resources: Arc<Resources>,
+    scope: Scope,
+    // LAST: borrowed arguments and original pool identity retire before payment.
+    _credit: Credit,
+}
+impl AdmissionRpcPermit {
+    pub fn reserve(resources: &Arc<Resources>, scope: Scope) -> Result<Self, VoiceError> {
+        let credit = resources.charge(scope.group, ADMISSION_RPC_BYTES, ResourceKind::Retained)?;
+        Ok(Self {
+            resources: resources.clone(),
+            scope,
+            _credit: credit,
+        })
+    }
+    pub fn scope(&self) -> Scope {
+        self.scope
+    }
+    pub(crate) fn matches(&self, resources: &Arc<Resources>, scope: Scope) -> bool {
+        Arc::ptr_eq(&self.resources, resources) && self.scope == scope
+    }
+}
+
+/// Actual Root preparation output, not a Ready/ledger-row certificate. Registration
+/// is returned independently of capacity failure so native cannot accidentally remint
+/// the public incarnation when the ordinary capacity pool is temporarily full.
+pub struct AdmissionPrepared {
+    registration: Option<RootAdmissionSession>,
+    capacity: Result<RootHighPreclaim, VoiceError>,
+}
+impl AdmissionPrepared {
+    pub(crate) fn new(
+        registration: Option<RootAdmissionSession>,
+        capacity: Result<RootHighPreclaim, VoiceError>,
+    ) -> Self {
+        Self {
+            registration,
+            capacity,
+        }
+    }
+    /// Consumes the exact original result; neither owner is cloned or reconstructed.
+    pub fn into_parts(
+        self,
+    ) -> (
+        Option<RootAdmissionSession>,
+        Result<RootHighPreclaim, VoiceError>,
+    ) {
+        (self.registration, self.capacity)
+    }
+}
+redacted_debug!(AdmissionRpcPermit, AdmissionPrepared);
+
 struct Registration {
     resources: Arc<Resources>,
     slots: Arc<Slots>,

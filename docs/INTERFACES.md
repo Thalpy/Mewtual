@@ -1,5 +1,22 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Actor admission invocation draft (28 October; not native IPC)
+
+`AdmissionRpcPermit` reserves a fixed4KiB from the canonical selected group/pool.
+Root checks exact pool/scope before minting. `prepare_voice_admission_step` returns an
+affine registration independently of HIGH capacity failure; an existing observer never
+requests a replacement registration. Neither output is native permission.
+
+`ServerActor::try_queue_voice_admission` is nonblocking. Publisher `accepted(work)` must
+install exact custody before enqueue. `completed(result, work)` stages the same original
+outcome synchronously outside Root Group/Policy guards. `refused(error, Some(work))`
+marks never-entered queued/prepared destruction; None marks pre-enqueue refusal. Actual
+retirement follows that callback. `VoiceAdmissionWork` gives exact identity and callback
+retirement observations only. The native Publisher's Drop after Root entry must preserve
+uncertainty; it cannot report absence or remint. Native must separately validate the
+concrete Publisher inventory, canonical Session/generation and final UI fence. The
+canonical native adapter and wire grammar remain unimplemented; no live readiness follows.
+
 ## Root admission preparation (28 October; draft leaf, not live IPC)
 
 `ChannelSync::prepare_voice_admission_session(grant)` mints an opaque affine

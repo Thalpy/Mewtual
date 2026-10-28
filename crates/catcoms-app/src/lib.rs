@@ -71,10 +71,11 @@ pub mod store;
 pub mod studio;
 pub mod studio_exchange;
 pub use actor::{
-    spawn, voice_context_queue_bytes, voice_initial_media_rpc_bytes, voice_sdp_delivery_rpc_bytes,
-    voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes, voice_sdp_rpc_bytes, AppCommand,
-    AppEvent, DownloadExportEdge, DownloadExportTransition, DownloadPreflight, DownloadReady,
-    Envelope, InitialSdpCompletion, InitialSdpPending, ServerActor, Trace, TracedEvent,
+    spawn, voice_admission_rpc_bytes, voice_context_queue_bytes, voice_initial_media_rpc_bytes,
+    voice_sdp_delivery_rpc_bytes, voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes,
+    voice_sdp_rpc_bytes, AppCommand, AppEvent, DownloadExportEdge, DownloadExportTransition,
+    DownloadPreflight, DownloadReady, Envelope, InitialSdpCompletion, InitialSdpPending,
+    ServerActor, Trace, TracedEvent, VoiceAdmissionPublisher, VoiceAdmissionWork,
     VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceContextPending, VoiceEndpointCommand,
     VoiceEndpointError, VoiceInitialMediaPublisher, VoiceInitialMediaWork, VoiceSdpBody,
     VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork,

@@ -5,6 +5,44 @@ use super::*;
 use voice_v2::admission::{AdmissionSessionObserver, RootAdmissionSession, RootHighPreclaim};
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Prepare one paid Actor invocation. Native must stage the returned registration
+    /// canonically even if HIGH reservation failed or its generation was cancelled.
+    /// No first native permission is implied; final attachment still orders against UI
+    /// lock/End. A lost/ambiguous invocation cannot be replaced by another mint.
+    pub fn prepare_voice_admission_step(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        original: Option<&AdmissionSessionObserver>,
+        generation: u64,
+        payment: &voice_v2::admission::AdmissionRpcPermit,
+    ) -> Result<voice_v2::admission::AdmissionPrepared, VoiceError> {
+        if generation == 0 {
+            return Err(VoiceError::Bounds);
+        }
+        self.validate_current_voice_call_grant(grant)?;
+        let voice = self
+            .voice_runtime
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !payment.matches(&voice.resources, grant.scope()) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let registration = if original.is_none() {
+            Some(self.prepare_voice_admission_session(grant)?)
+        } else {
+            None
+        };
+        let fresh = registration.as_ref().map(RootAdmissionSession::observer);
+        let observed = original
+            .or(fresh.as_ref())
+            .ok_or(VoiceError::Unauthorized)?;
+        let capacity = self.reserve_voice_high_preclaim(grant, observed, generation);
+        Ok(voice_v2::admission::AdmissionPrepared::new(
+            registration,
+            capacity,
+        ))
+    }
+
     /// Mint one original admission registration for the actual current participant.
     /// Native must install Pending before calling and recover this same returned owner
     /// across remount/lost replies. Calling again intentionally creates a NEW identity.

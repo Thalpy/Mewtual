@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Actor admission outcome staging (28 October; focused checks passed)
+
+`communication-v2-native-admission` joins the reviewed Root and browser leaves at
+`a44b51b2`; Git verifies its Root code matches `fb53c00f` and its desktop code matches
+`c30676c2` before this change. The new Actor API uses an opaque4KiB
+RPC payment from the selected pool/scope, independently of Root registration3KiB and
+the native worker8KiB. `prepare_voice_admission_step` returns a newly minted registration
+even when HIGH capacity fails; exact existing-observer retries mint nothing.
+
+The native Publisher receives accepted Work BEFORE enqueue can wake Root, then stages
+the original affine outcome before callback completion. Queued-drop refusal carries the
+same Work; pre-enqueue refusal carries none. Actor apply removes the publisher BEFORE
+entering Root. Only an untouched queued publisher may report never-entered Stopped;
+post-entry unwind must quarantine uncertainty, never authorize another mint. Paid field
+order keeps actual arguments/callbacks alive through retirement. Native canonical Slot,
+concrete Publisher/worker, authenticated Control operation and browser cancellation fence
+are NOT implemented yet. Staging alone supplies no Reserved/Ready or ledger row.
+
+Root/Actor regression drafts cover pressure retaining the same registration, foreign
+payment/scope/zero rejection, queue-full exact retry, caller loss while queued, destroyed
+command, post-entry unwind, cancellation and a held real callback. The held-callback test
+always releases/joins before assertions and uses the sanctioned Clock seam only for its
+harness failure bound. Both new Root preparation tests and all eight Actor admission tests
+pass. Three initial accounting assertions exposed a fixture error: moving the LAST call
+grant revoked the participant and independently returned its credit/LocalJoin. The fixtures
+now retain the original grant; their exact-return assertions are unchanged. Read-only
+adversarial review and re-review have no blocker/high/medium finding. All3,579 frontend
+tests pass on this integration checkout. Formatting/diff checks pass. Complete current
+backend validation is still required: the earlier frozen Root command at `fb53c00f`
+stopped without a final result and is NOT counted as passing. Native mode pinning is a
+separate subsequent draft, not canonical Slot/invocation or browser integration.
+V2 remains OFF; bilateral admission, audio, relay and physical acceptance remain open.
+
 ## Root admission registration leaf (28 October; focused checks and review passed)
 
 `communication-v2-admission-registration` adds native-only Root registration and

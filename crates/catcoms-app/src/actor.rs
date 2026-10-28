@@ -41,18 +41,18 @@ mod member_maintenance;
 mod member_reconnect;
 mod voice_endpoint;
 pub use voice_endpoint::{
-    voice_context_queue_bytes, voice_initial_media_rpc_bytes, voice_sdp_delivery_rpc_bytes,
-    voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes, voice_sdp_rpc_bytes,
-    InitialSdpCompletion, InitialSdpPending, VoiceConfirmationBody, VoiceConfirmationCompletion,
-    VoiceContextPending, VoiceEndpointCommand, VoiceEndpointError, VoiceInitialMediaPublisher,
-    VoiceInitialMediaWork, VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion,
-    VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork, VoiceSdpEnginePublisher, VoiceSdpEngineWork,
-    VoiceSdpInputPublisher, VoiceSdpInputWork, VoiceSdpPending, VoiceSdpPublication,
-    VoiceSdpRecordedInput, VoiceSdpRecordedQueue, VoiceSdpResult, VoiceSdpResultInput,
-    VoiceSdpResultPublisher, VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES,
-    VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_INITIAL_MEDIA_RPC_BYTES,
-    VOICE_SDP_DELIVERY_RPC_BYTES, VOICE_SDP_ENGINE_RPC_BYTES, VOICE_SDP_INPUT_RPC_BYTES,
-    VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
+    voice_admission_rpc_bytes, voice_context_queue_bytes, voice_initial_media_rpc_bytes,
+    voice_sdp_delivery_rpc_bytes, voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes,
+    voice_sdp_rpc_bytes, InitialSdpCompletion, InitialSdpPending, VoiceAdmissionPublisher,
+    VoiceAdmissionWork, VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceContextPending,
+    VoiceEndpointCommand, VoiceEndpointError, VoiceInitialMediaPublisher, VoiceInitialMediaWork,
+    VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpDeliveryPublisher,
+    VoiceSdpDeliveryWork, VoiceSdpEnginePublisher, VoiceSdpEngineWork, VoiceSdpInputPublisher,
+    VoiceSdpInputWork, VoiceSdpPending, VoiceSdpPublication, VoiceSdpRecordedInput,
+    VoiceSdpRecordedQueue, VoiceSdpResult, VoiceSdpResultInput, VoiceSdpResultPublisher,
+    VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
+    VOICE_INITIAL_MEDIA_RPC_BYTES, VOICE_SDP_DELIVERY_RPC_BYTES, VOICE_SDP_ENGINE_RPC_BYTES,
+    VOICE_SDP_INPUT_RPC_BYTES, VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
