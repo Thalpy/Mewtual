@@ -24,7 +24,10 @@ env:
 jobs:
   overlay:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # At 3e598b50 all seven negative/restored pairs passed, but the 30-minute job expired
+    # immediately afterward. Allow compilation, serial cases and artifact cleanup to
+    # finish; individual900-second case bounds and every assertion remain unchanged.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0

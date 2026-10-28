@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Corrected combined validation passed locally (28 October)
+
+The stacked Score candidate at `fa3107d2` passes the complete native command:
+1,011 library tests plus six ACL tests, zero failures; library runtime 2,336.29s.
+This includes the recovery changes from `3e598b50`, both earlier failing fixture
+cases, the original and forced-alternate media cases, and the Score batch cases.
+The previous failed runs below remain failures; this later run supersedes their
+pending local validation status without establishing the old intermittent refusal's cause.
+
+The complete Root result is 3,960 passes / 25 existing ignores at `c27e7694`;
+compiled Root sources and lockfiles are unchanged through this corrected candidate.
+Its current-native-source construction scan was separately rerun and passes.
+The complete current frontend passes 3,539 tests. Root/native formatting and strict
+Clippy, native check, both refreshed dependency audits and ambient/Store gates pass.
+Frontend static/build checks and the ten ordinary Edge flows plus Score/attachment
+fixtures pass on unchanged production frontend inputs. The final native build passes
+in 5m59s and the real startup gate reports `ok application startup completed`.
+
+Hosted validation is still pending. The `3e598b50` overlay job completed all seven
+negative checks and all seven restored controls, then was cancelled at its 30-minute
+job limit. Only that aggregate job allowance is now 45 minutes; case bounds, assertions
+and source are unchanged. A cancelled job is not green. PR #75 and stacked #76 remain
+drafts until the remaining hosted gates are reconciled. No extra local full suite is
+needed for this documentation/CI-allowance-only follow-up.
+
+App V2 remains OFF. Operational bilateral admission, production RTC/audio composition,
+member media relay and combined/physical acceptance are still open. Only one desktop
+is available. Passing controlled native/browser tests does not establish audible audio.
+
 ## Native fixture retry and sender-tail corrections (28 October)
 
 Two complete runs stopped on distinct fixture assumptions. Score `324bda42` had
