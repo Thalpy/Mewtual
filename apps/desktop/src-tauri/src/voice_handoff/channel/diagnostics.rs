@@ -115,28 +115,6 @@ impl NativeObservation {
     }
 }
 
-#[cfg(test)]
-mod request_tests {
-    use super::*;
-    #[test]
-    fn a_previous_physical_refusal_cannot_prove_a_later_ui_attempt() {
-        let parent = [9; 16];
-        let observation = NativeObservation {
-            flags: None,
-            diagnostic: Some(NativeDiagnostic {
-                sdp_refusal: Some((4, parent, 7, Some(VoiceError::Capacity))),
-                ..NativeDiagnostic::default()
-            }),
-            missed: false,
-        };
-        assert_eq!(observation.sdp_refusal_at(6), None);
-        assert_eq!(observation.sdp_refusal_at(8), None);
-        assert_eq!(
-            observation.sdp_refusal_at(7),
-            Some((4, parent, Some(VoiceError::Capacity)))
-        );
-    }
-}
 impl Session {
     pub(in crate::voice_handoff) fn fixture_sdp_stage(
         &self,
@@ -292,5 +270,28 @@ impl Session {
             diagnostic.finished_selector = diagnostic.selector;
             diagnostic.stage = 6;
         });
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    #[test]
+    fn a_previous_physical_refusal_cannot_prove_a_later_ui_attempt() {
+        let parent = [9; 16];
+        let observation = NativeObservation {
+            flags: None,
+            diagnostic: Some(NativeDiagnostic {
+                sdp_refusal: Some((4, parent, 7, Some(VoiceError::Capacity))),
+                ..NativeDiagnostic::default()
+            }),
+            missed: false,
+        };
+        assert_eq!(observation.sdp_refusal_at(6), None);
+        assert_eq!(observation.sdp_refusal_at(8), None);
+        assert_eq!(
+            observation.sdp_refusal_at(7),
+            Some((4, parent, Some(VoiceError::Capacity)))
+        );
     }
 }
