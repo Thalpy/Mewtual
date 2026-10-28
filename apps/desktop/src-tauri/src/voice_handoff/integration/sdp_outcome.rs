@@ -149,6 +149,13 @@ pub(super) async fn exercise(
     drop(body);
     drop(owner);
     drop(incoming);
+    // Receiver completion may run while send() still retains its paid Arc<Work>.
+    // This SAME actor's FIFO query proves that the synchronous sender/command tail
+    // returned; waking the receiver alone cannot certify native publication drainage.
+    actor
+        .voice_v2_context(route.selected().binding().scope.room)
+        .await
+        .unwrap();
     assert!(weak.upgrade().is_none());
     assert!(state.ui_session_commit.try_lock().is_ok());
 
