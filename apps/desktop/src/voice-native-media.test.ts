@@ -2,7 +2,7 @@ import { VOICE_AUDIO_FIXTURE_SDP } from "../scripts/voice-audio-sdp-fixture.ts";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { VoiceNativeMedia, VOICE_NATIVE_MEDIA_BYTES } from "./voice-native-media.ts";
+import { VoiceNativeMedia, VOICE_NATIVE_MEDIA_BYTES, voiceNativeMediaInventory } from "./voice-native-media.ts";
 import { VoiceSdpRtcOwner } from "./voice-sdp-rtc.ts";
 import type { VoiceSdpOriginal } from "./voice-ipc-sdp-actions.ts";
 import type { VoiceMediaReceipt } from "./voice-ipc-media.ts";
@@ -10,6 +10,58 @@ const original = JSON.parse(readFileSync(new URL("../src-tauri/src/voice_handoff
 const gate = () => { let release!: () => void; const promise = new Promise<void>(yes => { release = yes; }); return { promise, release }; };
 async function turn() { await new Promise<void>(yes => setImmediate(yes)); }
 async function until(condition: () => boolean) { for (let n = 0; n < 200; n++) { if (condition()) return; await turn(); } assert.fail("fixture did not progress"); }
+
+test("native media payment covers setup and simultaneous RPC/history/timer/cleanup owners", () => {
+  const inventory = voiceNativeMediaInventory();
+  for (const [stage, bytes] of Object.entries(inventory))
+    assert.ok(bytes <= VOICE_NATIVE_MEDIA_BYTES, `${stage} requires ${bytes} bytes`);
+  assert.ok(inventory.closingWait > inventory.adopted, "cleanup overlaps a still-running request");
+  assert.ok(inventory.closingJoined < inventory.closingWait, "only actual run return removes its pipeline");
+});
+
+test("End during compact metadata creation prevents native admission and retains payment until cleanup", async t => {
+  const f = await fixture(t), OriginalBytes = globalThis.Uint8Array;
+  let copies = 0;
+  globalThis.Uint8Array = class extends OriginalBytes {
+    constructor(length: number) {
+      super(length);
+      if (length === 226) { copies++; f.driver.close(); }
+    }
+  } as typeof Uint8Array;
+  try {
+    await f.driver.start();
+    assert.equal(copies, 1);
+    assert.deepEqual(f.requests, [], "End won before native Admit");
+    assert.equal(f.driver.closed, true);
+    assert.equal(f.counts.paid, VOICE_NATIVE_MEDIA_BYTES);
+    assert.equal(f.counts.active, 0);
+  } finally { globalThis.Uint8Array = OriginalBytes; }
+  await f.driver.cleanup();
+  assert.equal(f.counts.paid, 0);
+  assert.equal(f.counts.refund, 1);
+});
+
+test("End during the later fresh Admit copy refuses positive work while keeping original cleanup", async t => {
+  const f = await fixture(t), OriginalBytes = globalThis.Uint8Array;
+  let copies = 0;
+  globalThis.Uint8Array = class extends OriginalBytes {
+    constructor(length: number) {
+      super(length);
+      if (length === 226 && ++copies === 2) f.driver.close();
+    }
+  } as typeof Uint8Array;
+  try {
+    await f.driver.start();
+    assert.equal(copies, 2, "template construction returned before the distinct Admit body");
+    assert.deepEqual(f.requests, [], "a copied positive request never entered the provider");
+    assert.equal(f.counts.paid, VOICE_NATIVE_MEDIA_BYTES);
+    assert.equal(f.counts.active, 0);
+  } finally { globalThis.Uint8Array = OriginalBytes; }
+  await f.driver.cleanup();
+  assert.deepEqual(f.requests, [2, 3], "original Close/Release recovery is still permitted");
+  assert.equal(f.counts.paid, 0);
+  assert.equal(f.counts.refund, 1);
+});
 
 /** SDK/Root responses are controlled here. Real native framing is a separate acceptance
  * layer; these tests pin ownership, actual SDK calls and asynchronous driver ordering. */

@@ -3,7 +3,8 @@
  * old browser history has a separate explicit compaction transaction. This driver stays
  * paid through actual peer/native/IO cleanup and does not admit another pair. The opaque destination and
  * passive status contain no driver/old-chain callbacks; only this paid driver does. */
-import { encodeVoiceMediaOriginal, encodeVoiceMediaExisting, type VoiceMediaReceipt } from "./voice-ipc-media.ts";
+import type { encodeVoiceMediaOriginal, VoiceMediaReceipt } from "./voice-ipc-media.ts";
+import { VoiceMediaEncoding, VOICE_MEDIA_ENCODING_BYTES } from "./voice-media-encoding.ts";
 import type { VoiceSdpOriginal } from "./voice-ipc-sdp-actions.ts";
 import { VoiceMediaStatus, voiceMediaDeadline } from "./voice-media-status.ts";
 import type { VoiceMediaRtcOwner, VoiceSdpRtcOwner, VoiceSdpRtcClock } from "./voice-sdp-rtc.ts";
@@ -11,6 +12,41 @@ import type { VoiceMediaRtcOwner, VoiceSdpRtcOwner, VoiceSdpRtcClock } from "./v
 /** Fixed strings, one peer wrapper, one flight/monitor/callback cell and overlap with
  * the existing physical Control codec. Opaque browser RTC heap is outside this bound. */
 export const VOICE_NATIVE_MEDIA_BYTES = 8 * 1024;
+
+/** Conservative logical application-owned graph, not VM/SDK heap or RSS. Keep this
+ * synchronized with fields and asynchronous owners below. The shared physical Control
+ * envelope separately pays framing/crypto/read buffers, never this queued caller graph.
+ * Original history, then its transferred2KiB compact marker, pays registry/outer refund
+ * ownership. It cannot subsidize native RPC or a future audio worker.
+ *
+ * Setup's full original/copy ends before adoption; it cannot overlap future audio.
+ * RPC, history, timer replacement and cleanup CAN overlap and are additive. No audio
+ * partition is granted by these numbers; audio needs its own prepaid inventory. */
+export function voiceNativeMediaInventory(): Readonly<{
+  setup: number; adopted: number; closingWait: number; closingJoined: number;
+}> {
+  const common = 384 // driver fields/wrapper
+    + 512 // context and bounded shared-channel callback environments
+    + VOICE_MEDIA_ENCODING_BYTES
+    + 192 // private RTC owner/state and inert identity
+    + 320 // passive status, SAME persistent proof, flight token
+    + 512; // shared timer cell plus old executing AND new scheduled generations
+  const start = 5 * 64 + 3 * 128 + 128 + 64; // Promises, closures, run, adoption reaction.
+  const rpc = 1792; // Request370 + frames256 + Promises128 + queued closure128 +
+    // reactions128 + encode scratch256 + two temporary receipts480; rounded up.
+  const historyOrDrain = Math.max(3 * 64 + 128 + 128 + 64, 64 + 320);
+  // History must actually return BEFORE MediaRtcOwner.drain begins. Its retained
+  // fulfilled observer64 + drain Promise/frame320 share that serial512 allowance.
+  // Removing history must not accidentally remove the independent drain inventory.
+  const cleanup = 4 * 64 + 2 * 128 + 128 + 64;
+  const negative = 3 * 128; // Close/cancel and executing timer/provider return frames.
+  return Object.freeze({
+    setup: 1520 + 2560 + (384 + 512 + VOICE_MEDIA_ENCODING_BYTES + 192) + start + 512 + negative,
+    adopted: common + start + rpc + historyOrDrain + negative,
+    closingWait: common + start + rpc + historyOrDrain + cleanup + negative,
+    closingJoined: common + rpc + historyOrDrain + cleanup + negative,
+  });
+}
 type Request = ReturnType<typeof encodeVoiceMediaOriginal>;
 export type VoiceNativeMediaContext = Readonly<{
   clock: VoiceSdpRtcClock;
@@ -24,7 +60,8 @@ const unavailable = (): never => { throw new Error("original native media unavai
 
 export class VoiceNativeMedia {
   readonly #context: VoiceNativeMediaContext;
-  readonly #original: VoiceSdpOriginal;
+  #original: VoiceSdpOriginal | null;
+  #encoding: VoiceMediaEncoding | null = null;
   #source: VoiceSdpRtcOwner | null;
   #peer: VoiceMediaRtcOwner | null = null;
   #status: VoiceMediaStatus | null = null;
@@ -66,8 +103,24 @@ export class VoiceNativeMedia {
     // Notifications retain only one detachable cell and their inert identity, never
     // the old graph directly. Identity also fences a late old callback from paying off
     // a newer schedule call that registered a timer but threw before returning its handle.
-    this.#cell.work = generation => this.#onTimer(generation);
+    this.#cell.work = VoiceNativeMedia.#timerForwarder(this);
   } // Inert: no Clock, provider, SDK, native or owner callback before publication.
+  /** Separate lexical environment: the timer must retain only the driver, never
+   * the constructor's old original/source arguments after their private fields clear. */
+  static #timerForwarder(driver: VoiceNativeMedia): (generation: object) => void {
+    return generation => driver.#onTimer(generation);
+  }
+  #compactOriginal(): void {
+    if (this.#encoding) return;
+    const original = this.#original;
+    if (!original || this.#closed) return unavailable();
+    const encoding = new VoiceMediaEncoding(original);
+    // Encoding/copying may reenter End through an instrumented provider. Publish
+    // only after it returns and our original close fence is repeated. This tail
+    // has no callback/await; the full textual original ends before any native RPC.
+    if (this.#closed) { encoding.dispose(); return unavailable(); }
+    this.#encoding = encoding; this.#original = null;
+  }
   get adopted(): boolean { return this.#peer?.adopted === true; }
   get closed(): boolean { return this.#closed; }
   get detached(): boolean { return this.#detached; }
@@ -107,14 +160,25 @@ export class VoiceNativeMedia {
   }
   #observe(receipt: VoiceMediaReceipt | null): void {
     if (!receipt) return;
-    if (this.#proof !== null && this.#proof !== receipt.proof) { this.close(); return unavailable(); }
-    this.#proof = receipt.proof;
+    const proof = receipt.proof;
+    if (this.#proof !== null && this.#proof !== proof) { this.close(); return unavailable(); }
+    // Status retains this SAME original proof. Later equal decoded receipts are
+    // temporary RPC output, not additional persistent copies of that public string.
+    this.#proof ??= proof;
     this.#admitted ||= receipt.admitted;
     this.#nativeReleased ||= receipt.released;
     if (receipt.closed || receipt.released) this.close();
   }
   async #rpc(request: Request, cleanup: boolean): Promise<VoiceMediaReceipt | null> {
-    try { return await this.#context.request(request, cleanup); }
+    try {
+      // Fresh-body copying can synchronously End this driver. A live shared
+      // channel does not make this closed media owner current again. Cleanup
+      // retains its original negative recovery path and conservative obligations.
+      if (!cleanup && this.#closed) return null;
+      const send = this.#context.request;
+      if (!cleanup && this.#closed) return null; // A provider getter may also End.
+      return await send.call(this.#context, request, cleanup);
+    }
     finally { request.body.fill(0); }
   }
   /** Every observer, including a timer firing during hung IO, rejects invalid or
@@ -153,6 +217,7 @@ export class VoiceNativeMedia {
   }
   async #run(): Promise<void> {
     if (this.#closed || !this.#context.live() || this.#closed) return;
+    this.#compactOriginal(); // Driver/flight were published before this serial copy.
     const now = this.#now();
     this.#acquireUntil ??= this.#deadline(now);
     const until = this.#status?.deadline ?? this.#acquireUntil;
@@ -163,12 +228,12 @@ export class VoiceNativeMedia {
     if (this.#closed || !this.#context.live() || this.#closed) return;
     if (!this.#admitted) {
       if (this.#attempted) {
-        this.#observe(await this.#rpc(encodeVoiceMediaOriginal(this.#original, "resolve"), true));
+        this.#observe(await this.#rpc(this.#encoding!.original("resolve"), true));
       }
       if (this.#closed) return;
       if (!this.#admitted) {
         this.#attempted = true; // BEFORE encoding/crypto/transport can become uncertain.
-        this.#observe(await this.#rpc(encodeVoiceMediaOriginal(this.#original, "admit"), false));
+        this.#observe(await this.#rpc(this.#encoding!.original("admit"), false));
       }
       if (this.#closed || !this.#admitted || this.#proof === null) return;
     }
@@ -176,7 +241,7 @@ export class VoiceNativeMedia {
     const token = this.#status.begin(this.#now());
     let receipt: VoiceMediaReceipt | null = null;
     try {
-      receipt = await this.#rpc(encodeVoiceMediaExisting(this.#original.parentRow, this.#original.identity, this.#proof!, "current"), false);
+      receipt = await this.#rpc(this.#encoding!.existing(this.#proof!, "current"), false);
     } finally {
       let observed = NaN;
       try { observed = this.#now(); } catch { /* Fail closed and retire this exact token. */ }
@@ -197,7 +262,7 @@ export class VoiceNativeMedia {
     if (this.#detachRequested && !this.#detached && receipt?.retireInMs === 0) {
       const detachedToken = this.#status.begin(this.#now());
       let indexed: VoiceMediaReceipt | null = null;
-      try { indexed = await this.#rpc(encodeVoiceMediaExisting(this.#original.parentRow, this.#original.identity, this.#proof!, "detach"), false); }
+      try { indexed = await this.#rpc(this.#encoding!.existing(this.#proof!, "detach"), false); }
       finally {
         let at = NaN; try { at = this.#now(); } catch { /* Close already latched. */ }
         this.#status.finish(detachedToken, indexed, at);
@@ -208,8 +273,7 @@ export class VoiceNativeMedia {
     if (!this.#closed && this.#detached && this.#historyRequested && !this.#historyCollected) {
       // Historical cleanup cannot refresh freshness. The ordinary Current above and
       // its unchanged request-start deadline remain monitored while this RPC is held.
-      const history = await this.#rpc(encodeVoiceMediaExisting(this.#original.parentRow,
-        this.#original.identity, this.#proof!, "retirehistory"), true);
+      const history = await this.#rpc(this.#encoding!.existing(this.#proof!, "retirehistory"), true);
       this.#observe(history);
       if (history?.admitted && !history.current && history.retireInMs === null) this.#historyCollected = true;
     }
@@ -327,11 +391,11 @@ export class VoiceNativeMedia {
     if (this.#source) await this.#source.drain();
     if (this.#peer) await this.#peer.drain();
     if (this.#attempted && !this.#nativeReleased) {
-      const closed = await this.#rpc(encodeVoiceMediaOriginal(this.#original, "close"), true);
+      const closed = await this.#rpc(this.#encoding!.original("close"), true);
       this.#observe(closed);
       if (!closed?.closed) return unavailable();
       if (!this.#nativeReleased) {
-        const released = await this.#rpc(encodeVoiceMediaOriginal(this.#original, "release"), true);
+        const released = await this.#rpc(this.#encoding!.original("release"), true);
         this.#observe(released);
         if (!released?.released) return unavailable();
       }
@@ -342,6 +406,7 @@ export class VoiceNativeMedia {
     if (this.#arming || this.#cancelling || this.#callbackDepth !== 0 || this.#flight || this.#historyObservation || this.#timerSet || this.#registrationUnknown) return unavailable();
     this.#cell.work = null;
     this.#source = null; this.#peer = null;
+    this.#encoding?.dispose(); this.#encoding = null; this.#original = null;
     if (!this.#refunded) { this.#refunded = true; this.#context.refund(); }
   }
 }

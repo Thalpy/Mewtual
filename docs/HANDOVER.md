@@ -1,5 +1,91 @@
 # Mewtual; Handover
 
+## Combined admission/audio checkpoint (28 October; native gates passed)
+
+Frozen `56122a4f` passes the complete native suite:1,011 library tests and six ACL
+tests, with no failures (library2,303.45s). This includes the corrected discovery
+fixture, actual Node/native/HTTP/TCP handoff and indexed media regressions. Native
+`cargo check` and strict all-target/all-feature Clippy pass; both workspace format
+checks, the frontend production build,3,563 frontend tests and ten Edge flows pass.
+These are controlled RTC fixtures on one desktop, not microphone/WebView or physical
+network acceptance.
+
+The earlier complete Root run at `d55fa0db` failed its one exact-return accounting
+expectation (3,915 passes, one failure,25 existing ignores). `62be0add` corrects the
+expected original20KiB return; the complete affected sync crate then passes1,383
+tests. A clean complete Root command on the corrected source is still required;
+neither that focused success nor this native pass turns the earlier failure green.
+Operational native admission, bilateral agreement, audio composition, relay and
+combined/physical acceptance remain open. Production V2 remains OFF.
+
+## Native media logical inventory (28 October; browser checks passed)
+
+An executable guard now itemizes full-original setup, compact adopted state, cleanup
+waiting for actual work and joined cleanup:7,600 /6,144 /6,848 /5,952 bytes under the
+unchanged8KiB payment. It includes queued caller RPC storage independently of the
+physical Control envelope, two timer generations, history and actual cleanup/drain
+frames. Registry and outer refund ownership keep their original history/compacted2KiB
+payment. The model covers logical application owners, not VM/SDK heaps or RSS.
+
+All45 focused encoding/native-media tests,3,563 frontend tests, static checks (zero
+errors/warnings) and production build (41.94s) pass. Read-only review has no blocker,
+high or medium; the drain-funding clarification is recorded beside the formula.
+No audio partition, new group limit, audio factory or activation is implemented here.
+The ten ordinary Edge flows passed on identical runtime logic before this metric-only
+guard. The first flow invocation lost CDP before any test; its owned-browser rerun passed.
+
+## Compact native media encoding (28 October; browser checks passed)
+
+The browser media driver now prepares a private canonical226-byte template only after
+its driver/flight is published. It independently materializes the parent row, repeats
+the close fence and clears the full textual original in one callback-free tail before
+native RPC. Every original/current request gets fresh bytes; request zeroing cannot
+damage later cleanup. Disposal follows actual IO/SDK/timer retirement. A separate static
+timer-forwarder environment retains only the driver, not its constructor arguments.
+Repeated equal native proofs preserve the original retained value shared with status.
+
+All44 focused encoding/native-media tests pass, including every canonical mode and
+maximum integer, independent request clearing, disposal and End during compaction.
+An additional second-copy regression closes after template creation and before Admit:
+positive RPC repeats its close check after copying/provider lookup, while original
+Close/Release recovery remains available and paid. Adversarial review and re-review
+have no remaining finding. All3,562 frontend tests and static checks (zero errors or
+warnings) pass; production build passes40.78s with the existing chunk-size warning.
+The compact record's itemized640-byte component is not a whole-driver or audio partition
+proof. Combined native RPC/timer/history/sender/playback accounting remains required;
+no new audio allowance, factory, Current authority or activation is claimed here.
+Native and final combined gates remain pending, including the parent's known failures.
+
+## Detached capture funding (28 October; browser composition in progress)
+
+The isolated `communication-v2-audio-composition` branch separates byte accounting from
+the broker's owner/work graphs. Its capture funding owns one process-paid4KiB pool, at
+most two conservative group bindings (active selector plus old orphan), and one original
+8KiB capsule/master. Same-group references share their fixed group debit. Scope closure
+detaches inactive handles, while an old prompt retains only plain ledger metadata.
+
+Capsule release and actual finalizer return are independent latches. One observer tracks
+the SAME void `finishCapture` task, including `pool.returned`; the token stores no Promise.
+The original group fee returns only after both latches, with the final empty observer paid
+by fixed process inventory. Proven pre-SDK refusal has an explicit no-task transition.
+A failed observer registration detaches the target, prevents deferred SDK entry and keeps
+the real finalizer; it never invents no-task completion. No OS permission task borrows the
+shared RTC position, configuration loan, native channel activity or Call cleanup join.
+
+All90 focused byte-ledger/funding/capture/crypto/App-session tests and the complete3,557
+frontend tests pass. Final static checks report zero errors/warnings; production build
+passes in41.05s (existing chunk-size warning). These do not establish captured audio.
+Read-only adversarial review and re-review have no remaining finding. Fixed logical
+metadata is3776 retained /4032 binding bytes under4096; capture stages are6592/6944/6176
+under8192. Group materialization uses captured non-reentrant intrinsics and owned64-byte
+input; binding inventory still includes nested negative cleanup.
+
+This branch does NOT yet construct audio through a broker factory or attach sender clones
+or playback. App V2 stays OFF. Production App wiring, bilateral admission/native registration,
+relay and physical acceptance remain open. The initial browser slice did not change
+Rust inputs. This branch now integrates the reviewed Root/native corrections below;
+their focused checks pass, while complete combined native/Root sign-off remains open.
+
 ## Ready funding compatibility assertions (28 October; focused reruns passed)
 
 The full Root command on `d55fa0db` stopped with3,915 passes, one failure and25

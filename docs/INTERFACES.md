@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Compact local media encoding (28 October; App V2 inactive)
+
+`VoiceMediaEncoding` stores a private canonical226-byte original request and an
+independently materialized parent row. Its methods preserve Control28/version9 bytes
+and return fresh226/82-byte bodies; disposal invalidates only that private template.
+The media driver creates it after publication, repeats End's close fence, then clears
+full-original ownership before RPC. Its timer forwarder has a separate lexical scope.
+This is local storage/encoding only: fresh authenticated Current, exact PC adoption,
+actual cleanup joins and the unchanged8KiB media payment remain required. The640-byte
+component inventory grants no extra capacity or audio partition.
+
+## Detached capture payment (28 October; inactive composition)
+
+The internal capture budget returns `release`, one-shot `trackTask(actualFinalizer)` and
+`noTaskEntered`. The helper tracks its original void finalizer immediately after publication,
+before deferred SDK entry. Neither absence of a task nor timeout permits no-task completion
+after construction. The payment has no broker/Call/native-owner/channel/SDK backedge and
+stores no Promise. Fixed-group custody joins both actual finalizer return and capsule release.
+The same4KiB process pool can conservatively bind one active and one orphan group, sharing
+same-group references; its8KiB capsule remains charged to the immutable original group.
+All ordinary broker work and detached payments use the same ledger and unchanged limits.
+This internal contract adds no IPC/wire authority and is not yet an App audio factory.
+
 ## Inert V2 capacity contract (28 October; candidate, inactive)
 
 The opaque affine `ChainCapacity` has no Clone, serialization, budget accessor or renderer
