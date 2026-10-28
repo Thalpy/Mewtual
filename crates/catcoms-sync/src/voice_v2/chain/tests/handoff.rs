@@ -92,7 +92,19 @@ fn retained_plan_control_weak_zero_is_not_the_original_workflow_last_field_publi
     let publisher = workflow._retirement.take().unwrap();
     drop(workflow);
     let retirement = control.retire();
-    assert_eq!(pool.counts(), (METADATA_BYTES, 0));
+    // Intentional capacity contract: the parked actual publisher also owns the group
+    // progression claim. Its plain4KiB Ready metadata funding remains until real Drop.
+    assert_eq!(
+        pool.counts(),
+        (
+            METADATA_BYTES + crate::voice_v2::ready::capacity::METADATA,
+            0
+        )
+    );
+    assert_eq!(
+        prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).err(),
+        Some(VoiceError::Capacity)
+    );
     assert!(
         !retirement.is_drained(),
         "missing control and returned bytes are not completion"
@@ -249,7 +261,17 @@ fn original_publisher_proves_field_destruction_instead_of_weak_zero() {
     );
     let publisher = workflow._retirement.take().unwrap(); // park the SAME original last field
     drop(workflow); // normal Drop + every real capacity field, no unsafe/destructor bypass
-    assert_eq!(pool.counts(), (METADATA_BYTES, 0));
+    assert_eq!(
+        pool.counts(),
+        (
+            METADATA_BYTES + crate::voice_v2::ready::capacity::METADATA,
+            0
+        )
+    );
+    assert_eq!(
+        prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).err(),
+        Some(VoiceError::Capacity)
+    );
     assert!(!retirement.is_drained());
     drop(publisher); // only the SAME original last-field publisher can establish readiness
     assert!(retirement.is_drained());
@@ -393,6 +415,8 @@ fn explicit_confirmation_retirement_keeps_actual_input_and_lower_work_paid_until
         (
             METADATA_BYTES
                 + ROW_BYTES
+                // The original group claim remains funded until this actual Lower returns.
+                + crate::voice_v2::ready::capacity::METADATA
                 + 512
                 + crate::voice_v2::resources::GROUP_FORWARD_METADATA_BYTES,
             0
@@ -523,10 +547,12 @@ fn handoff_settlement_and_close_keep_actual_workflow_until_the_last_copy_owner_d
         action.input().is_err(),
         "native payload drained independently of IPC work"
     );
-    assert_eq!(pool.counts(), (METADATA_BYTES + ROW_BYTES + 16 * 1024, 0));
+    // Real handoff custody now also retains the group's existing4KiB claim payment.
+    let held = METADATA_BYTES + ROW_BYTES + 16 * 1024 + crate::voice_v2::ready::capacity::METADATA;
+    assert_eq!(pool.counts(), (held, 0));
     assert!(prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).is_err());
     drop(loan);
-    assert_eq!(pool.counts(), (METADATA_BYTES + ROW_BYTES + 16 * 1024, 0));
+    assert_eq!(pool.counts(), (held, 0));
     drop(actual_reader);
     assert_eq!(pool.counts(), (METADATA_BYTES + ROW_BYTES, 0));
     let next = prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
@@ -588,7 +614,13 @@ fn close_racing_handoff_admission_never_reopens_the_chain() {
         );
         assert_eq!(
             pool.counts().0,
-            METADATA_BYTES + ROW_BYTES + if loan.is_ok() { 16 * 1024 } else { 0 }
+            METADATA_BYTES
+                + ROW_BYTES
+                + if loan.is_ok() {
+                    16 * 1024 + crate::voice_v2::ready::capacity::METADATA
+                } else {
+                    0
+                }
         );
         drop(loan);
         drop((chain, action, _queue));

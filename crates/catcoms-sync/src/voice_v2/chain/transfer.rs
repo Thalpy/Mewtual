@@ -11,6 +11,9 @@ pub struct PreparedSdpCapacity {
     // One paid indirection keeps retry refusals small and affine. This allocation follows
     // payment below; caller-owned Result storage does not conceal another retained graph.
     inner: Box<PreparedCapacity>,
+    // OUTSIDE and after the Box: its fee survives actual body/claim destruction AND
+    // Box deallocation. No other graph's metadata pays this enclosing prepared owner.
+    _metadata: Arc<ProgressFunding>,
 }
 struct PreparedCapacity {
     resources: Arc<Resources>,
@@ -22,9 +25,12 @@ struct PreparedCapacity {
     _preparation: Preparation,
     // All capacity fields precede their metadata credit; only the fixed-plan publisher
     // follows it, so actual successor credits return before whole-plan drainage is visible.
-    _metadata: Credit,
+    _metadata: Arc<ProgressFunding>,
     // Last publisher covers partial preparation, extraction and eventual Exchange fields.
     custody: SuccessorCustody,
+    // Prepared successor can outlive Workflow before extraction. Retain the SAME claim
+    // through all previous capacity fields and the actual successor publisher's return.
+    progress: GroupProgressClaim,
 }
 // A weak reference cannot pin variable capacity or delay its retirement publisher. Its
 // allocation/owner storage stays covered by the prepared metadata and fixed plan binding.
@@ -71,6 +77,8 @@ impl TransferredSdpCapacity {
         let prepared = self._prepared.take().expect("one original preparation");
         let PreparedCapacity {
             // Bind FIRST so this publisher drops LAST if decomposition ever unwinds.
+            _metadata: metadata,
+            progress,
             custody,
             resources,
             _reserve: reserve,
@@ -79,7 +87,6 @@ impl TransferredSdpCapacity {
             ready,
             binding,
             _preparation: preparation,
-            _metadata: metadata,
         } = *prepared.inner;
         let closing = self
             .closing
@@ -101,6 +108,7 @@ impl TransferredSdpCapacity {
             closing,
             metadata,
             custody,
+            progress,
         }
     }
 }
@@ -187,11 +195,22 @@ pub(in crate::voice_v2) struct TransferredParts {
     pub proof: SuccessorProof,
     pub lane: Arc<WorkLane>,
     pub closing: SdpCapacityClosing,
-    pub metadata: Credit,
     pub custody: SuccessorCustody,
+    pub progress: GroupProgressClaim,
+    // This enclosing successor graph's fee survives its potentially blocking claim tail.
+    pub metadata: Arc<ProgressFunding>,
 }
 
 impl PreparedSdpCapacity {
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn park_progress_release_for_test(
+        &mut self,
+        entered: Arc<std::sync::Barrier>,
+        resume: Arc<std::sync::Barrier>,
+    ) {
+        self.inner.progress.park_release_for_test(entered, resume);
+    }
+
     pub(in crate::voice_v2) fn current_at(&self, mono: u64) -> bool {
         self.inner.binding.live()
             && !self.inner.binding.successor_closed.load(Ordering::Acquire)
@@ -267,7 +286,7 @@ impl ConfirmationControl {
         before_slots: impl FnOnce(),
     ) -> Result<PreparedSdpCapacity, VoiceError> {
         let chain = self.control.upgrade().ok_or(VoiceError::Unauthorized)?;
-        let (original_slots, preparation, custody, reserve, ready) = {
+        let (original_slots, preparation, custody, reserve, ready, progress_claim) = {
             let control = chain.control.lock().unwrap_or_else(|e| e.into_inner());
             if control.closed
                 || !Arc::ptr_eq(&chain.binding, &self.binding)
@@ -295,6 +314,12 @@ impl ConfirmationControl {
                 custody,
                 reserve,
                 ready,
+                workflow
+                    ._retirement
+                    .as_ref()
+                    .expect("original live publisher")
+                    .progress
+                    .share(),
             )
         };
         let resources = self.binding.resources().clone();
@@ -307,6 +332,7 @@ impl ConfirmationControl {
             super::super::negotiation::METADATA_BYTES,
             ResourceKind::Retained,
         )?;
+        let metadata = ProgressFunding::new(metadata);
         // Both backings were funded before Derive exposure. This metadata borrows the
         // original core directly (NO Workflow custody). Abandonment returns it and leaves
         // the old escrow/close rights intact, so an exact retry needs no ordinary bytes.
@@ -330,9 +356,11 @@ impl ConfirmationControl {
                 ready,
                 binding: self.binding.clone(),
                 _preparation: preparation,
-                _metadata: metadata,
+                _metadata: metadata.clone(),
                 custody,
+                progress: progress_claim,
             }),
+            _metadata: metadata,
         };
         let open = {
             let control = chain.control.lock().unwrap_or_else(|e| e.into_inner());

@@ -10,7 +10,8 @@
 
 use super::crypto_actions::{slots, CryptoAction, Key};
 use super::resources::{
-    ByteBudget, Credit, GroupForwardLanes, Reservation, ResourceKind, Resources, WorkLane,
+    ByteBudget, Credit, GroupForwardLanes, GroupProgressClaim, ProgressFunding, Reservation,
+    ResourceKind, Resources, WorkLane,
 };
 use super::{CallLease, DeviceId, Nonce, Scope, VoiceError};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -193,13 +194,19 @@ pub struct Workflow {
     // None occurs only when a deterministic test parks this exact original publisher.
     _retirement: Option<RetirementPublisher>,
 }
-struct RetirementPublisher(Arc<PlanBinding>);
+struct RetirementPublisher {
+    // With the ORIGINAL publisher, including a parked actual-last-field test. A
+    // successor shares this claim; fixed history/observers deliberately do not retain it.
+    progress: GroupProgressClaim,
+    // The original2KiB payment survives the claim's potentially blocking final release.
+    binding: Arc<PlanBinding>,
+}
 impl Drop for RetirementPublisher {
     fn drop(&mut self) {
         // All preceding Workflow fields have actually dropped. Credits return reservation
         // bytes/lane ownership before their custody can trigger Workflow's last drop. Keep
         // the original fixed metadata paid through this publication and every observer.
-        self.0.workflow_drained.store(true, Ordering::Release);
+        self.binding.workflow_drained.store(true, Ordering::Release);
     }
 }
 
@@ -610,6 +617,8 @@ impl PreparedChain {
             &resources,
             binding.scope.group,
         )?);
+        let progress_claim =
+            GroupProgressClaim::reserve(&resources, binding.scope.group, ready.metadata.clone())?;
         let closing = SdpCapacityClosing {
             core: reserve.clone(),
             ready,
@@ -647,7 +656,10 @@ impl PreparedChain {
                         handoff_busy: false,
                         sdp_preparing: false,
                     }),
-                    _retirement: Some(RetirementPublisher(binding)),
+                    _retirement: Some(RetirementPublisher {
+                        binding,
+                        progress: progress_claim,
+                    }),
                 })),
             }),
         });
@@ -746,6 +758,19 @@ impl Drop for PreparedChain {
     }
 }
 impl Workflow {
+    /// Pure registry validation under Pool; no Workflow/control/resource lock may be
+    /// acquired by this check. Only the original paid publisher owns this capacity.
+    pub(in crate::voice_v2) fn progress_matches(
+        &self,
+        resources: &Resources,
+        group: [u8; 32],
+        key: usize,
+    ) -> bool {
+        self._retirement
+            .as_ref()
+            .is_some_and(|publisher| publisher.progress.matches(resources, group, key))
+    }
+
     pub(crate) fn uses_resources(&self, resources: &Arc<Resources>, group: [u8; 32]) -> bool {
         Arc::ptr_eq(resources, self.binding.resources()) && group == self.binding.scope.group
     }

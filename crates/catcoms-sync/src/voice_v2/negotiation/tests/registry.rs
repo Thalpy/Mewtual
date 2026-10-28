@@ -86,13 +86,20 @@ fn sdp_registry_late_original_cleanup_cannot_clear_a_newly_installed_identity() 
     let resources = Arc::new(Resources::default());
     let first = bound(&resources, 1).unwrap();
     let group = first.group;
-    // Prepare the new allocation while old is still alive so allocator address reuse cannot
-    // make this raw-identity comparison a synthetic ABA. No pointer is ever dereferenced.
-    let next = Exchange::new(resources.clone(), group).unwrap();
+    // The intentional shared progression claim forbids constructing a replacement while
+    // the old Exchange is alive. Retain its already-paid FIXED allocation only, with an
+    // explicit metadata anchor; this test-only Weak prevents address reuse without keeping
+    // its actual progress claim or any variable capacity. No pointer is dereferenced.
+    let address_guard = Arc::downgrade(&first);
+    let original_metadata = first._metadata.clone();
     let original = Arc::as_ptr(&first);
     drop(first);
+    let next = Exchange::new(resources.clone(), group).unwrap();
+    assert_ne!(original, Arc::as_ptr(&next));
     resources.register_exchange(group, &next).unwrap();
     // Resume the exact destructor clear with its old captured identity after replacement.
     resources.unregister_exchange(group, original);
     assert!(Arc::ptr_eq(&resources.exchange(group).unwrap(), &next));
+    drop((next, address_guard, original_metadata));
+    assert_eq!(resources.counts(), (0, 0));
 }

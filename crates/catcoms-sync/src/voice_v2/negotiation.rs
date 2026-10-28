@@ -7,7 +7,8 @@
 //! phase quotas count retained terminal records and actual lower/engine/result owners too.
 
 use super::resources::{
-    ByteBudget, Credit, GroupForwardLanes, Reservation, ResourceKind, Resources, WorkLane,
+    ByteBudget, Credit, GroupForwardLanes, GroupProgressClaim, ProgressFunding, Reservation,
+    ResourceKind, Resources, WorkLane,
 };
 use super::{CallLease, EncryptedKind, Scope, VoiceError, MAX_SDP_PLAINTEXT, ROUTE_METADATA_BYTES};
 use catcoms_crypto::DeviceId;
@@ -126,11 +127,16 @@ pub struct Exchange {
     // It selects only exact Ready ACK recovery while generic SDP lenders remain inactive.
     low_ready: Option<Arc<super::ready::admission::ReadyAdmission>>,
     // Last: every enclosing owner/reservation/slot remains paid through field destruction.
-    _metadata: Credit,
-    // MUST remain last. All actual successor fields/credits return before whole-plan
-    // drainage publishes. Future Ready Source/Lower/ACK owners must retain this Exchange
+    // All actual successor fields/credits precede this whole-plan drainage publisher;
+    // the independent group progress claim follows it. Ready Source/Lower/ACK owners retain this Exchange
     // (one way, no cycle) or a separately counted lifetime owner through their real Drop.
     _successor_custody: Option<super::chain::SuccessorCustody>,
+    // Last: a new same-group progression cannot enter until every preceding actual
+    // capacity field and publisher has returned, including independently held Ready work.
+    progress: GroupProgressClaim,
+    // LAST: this Exchange's own4KiB fee stays paid through its potentially blocking
+    // final claim tail. Protected and standalone paths use the same plain anchor type.
+    _metadata: Arc<ProgressFunding>,
 }
 struct PhaseLoan {
     exchange: Arc<Exchange>,
@@ -211,6 +217,23 @@ impl Drop for PhaseLoan {
 }
 impl Exchange {
     #[cfg(test)]
+    pub(in crate::voice_v2) fn park_progress_release_for_test(
+        &mut self,
+        entered: Arc<std::sync::Barrier>,
+        resume: Arc<std::sync::Barrier>,
+    ) {
+        self.progress.park_release_for_test(entered, resume);
+    }
+    /// Pure under the process registry lock; no Exchange/Ready/Workflow lock or callback.
+    pub(in crate::voice_v2) fn progress_matches(
+        &self,
+        resources: &Resources,
+        group: [u8; 32],
+        key: usize,
+    ) -> bool {
+        self.progress.matches(resources, group, key)
+    }
+    #[cfg(test)]
     pub(in crate::voice_v2) fn ready_prepaid_for_test(&self) -> bool {
         self.ready.is_some()
     }
@@ -246,8 +269,10 @@ impl Exchange {
         low_ready: Option<Arc<super::ready::admission::ReadyAdmission>>,
     ) -> Arc<Self> {
         let super::chain::TransferredParts {
-            // Bind FIRST for reverse local-drop order during constructor unwinding.
-            // Normal construction moves it to Exchange's LAST field unchanged.
+            // Metadata FIRST for reverse local-drop order during constructor unwinding:
+            // the enclosing successor graph stays paid through the last claim tail.
+            metadata,
+            progress,
             custody,
             resources,
             reserve,
@@ -257,7 +282,6 @@ impl Exchange {
             packets,
             proof,
             lane,
-            metadata,
             // Last binding drops FIRST on constructor unwind: close unused backing
             // before returning its metadata loan and before the last custody publisher.
             closing,
@@ -306,6 +330,7 @@ impl Exchange {
             low_ready,
             _metadata: metadata,
             _successor_custody: Some(custody),
+            progress,
         })
     }
     pub(in crate::voice_v2) fn successor_current_at(
@@ -424,6 +449,10 @@ impl Exchange {
             METADATA_BYTES,
             ResourceKind::Retained,
         )?;
+        // Standalone SDP must exclude an inert/active/protected chain too. A separate
+        // weak Exchange index would allow the two paths to occupy one progress cell.
+        let metadata = ProgressFunding::new(metadata);
+        let progress = GroupProgressClaim::reserve(&resources, group, metadata.clone())?;
         Ok(Arc::new(Self {
             resources,
             group,
@@ -452,6 +481,7 @@ impl Exchange {
             ready_publication: std::sync::OnceLock::new(),
             low_ready: None,
             _successor_custody: None,
+            progress,
         }))
     }
     pub(crate) fn action_slot(
@@ -786,6 +816,9 @@ mod tests {
                 .max(size_of::<receive::RetainedOffer>())
             + 4 * 2 * size_of::<usize>()
             + 2 * size_of::<DeviceId>()
+            // Standalone SDP uses its ORIGINAL4KiB payment for the same progression
+            // claim, without a Ready reserve. Conservative for protected successors too.
+            + GroupProgressClaim::metadata_bytes()
             + 7 * 2 * size_of::<usize>();
         assert!(
             bytes < METADATA_BYTES,

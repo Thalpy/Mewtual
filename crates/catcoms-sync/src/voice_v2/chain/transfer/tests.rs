@@ -670,6 +670,8 @@ fn successor_metadata_covers_box_child_reserve_and_affine_ticket_layouts() {
         + size_of::<TransferredSdpCapacity>()
         + size_of::<slots::ReservedSlots>()
         + size_of::<Reservation>()
+        + size_of::<ProgressFunding>()
+        + 2 * size_of::<usize>() // shared enclosing metadata funding allocation
         + 3 * 2 * size_of::<usize>();
     assert!(
         bytes < super::super::super::negotiation::METADATA_BYTES,

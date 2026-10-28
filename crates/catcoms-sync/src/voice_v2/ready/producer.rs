@@ -231,6 +231,9 @@ mod tests {
             // The early capacity-only box is funded by the same Ready metadata. Adding
             // it conservatively here also covers preparation before this Producer exists.
             + crate::voice_v2::chain::progress_capacity_metadata_bytes()
+            // Shared plain funding + cell + headers + occupied registry stamp. The
+            // claim's enclosing handles are counted with Workflow/prepared/Exchange.
+            + crate::voice_v2::resources::GroupProgressClaim::metadata_bytes()
             + size_of::<Reservation>()
             + 5 * size_of::<Loan>()
             + 7 * 2 * size_of::<usize>()
