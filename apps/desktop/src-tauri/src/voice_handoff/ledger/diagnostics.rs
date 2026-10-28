@@ -3,6 +3,78 @@
 use super::*;
 
 impl Ledger {
+    /// Map only an independently discovered exact counterpart to its retained
+    /// original row for diagnostics. No row is returned to a browser/factory.
+    pub(in crate::voice_handoff) fn fixture_discovered_parent(
+        &self,
+        selected: &SelectedHandoffOwner,
+        selector: PairSelector,
+    ) -> Option<RowId> {
+        let index = self.index.try_lock().ok()?;
+        index
+            .rows
+            .iter()
+            .flatten()
+            .find(|row| row.key.matches(selected, Purpose::Derive(selector)))
+            .map(|row| row.id)
+    }
+
+    /// Fixed aggregate confirmation state for the SAME native parent. Never call
+    /// ordinary status/engine getters: a blocked callback may hold those locks.
+    pub(in crate::voice_handoff) fn fixture_confirmation_diagnostic(
+        &self,
+        selected: &SelectedHandoffOwner,
+        expected: Option<RowId>,
+    ) -> String {
+        let observed: Result<_, &'static str> = (|| {
+            let id = expected.ok_or("no original parent")?;
+            let index = self
+                .index
+                .try_lock()
+                .map_err(|_| "ledger index contended")?;
+            let parent = index
+                .rows
+                .iter()
+                .flatten()
+                .find(|row| row.id == id && row.key.matches(selected, row.key.purpose))
+                .ok_or("original parent absent")?;
+            let mut totals = [0_u8; 8];
+            for row in index.rows.iter().flatten() {
+                // SDP rows share this SAME parent Arc too. Their independent
+                // result/ACK/Return must not inflate confirmation progress.
+                let parent_row = Arc::ptr_eq(row, parent);
+                let confirmation_child = matches!(row.key.purpose,
+                    Purpose::Confirmation { parent: original, .. } if original == id)
+                    && row
+                        .key
+                        .parent
+                        .as_ref()
+                        .is_some_and(|original| Arc::ptr_eq(original, parent));
+                if !row.key.matches(selected, row.key.purpose)
+                    || (!parent_row && !confirmation_child)
+                {
+                    continue;
+                }
+                totals[0] += 1;
+                let Ok(state) = row.state.try_lock() else {
+                    totals[1] += 1;
+                    continue;
+                };
+                totals[2] += u8::from(state.status.action.is_some());
+                totals[3] += u8::from(state.status.engine.receipt.is_some());
+                totals[4] += u8::from(state.status.engine.settled);
+                totals[5] += u8::from(state.status.acknowledged);
+                totals[6] += u8::from(state.status.drained);
+                totals[7] += u8::from(matches!(state.body, Body::Pending(_)));
+            }
+            Ok(totals)
+        })();
+        match observed {
+            Ok(totals) => format!("original confirmation rows/contended/actions/receipts/settled/acked/drained/pending={totals:?}"),
+            Err(reason) => reason.into(),
+        }
+    }
+
     /// Original selection and full RowId only. Refuse equal-label replacement owners;
     /// diagnostics must not resolve a new parent or wait behind a stalled worker.
     pub(in crate::voice_handoff) fn fixture_sdp_diagnostic(

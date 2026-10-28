@@ -151,6 +151,10 @@ async fn native_webcrypto_cycle(
             return;
         }
         if automatic_browser {
+            // Actual member discovery supplies diagnostic scope only. Neither
+            // browser receives a parent/role/peer permission from these fields.
+            a.diagnostic_peer(discovered[0].1);
+            c.diagnostic_peer(discovered[1].1);
             // Only start the original consumers. Neither endpoint receives parent/child
             // identities or a scripted role sequence; native maintenance and broker work
             // discovery must compose independently through the real unjoined helper.

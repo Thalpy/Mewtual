@@ -82,6 +82,13 @@ fn sdp_failure_diagnostics_refuse_contended_and_equal_label_foreign_parents() {
     let id = registration.id();
     let before = selected.resources().counts();
     let index = ledger.index.lock().unwrap();
+    assert!(ledger
+        .fixture_discovered_parent(&selected, selector)
+        .is_none());
+    assert_eq!(
+        ledger.fixture_confirmation_diagnostic(&selected, Some(id)),
+        "ledger index contended"
+    );
     assert_eq!(
         ledger.fixture_sdp_diagnostic(&selected, Some(id)).1,
         "ledger index contended"
@@ -89,11 +96,28 @@ fn sdp_failure_diagnostics_refuse_contended_and_equal_label_foreign_parents() {
     let row = index.rows[id.slot].as_ref().unwrap().clone();
     drop(index);
     let state = row.state.lock().unwrap();
+    assert!(ledger
+        .fixture_confirmation_diagnostic(&selected, Some(id))
+        .contains("[1, 1, 0, 0, 0, 0, 0, 0]"));
     assert_eq!(
         ledger.fixture_sdp_diagnostic(&selected, Some(id)).1,
         "parent row contended"
     );
     drop(state);
+    assert_eq!(
+        ledger.fixture_discovered_parent(&selected, selector),
+        Some(id)
+    );
+    assert!(ledger
+        .fixture_discovered_parent(&foreign, selector)
+        .is_none());
+    assert_eq!(
+        ledger.fixture_confirmation_diagnostic(&foreign, Some(id)),
+        "original parent absent"
+    );
+    assert!(ledger
+        .fixture_confirmation_diagnostic(&selected, Some(id))
+        .contains("[1, 0, 0, 0, 0, 0, 0, 1]"));
     assert_eq!(
         ledger.fixture_sdp_diagnostic(&foreign, Some(id)).1,
         "original parent absent"

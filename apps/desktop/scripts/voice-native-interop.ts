@@ -4,7 +4,7 @@ import { VOICE_AUDIO_FIXTURE_MAX_SDP } from "./voice-audio-sdp-fixture.ts";
  * sends crypto Input, Result, private keys or plaintext over this control pipe. The Rust
  * parent accepts a closed set of public-metadata callbacks. No app command invokes this. */
 import assert from "node:assert/strict";
-import { NativeControlFrames } from "./voice-native-control.ts";
+import { NativeControlFrames, NativeControlProgress, type NativeProgressPhase } from "./voice-native-control.ts";
 import { NativeAdmissionObservations } from "./voice-native-admission-observations.ts";
 import { NativeSdpReplyLoss, type NativeSdpObservation } from "./voice-native-reply-loss.ts";
 import { webcrypto } from "node:crypto";
@@ -152,11 +152,23 @@ function send(value: unknown): void {
   process.stdout.write(head); process.stdout.write(body);
 }
 type Method = "admitKey" | "publishKey" | "settleKey" | "setup" | "settleSetup" | "collectChannel" | "readWork" | "observeTerminal" | "observeSdpRound";
+const latestProgress = new NativeControlProgress();
+// Only the latest closed phase crosses the metadata pipe. Never attach row,
+// request, key, SDP or plaintext values. Repeated identical phases add no work.
+function progress(phase: NativeProgressPhase): void {
+  if (stepRunning) latestProgress.update(phase);
+}
+const progressTimer = setInterval(() => {
+  if (!stepRunning) return;
+  const phase = latestProgress.sample();
+  if (phase !== null) send({ tag: "progress", phase });
+}, 100);
+progressTimer.unref();
 async function rpc<T>(method: Method, args: Record<string, string | number>): Promise<T> {
   assert.equal(callback, null, "only one native metadata call may be outstanding");
   const answer = new Promise<unknown>((resolve, reject) => { callback = { resolve, reject }; });
-  send({ tag: "call", method, args });
-  return await answer as T;
+  progress("rpc"); send({ tag: "call", method, args });
+  try { return await answer as T; } finally { progress("rpc-return"); }
 }
 const selectedNative: VoiceSelectedKeyNative = Object.freeze({
   admit: (owner: string, executor: string) => rpc<VoiceSelectedKeyAdmission>("admitKey", { owner, executor }),
@@ -185,7 +197,9 @@ const replyLoss = new NativeSdpReplyLoss();
 // response stream, MAC/AEAD and BYOB reader remain untouched. This proves no WebView policy.
 const transport: typeof fetch = async (url, init) => {
   const headers = new Headers(init?.headers); headers.set("origin", "http://tauri.localhost");
+  progress("http");
   const response = await realFetch(url, { ...init, headers });
+  progress("http-return");
   const operation = Number.parseInt((headers.get("x-voice-admission") ?? "").slice(12, 14), 16);
   // The global actual codec is serial. Correlate a positive decrypted Current with the
   // original full parent in its authenticated header, not the mutable active chain.
@@ -218,6 +232,7 @@ const transport: typeof fetch = async (url, init) => {
 };
 
 async function idle(): Promise<void> {
+  progress("idle");
   const deadline = performance.now() + 5000;
   while (broker.counts().active !== 0) {
     if (performance.now() >= deadline) {
@@ -400,6 +415,7 @@ async function step(value: Step): Promise<unknown> {
       return { kind: "coordinator-ended", peers: value.peers };
     }
     case "pump": {
+      progress("pump");
       assert.equal(stopPump, null);
       let stopped = false;
       stopPump = () => { stopped = true; };
@@ -412,6 +428,7 @@ async function step(value: Step): Promise<unknown> {
           if (callback === null) await rpc("observeTerminal", { owner: owner.token, executor: channelExecutor! });
           if (!stopped) await new Promise<void>(yes => setTimeout(yes, 50));
         }
+        progress("observer-close");
         await observer.close(); if (mediaRecords.length === 0) await idle(); return { kind: "observed" };
       }
       finally { stopPump = null; }
@@ -599,6 +616,7 @@ async function step(value: Step): Promise<unknown> {
         // success cannot prove both accepted results, Applied, settlement, ACK and Return.
         let complete = false;
         while (!complete) {
+          progress("rtc");
           await broker.completeNativeSdpRtcRound(owner, channel, chain); if (mediaRecords.length === 0) await idle();
           complete = (await rpc<{ complete: boolean }>("observeSdpRound", { owner: owner.token, executor: channelExecutor! })).complete;
           if (!complete) await new Promise<void>(yes => setTimeout(yes, 50));
@@ -613,6 +631,7 @@ async function step(value: Step): Promise<unknown> {
           const deadline = performance.now() + 5000;
           do {
             assert.ok(performance.now() < deadline, `media c${Number(retained.negotiation.media?.closed)} sdk${calls.closed} lost${[...mediaLoss().modes].join("/")} ${mediaEvents.join(",")}`);
+            progress("media");
             await broker.completeNativeMediaHandoff(owner, channel, chain); if (mediaRecords.length === 0) await idle();
             if (!retained.negotiation.media?.adopted) await new Promise<void>(yes => setTimeout(yes, 25));
           } while (!retained.negotiation.media?.adopted);
@@ -811,7 +830,7 @@ function accept(value: unknown): void {
     else pending.reject(new Error("native metadata callback refused"));
   } else {
     assert.equal(frame.tag, "step"); assert.equal(stepRunning, false, "control steps are serialized");
-    stepRunning = true; currentStep = String(frame.name);
+    stepRunning = true; currentStep = String(frame.name); latestProgress.reset(); progress("step");
     void step(frame as Step).then(value => {
       stepRunning = false; send({ tag: "done", value });
     }, error => {
@@ -847,6 +866,7 @@ process.stdin.on("data", (bytes: Buffer) => {
   }
 });
 process.stdin.on("end", () => {
+  clearInterval(progressTimer);
   stopAvailability();
   if (retirementWork && !retirementDone) {
     process.stderr.write("native media retirement incomplete at control EOF\n"); process.exitCode=1;

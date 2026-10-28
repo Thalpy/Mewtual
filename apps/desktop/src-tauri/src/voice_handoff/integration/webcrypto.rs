@@ -31,9 +31,26 @@ enum Frame {
     Call { method: Method, args: Metadata },
     Done { value: Value },
     Failed { reason: String },
+    Progress { phase: ProgressPhase },
     Blocked,
 }
-#[derive(Deserialize, Clone, Copy)]
+/// Closed metadata vocabulary only: never pipe keys, IDs, SDP or input bodies.
+#[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "kebab-case")]
+enum ProgressPhase {
+    Step,
+    Rpc,
+    RpcReturn,
+    Http,
+    HttpReturn,
+    Transition,
+    Rtc,
+    Media,
+    ObserverClose,
+    Pump,
+    Idle,
+}
+#[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "camelCase")]
 enum Method {
     AdmitKey,
@@ -45,6 +62,82 @@ enum Method {
     ReadWork,
     ObserveTerminal,
     ObserveSdpRound,
+}
+
+/// One fixed snapshot survives cancellation of the pipe future. A timeout must
+/// report the last actual wait, not lose it with the canceled future. This is
+/// test-harness evidence, never protocol progress or permission to retry work.
+#[derive(Debug)]
+struct StepTrace {
+    step: String,
+    phase: &'static str,
+    frames: usize,
+    callbacks: usize,
+    method: Option<Method>,
+    reply_returned: bool,
+    blocked_ack: bool,
+    node: Option<ProgressPhase>,
+}
+impl StepTrace {
+    fn new(step: &Value) -> Self {
+        Self {
+            // The source is our closed scenario, but cap/sanitize even that input.
+            step: step["name"]
+                .as_str()
+                .unwrap_or("unknown")
+                .chars()
+                .take(40)
+                .map(|c| {
+                    if c.is_ascii_lowercase() || c == '-' {
+                        c
+                    } else {
+                        '?'
+                    }
+                })
+                .collect(),
+            phase: "step-write",
+            frames: 0,
+            callbacks: 0,
+            method: None,
+            reply_returned: false,
+            blocked_ack: false,
+            node: None,
+        }
+    }
+}
+
+fn original_step_diagnostic(
+    state: &AppState,
+    selected: Option<&SelectedHandoffOwner>,
+    expected: Option<ledger::RowId>,
+    discovered: Option<PairSelector>,
+) -> Option<String> {
+    selected.map(|selected| {
+        // Every path here is a primitive try-lock snapshot. In particular, do
+        // not call ordinary terminal/SDP getters while diagnosing their stall.
+        let expected = expected.or_else(|| {
+            discovered.and_then(|selector| {
+                state
+                    .voice_handoff
+                    .fixture_discovered_parent(selected, selector)
+            })
+        });
+        let (selector, ledger) = state
+            .voice_handoff
+            .fixture_sdp_diagnostic(selected, expected);
+        let native = selector.or(discovered).map(|selector| {
+            state
+                .voice_channels
+                .fixture_native_diagnostic(selected, selector)
+        });
+        let session = state
+            .voice_channels
+            .fixture_sdp_session_diagnostic(selected);
+        let confirmation = state
+            .voice_handoff
+            .fixture_confirmation_diagnostic(selected, expected);
+        format!("{ledger}; {confirmation}; {native:?}; independent {session}")
+    })
 }
 #[derive(Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +173,9 @@ struct Callbacks {
     refuse_collect: bool,
     // Rust-only observation scope, derived from actual native discovery, never Node input.
     expected_parent: Option<ledger::RowId>,
+    // Actual test-observed member discovery, diagnostic only. Never browser
+    // selection, callback authority, parent construction or terminal success.
+    diagnostic_selector: Option<PairSelector>,
     pause_setup: bool,
     discovery_hold: Option<super::super::channel::NativeHold>,
     // Negative test-owned cadence barrier; dropping always resumes the actual Host.
@@ -94,6 +190,7 @@ impl Default for Callbacks {
             refuse_publish: true,
             refuse_collect: true,
             expected_parent: None,
+            diagnostic_selector: None,
             pause_setup: false,
             discovery_hold: None,
             deferred_maintenance: None,
@@ -361,9 +458,13 @@ impl Endpoint {
             self.callbacks.expected_parent
         ));
     }
+    pub(crate) fn diagnostic_peer(&mut self, selector: PairSelector) {
+        self.callbacks.diagnostic_selector = Some(selector);
+    }
     /// Scope only the independent test oracle; the normal browser work pump still chooses
     /// its own metadata. The expected full RowId comes from actual native discovery.
     pub(crate) async fn automatic_pair(&mut self, selector: PairSelector) -> ledger::ResolvedRow {
+        self.diagnostic_peer(selector);
         let parent = self.wait_native_derivation(selector).await;
         self.callbacks.expected_parent = Some(parent.id());
         self.automatic_confirmation().await;
@@ -830,6 +931,23 @@ impl Endpoint {
         assert_eq!(parent.sdk_test_released(), Some(false));
         {
             let selected = self.selected();
+            // Both genuine SDP children now exist under this same parent. They
+            // must not masquerade as extra confirmation actions in a failure log.
+            let clock = crate::voice_runtime(&self.state).clock();
+            let mut confirmation = String::new();
+            for _ in 0..20 {
+                confirmation = self
+                    .state
+                    .voice_handoff
+                    .fixture_confirmation_diagnostic(&selected, Some(parent.id()));
+                if confirmation != "ledger index contended" {
+                    break;
+                }
+                // Read-only test observation: brief contention must not invent
+                // a wrong row count or change the original protocol outcome.
+                clock.sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(confirmation.contains("pending=[4,"), "{confirmation}");
             let route = (1..=64)
                 .find_map(|slot| {
                     self.state
@@ -1398,7 +1516,9 @@ async fn drive_streams(
     } else {
         30
     };
-    tokio::time::timeout(
+    let mut trace = StepTrace::new(&step);
+    let expected = callbacks.expected_parent;
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(bound),
         drive_streams_inner(
             state,
@@ -1409,10 +1529,22 @@ async fn drive_streams(
             callbacks,
             diagnostic_scope,
             step,
+            &mut trace,
         ),
     )
-    .await
-    .expect("native/WebCrypto control step exceeded its harness bound")
+    .await;
+    match result {
+        Ok(value) => value,
+        Err(_) => {
+            let detail = original_step_diagnostic(
+                state,
+                diagnostic_scope,
+                expected,
+                callbacks.diagnostic_selector,
+            );
+            panic!("native/WebCrypto control step exceeded its harness bound: {trace:?}; original-scope diagnostics={detail:?}");
+        }
+    }
 }
 #[allow(clippy::too_many_arguments)] // Never resolve a replacement owner on failure.
 async fn drive_streams_inner(
@@ -1424,6 +1556,7 @@ async fn drive_streams_inner(
     callbacks: &mut Callbacks,
     diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
+    trace: &mut StepTrace,
 ) -> (Value, Option<[u8; 32]>) {
     let automatic = step["name"] == "pump";
     let coordinator = step["name"] == "coordinator";
@@ -1444,7 +1577,13 @@ async fn drive_streams_inner(
     } else {
         32
     };
-    for _ in 0..callbacks_bound {
+    // Node samples its single latest diagnostic phase at most once/100ms. Give
+    // that observer a separate allowance for the SAME unchanged30/60s bound;
+    // fast authenticated Capacity loops cannot consume callbacks through logs.
+    // A diagnostic flood still exhausts this finite loop without renewing time.
+    let progress_bound = if coordinator { 600 } else { 300 };
+    for _ in 0..callbacks_bound + progress_bound + 4 {
+        trace.phase = "frame-header";
         let length = output
             .read_u32()
             .await
@@ -1454,28 +1593,37 @@ async fn drive_streams_inner(
             "endpoint exceeded fixed control frame"
         );
         let mut bytes = [0; FRAME_BYTES];
+        trace.phase = "frame-body";
         output.read_exact(&mut bytes[..length]).await.unwrap();
+        trace.frames += 1;
         match serde_json::from_slice::<Frame>(&bytes[..length]).expect("closed metadata protocol") {
             Frame::Done { value } => return (value, published_executor),
             Frame::Failed { reason } => {
-                let detail = diagnostic_scope.map(|selected| {
-                    let (selector, ledger) = state
-                        .voice_handoff
-                        .fixture_sdp_diagnostic(selected, callbacks.expected_parent);
-                    let native = selector.map(|selector| {
-                        state
-                            .voice_channels
-                            .fixture_native_diagnostic(selected, selector)
-                    });
-                    let session = state
-                        .voice_channels
-                        .fixture_sdp_session_diagnostic(selected);
-                    format!("{ledger}; {native:?}; independent {session}")
-                });
-                panic!("actual native/WebCrypto step failed: {reason}; original-scope diagnostics={detail:?}")
+                let detail = original_step_diagnostic(
+                    state,
+                    diagnostic_scope,
+                    callbacks.expected_parent,
+                    callbacks.diagnostic_selector,
+                );
+                panic!("actual native/WebCrypto step failed: {reason}; {trace:?}; original-scope diagnostics={detail:?}")
             }
-            Frame::Blocked => panic!("unexpected blocked-step acknowledgement"),
+            Frame::Progress { phase } => trace.node = Some(phase),
+            Frame::Blocked => {
+                assert_eq!(
+                    trace.step, "wedge",
+                    "unexpected blocked-step acknowledgement"
+                );
+                trace.blocked_ack = true;
+            }
             Frame::Call { method, args } => {
+                trace.callbacks += 1;
+                assert!(
+                    trace.callbacks <= callbacks_bound,
+                    "endpoint exceeded its bounded callback count"
+                );
+                trace.method = Some(method);
+                trace.phase = "native-callback";
+                trace.reply_returned = false;
                 let stop_pump = automatic
                     && matches!(method, Method::ObserveTerminal)
                     && hex::decode(&args.executor)
@@ -1524,6 +1672,7 @@ async fn drive_streams_inner(
                 } else {
                     metadata(state, owner, port, method, args, callbacks.expected_parent).await
                 };
+                trace.reply_returned = true;
                 if matches!(method, Method::Setup) && reply.is_ok() && callbacks.pause_setup {
                     // Setup has installed the actual Session, but Node cannot ACK it until
                     // this reply returns. Reserve its existing sole factory position here;
@@ -1566,6 +1715,7 @@ async fn drive_streams_inner(
                     // the SAME retained broker decide recovery; never panic or dump input.
                     Err(()) => json!({"tag":"reply", "ok":false}),
                 };
+                trace.phase = "reply-write";
                 write(input, envelope).await;
                 drop(reply);
             }
@@ -1915,32 +2065,25 @@ async fn wedged_node_step_is_bounded_and_actual_child_stderr_and_service_are_col
     };
     let selected = endpoint.selected();
     let port = endpoint.port;
-    let wedged = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        catch_fixture(async {
-            write(
-                endpoint.input.as_mut().unwrap(),
-                json!({"tag":"step", "name":"wedge"}),
-            )
-            .await;
-            let output = endpoint.output.as_mut().unwrap();
-            let length = output.read_u32().await.unwrap() as usize;
-            assert!((1..=FRAME_BYTES).contains(&length));
-            let mut bytes = [0; FRAME_BYTES];
-            output.read_exact(&mut bytes[..length]).await.unwrap();
-            assert!(matches!(
-                serde_json::from_slice::<Frame>(&bytes[..length]).unwrap(),
-                Frame::Blocked
-            ));
-            // The child acknowledges its blocked state before this timer starts. It never
-            // completes the step; this bounds external fixture IO, not protocol time.
-            tokio::time::timeout(std::time::Duration::from_millis(100), output.read_u32()).await
-        }),
-    )
-    .await;
+    // Exercise the SAME production harness wrapper/report as an actual failed
+    // scenario, including its unchanged30s observer bound. The positive Blocked
+    // frame must have arrived; EOF or a slow child before ACK is not success.
+    let wedged = catch_fixture(endpoint.step(json!({"tag":"step", "name":"wedge"}))).await;
+    let reported = wedged
+        .err()
+        .and_then(|failure| failure.downcast::<String>().ok())
+        .map(|message| *message)
+        .unwrap_or_default();
     let success = endpoint.collect().await;
-    assert!(matches!(wedged, Ok(Ok(Err(_)))) && !success,
-        "only the acknowledged wedged step's timeout is success; EOF/read errors or pre-ACK timeout are failures");
+    assert!(
+        reported.contains("exceeded its harness bound")
+            && reported.contains("step: \"wedge\"")
+            && reported.contains("phase: \"frame-header\"")
+            && reported.contains("blocked_ack: true")
+            && reported.contains("original-scope diagnostics=Some")
+            && !success,
+        "only the acknowledged wedge's original wrapper timeout/report is success: {reported}"
+    );
     assert!(
         endpoint.child.try_wait().unwrap().is_some(),
         "the actual child was reaped"
@@ -1963,6 +2106,29 @@ async fn wedged_node_step_is_bounded_and_actual_child_stderr_and_service_are_col
     );
     drop((selected, endpoint));
     fixture.close().await;
+}
+
+#[test]
+fn diagnostic_progress_rejects_payloads_unknown_phases_and_unknown_metadata() {
+    assert!(matches!(
+        serde_json::from_value::<Frame>(json!({"tag":"progress", "phase":"rtc"})),
+        Ok(Frame::Progress {
+            phase: ProgressPhase::Rtc
+        })
+    ));
+    for frame in [
+        json!({"tag":"progress", "phase":"secret-key"}),
+        json!({"tag":"progress", "phase":"http", "body":"must not enter diagnostics"}),
+        json!({"tag":"progress", "phase":["rtc"]}),
+    ] {
+        assert!(serde_json::from_value::<Frame>(frame).is_err());
+    }
+    let trace = StepTrace::new(&json!({"name":"🔑".repeat(500)}));
+    assert_eq!(
+        trace.step,
+        "?".repeat(40),
+        "fixed diagnostic string and closed ASCII"
+    );
 }
 
 #[tokio::test]
