@@ -1,3 +1,9 @@
+import { DEFAULT_VOICE_BROWSER_BUDGET, voiceBrowserBudget, type VoiceBrowserBudget } from "./voice-browser-budget.ts";
+import { VoiceAudioFunding } from "./voice-audio-funding.ts";
+import { VoiceAudioCapturePool, VOICE_AUDIO_CAPTURE_POOL_BYTES, VOICE_AUDIO_CAPTURE_BYTES } from "./voice-audio-capture.ts";
+import { VoiceMediaStatus } from "./voice-media-status.ts";
+import { reserveVoiceBytePayment, type VoiceByteLedger } from "./voice-byte-ledger.ts";
+import { VOICE_NATIVE_MEDIA_BYTES } from "./voice-native-media.ts";
 import { VOICE_AUDIO_FIXTURE_MAX_SDP } from "../scripts/voice-audio-sdp-fixture.ts";
 import { encodeVoiceMediaOriginal, encodeVoiceMediaExisting } from "./voice-ipc-media.ts";
 import { VOICE_SESSION_LIFECYCLE_BYTES } from "./voice-session-lifecycle.ts";
@@ -51,9 +57,11 @@ const historyVector = (name: string) => {
  * selected point, never this broker's private key or its Session internals/counters. */
 async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identitySeed = 1,
     deviceSettings: VoiceRtcDeviceSettingsSource | null = null,
-    subscriptionHooks: { subscribe?(): void; unsubscribe?(): void } | null = null) {
+    subscriptionHooks: { subscribe?(): void; unsubscribe?(): void } | null = null,
+    configuredAdmission = false, memoryBudget: VoiceBrowserBudget = DEFAULT_VOICE_BROWSER_BUDGET) {
   const cleanups: Array<() => void> = [];
   let ordinary = 0, setups = 0, settlements = 0, loseSetup = false, loseSettle = false;
+  let retainedProcessBytes = 0;
   let setupClosed = false, published: Uint8Array | null = null, executor = "";
   let collections = 0, loseCollection = false;
   let tamperSetup = false, badBody = false, failEncrypt = false;
@@ -126,7 +134,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       }
       timers.delete(id as number); const hook = cancelHook; cancelHook = null; hook?.();
     },
-  });
+  }, memoryBudget);
   const selectedNative: VoiceSelectedKeyNative = {
     async admit(owner, value) { executor = value; return { owner, executor, permit: "permit", join: hash(2), kind: "admitted" }; },
     async publish(owner, executor, permit, point) { published = point.slice(); return { owner, executor, permit, join: hash(2), keyRef: hash(3) }; },
@@ -154,7 +162,9 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       async activate(candidate) { return { owner: candidate, group: candidate === controller ? null : group,
         join: candidate === controller ? null : hash(2) }; }, async end() {},
     };
-    const calls = broker.nativeConfiguredAppCalls(metadata, selectedNative, bootNative, deviceSettings, bootTransport);
+    const calls = configuredAdmission
+      ? broker.nativeConfiguredAdmissionAppCalls(metadata, selectedNative, bootNative, deviceSettings, bootTransport)
+      : broker.nativeConfiguredAppCalls(metadata, selectedNative, bootNative, deviceSettings, bootTransport);
     appCall = calls.prepare(1, "2"); appStarted = appCall.start();
     const originals = (broker as unknown as { selectedKeys: Map<string, { owner: VoiceCryptoOwner; outcome: VoiceSelectedKeyOutcome | null }> }).selectedKeys;
     await until(() => originals.has(token));
@@ -272,6 +282,10 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     return result;
   };
   const transport = bootTransport ?? nativeTransport;
+  const capacity = configuredAdmission ? installAdmissionEndpoint({
+    actions(responder) { actionResponder = responder; }, operations: () => [...operations],
+    cleanup(work) { cleanups.push(work); },
+  }) : null;
   if (appCall) {
     // The pending bootstrap exposed no Session/body. Now both independent endpoints
     // exist, resume that SAME paid original instead of constructing another channel.
@@ -286,10 +300,11 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     // Entered terminal-handle dispatch can finish after the last IPC activity. Join
     // its queued disposal tail too; End alone is never proof of that stack's return.
     await flush();
-    assert.equal(broker.counts().bytes, deviceSettings ? VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES : 0);
+    assert.equal(broker.counts().bytes, (deviceSettings ? VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES : 0) + retainedProcessBytes);
   });
   return {
-    owner, broker, native, transport, key: selected.key, admission, appCall,
+    owner, broker, native, transport, key: selected.key, admission, appCall, capacity,
+    retainProcessBytes(bytes: number) { retainedProcessBytes += bytes; },
     handoffReady(plan: Parameters<VoiceCryptoBroker["prepareNativeSdpHandoff"]>[2]): boolean {
       // The real App lifecycle keeps channel activity nonzero even with no codec
       // work. Observe the SAME scheduler's joined key/variable-state predicate; a
@@ -372,9 +387,12 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
 /** Independent capacity endpoint model on the ACTUAL authenticated WebCrypto/HTTP
  * framing above. It cannot inspect browser keys/counters or manufacture local drain.
  * Rust's real Actor/TCP tests separately establish these native state transitions. */
-async function admissionFixture(t: TestContext,
-  hooks: { subscribe?(): void; unsubscribe?(): void } | null = null) {
-  const f = await fixture(t, undefined, 1, null, hooks);
+type CapacityEndpoint = {
+  actions(responder: ((header: VoiceIpcHeader, opened: Uint8Array) =>
+    { kind: 0 | 1 | 2; body: Uint8Array } | Promise<{ kind: 0 | 1 | 2; body: Uint8Array }>) | null): void;
+  operations(): number[]; cleanup(work: () => void): void;
+};
+function installAdmissionEndpoint(f: CapacityEndpoint) {
   let pinned = false, canceled = false, canonical = 0n, floor = 0n;
   let pressure = false, heldNative = false, identity = hash(42);
   const requests: Array<{ kind: number; generation: bigint }> = [];
@@ -408,9 +426,123 @@ async function admissionFixture(t: TestContext,
     return { kind: 0, body: reply };
   });
   f.cleanup(() => { pressure = false; heldNative = false; identity = hash(42); });
-  return { ...f, requests: () => [...requests], probes: () => [...probes], pressure(value: boolean) { pressure = value; },
+  return { requests: () => [...requests], probes: () => [...probes], pressure(value: boolean) { pressure = value; },
     holdNative(value: boolean) { heldNative = value; }, incarnation(value: string) { identity = value; } };
 }
+
+async function admissionFixture(t: TestContext,
+  hooks: { subscribe?(): void; unsubscribe?(): void } | null = null) {
+  const f = await fixture(t, undefined, 1, null, hooks);
+  return { ...f, ...installAdmissionEndpoint(f) };
+}
+
+const configuredAdmissionSettings = () => ({ stun: "stun:device.example.test", turn: "turns:relay.example.test",
+  username: "device-user", credential: "device-secret", policy: "relay" });
+
+/** This is a receipt-boundary fixture for the existing capture helper, not actual
+ * native media/RTC permission. The real capture worker and its original payment,
+ * held SDK promise, returned tracks and cleanup are exercised below. */
+function captureAuthority() {
+  const status = new VoiceMediaStatus(hash(77));
+  status.finish(status.begin(0), { proof: hash(77), admitted: true, current: true,
+    closed: false, released: false, retireInMs: 0 }, 0);
+  return { status, clock: { now: () => 0, schedule() { assert.fail("capture must not create a media timer"); },
+    cancel() { assert.fail("capture must not cancel a media timer"); } } };
+}
+
+test("configured admission and actual capture retain independent original fees through End and late permission", async t => {
+  const f = await fixture(t, undefined, 1, configuredAdmissionSettings, null, true), channel = f.admissionChannel();
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved");
+  assert.equal(f.appCall!.snapshot().phase, "ready", "bootstrap-ready does not assert operational Ready/RTC");
+  assert.equal(f.broker.counts().bytes, 236 * 1024, "bootstrap setup fee has actually returned before preclaim");
+  assert.deepEqual(f.capacity!.probes(), [{ kind: 1, generation: 1n }]);
+  assert.ok(f.operations().indexOf(29) < f.operations().indexOf(9));
+  assert.ok(f.operations().indexOf(30) < f.operations().indexOf(9));
+
+  // Test-only observation supplies the SAME actual ledger to the independently
+  // implemented audio helper. There is no production microphone/RTC adapter yet.
+  const ledger = (f.broker as unknown as { byteLedger: VoiceByteLedger }).byteLedger;
+  const funding = VoiceAudioFunding.create(ledger); f.retainProcessBytes(VOICE_AUDIO_CAPTURE_POOL_BYTES);
+  const pool = new VoiceAudioCapturePool(), scope = funding.bind(f.owner.group), capture = pool.session(scope.budget);
+  const permission = gate(), delivered = gate(); let result!: MediaStream, sdkCalls = 0, stops = 0, enabled = true;
+  const track = { kind: "audio", readyState: "live", get enabled() { return enabled; },
+    set enabled(value: boolean) { enabled = value; }, stop() { stops++; } };
+  result = { getTracks: () => [track] } as unknown as MediaStream;
+  f.cleanup(() => { capture.close(); scope.close(); permission.release(); delivered.release(); });
+  assert.equal(capture.request(captureAuthority(), "", { async getUserMedia() {
+    sdkCalls++; await permission.promise; delivered.release(); return result;
+  } }), true);
+  const actualCaptureReturn = pool.settlement(); await until(() => sdkCalls === 1);
+  assert.equal(f.broker.counts().bytes, 248 * 1024);
+  assert.equal(ledger.groups.get(f.owner.group), 248 * 1024);
+  const fullPeerInventory = ledger.groups.get(f.owner.group)! + 16 * (VOICE_NATIVE_MEDIA_BYTES + 2 * 1024);
+  assert.equal(fullPeerInventory, 408 * 1024);
+  assert.equal(f.broker.memoryBudget.groupBytes - fullPeerInventory, 104 * 1024,
+    "structural16-peer inventory is headroom evidence, not actual admission-mode RTC acceptance");
+
+  f.capacity!.holdNative(true); capture.close(); scope.close();
+  let appReturned = false; const closing = f.appCall!.close().then(() => { appReturned = true; });
+  await until(() => f.capacity!.requests().some(request => request.kind === 2) && f.physicalIdle());
+  assert.equal(appReturned, false); assert.ok(f.broker.counts().bytes >= 128 * 1024 + VOICE_AUDIO_CAPTURE_BYTES);
+  f.capacity!.holdNative(false); f.broker.retrySelectedJoinKeys(); await closing;
+  assert.equal(f.broker.counts().bytes, VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES +
+    VOICE_AUDIO_CAPTURE_POOL_BYTES + VOICE_AUDIO_CAPTURE_BYTES);
+  assert.equal(ledger.groups.get(f.owner.group), VOICE_AUDIO_CAPTURE_POOL_BYTES + VOICE_AUDIO_CAPTURE_BYTES);
+  assert.equal(pool.pending, true); assert.equal(stops, 0);
+
+  const replacementScope = funding.bind(hash(88)), replacement = pool.session(replacementScope.budget);
+  assert.equal(replacement.request(captureAuthority(), "", { async getUserMedia() { sdkCalls++; return result; } }), false);
+  assert.equal(sdkCalls, 1, "old permission work cannot be replaced or make another capsule");
+  permission.release(); await delivered.promise; await actualCaptureReturn; await flush();
+  assert.equal(enabled, false); assert.equal(stops, 1); assert.equal(pool.pending, false);
+  assert.equal(ledger.groups.has(f.owner.group), false);
+  replacement.close(); replacementScope.close();
+  assert.equal(f.broker.counts().bytes, VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES + VOICE_AUDIO_CAPTURE_POOL_BYTES);
+});
+
+test("a selected256KiB local policy stays fixed under exact configured admission and capture pressure", async t => {
+  const f = await fixture(t, undefined, 1, configuredAdmissionSettings, null, true, voiceBrowserBudget(256));
+  const channel = f.admissionChannel(), claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved");
+  const ledger = (f.broker as unknown as { byteLedger: VoiceByteLedger }).byteLedger;
+  const funding = VoiceAudioFunding.create(ledger); f.retainProcessBytes(VOICE_AUDIO_CAPTURE_POOL_BYTES);
+  const scope = funding.bind(f.owner.group), pool = new VoiceAudioCapturePool(), capture = pool.session(scope.budget);
+  const held = gate(); let entered = false;
+  f.cleanup(() => { capture.close(); scope.close(); held.release(); });
+  assert.equal(capture.request(captureAuthority(), "", { async getUserMedia() {
+    entered = true; await held.promise; throw new Error("permission denied after End");
+  } }), true);
+  const returned = pool.settlement(); await until(() => entered);
+  const pressure = reserveVoiceBytePayment(ledger, f.owner.group,
+    f.broker.memoryBudget.groupBytes - ledger.groups.get(f.owner.group)!);
+  f.cleanup(() => pressure.release());
+  assert.equal(ledger.groups.get(f.owner.group), f.broker.memoryBudget.groupBytes);
+  assert.throws(() => reserveVoiceBytePayment(ledger, f.owner.group, 1), /capacity reached/);
+  assert.equal(f.broker.memoryBudget.groupBytes, 256 * 1024);
+  pressure.release(); capture.close(); scope.close(); held.release(); await returned; await flush();
+  assert.equal(f.broker.counts().bytes, 236 * 1024 + VOICE_AUDIO_CAPTURE_POOL_BYTES);
+});
+
+test("configured App mode selection is immutable before activation in either direction", () => {
+  for (const firstAdmission of [false, true]) {
+    const unavailable = async (): Promise<never> => { assert.fail("inert factory must not invoke native"); };
+    const native: VoiceAppNative = { prepareController: unavailable, prepareOwner: unavailable, activate: unavailable, end: unavailable };
+    const selected = { admit: unavailable, publish: unavailable, settle: unavailable };
+    const ipc: VoiceIpcNative = { setup: unavailable, settleSetup: unavailable, collectChannel: unavailable, readWork: unavailable };
+    const broker = new VoiceCryptoBroker({ admit: unavailable, settle: unavailable, commitInbound: unavailable }, real);
+    const original = firstAdmission
+      ? broker.nativeConfiguredAdmissionAppCalls(native, selected, ipc, configuredAdmissionSettings)
+      : broker.nativeConfiguredAppCalls(native, selected, ipc, configuredAdmissionSettings);
+    assert.equal(firstAdmission
+      ? broker.nativeConfiguredAdmissionAppCalls(native, selected, ipc, configuredAdmissionSettings)
+      : broker.nativeConfiguredAppCalls(native, selected, ipc, configuredAdmissionSettings), original);
+    assert.throws(() => firstAdmission
+      ? broker.nativeConfiguredAppCalls(native, selected, ipc, configuredAdmissionSettings)
+      : broker.nativeConfiguredAdmissionAppCalls(native, selected, ipc, configuredAdmissionSettings), /transport changed; reload required/);
+    assert.equal(broker.counts().bytes, VOICE_APP_SESSION_BYTES + VOICE_RTC_CONFIGURATION_BYTES);
+  }
+});
 
 test("admission pairing pins before ACK and constructor mode survives remount", async t => {
   const f = await admissionFixture(t), channel = f.admissionChannel();
@@ -711,12 +843,13 @@ test("admission pairing negative cleanup needs no fresh browser group credits", 
   await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved");
   const ledger = f.broker as unknown as { charge(owner: VoiceCryptoOwner, bytes: number): void;
     refund(owner: VoiceCryptoOwner, bytes: number): void };
-  const filler = 256 * 1024 - f.broker.counts().bytes; ledger.charge(f.owner, filler);
+  const filler = DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - f.broker.counts().bytes; ledger.charge(f.owner, filler);
   let filled = true;
   f.cleanup(() => { if (filled) { filled = false; ledger.refund(f.owner, filler); } });
   claim.retire();
   await until(() => f.rowBudget().reserved === 0);
-  assert.equal(f.broker.counts().bytes, 128 * 1024, "only the actual original envelope returned");
+  assert.equal(f.broker.counts().bytes, DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - 128 * 1024,
+    "only the actual original envelope returned");
   filled = false; ledger.refund(f.owner, filler);
 });
 
@@ -1906,7 +2039,7 @@ test("browser preclaim moves the same full-pool bytes and rows into actual frame
   // duplicate Intake. The old envelope alone must admit the exact conversion.
   const state = f.broker as unknown as { charge(owner: VoiceCryptoOwner, bytes: number): void;
     refund(owner: VoiceCryptoOwner, bytes: number): void };
-  const filler = 256 * 1024 - held;
+  const filler = DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - held;
   state.charge(f.owner, filler);
   let fillerHeld = true;
   f.cleanup(() => { if (fillerHeld) { fillerHeld = false; state.refund(f.owner, filler); } });
@@ -1962,7 +2095,7 @@ test("browser preclaim pressure refusal creates no claim and a later retry uses 
   const f = await fixture(t), channel = f.channel(); await channel.status();
   const state = f.broker as unknown as { charge(owner: VoiceCryptoOwner, bytes: number): void;
     refund(owner: VoiceCryptoOwner, bytes: number): void };
-  const filler = 256 * 1024 - f.broker.counts().bytes;
+  const filler = DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - f.broker.counts().bytes;
   state.charge(f.owner, filler);
   const full = f.broker.counts().bytes;
   try {
@@ -4971,7 +5104,7 @@ for (const low of [true, false]) test(`Session coordinator drives RTC through ac
 test("Session coordinator funding refuses before publication and its fee survives observer stop until End", async t => {
   const f = await fixture(t), channel = f.channel(); await channel.status();
   const privateBudget = f.broker as unknown as { charge(owner: typeof f.owner, bytes: number): void; refund(owner: typeof f.owner, bytes: number): void };
-  const pressure = 256 * 1024 - f.broker.counts().bytes - 1024;
+  const pressure = DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - f.broker.counts().bytes - 1024;
   const actualHeld = new Uint8Array(pressure); privateBudget.charge(f.owner, actualHeld.length);
   const full = f.broker.counts().bytes;
   assert.throws(() => f.broker.observeNativeLifecycle(f.owner, channel, f.key), /capacity/);

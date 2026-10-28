@@ -1,3 +1,4 @@
+import { DEFAULT_VOICE_BROWSER_BUDGET } from "./voice-browser-budget.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TestContext } from "node:test";
@@ -211,10 +212,13 @@ test("protected rows serialize through actual prior settlement and keep their re
 
 test("protected work progresses at the full ordinary byte and queue limits", async t => {
   const { low } = await fixture(t), held = gate(); t.after(held.release);
-  const free = 256 * 1024 - low.broker.counts().bytes;
-  const ordinary = low.broker.run(low.owner, "derive", free, () => held.promise);
-  const queued = Array.from({ length: 32 }, () => low.broker.run(low.owner, "derive", 0, () => held.promise));
-  assert.equal(low.broker.counts().bytes, 256 * 1024); assert.equal(low.broker.counts().queued, 32);
+  const free = DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - low.broker.counts().bytes;
+  const ordinary = Promise.all(Array.from({ length: Math.ceil(free / (256 * 1024)) }, (_, index) =>
+    low.broker.run(low.owner, "derive", Math.min(256 * 1024, free - index * 256 * 1024), () => held.promise)));
+  // One bounded pressure job can already occupy a queue position. Fill the SAME
+  // original32-position queue, not32 additional positions beside that owned job.
+  const queued = Array.from({ length: 32 - low.broker.counts().queued }, () => low.broker.run(low.owner, "derive", 0, () => held.promise));
+  assert.equal(low.broker.counts().bytes, DEFAULT_VOICE_BROWSER_BUDGET.groupBytes); assert.equal(low.broker.counts().queued, 32);
   const action = low.register(low.input(1, text("Hello")));
   assert.equal((await action.attempt()).kind, "accepted");
   held.release(); await Promise.all([ordinary, ...queued]);

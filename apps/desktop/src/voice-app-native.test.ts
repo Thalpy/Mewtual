@@ -1,3 +1,5 @@
+import { DEFAULT_VOICE_BROWSER_BUDGET } from "./voice-browser-budget.ts";
+import { reserveVoiceBytePayment, type VoiceByteLedger } from "./voice-byte-ledger.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { voiceAppNative, windowVoiceAppCalls } from "./voice-app-native.ts";
@@ -74,10 +76,10 @@ test("real broker composition retains one window transport and joins held native
 
 test("the SAME fixed reservation binds group before key admission and does not spend full group capacity", async () => {
   const host = {}, broker = windowVoiceCryptoBroker(unavailable, host), commands: string[] = [];
-  const occupants = Array.from({ length: 64 }, (_, n) => createVoiceCryptoOwner("occupant-" + n, hash(1), () => true));
+  const occupants = Array.from({ length: DEFAULT_VOICE_BROWSER_BUDGET.groupBytes / 4096 }, (_, n) => createVoiceCryptoOwner("occupant-" + n, hash(1), () => true));
   const keyNative = voiceJoinKeyNative(async <T>() => { assert.fail("unstarted keys cannot invoke"); return undefined as T; });
   for (const original of occupants) broker.selectJoinKey(original, keyNative);
-  assert.equal(broker.counts().bytes, 256 * 1024);
+  assert.equal(broker.counts().bytes, DEFAULT_VOICE_BROWSER_BUDGET.groupBytes);
   const invoke = async <T>(command: string, args: Record<string, unknown>): Promise<T> => {
     commands.push(command);
     if (command === "prepare_voice_controller") return controller as T;
@@ -87,7 +89,7 @@ test("the SAME fixed reservation binds group before key admission and does not s
     assert.equal(command, "end_voice_owner"); return undefined as T;
   };
   const calls = windowVoiceAppCalls(invoke, host);
-  assert.equal(broker.counts().bytes, 256 * 1024 + VOICE_APP_SESSION_BYTES);
+  assert.equal(broker.counts().bytes, DEFAULT_VOICE_BROWSER_BUDGET.groupBytes + VOICE_APP_SESSION_BYTES);
   const call = calls.prepare(1, "2"); assert.equal(await call.start(), "unavailable"); await call.close();
   assert.equal(commands.includes("admit_voice_join_key"), false);
   await Promise.all(occupants.map(original => broker.retireNativeOwner(original)));
@@ -240,11 +242,16 @@ test("configured facade prepays both inventories and retains group payment throu
   await until(() => events.includes("collect_voice_channel") && broker.counts().bytes === fee);
   assert.equal(returned, false, "native cleanup alone cannot return the configuration group fee");
   const probe = createVoiceCryptoOwner("configuration-pressure", hash(1), () => true);
-  const bytes = 256 * 1024 - fee + 1;
-  await assert.rejects(broker.run(probe, "generate", bytes, async () => undefined), /capacity/);
+  const ledger = (broker as unknown as { byteLedger: VoiceByteLedger }).byteLedger;
+  // Independently retained ordinary pressure keeps the one-byte probe below the
+  // unchanged per-job cap while still testing exact GROUP fee return.
+  const pressure = reserveVoiceBytePayment(ledger, probe.group, DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - fee);
+  t.after(() => pressure.release());
+  await assert.rejects(broker.run(probe, "generate", 1, async () => undefined), /capacity/);
   releaseVoiceRtcConfiguration(loan); loan = null; await closing;
   assert.equal(call.snapshot().phase, "closed"); assert.equal(returned, true);
-  await assert.rejects(broker.run(probe, "generate", bytes, async () => undefined), /unavailable/);
+  await assert.rejects(broker.run(probe, "generate", 1, async () => undefined), /unavailable/);
+  pressure.release();
   await until(() => broker.counts().active === 0);
   assert.deepEqual(broker.counts(), { active: 0, queued: 0, bytes: fee });
 });
@@ -270,7 +277,7 @@ test("configured process/group refusal precedes its settings callback and all ke
       held.release(); await Promise.all(work); await until(() => broker.counts().active === 0);
       assert.equal(broker.counts().bytes, 0);
     } else {
-      const occupants = Array.from({ length: 64 }, (_, n) => createVoiceCryptoOwner("occupant-" + n, hash(1), () => true));
+      const occupants = Array.from({ length: DEFAULT_VOICE_BROWSER_BUDGET.groupBytes / 4096 }, (_, n) => createVoiceCryptoOwner("occupant-" + n, hash(1), () => true));
       const keys = voiceJoinKeyNative(async <T>() => { assert.fail("no key admission"); return undefined as T; });
       for (const original of occupants) broker.selectJoinKey(original, keys);
       const calls = broker.nativeConfiguredAppCalls(voiceAppNative(invoke), keys, voiceIpcNative(invoke), source);
