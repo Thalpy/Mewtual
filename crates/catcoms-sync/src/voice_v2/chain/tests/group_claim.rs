@@ -33,9 +33,7 @@ fn original_workflow_payment_survives_actual_blocked_last_publisher() {
     let workflow = first.workflow().unwrap();
     first.close();
     drop(first);
-    let mut workflow = Arc::try_unwrap(workflow)
-        .ok()
-        .expect("actual sole Workflow");
+    let mut workflow = Arc::try_unwrap(workflow).expect("actual sole Workflow");
     let (entered, resume) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
     workflow
         ._retirement
@@ -84,9 +82,7 @@ fn protected_exchange_own_payment_survives_actual_blocked_final_claim() {
     let successor = Exchange::from_transferred(ticket, Vec::new());
     drop(control.retire_all());
     drop((workflow, first));
-    let mut successor = Arc::try_unwrap(successor)
-        .ok()
-        .expect("actual sole successor");
+    let mut successor = Arc::try_unwrap(successor).expect("actual sole successor");
     let (entered, resume) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
     successor.park_progress_release_for_test(entered.clone(), resume.clone());
     parked_drop(
@@ -101,9 +97,8 @@ fn protected_exchange_own_payment_survives_actual_blocked_final_claim() {
 #[test]
 fn standalone_exchange_own_payment_survives_actual_blocked_final_claim() {
     let pool = Arc::new(Resources::default());
-    let mut successor = Arc::try_unwrap(exchange(&pool).unwrap())
-        .ok()
-        .expect("actual sole standalone Exchange");
+    let mut successor =
+        Arc::try_unwrap(exchange(&pool).unwrap()).expect("actual sole standalone Exchange");
     let (entered, resume) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
     successor.park_progress_release_for_test(entered.clone(), resume.clone());
     parked_drop(

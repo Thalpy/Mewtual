@@ -18,10 +18,11 @@ pass, including inert/decomposition overlap. All729 focused V2 tests pass in20.9
 actual final-release barriers, foreign-owner/pressure/refusal cases and decomposition unwind.
 Read-only design/adversarial review and re-review have no remaining finding.
 
-Complete Root/native/frontend validation and separate native checks remain pending for this
+Strict Root Clippy across all targets/features and the complete frontend (3,539 tests)
+pass. Complete Root/native validation and separate native checks remain pending for this
 NEW source. The green combined candidate below predates these changes. Initial frontend
 invocation found missing worktree dependencies and executed no test bodies; a verified
-same-lockfile junction now shares the existing installation, and the real rerun is running.
+same-lockfile junction shares the existing installation, and the real rerun passes74.84s.
 This branch still has no native preclaim registration, signed bilateral Request/Grant/Commit,
 failed-round Forget, production audio composition or member relay. V2 stays OFF; #73's red
 all-three reproduction is not incorporated. One desktop remains available.
