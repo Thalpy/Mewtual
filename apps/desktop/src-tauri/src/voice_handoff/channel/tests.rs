@@ -42,7 +42,7 @@ fn native_diagnostics_retain_no_session_or_credit_owner() {
     let weak = Arc::downgrade(&session);
     let identity_owners = Arc::strong_count(&session.identity);
     session.fixture_native_started(0);
-    session.fixture_sdp_stage([5; 16], 5);
+    session.fixture_sdp_stage([5; 16], 1, 5);
     session.fixture_sdp_finished(Some(crate::voice_handoff::factory::Refused::Protocol(
         catcoms_sync::voice_v2::VoiceError::Capacity,
     )));

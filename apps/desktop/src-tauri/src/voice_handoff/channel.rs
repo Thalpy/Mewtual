@@ -620,6 +620,12 @@ pub(super) struct Incoming {
     worker: HeaderWorker,
 }
 impl Incoming {
+    /// Test-only original authenticated request nonce. Reading it changes no authority
+    /// or counters, and never waits on the mutable Session counters.
+    #[cfg(test)]
+    pub(super) fn fixture_sequence(&self) -> u64 {
+        self.request.sequence()
+    }
     /// Read-only test observation from the real prepared worker. This changes no authority,
     /// counters, capacity or scheduling and cannot be selected by HTTP or ordinary IPC.
     #[cfg(test)]
