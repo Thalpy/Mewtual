@@ -25,6 +25,8 @@ pub(in crate::voice_v2) const LOW_READY_RECEIPT_BYTES: usize = ROW_BYTES + 64;
 const ROWS: usize = 12;
 const NO_ROW: u8 = u8::MAX;
 mod admission;
+mod capacity;
+pub use capacity::ChainCapacity;
 mod derivation;
 mod established;
 /// Separately prepaid native SDP storage; no SDK or protocol permission by itself.
@@ -319,7 +321,9 @@ impl Drop for ProgressCapacityOwner {
 }
 #[cfg(test)]
 pub(in crate::voice_v2) fn progress_capacity_metadata_bytes() -> usize {
-    std::mem::size_of::<ProgressCapacity>()
+    // The same original Ready fee also covers an inert carrier and conservative overlap
+    // while it is decomposed into the eventual paid Root graph.
+    std::mem::size_of::<ProgressCapacity>() + ChainCapacity::metadata_bytes()
 }
 struct WorkflowState {
     closed: bool,
@@ -572,107 +576,26 @@ impl PreparedChain {
         if !binding.live() {
             return Err(VoiceError::Unauthorized);
         }
-        let packets = packet_slots.reserve_confirmation(binding.low)?;
-        // Pay the original fixed graph before allocating its lease, binding or publisher.
-        let metadata =
-            resources.charge(binding.scope.group, METADATA_BYTES, ResourceKind::Retained)?;
-        let live = CallLease::default();
-        let binding = Arc::new(PlanBinding {
-            _metadata: metadata,
-            value: binding,
-            transition: transition::FinishWindow::default(),
-            workflow_drained: AtomicBool::new(false),
-            successor_closed: AtomicBool::new(false),
-            whole_closed: AtomicBool::new(false),
-            successor_busy: AtomicBool::new(false),
-            low_ready: AtomicBool::new(false),
-            history_requested: AtomicBool::new(false),
-            history_records: AtomicUsize::new(0),
-        });
-        let history = Arc::new(HistoryPlan {
-            binding: binding.clone(),
-            live: live.clone(),
-            bytes: resources.reserve(binding.scope.group, ROWS * ROW_BYTES)?,
-            pool: slots.clone(),
-            slots: slots.reserve(ROWS)?,
-            state: Mutex::new(HistoryState {
-                closed: false,
-                serial: 0,
-                active_row: NO_ROW,
-                issued: 0,
-                candidates: if binding.low {
-                    Candidates::Low(std::array::from_fn(|_| None))
-                } else {
-                    Candidates::High(std::array::from_fn(|_| None))
-                },
-                followups: None,
-            }),
-        });
-        // Fund the complete variable progression BEFORE the first Derive can be exposed.
-        // Confirmation and SDP share one core, rather than paying both peaks at Ready.
-        // A DIRECT reservation loan sequesters the successor-only half: old borrowers still
-        // have precisely VARIABLE_BYTES, and this loan must never retain Workflow custody.
-        let reserve = resources.reserve(binding.scope.group, super::negotiation::EXCHANGE_BYTES)?;
-        let ready = Arc::new(super::ready::capacity::ReadyCapacity::new(
-            &resources,
+        let capacity = ChainCapacity::reserve(
+            resources.clone(),
             binding.scope.group,
-        )?);
-        let progress_claim =
-            GroupProgressClaim::reserve(&resources, binding.scope.group, ready.metadata.clone())?;
-        let closing = SdpCapacityClosing {
-            core: reserve.clone(),
-            ready,
-        };
-        let escrow = ByteBudget::Reserved(reserve.clone()).charge(
-            &resources,
-            binding.scope.group,
-            super::negotiation::EXCHANGE_BYTES - VARIABLE_BYTES,
-            ResourceKind::Retained,
+            binding.low,
+            slots.clone(),
+            packet_slots,
         )?;
-        // Ready's existing4KiB metadata pays this fixed heap before allocation. Keeping
-        // only fixed handles here preserves the original2KiB chain graph; the Ready growth
-        // guard counts the complete box and aligned shared Ready allocation together.
-        let progress = ProgressCapacityOwner::new(closing, escrow);
-        let crypto = resources.reserve_crypto_lane(binding.scope.group)?;
-        let lowers = resources.group_forward_lanes(binding.scope.group)?;
-        let chain = Arc::new_cyclic(|control| Self {
-            binding: binding.clone(),
-            live: live.clone(),
-            history,
-            control: Mutex::new(Control {
-                closed: false,
-                actions: std::array::from_fn(|_| Weak::new()),
-                workflow: Some(Arc::new(Workflow {
-                    binding: binding.clone(),
-                    live,
-                    control: control.clone(),
-                    reserve,
-                    state: Mutex::new(WorkflowState {
-                        closed: false,
-                        progress: Some(progress),
-                        packets: Some(packets),
-                        crypto: Some(crypto),
-                        lowers: Some(lowers),
-                        handoff_busy: false,
-                        sdp_preparing: false,
-                    }),
-                    _retirement: Some(RetirementPublisher {
-                        binding,
-                        progress: progress_claim,
-                    }),
-                })),
-            }),
-        });
-        // Prepare outside the process lock. A losing plan drops after install releases it;
-        // no resource destructor or callback may run under that shared pool mutex.
-        {
-            let control = chain.control.lock().unwrap_or_else(|e| e.into_inner());
-            resources.install_workflow(
-                chain.binding.scope.group,
-                control.workflow.as_ref().expect("prepared workflow"),
-            )?;
-        }
-        Ok(chain)
+        Self::from_capacity(resources, binding, slots, packet_slots, capacity)
+    }
+
+    /// Trusted native consumption reborrows the CURRENT exact pools. A held capacity
+    /// from a replaced join is not transferable by matching group/role labels.
+    pub(super) fn from_capacity(
+        resources: Arc<Resources>,
+        binding: Binding,
+        slots: Arc<slots::Slots>,
+        packet_slots: &super::packets::PacketSlots,
+        capacity: ChainCapacity,
+    ) -> Result<Arc<Self>, VoiceError> {
+        capacity.into_chain(&resources, binding, &slots, packet_slots)
     }
     /// End/expiry closes pending effects and returns only unused capacity. Existing engines
     /// and input readers remain charged through actual settlement/last drop, even after End.

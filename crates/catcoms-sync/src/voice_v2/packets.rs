@@ -120,6 +120,12 @@ impl PacketSlots {
     }
 }
 impl ConfirmationCapacity {
+    /// Both immutable table identities belong to the CURRENT consuming LocalJoin.
+    /// A same-group replacement has fresh tables; labels cannot adopt its old capacity.
+    pub(super) fn uses_pools(&self, tables: &PacketSlots) -> bool {
+        self.incoming.uses_pool(&tables.incoming) && self.outgoing.uses_pool(&tables.outgoing)
+    }
+
     pub(super) fn subreserve_sdp(&self) -> Result<SdpPacketCapacity, VoiceError> {
         let incoming = self.incoming.subreserve(1)?;
         let outgoing = self.outgoing.subreserve(1)?;

@@ -4,6 +4,16 @@
 App V2 remains disabled. The isolated composition branch deliberately contains a failing
 positive acceptance test. Do not merge it as a green checkpoint or enable V2 from it.
 
+28 October capacity implementation: `communication-v2-admission-completion` now has an
+exact group progression claim through actual original/successor custody and an inert
+`ChainCapacity` reserve/consume seam. It prepays the existing Root/Ready bytes and positions;
+consume requires current concrete pools, group/role/live Binding and the original deadline.
+No execution or readiness is advertised. Root1984/2048 and Ready2344/4096 inventory guards
+and729 focused V2 tests pass; complete gates are pending. This implements only that capacity
+prerequisite. Native registration/generation fencing, bilateral signed agreement/RoundRef,
+new key-domain integration, failed-round Forget and automatic multi-peer progress remain
+unimplemented. The dated reproduction and wider design requirements below remain applicable.
+
 ## What the new test actually establishes
 
 `three_production_browser_coordinators_adopt_every_peer_without_pair_selection` starts

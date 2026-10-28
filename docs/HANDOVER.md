@@ -1,5 +1,31 @@
 # Mewtual; Handover
 
+## Inert admission capacity groundwork (28 October; validation in progress)
+
+The isolated `communication-v2-admission-completion` branch adds reviewed group progression
+custody (`82a83ae3`) and an inert reserve/consume split. The same claim survives actual old
+Workflow work and independent prepared/transferred/Exchange owners. Native factories cannot
+substitute another same-group progression. Release follows actual final cell deallocation;
+plain outer payments survive the claim tail and enclosing Box destruction. Old retained work
+keeps the original Ready4KiB metadata fee until its actual return.
+
+`ChainCapacity` reserves original bytes/positions without a binding, lease or transcript
+clock. Consume reborrows CURRENT Resources/action/packet owners and validates group/role/live
+Binding before moving the exact prepayment and original deadline into the bound chain.
+Root metadata precedes packet allocations and survives its funded objects. No capacity,
+Source allowance or deadline was increased. Root1984/2048 and Ready2344/4096 structural guards
+pass, including inert/decomposition overlap. All729 focused V2 tests pass in20.97s, with
+actual final-release barriers, foreign-owner/pressure/refusal cases and decomposition unwind.
+Read-only design/adversarial review and re-review have no remaining finding.
+
+Complete Root/native/frontend validation and separate native checks remain pending for this
+NEW source. The green combined candidate below predates these changes. Initial frontend
+invocation found missing worktree dependencies and executed no test bodies; a verified
+same-lockfile junction now shares the existing installation, and the real rerun is running.
+This branch still has no native preclaim registration, signed bilateral Request/Grant/Commit,
+failed-round Forget, production audio composition or member relay. V2 stays OFF; #73's red
+all-three reproduction is not incorporated. One desktop remains available.
+
 ## Corrected combined validation passed locally (28 October)
 
 The stacked Score candidate at `fa3107d2` passes the complete native command:

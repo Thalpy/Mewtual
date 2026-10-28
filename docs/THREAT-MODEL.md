@@ -1,5 +1,29 @@
 # Threat model; client integrity & enforcement boundaries
 
+## V2 progression custody before bilateral admission (28 October; candidate)
+
+The group progression gate follows an affine claim shared only by genuine original and
+successor capacity owners. Removing a weak lookup, closing a plan, timeout or strong-zero
+cannot admit a replacement while actual work/preparation remains. Its internal address is
+an opaque registry identity, never network authority. A losing candidate remains unarmed:
+allocator address reuse before the old final publisher clears cannot release that old slot.
+The last private Arc is deallocated before publication; an outer plain credit stays paid
+through publication and through each enclosing graph's destruction. No strong backedge from
+Resources or payment into the work graph exists.
+
+Inert reservation creates no protocol/time/effect authority. Consume requires the current
+native Resources/action/packet owners as well as group/role/live Binding; a replaced join's
+same-valued labels are insufficient. Slots are compared without an allocation/refund probe,
+and original deadlines/allowances do not renew. Root2KiB is paid before packet wrappers and
+retained through all its capacity objects. Ready4KiB pays the inert Box and claim until their
+actual return. Existing ceilings remain; busy execution can still refuse conservatively.
+
+Focused tests cover concurrency, equal-stamp refusal, old/successor return orders, full
+ordinary pressure, foreign pools/role/group, exact position restoration, actual destruction
+barriers and decomposition unwind. This does not authorize bilateral admission or establish
+fair multi-peer progress. Signed incarnation/generation agreement, native registration,
+failed-round collection/replay floors, live audio/relay and activation remain open.
+
 ## Native settings versus Lock and Leave (28 October; candidate)
 
 Cache-limit and saved-file metadata commands carry the UI generation captured before

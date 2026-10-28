@@ -143,6 +143,14 @@ impl GroupProgressClaim {
             + 4 * size_of::<usize>() // both Arc headers
             + size_of::<usize>() // Counts' occupied registry stamp
     }
+
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn same_claim(&self, other: &Self) -> bool {
+        Arc::ptr_eq(
+            self.inner.as_ref().expect("live original"),
+            other.inner.as_ref().expect("live successor"),
+        )
+    }
 }
 impl Drop for GroupProgressClaim {
     fn drop(&mut self) {

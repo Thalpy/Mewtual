@@ -1,5 +1,23 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Inert V2 capacity contract (28 October; candidate, inactive)
+
+The opaque affine `ChainCapacity` has no Clone, serialization, budget accessor or renderer
+command. Internal reserve takes exact Resources/action/packet pools, group and role, and
+creates capacity only. Internal consume requires the caller's CURRENT pools again, a live
+native Binding and matching group/role. A replacement LocalJoin has fresh packet/action
+pools; equal labels cannot adopt the previous join's prepayment. Validation compares owners
+without borrowing/refunding positions. Successful consume charges no new ordinary bytes and
+moves the original Binding deadline unchanged. Failed validation or abandonment returns the
+original owners; it grants no browser, engine, packet or RTC authority.
+
+The same private group claim must accompany Workflow, independent preparation/transfer and
+Exchange. Fixed history and retirement observations do not retain it. Exact registry stamps
+never cross IPC or the wire. Metadata remains funded through the final publisher and Box
+deallocation. The existing Ready4KiB fee stays held while genuine old work owns the claim.
+No wire/persistence/profile or IPC change is made. Native preclaim registration, bilateral
+Request/Grant/Commit and activation are not provided by this API; App V2 remains OFF.
+
 ## Owned microphone device setting (27 October; inactive)
 
 The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after

@@ -65,6 +65,12 @@ impl Slots {
     }
 }
 impl ReservedSlots {
+    /// Pure original-pool identity, including while closed or occupied. Checking an inert
+    /// preclaim must never borrow/refund positions as an authorization side effect.
+    pub(crate) fn uses_pool(&self, expected: &Arc<Slots>) -> bool {
+        Arc::ptr_eq(&self.pool, expected)
+    }
+
     /// Move already-prepaid positions into a child reservation without freeing/recharging
     /// the shared table. The caller must fund the child wrapper before calling this.
     /// Unpublished abandonment returns to this exact parent; parent closure releases only
