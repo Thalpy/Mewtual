@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Ready funding compatibility assertions (28 October; focused reruns passed)
+
+The full Root command on `d55fa0db` stopped with3,915 passes, one failure and25
+existing ignores (36 result groups). The failing sync expiry test expected only
+16KiB at final HandoffLoan return; it actually returned20KiB. Remaining workspace
+groups were not run after that failure. This is not a passing complete Root result.
+
+The hosted Linux native command on the same checkpoint had972 passes and40 failures:
+the inherited discovery fixture below, the matching native custody expectation,
+and38 fail-closed fixture admission refusals. The ownership review confirms that
+the final loan retains Workflow/progression custody and Ready's original4KiB fee.
+Actual loan return releases16KiB, then final Workflow/claim destruction returns4KiB.
+With no loan, expiry collection already returns that metadata; dropping None returns0.
+
+Both exact test expectations now cover that ownership contract. Held-owner counts
+and negative drainage assertions remain unchanged; full-tuple and repeated collection/
+close checks strengthen the tests. No production payment, bound, deadline or authority
+was changed. Read-only ownership review/re-review has no finding. The affected complete
+sync suite passes1,383 tests in ten result groups, including1,334 library tests and ten
+compile-fail documentation checks. All379 focused native handoff tests pass24.41s.
+Both real-transport forced-alternate scenarios pass144.51s, including preserved indexed
+media and the genuine discovery-to-late-Capacity negative control. Full native, refreshed
+native checks/Clippy and a clean complete Root command remain required before sign-off.
+The reviewed discovery correction is integrated as `f8425239`.
+
 ## Inert admission capacity groundwork (28 October; validation in progress)
 
 The isolated `communication-v2-admission-completion` branch adds reviewed group progression

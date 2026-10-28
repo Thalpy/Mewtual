@@ -195,13 +195,27 @@ async fn root_handoff_expiry_refuses_new_capacity_but_preserves_the_actual_old_l
         );
         runtime.collect_expired();
         let collected = runtime.resources().counts();
-        drop(loan);
+        runtime.collect_expired();
         assert_eq!(
-            runtime.resources().counts().0,
-            collected.0 - if admitted { 16 * 1024 } else { 0 },
-            "actual old copy ownership, not expiry, returns its handoff loan"
+            runtime.resources().counts(),
+            collected,
+            "repeated expiry collection cannot return an actual retained loan"
+        );
+        drop(loan);
+        // The loan keeps the original Workflow/progression claim alive after the
+        // reserves close. Its final return releases16KiB plus Ready's separately
+        // retained4KiB metadata funding. With no loan, collection already returned
+        // that metadata; dropping None must return nothing.
+        let returned = if admitted { (16 + 4) * 1024 } else { 0 };
+        assert_eq!(
+            runtime.resources().counts(),
+            (collected.0 - returned, collected.1),
+            "actual final ownership, not expiry, returns loan and Ready funding"
         );
         assert_eq!(action.protected_binding().unwrap(), bound);
+        let after = runtime.resources().counts();
+        runtime.collect_expired();
+        assert_eq!(runtime.resources().counts(), after);
     }
 }
 

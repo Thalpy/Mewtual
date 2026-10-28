@@ -1001,12 +1001,17 @@ mod tests {
         assert_eq!(coordinator.runtime().resources().counts(), before);
         phase.finish_draining(loan);
         assert!(phase.is_drained());
+        // This final HandoffLoan also owns the last closed Workflow/progression
+        // claim. Actual return releases the16KiB loan and Ready's separately
+        // retained4KiB metadata, never the earlier close intent or second close.
         assert_eq!(
-            coordinator.runtime().resources().counts().0,
-            before.0 - 16 * 1024
+            coordinator.runtime().resources().counts(),
+            (before.0 - (16 + 4) * 1024, before.1)
         );
+        let after = coordinator.runtime().resources().counts();
         phase.close();
         assert!(phase.is_drained());
+        assert_eq!(coordinator.runtime().resources().counts(), after);
     }
 
     #[test]
