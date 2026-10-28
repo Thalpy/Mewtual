@@ -573,3 +573,173 @@ fn native_store_factory_delegates_bounded_owned_reads_and_their_storage_epoch() 
     assert!(!result.is_current());
     assert!(waiting.run().unwrap().is_none());
 }
+
+/// Leaving a server empties its namespace except what Studio still references, removes Keep
+/// wholesale, reports only bytes actually removed, and keeps the resume marker until nothing is
+/// left to fail.
+#[test]
+fn leave_cleanup_keeps_studio_references_and_empties_the_rest() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let device = MlsDevice::generate().unwrap();
+    let group = ServerGroup::create(&device).unwrap();
+    let key = hex::encode(group.group_id());
+    let (frame, cached) = {
+        let mut blobs = store.blob_store(&key).unwrap();
+        (
+            blobs.put(b"studio frame pixels").unwrap(),
+            blobs.put(b"an ordinary cached chunk").unwrap(),
+        )
+    };
+    let target = StudioTarget::Flipnote {
+        channel: [7; 16],
+        object: [9; 16],
+    };
+    save(&mut store, 1, &group, &device, target, frame, 1);
+    let dir = store.cache_namespace_dir(&key).unwrap();
+    std::fs::create_dir_all(dir.join("kept").join("transfers-v2").join("d-1")).unwrap();
+    std::fs::write(
+        dir.join("kept")
+            .join("transfers-v2")
+            .join("d-1")
+            .join("current"),
+        [0; 50],
+    )
+    .unwrap();
+    catcoms_storage::cache::write_leaving_marker(&dir).unwrap();
+
+    let mut cleanup = ready(store.begin_leave_cleanup(&key).unwrap());
+    while cleanup.delete_batch(1) {}
+    let report = cleanup.finish();
+    assert_eq!(report.failed, 0);
+    assert!(report.cleaned);
+    assert!(
+        report.kept_bytes > 0,
+        "the Studio frame is reported as kept"
+    );
+    assert!(
+        report.freed_bytes >= 50,
+        "Keep and the ordinary chunk were freed"
+    );
+    // Checked on disk: opening a handle would recreate `kept/` and the attach lock.
+    assert!(
+        dir.join(frame.to_hex()).exists(),
+        "Studio still references the frame"
+    );
+    assert!(!dir.join(cached.to_hex()).exists());
+    assert!(!dir.join("kept").exists());
+    assert!(
+        !catcoms_storage::cache::has_leaving_marker(&dir),
+        "nothing failed, so the marker went"
+    );
+    assert!(
+        !dir.join(catcoms_storage::cache::ATTACH_LOCK).exists(),
+        "the attach lock goes with the marker"
+    );
+    assert!(dir.exists(), "the pinned frame keeps the namespace");
+}
+
+/// Unknown Studio references delete no cache file and keep the marker for a later resume.
+#[test]
+fn leave_cleanup_with_unknown_references_keeps_the_cache_and_the_marker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let key = hex::encode([5u8; 32]);
+    let cached = store.blob_store(&key).unwrap().put(b"cached").unwrap();
+    std::fs::write(
+        root.path()
+            .join("servers")
+            .join(format!("{}.studio-epoch", "ab".repeat(32))),
+        b"broken",
+    )
+    .unwrap();
+    let dir = store.cache_namespace_dir(&key).unwrap();
+    catcoms_storage::cache::write_leaving_marker(&dir).unwrap();
+    let mut cleanup = ready(store.begin_leave_cleanup(&key).unwrap());
+    while cleanup.delete_batch(16) {}
+    let report = cleanup.finish();
+    assert!(report.failed > 0);
+    assert!(dir.join(cached.to_hex()).exists());
+    assert!(catcoms_storage::cache::has_leaving_marker(&dir));
+}
+
+fn ready(begun: crate::store::LeaveBegin) -> crate::store::LeaveCleanup {
+    match begun {
+        crate::store::LeaveBegin::Ready(cleanup) => cleanup,
+        other => panic!("cleanup did not start: {other:?}"),
+    }
+}
+
+/// Review H1: "attached" is the attach lock, not the Keep lease. A join of a group whose server
+/// still runs opens a second handle that cannot get the Keep lease. Once the old server leaves
+/// and its handle drops, the lease is free, but the joiner's handle still holds the attach lock,
+/// so the old server's leave cleanup deletes nothing and keeps its marker. A rejoin that removed
+/// the marker stops the cleanup too.
+#[test]
+fn leave_cleanup_never_touches_a_namespace_that_is_attached_or_taken_back() {
+    use catcoms_storage::cache::{self as storage_cache, LeaseAttempt};
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let key = hex::encode([6u8; 32]);
+    let leaving = store.blob_store(&key).unwrap(); // the running server: owns kept/lease.lock
+    let mut joiner = store.blob_store(&key).unwrap(); // the join: a faulted Keep, no lease
+    let cid = joiner.put(b"the joiner's cache").unwrap();
+    let dir = store.cache_namespace_dir(&key).unwrap();
+    storage_cache::write_leaving_marker(&dir).unwrap(); // the running server's leave
+    drop(leaving);
+    assert!(
+        matches!(storage_cache::lock_kept(&dir), LeaseAttempt::Held(Some(_))),
+        "the Keep lease alone would call this namespace free"
+    );
+    assert!(matches!(
+        store.begin_leave_cleanup(&key).unwrap(),
+        crate::store::LeaveBegin::Busy
+    ));
+    assert!(joiner.has(&cid), "nothing of the live joiner was deleted");
+    assert!(
+        storage_cache::has_leaving_marker(&dir),
+        "the marker stays, so a later attach or unlock finishes the leave"
+    );
+    drop(joiner);
+    // A Keep store a moment from dropping (its lease outlives its primary's attach hold) is busy
+    // too: the attach lock alone is free, but `kept/` is not removed under the lease.
+    let lease = storage_cache::lock_kept(&dir);
+    assert!(matches!(lease, LeaseAttempt::Held(Some(_))));
+    assert!(matches!(
+        store.begin_leave_cleanup(&key).unwrap(),
+        crate::store::LeaveBegin::Busy
+    ));
+    drop(lease);
+    std::fs::remove_file(dir.join("leaving")).unwrap(); // a rejoin took it back
+    assert!(matches!(
+        store.begin_leave_cleanup(&key).unwrap(),
+        crate::store::LeaveBegin::NoMarker
+    ));
+    assert!(dir.join(cid.to_hex()).exists());
+}
+
+/// A session change mid-cleanup abandons it: the rest of the cache, scratch and `kept/` stay, and
+/// so does the marker, for the next unlock.
+#[test]
+fn an_abandoned_cleanup_leaves_keep_scratch_and_the_marker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let key = hex::encode([7u8; 32]);
+    {
+        let mut blobs = store.blob_store(&key).unwrap();
+        blobs.put(b"one").unwrap();
+        blobs.put(b"two").unwrap();
+    }
+    let dir = store.cache_namespace_dir(&key).unwrap();
+    catcoms_storage::cache::write_leaving_marker(&dir).unwrap();
+    let mut cleanup = ready(store.begin_leave_cleanup(&key).unwrap());
+    cleanup.delete_batch(1);
+    cleanup.abandon();
+    let report = cleanup.finish();
+    assert!(report.failed > 0);
+    assert!(
+        dir.join("kept").exists(),
+        "kept/ is not emptied under a changed session"
+    );
+    assert!(catcoms_storage::cache::has_leaving_marker(&dir));
+}

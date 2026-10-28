@@ -99,6 +99,10 @@
   import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatLabel, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
   import { SAVED_ROW_GROUPS, TRANSFER_ICONS, compactControls, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type CompactControl, type CompactControls, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type SavedRowView, type TransferIcon } from "./transfer-rows";
   import {
+    CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cacheShown, checkedCacheStatus, leaveLoss,
+    leaveReportText, limitLabel, lowerLimitWarning, pinnedSummary, type CacheStatus, type LeaveLoss,
+  } from "./cache-status";
+  import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
   import { safeMediaMime } from "./media-safe";
@@ -594,6 +598,7 @@
     { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
     { id: "filetrust", label: "File Trust", cat: "Content" },
+    { id: "storage", label: "Storage", cat: "Content" },
     { id: "studio", label: "Studio", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
@@ -3825,6 +3830,17 @@
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
   let privateDownloads = $state<PrivateDownload[]>([]);
+  // Cache housekeeping for the selected server, as the native planner reports it (footer segment
+  // and Storage settings page). Never recomputed here: the counts are what the planner would do.
+  let cacheStatus = $state<CacheStatus | null>(null);
+  let cacheStatusSeq = 0;
+  // The Storage page's limit picker: the chosen option's bytes as a string ("null" = No limit),
+  // plus whether the user has seen the "removes files now" warning for that choice.
+  let cacheLimitDraft = $state("");
+  let cacheLimitConfirming = $state(false);
+  let cacheLimitBusy = $state(false);
+  // Leave confirmation: what leaving will permanently delete from this device, loaded on request.
+  let leaveConfirm = $state<{ id: number; name: string; loss: LeaveLoss | null } | null>(null);
   // Second review R2-M1: the Pause/Remove/Keep (and pre-acquisition Resume) owner of each row, by
   // download ID. Native removal can wait indefinitely on an external folder, so one row's pending
   // mutation must never disable or refuse actions on another row; native also claims per download.
@@ -4366,7 +4382,9 @@
   }
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
-    missing_chunks: number; unreadable_chunks: number; invalid_manifests: number;
+    // `missing` = absent chunks of this device's own uploads (damage); `not_cached` = absent
+    // chunks of other members' files, which is normal for a size-limited cache.
+    missing_chunks: number; not_cached_chunks: number; unreadable_chunks: number; invalid_manifests: number;
     verified_bytes: number; has_peers: boolean;
     checked_at_ms: number; unique_files: number; logical_bytes: number;
     local_estimated_bytes: number; pinned_files: number; pinned_logical_bytes: number;
@@ -7388,8 +7406,11 @@
     if (inCall && callServer === id) leaveVoice();
     const operation = { session, closed: false };
     leavingServers.set(id, operation);
+    // Captured now: once the leave lands the server is gone from the rail and its name with it.
+    const leftName = servers.find((s) => s.id === id)?.name ?? "the server";
+    let leaveReport: unknown = null;
     try {
-      await invoke("leave_server", { server: id });
+      leaveReport = await invoke("leave_server", { server: id });
     } catch (e) {
       const owns = leavingServers.get(id) === operation;
       if (owns) leavingServers.delete(id);
@@ -7409,6 +7430,103 @@
     fileTrustPolicies = remainingTrust;
     serverGone(id, true); // first, so the continuity saved next no longer carries its Studio work
     void saveUiStateImmediately();
+    toast(leaveReportText(leftName, checkedLeaveReport(leaveReport)), "ok", 6000);
+  }
+
+  /** Native's leave report, or `null` when it is missing or malformed (the toast then claims nothing). */
+  function checkedLeaveReport(raw: unknown): { freed_bytes: number; kept_bytes: number; failed: number; cleaned: boolean } | null {
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const n = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+    return n(r.freed_bytes) && n(r.kept_bytes) && n(r.failed) && typeof r.cleaned === "boolean"
+      ? { freed_bytes: r.freed_bytes as number, kept_bytes: r.kept_bytes as number, failed: r.failed as number, cleaned: r.cleaned }
+      : null;
+  }
+
+  /** Every Leave entry point comes here first: load what leaving would permanently delete from
+   * this device (Keep copies and unfinished Downloads, by name) and ask before leaving. */
+  async function requestLeave(id: number) {
+    const name = servers.find((s) => s.id === id)?.name ?? "this server";
+    leaveConfirm = { id, name, loss: null };
+    const [kept, downloads, listed] = await Promise.allSettled([
+      invoke<KeptFiles>("get_kept_files", { server: id }),
+      invoke<unknown>("get_private_downloads", { server: id }).then(checkedPrivateDownloads),
+      invoke<UiFile[]>("get_files", { server: id }),
+    ]);
+    if (leaveConfirm?.id !== id) return; // dismissed or replaced meanwhile
+    leaveConfirm = {
+      id,
+      name,
+      // An inventory that could not be read is passed as null, so the dialog says it could not
+      // check instead of claiming there is nothing to lose.
+      loss: leaveLoss(
+        kept.status === "fulfilled" ? kept.value : null,
+        downloads.status === "fulfilled" ? downloads.value : null,
+        listed.status === "fulfilled" ? listed.value : [],
+      ),
+    };
+  }
+
+  function confirmLeave() {
+    const target = leaveConfirm;
+    if (!target) return;
+    leaveConfirm = null;
+    showServerSettings = false;
+    void leaveServer(target.id);
+  }
+
+  /** This server's cache status (cheap natively). A stale reply for another server is dropped. */
+  async function refreshCacheStatus(server: number | null = activeServerId) {
+    const seq = ++cacheStatusSeq;
+    if (server === null || locked) {
+      cacheStatus = null;
+      return;
+    }
+    try {
+      const status = checkedCacheStatus(await invoke<unknown>("get_cache_status", { server }));
+      if (seq === cacheStatusSeq && server === activeServerId) cacheStatus = status;
+    } catch {
+      if (seq === cacheStatusSeq) cacheStatus = null;
+    }
+  }
+
+  // The footer follows the selected server; native pushes changes as `cache-status` events.
+  $effect(() => {
+    const server = activeServerId;
+    untrack(() => void refreshCacheStatus(server));
+  });
+  // Opening the Storage page re-reads the status and seeds the picker with the current limit.
+  $effect(() => {
+    if (!showServerSettings || serverSettingsPage !== "storage") return;
+    untrack(() => {
+      cacheLimitConfirming = false;
+      void refreshCacheStatus().then(() => {
+        cacheLimitDraft = !cacheStatus ? "" : cacheStatus.unlimited ? "null" : String(cacheStatus.limit_bytes ?? "");
+      });
+    });
+  });
+
+  /** Apply the Storage page's limit. Lowering below what is cached asks once before applying. */
+  async function applyCacheLimit() {
+    const server = activeServerId;
+    if (server === null || !cacheStatus || cacheLimitBusy) return;
+    const bytes = cacheLimitDraft === "null" ? null : Number(cacheLimitDraft);
+    if (bytes !== null && !Number.isSafeInteger(bytes)) return;
+    if (lowerLimitWarning(cacheStatus, bytes) && !cacheLimitConfirming) {
+      cacheLimitConfirming = true;
+      return;
+    }
+    cacheLimitBusy = true;
+    try {
+      const status = checkedCacheStatus(await invoke<unknown>("set_cache_limit", { server, bytes }));
+      if (server === activeServerId) cacheStatus = status;
+      toast(`Cache limit on this device: ${limitLabel(bytes)}`, "ok", 3500);
+    } catch (e) {
+      toast(`Couldn't change the cache limit: ${e}`, "err", 6000);
+    } finally {
+      cacheLimitBusy = false;
+      cacheLimitConfirming = false;
+    }
   }
 
   /// `server-closed`: the server's actor stopped. During this server's own leave the leave decides
@@ -9733,7 +9851,9 @@
       label: "Leave server",
       icon: "leave",
       danger: true,
-      onSelect: () => confirmInMenu(`Leave ${s.name}`, () => leaveServer(s.id)),
+      // A full confirmation, not the in-menu one: it has to name the Keep copies and unfinished
+      // Downloads that leaving permanently deletes from this device.
+      onSelect: () => void requestLeave(s.id),
     });
     return items;
   }
@@ -12712,8 +12832,9 @@
   }
 
   // The "Circulates until" row. Precedence: a wiki embed pins the file regardless of any recorded
-  // deadline; then an explicit keep-forever; then a date; then a legacy listing that never
-  // recorded one. `kind` drives the styling, `text` is the row's wording.
+  // deadline; then an explicit "never expires"; then a date; then a legacy listing that never
+  // recorded one. `kind` drives the styling, `text` is the row's wording. None of these is a
+  // cache pin: circulation is server-wide, while each device's cache follows its own limit.
   type ExpiryView = { kind: "pinned" | "forever" | "date" | "unknown"; text: string };
   let fileInfoExpiry = $derived.by((): ExpiryView => {
     const f = fileInfo;
@@ -12721,23 +12842,23 @@
     if (isPinned(f.cid) || fileInfoUsage?.pinned)
       return { kind: "pinned", text: "pinned: embedded in the wiki, never drops from sharing" };
     if (!f.expires_known) return { kind: "unknown", text: "not recorded (older share)" };
-    if (f.expires === null) return { kind: "forever", text: "forever" };
+    if (f.expires === null) return { kind: "forever", text: "never expires" };
     return { kind: "date", text: `${fmtDay(f.expires)} · ${relDay(f.expires, nowTick)}` };
   });
   // Expiry is per listing and the gate is uploader / owner / admin, matching the backend.
   let canSetExpiry = $derived(
     !!fileInfo && (fileInfo.author === myFp || myRole === "owner" || myRole === "admin")
   );
-  let keptForever = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
+  let neverExpires = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
 
-  /** Toggle this listing between "keep forever" and a fresh 30-day circulation window. */
-  async function toggleKeepForever() {
+  /** Toggle this listing between "never expires" and a fresh 30-day circulation window. */
+  async function toggleNeverExpires() {
     if (activeServerId === null || !fileInfo) return;
     const f = fileInfo;
-    const forever = !keptForever; // the state we're moving TO
+    const forever = !neverExpires; // the state we're moving TO
     const expires = forever ? null : Date.now() + FILE_EXPIRY_DEFAULT_MS;
     fileInfoExpiryBusy = true;
-    const tid = toast(forever ? "Keeping forever…" : "Restoring 30-day expiry…", "info", 0);
+    const tid = toast(forever ? "Marking it never expires…" : "Restoring 30-day expiry…", "info", 0);
     try {
       await invoke("set_file_expiry", { server: activeServerId, cid: f.cid, path: f.path, expires });
       await refreshFiles();
@@ -12747,7 +12868,7 @@
       updateToast(
         tid,
         forever
-          ? `${f.name} will be kept in circulation forever`
+          ? `${f.name} never expires from circulation`
           : `${f.name} circulates until ${fmtDay(expires as number)}`,
         "ok"
       );
@@ -22149,6 +22270,12 @@
         // being viewed, which is precisely when the active-server refresh above does nothing.
         if (e.payload.server === callServer) void refreshCallProfiles();
       }),
+      listen<{ server: number; status: unknown }>("cache-status", (e) => {
+        if (e.payload.server !== activeServerId) return;
+        // Newer than any get_cache_status still in flight: retire those replies.
+        cacheStatusSeq++;
+        cacheStatus = checkedCacheStatus(e.payload.status);
+      }),
       listen<{ server: number }>("files-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) {
@@ -27965,7 +28092,7 @@
                 <div><h3>{!storageHealth.missing_chunks && !storageHealth.unreadable_chunks && !storageHealth.invalid_manifests ? "Storage is healthy" : "Storage needs attention"}</h3><p>{storageHealth.verified_chunks} of {storageHealth.referenced_chunks} unique chunks verified · {fmtSize(storageHealth.verified_bytes)} encrypted content</p></div>
               </div>
               <div class="health-cards">
-                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing chunks</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
+                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing from your uploads</span></article><article><b>{storageHealth.not_cached_chunks ?? 0}</b><span>not cached on this device</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
               </div>
               <div class="storage-breakdown">
                 <section class="storage-categories">
@@ -28218,7 +28345,7 @@
                 <div class="kept-copy-row">
                   <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}… (unlisted)`} · {keptCopyLabel(copy)}</span>
                   <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => saved?.exhausted ? retryKeptFile(saved) : checkKeptFile(copy.cid)}>{saved?.exhausted ? "Retry check" : "Check and repair"}</button>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)} title="Deletes this device's kept copy. A checked kept copy replaces the cache's duplicate, so this can remove the last copy on this device; members who still have the file can send it again.">Release kept copy</button>
                 </div>
               {/each}
               {#each keptTransferRows(keptFiles) as copy (copy.cid)}
@@ -29046,6 +29173,22 @@
         </button>
       {/if}
       <span class="sb-spacer"></span>
+      {#if cur && !dmHome && !inboxView && cacheShown(cacheStatus)}
+        {@const foot = cacheFooter(cacheStatus)}
+        <button
+          class="seg sb-cache"
+          data-tone={foot.tone}
+          title={foot.title}
+          onclick={() => openServerSettings(activeServerId, "storage")}
+        >
+          <span class="sb-cache-label">cache</span>
+          {#if foot.bar !== null}
+            <span class="sb-cache-bar" role="progressbar" aria-label="Cache used on this device" aria-valuemin="0" aria-valuemax="100" aria-valuenow={foot.bar}><i style={`width:${foot.bar}%`}></i></span>
+          {/if}
+          <span class="sb-cache-value">{foot.value}</span>
+          {#if foot.chip}<span class="sb-cache-chip">{foot.chip}</span>{/if}
+        </button>
+      {/if}
       {#if myFp}<span class="seg" title="Your fingerprint on this server: click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
     </footer>
 
@@ -29694,6 +29837,40 @@
             </div>
           </div>
         {/if}
+      </div>
+    {/if}
+
+    {#if leaveConfirm}
+      {@const leaving = leaveConfirm}
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => (leaveConfirm = null)}>
+        <div class="overlay-card leave-confirm" role="alertdialog" aria-modal="true" aria-labelledby="leave-confirm-title">
+          <header class="overlay-head">
+            <div><span class="name-studio-label">LEAVE // {leaving.name.toUpperCase()}</span><h2 id="leave-confirm-title">Leave {leaving.name}?</h2></div>
+            <button class="ghost" title="Stay" onclick={() => (leaveConfirm = null)}>✕</button>
+          </header>
+          <p>Leaving forgets this server on this device and removes its cached files from this device. Coming back needs a fresh invite. Studio work keeps the files it still uses.</p>
+          {#if !leaving.loss}
+            <p class="muted small">Checking what this device keeps for it…</p>
+          {:else}
+            {#if leaving.loss.keep.length}
+              <h3>These Keep copies will be permanently deleted</h3>
+              <ul class="leave-loss">{#each leaving.loss.keep as name (name)}<li>{name}</li>{/each}</ul>
+            {/if}
+            {#if leaving.loss.downloads.length}
+              <h3>These unfinished downloads will be permanently deleted</h3>
+              <ul class="leave-loss">{#each leaving.loss.downloads as name (name)}<li>{name}</li>{/each}</ul>
+            {/if}
+            {#if leaving.loss.unknown}
+              <p class="warn-t small">Keep copies or unfinished downloads could not be checked. Leaving may delete any this device has for this server.</p>
+            {:else if !leaving.loss.keep.length && !leaving.loss.downloads.length}
+              <p class="muted small">No Keep copies or unfinished downloads on this device.</p>
+            {/if}
+          {/if}
+          <div class="leave-confirm-actions">
+            <button class="ghost" onclick={() => (leaveConfirm = null)}>Stay</button>
+            <button class="danger-btn" disabled={!leaving.loss} onclick={confirmLeave}>Leave and delete</button>
+          </div>
+        </div>
       </div>
     {/if}
 
@@ -31952,13 +32129,60 @@
               </form>
               <p class="muted small">Size sets how big <code>:code:</code> renders in messages (reactions stay small).</p>
               </section>
+            {:else if serverSettingsPage === "storage"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // STORAGE</div>
+              <h1>Storage on this device</h1>
+              <section class="set-section cache-set">
+                <h3>Cache</h3>
+                {#if cacheStatus}
+                  {@const foot = cacheFooter(cacheStatus)}
+                  <div class="cache-meter" data-tone={foot.tone}>
+                    {#if foot.bar !== null}
+                      <span class="cache-bar" role="progressbar" aria-label="Cache used" aria-valuemin="0" aria-valuemax="100" aria-valuenow={foot.bar}><i style={`width:${foot.bar}%`}></i></span>
+                    {/if}
+                    <b>{cacheBytes(cacheStatus.usage_bytes)}</b>
+                    <span class="muted small">{cacheStatus.unlimited ? "cached, no limit" : cacheStatus.limit_bytes !== null ? `of ${cacheBytes(cacheStatus.limit_bytes)}` : "cached"}</span>
+                    {#if foot.chip}<span class="cache-chip">{foot.chip}</span>{/if}
+                  </div>
+                  {#if cacheStatus.paused && cacheStatus.paused !== "not-ready"}
+                    <p class="warn-t small">{cachePauseText(cacheStatus.paused)}</p>
+                  {/if}
+                  {#if cacheStatus.leaving_soon_files > 0 && !cacheStatus.held_by_pins}
+                    <p class="small">{cacheStatus.leaving_soon_files} {cacheStatus.leaving_soon_files === 1 ? "file is" : "files are"} next to leave ({cacheBytes(cacheStatus.leaving_soon_bytes)}) when new files arrive.</p>
+                  {/if}
+                  <p class="muted small">{pinnedSummary(cacheStatus)}</p>
+                {:else}
+                  <p class="muted small">This device's cache has not been measured yet.</p>
+                {/if}
+                <p class="muted small">Files you open or save stay here so they show without fetching again, and this device can share them with members. Over the limit, the files shared longest ago leave first; anyone who still has them can send them again.</p>
+              </section>
+              <section class="set-section">
+                <h3>Limit on this device</h3>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); void applyCacheLimit(); }}>
+                  <select bind:value={cacheLimitDraft} onchange={() => (cacheLimitConfirming = false)} aria-label="Cache limit on this device" disabled={!cacheStatus || cacheLimitBusy}>
+                    {#if cacheStatus && !cacheStatus.unlimited && cacheStatus.limit_bytes !== null && !CACHE_LIMIT_CHOICES.some((c) => c.bytes === cacheStatus?.limit_bytes)}
+                      <option value={String(cacheStatus.limit_bytes)}>{limitLabel(cacheStatus.limit_bytes)}</option>
+                    {/if}
+                    {#each CACHE_LIMIT_CHOICES as choice (choice.label)}
+                      <option value={String(choice.bytes)}>{choice.label}</option>
+                    {/each}
+                  </select>
+                  <button class="ghost small" disabled={!cacheStatus || cacheLimitBusy || !cacheLimitDraft}>
+                    {cacheLimitBusy ? "Saving…" : cacheLimitConfirming ? "Remove and apply" : "Apply"}
+                  </button>
+                </form>
+                {#if cacheLimitConfirming && cacheStatus}
+                  <p class="warn-t small">{lowerLimitWarning(cacheStatus, cacheLimitDraft === "null" ? null : Number(cacheLimitDraft))}</p>
+                {/if}
+                <p class="muted small">Only this device. Other members choose their own, and nothing here changes what the server shares.</p>
+              </section>
             {:else if serverSettingsPage === "leave"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LEAVE</div>
               <h1>Leave Server</h1>
               {#if activeServerId !== null}
                 <section class="set-section danger">
-                  <p class="muted small">Leaving forgets this server on this device. Coming back needs a fresh invite.</p>
-                  <button class="ghost leave" onclick={() => { const id = activeServerId; showServerSettings = false; if (id !== null) leaveServer(id); }}>
+                  <p class="muted small">Leaving forgets this server on this device and removes its cached files, Keep copies and unfinished downloads from this device. Coming back needs a fresh invite.</p>
+                  <button class="ghost leave" onclick={() => { const id = activeServerId; if (id !== null) void requestLeave(id); }}>
                     Leave this server
                   </button>
                 </section>
@@ -32218,8 +32442,16 @@
               <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ {fileInfo ? downloadLabel(fileInfo) : "Download"}</button>
               <button class="ghost" onclick={() => fileInfo && downloadFile(fileInfo, true)}>Save as</button>
               {#if canSetExpiry}
-                <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>
-                  {fileInfoExpiryBusy ? "Saving…" : keptForever ? "Restore 30-day expiry" : "♾ Keep forever"}
+                <!-- "Never expires" is a server-wide circulation flag, not a promise that this or
+                     any device keeps the bytes: caches still drop it under their limit. Keep is
+                     the per-device pin. The old "Keep forever" label read as the latter. -->
+                <button
+                  class="ghost"
+                  disabled={fileInfoExpiryBusy}
+                  onclick={toggleNeverExpires}
+                  title={neverExpires ? "Give this listing a fresh 30-day circulation window" : "Keep this listing in circulation for everyone with no end date. Devices can still drop it from their cache; use Keep to hold a copy here."}
+                >
+                  {fileInfoExpiryBusy ? "Saving…" : neverExpires ? "Restore 30-day expiry" : "♾ Never expires"}
                 </button>
               {/if}
               {#if myRole === "owner" || myRole === "admin"}

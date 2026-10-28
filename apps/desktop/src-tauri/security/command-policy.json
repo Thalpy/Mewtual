@@ -38,6 +38,8 @@
   { "command": "get_files", "risk": "account-read", "surfaces": ["main"] },
   { "command": "get_storage_health", "risk": "account-read", "surfaces": ["main"] },
   { "command": "repair_storage", "risk": "account-write", "surfaces": ["main"] },
+  { "command": "get_cache_status", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "set_cache_limit", "risk": "account-write", "surfaces": ["main"] },
   { "command": "get_online_members", "risk": "account-read", "surfaces": ["main"] },
   { "command": "get_member_routes", "risk": "account-read", "surfaces": ["main"] },
   { "command": "manual_fallback_redial", "risk": "account-write", "surfaces": ["main"] },

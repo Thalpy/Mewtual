@@ -57,6 +57,7 @@ use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 mod admission_storage;
+mod cache_housekeeping;
 mod call_mappings;
 mod creative_blobs;
 mod discovery_timer;
@@ -587,6 +588,9 @@ struct AppState {
     network_changes: NetworkChangeSignal,
     /// Streamed uploads in flight, keyed by `(server, native token)`. See [`RegisteredUpload`].
     uploads: Mutex<HashMap<UploadKey, RegisteredUpload>>,
+    /// Cache housekeeping shared across servers: leave-cleanup claims and the Studio reference
+    /// service's pacing. See [`cache_housekeeping`].
+    cache: cache_housekeeping::CacheBridge,
 }
 
 /// Fixed-size keyed singleflight. Hash collisions only serialize two explicit scans; unlike a map
@@ -1543,7 +1547,10 @@ struct UiStorageHealth {
     listed_files: usize,
     referenced_chunks: usize,
     verified_chunks: usize,
+    /// Absent chunks of this device's own uploads (damage; Repair restores them).
     missing_chunks: usize,
+    /// Absent chunks of other members' files: normal for a size-limited cache, never "damage".
+    not_cached_chunks: usize,
     unreadable_chunks: usize,
     invalid_manifests: usize,
     verified_bytes: u64,
@@ -1778,6 +1785,7 @@ fn build_storage_report(
         referenced_chunks: health.referenced_chunks,
         verified_chunks: health.verified_chunks,
         missing_chunks: health.missing_chunks,
+        not_cached_chunks: health.not_cached_chunks,
         unreadable_chunks: health.unreadable_chunks,
         invalid_manifests: health.invalid_manifests,
         verified_bytes: health.verified_bytes,
@@ -2496,6 +2504,19 @@ fn forward_events(
                 AppEvent::FilesUpdated => {
                     emit_tracked(&app, "files-updated", ServerEvt { server }, trace);
                 }
+                AppEvent::CacheStatusChanged(status) => {
+                    emit_tracked(
+                        &app,
+                        "cache-status",
+                        cache_housekeeping::CacheStatusEvt {
+                            server,
+                            status: cache_housekeeping::bridge_status(&status),
+                        },
+                        trace,
+                    );
+                }
+                // Never await an actor or the store from here: the request spawns its own task.
+                AppEvent::CacheNeedsStudioScan => cache_housekeeping::request_studio_scan(&app),
                 AppEvent::StatusUpdated => {
                     emit_tracked(&app, "status-updated", ServerEvt { server }, trace);
                 }
@@ -3550,6 +3571,7 @@ async fn register_server(
     actor.set_keep_session(
         keep_session::current(state, expected_generation).map(|account| files.scope(account)),
     );
+    let cache_group = group_id.clone();
     // Exact row guard is already held. No await or fallible operation may separate the voice
     // registration CAS from publishing the native row that owns it.
     servers.insert(
@@ -3581,6 +3603,9 @@ async fn register_server(
     forward_events(app.clone(), id, instance, events);
     install_reconnect_capture_worker(app, id, instance, timer_actor.clone());
     studio::spawn_receiver(app.clone(), id, instance, timer_actor.clone());
+    // The blob store attached before this server had a number; resolve its cache limit now.
+    cache_housekeeping::adopt_cache_setting(state, id, &cache_group, &timer_actor).await;
+    cache_housekeeping::request_studio_scan(app);
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
     spawn_discovery_timer(app.clone(), id, instance, timer_actor);
@@ -4001,17 +4026,55 @@ async fn attach_blob_store<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
     state: &AppState,
     server: &mut Server<T, R>,
 ) {
-    let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
-        let key = hex::encode(server.group_id());
-        match store.blob_store(&key) {
-            Ok(blobs) => server.set_blob_store(blobs),
-            Err(e) => {
-                tracing::error!(target: "catcoms_app", error = %e, "STORAGE.BLOB_STORE.ATTACH_FAILED")
-            }
+    attach_blob_store_inner(state, None, server).await
+}
+
+/// As [`attach_blob_store`], for a registered server: also scans the primary cache, finishes an
+/// interrupted leave of the same group, and hands the actor its sealed (or migrated) cache limit.
+/// Waits while a leave cleanup holds the group, so no live server can attach a namespace that is
+/// being emptied.
+async fn attach_blob_store_for<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    state: &AppState,
+    server_id: u64,
+    server: &mut Server<T, R>,
+) {
+    attach_blob_store_inner(state, Some(server_id), server).await
+}
+
+async fn attach_blob_store_inner<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    state: &AppState,
+    server_id: Option<u64>,
+    server: &mut Server<T, R>,
+) {
+    let group = server.group_id();
+    // Re-check the claim under the store lock: a cleanup takes its claim before it takes the
+    // store lock, so a claim seen here means it is (or will be) deleting this namespace.
+    let guard = loop {
+        state.cache.wait_unclaimed(&group).await;
+        let guard = state.store.clone().lock_owned().await;
+        if !state.cache.claimed(&group) {
+            break guard;
         }
+    };
+    let prepared = tokio::task::spawn_blocking(move || {
+        let store = guard.as_ref()?;
+        Some(cache_housekeeping::prepare_blob_store(
+            store, server_id, &group,
+        ))
+    })
+    .await
+    .ok()
+    .flatten();
+    match prepared {
+        Some(Ok((blobs, limit))) => {
+            server.set_blob_store(blobs);
+            server.set_cache_limit(limit);
+        }
+        Some(Err(e)) => {
+            tracing::error!(target: "catcoms_app", error = %e, "STORAGE.BLOB_STORE.ATTACH_FAILED")
+        }
+        None => {}
     }
-    drop(guard);
     let swept = server.clear_staged_uploads();
     if swept > 0 {
         tracing::info!(target: "catcoms_app", chunks = swept, "STORAGE.UPLOAD.STAGED_SWEPT");
@@ -7313,20 +7376,40 @@ fn effective_join_reply_expiry(encoded_expires_at_ms: u64, received_at_ms: u64) 
     encoded_expires_at_ms.min(received_at_ms.saturating_add(catcoms_net::JOIN_REPLY_LIFETIME_MS))
 }
 
-/// Leave a server: shut down its actor and drop it from the registry.
+/// Leave a server: shut down its actor, drop it from the registry, then remove its cached files,
+/// Keep copies and unfinished Downloads from this device (Studio-referenced blobs stay). Returns
+/// what was freed; the frontend confirms with the user, naming the Keep copies and Downloads,
+/// before calling this.
 #[tauri::command]
-async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
+async fn leave_server(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<cache_housekeeping::LeaveReport, String> {
     require_unlocked_session(&state).await?;
     let generation = unlocked_ui_session_generation(&state).await?;
+    // Claim the group's namespace while the server still runs, so no attach of the group can
+    // start between its stop and the marker (see `claim_for_leave` for why that matters).
+    let claim = cache_housekeeping::claim_for_leave(&state, server).await;
     // Stop application publication/authoring before native retirement. Keeping the row while
     // waiting also lets an in-flight Ready/save finish without confusing its incarnation fence.
     let Some(stopped) = leaving::stop_server(&state, server, &SystemClock).await? else {
-        return Ok(());
+        return Ok(Default::default());
     };
     // Drain older captured writes before deleting the file; none can recreate it after leave.
-    let _persist = persist_lock_for(&state, server).lock_owned().await;
-    let _session = require_ui_session_generation(&state, generation).await?;
-    let removed = stopped.remove(&mut *state.servers.lock().await)?;
+    let persist = persist_lock_for(&state, server).lock_owned().await;
+    let session = require_ui_session_generation(&state, generation).await?;
+    let (removed, claim) = {
+        let mut servers = state.servers.lock().await;
+        let removed = stopped.remove(&mut servers)?;
+        // An alias (another server number for the same group: one that was already registered,
+        // or a join that attached before the claim and registered during the stop) still uses
+        // the namespace, so it is left alone entirely and the claim goes. Its own leave claims
+        // next (it may be waiting on this claim right now) and cleans up.
+        let alias = servers
+            .values()
+            .any(|entry| entry.group_id == removed.group_id);
+        (removed, claim.filter(|_| !alias))
+    };
     let mappings = state
         .media_mappings
         .lock()
@@ -7352,17 +7435,45 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
         .lock()
         .await
         .retain(|(candidate_server, _), _| *candidate_server != server);
-    // Drop the sealed snapshot + re-seal the (now smaller) registry.
+    // Mark the namespace for cleanup, drop the sealed snapshot + re-seal the (now smaller)
+    // registry. The marker comes first so a crash anywhere after it resumes the cleanup.
+    let mut marked = false;
     {
         let guard = state.store.lock().await;
         if let Some(store) = guard.as_ref() {
+            if claim.is_some() {
+                match cache_housekeeping::mark_leaving(store, &removed.group_id) {
+                    Ok(present) => marked = present,
+                    Err(error) => {
+                        tracing::warn!(target: "catcoms_app", server, %error, "STORAGE.CACHE.LEAVE_MARK_FAILED")
+                    }
+                }
+            }
             if let Err(e) = store.remove_server(server) {
                 tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.SERVER.REMOVE_FAILED");
             }
         }
     }
-    persist_registry(&state).await;
-    Ok(())
+    let registry = persist_registry(&state).await;
+    // The cleanup re-checks the session between batches, so the commit guard must not be held.
+    drop(session);
+    drop(persist);
+    // Only after the registry no longer lists the server: a crash earlier must not bring it
+    // back with half its cache. Without a marker there is nothing to resume, so nothing is
+    // deleted either.
+    let report = match (&claim, marked, registry) {
+        (Some(claim), true, PersistOutcome::Durable) => {
+            cache_housekeeping::clean_namespace(&state, claim, Some(generation), true).await
+        }
+        // Marked, but the smaller registry is not durable yet: the marker stays and a later
+        // unlock or attach carries the leave on, so this is "not finished", not "kept".
+        (_, true, _) => cache_housekeeping::LeaveReport::failed(),
+        // Nothing was marked (an alias, nothing on disk, or the marker could not be written):
+        // nothing is deleted now or later.
+        _ => Default::default(),
+    };
+    drop(claim);
+    Ok(report)
 }
 
 /// Open (create/subscribe) a channel by name; returns its id. Members who open the same
@@ -13231,7 +13342,7 @@ where
         .subscribe_control()
         .await
         .map_err(|error| error.to_string())?;
-    attach_blob_store(state, &mut server).await;
+    attach_blob_store_for(state, record.id, &mut server).await;
     if let Err(error) = server.publish_self_record(bootstrap.to_vec(), record_seq) {
         tracing::warn!(
             target: "catcoms_app",
@@ -16082,7 +16193,17 @@ async fn unlock(
             restored = reloaded.len(),
             "VAULT.UNLOCK.COMPLETED"
         );
+        // Every registry server is running, so a namespace with a leave marker that none of
+        // them uses really was left: finish its cleanup. A partial unlock skips this, because a
+        // server that failed to restore might still own one of those namespaces.
+        let sweep = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = sweep.state::<AppState>();
+            cache_housekeeping::sweep_leaving(&state, Some(unlock_generation)).await;
+        });
     }
+    // Studio protection starts unknown on a vault with Studio data; make it known once.
+    cache_housekeeping::request_studio_scan(&app);
     Ok(reloaded)
 }
 
@@ -18598,6 +18719,8 @@ pub fn run() {
             get_files,
             get_storage_health,
             repair_storage,
+            cache_housekeeping::get_cache_status,
+            cache_housekeeping::set_cache_limit,
             get_online_members,
             get_member_routes,
             manual_fallback_redial,

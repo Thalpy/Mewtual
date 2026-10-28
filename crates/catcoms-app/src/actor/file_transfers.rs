@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 
 use super::*;
 use crate::{file_resolution, CHUNK_BYTES};
+mod propagate;
 mod saved;
 use saved::SavedRun;
 
@@ -1448,6 +1449,14 @@ impl FileTransfers {
                     job.fail(server, "chunk is out of range".into());
                     return;
                 }
+                // Displayed or transferring right now: pin every chunk of every variant this read
+                // may use, refreshed on each chunk, so cache eviction never removes it mid-read.
+                server.note_cache_use(
+                    job.cid,
+                    manifests
+                        .iter()
+                        .flat_map(|manifest| manifest.chunks.iter().map(|c| c.ciphertext_cid)),
+                );
                 let mut missing = Vec::new();
                 let mut held = None;
                 for manifest in manifests {

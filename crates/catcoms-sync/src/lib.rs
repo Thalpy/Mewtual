@@ -5444,6 +5444,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.blobs.is_persistent()
     }
 
+    /// Size-limited cache facts of the attached blob store (see `catcoms_storage::cache`). These
+    /// are local bookkeeping only: nothing here is exposed to members or replicated, and a store
+    /// without a size-limited cache answers `None`/refuses, which the app treats as "do not evict".
+    pub fn blob_cache_scan(
+        &mut self,
+        recover: bool,
+    ) -> Result<catcoms_storage::CacheScanReport, SyncError> {
+        Ok(self.blobs.cache_scan(recover)?)
+    }
+    pub fn blob_cache_index(&self) -> Option<catcoms_storage::CacheIndex> {
+        self.blobs.cache_index()
+    }
+    pub fn blob_cache_usage(&self) -> Option<catcoms_storage::CacheUsage> {
+        self.blobs.cache_usage()
+    }
+    /// Studio-protected blobs of this group, or `None` while that set is unknown.
+    pub fn blob_protected_cids(&self) -> Option<std::collections::BTreeSet<Cid>> {
+        self.blobs.protected_cids()
+    }
+    /// Chunks a checked, completed Keep copy holds (reads fall back to them).
+    pub fn blob_retained_chunks(&self) -> std::collections::BTreeSet<Cid> {
+        self.blobs.retained_chunks()
+    }
+
     /// Local explicit-retention operations. Their policy/consent lives in the owning app actor;
     /// these calls are never exposed through member requests or replicated expiry fields.
     pub fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {

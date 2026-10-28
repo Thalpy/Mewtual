@@ -740,7 +740,9 @@ test("lock keeps its warning that the latest Studio edits could not be captured"
 const OTHER = SERVER + 1, DOC = id32(1);
 async function productionServerRemoval(opts: { applyFails?: boolean; whileLeaving?: () => void; leaveFailsAfterStop?: boolean; reply?: Promise<void> } = {}) {
   const st = await import("./studio-state.svelte.ts");
-  const ipc = fakeIpc(), calls: string[] = [], toasts: string[] = [];
+  // `left` collects the leave report toast (cache housekeeping) separately from `toasts`, so the
+  // Studio assertions below keep meaning "no Studio refusal or discard notice".
+  const ipc = fakeIpc(), calls: string[] = [], toasts: string[] = [], left: string[] = [];
   let stopped = false;
   ipc.on("studio_list", () => ({ ...ordinaryView(indexContent()), group: "deadbeef" }));
   ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ frames: [] })), group: "deadbeef" }));
@@ -758,7 +760,8 @@ async function productionServerRemoval(opts: { applyFails?: boolean; whileLeavin
     windowCloseInFlight: false, locked: false, uiStateReady: true, uiStateLoadGeneration: 1, inCall: false, callServer: null, error: "", fileTrustPolicies: {},
     restoredStudioDraft: null as string | null, leavingServers: new Map<number, { session: number; closed: boolean }>(),
     leaveVoice: () => {}, saveUiStateImmediately: async () => {}, beginViewSwitch: () => {},
-    toast: (text: string) => { toasts.push(text); },
+    toast: (text: string) => { (text.startsWith("LEFT:") ? left : toasts).push(text); },
+    checkedLeaveReport: () => null, leaveReportText: (name: string) => `LEFT:${name}`,
     clearServerView: () => { state.view = "chat"; },
     studioWork: st.studioWork, retireStudioServer: st.retireStudioServer, studioHasWork: st.studioHasPending,
     studioExit: createStudioExit({ onStudio: () => state.view === "studio", hasWork: st.studioHasPending, closing: () => false,
@@ -780,7 +783,7 @@ async function productionServerRemoval(opts: { applyFails?: boolean; whileLeavin
   };
   const app = production<{ serverGone: (id: number, left: boolean) => void; serverClosed: (id: number) => void; leaveServer: (id: number) => Promise<void> }>(
     ["restoredDraftServer", "serverGone", "serverClosed", "leaveServer"], state);
-  return { st, session, state, calls, toasts, app, stop: () => { stopped = true; } };
+  return { st, session, state, calls, toasts, left, app, stop: () => { stopped = true; } };
 }
 
 test("a removed server is moved off without a Save to its stopped actor, and the Studio scope follows", async () => {
@@ -796,6 +799,7 @@ test("a removed server is moved off without a Save to its stopped actor, and the
     assert.equal(leave.state.activeServerId, OTHER); assert.deepEqual(leave.state.servers.map(s => s.id), [OTHER]);
     assert.deepEqual([leave.session.scope, leave.session.saves.length, leave.st.studioDraftSnapshot()], [null, 0, null]);
     assert.deepEqual(leave.toasts, []);
+    assert.deepEqual(leave.left, ["LEFT:Alpha"], "a completed leave reports what it freed, named before it vanished");
     leave.st.setStudioScope(OTHER, CHANNEL); // the Studio's scope effect on the next server: no refusal
     assert.equal(leave.session.scope?.server, OTHER);
 

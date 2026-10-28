@@ -4434,6 +4434,53 @@ keys through final ACK, and actual Actor/MLS/WebView action acceptance. Engine a
 needs a synchronous native/Root commit boundary with Clock callbacks outside locks; it must not
 authorize work using a stale UI/route check. Exact action settlement cannot wait for whole-chain
 retirement. Live V2/RTC, relay, combined rollout and independent physical acceptance remain open.
+## Cache housekeeping (26 October, PR #55, stacked on #51)
+
+Each server's encrypted cache on a device now has a per-server size limit, crash-safe writes and
+cleanup on leave ([design](design-cache-housekeeping.md), owner decisions recorded there).
+
+- **Limit and order.** On by default at 5 GiB per server (1 GiB to 1 TiB or No limit, sealed in
+  `servers/<id>.storage`). Upgrades start at `max(5 GiB, usage / 0.8)`, or No limit above 1 TiB,
+  so nothing is dropped on update. Over the limit, unclaimed blobs from before the mount go first,
+  then listed chunks by the newest listing position naming them. A chunk a checked, completed
+  Keep copy holds is always dropped in favour of that copy.
+- **Pins** (chunk sets from owners' saved plans): Keep in progress, Downloads, files read in the
+  last ten minutes, this device's verified uploads, Studio protection. An unreadable index, Keep or
+  Download plans, or unknown Studio protection pause eviction; over-cap rows or a missing profile
+  document skip the unclaimed class only. Wiki embeds and "Never expires" (renamed from "Keep
+  forever") are not pins.
+- **Runtime.** The planner (`cache_plan`) is pure; the actor (`cache_housekeeping`) runs bounded
+  batches, at most one pass per 30 s plus a full evaluation per minute, and emits coalesced
+  `cache-status` events. A desktop Studio-reference service runs `creative_pinned_cids` per
+  unlock, after attaches and on request, rate-limited with backoff.
+- **Writes.** The primary cache writes `incoming/<cid>.<pid>.<generation>.<seq>`, syncs, renames;
+  mount recovery removes temps no live handle owns and torn sealed records. Keep's stores are
+  unchanged.
+- **Saved files propagate, once saved.** Export reads stage a Download's chunks in the cache's
+  `staging/`; only `FinishDownloadExport` (sent after the save published) promotes them, so this
+  device then serves the file. Acquisition copies nothing, and Remove drops what was staged.
+- **Leave.** Every Leave entry point confirms, naming Keep copies and unfinished Downloads. The
+  bridge claims the group, writes a marker before `remove_server`, then (after the registry
+  persisted) empties the namespace in batches without the store lock, keeps Studio-referenced
+  blobs, removes `kept/` wholesale and reports freed, kept and failed bytes. Interrupted cleanups
+  resume after an unlock in which every server restored; a rejoin finishes the non-cache part.
+  Every primary cache handle holds `<namespace>/attach.lock` shared; cleanup needs it exclusively
+  (the Keep lease could not prove "unattached": a second attach of a group, such as a join while
+  the group's server runs, gets no lease). A busy lock deletes nothing and keeps the marker.
+- **Storage health** reports other members' absent chunks as not cached; Repair fetches only
+  corrupt chunks and chunks missing from this device's own uploads.
+- **UI.** Footer cache segment (bar, %, "N leaving soon" past 90%), Server settings → Storage.
+- **Contract changes:** a private Download whose save published now fills the cache (the
+  six-client private test renamed; it keeps "not available" through acquisition, restart and
+  export, then checks the published save makes the file available, and the interrupted test checks
+  a removed Download does not); `leave_server` returns a report; Storage health's `missing_chunks`
+  narrowed.
+- **Limits:** no holder probe; caches left before this change are not cleaned; usage counts sealed
+  file lengths; expiry unenforced.
+
+Validation (focused, per the CI-first process): storage, app and desktop cache tests, the
+contract-changed tests, command ACL, full frontend suite, `npm run check`/`build`, strict Clippy
+(root changed crates and desktop), fmt, ambient and raw-fs gates; complete suites run in CI.
 
 ## Validated proof retention and automatic cleanup retry (22 October)
 
@@ -12320,10 +12367,11 @@ lives in `App.svelte`: it has been extracted into `apps/desktop/src/call-audio.t
   (9h-a), so files/avatars survive a restart and are encrypted at rest under `blob_key`;
   deleting a file reclaims its orphaned chunk blobs while keeping any chunk another file
   references (dedup-safe GC). `MemoryBlobStore` remains the pre-unlock/test path and is
-  size-bounded (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO**, 8s). What's still missing is the
-  `catcoms-storage` **retention engine**: eviction is not holder-probe-aware, so it can
-  drop the **last copy** of a blob (re-fetchable only while some holder is online), and
-  there is no disk quota/expiry enforcement on the sealing store.
+  size-bounded (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO**, 8s). Since PR #55 the sealing store
+  has a per-server cache limit (default 5 GiB, oldest listings first, pins for Keep, own
+  uploads, Studio, files in use and Downloads), crash-safe writes and leave cleanup; see the
+  top section. Still missing: the **holder probe** (the limit can drop the last copy of a
+  file other members uploaded) and any **expiry** enforcement; `RetentionIndex` stays unwired.
 - **Persistence + encryption-at-rest are DONE (Phase 9); the residuals are recovery
   ergonomics.** [`design-persistence.md`](design-persistence.md) is the design; it shipped
   as 9a–9h: a passphrase-sealed key vault, per-server snapshots (MLS + docs + routing +

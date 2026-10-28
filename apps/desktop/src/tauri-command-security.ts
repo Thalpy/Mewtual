@@ -99,7 +99,7 @@ export const TAURI_COMMAND_GROUPS = {
       "get_channels", "durable_send_context", "get_members", "get_profiles", "get_livery", "get_badges", "get_devices",
       // Exact actor's authenticated mode; fenced against lock and replacement, no authority write.
       "group_communication_mode",
-      "get_files", "get_storage_health", "get_online_members", "get_delivery", "dm_stats",
+      "get_files", "get_storage_health", "get_cache_status", "get_online_members", "get_delivery", "dm_stats",
       "get_dm_requests", "file_available", "get_kept_files", "get_private_downloads",
       // Read-only check of a Saved row's file: one of four words, never a path; bounded natively.
       "check_saved_download",
@@ -285,6 +285,10 @@ export const TAURI_COMMAND_GROUPS = {
       "keep_file", "request_kept_file", "set_kept_paused", "forget_kept_file", "retry_kept_file",
       // Private encrypted progress, independent of Keep; exact revision/grant CAS, no paths/keys.
       "set_private_download_paused", "retry_private_download", "cancel_private_download",
+      // This device's cache limit for one server: range-checked natively (1 GB to 1 TB or none),
+      // sealed before the actor applies it. Never replicated; pins still protect Keep, Studio,
+      // Downloads, own uploads and files in use whatever the page sends.
+      "set_cache_limit",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",

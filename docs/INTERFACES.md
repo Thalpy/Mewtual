@@ -2150,7 +2150,9 @@ and `cancel_private_download` mutate only that saved local owner under the origi
 entry fence. Retry uses the existing exact latest-receipt CAS contract. Metadata updates are
 owner-specific and coalesced around actual actor progress, so a same-CID Keep cannot mask them.
 Completed ciphertext is private; only native `DownloadReady`/export leases can read it. Successful
-external publication remains committed if encrypted cleanup fails, with a visible warning.
+external publication remains committed if encrypted cleanup fails, with a visible warning. Since
+cache housekeeping, a published save's chunks are promoted into the shared cache at
+`finish_download_export` (see the cache housekeeping section); nothing propagates earlier.
 
 ## Journaled external Download export (21 October; Save as and review fixes 22 October; focused checks, full suites pending)
 
@@ -3376,6 +3378,51 @@ pub trait BlobStore {
 }
 pub struct MemoryBlobStore;  pub struct FsBlobStore;  fn open(dir) -> Result<Self>;
 ```
+
+Cache housekeeping (PR #55) adds defaulted methods; stores without a size-limited cache refuse or
+answer `None`, which callers treat as "do not evict":
+
+```rust
+fn cache_scan(&mut self, recover: bool) -> Result<CacheScanReport>; // metadata-only scan; `recover` = mount
+fn cache_index(&self) -> Option<CacheIndex>;     // sizes + mount set + complete; None before a scan
+fn cache_usage(&self) -> Option<CacheUsage>;     // running total, cheap every actor turn
+fn protected_cids(&self) -> Option<BTreeSet<Cid>>; // Studio pins + live holds; None = unknown
+fn retained_chunks(&self) -> BTreeSet<Cid>;      // chunks of checked, completed Keep copies
+SealingBlobStore::open_cache(dir, key, rng)      // primary only: incoming/ + sync + rename writes;
+                                                 // holds <dir>/attach.lock shared; VaultBusy while
+                                                 // a cleanup holds it exclusively
+SealingBlobStore::open_cache_under(dir, key, rng, &AttachExclusive) // cleanup's own handle
+```
+
+`catcoms_storage::cache` holds the temp naming (`<cid>.<pid>.<mount generation>.<seq>`, live
+generations registered process-wide), the scan, the attach lock (`attach_exclusive` →
+`AttachAttempt::{Held, Busy, Failed}`, `remove_attach_lock`; every primary handle holds it shared,
+so an exclusive hold proves the namespace unattached, which the Keep lease cannot: a second attach
+of a group gets no lease), and the leave-cleanup steps (`write_leaving_marker`,
+`has_leaving_marker`, `finish_leaving`, `leaving_namespaces`, `remove_scratch`, `lock_kept`,
+`remove_kept_tree`), each returning freed bytes and failures without following links. `catcoms_app::cache_plan::plan` is the pure eviction planner and
+`catcoms_app::cache_housekeeping` the actor-side runtime (`CacheLimit`, `CacheStatus`,
+`CachePause`, `CacheSetting`). `ServerStore` gains `save_cache_setting` / `load_cache_setting`
+(sealed `servers/<id>.storage`, version 1: group, limit or none, origin; a record for another group
+reads as missing), `cache_namespace_dir`, `blobs_root`, `cache_only_blob_store(key, &held)` and
+`begin_leave_cleanup` (`LeaveBegin::{Ready, NoMarker, Busy, Unavailable}`; `Busy` deletes nothing
+and keeps the marker; `LeaveCleanup::delete_batch` / `finish` → `LeaveReport`). Actor commands:
+`SetCacheLimit`, `CacheStatus`, `CacheProtectionChanged`; events `CacheStatusChanged`,
+`CacheNeedsStudioScan`. Desktop commands: `get_cache_status(server)` (account-read) and
+`set_cache_limit(server, bytes|null)` (account-write, 1 GiB to 1 TiB or null, sealed before the
+actor applies it); event `cache-status { server, status }`; `leave_server` now returns
+`{ freed_bytes, kept_bytes, failed, cleaned }`. `StorageHealth` gains `not_cached_chunks`; `missing_chunks`
+counts only this device's own uploads, and Repair fetches only those and unreadable chunks.
+
+Saved files propagate only once saved (owner decision 2): `acquire_download` (network or the
+restart recheck) writes only the private store. `read_download_chunk` additionally stages the
+chunk's ciphertext in the primary cache's `staging/` unless already held (invisible to
+`has_blob`/`get_blob`/serving/`file_available`). `finish_download_export(ready)`, which native
+calls only after the save published, releases the record and then promotes those staged chunks
+into the shared cache if the lease was still current and the release succeeded, otherwise drops
+them. `cancel_download(id)` drops whatever that Download staged. Stage/promote failures are logged
+and never fail the call. A Download that is in progress, paused, failed, cancelled or removed
+therefore never makes this device a source.
 
 ---
 
@@ -6827,7 +6874,9 @@ the original set before starting work. A successful fallback returns a fresh exa
 after selection publication, preserving global intent/allowance and revoking old lower effects.
 Completed projections remain bound to the committed winner. Old exact-only records are not enriched.
 See the file contract for migration, directory barriers, execution ceilings and current resume limits.
-Remote confirmations and automated retention/eviction are not part of this interface.
+Remote confirmations and holder-aware retention are not part of this interface. Size-limited cache
+eviction (PR #55) never touches Keep copies; it pins in-progress Keeps and drops a cache duplicate
+only for a completed copy checked in this mount (see `BlobStore::retained_chunks` above).
 
 ### Pre-upload video editing (frontend only)
 

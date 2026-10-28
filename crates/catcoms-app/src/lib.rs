@@ -53,6 +53,8 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+pub mod cache_housekeeping;
+pub mod cache_plan;
 pub mod creative;
 pub mod durable_chat;
 mod file_resolution;
@@ -2864,20 +2866,22 @@ pub const FILE_EXPIRY_DEFAULT_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// under two names/folders (content dedup in [`Server::add_file`]) carry two independent
 /// deadlines.
 ///
-/// **NOTHING ENFORCES THIS YET.** As of this change the deadline is *recorded and displayed*
-/// metadata only; no eviction, no drop-from-circulation, no GC consults it. `catcoms-storage`'s
-/// [`RetentionIndex`](catcoms_storage::RetentionIndex) is a complete 3-scope expiry + GC engine,
-/// but it is **not wired into this layer at all**: the shared-file index records expiry, the blob
-/// store evicts nothing, and an "expired" file keeps circulating exactly as before. The point of
-/// stamping it now is that the eventual enforcement pass has honest inputs; including
-/// [`Server::wiki_pinned_cids`], which it MUST consult (wiki-embedded files never decay).
+/// **Nothing enforces this deadline.** It is *recorded and displayed* metadata only; no
+/// drop-from-circulation consults it, and `catcoms-storage`'s
+/// [`RetentionIndex`](catcoms_storage::RetentionIndex) is not wired in. Separately, each device's
+/// cache follows its own per-server size limit ([`cache_plan`], [`cache_housekeeping`]), which
+/// drops the oldest listings first and ignores this field: "never expires" (`FileExpiry::Never`)
+/// and wiki embeds are circulation rules members set for everyone, so they are deliberately not
+/// cache pins. A future expiry-enforcement pass must still consult
+/// [`Server::wiki_pinned_cids`] (wiki-embedded files never drop out of circulation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileExpiry {
     /// No deadline was ever recorded; a listing written before this field existed, or by a peer
     /// that predates it. Distinct from [`FileExpiry::Never`]: we do not know what was intended,
     /// so the UI says "not recorded (older share)" rather than promising anything.
     Unrecorded,
-    /// Explicitly kept forever ("keep forever"): never drops out of circulation.
+    /// Explicitly "never expires" (the Properties button, formerly "Keep forever"): never drops
+    /// out of circulation. Not a cache pin; see the type docs.
     Never,
     /// Drops out of circulation at this absolute ms-epoch instant.
     At(u64),
@@ -3143,7 +3147,12 @@ pub struct StorageHealth {
     pub listed_files: usize,
     pub referenced_chunks: usize,
     pub verified_chunks: usize,
+    /// Absent chunks of this device's own uploads: this device is their original source, so
+    /// their absence is damage and Repair fetches them.
     pub missing_chunks: usize,
+    /// Absent chunks of other members' files: normal for a size-limited cache (never fetched,
+    /// or dropped by the limit). Repair leaves them alone; opening the file fetches them.
+    pub not_cached_chunks: usize,
     pub unreadable_chunks: usize,
     pub invalid_manifests: usize,
     /// Exact manifest digests whose every exact chunk reference passed sealed-record,
@@ -3387,9 +3396,22 @@ fn bounded_file_bytes(doc: &AutoCommit, obj: &ObjId, key: &str, max: usize) -> O
 /// Materialize the file index document into the UI's file list (size/mime/cid come from the
 /// decoded `FileRef`; entries with a malformed ref are skipped).
 fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
+    read_file_rows(doc, group_id)
+        .map(|rows| rows.into_iter().map(|(_, entry)| entry).collect())
+        .unwrap_or_default()
+}
+
+/// As [`read_file_entries`], but each entry carries its position in the bounded projection (the
+/// listing order cache eviction uses), and a projection failure is an error rather than an empty
+/// list. Cache housekeeping must never read "unreadable" as "nothing is listed".
+fn read_file_rows(
+    doc: &AutoCommit,
+    group_id: &[u8],
+) -> Result<Vec<(usize, FileEntry)>, AutomergeError> {
     let mut out = Vec::new();
-    if let Ok(positions) = file_index_positions(doc) {
-        for (_, _, row) in positions {
+    {
+        let positions = file_index_positions(doc)?;
+        for (position, (_, _, row)) in positions.into_iter().enumerate() {
             if let Some(entry) = row {
                 let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES)
                 else {
@@ -3434,29 +3456,32 @@ fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
                                     signature,
                                 )
                             });
-                    out.push(FileEntry {
-                        name,
-                        author,
-                        author_identity: if author_verified {
-                            hex::encode(signer_id.as_bytes())
-                        } else {
-                            String::new()
+                    out.push((
+                        position,
+                        FileEntry {
+                            name,
+                            author,
+                            author_identity: if author_verified {
+                                hex::encode(signer_id.as_bytes())
+                            } else {
+                                String::new()
+                            },
+                            author_verified,
+                            size: manifest.total_size,
+                            mime: manifest.mime.clone(),
+                            // The file's identity is the whole-file PLAINTEXT cid (a chunked file
+                            // has no single ciphertext blob); this is the download/embed handle.
+                            cid: manifest.plaintext_cid.as_bytes().to_vec(),
+                            path,
+                            file_ref: ref_bytes,
+                            expires: expiry_field(doc, &entry),
                         },
-                        author_verified,
-                        size: manifest.total_size,
-                        mime: manifest.mime.clone(),
-                        // The file's identity is the whole-file PLAINTEXT cid (a chunked file has
-                        // no single ciphertext blob); this is the download/embed handle.
-                        cid: manifest.plaintext_cid.as_bytes().to_vec(),
-                        path,
-                        file_ref: ref_bytes,
-                        expires: expiry_field(doc, &entry),
-                    });
+                    ));
                 }
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn raw_file_index_row_count(doc: &AutoCommit) -> usize {
@@ -3646,6 +3671,9 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// Re-validating that registry costs one signature check per entry, so it is rebuilt only
     /// when the document actually changed; not on every tick. `None` = never reconciled.
     devices_sig: Option<u64>,
+    /// Cache housekeeping state (limit, files in use, pass pacing). Derived and process-local;
+    /// see [`cache_housekeeping`].
+    cache: cache_housekeeping::CacheRuntime,
 }
 
 /// How many of this device's most recent messages per channel carry delivery state. Bounded so a
@@ -3712,6 +3740,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            cache: Default::default(),
         })
     }
 
@@ -3774,6 +3803,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            cache: Default::default(),
         })
     }
 
@@ -3821,6 +3851,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            cache: Default::default(),
         })
     }
 
@@ -3904,6 +3935,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
+                cache: Default::default(),
             },
             contact,
         ))
@@ -3958,6 +3990,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
+                cache: Default::default(),
             },
             contact,
         ))
@@ -4051,6 +4084,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            cache: Default::default(),
         })
     }
 
@@ -4081,6 +4115,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            cache: Default::default(),
         })
     }
 
@@ -5665,6 +5700,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // the same sealed bytes paired with a different wrapped key are a different claim. More
         // than the small exact-ref cap is treated as ambiguity, not multiplied crypto work.
         let (refs, file_refs, invalid_manifests) = storage_ref_index(files);
+        // Completed Keep copies verify through the composite store's read fallback, so a cache
+        // duplicate housekeeping dropped is not counted as absent at all.
+        let own = self.own_upload_chunk_set(files);
 
         let mut health = StorageHealth {
             listed_files: files.len(),
@@ -5697,7 +5735,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         }
                     }
                     None if self.sync.has_blob(&cid) => health.unreadable_chunks += 1,
-                    None => health.missing_chunks += 1,
+                    None if own.contains(&cid) => health.missing_chunks += 1,
+                    None => health.not_cached_chunks += 1,
                 },
             }
         }
@@ -5728,15 +5767,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         health
     }
 
-    /// Re-fetch every repairable missing or unreadable referenced chunk from the best connected
-    /// member, then verify the whole set again. Contradictory over-cap exact references remain
-    /// visibly unreadable without a fetch: content addressing would return the same ciphertext and
-    /// cannot reconcile different wrapped keys. The sync/storage path authenticates the responder
-    /// and CID before replacing an unreadable record; no unreferenced blob is garbage-collected.
+    /// Re-fetch every repairable damaged chunk from the best connected member, then verify the
+    /// whole set again. Damaged means held but failing its checks, or absent from one of this
+    /// device's own uploads. A chunk that is simply not cached (never fetched, or dropped by the
+    /// cache limit) is left alone: fetching every one back would fight the limit, and opening the
+    /// file fetches what it needs. Contradictory over-cap exact references remain visibly
+    /// unreadable without a fetch: content addressing would return the same ciphertext and cannot
+    /// reconcile different wrapped keys. The sync/storage path authenticates the responder and
+    /// CID before replacing an unreadable record; no unreferenced blob is garbage-collected.
     pub async fn repair_storage(&mut self) -> Result<StorageRepair, AppError> {
         let before = self.storage_health();
         let mut candidates = HashSet::new();
         let files = self.files();
+        let own = self.own_upload_chunk_set(&files);
         let (refs, _, _) = storage_ref_index(&files);
         for (cid, exact_refs) in refs {
             let BoundedFileRefs::Exact(exact_refs) = exact_refs else {
@@ -5744,16 +5787,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 // wrapped keys. Leave this CID visibly unreadable without wasting peer traffic.
                 continue;
             };
-            let readable = self
-                .sync
-                .get_blob(&cid)
-                .map(|bytes| {
-                    exact_refs
-                        .values()
-                        .all(|chunk| self.sync.open_file(&bytes, chunk).is_ok())
-                })
-                .unwrap_or(false);
-            if !readable {
+            let held = self.sync.get_blob(&cid);
+            let readable = held.as_ref().is_some_and(|bytes| {
+                exact_refs
+                    .values()
+                    .all(|chunk| self.sync.open_file(bytes, chunk).is_ok())
+            });
+            let damaged = if held.is_some() {
+                !readable
+            } else {
+                self.sync.has_blob(&cid) || own.contains(&cid)
+            };
+            if damaged {
                 candidates.insert(cid);
             }
         }
@@ -6037,9 +6082,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// the protocol residual is identical to invites and member removal.
     ///
     /// Setting a deadline does **not** cause anything to happen at that instant; see
-    /// [`FileExpiry`]: this records metadata for a retention pass that does not exist yet, and a
-    /// deadline on a wiki-embedded file is overridden by [`wiki_pinned_cids`](Self::wiki_pinned_cids)
-    /// in any case.
+    /// [`FileExpiry`]: this records circulation metadata that no pass enforces yet, and a deadline
+    /// on a wiki-embedded file is overridden by [`wiki_pinned_cids`](Self::wiki_pinned_cids) in any
+    /// case. Neither a deadline nor "never expires" changes what a device's cache limit drops.
     pub async fn set_file_expiry(
         &mut self,
         cid: &Cid,
@@ -6079,9 +6124,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// either marker grammar (`![alt](cid:HEX)` embeds and `[label](file:HEX)` chips).
     ///
     /// **The never-decay set.** Product rule: a file embedded in a wiki page must never drop out
-    /// of circulation. Any future retention/GC pass; in this crate or in
-    /// `catcoms-storage`; **MUST** consult this set and treat a member of it as un-expirable,
-    /// whatever [`FileEntry::expires`] says.
+    /// of circulation. Any future *expiry* pass **MUST** consult this set and treat a member of it
+    /// as un-expirable, whatever [`FileEntry::expires`] says. This is not a local cache pin: any
+    /// member can embed any listed file (even in a pending edit), so the per-device cache limit
+    /// ([`cache_housekeeping`]) deliberately does not consult it.
     ///
     /// It is **derived, never stored**: the answer is recomputed from the wiki document every
     /// time, so editing the embed out of a page (or deleting the page) un-pins the file with no
@@ -11759,6 +11805,10 @@ mod tests {
         assert_eq!(alice.download_file(&cid).await.unwrap(), data);
     }
 
+    /// Contract changed with cache housekeeping: a chunk of another member's file that this
+    /// device never fetched (or dropped under its cache limit) is "not cached", which is normal,
+    /// and Repair leaves it alone. Only this device's own uploads report a missing chunk as damage,
+    /// and Repair restores exactly those through the authenticated member path.
     #[tokio::test]
     async fn storage_health_detects_missing_chunks_and_authenticated_repair_recovers_them() {
         let hub = Hub::new();
@@ -11789,17 +11839,68 @@ mod tests {
             .unwrap();
         let _ = tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
 
-        let missing = bob.storage_health();
-        assert_eq!(missing.listed_files, 1);
-        assert_eq!(missing.referenced_chunks, 1);
-        assert_eq!(missing.missing_chunks, 1);
-        assert_eq!(missing.verified_chunks, 0);
+        let not_cached = bob.storage_health();
+        assert_eq!(not_cached.listed_files, 1);
+        assert_eq!(not_cached.referenced_chunks, 1);
+        assert_eq!(not_cached.not_cached_chunks, 1);
+        assert_eq!(
+            not_cached.missing_chunks, 0,
+            "not this device's upload: not damage"
+        );
+        assert_eq!(not_cached.verified_chunks, 0);
+        // No network turn on Alice's side: a Repair that sends nothing must not need one.
+        let repair = bob.repair_storage().await.unwrap();
+        assert_eq!(
+            repair.attempted_chunks, 0,
+            "Repair never fetches merely uncached chunks back, which would fight the limit"
+        );
 
-        let (repair, _) = tokio::join!(bob.repair_storage(), alice.sync_once());
+        // Bob shares a file of his own, and Alice holds a copy of its chunk. Bob then loses it:
+        // for his own upload that is missing (damage), and Repair restores it from Alice.
+        bob.add_file("mine.txt", "text/plain", "", b"bob's own bytes")
+            .await
+            .unwrap();
+        let mine = bob
+            .files()
+            .into_iter()
+            .find(|entry| entry.name == "mine.txt")
+            .unwrap();
+        let chunk = FileManifest::decode_or_legacy(&mine.file_ref)
+            .unwrap()
+            .chunks[0]
+            .ciphertext_cid;
+        alice
+            .sync
+            .put_blob(&bob.sync.get_blob(&chunk).unwrap())
+            .unwrap();
+        assert!(bob.sync.delete_blob(&chunk).unwrap());
+        let missing = bob.storage_health();
+        assert_eq!(missing.missing_chunks, 1, "bob's own upload");
+        assert_eq!(
+            missing.not_cached_chunks, 1,
+            "alice's file, still merely not cached"
+        );
+
+        // Alice may first have Bob's index gossip to handle, so keep her turning until Bob's
+        // repair completes rather than granting exactly one turn.
+        let repair = {
+            let repair = bob.repair_storage();
+            tokio::pin!(repair);
+            loop {
+                tokio::select! {
+                    done = &mut repair => break done,
+                    _ = alice.sync_once() => {}
+                }
+            }
+        };
         let repair = repair.unwrap();
-        assert_eq!(repair.attempted_chunks, 1);
+        assert_eq!(
+            repair.attempted_chunks, 1,
+            "only the own-upload chunk is fetched"
+        );
         assert_eq!(repair.recovered_chunks, 1);
         assert_eq!(repair.health.missing_chunks, 0);
+        assert_eq!(repair.health.not_cached_chunks, 1);
         assert_eq!(repair.health.unreadable_chunks, 0);
         assert_eq!(repair.health.verified_chunks, 1);
         assert_eq!(repair.health.verified_manifest_versions.len(), 1);

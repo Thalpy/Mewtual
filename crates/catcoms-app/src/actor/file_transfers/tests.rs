@@ -2293,6 +2293,8 @@ async fn private_download_uses_real_acquisition_and_protected_store_without_publ
     assert!(requester.sync.kept_files().transfers.is_empty());
     assert!(requester.sync.automatic_keep_candidate(None).is_none());
     for chunk in &ready.manifest.chunks {
+        // Saved files propagate only once a save publishes (cache housekeeping), so acquisition
+        // alone still leaves nothing in the shared cache.
         assert!(!requester.sync.has_blob(&chunk.ciphertext_cid));
         assert!(requester.sync.get_blob(&chunk.ciphertext_cid).is_none());
         let bytes = requester
@@ -2308,6 +2310,94 @@ async fn private_download_uses_real_acquisition_and_protected_store_without_publ
     assert!(requester.sync.downloads().unwrap()[0].checked);
     requester.sync.cancel_download(ready.id()).unwrap();
     assert!(!ready.is_current());
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
+}
+
+/// Owner decision "saved files propagate" (cache housekeeping): a private Download's chunks reach
+/// the shared cache, so this device serves the file, only once a save of it has published.
+/// Acquisition copies nothing, export reads only stage (invisible to serving), a removed Download
+/// leaves nothing staged or held, and only `finish_download_export` after publication propagates.
+#[tokio::test]
+async fn a_private_download_reaches_the_shared_cache_only_once_its_save_publishes() {
+    let Pair {
+        mut requester,
+        holder,
+        cid,
+        gate,
+        entered: _entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _store = attach_protected_kept(&mut requester, dir.path());
+    let staging = dir
+        .path()
+        .join("blobs")
+        .join(hex::encode(requester.group_id()))
+        .join("staging");
+    let (source, _events, source_task) = spawn(holder);
+    gate.add_permits(64);
+    let (actor, mut events, task) = spawn(requester);
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let (_cancel, watch) = watch::channel(false);
+    let origin = RequestCancellation::new(watch, None);
+    let raw = cid.as_bytes().to_vec();
+    let staged = || std::fs::read_dir(&staging).map_or(0, |entries| entries.count());
+    let removed = bounded(actor.acquire_download(raw.clone(), None, origin.clone()))
+        .await
+        .unwrap()
+        .with_export_custody(Arc::new(()));
+    assert!(
+        !bounded(actor.file_available(raw.clone())).await,
+        "acquisition alone does not propagate"
+    );
+    assert_eq!(staged(), 0, "nor does it stage");
+
+    // Export reads, then Remove: nothing is served, and nothing stays staged.
+    for index in 0..removed.manifest.chunks.len() {
+        bounded(actor.read_download_chunk(removed.clone(), index, origin.clone()))
+            .await
+            .unwrap();
+    }
+    assert!(staged() > 0, "export reads stage their chunks");
+    assert!(
+        !bounded(actor.file_available(raw.clone())).await,
+        "a save in progress is not a source"
+    );
+    bounded(actor.cancel_download(removed.id())).await.unwrap();
+    assert!(!bounded(actor.file_available(raw.clone())).await);
+    assert_eq!(staged(), 0, "a removed Download leaves nothing staged");
+    // Finishing an export the Remove retired propagates nothing either.
+    let _ = bounded(actor.finish_download_export(removed.clone())).await;
+    assert!(!bounded(actor.file_available(raw.clone())).await);
+
+    // A fresh Download whose save publishes: only then does the file become available.
+    let saved = bounded(actor.acquire_download(raw.clone(), None, origin.clone()))
+        .await
+        .unwrap()
+        .with_export_custody(Arc::new(()));
+    assert!(
+        !bounded(actor.file_available(raw.clone())).await,
+        "acquisition alone does not propagate"
+    );
+    for index in 0..saved.manifest.chunks.len() {
+        bounded(actor.read_download_chunk(saved.clone(), index, origin.clone()))
+            .await
+            .unwrap();
+    }
+    assert!(!bounded(actor.file_available(raw.clone())).await);
+    bounded(actor.finish_download_export(saved.clone()))
+        .await
+        .unwrap();
+    assert!(
+        bounded(actor.file_available(raw.clone())).await,
+        "the published save propagates into the shared cache"
+    );
+    assert_eq!(staged(), 0, "promotion consumed the staged chunks");
+    assert!(bounded(actor.downloads()).await.unwrap().is_empty());
+    actor.shutdown().await;
+    bounded(task).await.unwrap();
+    bounded(drain).await.unwrap();
     source.shutdown().await;
     bounded(source_task).await.unwrap();
 }

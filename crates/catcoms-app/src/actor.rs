@@ -1084,6 +1084,18 @@ pub enum AppCommand {
     KeptFiles {
         reply: oneshot::Sender<catcoms_storage::kept::KeptFiles>,
     },
+    /// Hand over the cache limit (loaded, migrated or chosen by the user). Validation of a user
+    /// choice happens in the desktop bridge before the sealed record is written.
+    SetCacheLimit {
+        limit: crate::cache_housekeeping::CacheLimit,
+        reply: oneshot::Sender<crate::cache_housekeeping::CacheStatus>,
+    },
+    /// The current cache status (bounded; no decryption).
+    CacheStatus {
+        reply: oneshot::Sender<crate::cache_housekeeping::CacheStatus>,
+    },
+    /// The desktop's Studio reference service refreshed protection: replan next turn.
+    CacheProtectionChanged,
     ForgetKeptFile {
         cid: Vec<u8>,
         reply: oneshot::Sender<Result<(), String>>,
@@ -1549,6 +1561,12 @@ pub enum AppEvent {
     DevicesUpdated,
     /// The shared file list changed; the UI should re-fetch it (`files`).
     FilesUpdated,
+    /// This server's cache status changed (usage, leaving-soon count, pause reason). Coalesced to
+    /// at most one per second. Carries only local totals, never file names or addresses.
+    CacheStatusChanged(crate::cache_housekeeping::CacheStatus),
+    /// Cache eviction is paused because Studio protection is unknown; the desktop's reference
+    /// service should run a scan (it rate-limits and backs off on its own).
+    CacheNeedsStudioScan,
     /// The status feed changed; the UI should re-fetch it (`statuses`).
     StatusUpdated,
     /// The server events (calendar) changed; the UI should re-fetch them (`events`).
@@ -3289,6 +3307,35 @@ impl ServerActor {
         receiver.await.unwrap_or_default()
     }
 
+    /// Hand the cache limit to the actor and return the resulting status.
+    pub async fn set_cache_limit(
+        &self,
+        limit: crate::cache_housekeeping::CacheLimit,
+    ) -> Result<crate::cache_housekeeping::CacheStatus, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::SetCacheLimit { limit, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// The current cache status of this server.
+    pub async fn cache_status(&self) -> Result<crate::cache_housekeeping::CacheStatus, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::CacheStatus { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// Tell the actor Studio protection may have changed. Best effort: a stopped actor needs
+    /// nothing.
+    pub async fn cache_protection_changed(&self) {
+        let _ = self.cmd_tx.send(AppCommand::CacheProtectionChanged).await;
+    }
+
     /// Acquire encrypted private progress before touching an external plaintext destination.
     /// A saved ID selects its original plan; it never grants a new allowance or read authority.
     pub async fn acquire_download(
@@ -4745,6 +4792,19 @@ where
             let automatic_keep_due = file_transfers.pump_automatic(&mut server, keep_session);
             server.collect_expired_voice();
             maintenance.pump(&mut server);
+            // Cache housekeeping: cheap unless a pass, an evaluation or a held status is due. A
+            // pass deletes at most one bounded batch per turn and replans before the next.
+            let cache = server.cache_pump();
+            if let Some(status) = cache.status {
+                let _ = event_tx.send(AppEvent::CacheStatusChanged(status)).await;
+            }
+            if cache.studio_scan {
+                let _ = event_tx.send(AppEvent::CacheNeedsStudioScan).await;
+            }
+            if cache.deleted > 0 {
+                tracing::debug!(deleted = cache.deleted, freed = cache.freed, "STORAGE.CACHE.EVICTED");
+            }
+            let cache_due = cache.next_due;
             // Check at the owner boundary, including after a command cancelled a sync tick that
             // already applied a valid prefix. No snapshot I/O belongs in this event channel.
             if snapshot_versions.update(&server) {
@@ -4779,7 +4839,7 @@ where
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (only, None) | (None, only) => only,
             };
-            let delivery_due = [delivery_due, member_reconnect.next_due()].into_iter().flatten().min();
+            let delivery_due = [delivery_due, member_reconnect.next_due(), cache_due].into_iter().flatten().min();
             let voice_wake = server.voice_housekeeping_wake();
             let turn = {
             let keep_session_changed = async {
@@ -5602,15 +5662,20 @@ where
                             let bytes = server.sync.read_download_export(&ready.lease, &reference.ciphertext_cid, bound).map_err(|e| e.to_string())?;
                             let plaintext = server.sync.open_file(&bytes, reference).map_err(|e| e.to_string())?;
                             if !valid() { return Err("The download is no longer active.".to_string()); }
+                            // Staged only, for propagation once the save publishes (see
+                            // `file_transfers/propagate.rs`); not served until then.
+                            server.stage_export_chunk(&reference.ciphertext_cid, &bytes);
                             Ok(DownloadChunk { bytes: plaintext, _custody: custody })
                         })();
                         let _ = reply.send(result);
                     }
                     Some(AppCommand::Downloads { reply }) => { let _ = reply.send(server.sync.downloads().map_err(|e| e.to_string())); }
-                    Some(AppCommand::FinishDownloadExport { ready, reply }) => { let _ = reply.send(server.sync.finish_download_export(&ready.lease).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    // Native sends this only after the save published: the one point where a
+                    // Download's chunks propagate into the shared cache.
+                    Some(AppCommand::FinishDownloadExport { ready, reply }) => { let _ = reply.send(server.finish_download_export_and_propagate(&ready).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::SetDownloadPaused { id, expected_intent, paused, reply }) => { let _ = reply.send(server.sync.set_download_paused(id, expected_intent, paused).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::RetryDownload { id, request, reply }) => { let _ = reply.send(server.sync.retry_download(id, request).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
-                    Some(AppCommand::CancelDownload { id, reply }) => { let _ = reply.send(server.sync.cancel_download(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::CancelDownload { id, reply }) => { let _ = reply.send(server.cancel_download_and_unstage(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::FinishDownloadCleanup { id, reply }) => { let _ = reply.send(server.sync.finish_download_cleanup(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::DownloadExportState { id, reply }) => { let _ = reply.send(server.sync.download_export_state(id).map_err(|e| e.to_string())); }
                     Some(AppCommand::DownloadExportTransition { ready, transition, cancel, reply }) => {
@@ -5639,6 +5704,12 @@ where
                         let _ = event_tx.send(AppEvent::FilesUpdated).await;
                     }
                     Some(AppCommand::KeptFiles { reply }) => { let _ = reply.send(server.sync.kept_files()); }
+                    Some(AppCommand::SetCacheLimit { limit, reply }) => {
+                        server.set_cache_limit(limit);
+                        let _ = reply.send(server.cache_status());
+                    }
+                    Some(AppCommand::CacheStatus { reply }) => { let _ = reply.send(server.cache_status_cached()); }
+                    Some(AppCommand::CacheProtectionChanged) => server.cache_protection_changed(),
                     Some(AppCommand::RetryKeptFile { cid, request, reply }) => {
                         let result = <[u8; 32]>::try_from(cid.as_slice()).map_err(|_| "bad content address".to_string())
                             .and_then(|raw| server.sync.retry_kept(&Cid::from_bytes(raw), request).map_err(|error| error.to_string()));
