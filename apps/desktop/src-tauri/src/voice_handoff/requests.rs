@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 pub(super) mod key_session;
 pub(super) mod media;
 pub(super) mod negotiation_admission;
+pub(super) mod negotiation_capacity;
 pub(super) mod pc;
 pub(super) mod sdk;
 pub(super) mod sdp;
@@ -37,6 +38,9 @@ pub(super) fn wire_shape(
     use super::channel::BodyKind;
     if operation == Operation::NegotiationAdmission {
         return negotiation_admission::wire_shape(kind, logical, cipher_bytes, session);
+    }
+    if operation == Operation::NegotiationCapacity {
+        return negotiation_capacity::wire_shape(kind, logical, cipher_bytes, session);
     }
     if operation == Operation::Media {
         return media::wire_shape(kind, logical, cipher_bytes);

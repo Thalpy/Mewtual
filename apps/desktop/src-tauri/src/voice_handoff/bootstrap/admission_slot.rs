@@ -2,6 +2,9 @@
 //! One persistent continuation task owns the original8KiB and native position.
 //! Neither local Busy nor a lost IPC observer creates another task or Root mint.
 use super::*;
+use crate::voice_handoff::requests::negotiation_capacity::{
+    Kind as CapacityKind, Request as CapacityRequest, Snapshot, State as CapacityState,
+};
 use catcoms_app::{VoiceAdmissionPublisher, VoiceAdmissionWork, VoiceEndpointError};
 use catcoms_sync::voice_v2::admission::{
     AdmissionPrepared, AdmissionSessionObserver, RootAdmissionSession, RootHighPreclaim,
@@ -157,6 +160,23 @@ pub(super) fn retained_layout_bytes() -> usize {
     // independently counted in its original native8KiB graph below.
     2 * std::mem::size_of::<(usize, usize, InvocationId)>()
 }
+
+/// Synchronous Control stack in addition to its enclosing async service frame.
+/// The independently paid native8KiB owns the actual spawned future/custody graph;
+/// include the concrete prepayment/commit temporaries here rather than borrowing
+/// space from a future Root invocation or the bootstrap Row's retained fee.
+pub(in crate::voice_handoff) fn control_layout_bytes() -> usize {
+    std::mem::size_of::<crate::voice_handoff::context::LiveContext>()
+        + std::mem::size_of::<NativeCustody>()
+        + std::mem::size_of::<Credit>()
+        + std::mem::size_of::<Arc<TaskFunding>>()
+        + std::mem::size_of::<tokio::runtime::Handle>()
+        + std::mem::size_of::<tokio::sync::OwnedMutexGuard<()>>()
+        + std::mem::size_of::<std::sync::MutexGuard<'_, crate::voice_authority::Coordinator>>()
+        + std::mem::size_of::<std::sync::MutexGuard<'_, State>>()
+        + std::mem::size_of::<Snapshot>()
+        + 256 // bounded request borrows, negative validation and commit wrappers
+}
 fn worker_layout<F: std::future::Future<Output = Completion>>(_: fn(Worker) -> F) -> usize {
     std::mem::size_of::<F>()
         + std::mem::size_of::<Worker>()
@@ -243,6 +263,16 @@ fn queue_requested_at(
     generation: u64,
     before_commit: impl FnOnce(),
 ) -> Result<(), crate::voice_handoff::factory::Refused> {
+    queue_requested_with_hooks(context, route, native, generation, before_commit, || {})
+}
+fn queue_requested_with_hooks(
+    context: &crate::voice_handoff::context::Context,
+    route: &Route,
+    native: &crate::voice_handoff::channel::NativeHold,
+    generation: u64,
+    before_commit: impl FnOnce(),
+    before_enqueue: impl FnOnce(),
+) -> Result<(), crate::voice_handoff::factory::Refused> {
     use crate::voice_handoff::factory;
     use catcoms_sync::voice_v2::admission::AdmissionRpcPermit;
     let (actor, grant) = factory::native::observation_actor(context, route)?;
@@ -270,6 +300,7 @@ fn queue_requested_at(
     drop(live); // mailbox refusal/refund must be outside ALL guards
     if let Some(prepared) = prepared {
         let (original, generation, publisher) = prepared.publisher();
+        before_enqueue(); // test barrier at actual Pending -> Actor custody, outside guards
         let queued = actor.try_queue_voice_admission(
             grant.clone(),
             original,
@@ -394,6 +425,173 @@ fn register_with_hooks(
     Ok(())
 }
 impl Route {
+    /// Only an already-pinned physical Session can use capacity Control. Observe
+    /// creates no work; Register delegates outside State to the one paid task.
+    /// Cancel is negative-only and remains available after End/whole-mode close.
+    pub(in crate::voice_handoff) fn admission_capacity(
+        &self,
+        context: &crate::voice_handoff::context::Context,
+        request: CapacityRequest,
+    ) -> Result<Snapshot, Refused> {
+        {
+            let state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mode = state.admission.as_ref().ok_or(Refused::Binding)?;
+            if request.kind == CapacityKind::Register
+                && (mode.is_cancelled() || state.pending || state.browser_setup.is_some())
+            {
+                return Err(Refused::Binding);
+            }
+            state
+                .admission_slot
+                .require_observable(request.generation)?;
+        }
+        match request.kind {
+            CapacityKind::Register => {
+                use crate::voice_handoff::factory::Refused as FactoryRefused;
+                match register(context, self, request.generation) {
+                    Ok(()) | Err(FactoryRefused::Protocol(VoiceError::Capacity)) => {}
+                    Err(FactoryRefused::Protocol(VoiceError::Bounds)) => {
+                        return Err(Refused::Bounds)
+                    }
+                    Err(_) => self.close_admission_slot(),
+                }
+            }
+            CapacityKind::Observe => {} // no nudge, factory, token or capacity allocation
+            CapacityKind::Cancel => {
+                {
+                    let mut state = self
+                        .row
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    // A concurrent close must not turn a valid staged successor
+                    // into a demand to mutate an unrelated generation's floor.
+                    state
+                        .admission_slot
+                        .require_observable(request.generation)?;
+                    if !state.admission_slot.closed {
+                        state.admission_slot.cancel(request.generation)?;
+                    }
+                }
+                self.row.admission_changed.notify_waiters();
+            }
+        }
+        self.capacity_snapshot(request.generation)
+    }
+
+    fn capacity_snapshot(&self, requested: u64) -> Result<Snapshot, Refused> {
+        let mut state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let closed = state.closed
+            || state.effects_closed
+            || !self.selected().lease().is_live()
+            || state
+                .admission
+                .as_ref()
+                .is_none_or(AdmissionPin::is_cancelled);
+        let slot = &mut state.admission_slot;
+        slot.require_observable(requested)?;
+        let invalid_reserved = slot.phase == Phase::Reserved
+            && (slot.reclaiming
+                || slot.recovery_active
+                || !slot.capacity.as_ref().is_some_and(|capacity| {
+                    capacity.is_current()
+                        && capacity.generation() == slot.generation
+                        && slot
+                            .registration
+                            .as_ref()
+                            .is_some_and(|owner| capacity.belongs_to(owner))
+                }));
+        if closed
+            || invalid_reserved
+            || slot
+                .registration
+                .as_ref()
+                .is_some_and(|owner| !owner.is_current())
+        {
+            slot.close();
+        }
+        let code = if slot.closed {
+            if slot.collected() {
+                CapacityState::Closed
+            } else if slot.phase == Phase::Uncertain {
+                CapacityState::Uncertain
+            } else {
+                CapacityState::Closing
+            }
+        } else if requested < slot.generation {
+            // Advancement required actual old generation return. This is an
+            // exact negative certificate, never the successor's reservation.
+            if slot.cancelled_through < requested {
+                return Err(Refused::Binding);
+            }
+            CapacityState::Superseded
+        } else if slot.cancelled_through >= requested {
+            if slot.phase == Phase::Returned
+                && !slot.reclaiming
+                && slot.capacity.is_none()
+                && slot
+                    .invocation
+                    .as_ref()
+                    .is_none_or(|old| old.work.is_none() && old.outcome.is_none())
+            {
+                CapacityState::Returned
+            } else {
+                CapacityState::Closing
+            }
+        } else if requested > slot.generation {
+            if slot.task_started && slot.desired == requested {
+                CapacityState::Preparing
+            } else {
+                CapacityState::Unstarted
+            }
+        } else {
+            match slot.phase {
+                Phase::Waiting => CapacityState::Waiting,
+                Phase::Pending | Phase::Staged | Phase::Finalizing => CapacityState::Preparing,
+                Phase::Reserved
+                    if !slot.reclaiming
+                        && !slot.recovery_active
+                        && slot.capacity.as_ref().is_some_and(|capacity| {
+                            capacity.is_current()
+                                && capacity.generation() == requested
+                                && slot
+                                    .registration
+                                    .as_ref()
+                                    .is_some_and(|owner| capacity.belongs_to(owner))
+                        }) =>
+                {
+                    CapacityState::Reserved
+                }
+                Phase::Reserved | Phase::Uncertain => CapacityState::Uncertain,
+                Phase::Returned | Phase::Closed => CapacityState::Closing,
+            }
+        };
+        let snapshot = Snapshot {
+            state: code,
+            requested_generation: requested,
+            canonical_generation: slot.generation,
+            cancelled_through: slot.cancelled_through,
+            incarnation: slot
+                .registration
+                .as_ref()
+                .map(RootAdmissionSession::incarnation),
+        };
+        let wake = slot.closed && !slot.collected();
+        drop(state);
+        if wake {
+            self.row.admission_changed.notify_waiters();
+        }
+        Ok(snapshot)
+    }
+
     /// Recover the original terminal Slot using only its transferred position.
     /// Contending callers create no work. An active Actor is never waited on here;
     /// End returns Capacity and shutdown awaits its SAME retirement separately.
@@ -528,6 +726,12 @@ impl Route {
         {
             return Err(VoiceError::Bounds.into());
         }
+        if generation <= slot.cancelled_through || generation < slot.generation {
+            // Historical/never-started canceled retries must remain observations.
+            // In particular do not buy a permanent task for an ordinal it can
+            // never submit after its exact negative floor has been latched.
+            return Ok(true);
+        }
         if !slot.task_started {
             return Ok(false);
         }
@@ -611,6 +815,9 @@ enum Outcome {
     Prepared(Result<AdmissionPrepared, VoiceError>),
     /// The Actor's exact refusal certifies no Root entry, not actual return yet.
     Unstarted(VoiceEndpointError),
+    /// Exact accepted callback refused BEFORE enqueue because this generation
+    /// was canceled. Unlike generic Stopped, it does not terminate registration.
+    CancelledUnstarted,
     /// Cleanup of already retained capacity, or terminal uncertainty after the
     /// original callback returned. Neither variant certifies no Root entry.
     Capacity(RootHighPreclaim),
@@ -664,6 +871,34 @@ impl Default for Slot {
     }
 }
 impl Slot {
+    /// Pure ordinal validation. Observing never creates a generation, but an
+    /// already-staged successor remains observable if whole-Session close wins
+    /// before its worker can install Pending. Unknown skips/wrap always refuse.
+    fn require_observable(&self, generation: u64) -> Result<(), Refused> {
+        if generation == 0 {
+            return Err(Refused::Bounds);
+        }
+        if generation <= self.generation
+            || (self.generation == 0 && generation == 1)
+            || (generation == self.desired && self.desired > self.generation)
+        {
+            return Ok(());
+        }
+        if self.generation.checked_add(1) == Some(generation)
+            && self.phase == Phase::Returned
+            && self.cancelled_through >= self.generation
+            && !self.reclaiming
+            && self.capacity.is_none()
+            && self
+                .invocation
+                .as_ref()
+                .is_none_or(|old| old.work.is_none() && old.outcome.is_none())
+        {
+            return Ok(());
+        }
+        Err(Refused::Bounds)
+    }
+
     fn owners_drained(&self) -> bool {
         self.closed
             && !self.reclaiming
@@ -878,6 +1113,7 @@ impl Route {
                 route: self.clone(),
                 id,
                 settled: false,
+                cancelled_before_enqueue: false,
             },
         }))
     }
@@ -1024,6 +1260,7 @@ impl Finalization<'_> {
                     (None, None, Phase::Waiting, false)
                 }
                 Outcome::Capacity(capacity) => (None, Some(capacity), Phase::Returned, false),
+                Outcome::CancelledUnstarted => (None, None, Phase::Returned, false),
                 Outcome::Candidate(capacity) => (None, Some(capacity), Phase::Reserved, false),
                 Outcome::Prepared(Err(VoiceError::Unauthorized)) => {
                     (None, None, Phase::Closed, true)
@@ -1340,6 +1577,7 @@ struct Publisher {
     route: Route,
     id: Arc<InvocationId>,
     settled: bool,
+    cancelled_before_enqueue: bool,
 }
 impl Publisher {
     /// Apply only a proof from this exact invocation. No Root factory or callback
@@ -1402,6 +1640,11 @@ impl VoiceAdmissionPublisher for Publisher {
         // Even refusal keeps the exact Work: its callback/argument retirement
         // occurs AFTER the consuming refused callback, not at this observation.
         original.work = Some(work);
+        // This proof is narrower than Stopped: the actor has not enqueued any
+        // request, and ordinary ordinal cancellation alone won the admission.
+        // Whole-mode/End closure still overrides it during final collection.
+        self.cancelled_before_enqueue =
+            !closed && !slot.closed && slot.cancelled_through >= slot.generation;
         if closed || slot.closed || slot.cancelled_through >= slot.generation {
             Err(VoiceEndpointError::Stopped)
         } else {
@@ -1418,7 +1661,15 @@ impl VoiceAdmissionPublisher for Publisher {
     }
 
     fn refused(mut self: Box<Self>, error: VoiceEndpointError, work: Option<VoiceAdmissionWork>) {
-        self.stage(Some(Outcome::Unstarted(error)), work);
+        let outcome = if self.cancelled_before_enqueue
+            && matches!(error, VoiceEndpointError::Stopped)
+            && work.is_some()
+        {
+            Outcome::CancelledUnstarted
+        } else {
+            Outcome::Unstarted(error)
+        };
+        self.stage(Some(outcome), work);
     }
 }
 impl Drop for Publisher {

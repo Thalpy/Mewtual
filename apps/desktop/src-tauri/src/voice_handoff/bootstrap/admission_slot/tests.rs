@@ -6,6 +6,311 @@ use crate::voice_handoff::factory::tests::{park, selection, unacknowledged_chann
 use crate::voice_handoff::requests::negotiation_admission::{Kind, Request};
 use catcoms_sync::voice_v2::admission::ADMISSION_RPC_BYTES;
 use catcoms_sync::voice_v2::resources::{ResourceKind, GROUP_BYTES};
+use std::future::Future;
+
+fn capacity(
+    route: &Route,
+    context: &Context,
+    kind: CapacityKind,
+    generation: u64,
+) -> Result<Snapshot, Refused> {
+    route.admission_capacity(context, CapacityRequest { kind, generation })
+}
+
+async fn finalize_original(
+    route: &Route,
+    context: &Context,
+    native: &crate::voice_handoff::channel::NativeHold,
+) {
+    until(|| {
+        route
+            .admission_work()
+            .as_ref()
+            .is_some_and(VoiceAdmissionWork::is_retired)
+    })
+    .await;
+    route
+        .take_admission_finalization(native)
+        .unwrap()
+        .expect("actual staged outcome")
+        .finish(context);
+}
+
+#[tokio::test]
+async fn capacity_cancel_between_pending_and_actor_acceptance_returns_without_closing_registration()
+{
+    for known_registration in [false, true] {
+        let (f, context, route, _cleanup) = setup().await;
+        // A synchronous native caller owns the SAME real position and original
+        //8KiB payment as the production worker. This deterministic hook lies at
+        //its actual Pending->accepted boundary, not a simulated actor outcome.
+        let _payment = route
+            .selected()
+            .resources()
+            .charge(
+                route.selected().binding().scope.group,
+                NATIVE_TASK_BYTES,
+                ResourceKind::Retained,
+            )
+            .unwrap();
+        let native = route.session().native_hold().unwrap();
+        let mut original = None;
+        let canceled_generation = if known_registration {
+            queue_requested(&context, &route, &native, 1).unwrap();
+            finalize_original(&route, &context, &native).await;
+            assert_eq!(view(&route).phase, Phase::Reserved);
+            original = view(&route).incarnation;
+            cancel(&route, 1).unwrap();
+            route
+                .take_admission_finalization(&native)
+                .unwrap()
+                .unwrap()
+                .finish(&context);
+            assert_eq!(view(&route).phase, Phase::Returned);
+            2
+        } else {
+            1
+        };
+        queue_requested_with_hooks(
+            &context,
+            &route,
+            &native,
+            canceled_generation,
+            || {},
+            || {
+                assert_eq!(view(&route).phase, Phase::Pending);
+                assert!(!view(&route).work);
+                cancel(&route, canceled_generation).unwrap();
+            },
+        )
+        .unwrap();
+        finalize_original(&route, &context, &native).await;
+        assert_eq!(view(&route).phase, Phase::Returned);
+        assert!(!route.row.state.lock().unwrap().admission_slot.closed);
+        assert_eq!(
+            view(&route).incarnation,
+            original,
+            "never-entered cancellation cannot close or mint registration"
+        );
+        queue_requested(&context, &route, &native, canceled_generation + 1).unwrap();
+        finalize_original(&route, &context, &native).await;
+        assert_eq!(view(&route).phase, Phase::Reserved);
+        if let Some(original) = original {
+            assert_eq!(view(&route).incarnation, Some(original));
+        }
+        route.close_admission_slot();
+        route
+            .take_admission_finalization(&native)
+            .unwrap()
+            .unwrap()
+            .finish(&context);
+        drop(native);
+        f.close().await;
+    }
+}
+
+#[tokio::test]
+async fn capacity_control_observes_actual_parked_work_and_never_projects_successor_capacity_onto_old_request(
+) {
+    let (f, context, route, _cleanup) = setup().await;
+    let before = route.selected().resources().counts();
+    for _ in 0..3 {
+        let initial = capacity(&route, &context, CapacityKind::Observe, 1).unwrap();
+        assert_eq!(
+            (
+                initial.state,
+                initial.canonical_generation,
+                initial.incarnation
+            ),
+            (CapacityState::Unstarted, 0, None)
+        );
+    }
+    assert_eq!(route.selected().resources().counts(), before);
+    let parked = park(&f.actor).await;
+    capacity(&route, &context, CapacityKind::Register, 1).unwrap();
+    until(|| view(&route).work && !view(&route).retired).await;
+    let preparing = capacity(&route, &context, CapacityKind::Observe, 1).unwrap();
+    assert_eq!(
+        (
+            preparing.state,
+            preparing.canonical_generation,
+            preparing.incarnation
+        ),
+        (CapacityState::Preparing, 1, None)
+    );
+    let canceled = capacity(&route, &context, CapacityKind::Cancel, 1).unwrap();
+    drop(parked); // release the real actor even if an assertion below fails
+    assert_eq!(
+        (canceled.state, canceled.cancelled_through),
+        (CapacityState::Closing, 1)
+    );
+    until(|| view(&route).phase == Phase::Returned).await;
+    let returned = capacity(&route, &context, CapacityKind::Observe, 1).unwrap();
+    assert_eq!(returned.state, CapacityState::Returned);
+    let original = returned.incarnation.unwrap();
+    capacity(&route, &context, CapacityKind::Register, 2).unwrap();
+    until(|| view(&route).phase == Phase::Reserved && view(&route).generation == 2).await;
+    let held = route.selected().resources().counts();
+    let reserved = capacity(&route, &context, CapacityKind::Observe, 2).unwrap();
+    assert_eq!(
+        (reserved.state, reserved.incarnation),
+        (CapacityState::Reserved, Some(original))
+    );
+    for kind in [
+        CapacityKind::Register,
+        CapacityKind::Observe,
+        CapacityKind::Cancel,
+    ] {
+        let old = capacity(&route, &context, kind, 1).unwrap();
+        assert_eq!(
+            (
+                old.state,
+                old.requested_generation,
+                old.canonical_generation,
+                old.cancelled_through
+            ),
+            (CapacityState::Superseded, 1, 2, 1)
+        );
+        assert_eq!(old.incarnation, Some(original));
+    }
+    for future in [3, 4, u64::MAX] {
+        assert_eq!(
+            capacity(&route, &context, CapacityKind::Observe, future),
+            Err(Refused::Bounds)
+        );
+    }
+    assert_eq!(route.selected().resources().counts(), held);
+    assert!(view(&route).capacity);
+    finish(f, &route).await;
+}
+
+#[tokio::test]
+async fn capacity_control_cancel_before_ack_fences_late_first_register_without_task_or_root_mint() {
+    let f = Fixture::new().await;
+    let (_, selected, _) = selection(&f).await;
+    let route = unacknowledged_channel_route(&f, &selected).await;
+    let _cleanup = CloseOnDrop(route.clone());
+    let context = Context::new(&f.state);
+    assert_eq!(
+        capacity(&route, &context, CapacityKind::Observe, 1),
+        Err(Refused::Binding)
+    );
+    route
+        .admission_mode(Request {
+            kind: Kind::Register,
+            generation: 1,
+        })
+        .unwrap();
+    assert_eq!(
+        capacity(&route, &context, CapacityKind::Register, 1),
+        Err(Refused::Binding)
+    );
+    let canceled = capacity(&route, &context, CapacityKind::Cancel, 1).unwrap();
+    assert_eq!(
+        (
+            canceled.state,
+            canceled.canonical_generation,
+            canceled.cancelled_through,
+            canceled.incarnation
+        ),
+        (CapacityState::Returned, 1, 1, None)
+    );
+    route.acknowledge_setup().unwrap();
+    let before = route.selected().resources().counts();
+    // Both the public capacity adapter and its underlying native API must fence
+    // the late retry; it cannot allocate a forever-idle permanent8KiB task.
+    assert_eq!(
+        capacity(&route, &context, CapacityKind::Register, 1).unwrap(),
+        canceled
+    );
+    register(&context, &route, 1).unwrap();
+    assert_eq!(route.selected().resources().counts(), before);
+    assert!(!route.row.state.lock().unwrap().admission_slot.task_started);
+    assert!(view(&route).incarnation.is_none());
+    capacity(&route, &context, CapacityKind::Register, 2).unwrap();
+    until(|| view(&route).phase == Phase::Reserved && view(&route).generation == 2).await;
+    finish(f, &route).await;
+}
+
+#[tokio::test]
+async fn capacity_control_whole_mode_cancel_and_end_keep_closing_until_original_actor_work_returns()
+{
+    for whole_mode in [true, false] {
+        let (f, context, route, _cleanup) = setup().await;
+        let parked = park(&f.actor).await;
+        capacity(&route, &context, CapacityKind::Register, 1).unwrap();
+        until(|| view(&route).work && !view(&route).retired).await;
+        let owner = route.selected().id().to_string();
+        let mut ending = Box::pin(crate::end_voice_owner_inner(&f.state, &owner));
+        if whole_mode {
+            route
+                .admission_mode(Request {
+                    kind: Kind::Cancel,
+                    generation: 1,
+                })
+                .unwrap();
+        } else {
+            // Logical End precedes its awaited actor Stop. Poll that ACTUAL
+            // future once while the original actor remains deterministically parked.
+            std::future::poll_fn(|cx| {
+                let _ = ending.as_mut().poll(cx);
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert!(!route.selected().lease().is_live());
+        }
+        let closing = capacity(&route, &context, CapacityKind::Observe, 1).unwrap();
+        let pending = view(&route).work && !view(&route).retired;
+        drop(parked);
+        assert_eq!(closing.state, CapacityState::Closing);
+        assert!(pending);
+        if !whole_mode {
+            ending.as_mut().await;
+        }
+        until(|| view(&route).returned).await;
+        let closed = capacity(&route, &context, CapacityKind::Observe, 1).unwrap();
+        assert_eq!(
+            (closed.state, closed.incarnation),
+            (CapacityState::Closed, None)
+        );
+        drop(ending);
+        f.close().await;
+    }
+}
+
+#[tokio::test]
+async fn capacity_control_full_pressure_keeps_observation_and_exact_never_started_cancel_available()
+{
+    let (f, context, route, _cleanup) = setup().await;
+    let resources = route.selected().resources();
+    let filler = resources
+        .charge(
+            route.selected().binding().scope.group,
+            GROUP_BYTES
+                - resources
+                    .group_counts(route.selected().binding().scope.group)
+                    .unwrap()
+                    .0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let full = resources.counts();
+    let refused = capacity(&route, &context, CapacityKind::Register, 1).unwrap();
+    assert_eq!(
+        (refused.state, refused.canonical_generation),
+        (CapacityState::Unstarted, 0)
+    );
+    assert_eq!(
+        capacity(&route, &context, CapacityKind::Observe, 1).unwrap(),
+        refused
+    );
+    let canceled = capacity(&route, &context, CapacityKind::Cancel, 1).unwrap();
+    assert_eq!(canceled.state, CapacityState::Returned);
+    assert_eq!(resources.counts(), full);
+    assert!(!route.row.state.lock().unwrap().admission_slot.task_started);
+    drop(filler);
+    f.close().await;
+}
 
 #[tokio::test]
 async fn native_admission_slot_both_close_paths_keep_control_until_actual_actor_retirement() {

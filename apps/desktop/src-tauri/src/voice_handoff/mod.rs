@@ -27,6 +27,7 @@ mod key_session;
 pub(crate) mod ledger;
 mod media;
 mod negotiation_admission;
+mod negotiation_capacity;
 mod pc;
 mod pending_close;
 mod plan_final;

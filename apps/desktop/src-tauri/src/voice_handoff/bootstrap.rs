@@ -19,6 +19,7 @@ mod admission_slot;
 mod diagnostics;
 pub(super) use admission_mode::observation_layout_bytes as admission_mode_layout_bytes;
 use admission_mode::AdmissionPin;
+pub(super) use admission_slot::control_layout_bytes as admission_capacity_layout_bytes;
 
 const ROWS: usize = 64;
 const INDEX_BYTES: usize = 4096;

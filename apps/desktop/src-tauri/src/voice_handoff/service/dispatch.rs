@@ -123,6 +123,10 @@ pub(super) async fn respond(
     route: &Route,
     incoming: Incoming,
 ) -> Result<CompletedReply, Refused> {
+    if incoming.operation() == Operation::NegotiationCapacity {
+        return crate::voice_handoff::negotiation_capacity::apply(context, route, incoming)
+            .map_err(|_| Refused::Body);
+    }
     if incoming.operation() == Operation::NegotiationAdmission {
         return crate::voice_handoff::negotiation_admission::apply(route, incoming)
             .map_err(|_| Refused::Body);
