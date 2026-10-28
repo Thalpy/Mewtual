@@ -2,6 +2,7 @@ import { VoiceAppSession, VOICE_APP_SESSION_BYTES, type VoiceAppCalls, type Voic
 import { VoiceHandleCell } from "./voice-handle-cell.ts";
 import { VoiceSharedExecution } from "./voice-shared-execution.ts";
 import { VoiceSdkPositions, type VoiceSdkPositionRequest } from "./voice-sdk-positions.ts";
+import { VoiceByteLedger } from "./voice-byte-ledger.ts";
 /** Retained V2 endpoint crypto/native custody. App activation still requires production
  * adapter/RTC-track composition and acceptance. Native tickets and original scoped grants
  * are authority; WebCrypto alone neither authenticates a member nor authorizes a helper. */
@@ -493,8 +494,12 @@ export class VoiceCryptoBroker {
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
-  private bytes = 0;
-  private readonly groupBytes = new Map<string, number>();
+  // Detached audio payments may retain this ledger, never this broker's owner/work maps.
+  // Existing admission paths keep their synchronous compare/update ordering unchanged.
+  private readonly byteLedger = new VoiceByteLedger(MAX_BYTES, MAX_GROUP_BYTES);
+  private get bytes(): number { return this.byteLedger.bytes; }
+  private set bytes(value: number) { this.byteLedger.bytes = value; }
+  private readonly groupBytes = this.byteLedger.groups;
   private readonly queue: Job[] = [];
   private readonly sequences = new Map<string, { owner: VoiceCryptoOwner; highest: bigint; used: Set<bigint> }>();
   // This map and its combined pending/terminal cap survive HMR with this exact broker.

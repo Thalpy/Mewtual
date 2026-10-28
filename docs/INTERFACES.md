@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Detached capture payment (28 October; inactive composition)
+
+The internal capture budget returns `release`, one-shot `trackTask(actualFinalizer)` and
+`noTaskEntered`. The helper tracks its original void finalizer immediately after publication,
+before deferred SDK entry. Neither absence of a task nor timeout permits no-task completion
+after construction. The payment has no broker/Call/native-owner/channel/SDK backedge and
+stores no Promise. Fixed-group custody joins both actual finalizer return and capsule release.
+The same4KiB process pool can conservatively bind one active and one orphan group, sharing
+same-group references; its8KiB capsule remains charged to the immutable original group.
+All ordinary broker work and detached payments use the same ledger and unchanged limits.
+This internal contract adds no IPC/wire authority and is not yet an App audio factory.
+
 ## Inert V2 capacity contract (28 October; candidate, inactive)
 
 The opaque affine `ChainCapacity` has no Clone, serialization, budget accessor or renderer

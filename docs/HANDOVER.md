@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Detached capture funding (28 October; browser composition in progress)
+
+The isolated `communication-v2-audio-composition` branch separates byte accounting from
+the broker's owner/work graphs. Its capture funding owns one process-paid4KiB pool, at
+most two conservative group bindings (active selector plus old orphan), and one original
+8KiB capsule/master. Same-group references share their fixed group debit. Scope closure
+detaches inactive handles, while an old prompt retains only plain ledger metadata.
+
+Capsule release and actual finalizer return are independent latches. One observer tracks
+the SAME void `finishCapture` task, including `pool.returned`; the token stores no Promise.
+The original group fee returns only after both latches, with the final empty observer paid
+by fixed process inventory. Proven pre-SDK refusal has an explicit no-task transition.
+A failed observer registration detaches the target, prevents deferred SDK entry and keeps
+the real finalizer; it never invents no-task completion. No OS permission task borrows the
+shared RTC position, configuration loan, native channel activity or Call cleanup join.
+
+All90 focused byte-ledger/funding/capture/crypto/App-session tests pass. Static checks pass
+on the first slice; final static/full frontend checks remain required after composition.
+Read-only adversarial review and re-review have no remaining finding. Fixed logical
+metadata is3776 retained /4032 binding bytes under4096; capture stages are6592/6944/6176
+under8192. Group materialization uses captured non-reentrant intrinsics and owned64-byte
+input; binding inventory still includes nested negative cleanup.
+
+This branch does NOT yet construct audio through a broker factory or attach sender clones
+or playback. App V2 stays OFF. Production App wiring, bilateral admission/native registration,
+relay and physical acceptance remain open. The complete Root run validates frozen Rust
+`d55fa0db` in the admission checkout; this browser work does not change those inputs.
+Complete native acceptance and all final combined gates remain pending.
+
 ## Inert admission capacity groundwork (28 October; validation in progress)
 
 The isolated `communication-v2-admission-completion` branch adds reviewed group progression
