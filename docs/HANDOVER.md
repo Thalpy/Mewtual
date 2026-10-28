@@ -1,5 +1,42 @@
 # Mewtual; Handover
 
+## Inert browser negotiation preclaim (28 October; browser gates and review passed)
+
+`communication-v2-browser-preclaim` reserves the existing128KiB intake envelope,
+twelve history rows and exact group progression position for the original selected
+owner/key/channel/negotiation. It names no peer/action/row and starts no clock, timer,
+Input or SDK work. Remounts coalesce the exact handle; draining old dispatch refuses
+replacement. Ordinary producers cannot consume the promised position.
+
+Conversion validates the same allocation/generation, then moves the same bytes/rows
+into an ordinary Intake in a callback-free publication tail. The original15s window
+starts once at conversion; scheduler callouts receive remaining time, never a renewal.
+Old caller operations become inert. Detach occurs AFTER the entered conversion returns,
+and End cannot refund the shared envelope during subscription/unsubscription callouts.
+New Intake subscription/publication precedes removal of the old listener. The logical
+initial-overlap guard fits the same8KiB metadata, before deferred Input can build the
+full chain. Byte/group/process/execution limits are unchanged. Retained Broker46 requires
+reload; Broker47 uses the SAME window symbol and refuses incompatible old ownership.
+
+All353 native-session frontend tests pass, including sixteen new preclaim cases: inert
+waiting beyond15s, full ordinary-pool conversion, exact row/byte ownership, forged handle,
+unstarted refusal/retry, reentrant reserve/work-pump contention, and End during owner,
+scheduler, subscription and unsubscription callouts. Nested conversion is latched before
+every callout; rejected nested calls cannot finalize the outer frame. A fresh preclaim
+rejects a retained Intake from an older negotiation without spending its reservation,
+then successfully converts a fresh row while existing indexed media stays live. These End unit fixtures have no
+native row and assert no Input; positive conversion traverses the framed mock native
+action and actual WebCrypto. They do not prove native canonical admission or real RTC.
+All3,579 frontend tests pass (76.69s), static checks report zero errors/warnings, production
+build passes39.16s with the existing chunk warning, and ten real Edge flows pass. Read-only
+adversarial review and re-review have no remaining blocker/high/medium. Disabling only the
+nested-conversion guard makes its regression fail; exact source bytes were restored before
+the passing final run. The overlap guard includes5,616B against8KiB, with explicit string
+headers/frozen descriptors. Complete combined backend gates remain pending.
+Root registration is a separate leaf; no native Register/Observe/Cancel grammar,
+ordinal fence, native-row reservation, signed bilateral agreement or Ready is wired here.
+Audio factory, multi-peer agreement, relay and physical acceptance remain open. V2 is OFF.
+
 ## Combined admission/audio checkpoint (28 October; native gates passed)
 
 Frozen `56122a4f` passes the complete native suite:1,011 library tests and six ACL
