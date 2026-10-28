@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Browser preclaim contract (28 October; Broker47, V2 inactive)
+
+`preclaimNativeNegotiation(owner, channel, key)` returns an opaque inert capacity
+handle with only pure state inspection and negative retirement. It coalesces the
+original allocation; no deadline, timer or native availability follows. Existing
+128KiB/twelve-row/group intake capacity is paid before publication/subscription.
+`nativeDerivationFromPreclaim` accepts only that broker's exact original handle and
+selected key/channel/negotiation. It transfers the same envelope into the ordinary
+authenticated Input path; it cannot manufacture a native Action or bypass its checks.
+Validation refusal leaves an unstarted claim reusable. Successful conversion starts
+one original15s window and returns its actual Intake handle; subsequent retries retain
+that Intake. The old preclaim handle becomes detached and cannot close its replacement.
+End joins actual conversion/callback dispatch before refunding. Native canonical
+Session/ordinal registration and signed bilateral admission remain separate requirements.
+The retained broker ABI is47 on the same window symbol; older ownership requires reload.
+
 ## Compact local media encoding (28 October; App V2 inactive)
 
 `VoiceMediaEncoding` stores a private canonical226-byte original request and an

@@ -281,6 +281,27 @@ type ChainHandleOps = { close(): void; current(): boolean; retired(): void; time
 type ActionHandleOps = { attempt(): Promise<ActionOutcome>; inspect(): VoiceConfirmationStatus;
   retire(): void; pair(): VoiceCryptoPair | null };
 type DerivationIntakeOps = { attempt(): Promise<VoiceChannelDerivationOutcome>; retire(): void; timer(): void };
+
+/** Browser capacity only. It is not native availability, an agreement, or an RTC grant. */
+export type VoiceBrowserPreclaim = Readonly<{
+  inspect(): "reserved" | "transferred" | "retired";
+  retire(): void;
+}>;
+type BrowserPreclaim = {
+  cell: VoiceHandleCell<BrowserPreclaim>; handle: VoiceBrowserPreclaim;
+  owner: VoiceCryptoOwner; key: JoinKeyRecord; channel: RetainedIpcChannel; generation: object;
+  retired: boolean; transferred: boolean; converting: boolean; disposing: boolean; released: boolean;
+  fixedBytes: number; variable: boolean; rows: number; unsubscribe: () => void;
+  drained: Signal<void>; conversion: ChainIntake | null; retire(): void;
+};
+function browserPreclaimHandle(cell: VoiceHandleCell<BrowserPreclaim>): VoiceBrowserPreclaim {
+  return Object.freeze({ inspect: () => cell.dispatch(record => record.transferred ? "transferred" as const :
+    record.retired ? "retired" as const : "reserved" as const, "retired" as const),
+    retire: () => cell.dispatch(record => record.retire(), undefined) });
+}
+function browserPreclaimRetirement(cell: VoiceHandleCell<BrowserPreclaim>): () => void {
+  return () => cell.dispatch(record => record.retire(), undefined);
+}
 type ConfirmationIntakeOps = { attempt(): Promise<VoiceChannelConfirmationOutcome>; row(): string | null };
 const retiredAction = Promise.resolve(Object.freeze({ kind: "retired" } as const));
 const retiredDerivationIntake = Promise.resolve(Object.freeze({ kind: "retired" } as const));
@@ -362,6 +383,7 @@ type ChainIntake = {
   owner: VoiceCryptoOwner; key: JoinKeyRecord; channel: RetainedIpcChannel; generation: object; handleKey: VoiceJoinKeyHandle;
   purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity; expires: number;
   transferred: boolean; retired: boolean; released: boolean; disposing: boolean; running: boolean;
+  conversionReturned: boolean;
   fixedBytes: number; variable: boolean; rows: number; unsubscribe: () => void; timer: unknown;
   pending: Promise<VoiceChannelDerivationOutcome> | null; outcome: VoiceChannelDerivationOutcome | null;
   handle: VoiceChannelDerivationHandle; drained: Signal<void>; retire(): void;
@@ -490,7 +512,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 46;
+  readonly version = 47;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -524,7 +546,8 @@ export class VoiceCryptoBroker {
   private readonly sdkPositions = new VoiceSdkPositions(() => this.acquireSdkPosition());
   private readonly chains = new WeakMap<VoiceCryptoChain, BrowserChain>();
   private readonly chainStamps = new Map<VoiceCryptoOwner, Map<string, BrowserChain>>();
-  private readonly progress = new Map<string, BrowserChain | ChainIntake | VoiceSdpSdkCustody>();
+  private readonly progress = new Map<string, BrowserChain | ChainIntake | BrowserPreclaim | VoiceSdpSdkCustody>();
+  private readonly preclaims = new WeakMap<VoiceBrowserPreclaim, VoiceHandleCell<BrowserPreclaim>>();
   private readonly intakes = new Map<VoiceCryptoOwner, Map<string, ChainIntake>>();
   private reservedRows = 0;
   private protectedPositions = 0;
@@ -1055,11 +1078,136 @@ export class VoiceCryptoBroker {
     return channel.advanceNegotiation(plan);
   }
 
+  /** Hold the existing intake envelope before native admission, without a peer, row,
+   * transcript deadline, timer or SDK task. Remounts share the exact paid preclaim.
+   * Native must separately bind its canonical Session/ordinal and Root capacity; this
+   * browser observation must never be advertised as an authenticated Ready by itself. */
+  preclaimNativeNegotiation(owner: VoiceCryptoOwner, channelHandle: VoiceIpcChannel,
+    handle: VoiceJoinKeyHandle): VoiceBrowserPreclaim {
+    const channel = this.ipcChannels.get(owner.token), key = this.joinKeys.get(handle);
+    if (!channel || channel.handle !== channelHandle || !channel.owns(owner) || !key || key.owner !== owner)
+      throw new Error("original voice preclaim channel required");
+    const generation = channel.generation();
+    current(owner);
+    const previous = channel.preclaim(generation);
+    if (previous) {
+      if (previous.key !== key) throw new Error("voice preclaim identity changed");
+      if (previous.retired || previous.transferred || previous.released) throw new Error("voice preclaim is draining");
+      return previous.handle;
+    }
+    if (!channel.canLend(owner, key, generation)) throw new Error("ready voice preclaim channel required");
+    // The owner predicate above may retire/reenter. Repeat all pure publication fences.
+    const reentered = channel.preclaim(generation);
+    if (reentered) {
+      if (reentered.key !== key) throw new Error("voice preclaim identity changed");
+      if (reentered.retired || reentered.transferred || reentered.released) throw new Error("voice preclaim is draining");
+      return reentered.handle;
+    }
+    if (!channel.canPreclaim(generation) || (this.intakes.get(owner)?.size ?? 0) >= 16 ||
+        this.progress.has(owner.group) || this.actions.size + this.reservedRows + CHAIN_ROWS > MAX_ACTIONS)
+      throw new Error("voice preclaim capacity reached");
+    const fixed = CHAIN_HISTORY + CHAIN_METADATA;
+    this.charge(owner, fixed + CHAIN_VARIABLE);
+    const claim: BrowserPreclaim = { cell: null!, handle: null!, owner, key, channel, generation,
+      retired: false, transferred: false, converting: false, disposing: false, released: false, fixedBytes: fixed,
+      variable: true, rows: CHAIN_ROWS, unsubscribe: voiceNoop, drained: signal<void>(), conversion: null, retire: null! };
+    claim.cell = new VoiceHandleCell(claim);
+    claim.handle = browserPreclaimHandle(claim.cell);
+    claim.retire = () => this.retirePreclaim(claim);
+    // No callouts between the exact channel, group, rows and handle publications.
+    channel.reservePreclaim(claim);
+    this.preclaims.set(claim.handle, claim.cell);
+    this.reservedRows += CHAIN_ROWS; this.progress.set(owner.group, claim);
+    try {
+      claim.unsubscribe = owner.onRetired(browserPreclaimRetirement(claim.cell));
+      // Immediate retirement during registration may have run before it returned this
+      // unsubscribe. The cell is already negative, but that returned observer still joins.
+      if (claim.retired || claim.transferred) this.unsubscribePreclaim(claim);
+    } catch (error) { claim.retire(); throw error; }
+    return claim.handle;
+  }
+
+  /** Convert this exact inert envelope into an ordinary retained intake. The native
+   * action identity is still authenticated by Input, never by the preclaim handle.
+   * Validation/clock refusal leaves an unstarted claim reusable; successful conversion
+   * moves the same bytes/rows/group position and starts exactly one original15s window. */
+  nativeDerivationFromPreclaim(owner: VoiceCryptoOwner, channel: VoiceIpcChannel, key: VoiceJoinKeyHandle,
+    preclaim: VoiceBrowserPreclaim, purpose: VoiceIpcPurpose, row: string,
+    identity: VoiceIpcActionIdentity): VoiceChannelDerivationHandle {
+    const cell = this.preclaims.get(preclaim);
+    if (!cell) throw new Error("original voice preclaim required");
+    let original: BrowserPreclaim | null = null;
+    try {
+      const result = cell.dispatch(claim => {
+        // Latch BEFORE purpose getters, current predicates or Clock callbacks. A
+        // nested caller must neither convert twice nor run THIS frame's detach tail.
+        if (claim.converting) throw new Error("voice preclaim conversion is already in progress");
+        if (claim.retired || claim.transferred || claim.released || claim.owner !== owner ||
+            claim.channel.handle !== channel || this.joinKeys.get(key) !== claim.key)
+          throw new Error("voice preclaim identity changed");
+        claim.converting = true; original = claim;
+        return this.intakeFromChannel(owner, channel, key, purpose, row, identity, claim.generation, claim);
+      }, null);
+      if (!result) throw new Error("voice preclaim retired during conversion");
+      return result;
+    } finally {
+      // Do NOT detach inside dispatch: its negative fallback would suppress a
+      // successfully published Intake handle. The old operations are already inert.
+      const transferred = original as BrowserPreclaim | null;
+      if (transferred) transferred.converting = false;
+      if (transferred?.transferred) {
+        void transferred.cell.detach();
+        this.preclaims.delete(transferred.handle);
+        this.unsubscribePreclaim(transferred);
+        const intake = transferred.conversion; transferred.conversion = null;
+        if (intake) {
+          // The conversion dispatch and its last subscription/unsubscription callout
+          // have returned. End may now dispose the exact published replacement.
+          intake.conversionReturned = true;
+          if (intake.retired) this.releaseIntake(intake);
+        }
+        transferred.drained.resolve();
+      }
+    }
+  }
+  private unsubscribePreclaim(claim: BrowserPreclaim): void {
+    const unsubscribe = claim.unsubscribe; claim.unsubscribe = voiceNoop;
+    // The listener retains only its detachable cell. Once detached, a failed removal
+    // cannot retain the paid owner graph or turn an old callback into a new operation.
+    try { unsubscribe(); } catch { /* The original negative cell remains detached. */ }
+  }
+  private retirePreclaim(claim: BrowserPreclaim): void {
+    if (claim.transferred || claim.released) return;
+    claim.retired = true;
+    if (claim.disposing) return;
+    claim.disposing = true;
+    const returned = claim.cell.detach();
+    if (!claim.cell.detached) { void returned.then(() => this.releasePreclaim(claim)); return; }
+    this.releasePreclaim(claim);
+  }
+  private releasePreclaim(claim: BrowserPreclaim): void {
+    if (claim.transferred || claim.released) return;
+    claim.released = true;
+    this.unsubscribePreclaim(claim);
+    this.preclaims.delete(claim.handle);
+    claim.channel.releasePreclaim(claim);
+    if (this.progress.get(claim.owner.group) === claim) this.progress.delete(claim.owner.group);
+    this.reservedRows -= claim.rows; claim.rows = 0;
+    const bytes = claim.fixedBytes + (claim.variable ? CHAIN_VARIABLE : 0);
+    claim.fixedBytes = 0; claim.variable = false; claim.drained.resolve();
+    this.refund(claim.owner, bytes);
+  }
+
   /** Reserve the original group/row/variable position BEFORE Input fetch or materialization.
    * Exact retries keep this handle, its start deadline and its affine claim. A historical
    * Derived response is observation only and never reconstructs keys in a fresh browser. */
   nativeDerivationFromChannel(owner: VoiceCryptoOwner, channelHandle: VoiceIpcChannel, handle: VoiceJoinKeyHandle,
     purpose: VoiceIpcPurpose, row: string, identity: VoiceIpcActionIdentity, expectedGeneration?: object): VoiceChannelDerivationHandle {
+    return this.intakeFromChannel(owner, channelHandle, handle, purpose, row, identity, expectedGeneration);
+  }
+  private intakeFromChannel(owner: VoiceCryptoOwner, channelHandle: VoiceIpcChannel, handle: VoiceJoinKeyHandle,
+    purpose: VoiceIpcPurpose, row: string, identity: VoiceIpcActionIdentity, expectedGeneration?: object,
+    preclaim: BrowserPreclaim | null = null): VoiceChannelDerivationHandle {
     const channel = this.ipcChannels.get(owner.token), key = this.joinKeys.get(handle);
     if (!channel || channel.handle !== channelHandle || !channel.owns(owner) || !key || key.owner !== owner || !isVoiceIpcActionRow(row)) throw new Error("original voice intake required");
     const generation = expectedGeneration ?? channel.generation();
@@ -1070,6 +1218,13 @@ export class VoiceCryptoBroker {
     const prior = () => {
       if (!channel.matchesGeneration(generation)) throw new Error("old voice intake generation");
       const record = this.intakes.get(owner)?.get(row);
+      // Ordinary callers may still inspect retained historical Intake handles. A
+      // NEW preclaim must instead move its own envelope into a new current Intake;
+      // returning old history would falsely report conversion and strand this claim.
+      if (preclaim && record) {
+        if (record.generation !== generation) throw new Error("old voice intake generation");
+        throw new Error("voice preclaim cannot adopt retained intake");
+      }
       if (record && (record.key !== key || record.channel !== channel || record.purpose.peer !== selected.peer || record.purpose.join !== selected.join ||
           record.purpose.keyRef !== selected.keyRef || record.purpose.epoch !== selected.epoch || record.identity.action !== original.action ||
           record.identity.version !== original.version || record.identity.inputTag !== original.inputTag)) throw new Error("voice intake identity changed");
@@ -1077,16 +1232,19 @@ export class VoiceCryptoBroker {
     };
     let previous = prior(); if (previous) return previous.handle;
     const expires = this.now() + 15_000;
-    if (!Number.isFinite(expires) || !channel.canLend(owner, key, generation) || !channel.canLink(null, generation)) throw new Error("ready voice channel required");
+    if (!Number.isFinite(expires) || !channel.canLend(owner, key, generation) || !channel.canLink(null, generation, preclaim)) throw new Error("ready voice channel required");
     // Predicates/Clock above may reenter. Repeat ownership/capacity after their last callback.
     current(owner); previous = prior(); if (previous) return previous.handle;
-    if (!channel.canLink(null, generation)) throw new Error("ready voice channel required");
-    if ((this.intakes.get(owner)?.size ?? 0) >= 16 || this.progress.has(owner.group) ||
-        this.actions.size + this.reservedRows + CHAIN_ROWS > MAX_ACTIONS) throw new Error("voice intake capacity reached");
+    if (!channel.canLink(null, generation, preclaim) || preclaim && (preclaim.retired || preclaim.transferred || preclaim.released))
+      throw new Error("ready voice channel required");
+    if ((this.intakes.get(owner)?.size ?? 0) >= 16 ||
+        (preclaim ? this.progress.get(owner.group) !== preclaim : this.progress.has(owner.group)) ||
+        this.actions.size + this.reservedRows + (preclaim ? 0 : CHAIN_ROWS) > MAX_ACTIONS) throw new Error("voice intake capacity reached");
     const fixed = CHAIN_HISTORY + CHAIN_METADATA;
-    this.charge(owner, fixed + CHAIN_VARIABLE);
+    if (!preclaim) this.charge(owner, fixed + CHAIN_VARIABLE);
     const intake: ChainIntake = { cell: null!, owner, key, channel, generation, handleKey: handle, purpose: selected, row, identity: original, expires,
-      transferred: false, retired: false, released: false, disposing: false, running: false, fixedBytes: fixed, variable: true, rows: CHAIN_ROWS,
+      transferred: false, retired: false, released: false, disposing: false, running: false,
+      conversionReturned: preclaim === null, fixedBytes: fixed, variable: true, rows: CHAIN_ROWS,
       unsubscribe: () => {}, timer: null, pending: null, outcome: null, handle: null!, drained: signal<void>(),
       retire: null! };
     intake.cell = new VoiceHandleCell({ attempt: () => this.attemptIntake(intake),
@@ -1094,13 +1252,26 @@ export class VoiceCryptoBroker {
       timer: () => this.expireIntake(intake) });
     intake.retire = derivationIntakeRetirement(intake.cell);
     intake.handle = derivationIntakeHandle(intake.cell);
-    this.reservedRows += CHAIN_ROWS; this.progress.set(owner.group, intake);
+    // This short commit invokes no owner/clock/subscription. The original preclaim
+    // empties only after the exact N accepted its replacement; no refund/recharge.
+    channel.reserveIntake(intake, preclaim);
+    if (preclaim) { preclaim.transferred = true; preclaim.conversion = intake; preclaim.fixedBytes = 0; preclaim.variable = false; preclaim.rows = 0; }
+    else this.reservedRows += CHAIN_ROWS;
+    this.progress.set(owner.group, intake);
     const records = this.intakes.get(owner) ?? new Map<string, ChainIntake>(); records.set(row, intake); this.intakes.set(owner, records);
     // Publish before any subscription/scheduler callback can run. End never loses a claim.
     try {
-      channel.reserveIntake(intake);
       intake.unsubscribe = owner.onRetired(intake.retire);
-      if (!intake.retired) intake.timer = this.ipcClock.schedule(derivationIntakeTimer(intake.cell), 15_000);
+      if (intake.retired) { intake.unsubscribe(); intake.unsubscribe = voiceNoop; }
+      if (!intake.retired) {
+        const remaining = Math.max(0, expires - this.now());
+        if (!intake.retired) {
+          const timer = this.ipcClock.schedule(derivationIntakeTimer(intake.cell), remaining);
+          intake.timer = timer;
+          // The scheduler can synchronously End before returning its timer identity.
+          if (intake.retired) { intake.timer = null; this.ipcClock.cancel(timer); }
+        }
+      }
     } catch (error) { intake.retired = true; this.releaseIntake(intake); throw error; }
     return intake.handle;
   }
@@ -1152,7 +1323,9 @@ export class VoiceCryptoBroker {
     }
   }
   private releaseIntake(intake: ChainIntake): void {
-    if (intake.running) return; // cancellation/deadline is never actual SDK/IO drainage
+    // End during conversion sees the published Intake, but the SAME envelope must
+    // still pay the entered preclaim frame and subscription handoff until it returns.
+    if (intake.running || !intake.conversionReturned) return;
     if (!intake.released) {
       intake.released = true;
       if (intake.timer !== null) this.ipcClock.cancel(intake.timer);
@@ -2349,6 +2522,7 @@ class RetainedNativeNegotiation {
   workPump: NativeWorkPump | null = null;
   linked: BrowserChain | null = null;
   intake: ChainIntake | null = null;
+  preclaim: BrowserPreclaim | null = null;
   // Original Derive parent only. This descriptor is never replaced by a sibling; native's
   // separate Plan-final intent still names that same parent after ordinary Return. Child
   // key/phase transfer remains separate. Neither a renderer flag nor localDrained can
@@ -2489,7 +2663,7 @@ class RetainedIpcChannel {
     else if (next?.generation === state.generation) { stage = "advance"; plan = next.plan; }
     else if (state.failedReturned) { stage = "advance"; plan = state.failedPlan; }
     else if (state.failed || chain?.closed || chain?.sdp?.closed) stage = chain ? "failed" : "waiting";
-    else if (!chain) stage = state.workPump ? "waiting" : "confirmation";
+    else if (!chain) stage = state.preclaim || state.workPump ? "waiting" : "confirmation";
     else if (state.negotiationRetired) stage = "compact";
     else if (state.media?.adopted) stage = state.media.closed ? "stopped" : "retire";
     else if (chain.custody?.keyReceipt?.state !== "current" || chain.variable || chain.running || chain.continuation?.running)
@@ -2561,7 +2735,7 @@ class RetainedIpcChannel {
     // Coalesce the reentrant publication, then recheck callback-free flags after the LAST
     // predicate. No callback occurs between here and installing the original pump.
     if (pairState.workPump) return pairState.workPump.handle;
-    if (this.negotiation !== pairState || this.retired || this.drained || !this.readyAcknowledged || !this.keys || !this.bootstrap) throw new Error("authenticated ready voice channel required");
+    if (this.negotiation !== pairState || this.retired || this.drained || pairState.preclaim || !this.readyAcknowledged || !this.keys || !this.bootstrap) throw new Error("authenticated ready voice channel required");
     const owner = this.selected.owner;
     const pump = new NativeWorkPump({ owner: owner.token, executor: this.selected.executor,
       live: () => this.negotiationCurrent(pairState),
@@ -2634,14 +2808,31 @@ class RetainedIpcChannel {
   /** Local generation identities fence callbacks; native still enforces every grant. */
   generation(): object { return this.negotiation.generation; }
   matchesGeneration(generation: object): boolean { return this.negotiation.generation === generation; }
+  preclaim(generation: object): BrowserPreclaim | null {
+    return this.negotiation.generation === generation ? this.negotiation.preclaim : null;
+  }
+  canPreclaim(generation: object): boolean {
+    return !this.negotiation.workPump && this.canLink(null, generation);
+  }
+  reservePreclaim(claim: BrowserPreclaim): void {
+    const state = this.negotiation;
+    if (!this.canPreclaim(claim.generation) || claim.channel !== this ||
+        claim.owner !== this.selected.owner || claim.key !== this.selected.key)
+      throw new Error("voice preclaim channel changed");
+    state.preclaim = claim;
+  }
+  releasePreclaim(claim: BrowserPreclaim): void {
+    if (this.negotiation.preclaim === claim) this.negotiation.preclaim = null;
+  }
   canLend(owner: VoiceCryptoOwner, key: JoinKeyRecord, generation = this.negotiation.generation): boolean {
     const pairState = this.negotiation;
     return pairState.generation === generation && this.negotiationCurrent(pairState) && !this.retired && !this.drained && this.keys !== null &&
       this.selected.owner === owner && this.selected.key === key;
   }
-  canLink(intake: ChainIntake | null = null, generation = intake?.generation ?? this.negotiation.generation): boolean {
+  canLink(intake: ChainIntake | null = null, generation = intake?.generation ?? this.negotiation.generation,
+    preclaim: BrowserPreclaim | null = null): boolean {
     const pairState = this.negotiation;
-    if (pairState.generation !== generation) return false;
+    if (pairState.generation !== generation || pairState.preclaim !== preclaim) return false;
     // This pilot owns ONE original terminal plan. Historical Input may release its variable
     // claim without linking a chain, but cannot let another row overwrite its final cleanup.
     const sameTerminal = pairState.terminalAction === null || (intake !== null && pairState.terminalAction.row === intake.row &&
@@ -2659,9 +2850,10 @@ class RetainedIpcChannel {
    * finalization must not release either its byte payment or its global row claims. */
   retainsHistory(chain: BrowserChain): boolean {
     const pairState = this.negotiation; return pairState.linked === chain; }
-  reserveIntake(intake: ChainIntake): void {
+  reserveIntake(intake: ChainIntake, preclaim: BrowserPreclaim | null = null): void {
     const pairState = this.negotiation;
-    if (!this.canLink(null, intake.generation) || pairState.intake || intake.channel !== this || intake.owner !== this.selected.owner || intake.key !== this.selected.key) throw new Error("voice intake changed");
+    if (!this.canLink(null, intake.generation, preclaim) || pairState.intake || intake.channel !== this || intake.owner !== this.selected.owner || intake.key !== this.selected.key) throw new Error("voice intake changed");
+    pairState.preclaim = null;
     pairState.intake = intake;
     pairState.terminalAction = Object.freeze({ purpose: intake.purpose, row: intake.row, identity: intake.identity });
   }
@@ -3020,6 +3212,8 @@ class RetainedIpcChannel {
     state.sdkPosition?.cancel();
     if (state.workPump) { await state.workPump.close(); state.workPump = null; }
     state.intake?.retire();
+    state.preclaim?.retire();
+    if (state.preclaim) await state.preclaim.drained.promise;
     if (state.intake) await state.intake.drained.promise;
     await chain.drained.promise;
     if (state.derivationReturn) { try { await state.derivationReturn; } catch { /* exact cleanup below */ } }
@@ -3398,7 +3592,7 @@ class RetainedIpcChannel {
     // A queued history driver still captures the old N for its End joins even when its
     // current request appears harmless. Never replace N before that driver's finally.
     return !this.driving && !this.request && !this.historyRequest && !this.retry &&
-      !state.compactFlight && !state.failedFlight && !state.sdkPosition && !state.workPump && !state.linked && !state.intake && !state.media &&
+      !state.compactFlight && !state.failedFlight && !state.sdkPosition && !state.workPump && !state.linked && !state.intake && !state.preclaim && !state.media &&
       !state.transitionFlight && !state.derivationReturn && !state.sdpFlight && !state.rtcFlight && !state.negotiationFlight &&
       !state.actionBusy && !state.rtcCreating && !state.sdpCreating && !state.sdpRtc && !state.sdpAction && state.negotiationRetired;
   }
@@ -3853,6 +4047,7 @@ class RetainedIpcChannel {
     // Retire the original prepaid intake even while its owner remains current. The broker
     // retains running SDK/read custody until its finally; an idle claim needs no expiry wait.
     pairState.intake?.retire();
+    pairState.preclaim?.retire();
     pairState.linked?.handle.close();
     this.request?.resolve(Object.freeze({ kind: "retired" })); this.request = null;
     // Early observation is not physical completion. Keep the SAME query/body in State and
@@ -3915,6 +4110,7 @@ class RetainedIpcChannel {
         // Release the physical lane BEFORE waiting for linked SDK/settlement. A provider
         // may already be queued behind our aborting read and still need this SAME position.
         // Framing keys and the selected-key/control payment remain until cleanup is last.
+        if (pairState.preclaim) await pairState.preclaim.drained.promise;
         if (pairState.intake) await pairState.intake.drained.promise;
         if (pairState.linked) await pairState.linked.drained.promise;
         // Ordinary Return comprises several serialized RPCs. Acquiring the lane between
@@ -4424,7 +4620,7 @@ export function windowVoiceCryptoBroker(
   // null or swapped slots cannot publish a second pool beside its unresolved original.
   if (expected !== undefined && previous !== expected) throw new Error("voice crypto broker changed; reload required");
   if (previous) {
-    if (previous.version !== 46 || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 47 || typeof previous.preclaimNativeNegotiation !== "function" || typeof previous.nativeDerivationFromPreclaim !== "function" || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
