@@ -19,6 +19,14 @@ pub(in crate::voice_handoff) struct NativeDiagnostic {
     pub sdp_sequence: u64,
     pub sdp_stage: u8,
     pub sdp_refusal: Option<(u8, [u8; 16], u64, Option<VoiceError>)>,
+    // Latest exact reservation refusal, not a later racy counts() observation.
+    // Retain its own parent/physical request even when another request advances
+    // the ordinary stage fields. The bounded harness table pays only scalars.
+    pub sdp_reservation_refusal: Option<(
+        [u8; 16],
+        u64,
+        catcoms_sync::voice_v2::resources::ReservationRefusal,
+    )>,
     pub attempts: [u32; 6],
     pub refusals: [u32; 6],
     pub started: [u32; 6],
@@ -103,8 +111,22 @@ impl NativeObservation {
             .map(|(stage, parent, _, error)| (stage, parent, error))
     }
     pub(in crate::voice_handoff) fn describe_sdp(self) -> String {
-        format!("closed/physical/native={:?}; sdp_refusal(stage,parent,physical_sequence,error)={:?}; diagnostic_present={}; global_missed={}; pool counts not sampled (blocking getters)",
-            self.flags, self.diagnostic.and_then(|diagnostic| diagnostic.sdp_refusal), self.diagnostic.is_some(), self.missed)
+        format!("closed/physical/native={:?}; sdp_refusal(stage,parent,physical_sequence,error)={:?}; reservation_refusal_at_decision(parent,physical_sequence,bytes)={:?}; diagnostic_present={}; global_missed={}; current pool counts not sampled (blocking getters)",
+            self.flags, self.diagnostic.and_then(|diagnostic| diagnostic.sdp_refusal), self.diagnostic.and_then(|diagnostic| diagnostic.sdp_reservation_refusal), self.diagnostic.is_some(), self.missed)
+    }
+    /// Exact historical reservation only; a later physical retry cannot borrow
+    /// this earlier cap decision merely by naming the same logical parent.
+    pub(in crate::voice_handoff) fn reservation_refusal_at(
+        self,
+        parent: [u8; 16],
+        sequence: u64,
+    ) -> Option<catcoms_sync::voice_v2::resources::ReservationRefusal> {
+        self.diagnostic
+            .and_then(|diagnostic| diagnostic.sdp_reservation_refusal)
+            .filter(|(actual_parent, actual_sequence, _)| {
+                *actual_parent == parent && *actual_sequence == sequence
+            })
+            .map(|(_, _, refusal)| refusal)
     }
     pub(super) fn is_missing(self) -> bool {
         self.diagnostic.is_none()
@@ -135,6 +157,16 @@ impl NativeObservation {
 }
 
 impl Session {
+    pub(in crate::voice_handoff) fn fixture_sdp_reservation_refusal(
+        &self,
+        parent: [u8; 16],
+        sequence: u64,
+        observation: catcoms_sync::voice_v2::resources::ReservationRefusal,
+    ) {
+        self.fixture_update_native(|diagnostic| {
+            diagnostic.sdp_reservation_refusal = Some((parent, sequence, observation));
+        });
+    }
     pub(in crate::voice_handoff) fn fixture_sdp_stage(
         &self,
         parent: [u8; 16],
@@ -295,6 +327,39 @@ impl Session {
 #[cfg(test)]
 mod request_tests {
     use super::*;
+    #[test]
+    fn a_reservation_refusal_keeps_its_deciding_request_when_the_latest_stage_advances() {
+        let resources = Arc::new(catcoms_sync::voice_v2::resources::Resources::default());
+        let mut refusal = None;
+        assert!(resources
+            .reserve_recording_refusal(
+                [3; 32],
+                catcoms_sync::voice_v2::resources::GROUP_BYTES + 1,
+                &mut refusal,
+            )
+            .is_err());
+        let refused = refusal.unwrap();
+        // Exercise fixed correlation without the intentionally lossy global test
+        // table: another parallel unit may legitimately hold that table's mutex.
+        let actual = NativeObservation {
+            flags: None,
+            diagnostic: Some(NativeDiagnostic {
+                sdp_parent: [6; 16],
+                sdp_sequence: 8,
+                sdp_stage: 4,
+                sdp_reservation_refusal: Some(([5; 16], 7, refused)),
+                ..NativeDiagnostic::default()
+            }),
+            missed: false,
+        };
+        assert_eq!(actual.reservation_refusal_at([5; 16], 7), Some(refused));
+        assert_eq!(actual.reservation_refusal_at([5; 16], 8), None);
+        assert_eq!(actual.reservation_refusal_at([6; 16], 7), None);
+        assert!(actual
+            .describe_sdp()
+            .contains("reservation_refusal_at_decision"));
+        assert_eq!(resources.counts(), (0, 0));
+    }
     #[test]
     fn a_previous_physical_refusal_cannot_prove_a_later_ui_attempt() {
         let parent = [9; 16];

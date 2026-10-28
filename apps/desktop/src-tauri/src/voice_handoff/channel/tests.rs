@@ -46,6 +46,15 @@ fn native_diagnostics_retain_no_session_or_credit_owner() {
     session.fixture_sdp_finished(Some(crate::voice_handoff::factory::Refused::Protocol(
         catcoms_sync::voice_v2::VoiceError::Capacity,
     )));
+    let mut observation = None;
+    assert!(resources
+        .reserve_recording_refusal(
+            [3; 32],
+            catcoms_sync::voice_v2::resources::GROUP_BYTES + 1,
+            &mut observation
+        )
+        .is_err());
+    session.fixture_sdp_reservation_refusal([5; 16], 1, observation.unwrap());
     assert_eq!(Arc::strong_count(&session.identity), identity_owners);
     drop(session);
     assert!(

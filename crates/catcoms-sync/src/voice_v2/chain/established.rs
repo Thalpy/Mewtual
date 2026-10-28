@@ -73,6 +73,16 @@ impl EstablishedKeyCustody {
     pub fn prepare_sdp_handoff(&self) -> Result<Arc<super::sdp_handoff::Phase>, VoiceError> {
         super::sdp_handoff::Phase::prepare(self.binding.clone())
     }
+    /// Same inert preparation and original custody, with bounded byte-refusal
+    /// evidence captured by the deciding pool. The observation has no authority
+    /// and exposes neither the group identity nor any retained owner. Native
+    /// diagnostics must keep it associated with this exact original request.
+    pub fn prepare_sdp_handoff_recording_refusal(
+        &self,
+        observation: &mut Option<crate::voice_v2::resources::ReservationRefusal>,
+    ) -> Result<Arc<super::sdp_handoff::Phase>, VoiceError> {
+        super::sdp_handoff::Phase::prepare_recording_refusal(self.binding.clone(), observation)
+    }
     /// Allocation identity, independent of equal serialized labels. This is not admission.
     pub fn contains_sdp_handoff(&self, phase: &super::sdp_handoff::Phase) -> bool {
         phase.belongs_to(&self.binding)
