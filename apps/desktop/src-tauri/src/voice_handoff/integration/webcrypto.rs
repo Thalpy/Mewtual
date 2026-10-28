@@ -278,6 +278,7 @@ impl Endpoint {
             endpoint.input.as_mut().unwrap(),
             endpoint.output.as_mut().unwrap(),
             &mut endpoint.callbacks,
+            None,
             json!({
                 "tag": "step", "name": "prepare", "owner": endpoint.owner, "group": hex::encode(group),
             }),
@@ -319,6 +320,7 @@ impl Endpoint {
             self.input.as_mut().unwrap(),
             self.output.as_mut().unwrap(),
             &mut self.callbacks,
+            self.selected.as_deref(),
             value,
         )
         .await
@@ -1374,6 +1376,7 @@ async fn write(input: &mut ChildStdin, value: Value) {
     input.write_all(&bytes).await.unwrap();
     input.flush().await.unwrap();
 }
+#[allow(clippy::too_many_arguments)] // Original borrowed selection is diagnostic-only.
 async fn drive_streams(
     state: &AppState,
     owner: &str,
@@ -1381,6 +1384,7 @@ async fn drive_streams(
     input: &mut ChildStdin,
     output: &mut ChildStdout,
     callbacks: &mut Callbacks,
+    diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
     // This bounds a broken subprocess/harness, never a protocol deadline. Cancelling this
@@ -1396,11 +1400,21 @@ async fn drive_streams(
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(bound),
-        drive_streams_inner(state, owner, port, input, output, callbacks, step),
+        drive_streams_inner(
+            state,
+            owner,
+            port,
+            input,
+            output,
+            callbacks,
+            diagnostic_scope,
+            step,
+        ),
     )
     .await
     .expect("native/WebCrypto control step exceeded its harness bound")
 }
+#[allow(clippy::too_many_arguments)] // Never resolve a replacement owner on failure.
 async fn drive_streams_inner(
     state: &AppState,
     owner: &str,
@@ -1408,6 +1422,7 @@ async fn drive_streams_inner(
     input: &mut ChildStdin,
     output: &mut ChildStdout,
     callbacks: &mut Callbacks,
+    diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
     let automatic = step["name"] == "pump";
@@ -1442,7 +1457,23 @@ async fn drive_streams_inner(
         output.read_exact(&mut bytes[..length]).await.unwrap();
         match serde_json::from_slice::<Frame>(&bytes[..length]).expect("closed metadata protocol") {
             Frame::Done { value } => return (value, published_executor),
-            Frame::Failed { reason } => panic!("actual native/WebCrypto step failed: {reason}"),
+            Frame::Failed { reason } => {
+                let detail = diagnostic_scope.map(|selected| {
+                    let (selector, ledger) = state
+                        .voice_handoff
+                        .fixture_sdp_diagnostic(selected, callbacks.expected_parent);
+                    let native = selector.map(|selector| {
+                        state
+                            .voice_channels
+                            .fixture_native_diagnostic(selected, selector)
+                    });
+                    let session = state
+                        .voice_channels
+                        .fixture_sdp_session_diagnostic(selected);
+                    format!("{ledger}; {native:?}; independent {session}")
+                });
+                panic!("actual native/WebCrypto step failed: {reason}; original-scope diagnostics={detail:?}")
+            }
             Frame::Blocked => panic!("unexpected blocked-step acknowledgement"),
             Frame::Call { method, args } => {
                 let stop_pump = automatic

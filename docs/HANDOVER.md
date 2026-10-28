@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Second-peer native admission failure (28 October; diagnosis in progress)
+
+The corrected `c3877704` Linux native gate completed with 963 passes and 40
+failures. The first real failure is
+`native_browser_failed_media_peer_preserves_original_session_and_indexed_sibling`:
+the initial media pair and its history collection completed, a newcomer naturally
+selected the other original endpoint, and that pair's confirmation/Ready completed.
+Its storage request (opcode12, before SDK13) then repeatedly received authenticated
+Capacity. The other39 failures are subsequent fixture admission refusals after that
+failure; keep this fail-closed behavior. The cause remains unproven. This is not a
+green native gate or evidence that the second peer is operational.
+
+Test-only diagnostics now preserve the exact authenticated parent and the failed
+storage boundary in the existing bounded harness table. Independent original-Session
+and parent snapshots use try-locks, retain no authority/credit owners and omit blocking
+pool counts. The Node observer attributes Capacity to the actual response AAD's
+operation, full parent and original request sequence. An indexed sibling's Current
+cannot authorize storage retry, and duplicate observations cannot count twice. The
+former global counter was a fixture defect; it does not explain away the genuine
+repeated opcode12 refusals. Thirteen focused Node tests and Svelte checks pass;
+read-only review has no remaining findings in this diagnostic/regression scope.
+
+The native regression now requires an actual authenticated opcode12 reservation
+refusal under held ordinary-pool pressure, drained preparation without a Phase,
+then funding/recovery of the same parent/action/key/sequence proof after that pressure
+is released. It explicitly checks the reservation boundary, so preflight/UI/attach
+contention cannot pass as the intended failure. This is a pressure/recovery check,
+not an atomic one-byte-limit proof. Native compilation and focused execution are
+in progress. Do not merge or enable V2 until the actual failure and complete gates pass.
+
+The Score integration at `c27e7694` completed the full Root suite with3,960 passes,
+25 ignored and no failures. Its strict Root Clippy and complete frontend suite
+(3,537 passes) also passed. Those results do not replace the pending native gate.
+
 ## Shared actor Control inventory correction (28 October; under validation)
 
 The complete combined native suite finished with 1,001 passes and one failure: the
@@ -19,8 +53,10 @@ Three focused ownership regressions pass, pinning waiting cancellation, traced e
 ownership and queued custody after the sender future ends. The diagnostic voice-context
 future shrinks from1,264 to880 bytes; command/envelope sizes stay unchanged. The temporary
 diagnostic is removed; the unchanged whole-Control guard remains the regression.
-Static re-review has no blocker/high/medium finding. The native whole-Control graph and complete gates still need a successful run;
-the original failed suite is not sign-off evidence. No memory bound has been raised.
+Static re-review has no blocker/high/medium finding. All375 focused native handoff
+tests pass after correction, including the unchanged whole-Control guard at12,244
+bytes against12,288. Complete gates still need to pass; the original failed suite
+is not sign-off evidence. No memory bound has been raised.
 
 Windows CI at `c499228d` also stopped in strict Clippy before Root tests: the Windows
 path codec used a manual remainder check. The equivalent `is_multiple_of(2)` form is

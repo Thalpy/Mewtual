@@ -60,6 +60,7 @@ pub(super) async fn exercise(
     Option<super::sdk::Token>,
     Option<super::sdp_http::RetiredProbe>,
 ) {
+    channel::Session::fixture_prepare_native_diagnostics();
     let prepare = body(parent, key, None);
     let request = requests::sdp::Request::decode(parent.id().logical(), &prepare).unwrap();
     let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
@@ -86,9 +87,49 @@ pub(super) async fn exercise(
         replies::refused(factory::Refused::Protocol(VoiceError::Malformed))
     );
     if attach {
+        // Traverse the ACTUAL authenticated opcode12 path, not just Phase::prepare.
+        // Hold ordinary-pool pressure and require the actual failure at RESERVATION,
+        // not preflight/UI/attachment contention. Pool snapshots can change while the
+        // actor preflight awaits; they are not an atomic one-byte boundary oracle.
+        // Only this unrelated pressure is released before retrying the same intent.
+        let pool = route.selected().resources();
+        let group = route.selected().binding().scope.group;
+        let used = pool.group_counts(group).unwrap().0;
+        let pressure = pool
+            .charge(
+                group,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES - used,
+                catcoms_sync::voice_v2::resources::ResourceKind::Retained,
+            )
+            .unwrap();
+        assert_eq!(
+            exchange(state, public, route, parent, &prepare).await,
+            capacity,
+            "actual storage admission must refuse under ordinary-pool pressure"
+        );
+        assert_eq!(
+            route.session().fixture_native_snapshot().sdp_refusal(),
+            Some((5, parent.id().logical(), Some(VoiceError::Capacity))),
+            "only the actual reserve refusal exercises this recovery contract"
+        );
+        let failed = parent
+            .sdp_test_preparation()
+            .expect("original fixed intent survives refusal");
+        assert_eq!(failed.0, 1);
+        assert!(
+            !failed.2 && !failed.3,
+            "refused worker drained without installing a Phase"
+        );
+        assert!(parent.sdp_test_drained());
+        drop(pressure);
         let first = exchange(state, public, route, parent, &prepare).await;
         assert_eq!(first.len(), crate::voice_handoff::sdp::REPLY_BYTES);
         assert_eq!(&first[..2], &[5, 1]);
+        assert_eq!(
+            &first[138..170],
+            &failed.1,
+            "retry funds the SAME parent/action/key/sequence intent, not a replacement"
+        );
         assert_eq!(
             exchange(state, public, route, parent, &prepare).await,
             first,
