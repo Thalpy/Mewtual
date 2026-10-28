@@ -7,6 +7,7 @@ use crate::voice_handoff::requests::negotiation_admission::{Kind, Request};
 use catcoms_sync::voice_v2::admission::ADMISSION_RPC_BYTES;
 use catcoms_sync::voice_v2::resources::{ResourceKind, GROUP_BYTES};
 use std::future::Future;
+mod parent_claim;
 
 fn capacity(
     route: &Route,
@@ -702,6 +703,7 @@ async fn finish(f: Fixture, route: &Route) {
 fn native_admission_slot_task_and_concrete_callback_fit_original_fixed_fees() {
     let rpc = rpc_layout_bytes();
     let task = worker_layout(run_worker);
+    eprintln!("native admission RPC {rpc}/{ADMISSION_RPC_BYTES}; persistent task {task}/{NATIVE_TASK_BYTES}");
     assert!(
         rpc <= ADMISSION_RPC_BYTES,
         "actual admission RPC {rpc}/{ADMISSION_RPC_BYTES}"

@@ -934,11 +934,7 @@ impl Ledger {
         require_current(
             parent, &state, storage, intent, candidate, admission, wall, mono,
         )?;
-        let slot = index
-            .rows
-            .iter()
-            .position(Option::is_none)
-            .ok_or(VoiceError::Capacity)?;
+        let slot = index.vacant().ok_or(VoiceError::Capacity)?;
         let serial = index.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
         // Exact uniqueness and all fallible/current gates precede BOTH allocations.
         // Competing candidates must reuse this slot; no speculative Outcome is installed.

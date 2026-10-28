@@ -187,6 +187,18 @@ pub(super) async fn exercise(
         .sdp_action_candidate(route.session().identity(), &request)
         .unwrap();
     let funding = candidate.funding();
+    // The actual independent SDP allocator shares the parent-claim namespace.
+    // A regression to rows.position(None) would steal precisely this first
+    // vacant slot despite successful real PC/intent/current-Root authorization.
+    let parent_claim = state
+        .voice_handoff
+        .reserve_parent(
+            route.selected().clone(),
+            route.session().identity().clone(),
+            1,
+        )
+        .unwrap();
+    let reserved_parent_id = parent_claim.fixture_id();
     let before = state.voice_handoff.sdp_test_rows(parent.id());
     // An outer Capacity occurs BEFORE this closure. Keep the complete successful batch,
     // including its affine Factory, then retry only individual LOCAL refusals below.
@@ -258,6 +270,16 @@ pub(super) async fn exercise(
     let ticket = factory.expect("one Factory plus seven exact existing rows");
     assert_eq!(ids.len(), 8);
     assert!(ids.iter().all(|id| *id == ticket.id()));
+    assert!(ids
+        .iter()
+        .all(|id| id.logical()[..8] != reserved_parent_id.logical()[..8]));
+    assert!(state
+        .voice_handoff
+        .fixture_parent_reserved(reserved_parent_id));
+    drop(parent_claim);
+    assert!(!state
+        .voice_handoff
+        .fixture_parent_reserved(reserved_parent_id));
     assert!(
         outcomes.iter().all(|slot| Arc::ptr_eq(slot, &outcomes[0])),
         "every competing candidate observes the ONE actually installed outcome"

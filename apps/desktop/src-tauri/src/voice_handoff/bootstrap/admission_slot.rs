@@ -2,6 +2,7 @@
 //! One persistent continuation task owns the original8KiB and native position.
 //! Neither local Busy nor a lost IPC observer creates another task or Root mint.
 use super::*;
+use crate::voice_handoff::ledger::ParentClaim;
 use crate::voice_handoff::requests::negotiation_capacity::{
     Kind as CapacityKind, Request as CapacityRequest, Snapshot, State as CapacityState,
 };
@@ -115,6 +116,7 @@ struct Reclamation {
     returned: ReclamationReturned,
 }
 struct ReclamationOwners {
+    parent: Option<ParentClaim>,
     capacity: Option<RootHighPreclaim>,
     registration: Option<RootAdmissionSession>,
     work: Option<VoiceAdmissionWork>,
@@ -186,6 +188,8 @@ fn worker_layout<F: std::future::Future<Output = Completion>>(_: fn(Worker) -> F
         + std::mem::size_of::<Preparation>()
         + std::mem::size_of::<Finalization<'_>>()
         + std::mem::size_of::<Outcome>()
+        + std::mem::size_of::<Option<ParentClaim>>()
+        + ParentClaim::preparation_layout_bytes()
         + std::mem::size_of::<Option<RootHighPreclaim>>()
         + std::mem::size_of::<Option<RootAdmissionSession>>()
         + std::mem::size_of::<Reclamation>()
@@ -501,6 +505,9 @@ impl Route {
         let invalid_reserved = slot.phase == Phase::Reserved
             && (slot.reclaiming
                 || slot.recovery_active
+                || !slot.parent.as_ref().is_some_and(|parent| {
+                    parent.matches(self.selected(), self.session().identity(), slot.generation)
+                })
                 || !slot.capacity.as_ref().is_some_and(|capacity| {
                     capacity.is_current()
                         && capacity.generation() == slot.generation
@@ -537,6 +544,7 @@ impl Route {
             if slot.phase == Phase::Returned
                 && !slot.reclaiming
                 && slot.capacity.is_none()
+                && slot.parent.is_none()
                 && slot
                     .invocation
                     .as_ref()
@@ -559,6 +567,9 @@ impl Route {
                 Phase::Reserved
                     if !slot.reclaiming
                         && !slot.recovery_active
+                        && slot.parent.as_ref().is_some_and(|parent| {
+                            parent.matches(self.selected(), self.session().identity(), requested)
+                        })
                         && slot.capacity.as_ref().is_some_and(|capacity| {
                             capacity.is_current()
                                 && capacity.generation() == requested
@@ -823,7 +834,7 @@ enum Outcome {
     Capacity(RootHighPreclaim),
     /// Same original candidate retained after a proven local final-fence refusal.
     /// Retrying this value never requeues Root or replaces the registration.
-    Candidate(RootHighPreclaim),
+    Candidate(RootHighPreclaim, Option<ParentClaim>),
     Uncertain,
 }
 
@@ -835,6 +846,7 @@ pub(super) struct Slot {
     reclaiming: bool,
     registration: Option<RootAdmissionSession>,
     capacity: Option<RootHighPreclaim>,
+    parent: Option<ParentClaim>,
     invocation: Option<Invocation>,
     // One permanent task/position. Funding is plain, with no Row/task backedge.
     task_started: bool,
@@ -857,6 +869,7 @@ impl Default for Slot {
             reclaiming: false,
             registration: None,
             capacity: None,
+            parent: None,
             invocation: None,
             task_started: false,
             task_returned: false,
@@ -889,6 +902,7 @@ impl Slot {
             && self.cancelled_through >= self.generation
             && !self.reclaiming
             && self.capacity.is_none()
+            && self.parent.is_none()
             && self
                 .invocation
                 .as_ref()
@@ -904,6 +918,7 @@ impl Slot {
             && !self.reclaiming
             && self.registration.is_none()
             && self.capacity.is_none()
+            && self.parent.is_none()
             && self.invocation.is_none()
     }
     fn is_original(&self, id: &Arc<InvocationId>) -> bool {
@@ -922,6 +937,7 @@ impl Slot {
         }
         if self.registration.is_none()
             && self.capacity.is_none()
+            && self.parent.is_none()
             && !self.reclaiming
             && self.phase != Phase::Finalizing
             && self
@@ -960,6 +976,7 @@ impl Slot {
                 || self.cancelled_through < self.generation
                 || self.reclaiming
                 || self.capacity.is_some()
+                || self.parent.is_some()
                 || !no_work
             {
                 return Err(Refused::Bounds);
@@ -995,6 +1012,7 @@ impl Slot {
             && !self.reclaiming
             && self.registration.is_none()
             && self.capacity.is_none()
+            && self.parent.is_none()
             && self.invocation.is_none()
             && self.emergency_native.is_none()
             && !self.recovery_active
@@ -1085,6 +1103,7 @@ impl Route {
                 || slot.phase != Phase::Returned
                 || slot.cancelled_through < slot.generation
                 || slot.capacity.is_some()
+                || slot.parent.is_some()
                 || !collected
             {
                 return Err(VoiceError::Bounds.into());
@@ -1235,40 +1254,48 @@ impl Finalization<'_> {
     }
     fn finish_at(mut self, context: Option<&crate::voice_handoff::context::Context>) {
         let outcome = self.outcome.take().expect("one affine outcome");
-        let (mut registration, mut capacity, mut wanted, cancellation_may_explain_refusal) =
-            match outcome {
-                Outcome::Prepared(Ok(prepared)) => {
-                    let (registration, capacity) = prepared.into_parts();
-                    let wanted = if capacity.is_ok() {
-                        Phase::Reserved
-                    } else if matches!(capacity, Err(VoiceError::Capacity)) {
-                        Phase::Waiting
-                    } else {
-                        Phase::Closed
-                    };
-                    let cancellation_may_explain_refusal =
-                        matches!(capacity, Err(VoiceError::Unauthorized));
-                    (
-                        registration,
-                        capacity.ok(),
-                        wanted,
-                        cancellation_may_explain_refusal,
-                    )
-                }
-                Outcome::Prepared(Err(VoiceError::Capacity))
-                | Outcome::Unstarted(VoiceEndpointError::Protocol(VoiceError::Capacity)) => {
-                    (None, None, Phase::Waiting, false)
-                }
-                Outcome::Capacity(capacity) => (None, Some(capacity), Phase::Returned, false),
-                Outcome::CancelledUnstarted => (None, None, Phase::Returned, false),
-                Outcome::Candidate(capacity) => (None, Some(capacity), Phase::Reserved, false),
-                Outcome::Prepared(Err(VoiceError::Unauthorized)) => {
-                    (None, None, Phase::Closed, true)
-                }
-                Outcome::Prepared(Err(_)) | Outcome::Unstarted(_) | Outcome::Uncertain => {
-                    (None, None, Phase::Closed, false)
-                }
-            };
+        let (
+            mut registration,
+            mut capacity,
+            mut parent,
+            mut wanted,
+            cancellation_may_explain_refusal,
+        ) = match outcome {
+            Outcome::Prepared(Ok(prepared)) => {
+                let (registration, capacity) = prepared.into_parts();
+                let wanted = if capacity.is_ok() {
+                    Phase::Reserved
+                } else if matches!(capacity, Err(VoiceError::Capacity)) {
+                    Phase::Waiting
+                } else {
+                    Phase::Closed
+                };
+                let cancellation_may_explain_refusal =
+                    matches!(capacity, Err(VoiceError::Unauthorized));
+                (
+                    registration,
+                    capacity.ok(),
+                    None,
+                    wanted,
+                    cancellation_may_explain_refusal,
+                )
+            }
+            Outcome::Prepared(Err(VoiceError::Capacity))
+            | Outcome::Unstarted(VoiceEndpointError::Protocol(VoiceError::Capacity)) => {
+                (None, None, None, Phase::Waiting, false)
+            }
+            Outcome::Capacity(capacity) => (None, Some(capacity), None, Phase::Returned, false),
+            Outcome::CancelledUnstarted => (None, None, None, Phase::Returned, false),
+            Outcome::Candidate(capacity, parent) => {
+                (None, Some(capacity), parent, Phase::Reserved, false)
+            }
+            Outcome::Prepared(Err(VoiceError::Unauthorized)) => {
+                (None, None, None, Phase::Closed, true)
+            }
+            Outcome::Prepared(Err(_)) | Outcome::Unstarted(_) | Outcome::Uncertain => {
+                (None, None, None, Phase::Closed, false)
+            }
+        };
         // Preserve the original newly minted registration EVEN if capacity failed
         // or cancellation/End won. This quarantine step grants no permission.
         {
@@ -1335,6 +1362,21 @@ impl Finalization<'_> {
                 use crate::voice_handoff::factory;
                 let context = context.ok_or(factory::Refused::Closed)?;
                 let live = context.upgrade().ok_or(factory::Refused::Closed)?;
+                if parent.is_none() {
+                    // Root capacity is already original and paid. Reserve the
+                    // native parent outside EVERY final guard, preserving that
+                    // same candidate when ledger/ordinary capacity is busy.
+                    // This invents no selector, Pending, Action or Ready.
+                    let generation = capacity
+                        .as_ref()
+                        .ok_or(factory::Refused::Closed)?
+                        .generation();
+                    parent = Some(live.ledger.reserve_parent(
+                        self.route.selected().clone(),
+                        self.route.session().identity().clone(),
+                        generation,
+                    )?);
+                }
                 let commit = live
                     .commit
                     .clone()
@@ -1395,10 +1437,20 @@ impl Finalization<'_> {
                         .as_ref()
                         .is_some_and(|owner| owner.is_current() && candidate.belongs_to(owner))
                     || slot.capacity.is_some()
+                    || slot.parent.is_some()
+                    || !parent.as_ref().is_some_and(|parent| {
+                        parent.belongs_to(&live.ledger)
+                            && parent.matches(
+                                self.route.selected(),
+                                self.route.session().identity(),
+                                slot.generation,
+                            )
+                    })
                 {
                     return Err(factory::Refused::Closed);
                 }
                 slot.capacity = capacity.take();
+                slot.parent = parent.take();
                 // Explicitly release short guards before any outer owner/credit
                 // can drop. Returning success is capacity only, never signed Ready.
                 drop(state);
@@ -1412,7 +1464,7 @@ impl Finalization<'_> {
                 Err(crate::voice_handoff::factory::Refused::Protocol(VoiceError::Capacity)) => {
                     // A local busy guard is not call failure or permission to
                     // allocate another HIGH. Restore THIS exact candidate.
-                    if self.retain_candidate(&mut capacity) {
+                    if self.retain_candidate(&mut capacity, &mut parent) {
                         return;
                     }
                     wanted = Phase::Returned;
@@ -1422,11 +1474,16 @@ impl Finalization<'_> {
         }
         // The outer candidate's actual heavy destruction precedes any collection
         // publication, including after positive fence refusal or cancellation.
+        drop(parent);
         drop(capacity);
         self.collect(wanted);
     }
 
-    fn retain_candidate(&mut self, capacity: &mut Option<RootHighPreclaim>) -> bool {
+    fn retain_candidate(
+        &mut self,
+        capacity: &mut Option<RootHighPreclaim>,
+        parent: &mut Option<ParentClaim>,
+    ) -> bool {
         let mut state = self
             .route
             .row
@@ -1459,6 +1516,7 @@ impl Finalization<'_> {
         }
         original.outcome = Some(Outcome::Candidate(
             capacity.take().expect("same original candidate"),
+            parent.take(),
         ));
         slot.phase = Phase::Staged;
         self.completed = true;
@@ -1467,7 +1525,7 @@ impl Finalization<'_> {
 
     fn collect(&mut self, mut wanted: Phase) {
         loop {
-            let (capacity, registration, work, done, unwind) = {
+            let (parent, capacity, registration, work, done, unwind) = {
                 let mut state = self
                     .route
                     .row
@@ -1508,13 +1566,21 @@ impl Finalization<'_> {
                 } else {
                     None
                 };
+                let parent = if slot.closed || cancelled {
+                    slot.parent.take()
+                } else {
+                    None
+                };
                 let registration = if slot.closed {
                     slot.registration.take()
                 } else {
                     None
                 };
                 let work = slot.invocation.as_mut().expect("original").work.take();
-                let done = capacity.is_none() && registration.is_none() && work.is_none();
+                let done = parent.is_none()
+                    && capacity.is_none()
+                    && registration.is_none()
+                    && work.is_none();
                 #[cfg(test)]
                 let unwind = std::mem::take(&mut slot.unwind_reclamation);
                 #[cfg(not(test))]
@@ -1528,12 +1594,13 @@ impl Finalization<'_> {
                         slot.invocation.take();
                     }
                 }
-                (capacity, registration, work, done, unwind)
+                (parent, capacity, registration, work, done, unwind)
             };
             // End/Cancel can arrive DURING these destructors. Loop and inspect
             // again before publishing return; never use the earlier closed bit.
             drop(Reclamation {
                 owners: ReclamationOwners {
+                    parent,
                     capacity,
                     registration,
                     work,
