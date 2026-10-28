@@ -50,7 +50,8 @@ const historyVector = (name: string) => {
 /** Independent actual-WebCrypto native endpoint fixture. It consumes only the published
  * selected point, never this broker's private key or its Session internals/counters. */
 async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identitySeed = 1,
-    deviceSettings: VoiceRtcDeviceSettingsSource | null = null) {
+    deviceSettings: VoiceRtcDeviceSettingsSource | null = null,
+    subscriptionHooks: { subscribe?(): void; unsubscribe?(): void } | null = null) {
   const cleanups: Array<() => void> = [];
   let ordinary = 0, setups = 0, settlements = 0, loseSetup = false, loseSettle = false;
   let setupClosed = false, published: Uint8Array | null = null, executor = "";
@@ -71,6 +72,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   let now = 0, timerSerial = 0, hostileHeaders = false, hangFetch = false, fetchAborted = false, fetchEntered = false;
   const timers = new Map<number, { at: number; run(): void }>();
   let timerPeak = 0, scheduleHook: (() => void) | null = null, cancelHook: (() => void) | null = null, nowHook: (() => void) | null = null;
+  let brokerNowHook: (() => void) | null = null;
   let fetchCancel: ReturnType<typeof gate> | null = null;
   const engine = new Proxy(real, { get(target, name) {
     const value = Reflect.get(target, name);
@@ -94,8 +96,20 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   let owner = createVoiceCryptoOwner(`voice-${identitySeed.toString(16).padStart(16, "0")}`, hash(identitySeed), () => {
     const hook = ownerHook; ownerHook = null; hook?.(); return true;
   });
+  if (subscriptionHooks) {
+    // Mock lifecycle callouts, not native authorization. Preserve the original
+    // irreversible owner closure and use this same wrapper for every broker record.
+    const original = owner;
+    owner = Object.freeze({ ...original, onRetired(listener: () => void) {
+      subscriptionHooks.subscribe?.();
+      const unsubscribe = original.onRetired(listener);
+      return () => { subscriptionHooks.unsubscribe?.(); unsubscribe(); };
+    } });
+  }
   const admission = { async admit() { ordinary++; return "ordinary"; }, async settle() {}, async commitInbound() {} };
-  const broker = sharedBroker ?? new VoiceCryptoBroker(admission, engine, () => now, {
+  const broker = sharedBroker ?? new VoiceCryptoBroker(admission, engine, () => {
+    const hook = brokerNowHook; brokerNowHook = null; hook?.(); return now;
+  }, {
     now() { const hook = nowHook; nowHook = null; hook?.(); return now; }, schedule(run, ms) {
       const id = ++timerSerial; timers.set(id, { at: now + ms, run }); timerPeak = Math.max(timerPeak, timers.size);
       const hook = scheduleHook; scheduleHook = null; hook?.(); return id;
@@ -316,6 +330,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     onSchedule(work: () => void) { scheduleHook = work; },
     onCancel(work: () => void) { cancelHook = work; },
     onNow(work: () => void) { nowHook = work; },
+    onIntakeNow(work: () => void) { brokerNowHook = work; },
     advance(ms: number) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.run(); } },
   };
 }
@@ -1343,6 +1358,232 @@ for (const offset of [81, 417, 425]) test(`known child bound Input mutation at${
   assert.equal((await handle.attempt()).kind, "uncertain");
   assert.equal(handle.row(), null, "invalid Input cannot authenticate a supplied row hint");
   assert.equal(child.counts().admissions, 0); assert.equal(child.counts().results, 0);
+});
+
+test("browser preclaim waits without a clock, timer, action or SDK and coalesces remounts", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const before = f.broker.counts(), calls = f.counts();
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  assert.equal(claim.inspect(), "reserved");
+  assert.equal(f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), claim);
+  assert.equal(f.broker.counts().bytes, before.bytes + 128 * 1024);
+  assert.deepEqual(f.rowBudget(), { reserved: 12, actions: 0 });
+  assert.equal(f.timers().pending, 0);
+  f.advance(120_000);
+  assert.equal(claim.inspect(), "reserved", "waiting never consumes the transcript window");
+  assert.deepEqual(f.counts(), calls);
+  claim.retire();
+  assert.equal(f.broker.counts().bytes, before.bytes + 128 * 1024,
+    "entered retire dispatch still owns the original envelope");
+  assert.throws(() => f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), /draining/);
+  await flush();
+  assert.equal(f.broker.counts().bytes, before.bytes);
+  assert.deepEqual(f.rowBudget(), { reserved: 0, actions: 0 });
+  const replacement = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  assert.notEqual(replacement, claim);
+  claim.retire();
+  assert.equal(replacement.inspect(), "reserved", "late old cleanup cannot clear the replacement");
+});
+
+test("browser preclaim moves the same full-pool bytes and rows into actual framed Input", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f);
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  const held = f.broker.counts().bytes;
+  assert.throws(() => f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose,
+    source.row, source.identity), /ready voice channel/);
+  assert.throws(() => f.broker.observeNativeWork(f.owner, channel, f.key), /authenticated ready/);
+  f.advance(120_000);
+  // Genuine ordinary ledger pressure: no spare bytes remain for refund/recharge or a
+  // duplicate Intake. The old envelope alone must admit the exact conversion.
+  const state = f.broker as unknown as { charge(owner: VoiceCryptoOwner, bytes: number): void;
+    refund(owner: VoiceCryptoOwner, bytes: number): void };
+  const filler = 256 * 1024 - held;
+  state.charge(f.owner, filler);
+  let fillerHeld = true;
+  f.cleanup(() => { if (fillerHeld) { fillerHeld = false; state.refund(f.owner, filler); } });
+  const full = f.broker.counts().bytes;
+  const intake = f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    historyPurpose, source.row, source.identity);
+  assert.equal(f.broker.counts().bytes, full);
+  assert.deepEqual(f.rowBudget(), { reserved: 12, actions: 0 });
+  assert.deepEqual(f.timers().delays, [15_000]);
+  claim.retire();
+  assert.equal(f.broker.counts().bytes, full, "old handle cannot retire transferred Intake");
+  assert.throws(() => f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    historyPurpose, source.row, source.identity), /original voice preclaim/);
+  fillerHeld = false; state.refund(f.owner, filler);
+  const result = await intake.attempt();
+  assert.equal(result.kind, "ready");
+  if (result.kind !== "ready") throw new Error("framed preclaimed Input required");
+  assert.equal((await result.derivation.attempt()).kind, "accepted");
+  await until(() => source.counts().settlements === 1 && f.broker.counts().active === 0);
+  assert.equal(source.counts().inputReads, 1);
+});
+
+test("browser preclaim wrong identity and unstarted validation refusal leave its exact payment reusable", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f);
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), held = f.broker.counts().bytes;
+  assert.throws(() => f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key,
+    Object.freeze({ inspect: () => "reserved" as const, retire() {} }), historyPurpose, source.row, source.identity), /original voice preclaim/);
+  assert.throws(() => f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    historyPurpose, "invalid", source.identity), /original voice intake/);
+  assert.throws(() => f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    { ...historyPurpose, epoch: "18446744073709551616" }, source.row, source.identity), /invalid/);
+  assert.equal(claim.inspect(), "reserved");
+  assert.equal(f.broker.counts().bytes, held);
+  assert.deepEqual(f.rowBudget(), { reserved: 12, actions: 0 });
+  const intake = f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    historyPurpose, source.row, source.identity);
+  assert.equal(typeof intake.attempt, "function", "successful entered conversion returns its real handle");
+});
+
+test("browser preclaim creation reentry coalesces before publishing a second envelope", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const baseline = f.broker.counts().bytes;
+  let nested: ReturnType<VoiceCryptoBroker["preclaimNativeNegotiation"]> | null = null;
+  f.onOwnerCheck(() => { nested = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key); });
+  const original = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  assert.equal(original, nested);
+  assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  assert.deepEqual(f.rowBudget(), { reserved: 12, actions: 0 });
+});
+
+test("browser preclaim pressure refusal creates no claim and a later retry uses the same channel", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const state = f.broker as unknown as { charge(owner: VoiceCryptoOwner, bytes: number): void;
+    refund(owner: VoiceCryptoOwner, bytes: number): void };
+  const filler = 256 * 1024 - f.broker.counts().bytes;
+  state.charge(f.owner, filler);
+  const full = f.broker.counts().bytes;
+  try {
+    assert.throws(() => f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), /capacity reached/);
+    assert.equal(f.broker.counts().bytes, full);
+    assert.deepEqual(f.rowBudget(), { reserved: 0, actions: 0 });
+  } finally { state.refund(f.owner, filler); }
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  assert.equal(claim.inspect(), "reserved");
+});
+
+test("browser preclaim cannot publish after a reentrant work pump takes its original channel", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const before = f.broker.counts().bytes;
+  f.onOwnerCheck(() => { f.broker.observeNativeWork(f.owner, channel, f.key); });
+  assert.throws(() => f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), /capacity reached/);
+  assert.equal(f.broker.counts().bytes, before, "no payment precedes the pure last pump fence");
+  assert.deepEqual(f.rowBudget(), { reserved: 0, actions: 0 });
+});
+
+test("browser preclaim and initial conversion overlap fit the SAME8KiB metadata envelope", () => {
+  // Logical application graph, not VM/provider heap size. The old preclaim is
+  // detached/cleared synchronously after conversion dispatch returns, BEFORE the
+  // deferred Input worker may create the full chain/crypto graph counted below.
+  const preclaim = 512 + 128 + 64 + 256 + 256 + 192 + 128 + 128;
+  // New Intake/cell/handle/drain/retirement/subscription, two timer generations,
+  // bounded selector+row+Action strings, map entries, conversion frame and encoded
+  // validation scratch. End holds the WHOLE original envelope across these stages.
+  const selectorAndAction = 2 * (3 * 64 + 20 + 32 + 2 * 20 + 64);
+  const stringHeadersAndFrozenDescriptors = 8 * 32 + 120;
+  const conversion = preclaim + 640 + 128 + 64 + 256 + 128 + 256 + 256
+    + selectorAndAction + stringHeadersAndFrozenDescriptors + 128 + 512 + 512;
+  assert.ok(preclaim <= 8 * 1024);
+  assert.ok(conversion <= 8 * 1024, `preclaim/Intake/dispatch overlap ${conversion}/8192`);
+});
+
+for (const seam of ["owner", "clock", "subscription"] as const)
+test(`browser preclaim nested ${seam} conversion cannot detach or refund the entered original`, async t => {
+  const hooks: { subscribe?(): void; unsubscribe?(): void } = {};
+  const f = await fixture(t, undefined, 1, null, hooks), channel = f.channel(); await channel.status();
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  const held = f.broker.counts().bytes;
+  const row = "0".repeat(31) + "1", identity = { action: "1", version: "1", inputTag: hash(11) };
+  let reached = false;
+  let nestedError: string | null = null, rowsAtReentry: ReturnType<typeof f.rowBudget> | null = null;
+  let paidAfterEnd: number | null = null;
+  const reenter = () => {
+    reached = true;
+    // isCurrent intentionally catches predicate exceptions. Record observations
+    // here and assert OUTSIDE it so a failed assertion cannot silently retire/pass.
+    try { f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim, historyPurpose, row, identity); }
+    catch (error) { nestedError = String(error); }
+    rowsAtReentry = f.rowBudget();
+    f.owner.retire();
+    paidAfterEnd = f.broker.counts().bytes;
+  };
+  if (seam === "owner") f.onOwnerCheck(reenter);
+  else if (seam === "clock") f.onIntakeNow(reenter);
+  else hooks.subscribe = () => { delete hooks.subscribe; reenter(); };
+  try {
+    const intake = f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim, historyPurpose, row, identity);
+    assert.equal((await intake.attempt()).kind, "retired");
+  } catch (error) { assert.match(String(error), /retired|owner changed|ready voice channel/); }
+  assert.ok(reached);
+  assert.match(nestedError ?? "nested conversion unexpectedly succeeded", /conversion is already in progress/);
+  assert.deepEqual(rowsAtReentry, { reserved: 12, actions: 0 });
+  assert.equal(paidAfterEnd, held, "nested failure cannot release the outer conversion's debt");
+  f.broker.retrySelectedJoinKeys();
+  await until(() => f.broker.counts().active === 0); await flush();
+  assert.equal(f.broker.counts().bytes, 0);
+  assert.equal(f.operations().includes(1), false);
+});
+
+test("browser preclaim nested conversion refusal preserves one successful original Intake handle", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f), claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  const held = f.broker.counts().bytes;
+  let nestedError: string | null = null;
+  f.onOwnerCheck(() => {
+    try { f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim, historyPurpose, source.row, source.identity); }
+    catch (error) { nestedError = String(error); }
+  });
+  const intake = f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    historyPurpose, source.row, source.identity);
+  assert.equal(f.broker.counts().bytes, held);
+  assert.match(nestedError ?? "nested conversion unexpectedly succeeded", /conversion is already in progress/);
+  assert.deepEqual(f.rowBudget(), { reserved: 12, actions: 0 });
+  assert.equal((await intake.attempt()).kind, "ready");
+});
+
+for (const seam of ["owner", "schedule", "subscription", "unsubscribe"] as const) test(`browser preclaim End during ${seam} conversion keeps the original graph paid through return`, async t => {
+  const hooks: { subscribe?(): void; unsubscribe?(): void } = {};
+  const f = await fixture(t, undefined, 1, null, hooks), channel = f.channel(); await channel.status();
+  // This negative fixture has no native row: no Input/engine may be submitted at
+  // any seam below. Actual native-row finalization is a separate integration gate;
+  // the positive full-pool test above uses the real framed native-action mock.
+  const source = { row: "0".repeat(31) + "1", identity: { action: "1", version: "1", inputTag: hash(11) } };
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), held = f.broker.counts().bytes;
+  let paidAfterEnd: number | null = null;
+  const stop = () => { f.owner.retire(); paidAfterEnd = f.broker.counts().bytes; };
+  if (seam === "owner") f.onOwnerCheck(stop);
+  else if (seam === "schedule") f.onSchedule(stop);
+  else if (seam === "subscription") hooks.subscribe = () => { delete hooks.subscribe; stop(); };
+  else hooks.unsubscribe = () => { delete hooks.unsubscribe; stop(); };
+  let intake: ReturnType<VoiceCryptoBroker["nativeDerivationFromPreclaim"]> | null = null;
+  try { intake = f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    historyPurpose, source.row, source.identity); }
+  catch (error) { assert.match(String(error), /retired|ready voice channel|owner changed/); }
+  assert.equal(paidAfterEnd, held, "End inside the entered conversion frame cannot refund that frame");
+  if (intake) assert.equal((await intake.attempt()).kind, "retired");
+  f.broker.retrySelectedJoinKeys();
+  try { await until(() => f.broker.counts().active === 0); } catch (error) {
+    const diagnostic = (f.broker as unknown as { ipcChannels: Map<string, {
+      retired: boolean; driving: boolean; drained: boolean; activity: number;
+      negotiation: { preclaim: { retired: boolean; released: boolean; disposing: boolean; cell: { detached: boolean } } | null;
+        intake: { retired: boolean; released: boolean; conversionReturned: boolean } | null };
+    }> }).ipcChannels.get(f.owner.token);
+    console.error("preclaim cleanup", f.broker.counts(), diagnostic && { retired: diagnostic.retired, driving: diagnostic.driving,
+      drained: diagnostic.drained, activity: diagnostic.activity, preclaim: diagnostic.negotiation.preclaim && {
+        retired: diagnostic.negotiation.preclaim.retired, released: diagnostic.negotiation.preclaim.released,
+        disposing: diagnostic.negotiation.preclaim.disposing, detached: diagnostic.negotiation.preclaim.cell.detached },
+      intake: diagnostic.negotiation.intake && { retired: diagnostic.negotiation.intake.retired,
+        released: diagnostic.negotiation.intake.released, conversionReturned: diagnostic.negotiation.intake.conversionReturned } });
+    throw error;
+  }
+  await flush();
+  assert.equal(f.broker.counts().bytes, 0);
+  assert.equal(f.timers().pending, 0);
+  assert.equal(f.operations().includes(1), false, "no Input submitted after End");
 });
 
 test("native Input prepays and transfers the same claim, then executes real framed admission/result/ACK/settlement", async t => {
@@ -4639,6 +4880,35 @@ async function failedParentFixture(t: TestContext) {
   await until(() => parent.counts().settlements !== 0);
   return { first, f, parent, channel, ready, purpose };
 }
+
+test("browser preclaim after actual failed-plan advancement cannot adopt an old retained Intake", async t => {
+  const { first, f, parent, channel, ready, purpose } = await failedParentFixture(t);
+  ready.chain.close();
+  await f.broker.retireFailedNativeNegotiation(f.owner, channel, ready.chain);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, channel, ready.chain), true);
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  const held = f.broker.counts().bytes, rows = f.rowBudget();
+  assert.throws(() => f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    purpose, parent.row, parent.identity), /old voice intake generation/);
+  assert.equal(claim.inspect(), "reserved");
+  assert.equal(f.broker.counts().bytes, held);
+  assert.deepEqual(f.rowBudget(), rows, "refusal leaves the same twelve-row envelope reusable");
+  const retainedResponder = f.actionHandler()!;
+  const freshPurpose = { ...historyPurpose, peer: hash(207), join: hash(208), keyRef: hash(209) };
+  const fresh = await framedDerivation(f, true, 3, freshPurpose), freshResponder = f.actionHandler()!;
+  f.actions((header, body) => header.logical === fresh.row ? freshResponder(header, body) : retainedResponder(header, body));
+  const intake = f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    freshPurpose, fresh.row, fresh.identity);
+  assert.equal(f.broker.counts().bytes, held);
+  const next = await intake.attempt();
+  assert.equal(next.kind, "ready");
+  if (next.kind !== "ready") throw new Error("fresh preclaimed Intake required");
+  assert.equal((await next.derivation.attempt()).kind, "accepted");
+  await until(() => fresh.counts().settlements !== 0);
+  assert.equal(first.sdk.calls.closed, 0, "existing indexed media survives a refused old row");
+  f.owner.retire(); await channel.close();
+  assert.equal(f.broker.counts().bytes, 0);
+});
 
 test("attached failure before ordinary parent Return obtains exact Plan final and preserves indexed media", async t => {
   const { first, f, parent, channel, ready } = await failedParentFixture(t);

@@ -21,6 +21,19 @@ LOW/HIGH agreement, native-row permission or protocol effect is exposed. The pro
 independent3KiB payment follows the initial guard's2,168B measurement/refusal of2KiB.
 Corrected focused tests and read-only re-review pass; full suites remain pending. No live security or
 availability guarantee follows. Wire formats and production V2 activation are unchanged.
+## Inert browser admission capacity (28 October; inactive)
+
+The original selected key/channel/negotiation may preclaim the SAME ordinary intake
+envelope and group/row positions before native admission. Public handles expose no
+capacity counters or effect operations; exact broker lookup and current allocation
+checks precede transfer. Waiting creates no deadline, signed readiness, native row or
+SDK work. Cancellation denies future conversion but returns no entered dispatch early.
+Conversion preserves payment through both the old dispatch and new subscription tail;
+reentrant End finds the published Intake and waits for the original conversion return.
+Old listeners/handles are detached rather than redirected at the new Intake. Existing
+caps are unchanged. This browser bookkeeping does not authorize a native Session/ordinal,
+HIGH/LOW orientation, bilateral round, packet, media or relay. Broker47 refuses older
+retained broker versions at the same window symbol. Production V2 remains OFF.
 
 ## V2 progression custody before bilateral admission (28 October; candidate)
 
