@@ -29,6 +29,8 @@ test("an external scope request cannot submit restored held work without an expl
   const settle = async (turns = 10) => { for (let i = 0; i < turns; i++) {
     session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync();
   } };
+  const target = document.createElement("div"); document.body.append(target);
+  let editor: ReturnType<typeof mount<typeof Studio>> | null = null;
   try {
     session.setScope({ server: SERVER, channel: CHANNEL }); await settle(10); session.open(a); await settle(10);
     assert.ok(session.doc?.model, JSON.stringify(session.doc));
@@ -38,15 +40,97 @@ test("an external scope request cannot submit restored held work without an expl
     assert.equal(setStudioScope(SERVER, CHANNEL), true); await settle(10);
     assert.ok(session.saves.length);
     assert.equal(session.awaitsExplicitSave(session.saves[0].id), true);
+    const original = session.saves[0]; assert.ok(original.kind === "apply");
     assert.equal(setStudioScope(SERVER, "77777777777777777"), false);
+    editor = mount(Studio, { target, props: { me: ME, server: SERVER, channel: "77777777777777777",
+      nameOf: () => "member", colorOf: () => "#fff", onnotice: () => {} } }); flushSync();
     await settle(10);
     assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply" || c.cmd === "studio_apply_batch").length, 0,
       "mounting another channel does not grant permission to send restored edits");
     assert.equal(session.scope?.channel, CHANNEL);
-    await saveStudio();
-    assert.equal(setStudioScope(SERVER, "77777777777777777"), true);
+    const waiting = target.querySelector('[data-scope-wait]'); assert.ok(waiting);
+    assert.match(waiting.textContent!, /Unsaved edits.*waiting/);
+    assert.doesNotMatch(waiting.textContent!, /Saving your edits/);
+    const save = target.querySelector<HTMLButtonElement>('[data-save-held-scope]'); assert.ok(save);
+    const actualSave = session.save.bind(session); let waiters = 0;
+    session.save = () => {
+      waiters++;
+      if (waiters === 1) save.click(); // reentrant click before Save stages/releases the records
+      return actualSave();
+    };
+    save.click(); flushSync(); await settle(15);
+    assert.equal(waiters, 1, "reentrant clicks cannot create more Save waiters");
+    const sent = ipc.calls.filter(c => c.cmd === "studio_apply"); assert.equal(sent.length, 1);
+    assert.equal(sent[0].args.channel, CHANNEL, "explicit Save writes the original channel");
+    assert.equal(sent[0].args.nonce, original.request.nonce, "it retains the original request identity");
     assert.equal(session.scope?.channel, "77777777777777777");
-  } finally { disposeStudio(); }
+  } finally { if (editor) await unmount(editor); disposeStudio(); target.remove(); }
+});
+
+test("a held-scope Save completion cannot notify a new destination, reset or destroyed panel", async () => {
+  const { default: Harness } = await import("../scripts/fixtures/StudioDestinationHarness.svelte");
+  for (const replacement of ["destination", "reset", "unmount"] as const) {
+    const ipc = fakeIpc(), notices: string[] = [], ack = deferred<unknown>();
+    const view = () => ({ ...ordinaryView(flipnoteContent({ frames: [] })), group: "deadbeef" });
+    ipc.on("studio_list", () => ({ ...ordinaryView(indexContent({ objects: { [a]: indexEntry({ title: "A" }) } })), group: "deadbeef" }));
+    ipc.on("studio_read", view); ipc.on("studio_apply", () => ack.promise);
+    useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+    const settle = async () => { for (let i = 0; i < 15; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+    const target = document.createElement("div"); document.body.append(target);
+    let mounted: ReturnType<typeof mount<typeof Harness>> | null = null;
+    try {
+      session.setScope({ server: SERVER, channel: CHANNEL }); await settle(); session.open(a); await settle();
+      session.setFps(a, 7); const draft = studioDraftSnapshot(); assert.ok(draft);
+      resetStudio(); restoreStudioDraft(draft); setStudioScope(SERVER, CHANNEL); await settle();
+      mounted = mount(Harness, { target, props: { props: { me: ME, server: SERVER, channel: "77777777777777777",
+        nameOf: () => "member", colorOf: () => "#fff", onnotice: text => notices.push(text) } } }); flushSync(); await settle();
+      const save = target.querySelector<HTMLButtonElement>('[data-save-held-scope]'); assert.ok(save);
+      save.click(); flushSync(); await settle();
+      assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply").length, 1);
+      if (replacement === "destination") {
+        const generation = session.generation;
+        (mounted as unknown as { destination(server: number, channel: string): void }).destination(SERVER, "88888888888888888");
+        flushSync(); assert.equal(session.generation, generation, "target-only change leaves the source generation intact");
+      } else if (replacement === "reset") resetStudio();
+      else { await unmount(mounted); mounted = null; }
+      ack.reject(new Error("late save failure")); await settle();
+      assert.deepEqual(notices, [], `${replacement}: the old waiter cannot publish into a replacement surface`);
+      assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply").length, 1, "no new nonce or automatic replacement Save");
+    } finally { if (mounted) await unmount(mounted); disposeStudio(); target.remove(); }
+  }
+});
+
+test("saving a mixed held and blocked scope never retries or reauthors the blocked request", async () => {
+  for (const failure of ["epoch studio: edit belongs to a retired epoch", "Studio transaction expired, cancelled or server stopped"]) {
+  const ipc = fakeIpc(), notices: string[] = [];
+  const view = () => ({ ...ordinaryView(flipnoteContent({ frames: [] })), group: "deadbeef" });
+  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent({ objects: { [a]: indexEntry({ title: "A" }) } })), group: "deadbeef" }));
+  ipc.on("studio_read", view);
+  ipc.on("studio_apply", () => { throw new Error(failure); });
+  useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+  const settle = async () => { for (let i = 0; i < 15; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+  const target = document.createElement("div"); document.body.append(target);
+  let mounted: ReturnType<typeof mount<typeof Studio>> | null = null;
+  try {
+    session.setScope({ server: SERVER, channel: CHANNEL }); await settle(); session.open(a); await settle();
+    session.setFps(a, 7); await session.save().catch(() => {}); session.setFps(a, 8);
+    const draft = studioDraftSnapshot(); assert.ok(draft);
+    resetStudio(); restoreStudioDraft(draft); setStudioScope(SERVER, CHANNEL); await settle();
+    const identities = session.saves.map(s => s.kind === "apply" ? s.request.nonce : null);
+    assert.equal(session.needsDecision(session.saves[0].id), failure.includes("retired epoch"));
+    assert.equal(session.awaitsExplicitSave(session.saves[1].id), true);
+    mounted = mount(Studio, { target, props: { me: ME, server: SERVER, channel: "77777777777777777",
+      nameOf: () => "member", colorOf: () => "#fff", onnotice: text => notices.push(text) } }); flushSync(); await settle();
+    assert.match(target.querySelector('[data-scope-wait]')!.textContent!, /Unsaved edits.*waiting/);
+    const before = ipc.calls.filter(c => c.cmd === "studio_apply" || c.cmd === "studio_apply_batch").length;
+    target.querySelector<HTMLButtonElement>('[data-save-held-scope]')!.click(); flushSync(); await settle();
+    assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply" || c.cmd === "studio_apply_batch").length, before);
+    assert.deepEqual(session.saves.map(s => s.kind === "apply" ? s.request.nonce : null), identities);
+    assert.equal(session.scope?.channel, CHANNEL, "a blocked original prevents the switch");
+    assert.equal(notices.length, 1, "the current panel reports that Save could not finish");
+    assert.match(notices[0], /not saved|not confirmed/);
+  } finally { if (mounted) await unmount(mounted); disposeStudio(); target.remove(); }
+  }
 });
 
 test("editor Play starts all six frames and frame-one sound again after stopping on frame three", async () => {

@@ -21,24 +21,37 @@ key preserves the mounted composer across ordinary revisions. Actual mounted wra
 editor regressions check equal-valued fresh scopes, DOM identity, undo, an active press,
 group-only and generation-only replacement, A-B-A and reset while still mounted.
 
-All 3,535 frontend tests pass, with zero Svelte errors/warnings and a passing production
-build. The earlier full run found two integration failures; both focused reruns and the
-subsequent complete run pass. Read-only UI review has no blocker/high/medium findings;
+All 3,537 frontend tests pass, with zero Svelte errors/warnings and a passing production
+build. Integration test expectations and an error-literal collision were resolved without
+weakening the production source guard. Read-only UI review has no remaining findings;
 its additional regression-precision suggestions are included. New native acceptance
 tests cover the real batch parser/invoke/custody, concrete wrong epoch, admission after
 Lock or incarnation replacement, admitted-worker lost reply, physical store reopen,
-and exact signed-operation counts/bytes after retry or a refused partial prefix. These
-new native tests have not run yet; they await the single local Rust validation queue.
+and exact signed-operation counts/bytes after retry or a refused partial prefix. All four
+pass at `6c2555d1`. The wrong-epoch assertion now checks the full public error prefix,
+avoiding confusion with the single production error literal; its stronger assertion
+will run again in the complete native gate. Root strict Clippy and both format checks pass.
 The normal ten-case Edge flow gate and the new Score grid/transport/recovery fixture
-pass. The latter captures `target/score-integration.png` at900x640; it was inspected.
+pass, as does the existing Gate7 attachment/playback scenario. The Score fixture captures
+`target/score-integration.png` at 900x640; it was inspected.
 Its native commands are development mocks, not native or physical audio acceptance.
-Ambient-dependency and Store raw-fs gates pass. The lost-reply barrier is before the first batch item, after worker admission; it is
+Ambient-dependency and Store raw-fs gates pass. The lost-reply barrier is before the
+first batch item, after worker admission; it is
 separate from the genuine causal-refusal test of a durable partial prefix.
+
+The defensive channel-wait panel distinguishes restored held edits from active saving.
+It offers an explicit Save through the existing request path, with one operation-owned
+waiter token. Original source scope/generation, displayed destination and panel lifetime
+fence stale clicks/notices. The regression fails before this correction at the false
+"Saving" text. All 13 mounted navigation cases pass, including reentrant clicks, target-only
+replacement, reset, unmount and mixed held/blocked/uncertain records without retry or
+reauthoring. Architecture, interface and threat-model descriptions now match the retained
+Save-before-switch contract. Complete combined backend gates and native startup remain pending.
 
 Layered Score operations require every member to run a compatible build before use.
 Older builds reject the new bodies/seeds; clearing current notes does not make retained
-operation history and recovery archives safe to downgrade. Root/native validation,
-browser flow evidence and final review of the completed merge remain required.
+operation history and recovery archives safe to downgrade. Complete Root/native validation
+and the native build/startup gate remain required before acceptance.
 
 ## Shared actor Control inventory correction (28 October; under validation)
 

@@ -1920,10 +1920,10 @@ fence an ACK's projection: an overlapping later read preserves its newer state, 
 finishes before dependent queued work runs. Navigation without a read never suppresses Create's
 initial projection. Editor selection flushes the original
 object/frame's dirty raster before replacing the document; a synchronous enqueue refusal vetoes
-the switch. Pending exact Saves retain their pixels and identity offscreen. A slow or failed Save
-never holds navigation: leaving hands it to the background queue, which resends a failed exact
-request on its own for about two minutes (bounded backoff) before leaving it to the member, and the
-Studio waits to change channel until its queue has drained. Protocol Open phase
+the switch. Document departure awaits definite Saves for that document before switching; refusal
+keeps the editor and original request. Bounded automatic retries can continue in the queue, but
+do not grant an early departure. An external prop change cannot release restored held work; the
+waiting panel offers an explicit Save under the original scope. Protocol Open phase
 and bounded maintenance watches are independent of the one currently open editor.
 
 Looping pictures wrap through long authored sound/release tails without shortening sound. Shared

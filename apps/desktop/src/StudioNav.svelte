@@ -274,7 +274,7 @@
   </div>
 {/if}
 {#if scopeWaiting}
-  <!-- The session is still on the previous channel, sending its edits. Its list is not this
+  <!-- The session still owns work from the previous channel. Its list is not this
        channel's, and a "new flipnote" here would land in the wrong channel, so nothing below shows. -->
   <p class="studio-note" data-scope-wait>This list follows once your edits from the last channel are saved or discarded.</p>
 {:else}

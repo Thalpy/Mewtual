@@ -3452,8 +3452,8 @@ owner's choice for collaborative scores.
   the retained signed envelope (Create, Apply, Index Apply, ordinary frames). Native still runs the
   full membership, epoch and gate checks on every visit, so a resend cannot outlive a revoked member
   or a closed epoch. Resends never cross a reset, lock or scope change. Restored work is never
-  resent before something the member did sends it (an explicit Save or retry, leaving its document
-  or the Studio, a channel change, or a post to chat). A refusal no resend can change (changed
+  resent before an explicit Save/retry or the Save barrier for document/Studio departure, channel
+  navigation or chat posting. An external prop change alone cannot grant release. A refusal no resend can change (changed
   history, retired epoch, a server or membership that is gone, an id that already exists) is never
   resent, and the member's own Retry refuses it too. The amplification bound per failed record is
   seven resends. Each resend can itself be repeated by the two busy layers beneath it (at most 4 x 6
@@ -3469,9 +3469,13 @@ owner's choice for collaborative scores.
   it before the intent barrier, and batch items are applied in order. A test pins the text, its
   single producer, the ordering and the batch wrapper to the Rust sources. Anything else, including
   a later batch item or a record whose earlier attempt was uncertain, stays uncertain.
-- **Leaving no longer waits for receipts.** Edits keep their full request on the queue (and in the
-  lock snapshot) until they land or the member discards them; the Studio does not change channel
-  while its queue holds work. Window close still waits for every receipt.
+- **Departure retains the Save barrier.** Document switching, leaving the Studio and chat posting
+  await their covered definite Saves. Refusal/uncertainty keeps the editor and original requests.
+  A defensive external scope change holds restored edits without sending them. Its explicit Save
+  uses one owned waiter token and the original source generation/scope and displayed destination;
+  replacement, Lock/reset or panel destruction suppress stale UI effects. An admitted native Save
+  may still finish. Window close also waits for its receipts. Records remain in the queue/lock
+  snapshot until saved or explicitly discarded; no error is treated as rollback.
 
 ## Gate 6 enforcement checkpoint (2026-10-14; candidate at that date)
 

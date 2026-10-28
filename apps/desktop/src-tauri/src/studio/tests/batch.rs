@@ -170,7 +170,10 @@ async fn native_batch_reopen_exact_retry_and_wrong_epoch_preserve_signed_union()
         )
         .await
         .unwrap_err();
-        assert!(error.contains("edit belongs to a retired epoch"), "{error}");
+        assert!(
+            error.contains("epoch studio: edit belongs to a retired epoch"),
+            "{error}"
+        );
         assert_eq!(
             source(&state, &ops, &[(23, note(2, 5))]).await,
             initial + 2,

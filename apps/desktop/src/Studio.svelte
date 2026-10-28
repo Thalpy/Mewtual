@@ -1003,6 +1003,28 @@
     void studio.rev;
     return session.saves.filter(s => (s.status === "blocked" || s.status === "uncertain") && session.autoRetryAt(s.id) === null && !session.resaving(s.id));
   }
+  function heldScopeRecords(): SaveRecord[] {
+    void studio.rev;
+    return session.saves.filter(s => session.awaitsExplicitSave(s.id));
+  }
+  let heldScopePanelLive = true;
+  let heldScopeOperation: object | null = null;
+  let heldScopeBusy = $state(false);
+  async function saveHeldScope(scope: { server: number; channel: string } | null, generation: number,
+    destination: { server: number | null; channel: string }) {
+    // The waiting panel names the ORIGINAL session, not the newly requested channel.
+    // An old click must never release a replacement queue after Lock/reset/scope change.
+    const current = () => heldScopePanelLive && !!scope && scopeWaiting && !session.closing &&
+      server === destination.server && channel === destination.channel && session.generation === generation &&
+      session.scope?.server === scope.server && session.scope.channel === scope.channel;
+    if (heldScopeOperation || !current()) return;
+    // Publish busy before calling Save: staging/change listeners can reenter synchronously.
+    // The original operation returns its own token only after its actual waiter completes.
+    const token = {}; heldScopeOperation = token; heldScopeBusy = true;
+    try { await session.save(); }
+    catch (error) { if (current()) onnotice(reason(error), "error"); }
+    finally { if (heldScopeOperation === token) { heldScopeOperation = null; heldScopeBusy = false; } }
+  }
   const stuckArmKey = () => `stuck:${stuckRecords().map(armKey).join(",")}`;
   // Only what a retry can move: a spent local-draft ticket or a changed history would be a no-op.
   function retryStuck() { for (const s of stuckRecords()) if (session.canRetry(s.id)) retrySave(s); }
@@ -1198,7 +1220,7 @@
     const t = setInterval(() => { tick++; }, 1000);
     return () => clearInterval(t);
   });
-  onDestroy(() => { removeCloseHandler(); removeSaveHandler(); auditionRequest++; audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
+  onDestroy(() => { heldScopePanelLive = false; removeCloseHandler(); removeSaveHandler(); auditionRequest++; audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
@@ -1486,15 +1508,23 @@
     </div>
   {/if}
   {#if scopeWaiting}
-    <!-- The previous channel's edits are still saving. The session stays on that channel until they
-         land and then switches here by itself; the member only needs to act on an edit that will not
-         save on its own, and the words say which of the two this is. -->
+    <!-- Keep the old scope until its work lands. Restored held records need an explicit
+         Save; merely mounting this panel must neither send them nor claim they are saving. -->
     {@const stuck = stuckRecords()}
+    {@const held = heldScopeRecords()}
+    {@const heldScope = session.scope ? { ...session.scope } : null}
+    {@const heldGeneration = session.generation}
+    {@const heldDestination = { server, channel }}
     <div class="studio-empty" data-scope-wait>
       <!-- "Need you" once nothing will resend on its own: what is left queued behind a stuck edit
            cannot run either. -->
-      <p>{waitTally && waitTally.stuck > 0 && waitTally.retrying === 0 ? "Your edits from the last channel need you." : "Saving your edits from the last channel."}</p>
+      <p>{held.length ? "Unsaved edits from the previous channel are waiting." : waitTally && waitTally.stuck > 0 && waitTally.retrying === 0 ? "Your edits from the last channel need you." : "Saving your edits from the last channel."}</p>
       {#if waitTally?.left}<p class="micro">{waitTally.left} left</p>{/if}
+      {#if held.length}
+        <p class="micro">Open that channel to review them, or save them before continuing.</p>
+        <button type="button" class="st-btn primary" data-save-held-scope disabled={heldScopeBusy}
+          onclick={() => saveHeldScope(heldScope, heldGeneration, heldDestination)}>Save edits</button>
+      {/if}
       {#if stuck.length}
         <p class="micro">{stuck.slice(0, 4).map(s => s.label).join(", ")}{stuck.length > 4 ? `, ${stuck.length - 4} more` : ""}</p>
         <!-- No bulk "save as a new edit" here: the document changed under those edits, and saving them
