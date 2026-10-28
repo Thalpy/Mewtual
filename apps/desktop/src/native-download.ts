@@ -8,6 +8,9 @@ export type SavedFileResult = {
   displayed: boolean;
   warning?: string;
   contentValidation?: "matched" | "mismatch" | "unrecognized";
+  /** Native asserts this group-file save sits directly in the Downloads folder. Absent means
+   * not asserted (a chosen place, a resumed journal's own folder, or unknown). */
+  inDownloads?: true;
 };
 
 function checkedResult(value: unknown): SavedFileResult {
@@ -26,6 +29,9 @@ function checkedResult(value: unknown): SavedFileResult {
       result.contentValidation !== "unrecognized") {
     throw new Error("the desktop returned an invalid save result");
   }
+  if (result.inDownloads !== undefined && result.inDownloads !== null && typeof result.inDownloads !== "boolean") {
+    throw new Error("the desktop returned an invalid save result");
+  }
   return {
     path: result.path,
     displayed: result.displayed,
@@ -33,6 +39,7 @@ function checkedResult(value: unknown): SavedFileResult {
     ...(typeof result.contentValidation === "string"
       ? { contentValidation: result.contentValidation as SavedFileResult["contentValidation"] }
       : {}),
+    ...(result.inDownloads === true ? { inDownloads: true as const } : {}),
   };
 }
 
@@ -49,22 +56,43 @@ export async function saveGroupFile(
   server: number,
   cid: string,
   name: string,
-  options?: { resume?: string; expectedIntent?: string; operation?: string },
+  options?: {
+    resume?: string; expectedIntent?: string; operation?: string; freshCopy?: boolean;
+    /** Native opens the OS "Save as" dialog itself; no path or folder is ever sent from here. */
+    saveAs?: boolean;
+    /** "Replace my older saved copy" (PR #56): a flag only. Native replaces only a copy the
+     * sealed saved-files list names and that it proves is its own and unchanged. */
+    replaceOlder?: boolean;
+  },
 ): Promise<SavedFileResult> {
   return checkedResult(await invoke<unknown>("save_group_file", {
     server, cid, name,
     ...(options?.resume ? { resume: options.resume, expectedIntent: options.expectedIntent } : {}),
+    // Only meaningful with a resume ID: native removes the partly saved file it can prove it
+    // created, forgets that journal under the same intent CAS, then saves a separate file.
+    ...(options?.resume && options.freshCopy ? { freshCopy: true } : {}),
+    ...(options?.saveAs ? { saveAs: true } : {}),
+    ...(options?.replaceOlder ? { replaceOlder: true } : {}),
     ...(options?.operation ? { operation: options.operation } : {}),
   }));
 }
 
-/** Explicit resume selects saved encrypted work by ID/revision; native captures a fresh
- * session and destination. A browser path, plaintext offset or new allowance is never sent. */
+/** Explicit resume selects saved encrypted work by ID/revision. Native revalidates the saved
+ * destination (or captures a fresh one for a new copy). A browser path, plaintext offset or new
+ * allowance is never sent. */
 export async function resumeGroupFile(
   invoke: NativeInvoker, server: number, cid: string, name: string,
-  resume: string, expectedIntent: string, operation?: string,
+  resume: string, expectedIntent: string, operation?: string, freshCopy = false, saveAs = false,
+  replaceOlder = false,
 ): Promise<SavedFileResult> {
-  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation });
+  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation, freshCopy, saveAs, replaceOlder });
+}
+
+/** Native's exact reply when the user closes the "Save as" dialog without choosing. Nothing was
+ * started or recorded, so the caller drops its pending row quietly instead of showing an error. */
+export const SAVE_AS_CANCELLED = "Save as was cancelled.";
+export function isSaveAsCancelled(error: unknown): boolean {
+  return (error instanceof Error ? error.message : String(error)) === SAVE_AS_CANCELLED;
 }
 
 export async function saveSpaceGuide(
@@ -90,8 +118,31 @@ export function completedDownload(
   };
 }
 
-export function downloadSavedNotice(name: string, saved: SavedFileResult) {
+/** The final component of the path native saved to (either separator), or `fallback` when the
+ * path has none. Display only: the path itself was produced and validated by native. */
+export function savedFileName(saved: SavedFileResult, fallback: string): string {
+  const leaf = saved.path.split(/[\\/]/).filter(part => part.length > 0).pop();
+  return leaf ?? fallback;
+}
+
+/** The notice names the Downloads folder only when the caller expects a first one-click save
+ * (`toDownloads`) AND native asserts the file sits in Downloads (`inDownloads`). A "Save as"
+ * choice, a remembered choice or a resumed partial may be anywhere, so those notices name no
+ * folder. A "matched" media verdict carries no extra warning, so it takes the same folder-free
+ * wording; only "mismatch" and "unrecognized" need their own text. */
+export function downloadSavedNotice(listedName: string, saved: SavedFileResult, toDownloads = true) {
+  // Re-review 2 LOW 5: name the file that was actually written (a name typed in Save as, or a
+  // numbered name when the listed one was taken), not the listed name.
+  const name = savedFileName(saved, listedName);
   const warning = saved.warning ? ` ${saved.warning}` : "";
+  // Fails closed: the caller's inference rests on a list that can be stale (a one-click save can
+  // resume a record whose save goes to a place chosen earlier), so native must also say so.
+  const inDownloads = toDownloads && saved.inDownloads === true;
+  if (!inDownloads && (!saved.contentValidation || saved.contentValidation === "matched")) {
+    return saved.displayed
+      ? { text: `Saved ${name}.${warning}`, kind: saved.warning ? "info" as const : "ok" as const, ms: saved.warning ? 8_000 : 4_000 }
+      : { text: `Saved to ${saved.path}.${warning}`, kind: "info" as const, ms: 8_000 };
+  }
   if (saved.contentValidation === "mismatch") {
     return {
       text: `Saved ${name}, but its bytes do not match the declared media type. Treat the unlocked copy as untrusted.${warning}`,

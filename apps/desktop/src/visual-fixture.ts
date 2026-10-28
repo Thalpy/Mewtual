@@ -3,6 +3,7 @@ import type { InvokeArgs } from "@tauri-apps/api/core";
 import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging.ts";
 import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
 import { createVisualFileUploads } from "./visual-file-uploads.ts";
+import { VISUAL_SAVED_FILES, visualTransfersResponse } from "./visual-transfers-fixture.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -62,6 +63,16 @@ const CHANNEL_MESSAGES: Record<string, Message[]> = {
     message("dm-2", ME, "Perfect — one stable URL per state is the goal.", 22),
   ],
 };
+
+/** A channel's messages. The Transfers fixture (`transfers=1`) adds one message sharing a file
+ * the device already saved, so its chat card shows the "Saved" mark (PR #56). */
+function channelMessages(key: string, transfers: boolean): Message[] {
+  const rows = CHANNEL_MESSAGES[key] ?? [];
+  if (!transfers || key !== "general") return rows;
+  const saved = VISUAL_SAVED_FILES[0].file;
+  // A file reference on a line of its own renders as a file card (`[label](file:CID)`).
+  return [...rows, message("msg-6", JUNIPER, `Here is the kit again:\n[${saved.name}](file:${saved.cid})`, 3)];
+}
 
 const PROFILES = [
   {
@@ -161,11 +172,17 @@ const BRIDGED = "LOG.TRACING.EVENT";
  * call fail loudly. That is preferable to a screenshot which looks plausible while silently
  * omitting a newly-added backend dependency.
  */
-export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false): unknown {
+export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false, transfers = false): unknown {
   const args: Record<string, unknown> =
     Array.isArray(payload) || payload instanceof ArrayBuffer || payload instanceof Uint8Array
       ? {}
       : payload;
+  // `transfers=1`: one private download row in every Transfers state (Transfers UX, PR #51).
+  if (transfers) {
+    const response = visualTransfersResponse(command, args,
+      () => visualFixtureResponse("get_files", payload, studio) as { has_peers: boolean; files: Array<Record<string, unknown>> });
+    if (response.handled) return response.value;
+  }
   if (studio) {
     const response = visualStudioFixtureResponse(command, args, VISUAL_FIXTURE_NOW);
     if (response.handled) return response.value;
@@ -249,9 +266,9 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         },
       ]);
     case "get_messages":
-      return clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []);
+      return clone(channelMessages(server === 2 ? "dm" : channel, transfers));
     case "get_message_page": {
-      const rows = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Message[];
+      const rows = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Message[];
       const request: PageRequest = {
         anchor: (args.anchor as PageRequest["anchor"]) ?? { kind: "tail" },
         before: typeof args.before === "number" ? args.before : 0,
@@ -261,11 +278,11 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       return pageOfList(rows, request, ME, "@[Rowan]", 1, probe);
     }
     case "get_pinned_messages":
-      return clone((CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []).filter((m) => m.pinned));
+      return clone((channelMessages(server === 2 ? "dm" : channel, transfers)).filter((m) => m.pinned));
     case "get_messages_by_id": {
       // The arrival read: the named rows wherever they sort, each with its addressing bit. Ids
       // that name nothing are absent, exactly as the native command answers.
-      const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{
+      const all = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Array<{
         id: string;
         text: string;
       }>;
@@ -275,7 +292,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         .map((row) => ({ ...row, targets_me: row.text.includes("@[Rowan]") }));
     }
     case "get_message_tail": {
-      const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{ id: string; text: string }>;
+      const all = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Array<{ id: string; text: string }>;
       const limit = typeof args.limit === "number" && args.limit > 0 ? Math.trunc(args.limit) : all.length;
       const cursor = typeof args.afterId === "string" ? args.afterId : "";
       const at = cursor ? all.findIndex((row) => row.id === cursor) : -1;
@@ -323,9 +340,71 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         ],
       });
     case "get_private_downloads": return [];
+    // A Saved row's read-only file check: one of four words, never a path. The fixture lists no
+    // saved rows, so this answers "present" if a captured state ever asks.
+    case "check_saved_download": return "present";
+    // Show in folder: native checks the file and opens the system file manager; nothing returns.
+    case "reveal_saved_download": return null;
+    // PR #56: the saved-files list. The chat fixture has saved nothing; `transfers=1` lists one
+    // entry per row state. Its check answers nothing, and the list actions change nothing.
+    case "get_saved_files": return { state: "ok", files: [] };
+    case "check_saved_files": return [];
+    case "reveal_saved_file":
+    case "forget_saved_file":
+    case "reset_saved_files":
+      return null;
+    // "Remember saved files" (Server settings, Storage). Lantern Room's list is said to hold 212
+    // entries (display data for that page only), so a lower choice previews what it forgets. A
+    // choice is clamped and echoed back like native, never persisted.
+    case "get_saved_files_limit":
+      return { state: "ok", limit: 256, listed: server === 1 ? 212 : 0, min: 16, max: 4096, default: 256 };
+    case "set_saved_files_limit": {
+      const asked = typeof args.limit === "number" ? args.limit : 256;
+      const limit = Math.min(4096, Math.max(16, Math.trunc(asked)));
+      const forgets = Math.max(0, (server === 1 ? 212 : 0) - limit);
+      // Like native, an apply holds only for the count the user confirmed.
+      if (args.apply === true && args.expectedForgets !== forgets) {
+        throw new Error("The list of saved files changed meanwhile, so Mewtual kept the current setting. Choose again.");
+      }
+      return { limit, forgets, applied: args.apply === true };
+    }
+    case "save_group_file": {
+      // Mirrors the native contract: the renderer sends a name and an optional `saveAs` flag,
+      // never a path or folder. A fixture "Save as" behaves as if the user closed the dialog, so
+      // screenshots never imply a real destination was chosen.
+      if (["path", "folder", "dir", "destination"].some((key) => key in args)) {
+        throw new Error("save_group_file never accepts a path from the renderer");
+      }
+      if (args.saveAs === true) throw new Error("Save as was cancelled.");
+      const name = typeof args.name === "string" ? args.name : "download";
+      // A one-click save lands directly in Downloads, which native asserts with `inDownloads`.
+      return { path: `C:\\Users\\fixture\\Downloads\\${name}`, displayed: true, inDownloads: true };
+    }
+    case "get_cache_status":
+    case "set_cache_limit": {
+      // Lantern Room sits just past the 90% warning so the footer shows its amber bar and the
+      // leaving-soon chip; the DM is calm. A limit choice is echoed back, not persisted.
+      const GIB = 1024 ** 3;
+      const chosen = command === "set_cache_limit" ? (args.bytes as number | null) : 5 * GIB;
+      if (server !== 1) {
+        return { usage_bytes: Math.round(0.4 * GIB), limit_bytes: 5 * GIB, unlimited: false, pinned_bytes: 0,
+          leaving_soon_files: 0, leaving_soon_bytes: 0, nearly_full: false, over_limit: false,
+          held_by_pins: false, paused: null };
+      }
+      const usage = Math.round(4.6 * GIB);
+      return {
+        usage_bytes: usage, limit_bytes: chosen, unlimited: chosen === null,
+        pinned_bytes: Math.round(0.8 * GIB),
+        leaving_soon_files: chosen === null ? 0 : 3,
+        leaving_soon_bytes: chosen === null ? 0 : Math.round(0.4 * GIB),
+        nearly_full: chosen !== null && usage * 100 > chosen * 90,
+        over_limit: chosen !== null && usage > chosen,
+        held_by_pins: false, paused: null,
+      };
+    }
     case "get_storage_health":
       return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,
-        missing_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
+        missing_chunks: 0, not_cached_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
         has_peers: true, checked_at_ms: VISUAL_FIXTURE_NOW, logical_bytes: 2048,
         local_estimated_bytes: 2048, pinned_files: 0, pinned_logical_bytes: 0,
         pinned_local_estimated_bytes: 0, categories: [], largest_files: [], local_files: [] };
@@ -746,12 +825,13 @@ export function installVisualFixture(name: string): void {
   // The existing DEV+localhost entry point still owns availability and readiness. Nothing in
   // production recognizes this flag, and default chat fixtures remain byte-for-byte unchanged.
   const studio = new URLSearchParams(window.location.search).get("studio") === "1";
+  const transfers = new URLSearchParams(window.location.search).get("transfers") === "1";
   const uploads = studio ? createVisualFileUploads(ME.repeat(2)) : null;
   mockIPC(
     (command, payload) => {
       const args = payload as Record<string, unknown> ?? {};
       const fileResponse = uploads?.response(command, args);
-      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio);
+      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio, transfers);
       if (uploads && command === "get_files") {
         const list = response as { files: unknown[]; has_peers: boolean };
         response = { ...list, files: [...list.files, ...uploads.files(Number(args.server))] };

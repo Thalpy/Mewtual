@@ -38,6 +38,8 @@
   { "command": "get_files", "risk": "account-read", "surfaces": ["main"] },
   { "command": "get_storage_health", "risk": "account-read", "surfaces": ["main"] },
   { "command": "repair_storage", "risk": "account-write", "surfaces": ["main"] },
+  { "command": "get_cache_status", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "set_cache_limit", "risk": "account-write", "surfaces": ["main"] },
   { "command": "get_online_members", "risk": "account-read", "surfaces": ["main"] },
   { "command": "get_member_routes", "risk": "account-read", "surfaces": ["main"] },
   { "command": "manual_fallback_redial", "risk": "account-write", "surfaces": ["main"] },
@@ -210,5 +212,14 @@
   { "command": "get_private_downloads", "risk": "account-read", "surfaces": ["main"] },
   { "command": "set_private_download_paused", "risk": "account-write", "surfaces": ["main"] },
   { "command": "retry_private_download", "risk": "account-write", "surfaces": ["main"] },
-  { "command": "cancel_private_download", "risk": "account-write", "surfaces": ["main"] }
+  { "command": "cancel_private_download", "risk": "account-write", "surfaces": ["main"] },
+  { "command": "check_saved_download", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "reveal_saved_download", "risk": "os-facing", "surfaces": ["main"] },
+  { "command": "get_saved_files", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "check_saved_files", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "forget_saved_file", "risk": "account-write", "surfaces": ["main"] },
+  { "command": "reset_saved_files", "risk": "account-write", "surfaces": ["main"] },
+  { "command": "reveal_saved_file", "risk": "os-facing", "surfaces": ["main"] },
+  { "command": "get_saved_files_limit", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "set_saved_files_limit", "risk": "account-write", "surfaces": ["main"] }
 ]

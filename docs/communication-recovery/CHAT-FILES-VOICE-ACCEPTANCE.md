@@ -2035,6 +2035,44 @@ Native/browser bootstrap, actual framed input/result/ACK/settlement, whole-chain
 transfer, RTC and legacy-mode isolation, live V2, media relay, external destination resume,
 combined rollout and physical audio/network acceptance remain open. Only one desktop is available.
 
+## External download resume and Save as (24 October; suites and CI pass, manual acceptance open)
+
+Branch `communication-external-download` from `dbb8d36b` (draft PR #51 into
+`chat-update-implementation`, head `83a918f4`, this branch merged in at `8ef5bcff` and `2f08bde0`)
+closes the open "external destination resume" item for destinations that can carry a journal, and
+adds a native Save as picker. It is not merged and not accepted. Design, filesystem support matrix,
+commit table and every review disposition: [EXTERNAL-DOWNLOAD-RESUME](EXTERNAL-DOWNLOAD-RESUME.md).
+
+Reviews: the implementer's design, implementation and fix reviews; independent read-only reviews of
+every range from `dbb8d36b` to `b3f918af` (the last found no blocker, high or medium); and the
+owner's adversarial reviews of `27ffa183` and `86664d94`. The second owner review raised path-based
+removal as a blocker and mediums on the Unix link race, publication durability, filesystem support,
+a stalled Remove locking other rows, the Save as turn outliving its dialog and a lost old-partial
+notice. Every high and medium finding is recorded as fixed with a regression test; remaining lows
+and residuals are in the design document. No `unsafe` was added: by the owner's decision, vetted
+crates (`fs_at` on Windows, `rustix` on Unix) were used, and guarantees were narrowed where no crate
+fits.
+
+Hosted Linux CI found a real defect introduced by the path-removal fixes (`90de8c03`): on Unix, a
+folder swap and swap-back around creation with a planted file let the partial's plaintext land in
+the swapped-in folder. `bbdbdf99` and `8832aacb` bind the folder identity and the partial's name to
+one pinned folder handle; `74b9dfe4` fixes the related unjournaled publication into a swapped
+folder; `bc41d52e` and `ceae7036` give Windows the same held-folder name check through `fs_at`.
+`be00b939` moves tokio to 1.53.3 for RUSTSEC-2026-0386 (version and checksum only).
+
+Complete local suites at `83a918f4` (24 October): root `cargo test --all --all-features` 3,379
+passed, 0 failed, 24 existing ignored; native suite 728 passed, 0 failed; frontend 2,531 passed;
+`test:startup` passed (it reused the dev server already on port 1420); `test:flows` passed, as did
+`FLOW_SCENARIO=private-download` (resume, active Pause, exact Retry and completion). Hosted CI at
+`83a918f4`: all 28 checks pass, including root Linux and Windows build and test, strict Linux desktop
+Clippy, the Linux frontend and native tests, and `cargo-deny`. The Linux-only storage tests also
+pass in WSL Ubuntu (Rust 1.89): `catcoms-storage` lib 231 passed, 1 existing ignored.
+
+Still open: a real native Save as dialog on each OS; Pause or Lock during an actual external write;
+restart after an actually interrupted save; physical FAT/exFAT, SMB, ReFS, OneDrive or portal
+volumes; power loss; macOS is never built in CI. ReFS file-ID uniqueness is documented, not
+detected. No rendered Transfers screenshot has been captured.
+
 ## Validated handoff prerequisites (21 October)
 
 Validated runtime source is `fef81f48`. Current code passes434 focused Root voice tests, including eight new

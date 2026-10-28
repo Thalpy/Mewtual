@@ -461,6 +461,75 @@ test("the frontend invokes only registered, security-classified literal commands
   }
 });
 
+test("save_group_file's signature cannot carry a path from the renderer", () => {
+  // "Save as" must keep the native side as the only source of a destination: the dialog runs in
+  // native code and the renderer sends only a flag. Pin the exact parameter list so a path,
+  // folder or destination parameter cannot be added unnoticed.
+  const source = readFileSync(bridgePath, "utf8");
+  const start = source.indexOf("async fn save_group_file(");
+  assert.ok(start > 0, "save_group_file is declared in lib.rs");
+  const close = source.indexOf(") -> Result<SavedFileResult, String>", start);
+  assert.ok(close > start, "save_group_file's signature parses");
+  // Split on top-level commas only: `State<'_, AppState>` carries one inside its generics.
+  const list = source.slice(start + "async fn save_group_file(".length, close);
+  const parts: string[] = [];
+  let depth = 0, current = "";
+  for (const char of list) {
+    if (char === "<") depth += 1;
+    if (char === ">") depth -= 1;
+    if (char === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+    } else current += char;
+  }
+  parts.push(current);
+  const params = parts
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.split(":")[0].trim());
+  // PR #56 added `replace_older`, "Replace my older saved copy": a flag, like `save_as`. Native
+  // replaces only a copy its sealed saved-files list names and proves is its own and unchanged.
+  assert.deepEqual(params, [
+    "app", "state", "server", "cid", "name", "resume", "expected_intent", "operation", "fresh_copy", "save_as",
+    "replace_older",
+  ]);
+  for (const param of params) {
+    assert.doesNotMatch(param, /path|folder|dir|destination|location|target/i, param);
+  }
+  const saveAs = source.slice(start, close);
+  assert.match(saveAs, /save_as:\s*Option<bool>/, "Save as is a flag, never a value");
+  assert.match(saveAs, /replace_older:\s*Option<bool>/, "replace older is a flag, never a value");
+});
+
+test("saved-files list commands take only a server and an entry ID", () => {
+  // PR #56: no path, folder or name can reach native through them.
+  const source = readFileSync(new URL("../src-tauri/src/saved_files.rs", import.meta.url), "utf8");
+  for (const [command, expected] of [
+    ["get_saved_files", ["app", "state", "server"]],
+    ["check_saved_files", ["state", "server"]],
+    ["reveal_saved_file", ["state", "server", "entry"]],
+    ["forget_saved_file", ["state", "server", "entry"]],
+    ["reset_saved_files", ["state", "server"]],
+    ["get_saved_files_limit", ["state", "server"]],
+    ["set_saved_files_limit", ["state", "server", "limit", "apply", "expected_forgets"]],
+  ] as const) {
+    const start = source.indexOf(`pub(super) async fn ${command}(`);
+    assert.ok(start > 0, `${command} is declared`);
+    const close = source.indexOf(") -> Result<", start);
+    const list = source.slice(start + `pub(super) async fn ${command}(`.length, close);
+    const params: string[] = [];
+    let depth = 0, current = "";
+    for (const char of list) {
+      if (char === "<") depth += 1;
+      if (char === ">") depth -= 1;
+      if (char === "," && depth === 0) { params.push(current); current = ""; } else current += char;
+    }
+    params.push(current);
+    assert.deepEqual(params.map((p) => p.trim()).filter(Boolean).map((p) => p.split(":")[0].trim()), expected, command);
+  }
+  assert.match(source, /async fn reveal_saved_file\([^)]*entry: String/);
+});
+
 test("every non-bootstrap native command visibly crosses the unlocked-session gate", () => {
   const segments = commandSegments(nativeSources());
   // Commands that must work before, or without, an unlocked session. The log_ui pair is here for

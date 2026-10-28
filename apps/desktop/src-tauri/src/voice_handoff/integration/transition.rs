@@ -433,6 +433,7 @@ pub(super) async fn custody_cycle(
         &route,
         parent,
         key_proof,
+        setup_deadline,
         !matches!(cleanup, Cleanup::Ended),
         matches!(cleanup, Cleanup::SdkAdmissionRace),
         if let Cleanup::Pc(case) = cleanup {

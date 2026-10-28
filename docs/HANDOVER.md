@@ -1,5 +1,198 @@
 # Mewtual; Handover
 
+## Corrected combined validation passed locally (28 October)
+
+The stacked Score candidate at `fa3107d2` passes the complete native command:
+1,011 library tests plus six ACL tests, zero failures; library runtime 2,336.29s.
+This includes the recovery changes from `3e598b50`, both earlier failing fixture
+cases, the original and forced-alternate media cases, and the Score batch cases.
+The previous failed runs below remain failures; this later run supersedes their
+pending local validation status without establishing the old intermittent refusal's cause.
+
+The complete Root result is 3,960 passes / 25 existing ignores at `c27e7694`;
+compiled Root sources and lockfiles are unchanged through this corrected candidate.
+Its current-native-source construction scan was separately rerun and passes.
+The complete current frontend passes 3,539 tests. Root/native formatting and strict
+Clippy, native check, both refreshed dependency audits and ambient/Store gates pass.
+Frontend static/build checks and the ten ordinary Edge flows plus Score/attachment
+fixtures pass on unchanged production frontend inputs. The final native build passes
+in 5m59s and the real startup gate reports `ok application startup completed`.
+
+Hosted validation is still pending. The `3e598b50` overlay job completed all seven
+negative checks and all seven restored controls, then was cancelled at its 30-minute
+job limit. Only that aggregate job allowance is now 45 minutes; case bounds, assertions
+and source are unchanged. A cancelled job is not green. PR #75 and stacked #76 remain
+drafts until the remaining hosted gates are reconciled. No extra local full suite is
+needed for this documentation/CI-allowance-only follow-up.
+
+App V2 remains OFF. Operational bilateral admission, production RTC/audio composition,
+member media relay and combined/physical acceptance are still open. Only one desktop
+is available. Passing controlled native/browser tests does not establish audible audio.
+
+## Native fixture retry and sender-tail corrections (28 October)
+
+Two complete runs stopped on distinct fixture assumptions. Score `324bda42` had
+993 passes and 15 failures: the real failure was
+`native_v2_pc_intent_lost_publication_recovers_original_outcome_after_parent_close`
+in the new pressure regression's immediate post-release retry (three-byte reply,
+expected170); the other14 were fail-closed fixture refusals. That log does not
+identify the three-byte refusal code. Its focused rerun passes13.14s; that alone
+does not diagnose the intermittent response.
+
+Linux at `f4ec9165` had994 passes and11 failures. Its real failure was
+`native_v2_pc_intent_recorded_actor_outcomes_retire_before_actual_io_collection`:
+the receiver reached a weak-owner assertion while the sender still owned its paid
+Work. `sdp_rpc::complete` intentionally wakes the receiver BEFORE dropping that
+sender owner. The corrected test joins the SAME actor's FIFO after caller owners
+drop, then keeps both weak-owner and UI-lock assertions. It neither shortens
+production custody nor polls weak counts as a substitute for collection. The existing
+synchronous receiver-waker regression pins this ownership window and passes.
+
+`c023658a` retries only exact authenticated Capacity on the SAME storage request,
+parent/action/key/SDP sequence/proof and original Claim setup deadline. Every other
+response fails immediately; exchanges/backoff and positive observation share that
+original cutoff. A held real UI commit forces a retry after reserve pressure ends;
+only stage4 evidence for the SAME authenticated physical sequence releases that guard.
+Past/missing observations cannot satisfy the oracle. The stage5 reserve refusal,
+drained worker, absent Phase and same-proof recovery assertions remain. Pressure
+setup retries a lost snapshot/charge race at most eight yields; deterministic real
+credit tests cover one winning race and bounded repeated losses without early refund.
+
+`56e86c6a` adds the sender FIFO correction. On the combined Score source, all379
+handoff module checks plus both causal native cases pass (381 total,35.68s). The
+complete frontend passes3,539 tests again. Native check, strict native Clippy across
+all targets/features and the current-source Root construction scan (0.47s) pass.
+A corrected complete native run remains required; the failed complete runs are not sign-off evidence. Read-only
+review finds no remaining issue in either correction. Production behavior, resource
+ceilings, Source attempts and protocol deadlines are unchanged; App V2 remains OFF.
+
+## Second-peer native admission failure (28 October; diagnosis in progress)
+
+The corrected `c3877704` Linux native gate completed with 963 passes and 40
+failures. The first real failure is
+`native_browser_failed_media_peer_preserves_original_session_and_indexed_sibling`:
+the initial media pair and its history collection completed, a newcomer naturally
+selected the other original endpoint, and that pair's confirmation/Ready completed.
+Its storage request (opcode12, before SDK13) then repeatedly received authenticated
+Capacity. The other 39 failures are subsequent fixture admission refusals after that
+failure; keep this fail-closed behavior. The cause remains unproven. This is not a
+green native gate or evidence that the second peer is operational.
+
+Test-only diagnostics now preserve the exact authenticated parent and the failed
+storage boundary in the existing bounded harness table. Independent original-Session
+and parent snapshots use try-locks, retain no authority/credit owners and omit blocking
+pool counts. The Node observer attributes Capacity to the actual response AAD's
+operation, full parent and original request sequence. An indexed sibling's Current
+cannot authorize storage retry, and duplicate observations cannot count twice. The
+former global counter was a fixture defect; it does not explain away the genuine
+repeated opcode12 refusals. Thirteen focused Node tests and Svelte checks pass;
+read-only review has no remaining findings in this diagnostic/regression scope.
+
+The native regression now requires an actual authenticated opcode12 reservation
+refusal under held ordinary-pool pressure, drained preparation without a Phase,
+then funding/recovery of the same parent/action/key/sequence proof after that pressure
+is released. It explicitly checks the reservation boundary, so preflight/UI/attach
+contention cannot pass as the intended failure. This is a pressure/recovery check,
+not an atomic one-byte-limit proof. This actual framed native/real-TCP regression
+passes (10.64s), as do all 376 native handoff module tests (22.73s). The original
+second-media scenario passes locally on Windows (77.33s), selecting the first peer.
+A new case uses the existing genuine local discovery refusal to force the alternate
+native peer, then exercises storage, SDK, media, failure cleanup and the indexed
+sibling's fresh Current; it also passes (77.54s). No row, Ready flag or key is
+injected into admission, and the original topology/bounds remain unchanged. These
+local passes do not establish the cause of the Linux failure. Complete frontend
+tests (3,314), static checks and production build pass. Do not merge or enable V2
+until the actual failure and complete native/CI gates pass.
+
+The Score integration at `c27e7694` completed the full Root suite with 3,960 passes,
+25 ignored and no failures. Its strict Root Clippy and complete frontend suite
+(3,537 passes) also passed. Those results do not replace the pending native gate.
+
+## Shared actor Control inventory correction (28 October; under validation)
+
+The complete combined native suite finished with 1,001 passes and one failure: the
+unchanged 12,288-byte physical Control guard measured 12,327 bytes. The largest graph
+was KeySession, not ChainTransition; its diagnostic label had omitted KeySession.
+The nested native preflight reaches the ordinary actor command sender, so growth in
+an unrelated command can enlarge that async graph. The combined Root test inventory
+measured AppCommand336, Envelope352, DownloadReady264, ExportJournal152 and the
+voice-context future1264 bytes before correction.
+
+CommandSender now reserves the existing FIFO mailbox capacity before constructing
+the traced envelope. This is Tokio's existing send sequence moved into the wrapper:
+it avoids retaining another full envelope in a nested send future, without a new heap
+allocation, cloned command, different queue or additional authority. The original
+payload/custody is moved exactly once, including the exact closed-channel error.
+Three focused ownership regressions pass, pinning waiting cancellation, traced error
+ownership and queued custody after the sender future ends. The diagnostic voice-context
+future shrinks from1,264 to880 bytes; command/envelope sizes stay unchanged. The temporary
+diagnostic is removed; the unchanged whole-Control guard remains the regression.
+Static re-review has no blocker/high/medium finding. All375 focused native handoff
+tests pass after correction, including the unchanged whole-Control guard at12,244
+bytes against12,288. Complete gates still need to pass; the original failed suite
+is not sign-off evidence. No memory bound has been raised.
+
+Windows CI at `c499228d` also stopped in strict Clippy before Root tests: the Windows
+path codec used a manual remainder check. The equivalent `is_multiple_of(2)` form is
+now used, without changing the odd-length rejection. Its exact codec regression and
+Root strict Clippy must pass on the corrected source. Both formatting checks and the
+ambient-dependency/Store raw-fs gates pass; both dependency audits passed before this
+dependency-neutral correction.
+
+## Recovery gap completion candidate (28 October)
+
+PR #74 merged into `main` at `85b345cf`. The `communication-gap-completion` branch
+preserves that foundation and the original #51 external-download, #55 cache and #56
+saved-files histories. This combination is under validation; the older results below
+do not establish that these additional features pass together.
+
+The native setting fixes bind queued cache and saved-file changes to their original
+UI generation and server incarnation. Cache choices retain serialization and UI
+commit through the actual actor application even if the caller disappears. UI commit
+also orders Leave's row removal/deletion; the cache setter does not take the actor
+snapshot persistence mutex. Registration already holds UI while using that mutex,
+so taking it before UI would deadlock an admitted new-server save. Store/registry locks are released
+before actor I/O. Saved-file forget, reset and limit changes retain UI commit through
+their synchronous sealed writes and repeat the generation check after lock waits.
+Lock registered before final admission prevents the write; an earlier admitted
+application completes before Lock can return. Unlock never revives the old request.
+
+Focused regressions exercise the real sealed records, actors and Lock path, including
+server replacement, committed Leave, lock/unlock and an abandoned cache caller behind
+a full actor event queue. At `5340c04a`, all 15 cache and 24 saved-file tests pass. Five exact
+negative controls fail at their intended assertions; all five restored controls pass
+after byte-exact restoration and a fresh build. Read-only review has no remaining
+findings in that scoped review. Broader integration review then found the registration
+deadlock above and a Show-in-folder race. Its new registration-shaped test fails before
+the correction. The follow-up passes 16 cache, 27 saved-file and eight saved-download
+check/reveal tests; re-review has no remaining blocker/high/medium finding. Expanded
+seven-case negative/restored controls all pass after exact restoration and a fresh
+build, as do the three complete focused modules. Strict native Clippy passes after
+removing redundant non-Drop markers in the tests; review confirms no guard/assertion
+or cleanup change. Complete combined backend gates remain pending.
+The original #51 hostile six-client scenario now passes on the combined stack in
+228.48 seconds, including bridge/reunion and independent sealed reopens. That validates
+the current graceful-close path; it does not establish the cause of the old Linux failure
+or abrupt-crash custody. The complete combined native suite still needs to pass.
+
+Show in folder now takes original-generation UI commit for final admission, revalidates
+the exact saved entry or Published journal/intent, and repeats incarnation/generation
+checks before synchronous OS launch. Filesystem probing stays outside commit. Native
+actor reads never hold Servers; saved-list revalidation/launch retains Store then Servers.
+Only typed fixed errors cross IPC, including platform launch errors that contain paths.
+
+The combined frontend suite passes 3,312 tests, with zero Svelte diagnostics and a
+successful production build. All ten ordinary rendered Edge flows and the dedicated
+download-resume/Pause/exact-Retry/completion scenario pass. The latter exposed a
+broken nested template literal in its existing harness; the quoting fix has three
+parser regressions and a read-only review. The initial sandbox debugger failure ran
+no scenarios; successful flows used the isolated harness outside that sandbox.
+Complete combined Root/native gates and final native build/startup remain pending.
+
+App V2 remains OFF. Production audio/RTC composition, multi-peer admission, member
+media relay and physical acceptance remain open; merging the foundations did not
+complete those boundaries. Only one desktop is currently available for physical tests.
+
 ## Backlog integration checkpoint (27 October)
 
 PRs #26/#54 have landed in main; #57 has landed in the chat-recovery branch. PR #74
@@ -4434,6 +4627,107 @@ keys through final ACK, and actual Actor/MLS/WebView action acceptance. Engine a
 needs a synchronous native/Root commit boundary with Clock callbacks outside locks; it must not
 authorize work using a stale UI/route check. Exact action settlement cannot wait for whole-chain
 retirement. Live V2/RTC, relay, combined rollout and independent physical acceptance remain open.
+## Saved-files list (26 October, PR #56, stacked on #55)
+
+Finished saves of shared files are now remembered per server on this device
+([design](design-saved-files-list.md), owner decisions and both reviews recorded there).
+
+- **Record.** `servers/<id>.saved`, sealed under the vault `db_key`, bound to the group and this
+  device's member id, one entry per saved copy. Written by native right after each publication
+  (journaled, recovered and non-resumable writers) under the store and registry locks for the
+  saving incarnation; identities only from a journal. Newer, damaged or unreadable records are
+  never written over; "Start a new list" replaces only a damaged one; `remove_server` (leave)
+  deletes it. Not a cache pin.
+- **Remember saved files** (owner request, 27 October): a per-server setting in Server settings,
+  Storage, 16 to 4096 files (default 256), sealed in `servers/<id>.saved-limit`. The list keeps at
+  most that many entries and 4 KiB of plaintext per allowed entry, and is read with at most
+  `max(1 MiB, limit * 4 KiB)`. Lowering previews natively and says how many of the oldest entries go
+  (never files) before the user confirms; the list is trimmed before the setting is stored. A list
+  within 256 entries and 1 MiB stays version 1; a longer one is version 2. An unreadable setting
+  stops recording until the user chooses again.
+- **Transfers.** The Saved group shows list rows (newest first) as PR #51's compact rows, arranged
+  by the same action model (`compactListControls`): Saved, Saved file missing or replaced, could
+  not check, or cannot check (no identity). Show in folder (by entry ID, with PR #51's read-only
+  check) is the primary icon, or Save again once the file is gone; Save another copy is in the
+  "more" menu while the file is still shared; the red x Clears (forgets the entry). A Saved private row stands for its own entry (`savedEntry`) and its Clear
+  forgets it; a finished download whose file is listed leaves the live list.
+- **Chat mark.** "Saved" on file cards in chat (also cards built earlier), the Files list and the
+  file details, from the list only.
+- **Replace my older saved copy** (Settings, Chat & Media, off by default, a `localStorage`
+  preference passed as `replaceOlder`). Native replaces only the newest older listed copy of the
+  same file in the same folder that it proves is its own and unchanged (identity, one name, not
+  read-only, no reparse point, exact length and CID; Unix not writable by other accounts), deletes
+  it through the verified object (Windows: the hashed handle; Unix: rename aside, recheck,
+  unlinkat) only while the pinned new copy still has its name, and gives the new copy the old name
+  by a no-replace link only for a fresh one-click save into Downloads that asked for that name. The
+  first name goes only while the old name still holds the copy. Every refusal keeps the old copy
+  and says why.
+- **Found:** on Windows a delete-denying handle on one hard link does not protect another link of
+  the same file; the replace pins the other name. PR #51 fixed the same gap in its Clear of a
+  published row (`a670275f`, merged here with #55 at `d58c52c1`), and the replace's first-name
+  removal now uses that fix's `remove_verified` `keep` rule. #55's `bc891185` (a Download fills the cache only once its save publishes) is
+  merged here; it also fixed the two six-client private download tests that failed on #55's
+  earlier head. A replace releases the record (`FinishDownloadExport`, which now promotes the
+  staged chunks) before it runs, exactly as an ordinary save does afterwards.
+- **Contract changes:** `save_group_file` gains `replace_older` (signature pin updated);
+  private download rows gain `savedEntry`; four commands plus `reset_saved_files`; the Transfers
+  refresh also checks the list; PR #51's "no trace of the replace setting" assertion became a
+  positive one.
+- **Limits:** see the design's residuals (old copy's streams and metadata go with it, Unix
+  same-account windows including removal of the new copy just before the unlink, Windows memory
+  mappings and late read-only attribute, the bulk check holding PR #51's check slots, Unix crash leftover
+  at a `mewtual-removing-` name, unreached entries stay unchecked, `save_group_file` itself is
+  covered by its port seams and a text-order test, not end to end).
+
+Validation: see the design's ledger.
+
+## Cache housekeeping (26 October, PR #55, stacked on #51)
+
+Each server's encrypted cache on a device now has a per-server size limit, crash-safe writes and
+cleanup on leave ([design](design-cache-housekeeping.md), owner decisions recorded there).
+
+- **Limit and order.** On by default at 5 GiB per server (1 GiB to 1 TiB or No limit, sealed in
+  `servers/<id>.storage`). Upgrades start at `max(5 GiB, usage / 0.8)`, or No limit above 1 TiB,
+  so nothing is dropped on update. Over the limit, unclaimed blobs from before the mount go first,
+  then listed chunks by the newest listing position naming them. A chunk a checked, completed
+  Keep copy holds is always dropped in favour of that copy.
+- **Pins** (chunk sets from owners' saved plans): Keep in progress, Downloads, files read in the
+  last ten minutes, this device's verified uploads, Studio protection. An unreadable index, Keep or
+  Download plans, or unknown Studio protection pause eviction; over-cap rows or a missing profile
+  document skip the unclaimed class only. Wiki embeds and "Never expires" (renamed from "Keep
+  forever") are not pins.
+- **Runtime.** The planner (`cache_plan`) is pure; the actor (`cache_housekeeping`) runs bounded
+  batches, at most one pass per 30 s plus a full evaluation per minute, and emits coalesced
+  `cache-status` events. A desktop Studio-reference service runs `creative_pinned_cids` per
+  unlock, after attaches and on request, rate-limited with backoff.
+- **Writes.** The primary cache writes `incoming/<cid>.<pid>.<generation>.<seq>`, syncs, renames;
+  mount recovery removes temps no live handle owns and torn sealed records. Keep's stores are
+  unchanged.
+- **Saved files propagate, once saved.** Export reads stage a Download's chunks in the cache's
+  `staging/`; only `FinishDownloadExport` (sent after the save published) promotes them, so this
+  device then serves the file. Acquisition copies nothing, and Remove drops what was staged.
+- **Leave.** Every Leave entry point confirms, naming Keep copies and unfinished Downloads. The
+  bridge claims the group, writes a marker before `remove_server`, then (after the registry
+  persisted) empties the namespace in batches without the store lock, keeps Studio-referenced
+  blobs, removes `kept/` wholesale and reports freed, kept and failed bytes. Interrupted cleanups
+  resume after an unlock in which every server restored; a rejoin finishes the non-cache part.
+  Every primary cache handle holds `<namespace>/attach.lock` shared; cleanup needs it exclusively
+  (the Keep lease could not prove "unattached": a second attach of a group, such as a join while
+  the group's server runs, gets no lease). A busy lock deletes nothing and keeps the marker.
+- **Storage health** reports other members' absent chunks as not cached; Repair fetches only
+  corrupt chunks and chunks missing from this device's own uploads.
+- **UI.** Footer cache segment (bar, %, "N leaving soon" past 90%), Server settings → Storage.
+- **Contract changes:** a private Download whose save published now fills the cache (the
+  six-client private test renamed; it keeps "not available" through acquisition, restart and
+  export, then checks the published save makes the file available, and the interrupted test checks
+  a removed Download does not); `leave_server` returns a report; Storage health's `missing_chunks`
+  narrowed.
+- **Limits:** no holder probe; caches left before this change are not cleaned; usage counts sealed
+  file lengths; expiry unenforced.
+
+Validation (focused, per the CI-first process): storage, app and desktop cache tests, the
+contract-changed tests, command ACL, full frontend suite, `npm run check`/`build`, strict Clippy
+(root changed crates and desktop), fmt, ambient and raw-fs gates; complete suites run in CI.
 
 ## Validated proof retention and automatic cleanup retry (22 October)
 
@@ -5538,6 +5832,114 @@ The standalone IPC feasibility probe passes its recorded functional checks, but 
 dependency audit still fails on the pinned Tauri maintenance/quick-xml/plist advisories. Passing
 root `cargo deny` does not clear that separate failure. No dependency exemption was added.
 The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the evidence.
+
+## External download resume and Save as (2026-10-21/24; suites and CI pass, manual acceptance open)
+
+Branch `communication-external-download` (worktree `target/communication-external-download-worktree`,
+baseline `dbb8d36b`, draft PR #51 into `chat-update-implementation`, not merged) implements resumable saves of private Downloads, to the
+user's Downloads folder or to a folder and name chosen in a native "Save as" dialog; this
+supersedes the "appending to a partly written external file is not implemented" note above for
+destinations that can be journaled. Design, crash table and every review's dispositions:
+[EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
+
+- Storage: `kept/export.rs` (sealed `mewtual/download-transfer/v2` journal plus a remembered
+  "Save as" destination, typed transitions, `ExportFile` with an exclusive OS lock, read-only
+  verification before any Published, preflight observation, retire-before-delete),
+  `kept/external.rs` (handle identity with birth time via `winapi-util`, no-follow and
+  non-blocking opens via `libc` constants on Unix, name-surrogate classification, the Windows
+  publication pin, the name budget, link probe), exhaustive encoding predicates in `record.rs`,
+  disk-full record writes and admission that no longer poison (`persistence.rs`).
+- Actor: journal transitions fenced by the export lease, preflight edges fenced by a
+  `DownloadPreflight` observation (actor lifetime, Root, mount, transfer epoch), the remembered
+  choice written before network work, all carrying the original invocation (`actor.rs`,
+  `actor/file_transfers.rs`); tests in `actor/file_transfers/tests/export.rs` and `tests.rs`.
+- Native: `private_downloads.rs` runs the export sequence over `ExportPorts` in `spawn_blocking`,
+  the Resume preflight, Save new copy, two-step Remove with a process-wide cleanup claim, and the
+  `rfd` dialog behind a chooser seam; `save_group_file` in `lib.rs` orders the dialog before any
+  slot or record. No plugin, builder or `setup` change. FAT and exFAT are refused; fresh saves on
+  destinations without identity or locks keep the old writer, which now also does its file work
+  in `spawn_blocking` (as does the post-save media check), so no destination I/O runs on an async
+  worker.
+- Frontend: typed statuses and actions (including Save as and `chosenPlace`) in
+  `private-downloads.ts`, `native-download.ts`; Save as entries and the Transfers list in
+  `App.svelte`; visual fixture support.
+
+Focused checks, the picker design review and the dispositions of two reviews of `27ffa183` are in
+the design document's ledger; the actual `dbb8d36b` reader was shown to refuse real V2 fixtures
+without changing a byte. At that stage the complete suites and any Unix execution had not run;
+the current verification is in the last paragraph of this section. A post-implementation review of the
+picker found no blocker or high; its fixes and dispositions are in the design document, as are
+those of Re-review 2 (one medium, seven lows, a dialog residual; all fixed or settled). Vaults
+written by the intermediate build `27ffa183` would fault (v2 was amended with the planned
+destination), but no dogfood or installed build of `27ffa183` exists; it only ran in tests. No
+screenshot exists yet for the new rows or Save as entries.
+
+PR51 review (user, at `86664d94`): every automatic delete of an external name now deletes only the
+object it verified (Windows through the verified handle via `fs_at`; Unix by rename-aside, verify,
+`unlinkat` via `rustix`, never in folders other accounts can modify, so on Unix the guarantee holds
+only against other accounts); both writers publish exactly the object behind their open handle
+(Linux via `/proc/self/fd`, Windows under a pin, macOS path link plus post-check only); the folder
+is flushed after the link and before Published; filesystem support fails closed (matrix in the
+design document). No `unsafe` was added. Native's fallback writer, GIF export and `write_download`
+use the new `session_id`/`remove_if_session`/`publish_unjournaled`. An adversarial review of those
+changes found no blocker or high; its six mediums (published-row removal, Unix rename-before-verify,
+network/FUSE mode bits, untruthful "delete it yourself", silent leftovers after a successful save,
+user-private groups) are fixed or settled in the design document. The user's second review of
+`86664d94` (R2-M1 to R2-M3, R2-L1: a stalled Remove disabling other rows, the Save as turn held
+across validation, Save new copy's old-partial notice lost on failure, deferred closes escaping
+export capacity) is fixed; dispositions in the design document. User decisions of 23 October,
+implemented: a group-writable folder of a user-private group proven from the local account files
+counts as private (unprovable stays shared, macOS always shared), and Transfers checks each Saved
+row's file (new read-only command `check_saved_download`), saying when it is missing or replaced
+and offering Save again. Open: Unix behaviour runs only in Linux CI, macOS is not built in CI,
+ReFS is unverified, and no test pins a Remove landing between the flush and Published.
+
+Verification as of 24 October (head `83a918f4`). Hosted Linux CI caught a defect introduced by the
+path-removal fixes: on Unix a folder swap and swap-back around creation with a planted file let the
+partial's plaintext land in the swapped-in folder. It is fixed by binding the folder identity and
+the partial's name to one pinned folder handle (`bbdbdf99`, `8832aacb`), with the related
+unjournaled publication fix (`74b9dfe4`); Windows got the same held-folder check through `fs_at`
+(`bc41d52e`, `ceae7036`). tokio moved to 1.53.3 for RUSTSEC-2026-0386 (`be00b939`). Complete local
+suites pass: root 3,379 (0 failed, 24 existing ignored), native 728, frontend 2,531, `test:startup`,
+`test:flows` and `FLOW_SCENARIO=private-download`. All 28 hosted CI checks pass at `83a918f4`.
+Linux-only storage tests also pass in WSL Ubuntu (Rust 1.89 installed there for this work). Still
+manual: a real Save as dialog per OS, Pause/Lock during real writes, restart after an interrupted
+save, FAT/exFAT/SMB/ReFS/OneDrive volumes, power loss, and macOS. The acceptance ledger has the
+same summary.
+
+Transfers UX (24 October, on top of `95eaeda6`): one row per file (a save's live progress shows in
+its private download row, and the live list leaves that file out), rows grouped Needs you / In
+progress / Saved with an icon and a word per state, a byte bar ("3.1 MB / 12.4 MB", 1000-based,
+no percentage) plus the chunk count, one checked sentence per state, "Saved to Downloads" or
+"Saved to another folder" with Show in folder (new `os-facing` command `reveal_saved_download`),
+inline Confirm remove, file-specific accessible names, disabled reasons, one polite live region
+for state changes. Native rows carry byte counts and `savedTo`. Deferred to a follow-up PR (owner
+decision): "Replace my older saved copy", which needs a durable record of saved copies first. On
+hold (owner): keeping finished saves listed; a finished save still releases its row (and its
+private copy) and shows done in the live list, so a Saved row is only an interrupted cleanup's
+leftover. A row reads Saving from the first written byte of its save. An adversarial review and a
+re-review found no blocker or high; their mediums (Saving state, unproven "another folder", focus
+handling) are fixed. `cargo deny` now fails on RUSTSEC-2026-0387 (`crypto-bigint` through `p256`),
+published after `95eaeda6` and unrelated to this work. Details, dispositions and the ledger are in
+the design document's Transfers UX section.
+
+Fix-the-lows round (24 October, on top of `3f14ee2e`; focused checks only, CI runs the suites):
+Clear on a Saved row checks the file again before skipping its confirmation; Explorer gets
+`/select,"<path>"` (a comma no longer splits it) and `xdg-open` the folder with a trailing `/`
+(never the file itself); a name check that could not be made is no longer reported as "the folder
+changed"; on Windows a refused creation removes its empty partial through the held folder even
+after a junction retarget; a stale list's one-click start no longer interrupts a running
+journaled save; the plain save item reads "Save to chosen place" while a Save as choice would be
+used; a stuck Clear offers "Keep the file" and native's messages describe a temporary copy. The
+remaining items, each with its reason (no safe API, macOS, out of scope), are in the design
+document's "Fix-the-lows round" section.
+
+Published-staging fix (26 October, `a670275f`): a saved file's `.mewtual-part` staging copy is
+deleted only while its final name still holds the same file at the delete itself (Windows pins the
+final name across the delete; Unix checks it just before the unlink), so a final name deleted
+during Clear no longer leaves no copy. Compact Transfers rows (27 October): status symbol, name,
+then the primary icon, the chip word, a keyboard-operable "more" menu and the red x on one line;
+the text-button row is gone. Both are described, with their reviews, in the design document.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 
@@ -12212,10 +12614,11 @@ lives in `App.svelte`: it has been extracted into `apps/desktop/src/call-audio.t
   (9h-a), so files/avatars survive a restart and are encrypted at rest under `blob_key`;
   deleting a file reclaims its orphaned chunk blobs while keeping any chunk another file
   references (dedup-safe GC). `MemoryBlobStore` remains the pre-unlock/test path and is
-  size-bounded (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO**, 8s). What's still missing is the
-  `catcoms-storage` **retention engine**: eviction is not holder-probe-aware, so it can
-  drop the **last copy** of a blob (re-fetchable only while some holder is online), and
-  there is no disk quota/expiry enforcement on the sealing store.
+  size-bounded (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO**, 8s). Since PR #55 the sealing store
+  has a per-server cache limit (default 5 GiB, oldest listings first, pins for Keep, own
+  uploads, Studio, files in use and Downloads), crash-safe writes and leave cleanup; see the
+  top section. Still missing: the **holder probe** (the limit can drop the last copy of a
+  file other members uploaded) and any **expiry** enforcement; `RetentionIndex` stays unwired.
 - **Persistence + encryption-at-rest are DONE (Phase 9); the residuals are recovery
   ergonomics.** [`design-persistence.md`](design-persistence.md) is the design; it shipped
   as 9a–9h: a passphrase-sealed key vault, per-server snapshots (MLS + docs + routing +

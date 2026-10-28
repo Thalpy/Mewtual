@@ -4,6 +4,8 @@
 //! Outcome: success/capacity/freshness/unauthorized/closed-or-stopped/other =0..5.
 //! Stages: start1, peer-snapshot2, preflight3, UI-commit4, publication5,
 //! finished6, mount7, parent-slot8, server-map9, unlocked10, selection11, begin12.
+//! SDP boundaries (separate field): resolve1, recovery2, preflight3,
+//! current/begin4, reserve5, current/attach6, busy-recovery7.
 use super::*;
 use crate::voice_handoff::factory::Refused as FactoryRefused;
 use catcoms_sync::voice_v2::presence::PairSelector;
@@ -11,6 +13,12 @@ use catcoms_sync::voice_v2::VoiceError;
 
 #[derive(Clone, Copy, Default)]
 pub(in crate::voice_handoff) struct NativeDiagnostic {
+    // The table is harness-owned, never part of the paid Session graph. The exact
+    // authenticated logical parent distinguishes a newcomer from an indexed sibling.
+    pub sdp_parent: [u8; 16],
+    pub sdp_sequence: u64,
+    pub sdp_stage: u8,
+    pub sdp_refusal: Option<(u8, [u8; 16], u64, Option<VoiceError>)>,
     pub attempts: [u32; 6],
     pub refusals: [u32; 6],
     pub started: [u32; 6],
@@ -57,6 +65,28 @@ pub(in crate::voice_handoff) struct NativeObservation {
     missed: bool,
 }
 impl NativeObservation {
+    pub(in crate::voice_handoff) fn sdp_refusal(
+        self,
+    ) -> Option<(u8, [u8; 16], Option<VoiceError>)> {
+        self.diagnostic
+            .and_then(|diagnostic| diagnostic.sdp_refusal)
+            .map(|(stage, parent, _, error)| (stage, parent, error))
+    }
+    /// A past refusal, even for this same intent, is not evidence about a later
+    /// physical retry. Missing/contended observations remain absence of evidence.
+    pub(in crate::voice_handoff) fn sdp_refusal_at(
+        self,
+        sequence: u64,
+    ) -> Option<(u8, [u8; 16], Option<VoiceError>)> {
+        self.diagnostic
+            .and_then(|diagnostic| diagnostic.sdp_refusal)
+            .filter(|(_, _, actual, _)| *actual == sequence)
+            .map(|(stage, parent, _, error)| (stage, parent, error))
+    }
+    pub(in crate::voice_handoff) fn describe_sdp(self) -> String {
+        format!("closed/physical/native={:?}; sdp_refusal(stage,parent,physical_sequence,error)={:?}; diagnostic_present={}; global_missed={}; pool counts not sampled (blocking getters)",
+            self.flags, self.diagnostic.and_then(|diagnostic| diagnostic.sdp_refusal), self.diagnostic.is_some(), self.missed)
+    }
     pub(super) fn is_missing(self) -> bool {
         self.diagnostic.is_none()
     }
@@ -77,14 +107,40 @@ impl NativeObservation {
                 ]
             })
         };
-        format!("closed/physical/native={:?}; kind/stage={}/{}; last_maintenance_cursor={}; last_attempt_cursor={}; turns={:?}; spawn_attempts={:?}; refusals={:?}; started={:?}; finished={:?}; last_kind/stage={}/{}; last_error={:?}; selector peer/join/key/epoch={:?}; last_selector={:?}; global_missed={}; refusals before spawn not observed",
+        format!("closed/physical/native={:?}; kind/stage={}/{}; last_maintenance_cursor={}; last_attempt_cursor={}; turns={:?}; spawn_attempts={:?}; refusals={:?}; started={:?}; finished={:?}; last_kind/stage={}/{}; last_error={:?}; selector peer/join/key/epoch={:?}; last_selector={:?}; sdp_stage={}; sdp_last_refusal(stage,parent,physical_sequence,error)={:?}; global_missed={}; refusals before spawn not observed",
             self.flags, diagnostic.kind, diagnostic.stage, diagnostic.maintenance_cursor, diagnostic.attempt_cursor,
             diagnostic.maintenance, diagnostic.attempts, diagnostic.refusals, diagnostic.started, diagnostic.finished,
             diagnostic.finished_kind, diagnostic.finished_stage, diagnostic.last_error,
-            matches(diagnostic.selector), matches(diagnostic.finished_selector), self.missed)
+            matches(diagnostic.selector), matches(diagnostic.finished_selector), diagnostic.sdp_stage, diagnostic.sdp_refusal, self.missed)
     }
 }
+
 impl Session {
+    pub(in crate::voice_handoff) fn fixture_sdp_stage(
+        &self,
+        parent: [u8; 16],
+        sequence: u64,
+        stage: u8,
+    ) {
+        self.fixture_update_native(|diagnostic| {
+            diagnostic.sdp_parent = parent;
+            diagnostic.sdp_sequence = sequence;
+            diagnostic.sdp_stage = stage;
+        });
+    }
+    pub(in crate::voice_handoff) fn fixture_sdp_finished(&self, error: Option<FactoryRefused>) {
+        let Some(error) = error else { return };
+        // Even a pool snapshot could wait behind a stalled owner. Keep diagnostic
+        // writes nonblocking and do not delay the original authenticated refusal.
+        self.fixture_update_native(|diagnostic| {
+            diagnostic.sdp_refusal = Some((
+                diagnostic.sdp_stage,
+                diagnostic.sdp_parent,
+                diagnostic.sdp_sequence,
+                classification(Some(error)).1,
+            ));
+        });
+    }
     pub(in crate::voice_handoff) fn fixture_prepare_native_diagnostics() {
         TABLE.get_or_init(|| {
             Mutex::new(
@@ -214,5 +270,28 @@ impl Session {
             diagnostic.finished_selector = diagnostic.selector;
             diagnostic.stage = 6;
         });
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    #[test]
+    fn a_previous_physical_refusal_cannot_prove_a_later_ui_attempt() {
+        let parent = [9; 16];
+        let observation = NativeObservation {
+            flags: None,
+            diagnostic: Some(NativeDiagnostic {
+                sdp_refusal: Some((4, parent, 7, Some(VoiceError::Capacity))),
+                ..NativeDiagnostic::default()
+            }),
+            missed: false,
+        };
+        assert_eq!(observation.sdp_refusal_at(6), None);
+        assert_eq!(observation.sdp_refusal_at(8), None);
+        assert_eq!(
+            observation.sdp_refusal_at(7),
+            Some((4, parent, Some(VoiceError::Capacity)))
+        );
     }
 }

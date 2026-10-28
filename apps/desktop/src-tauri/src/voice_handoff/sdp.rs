@@ -15,7 +15,15 @@ pub(super) async fn apply(
     incoming: Incoming,
 ) -> Result<CompletedReply, channel::Refused> {
     let _physical = incoming.hold_position()?;
+    #[cfg(test)]
+    route
+        .session()
+        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 1);
     let result = prepare(context, route, &incoming).await;
+    #[cfg(test)]
+    route
+        .session()
+        .fixture_sdp_finished(result.as_ref().err().copied());
     let mut reply = incoming.reply(
         BodyKind::Control,
         if result.is_ok() { REPLY_BYTES } else { 3 },
@@ -84,21 +92,45 @@ async fn prepare(
             .release_sdp(route.session().identity(), &request, proof)
             .map_err(Into::into);
     }
+    #[cfg(test)]
+    route
+        .session()
+        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 2);
     if let Some(receipt) = row.recover_sdp(route.session().identity(), &request)? {
         return Ok(receipt);
     }
+    #[cfg(test)]
+    route
+        .session()
+        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 3);
     factory::preflight_binding(context, route).await?;
+    #[cfg(test)]
+    route
+        .session()
+        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 4);
     let Some(mut preparation) = current(context, route, |admission| {
         row.begin_sdp(admission, &request)
     })?
     else {
+        #[cfg(test)]
+        route
+            .session()
+            .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 7);
         return row
             .recover_sdp(route.session().identity(), &request)?
             .ok_or(VoiceError::Capacity.into());
     };
     // Fixed native intent already owns this preparation. End cannot report final drainage
     // while its actual reservation is being acquired, refused, attached or destroyed.
+    #[cfg(test)]
+    route
+        .session()
+        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 5);
     preparation.prepare()?;
+    #[cfg(test)]
+    route
+        .session()
+        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 6);
     let result = current(context, route, |admission| {
         row.attach_sdp(admission, &request, &mut preparation)
     });

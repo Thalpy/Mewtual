@@ -3,6 +3,62 @@
 use super::*;
 
 impl Ledger {
+    /// Original selection and full RowId only. Refuse equal-label replacement owners;
+    /// diagnostics must not resolve a new parent or wait behind a stalled worker.
+    pub(in crate::voice_handoff) fn fixture_sdp_diagnostic(
+        &self,
+        selected: &SelectedHandoffOwner,
+        expected: Option<RowId>,
+    ) -> (Option<PairSelector>, String) {
+        let observed: Result<_, &'static str> = (|| {
+            let id = expected.ok_or("no expected original parent")?;
+            let index = self
+                .index
+                .try_lock()
+                .map_err(|_| "ledger index contended")?;
+            let row = index
+                .rows
+                .iter()
+                .flatten()
+                .find(|row| row.id == id && row.key.matches(selected, row.key.purpose))
+                .ok_or("original parent absent")?;
+            let Purpose::Derive(selector) = row.key.purpose else {
+                return Err("not a parent");
+            };
+            let state = row.state.try_lock().map_err(|_| "parent row contended")?;
+            let plan = state.plan().ok_or("parent has no plan")?;
+            let key = plan
+                .transition
+                .as_ref()
+                .and_then(|claim| claim.key.as_ref())
+                .ok_or("parent has no key")?;
+            let storage = key.sdp.as_ref().map(|sdp| {
+                (
+                    sdp.closed,
+                    sdp.worker(),
+                    sdp.phase.is_some(),
+                    sdp.sdk_preparing,
+                    sdp.sdk.as_ref().map(|sdk| sdk.released()),
+                    sdp.phase.as_ref().map(|phase| phase.try_status()),
+                )
+            });
+            Ok((
+                selector,
+                (
+                    plan.local_is_low,
+                    key.ready as u8,
+                    key.released,
+                    state.final_delivery().is_some(),
+                    state.final_phase.is_some(),
+                ),
+                storage,
+            ))
+        })();
+        match observed {
+            Ok((selector, flags, storage)) => (Some(selector), format!("original parent LOW/Ready/key_released/final_delivery/final_phase={flags:?}; storage closed/worker/phase/sdk_preparing/sdk_released/phase_status={storage:?}")),
+            Err(reason) => (None, reason.into()),
+        }
+    }
     pub(in crate::voice_handoff) fn fixture_derivation_diagnostic(
         &self,
         selected: &SelectedHandoffOwner,

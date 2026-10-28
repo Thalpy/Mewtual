@@ -25,13 +25,34 @@ const META: &str = "manifest";
 const PENDING: &str = "pending";
 const LEASE: &str = "lease.lock";
 mod downloads;
+mod export;
+mod external;
 mod persistence;
 mod record;
+mod saved;
 use downloads::Owner;
-pub use downloads::{DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore};
+pub use downloads::{
+    DownloadBytes, DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore,
+};
+pub use export::{
+    confirm_staging_links, create_folder, flush_destination, flush_folder, partial_presence,
+    publish_unjournaled, remove_if_session, remove_partial, saved_file_path, saved_presence,
+    session_at, session_id, ChoiceRefusal, ChosenDestination, DownloadObservation, ExportError,
+    ExportFence, ExportFile, ExportHalt, ExportJournal, ExportPlan, ExportPresence, ExportProbe,
+    ExportProgress, ExportReopen, ExportState, ExportView, PartialPresence, PartialRemoval,
+    Publication, SavedCandidate, SavedPresence, SessionAt, SessionId, SessionRemoval,
+    EXPORT_CHECKPOINT_CHUNKS,
+};
+pub(crate) use persistence::directory_barrier;
 use persistence::{Transfer, DELETING, FORMAT, FORMAT_CHARGE, TRANSFERS};
 pub use record::{
     KeepAllowance, KeepPhase, KeepRetry, KeepRetryReceipt, KeepScope, KEEP_EXECUTION_SLICE_MS,
+};
+pub use saved::{
+    drop_first_name, replace_older_copy, saved_file_location, saved_file_presence, FirstNameDrop,
+    NoCandidate, ReplaceOutcome, ReplaceRefusal, ReplaceRequest, SavedFile, SavedFileId,
+    SavedFiles, SavedLimit, SavedListError, SavedLocation, SAVED_ENTRY_ALLOWANCE,
+    SAVED_LIST_VERSION,
 };
 
 /// Opaque process-local run identity. It is not serialized or accepted from IPC. One checked
@@ -665,6 +686,24 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             {
                 return Err(StorageError::Malformed);
             }
+            if matches!(transfer.record.export, export::Export::Published(_)) {
+                // Re-verifying a saved file would spend allowance for nothing: the user chooses
+                // "Save another copy" (which forgets the journal) or "Clear" instead.
+                return Err(StorageError::Io(
+                    "This file was already saved. Clear it or save another copy from Transfers."
+                        .into(),
+                ));
+            }
+            if matches!(&transfer.record.export, export::Export::Writing(journal) if journal.halt().is_some())
+            {
+                // Review L10: a halted save needs the explicit Resume (its intent CAS clears the
+                // halt after the destination preflight) or Save new copy. A plain chat Save must
+                // not spend a re-verification and then fail at the journal.
+                return Err(StorageError::Io(
+                    "Saving this file stopped. Open Transfers to resume it or save a new copy."
+                        .into(),
+                ));
+            }
             if transfer.record.exhausted {
                 return Err(StorageError::KeepExhausted);
             }
@@ -675,6 +714,8 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                 if !transfer.record.public_retained() {
                     // Starting another private verification run invalidates previously issued
                     // export observations, even when the saved winner itself is unchanged.
+                    // The export presence token is kept: a still-live older session must block
+                    // a new one from opening a second handle onto the same partial.
                     transfer.read_epoch.retire();
                 }
                 transfer.checked = false;
@@ -739,6 +780,9 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             })();
             let transfer = match created {
                 Ok(transfer) => transfer,
+                // A full volume refused the first record, and both the torn record and the empty
+                // directory were removed: nothing new exists on disk, so admission simply fails.
+                Err(error) if persistence::is_clean_disk_full(&error) => return Err(error),
                 Err(error) => {
                     // An orphan/ambiguous first publication remains charged conservatively.
                     // Never retry another admission against the previous in-memory inventory.
@@ -796,6 +840,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             transfer.publish(next, &self.metadata_key, &mut self.rng)?;
         }
         transfer.checked = false;
+        transfer.export_presence = None;
         // Invalidate runtime ownership before moving/removing any ciphertext. Late workers keep
         // their actual transport charges, but cannot mutate a replacement same-CID transfer.
         self.active = None;
@@ -857,6 +902,10 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             .position(|t| t.record.owner() == identity)
             .ok_or(StorageError::Malformed)?;
         let transfer = &self.transfers[index];
+        if matches!(transfer.record.export, export::Export::Published(_)) {
+            // A saved file has nothing to pause or resume; Clear or Save another copy apply.
+            return Err(StorageError::Malformed);
+        }
         let phase_allows_intent = match transfer.record.phase {
             KeepPhase::Resumable => true,
             // Private export can be paused too. Public completed Keeps retain their existing
@@ -881,6 +930,9 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                 self.active = None;
             }
             if !self.transfers[index].record.public_retained() {
+                // Retiring the epoch ends "Saving" in the projection and fences the old session's
+                // journal writes. Its presence token stays until that session drops its file, so
+                // a Resume cannot open a second writer onto the same partial in the meantime.
                 self.transfers[index].read_epoch.retire();
             }
         }
@@ -888,6 +940,11 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         next.user_paused = paused;
         if !paused {
             next.blocked = false;
+            // Explicit Resume re-checks the destination from scratch; a halt is cleared only by
+            // this intent change, and the next reopen persists it again if it still applies.
+            if let export::Export::Writing(journal) = &mut next.export {
+                journal.halt = None;
+            }
         }
         next.intent = expected_intent
             .checked_add(1)
@@ -1041,11 +1098,23 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
             self.transfers = loaded;
             // A durable deletion intent may have stopped before its cleanup-only move. Scope
             // and full inventory are now validated; finish it without manufacturing a run grant.
-            while let Some(index) = self
+            // One pass over a fixed list: a Download that still names an external partial is
+            // left in Deleting for an explicit Remove, because only native may touch the
+            // Downloads folder and a stalled or missing folder must never stall or loop mount.
+            let pending: Vec<Owner> = self
                 .transfers
                 .iter()
-                .position(|t| t.record.phase == KeepPhase::Deleting)
-            {
+                .filter(|t| {
+                    t.record.phase == KeepPhase::Deleting && t.record.export.journal().is_none()
+                })
+                .map(|t| t.record.owner())
+                .collect();
+            for owner in pending {
+                let index = self
+                    .transfers
+                    .iter()
+                    .position(|t| t.record.owner() == owner)
+                    .ok_or(StorageError::Malformed)?;
                 self.release_transfer(index)?;
             }
             Ok(())
@@ -1205,7 +1274,9 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         let invalidated_winner = bad_current && record.selected_is_winner();
         let plan = next.plan.clone();
         // Synchronously revoke all old queued lower effects BEFORE attempting publication. A
-        // failed publication poisons the journal and never restores their authority or budget.
+        // failed publication poisons the journal (or, for a clean disk-full refusal before the
+        // rename, leaves the previous record in force) and never restores their authority or
+        // budget: the active run stays revoked either way.
         self.active = None;
         if invalidated_winner {
             self.transfers[index].checked = false;
@@ -1718,6 +1789,55 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
     }
     fn clear_staging(&mut self) -> Result<usize, StorageError> {
         self.primary.clear_staging()
+    }
+    // The size-limited cache is the primary store's alone; Keep copies are neither counted nor
+    // evicted by it.
+    fn cache_scan(&mut self, recover: bool) -> Result<crate::cache::CacheScanReport, StorageError> {
+        self.primary.cache_scan(recover)
+    }
+    fn cache_index(&self) -> Option<crate::cache::CacheIndex> {
+        self.primary.cache_index()
+    }
+    fn cache_usage(&self) -> Option<crate::cache::CacheUsage> {
+        self.primary.cache_usage()
+    }
+    fn protected_cids(&self) -> Option<std::collections::BTreeSet<Cid>> {
+        self.primary.protected_cids()
+    }
+    /// The chunks the public read paths above fall back to (completed winners' committed plans and
+    /// legacy completed copies, on disk), restricted to copies whose whole file passed its check
+    /// in this store instance. Restart resets that evidence, so an unchecked copy never replaces a
+    /// cache duplicate: if one of its chunks were damaged, the duplicate is what repair would read.
+    /// Private Downloads and partial transfers never count, because reads never fall back to them.
+    fn retained_chunks(&self) -> std::collections::BTreeSet<Cid> {
+        let mut held = std::collections::BTreeSet::new();
+        if self.scope.is_none() || self.fault.is_some() {
+            return held;
+        }
+        for copy in self.copies.iter().filter(|copy| copy.file.checked) {
+            for (cid, _) in &copy.file.plan.chunks {
+                if copy.store.has(cid) {
+                    held.insert(*cid);
+                }
+            }
+        }
+        for transfer in &self.transfers {
+            if transfer.poisoned
+                || !transfer.checked
+                || !transfer.record.public_retained()
+                || transfer.record.phase != KeepPhase::Completed
+            {
+                continue;
+            }
+            if let Some(plan) = transfer.record.committed_plan() {
+                for (cid, _) in &plan.chunks {
+                    if transfer.store.has(cid) {
+                        held.insert(*cid);
+                    }
+                }
+            }
+        }
+        held
     }
 }
 

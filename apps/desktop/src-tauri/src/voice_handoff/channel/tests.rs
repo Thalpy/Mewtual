@@ -42,6 +42,10 @@ fn native_diagnostics_retain_no_session_or_credit_owner() {
     let weak = Arc::downgrade(&session);
     let identity_owners = Arc::strong_count(&session.identity);
     session.fixture_native_started(0);
+    session.fixture_sdp_stage([5; 16], 1, 5);
+    session.fixture_sdp_finished(Some(crate::voice_handoff::factory::Refused::Protocol(
+        catcoms_sync::voice_v2::VoiceError::Capacity,
+    )));
     assert_eq!(Arc::strong_count(&session.identity), identity_owners);
     drop(session);
     assert!(
@@ -333,7 +337,7 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         super::super::sdp_result::layout_bytes(),
     ];
     eprintln!(
-        "adapter graphs pending/history/final/input/admission/settlement/plan-final/transition/child-history/child-input/child-admission/child-settlement/child-result/child-begin: {adapters:?}"
+        "adapter graphs pending/history/final/input/admission/settlement/plan-final/key-session/transition/child-history/child-input/child-admission/child-settlement/child-result/child-begin/sdp-http/sdp-input/sdp-engine/sdp-delivery/media/sdp-result: {adapters:?}"
     );
     let state = std::mem::size_of::<HeaderWorker>()
         .max(std::mem::size_of::<AuthenticatedRequest>())

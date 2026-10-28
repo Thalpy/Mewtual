@@ -2,7 +2,10 @@
 //! Hold original preparation/copy owners at the real admission boundary; no sleeps or
 //! literal unlocked/confirmed booleans stand in for the process publication fence.
 use super::*;
-use catcoms_sync::voice_v2::VoiceError;
+use catcoms_sync::voice_v2::{
+    resources::{Credit, ResourceKind, Resources, GROUP_BYTES},
+    VoiceError,
+};
 pub(super) fn body(
     parent: &ledger::ResolvedRow,
     key: [u8; 32],
@@ -29,6 +32,17 @@ pub(super) async fn exchange(
     parent: &ledger::ResolvedRow,
     body: &[u8],
 ) -> Vec<u8> {
+    exchange_observed(state, public, route, parent, body)
+        .await
+        .0
+}
+async fn exchange_observed(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+) -> (Vec<u8>, u64) {
     let header = (
         route.session().fixture_counts().1 + 1,
         12,
@@ -43,8 +57,75 @@ pub(super) async fn exchange(
     )
     .await
     .unwrap();
-    opened_reply(public, header, body, &reply)
+    (opened_reply(public, header, body, &reply), header.0)
 }
+
+/// Preparing fixture pressure is not protocol work. A concurrent paid owner may win
+/// between the snapshot and charge, so retry that local refusal a bounded number of
+/// times. The hook is test-only and runs outside all pool/native guards.
+async fn hold_pressure(
+    pool: &Arc<Resources>,
+    group: [u8; 32],
+    mut before_charge: impl FnMut(),
+) -> Result<Credit, VoiceError> {
+    for _ in 0..8 {
+        let used = pool.group_counts(group).map_or(0, |counts| counts.0);
+        let available = GROUP_BYTES - used;
+        before_charge();
+        if available != 0 {
+            match pool.charge(group, available, ResourceKind::Retained) {
+                Ok(credit) => return Ok(credit),
+                Err(VoiceError::Capacity) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    Err(VoiceError::Capacity)
+}
+
+/// Same logical intent and original Claim deadline throughout. Only an authenticated
+/// Capacity reply is retryable. New physical nonces are required by the real codec;
+/// neither the SDP sequence/proof nor a Source attempt/deadline is reset.
+async fn retry_capacity(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+    deadline: u64,
+    mut refused: impl FnMut(u64),
+) -> Vec<u8> {
+    let clock = crate::voice_runtime(state).clock();
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    loop {
+        let now = clock.monotonic_ms();
+        assert!(
+            now < deadline,
+            "original storage observation deadline expired; {}",
+            route.session().fixture_native_snapshot().describe_sdp()
+        );
+        let (reply, sequence) = tokio::select! {
+            result = exchange_observed(state, public, route, parent, body) => result,
+            _ = clock.sleep(std::time::Duration::from_millis(deadline - now)) => {
+                panic!("original storage exchange exceeded its remaining deadline");
+            }
+        };
+        assert!(
+            clock.monotonic_ms() < deadline,
+            "storage observation returned after its original deadline"
+        );
+        if reply != capacity {
+            return reply; // Unauthorized/closed/malformed never become retries.
+        }
+        refused(sequence);
+        let remaining = deadline.saturating_sub(clock.monotonic_ms());
+        clock
+            .sleep(std::time::Duration::from_millis(remaining.min(10)))
+            .await;
+    }
+}
+
 // Keep original endpoint/parent/proof owners explicit across these independent race modes.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn exercise(
@@ -53,6 +134,7 @@ pub(super) async fn exercise(
     route: &bootstrap::Route,
     parent: &ledger::ResolvedRow,
     key: [u8; 32],
+    deadline: u64,
     attach: bool,
     sdk_race: bool,
     pc_case: Option<u8>,
@@ -60,6 +142,7 @@ pub(super) async fn exercise(
     Option<super::sdk::Token>,
     Option<super::sdp_http::RetiredProbe>,
 ) {
+    channel::Session::fixture_prepare_native_diagnostics();
     let prepare = body(parent, key, None);
     let request = requests::sdp::Request::decode(parent.id().logical(), &prepare).unwrap();
     let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
@@ -86,11 +169,77 @@ pub(super) async fn exercise(
         replies::refused(factory::Refused::Protocol(VoiceError::Malformed))
     );
     if attach {
-        let first = exchange(state, public, route, parent, &prepare).await;
-        assert_eq!(first.len(), crate::voice_handoff::sdp::REPLY_BYTES);
-        assert_eq!(&first[..2], &[5, 1]);
+        // Traverse the ACTUAL authenticated opcode12 path, not just Phase::prepare.
+        // Hold ordinary-pool pressure and require the actual failure at RESERVATION,
+        // not preflight/UI/attachment contention. Pool snapshots can change while the
+        // actor preflight awaits; they are not an atomic one-byte boundary oracle.
+        // Only this unrelated pressure is released before retrying the same intent.
+        let pool = route.selected().resources();
+        let group = route.selected().binding().scope.group;
+        let pressure = hold_pressure(&pool, group, || {}).await.unwrap();
         assert_eq!(
             exchange(state, public, route, parent, &prepare).await,
+            capacity,
+            "actual storage admission must refuse under ordinary-pool pressure"
+        );
+        assert_eq!(
+            route.session().fixture_native_snapshot().sdp_refusal(),
+            Some((5, parent.id().logical(), Some(VoiceError::Capacity))),
+            "only the actual reserve refusal exercises this recovery contract"
+        );
+        let failed = parent
+            .sdp_test_preparation()
+            .expect("original fixed intent survives refusal");
+        assert_eq!(failed.0, 1);
+        assert!(
+            !failed.2 && !failed.3,
+            "refused worker drained without installing a Phase"
+        );
+        assert!(parent.sdp_test_drained());
+        drop(pressure);
+        // Capacity release does not make native UI/Index fences immediately idle.
+        // Force genuine UI contention AFTER the reserve refusal, and release only on
+        // this physical request's stage4 evidence. A preflight refusal cannot satisfy it.
+        let mut commit = Some(state.ui_session_commit.clone().lock_owned().await);
+        let first = retry_capacity(
+            state,
+            public,
+            route,
+            parent,
+            &prepare,
+            deadline,
+            |sequence| {
+                if commit.is_some()
+                    && route
+                        .session()
+                        .fixture_native_snapshot()
+                        .sdp_refusal_at(sequence)
+                        == Some((4, parent.id().logical(), Some(VoiceError::Capacity)))
+                {
+                    drop(commit.take());
+                }
+            },
+        )
+        .await;
+        assert!(
+            commit.is_none(),
+            "actual forced UI admission refusal must have returned"
+        );
+        assert_eq!(
+            first.len(),
+            crate::voice_handoff::sdp::REPLY_BYTES,
+            "unexpected authenticated storage reply prefix {:?}; {}",
+            &first[..first.len().min(3)],
+            route.session().fixture_native_snapshot().describe_sdp()
+        );
+        assert_eq!(&first[..2], &[5, 1]);
+        assert_eq!(
+            &first[138..170],
+            &failed.1,
+            "retry funds the SAME parent/action/key/sequence intent, not a replacement"
+        );
+        assert_eq!(
+            retry_capacity(state, public, route, parent, &prepare, deadline, |_| {}).await,
             first,
             "lost reply recovers same original storage intent"
         );
@@ -202,5 +351,49 @@ pub(super) async fn exercise(
         assert_eq!(&closed[..2], &[5, 3]);
         assert_eq!(&closed[138..170], &proof);
         (None, None)
+    }
+}
+
+#[cfg(test)]
+mod pressure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pressure_setup_retries_a_real_charge_race_without_losing_either_owner() {
+        let pool = Arc::new(Resources::default());
+        let group = [81; 32];
+        let mut other = None;
+        let mut samples = 0;
+        let pressure = hold_pressure(&pool, group, || {
+            samples += 1;
+            if other.is_none() {
+                // A genuine paid owner wins precisely between snapshot and charge.
+                other = Some(pool.charge(group, 1, ResourceKind::Retained).unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(samples, 2);
+        assert_eq!(pool.counts(), (GROUP_BYTES, 0));
+        drop(pressure);
+        assert_eq!(pool.counts(), (1, 0));
+        drop(other);
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn pressure_setup_stops_after_eight_actual_losses_and_refunds_only_its_owners() {
+        let pool = Arc::new(Resources::default());
+        let group = [82; 32];
+        let mut winners = Vec::new();
+        let result = hold_pressure(&pool, group, || {
+            winners.push(pool.charge(group, 1, ResourceKind::Retained).unwrap());
+        })
+        .await;
+        assert!(matches!(result, Err(VoiceError::Capacity)));
+        assert_eq!(winners.len(), 8);
+        assert_eq!(pool.counts(), (8, 0));
+        drop(winners);
+        assert_eq!(pool.counts(), (0, 0));
     }
 }

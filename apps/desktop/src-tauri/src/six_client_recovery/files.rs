@@ -15,8 +15,13 @@ async fn file_keep_uses_member_bridge_without_a_direct_edge_and_survives_solo_na
     bridged_saved_copy(false).await;
 }
 
+/// Was `..._without_becoming_a_source_and_exports_...`. Saved files now propagate (cache
+/// housekeeping), but only once the save publishes: acquisition, the restart recheck and the
+/// export reads still leave the file unavailable here, and the published export makes it
+/// available. The private record itself never serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn private_download_bridges_without_becoming_a_source_and_exports_after_solo_native_reopen() {
+async fn private_download_bridges_and_becomes_a_source_only_once_exported_after_solo_native_reopen()
+{
     bridged_saved_copy(true).await;
 }
 
@@ -101,6 +106,7 @@ async fn bridged_saved_copy(private: bool) {
     let kept = scenario.online(2).actor.kept_files().await;
     let expected_plan = if let Some(id) = download_id {
         assert!(kept.files.is_empty() && kept.transfers.is_empty());
+        // Saved files propagate only once a save publishes, so acquisition leaves nothing here.
         assert!(!scenario.online(2).actor.file_available(raw.clone()).await);
         let saved = scenario.online(2).actor.downloads().await.unwrap();
         assert_eq!(saved.len(), 1);
@@ -167,7 +173,7 @@ async fn bridged_saved_copy(private: bool) {
             generation: 0,
         };
         let target = source.ready.cid();
-        let path = bounded(
+        let (path, _note) = bounded(
             "native private export streams to a fresh destination",
             stream_download_to_disk(
                 destination.path(),
@@ -181,6 +187,10 @@ async fn bridged_saved_copy(private: bool) {
         .await
         .unwrap();
         let actual = std::fs::read(path).unwrap();
+        assert!(
+            !source.running.actor.file_available(raw.clone()).await,
+            "export reads only stage; nothing is served until native reports the published save"
+        );
         source
             .running
             .actor
@@ -188,6 +198,10 @@ async fn bridged_saved_copy(private: bool) {
             .await
             .unwrap();
         assert!(source.running.actor.downloads().await.unwrap().is_empty());
+        assert!(
+            source.running.actor.file_available(raw.clone()).await,
+            "the published save propagates: this device now serves the file"
+        );
         actual
     } else {
         bounded(
@@ -241,13 +255,25 @@ impl SaveSource for PrivateExportSource<'_> {
         }
         Ok(())
     }
-    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+    async fn publish_verified(
+        &self,
+        file: &mut private_downloads::OnPool<std::fs::File>,
+        staging: &Path,
+        final_path: &Path,
+    ) -> Result<(), String> {
         let _commit =
             keep_session::read_commit(&self.running.state, self.generation, &self.origin).await?;
         if !self.ready.is_current() {
             return Err("Download retired.".into());
         }
-        publish_staged_download(staging, final_path)
+        publish_staged_on_pool(file, staging, final_path).await
+    }
+    fn liveness(&self) -> private_downloads::Liveness {
+        let (origin, ready) = (self.origin.clone(), self.ready.clone());
+        Arc::new(move || !origin.is_cancelled() && ready.is_current())
+    }
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        self.ready.export_custody()
     }
     fn progress(&self, _: usize, _: u64, _: u64, _: Option<String>) {}
 }
@@ -673,7 +699,8 @@ async fn interrupted_saved_bridge(private: bool) {
     let actual = if let Some(ready) = ready {
         assert!(!scenario.online(2).actor.file_available(raw.clone()).await);
         assert!(scenario.online(2).actor.kept_files().await.files.is_empty());
-        bounded(
+        let id = ready.id();
+        let chunk = bounded(
             "private resumed bytes remain under original native custody",
             scenario
                 .online(2)
@@ -682,7 +709,21 @@ async fn interrupted_saved_bridge(private: bool) {
         )
         .await
         .unwrap()
-        .into_bytes()
+        .into_bytes();
+        // Saved files propagate only once a save publishes. An export read stages its chunk but
+        // serves nothing, and removing the Download then leaves nothing to serve either.
+        assert!(!scenario.online(2).actor.file_available(raw.clone()).await);
+        bounded(
+            "the resumed private Download is removed",
+            scenario.online(2).actor.cancel_download(id),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !scenario.online(2).actor.file_available(raw.clone()).await,
+            "a removed Download never makes this device a source"
+        );
+        chunk
     } else {
         let (actual, _) = bounded(
             "recovered native file reads verified bytes",

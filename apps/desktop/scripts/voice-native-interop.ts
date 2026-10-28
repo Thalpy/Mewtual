@@ -5,6 +5,7 @@ import { VOICE_AUDIO_FIXTURE_MAX_SDP } from "./voice-audio-sdp-fixture.ts";
  * parent accepts a closed set of public-metadata callbacks. No app command invokes this. */
 import assert from "node:assert/strict";
 import { NativeControlFrames } from "./voice-native-control.ts";
+import { NativeAdmissionObservations } from "./voice-native-admission-observations.ts";
 import { NativeSdpReplyLoss, type NativeSdpObservation } from "./voice-native-reply-loss.ts";
 import { webcrypto } from "node:crypto";
 import {
@@ -31,7 +32,8 @@ let availability: ReturnType<typeof setInterval> | null = null;
 // Fixture-only bounded stage trace. No keys, Input, Result or ciphertext is copied/logged.
 // A closed native refusal code is metadata; every other crypto result contributes length.
 const stages: string[] = [];
-let capacityRefusals = 0, providerCalls = 0;
+const admissionObservations = new NativeAdmissionObservations();
+let providerCalls = 0;
 let mediaRequestMode = -1;
 type MediaLoss = { modes: Set<number>; lose: boolean; detach: boolean; history: boolean };
 const mediaLosses = new Map<string, MediaLoss>();
@@ -132,8 +134,8 @@ const provider = new Proxy(webcrypto.subtle as unknown as SubtleCrypto, { get(ta
       }
       if (name === "decrypt" && view.length === 3 && view[0] === 1 && view[1] === 3) {
         detail += "/refused-" + view[2];
-        if (view[2] === 7) capacityRefusals++;
       }
+      if (name === "decrypt") admissionObservations.observe((args[0] as AesGcmParams)?.additionalData, view);
     }
     stage(detail); return result;
   };
@@ -454,19 +456,20 @@ async function step(value: Step): Promise<unknown> {
       assert.deepEqual(purpose, value.purpose, "public selection cannot substitute another native purpose");
       parent = Object.freeze({ purpose, row: work.row, identity: work.identity });
       const intake = broker.nativeDerivationFromChannel(owner, channel, key, parent.purpose, parent.row, parent.identity);
-      const initialRefusals = capacityRefusals;
-      let before = capacityRefusals;
+      const refusals = () => admissionObservations.count([1, 3], parent.row);
+      const initialRefusals = refusals();
+      let before = refusals();
       let ready = await intake.attempt();
       // A fresh authenticated native Capacity observation authorizes retry of THIS intake.
       // A stale trace or unexplained uncertainty must fail rather than hide a new defect.
-      while (ready.kind === "uncertain" && capacityRefusals > before) {
+      while (ready.kind === "uncertain" && refusals() > before) {
         await new Promise<void>(resolve => setTimeout(resolve, 25));
-        before = capacityRefusals;
+        before = refusals();
         ready = await intake.attempt();
       }
       assert.equal(ready.kind, "ready");
       if (ready.kind !== "ready") throw new Error("native derivation input unavailable");
-      assert.ok(capacityRefusals > initialRefusals, "real native Input Capacity refusal must be observed before recovery");
+      assert.ok(refusals() > initialRefusals, "real native Input Capacity refusal must be observed before recovery");
       chain = ready.chain;
       const outcome = await ready.derivation.attempt();
       assert.equal(outcome.kind, "accepted");
@@ -533,15 +536,16 @@ async function step(value: Step): Promise<unknown> {
       assert.ok(before < 96 * 1024, "actual old browser variable envelope returned");
       const deadline = performance.now() + 5000;
       let observed: number;
+      const refusals = () => admissionObservations.count([12, 13], parent.row);
       do {
-        assert.ok(performance.now() < deadline, "original SDK custody stayed busy");
-        observed = capacityRefusals;
+        assert.ok(performance.now() < deadline, `original storage/SDK admission stayed under pressure; exact refusals=${admissionObservations.describe()}`);
+        observed = refusals();
         await broker.prepareNativeSdpHandoff(owner, channel, ready.chain);
         if (mediaRecords.length === 0) await idle();
         // Retry ONLY an actual authenticated native Capacity on this same original
         // intent. The Rust parent independently requires installed SDK custody below.
-        if (capacityRefusals > observed) await new Promise<void>(yes => setTimeout(yes, 25));
-      } while (capacityRefusals > observed);
+        if (refusals() > observed) await new Promise<void>(yes => setTimeout(yes, 25));
+      } while (refusals() > observed);
       assert.equal(broker.counts().bytes, before + 64 * 1024);
       return { kind: "custody-attempted", bytes: 64 * 1024 };
     }
@@ -549,13 +553,14 @@ async function step(value: Step): Promise<unknown> {
       const before = broker.counts().bytes;
       const deadline = performance.now() + 5000;
       let observed: number;
+      const refusals = () => admissionObservations.count([14], parent.row);
       do {
         assert.ok(performance.now() < deadline, "original PC intent stayed busy");
-        observed = capacityRefusals;
+        observed = refusals();
         await broker.prepareNativePcIntent(owner, channel, chain);
         if (mediaRecords.length === 0) await idle();
-        if (capacityRefusals > observed) await new Promise<void>(yes => setTimeout(yes, 25));
-      } while (capacityRefusals > observed);
+        if (refusals() > observed) await new Promise<void>(yes => setTimeout(yes, 25));
+      } while (refusals() > observed);
       // This Promise<void> is deliberately not the success oracle. Rust independently
       // requires an original Root intent attached by the actual HTTP14 dispatch below.
       assert.equal(broker.counts().bytes, before);

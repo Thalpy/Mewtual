@@ -11,18 +11,20 @@
 //! - [`pad`]; deterministic size quantization (P10): a padded frame that goes **inside** the
 //!   AEAD, so a forwarder measuring ciphertext lengths sees a bucket instead of the payload's
 //!   exact size. Shared by [`filecrypto`] and by `catcoms-replication`'s sealed ops.
-//! - [`retention`]; the adjustable expiry model (global → server → file,
-//!   most-specific wins), and a GC engine with **decorrelated eviction** (per-file
-//!   jitter so the whole group doesn't drop a blob at once) and a **holder probe**
-//!   (never evict the last copy). Eviction drops the bytes but keeps the metadata,
-//!   so an expired file stays re-fetchable by CID.
+//! - [`cache`]; the size-limited primary cache's bookkeeping: crash-safe temporary
+//!   names (write, sync, rename), the metadata-only directory scan with its mount set,
+//!   and the filesystem steps of leave cleanup. The eviction policy itself (listing
+//!   order and pins) lives in `catcoms-app::cache_plan`.
+//! - [`retention`]; an expiry-and-GC engine (global → server → file expiry, decorrelated
+//!   eviction, holder probe). **The application does not use it**: circulation expiry is
+//!   recorded and displayed only, and the per-server cache limit (see [`cache`]) is the
+//!   only eviction. It remains as tested building blocks for a future holder-aware pass.
 //!
-//! The metadata index is an in-memory projection here (it is local and
-//! rebuildable from CRDT sync); the SQLCipher-backed persistence is wired up with
-//! the platform/keystore layer.
+//! Persistence is the sealed vault and sealed blob files; there is no SQLCipher database.
 
 pub mod blob;
 mod blob_read;
+pub mod cache;
 pub mod cid;
 pub mod filecrypto;
 pub mod kept;
@@ -34,6 +36,7 @@ use thiserror::Error;
 
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore, SealingBlobStore};
 pub use blob_read::{BlobReadPlan, BlobReadResult};
+pub use cache::{CacheIndex, CacheScanReport, CacheUsage, Removal};
 pub use cid::{Cid, CidHasher};
 pub use filecrypto::{open_file, seal_file, FileManifest, FileRef, MAX_CHUNKS};
 // `FileRef::wrapped_key` is a public field of this type, so a caller cannot read or build a

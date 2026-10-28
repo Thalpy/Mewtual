@@ -1,8 +1,22 @@
-//! Private encrypted download inventory. Renderer identifiers select existing records; they
-//! cannot supply manifests, keys, paths or execution allowances. Export remains a separate
-//! explicit native invocation with its own original account/entry/Root/storage authority.
+//! Private encrypted download inventory and its journaled export to Downloads. Renderer
+//! identifiers select existing records; they cannot supply manifests, keys, paths or execution
+//! allowances. Export remains a separate explicit native invocation with its own original
+//! account/entry/Root/storage authority.
+//!
+//! Journaled export (see docs/communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md): every external
+//! filesystem effect runs in `spawn_blocking` through the storage crate's `ExportFile`, so a stalled
+//! Downloads volume pins only this save's worker. The server actor performs only sealed journal
+//! transitions, each fenced by the original invocation, actor/Root generation and storage lease.
+//! Publication alone holds the session commit guard, so Pause/Remove/Lock serialize with it.
 use super::*;
-use catcoms_storage::kept::{DownloadId, DownloadStatus, KeepPhase};
+use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadPreflight, DownloadReady};
+use catcoms_storage::kept::{
+    flush_destination, partial_presence, remove_partial, saved_file_path, saved_presence,
+    ChoiceRefusal, ChosenDestination, DownloadId, DownloadStatus, ExportError, ExportFile,
+    ExportHalt, ExportJournal, ExportPlan, ExportProbe, ExportProgress, ExportReopen, ExportState,
+    ExportView, KeepPhase, PartialPresence, PartialRemoval, Publication, SavedPresence,
+    EXPORT_CHECKPOINT_CHUNKS,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,32 +27,106 @@ pub(super) struct UiDownload {
     grant: String,
     status: &'static str,
     verified_chunks: usize,
+    /// Whole chunks covered by the durable external-save checkpoint (0 without a journal).
+    saved_chunks: usize,
     total_chunks: usize,
+    /// A "Save as" choice is remembered for this row's next save. Never the path or name.
+    chosen_place: bool,
+    /// Transfers UX (PR #51): plaintext byte counts, sizes only. `received_bytes` is what the
+    /// private copy holds, `saved_bytes` what the external save's durable checkpoint covers (the
+    /// whole file once saved), `total_bytes` the declared size. All `null` when native cannot read
+    /// the saved manifest; the renderer then shows chunk counts only.
+    received_bytes: Option<u64>,
+    saved_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+    /// Saved rows only: `"downloads"` when native proves the saved file's folder is the resolved
+    /// Downloads folder, `"other"` otherwise (a place chosen in Save as, or a Downloads folder
+    /// that moved since). `None` for every other state. Never a path or folder name.
+    saved_to: Option<&'static str>,
+    /// Saved rows only (PR #56): the ID of the saved-files list entry for exactly this saved
+    /// file (same folder and file identity as the published journal). The renderer draws that
+    /// entry as this row, never as a second one. `None` when no entry matches.
+    saved_entry: Option<String>,
 }
-fn project(download: DownloadStatus) -> UiDownload {
+
+/// Closed renderer status, highest precedence first. Typed storage state decides it; nothing is
+/// inferred from a path, and the projection never carries a path, name or file identity.
+fn status(download: &DownloadStatus) -> &'static str {
+    let state = &download.state;
+    let writing = matches!(download.export, ExportView::Writing { .. });
+    if state.phase == KeepPhase::Deleting {
+        "removing"
+    } else if download.export == ExportView::Published {
+        "saved"
+    } else if let ExportView::Writing {
+        halt: Some(halt), ..
+    } = download.export
+    {
+        match halt {
+            ExportHalt::Changed => "destination-changed",
+            ExportHalt::Unavailable => "destination-unavailable",
+        }
+    } else if state.exhausted {
+        "exhausted"
+    } else if state.user_paused {
+        if writing {
+            "save-paused"
+        } else {
+            "paused"
+        }
+    } else if state.blocked {
+        "blocked"
+    } else if state.running {
+        "receiving"
+    } else if matches!(download.export, ExportView::Writing { active: true, .. }) {
+        "saving"
+    } else if writing {
+        "save-interrupted"
+    } else if download.checked {
+        "ready"
+    } else {
+        "incomplete"
+    }
+}
+/// The renderer row. `in_downloads` answers, for a saved row only, whether its file sits in the
+/// resolved Downloads folder (`Some(true)`), proven elsewhere (`Some(false)`), or could not be
+/// told (`None`: no resolvable Downloads folder, or the journal could not be read); see
+/// [`UiDownload::saved_to`]. It is ignored for every other state.
+fn project(
+    download: DownloadStatus,
+    in_downloads: Option<bool>,
+    saved_entry: Option<String>,
+) -> UiDownload {
+    let status = status(&download);
+    let total_chunks = download.state.plan.chunks.len();
+    let saved_chunks = match download.export {
+        ExportView::Writing { saved_chunks, .. } => saved_chunks.min(total_chunks),
+        ExportView::Published => total_chunks,
+        ExportView::None => 0,
+    };
+    let chosen_place = download.planned;
+    let saved_to = match (status == "saved", in_downloads) {
+        (true, Some(true)) => Some("downloads"),
+        (true, Some(false)) => Some("other"),
+        _ => None,
+    };
+    let bytes = download.bytes;
     let state = download.state;
     UiDownload {
         id: hex::encode(download.id.as_bytes()),
         cid: state.plan.cid.to_hex(),
         intent: state.intent.to_string(),
         grant: state.grant.to_string(),
-        status: if state.phase == KeepPhase::Deleting {
-            "removing"
-        } else if state.exhausted {
-            "exhausted"
-        } else if state.user_paused {
-            "paused"
-        } else if state.blocked {
-            "blocked"
-        } else if state.running {
-            "receiving"
-        } else if download.checked {
-            "ready"
-        } else {
-            "incomplete"
-        },
+        status,
         verified_chunks: state.verified_chunks,
-        total_chunks: state.plan.chunks.len(),
+        saved_chunks,
+        total_chunks,
+        chosen_place,
+        received_bytes: bytes.map(|bytes| bytes.received),
+        saved_bytes: bytes.map(|bytes| bytes.saved),
+        total_bytes: bytes.map(|bytes| bytes.total),
+        saved_to,
+        saved_entry: saved_entry.filter(|_| status == "saved"),
     }
 }
 pub(super) fn id(text: &str) -> Result<DownloadId, String> {
@@ -68,6 +156,7 @@ pub(super) fn intent(text: &str) -> Result<u64, String> {
 
 #[tauri::command]
 pub(super) async fn get_private_downloads(
+    app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
 ) -> Result<Vec<UiDownload>, String> {
@@ -75,7 +164,58 @@ pub(super) async fn get_private_downloads(
     let (actor, instance) = actor_instance_of(&state, server).await?;
     let downloads =
         commit_kept_command(&state, server, instance, generation, actor.downloads()).await?;
-    Ok(downloads.into_iter().map(project).collect())
+    // Transfers UX: a saved row says "Saved to Downloads" only when its published journal's
+    // folder is exactly the resolved Downloads folder, and "another folder" only when the journal
+    // was read and its folder differs; anything else names no folder. One journal read per saved
+    // row (at most 32), outside the session commit guard so Lock never waits behind them, then a
+    // cheap generation check so nothing from another session is returned. No filesystem access:
+    // the journal's folder is compared as recorded.
+    let folder = app.path().download_dir().ok();
+    let mut read = Vec::with_capacity(downloads.len());
+    let mut journals = Vec::new();
+    for download in downloads {
+        let journal = match download.export == ExportView::Published {
+            true => match actor.download_export_state(download.id).await {
+                Ok(Some(ExportState::Published(journal))) => Some(journal),
+                _ => None,
+            },
+            false => None,
+        };
+        let in_downloads = match (&folder, &journal) {
+            (Some(folder), Some(journal)) => Some(journal.is_in_folder(folder)),
+            _ => None,
+        };
+        if let Some(journal) = journal {
+            journals.push((read.len(), journal));
+        }
+        read.push((download, in_downloads));
+    }
+    // PR #56: which list entry each Saved row stands for (one locked read of the sealed list).
+    let entries = if journals.is_empty() {
+        Vec::new()
+    } else {
+        let only: Vec<ExportJournal> = journals.iter().map(|(_, j)| j.clone()).collect();
+        crate::saved_files::entries_for_journals(&state, server, instance, &only).await
+    };
+    let mut saved_entries = vec![None; read.len()];
+    for ((at, _), entry) in journals.iter().zip(entries) {
+        saved_entries[*at] = entry;
+    }
+    let rows: Vec<UiDownload> = read
+        .into_iter()
+        .zip(saved_entries)
+        .map(|((download, in_downloads), entry)| project(download, in_downloads, entry))
+        .collect();
+    if keep_session::invocation_generation(&state).await? != generation {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    if !actor_instance_of(&state, server)
+        .await
+        .is_ok_and(|(_, now)| now == instance)
+    {
+        return Err("server changed".into());
+    }
+    Ok(rows)
 }
 #[tauri::command]
 pub(super) async fn set_private_download_paused(
@@ -121,23 +261,716 @@ pub(super) async fn retry_private_download(
     .granted
     .to_string())
 }
+/// Remove (or Clear a saved row). With an export journal this is two-step: the actor durably
+/// publishes Deleting, native removes only the partial file proven to be ours (never the final
+/// name), then the actor releases the record. `keepPartial` releases without deleting the file,
+/// the escape when removal keeps failing.
+///
+/// Returns a notice when the removal finished but a file of this save stays on disk (a saved
+/// copy, another name for the partial, or a file at its name that cannot be proven ours). The
+/// renderer shows it; a removal is never reported as complete while plaintext remains unmentioned.
 #[tauri::command]
 pub(super) async fn cancel_private_download(
     state: State<'_, AppState>,
     server: u64,
     download: String,
-) -> Result<(), String> {
+    keep_partial: Option<bool>,
+) -> Result<Option<String>, String> {
     let generation = keep_session::invocation_generation(&state).await?;
     let id = id(&download)?;
     let (actor, instance) = actor_instance_of(&state, server).await?;
-    commit_kept_command(
+    let notice = remove_download(
         &state,
         server,
         instance,
         generation,
-        actor.cancel_download(id),
+        &actor,
+        id,
+        keep_partial.unwrap_or(false),
     )
+    .await?;
+    Ok(notice.map(str::to_owned))
+}
+
+/// Shared Remove/Clear sequence. A removal whose proven partial cannot be deleted stays in the
+/// visible Removing state, conservatively charged; it never faults the store. `Ok(Some(_))` is a
+/// finished removal that left a file on disk, with the text to tell the user.
+pub(super) async fn remove_download(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    generation: u64,
+    actor: &ServerActor,
+    id: DownloadId,
+    keep_partial: bool,
+) -> Result<Option<&'static str>, String> {
+    let claim = CleanupClaim::acquire(server, id)?;
+    let ports = ActorCleanup {
+        state,
+        server,
+        instance,
+        generation,
+        actor,
+        id,
+        forget_saved: true,
+    };
+    remove_sequence(&ports, claim, keep_partial).await
+}
+// A Removing row's Keep reads "Keep partly saved file", or "Keep the file" once every part was
+// written (the renderer decides from the row's counts), so these messages name only "Keep".
+// Fix-the-lows round (follow-up "Clear on a saved row with an unplugged folder"): a Clear of a
+// saved row (`published`) has its own wording, because what it removes is a temporary second name
+// of the complete saved file, not a partly saved file.
+const REMOVE_RETRY: &str = "The partly saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep to leave it there.";
+const REMOVE_RETRY_SAVED: &str = "A temporary copy of the saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep to leave it there.";
+const REMOVE_UNREACHABLE: &str = "The folder with the partly saved file is unavailable. Reconnect it and choose Remove again, or choose Keep to leave the file there.";
+const REMOVE_UNREACHABLE_SAVED: &str = "The folder with the saved file is unavailable. Reconnect it and choose Remove again, or choose Keep to leave the file there.";
+const CLEANUP_BUSY: &str = "This file is still being removed. Try again shortly.";
+const ALREADY_REMOVED: &str =
+    "The partly saved file had already been removed, so there was nothing to keep.";
+/// Keep of a saved row whose check found neither the saved name nor its temporary copy holding
+/// the file (`partial_presence` looks at both).
+const ALREADY_REMOVED_SAVED: &str =
+    "The saved file and its temporary copy were already gone, so there was nothing to keep.";
+
+/// Process-wide ownership of every destructive cleanup (Remove, Save new copy) and every
+/// preserve decision ("Keep partly saved file") for one Download, keyed by (server, Download ID).
+///
+/// Review U-H1: without it, a Remove stalled just before deleting the partial and a later Keep
+/// could both act on the same Deleting journal; Keep reported the file preserved and released the
+/// encrypted copy, then the stalled Remove deleted the only remaining copy. A second claimant now
+/// gets Busy instead of a promise. The claim is shared with the blocking worker that deletes, so
+/// it outlives a dropped invocation (Lock, a closed window) until the delete has actually ended.
+#[derive(Clone)]
+pub(super) struct CleanupClaim {
+    /// Released when the last clone (the invocation's or its blocking worker's) drops.
+    _held: Arc<ClaimKey>,
+}
+struct ClaimKey(u64, [u8; 32]);
+impl Drop for ClaimKey {
+    fn drop(&mut self) {
+        claimed()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(self.0, self.1));
+    }
+}
+/// Claimed (server, Download ID) pairs.
+type Claimed = StdMutex<std::collections::HashSet<(u64, [u8; 32])>>;
+fn claimed() -> &'static Claimed {
+    static CLAIMED: std::sync::OnceLock<Claimed> = std::sync::OnceLock::new();
+    CLAIMED.get_or_init(Default::default)
+}
+impl CleanupClaim {
+    pub(super) fn acquire(server: u64, id: DownloadId) -> Result<Self, String> {
+        let key = (server, *id.as_bytes());
+        if !claimed()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key)
+        {
+            return Err(CLEANUP_BUSY.into());
+        }
+        Ok(Self {
+            _held: Arc::new(ClaimKey(key.0, key.1)),
+        })
+    }
+}
+
+/// The effects a cleanup sequence needs, behind a seam so the real sequences run in tests with
+/// barriers between awaits. Production is [`ActorCleanup`]: guarded actor commands and blocking
+/// filesystem workers.
+#[async_trait::async_trait]
+pub(super) trait CleanupPorts: Send + Sync {
+    /// Durably publish Deleting (or release at once without a journal); `Some` is the journal
+    /// native must clean up before [`CleanupPorts::finish_cleanup`].
+    async fn cancel(&self) -> Result<Option<ExportState>, String>;
+    async fn export_state(&self) -> Result<Option<ExportState>, String>;
+    /// The blocking work that deletes the proven partial. [`delete_owned`] runs it on a worker
+    /// that also owns the claim, so the claim lasts exactly as long as the delete can happen.
+    /// `published` tells the removal that the record was already saved, so a staging name that is
+    /// the only remaining copy is kept (PR51 M2).
+    fn remover(&self, journal: ExportJournal, published: bool) -> Result<Remover, String>;
+    /// Read-only: is anything of this save still on disk? Best effort: production answers
+    /// `Unknown` at once when no cleanup slot is free, and [`remove_sequence`] stops waiting after
+    /// [`KEEP_PRESENCE_WAIT`] (re-review 2 MEDIUM).
+    async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String>;
+    /// Sanctioned-clock wait bounding how long Keep waits for [`CleanupPorts::presence`].
+    async fn wait(&self, delay: Duration);
+    async fn finish_cleanup(&self) -> Result<(), String>;
+    /// Save new copy, step one: retire every observer under the intent CAS, keeping the journal.
+    async fn retire(&self, expected_intent: u64) -> Result<u64, String>;
+    /// Save new copy, step two: forget the journal under the intent CAS.
+    async fn abandon(&self, expected_intent: u64) -> Result<u64, String>;
+    /// PR #56: a Clear of a Saved row whose record was just released also forgets the saved-files
+    /// list entry of exactly that saved file, so the row goes away instead of a list row for the
+    /// same copy appearing in its place. Best effort; a no-op unless the ports opt in.
+    async fn forget_saved(&self, _journal: ExportJournal) {}
+}
+
+/// Production cleanup effects for one Download of one server instance and UI generation.
+pub(super) struct ActorCleanup<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) server: u64,
+    pub(super) instance: u64,
+    pub(super) generation: u64,
+    pub(super) actor: &'a ServerActor,
+    pub(super) id: DownloadId,
+    /// PR #56: this is the user's Clear or Remove, so a released Saved row also forgets its list
+    /// entry ([`CleanupPorts::forget_saved`]). False for the cleanup of a recovered save, whose
+    /// entry was just recorded and must stay.
+    pub(super) forget_saved: bool,
+}
+#[async_trait::async_trait]
+impl CleanupPorts for ActorCleanup<'_> {
+    async fn cancel(&self) -> Result<Option<ExportState>, String> {
+        let (state, server, instance, generation) =
+            (self.state, self.server, self.instance, self.generation);
+        commit_kept_command(
+            state,
+            server,
+            instance,
+            generation,
+            self.actor.cancel_download(self.id),
+        )
+        .await
+    }
+    async fn export_state(&self) -> Result<Option<ExportState>, String> {
+        self.actor.download_export_state(self.id).await
+    }
+    fn remover(&self, journal: ExportJournal, published: bool) -> Result<Remover, String> {
+        // Review L9: a bounded number of cleanup workers, so a compromised renderer cannot pin
+        // unlimited blocking threads on a stalled volume. The permit moves into the worker.
+        let slot = cleanup_slot()?;
+        Ok(Box::new(move || {
+            let _slot = slot;
+            // PR51 H1: the verified removal draws its Unix "removing" name from the RNG seam.
+            remove_partial(&journal, published, &mut OsCryptoRng)
+        }))
+    }
+    async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String> {
+        bounded_presence(journal).await
+    }
+    async fn wait(&self, delay: Duration) {
+        SystemClock.sleep(delay).await;
+    }
+    async fn finish_cleanup(&self) -> Result<(), String> {
+        let (state, server, instance, generation) =
+            (self.state, self.server, self.instance, self.generation);
+        commit_kept_command(
+            state,
+            server,
+            instance,
+            generation,
+            self.actor.finish_download_cleanup(self.id),
+        )
+        .await
+    }
+    async fn retire(&self, expected_intent: u64) -> Result<u64, String> {
+        let (state, server, instance, generation) =
+            (self.state, self.server, self.instance, self.generation);
+        commit_kept_command(
+            state,
+            server,
+            instance,
+            generation,
+            self.actor.retire_download_export(self.id, expected_intent),
+        )
+        .await
+        .map_err(|_| STALE_DOWNLOAD.to_string())
+    }
+    async fn abandon(&self, expected_intent: u64) -> Result<u64, String> {
+        let (state, server, instance, generation) =
+            (self.state, self.server, self.instance, self.generation);
+        commit_kept_command(
+            state,
+            server,
+            instance,
+            generation,
+            self.actor.abandon_download_export(self.id, expected_intent),
+        )
+        .await
+    }
+    async fn forget_saved(&self, journal: ExportJournal) {
+        if self.forget_saved {
+            crate::saved_files::forget_journal(self.state, self.server, self.instance, &journal)
+                .await;
+        }
+    }
+}
+const STALE_DOWNLOAD: &str = "This download changed. Open Transfers and try again.";
+
+/// Small dedicated bound on blocking cleanup workers, separate from the export slots so a Remove
+/// can still run while saves are busy.
+fn cleanup_slot() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    cleanup_slots()
+        .try_acquire_owned()
+        .map_err(|_| CLEANUP_BUSY.into())
+}
+/// The process-wide pool behind [`cleanup_slot`]. "Replace my older saved copy" (PR #56,
+/// `saved_files.rs`) holds one of these for its whole sequence too: it deletes, like a cleanup.
+pub(super) fn cleanup_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+}
+
+/// How long "Keep partly saved file" waits for its read-only presence check before releasing the
+/// record anyway with no promise about the file (re-review 2 MEDIUM).
+pub(super) const KEEP_PRESENCE_WAIT: Duration = Duration::from_secs(3);
+
+/// Production presence check for Keep. It takes a cleanup slot like every blocking cleanup worker
+/// (review L9), but when all slots are busy (for example four Removes stuck on a dead share, of
+/// any downloads) it answers `Unknown` without touching the filesystem instead of Busy: Keep is
+/// the escape from a stuck removal, `Unknown` makes no promise, and the held claim alone already
+/// excludes a concurrent delete of this Download.
+pub(super) async fn bounded_presence(journal: ExportJournal) -> Result<PartialPresence, String> {
+    presence_in(cleanup_slots(), journal).await
+}
+
+/// [`bounded_presence`] against a given slot pool, so a test owns its pool instead of depending
+/// on the process-wide one being free.
+pub(super) async fn presence_in(
+    pool: Arc<tokio::sync::Semaphore>,
+    journal: ExportJournal,
+) -> Result<PartialPresence, String> {
+    let Ok(slot) = pool.try_acquire_owned() else {
+        return Ok(PartialPresence::Unknown);
+    };
+    blocking(move || {
+        let _held = slot;
+        partial_presence(&journal)
+    })
     .await
+}
+
+/// What Transfers shows for a Saved row after checking its file (user decision, 23 October: a
+/// saved file that disappeared or was replaced is said so instead of reading "Saved" until the
+/// row is cleared). Serialized as `present`, `missing`, `replaced` or `unknown`; never a path.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum SavedCheck {
+    /// The saved name still holds our file: "Saved", unchanged.
+    Present,
+    /// Nothing is at the saved name: the row offers Save again.
+    Missing,
+    /// Another file is at the saved name: never claimed as ours; the row offers Save again.
+    Replaced,
+    /// Not checked (timeout, folder unreachable, busy): the row keeps "Saved" without claiming a
+    /// fresh check.
+    Unknown,
+}
+
+/// How long the check waits for its read-only worker before answering `Unknown` (Keep's bound).
+pub(super) const SAVED_CHECK_WAIT: Duration = KEEP_PRESENCE_WAIT;
+
+/// The effects of one saved-file check, behind a seam so the real sequence runs in tests.
+#[async_trait::async_trait]
+pub(super) trait SavedCheckPorts: Send + Sync {
+    /// The record's revision and its saved journal now, `Some` only while it is a Saved
+    /// (Published) record.
+    async fn saved(&self) -> Result<Option<(u64, ExportJournal)>, String>;
+    /// Read-only check of the saved name. Production waits for one of two check slots; the
+    /// sequence's bounded wait covers that wait too.
+    async fn presence(&self, journal: ExportJournal) -> Result<SavedPresence, String>;
+    /// Sanctioned-clock wait bounding how long the check waits for [`SavedCheckPorts::presence`].
+    async fn wait(&self, delay: Duration);
+    /// The invocation's UI session and server entry are still the ones that asked.
+    async fn current(&self) -> bool;
+}
+
+/// One saved-file check. Read-only throughout: no journal transition, no file effect, and no
+/// session commit guard held while the filesystem is consulted (the bounded worker keeps running
+/// read-only if the wait ends first). Fenced on both sides: the record must be the same Saved
+/// record (revision and journal) before and after, and the UI session must still be the one that
+/// asked, so a stale answer can never relabel a newer row; the renderer fences on the revision too.
+pub(super) async fn saved_check_sequence(
+    ports: &impl SavedCheckPorts,
+    expected_intent: u64,
+) -> Result<SavedCheck, String> {
+    let Some((intent, journal)) = ports.saved().await? else {
+        return Err(STALE_DOWNLOAD.into());
+    };
+    if intent != expected_intent {
+        return Err(STALE_DOWNLOAD.into());
+    }
+    let checked = tokio::select! {
+        biased;
+        presence = ports.presence(journal.clone()) => presence.ok(),
+        () = ports.wait(SAVED_CHECK_WAIT) => None,
+    };
+    let check = match checked {
+        Some(SavedPresence::Ours) => SavedCheck::Present,
+        Some(SavedPresence::Missing) => SavedCheck::Missing,
+        Some(SavedPresence::Replaced) => SavedCheck::Replaced,
+        Some(SavedPresence::Unknown) | None => SavedCheck::Unknown,
+    };
+    match ports.saved().await? {
+        Some((now, again)) if now == intent && again == journal => {}
+        _ => return Err(STALE_DOWNLOAD.into()),
+    }
+    if !ports.current().await {
+        return Err("The download is no longer active.".into());
+    }
+    Ok(check)
+}
+
+/// Small dedicated bound on saved-file check workers, separate from cleanup and export slots, so
+/// a renderer cannot pin more blocking threads on a stalled share by asking repeatedly. The
+/// saved-files list's checks and Show in folder (PR #56, `saved_files.rs`) share these two slots.
+pub(super) fn check_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
+}
+
+/// [`saved_presence`] on the blocking pool with a slot of `pool`. Decisions review M1: it waits for
+/// a free slot instead of answering `Unknown` at once, so a third Saved row is checked once an
+/// earlier check finishes; the wait holds no thread, and [`saved_check_sequence`] bounds it with
+/// [`SAVED_CHECK_WAIT`] like the check itself. At most the pool's size of workers ever run.
+pub(super) async fn saved_presence_in(
+    pool: Arc<tokio::sync::Semaphore>,
+    journal: ExportJournal,
+) -> Result<SavedPresence, String> {
+    let Ok(slot) = pool.acquire_owned().await else {
+        return Ok(SavedPresence::Unknown);
+    };
+    blocking(move || {
+        let _held = slot;
+        saved_presence(&journal)
+    })
+    .await
+}
+
+/// Production saved-file check effects for one Download of one server instance and UI generation.
+pub(super) struct ActorSavedCheck<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) server: u64,
+    pub(super) instance: u64,
+    pub(super) generation: u64,
+    pub(super) actor: &'a ServerActor,
+    pub(super) id: DownloadId,
+}
+#[async_trait::async_trait]
+impl SavedCheckPorts for ActorSavedCheck<'_> {
+    async fn saved(&self) -> Result<Option<(u64, ExportJournal)>, String> {
+        let rows = commit_kept_command(
+            self.state,
+            self.server,
+            self.instance,
+            self.generation,
+            self.actor.downloads(),
+        )
+        .await?;
+        let Some(intent) = rows
+            .iter()
+            .find(|row| row.id == self.id)
+            .map(|row| row.state.intent)
+        else {
+            return Ok(None);
+        };
+        Ok(match self.actor.download_export_state(self.id).await? {
+            Some(ExportState::Published(journal)) => Some((intent, journal)),
+            _ => None,
+        })
+    }
+    async fn presence(&self, journal: ExportJournal) -> Result<SavedPresence, String> {
+        saved_presence_in(check_slots(), journal).await
+    }
+    async fn wait(&self, delay: Duration) {
+        SystemClock.sleep(delay).await;
+    }
+    async fn current(&self) -> bool {
+        let session = keep_session::invocation_generation(self.state)
+            .await
+            .is_ok_and(|now| now == self.generation);
+        let entry = actor_instance_of(self.state, self.server)
+            .await
+            .is_ok_and(|(_, now)| now == self.instance);
+        session && entry
+    }
+}
+
+/// Check whether a Saved row's file is still at its saved name (user decision, 23 October). The
+/// renderer asks when Transfers is shown and after acting on a Saved row; the answer is one of
+/// four words and never carries a path. `expected_intent` is the row's revision: a row that
+/// changed meanwhile gets the stale-download error instead of an answer.
+#[tauri::command]
+pub(super) async fn check_saved_download(
+    state: State<'_, AppState>,
+    server: u64,
+    download: String,
+    expected_intent: String,
+) -> Result<SavedCheck, String> {
+    let generation = keep_session::invocation_generation(&state).await?;
+    let id = id(&download)?;
+    let expected = intent(&expected_intent)?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let ports = ActorSavedCheck {
+        state: &state,
+        server,
+        instance,
+        generation,
+        actor: &actor,
+        id,
+    };
+    saved_check_sequence(&ports, expected).await
+}
+
+/// "Show in folder" refusals (Transfers UX, PR #51). None names a path or a file.
+pub(super) const REVEAL_MISSING: &str = "The saved file is no longer there.";
+pub(super) const REVEAL_REPLACED: &str =
+    "Another file is at the saved name now, so Mewtual did not show it.";
+pub(super) const REVEAL_UNCHECKED: &str =
+    "Mewtual could not check the saved file right now. Try again shortly.";
+pub(super) const REVEAL_FAILED: &str = "The folder could not be opened.";
+
+/// Only fixed outcomes cross IPC; platform launch errors may contain a private path.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RevealError {
+    Stale,
+    Launch,
+}
+impl RevealError {
+    pub(super) fn message(self) -> String {
+        match self {
+            Self::Stale => "The download is no longer active.".into(),
+            Self::Launch => REVEAL_FAILED.into(),
+        }
+    }
+}
+
+/// The effects of "Show in folder" beyond a saved-file check, behind a seam for tests.
+#[async_trait::async_trait]
+pub(super) trait SavedRevealPorts: SavedCheckPorts {
+    /// The saved file's path, only while the same read-only check as [`saved_presence`] proves
+    /// the saved name still holds our file; otherwise the presence that says why not. Production
+    /// waits for one of the check slots, like [`SavedCheckPorts::presence`].
+    async fn locate(
+        &self,
+        journal: ExportJournal,
+    ) -> Result<Result<PathBuf, SavedPresence>, String>;
+    /// Revalidate the exact saved record under original UI commit, then synchronously
+    /// show its path. A boolean currentness observation alone is not reveal authority.
+    async fn reveal(
+        &self,
+        path: &Path,
+        intent: u64,
+        journal: &ExportJournal,
+    ) -> Result<(), RevealError>;
+}
+
+/// "Show in folder" for a Saved row: the same fenced, bounded, read-only identity check as
+/// [`saved_check_sequence`], then the system file manager shows the file selected. Nothing is
+/// returned to the renderer but success or one of the fixed refusals, so the path never leaves
+/// native. A row that changed meanwhile gets the stale-download error.
+pub(super) async fn reveal_saved_sequence(
+    ports: &impl SavedRevealPorts,
+    expected_intent: u64,
+) -> Result<(), String> {
+    let Some((intent, journal)) = ports.saved().await? else {
+        return Err(STALE_DOWNLOAD.into());
+    };
+    if intent != expected_intent {
+        return Err(STALE_DOWNLOAD.into());
+    }
+    let located = tokio::select! {
+        biased;
+        located = ports.locate(journal.clone()) => located.ok(),
+        () = ports.wait(SAVED_CHECK_WAIT) => None,
+    };
+    match ports.saved().await? {
+        Some((now, again)) if now == intent && again == journal => {}
+        _ => return Err(STALE_DOWNLOAD.into()),
+    }
+    if !ports.current().await {
+        return Err("The download is no longer active.".into());
+    }
+    match located {
+        Some(Ok(path)) => ports
+            .reveal(&path, intent, &journal)
+            .await
+            .map_err(RevealError::message),
+        Some(Err(SavedPresence::Missing)) => Err(REVEAL_MISSING.into()),
+        Some(Err(SavedPresence::Replaced)) => Err(REVEAL_REPLACED.into()),
+        Some(Err(SavedPresence::Ours | SavedPresence::Unknown)) | None => {
+            Err(REVEAL_UNCHECKED.into())
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SavedRevealPorts for ActorSavedCheck<'_> {
+    async fn locate(
+        &self,
+        journal: ExportJournal,
+    ) -> Result<Result<PathBuf, SavedPresence>, String> {
+        let Ok(slot) = check_slots().acquire_owned().await else {
+            return Ok(Err(SavedPresence::Unknown));
+        };
+        blocking(move || {
+            let _held = slot;
+            saved_file_path(&journal)
+        })
+        .await
+    }
+    async fn reveal(
+        &self,
+        path: &Path,
+        intent: u64,
+        journal: &ExportJournal,
+    ) -> Result<(), RevealError> {
+        reveal_download_in_session(self, path, intent, journal, reveal_path).await
+    }
+}
+
+/// Final Show-in-folder admission, after read-only filesystem probing. UI commit
+/// excludes Lock and foreground Clear/retry while the actor record is re-read.
+/// Never hold Servers across actor I/O: its bounded event consumer needs that map.
+async fn reveal_download_in_session(
+    request: &ActorSavedCheck<'_>,
+    path: &Path,
+    intent: u64,
+    journal: &ExportJournal,
+    reveal: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), RevealError> {
+    let state = request.state;
+    let _session = require_ui_session_generation(state, request.generation)
+        .await
+        .map_err(|_| RevealError::Stale)?;
+    let rows = request
+        .actor
+        .downloads()
+        .await
+        .map_err(|_| RevealError::Stale)?;
+    if !rows
+        .iter()
+        .any(|row| row.id == request.id && row.state.intent == intent)
+    {
+        return Err(RevealError::Stale);
+    }
+    let saved = request
+        .actor
+        .download_export_state(request.id)
+        .await
+        .map_err(|_| RevealError::Stale)?;
+    if !matches!(saved, Some(ExportState::Published(ref now)) if now == journal) {
+        return Err(RevealError::Stale);
+    }
+    let servers = state.servers.lock().await;
+    if !servers.get(&request.server).is_some_and(|entry| {
+        entry.instance == request.instance && entry.actor.same_instance(request.actor)
+    }) {
+        return Err(RevealError::Stale);
+    }
+    state
+        .ui_session_gate()
+        .check_generation(request.generation)
+        .map_err(|_| RevealError::Stale)?;
+    // No await after the last generation/record checks. Lock cannot finish before
+    // the OS launch; neither private path nor its raw launch error leaves native.
+    reveal(path).map_err(|_| RevealError::Launch)
+}
+
+/// Show a Saved row's file in the system file manager (Transfers UX, PR #51), after the same
+/// read-only identity check as [`check_saved_download`]. Returns nothing on success and a fixed
+/// message when the file is missing, replaced or cannot be checked; never the path.
+#[tauri::command]
+pub(super) async fn reveal_saved_download(
+    state: State<'_, AppState>,
+    server: u64,
+    download: String,
+    expected_intent: String,
+) -> Result<(), String> {
+    let generation = keep_session::invocation_generation(&state).await?;
+    let id = id(&download)?;
+    let expected = intent(&expected_intent)?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let ports = ActorSavedCheck {
+        state: &state,
+        server,
+        instance,
+        generation,
+        actor: &actor,
+        id,
+    };
+    reveal_saved_sequence(&ports, expected).await
+}
+
+/// Blocking delete work for one proven partial; see [`CleanupPorts::remover`].
+pub(super) type Remover = Box<dyn FnOnce() -> Result<PartialRemoval, ExportError> + Send>;
+
+/// Run a delete on a blocking worker that owns a clone of `claim`. If the awaiting invocation is
+/// dropped (Lock, a closed window), the worker keeps the claim until the delete has finished, so
+/// no preserve decision can be made while the file may still disappear.
+async fn delete_owned(
+    ports: &impl CleanupPorts,
+    journal: ExportJournal,
+    published: bool,
+    claim: &CleanupClaim,
+) -> Result<Result<PartialRemoval, ExportError>, String> {
+    let work = ports.remover(journal, published)?;
+    let claim = claim.clone();
+    blocking(move || {
+        let _claim = claim;
+        work()
+    })
+    .await
+}
+
+/// Remove/Clear under a held [`CleanupClaim`]. With `keep_partial`, the record is released
+/// without deleting the file, after reassessing (under the claim) whether the file still exists:
+/// it never reports a file kept that an earlier removal already deleted.
+pub(super) async fn remove_sequence(
+    ports: &impl CleanupPorts,
+    claim: CleanupClaim,
+    keep_partial: bool,
+) -> Result<Option<&'static str>, String> {
+    let Some(saved) = ports.cancel().await? else {
+        return Ok(None);
+    };
+    let published = matches!(saved, ExportState::Published(_));
+    let journal = saved.journal().clone();
+    let saved_journal = journal.clone();
+    let notice = if keep_partial {
+        // Re-review 2 MEDIUM: the check only decides whether to say "already removed". A hung
+        // share (folder identity can block until the OS gives up, forever on a hard NFS mount), a
+        // busy slot or a failed check all mean "no promise", and Keep still releases the record.
+        // The worker of a check that times out keeps running read-only; it cannot delete.
+        let checked = tokio::select! {
+            biased;
+            presence = ports.presence(journal) => presence.ok(),
+            () = ports.wait(KEEP_PRESENCE_WAIT) => None,
+        };
+        match checked {
+            Some(PartialPresence::Gone) if published => Some(ALREADY_REMOVED_SAVED),
+            Some(PartialPresence::Gone) => Some(ALREADY_REMOVED),
+            Some(PartialPresence::Present | PartialPresence::Unknown) | None => None,
+        }
+    } else {
+        // Only an outcome that settles the question may forget the journal. A partial that cannot
+        // be checked right now stays tracked in Removing.
+        let (unreachable, retry) = if published {
+            (REMOVE_UNREACHABLE_SAVED, REMOVE_RETRY_SAVED)
+        } else {
+            (REMOVE_UNREACHABLE, REMOVE_RETRY)
+        };
+        match delete_owned(ports, journal, published, &claim).await? {
+            Ok(outcome) if outcome.settled() => outcome.notice(published),
+            Ok(PartialRemoval::FolderUnreachable) => return Err(unreachable.into()),
+            Ok(_) | Err(_) => return Err(retry.into()),
+        }
+    };
+    ports.finish_cleanup().await?;
+    // PR #56 (design review L5): only once the record is released (a Clear stuck in Removing
+    // returned above), and never for Keep, which keeps the file and so its entry.
+    if published && !keep_partial {
+        ports.forget_saved(saved_journal).await;
+    }
+    drop(claim);
+    Ok(notice)
 }
 
 /// Capacity follows the entire export, including its queued actor plaintext reply. Acquiring
@@ -150,5 +983,1672 @@ pub(super) fn export_slot() -> Result<Arc<tokio::sync::OwnedSemaphorePermit>, St
         .clone()
         .try_acquire_owned()
         .map(Arc::new)
-        .map_err(|_| "Downloads are busy. Try again shortly.".into())
+        .map_err(|_| "Too many files are being saved. Try again shortly.".into())
 }
+
+/// Run one external filesystem step off the async workers and the server actor.
+///
+/// Shared with the non-resumable fallback writer in `lib.rs` (`stream_download_staged`), whose
+/// staging, writes, sync, cleanup and publication must stay off the runtime for the same reason:
+/// a stalled share pins one blocking-pool thread, never a tokio worker that chat and sync need.
+pub(super) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| "The save worker stopped unexpectedly.".to_string())
+}
+
+/// Transient local destination failures (a lock held by another program, a flaky network share)
+/// have their own in-session bound, separate from the network execution allowance: at most
+/// three retries per chunk and eight per export session, with growing backoff. Exports never
+/// start without an explicit invocation, so any later retry is a user action.
+pub(super) const LOCAL_RETRIES_PER_CHUNK: u32 = 3;
+pub(super) const LOCAL_RETRIES_PER_SESSION: u32 = 8;
+pub(super) fn local_retry_delay(chunk_attempts: u32, session_retries: u32) -> Option<Duration> {
+    (chunk_attempts < LOCAL_RETRIES_PER_CHUNK && session_retries < LOCAL_RETRIES_PER_SESSION)
+        .then(|| Duration::from_millis(250u64 << chunk_attempts.min(4)))
+}
+
+const ALREADY_SAVED: &str =
+    "This file was already saved. Clear it or save another copy from Transfers.";
+const JOURNAL_EXISTS: &str =
+    "This file already has a partly saved copy. Choose Save new copy or Remove in Transfers first.";
+/// Returned when the user closes the "Save as" dialog without choosing. Nothing was started or
+/// recorded; the renderer treats exactly this text as a quiet cancel, not a failure.
+pub(super) const SAVE_AS_CANCELLED: &str = "Save as was cancelled.";
+/// A Save as invocation found its choice already consumed by another save of the same file.
+pub(super) const PLACE_CHANGED: &str =
+    "This file is already being saved somewhere else. Open Transfers to see it.";
+/// Appended when a save uses the non-resumable writer (no stable identity or hard links there).
+pub(super) const NOT_RESUMABLE_NOTE: &str =
+    "This location cannot keep a partly saved file, so an interrupted save there starts over.";
+
+/// Where one save writes. A chosen destination comes only from the native dialog through
+/// [`choose_destination`]; nothing from the renderer can construct one.
+pub(super) enum Destination {
+    /// The one-click default: the OS Downloads folder, resolved for this invocation.
+    Downloads(PathBuf),
+    /// A folder and name the user picked in the native "Save as" dialog, for this save only.
+    Chosen(Arc<ChosenDestination>),
+}
+
+/// Whether a finished group-file save sits directly in the resolved Downloads folder, for the
+/// result's `inDownloads` flag (picker re-review LOW 1b and its re-check). Where the file was
+/// actually written decides, not which destination was selected: a resumed or recovered journal
+/// keeps its own sealed folder, which may be a place chosen earlier, and a Save as into the
+/// Downloads folder itself is in Downloads. This drives notice wording only, never authority. It
+/// fails closed: no resolvable Downloads folder, or any path-form mismatch (case, links), means
+/// "not asserted", so the notice names no folder.
+pub(super) fn saved_in_downloads(downloads: Option<&Path>, saved: &Path) -> bool {
+    downloads.is_some_and(|folder| saved.parent() == Some(folder))
+}
+
+/// Where a fresh save of this Download goes. The record, not the invocation, decides: its
+/// remembered choice (this invocation's, an earlier one that survived a restart, or a newer Save
+/// as that replaced it), else Downloads. Begin later refuses any journal that does not match it.
+///
+/// - `planned`: the record's remembered choice as acquisition returned it; `Some(Err(_))` is a
+///   choice this platform cannot decode (the vault moved to another operating system), refused
+///   rather than redirected to Downloads.
+/// - `chose_now`: this invocation opened Save as. If the record no longer remembers any choice,
+///   another save already took it into a journal, and this Save as is refused with
+///   [`PLACE_CHANGED`], never silently redirected to Downloads.
+/// - `downloads`: resolved only when Downloads is actually the destination.
+pub(super) fn select_destination(
+    planned: Option<Result<Arc<ChosenDestination>, ChoiceRefusal>>,
+    chose_now: bool,
+    downloads: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<Destination, String> {
+    match (planned, chose_now) {
+        (Some(Ok(choice)), _) => Ok(Destination::Chosen(choice)),
+        (Some(Err(refusal)), _) => Err(refusal.to_string()),
+        (None, true) => Err(PLACE_CHANGED.into()),
+        (None, false) => downloads().map(Destination::Downloads),
+    }
+}
+
+/// The native "Save as" dialog behind a seam, so tests never open a real window. Returns the
+/// path the user picked, or `None` when they cancelled. `directory` is where the dialog starts;
+/// `None` (no Downloads folder could be resolved) lets the OS pick its own default, because Save
+/// as is the remedy for a Downloads folder that does not work and must not depend on one.
+#[async_trait::async_trait]
+pub(super) trait DestinationChooser: Send + Sync {
+    async fn choose(
+        &self,
+        directory: Option<PathBuf>,
+        suggested_name: String,
+    ) -> Result<Option<PathBuf>, String>;
+}
+
+/// Production chooser: `rfd`'s OS dialog, configured like tauri-plugin-dialog 2.7. It is built on
+/// the main thread (GTK and AppKit require that) through Tauri core's `run_on_main_thread`, then
+/// awaited on a dedicated thread; the async command only awaits a oneshot, so neither the async
+/// runtime nor the main thread blocks while the dialog is open.
+pub(super) struct NativeChooser(AppHandle);
+impl NativeChooser {
+    pub(super) fn new(app: AppHandle) -> Self {
+        Self(app)
+    }
+}
+#[async_trait::async_trait]
+impl DestinationChooser for NativeChooser {
+    async fn choose(
+        &self,
+        directory: Option<PathBuf>,
+        suggested_name: String,
+    ) -> Result<Option<PathBuf>, String> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let window = self.0.get_webview_window("main");
+        self.0
+            .run_on_main_thread(move || {
+                let mut dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Save as")
+                    .set_file_name(&suggested_name);
+                if let Some(directory) = &directory {
+                    dialog = dialog.set_directory(directory);
+                }
+                if let Some(window) = &window {
+                    dialog = dialog.set_parent(window);
+                }
+                let pending = dialog.save_file();
+                std::thread::spawn(move || {
+                    let picked = tauri::async_runtime::block_on(pending);
+                    let _ = sender.send(picked.map(|handle| handle.path().to_path_buf()));
+                });
+            })
+            .map_err(|_| "The Save as window could not be opened.".to_string())?;
+        // A dropped sender (the main-thread closure never ran, or the dialog task ended without
+        // a result) means no path was chosen: the same as Cancel, nothing started.
+        Ok(receiver.await.unwrap_or(None))
+    }
+}
+
+/// Process-wide: at most one "Save as" dialog at a time (picker review M4). A second request
+/// while one is open is refused instead of stacking unowned dialogs.
+static DIALOG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct DialogTurn;
+impl DialogTurn {
+    fn take() -> Option<Self> {
+        DIALOG_OPEN
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+            .then_some(Self)
+    }
+}
+impl Drop for DialogTurn {
+    fn drop(&mut self) {
+        DIALOG_OPEN.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+pub(super) const DIALOG_BUSY: &str = "A Save as window is already open.";
+/// The invocation that opened the dialog ended (Lock, unlock, server replacement) first.
+pub(super) const DIALOG_ABANDONED: &str = "The download is no longer active.";
+
+/// Ask the user where to save, starting in Downloads (or the OS default when `downloads` is
+/// `None`, picker review L6) with the sanitized file name. `Ok(None)` means cancelled. Whatever
+/// the dialog returns is validated before use: absolute path, usable name, an existing parent
+/// directory whose identity is captured, and no existing file or partial at that name (an
+/// existing file is refused and left untouched even if the dialog already asked to replace it).
+///
+/// The one-dialog turn is an RAII guard held only while the chooser runs: it is released when the
+/// dialog answers, when the chooser fails, and when the awaiting invocation is dropped. A dialog
+/// whose answer never comes (for example a GTK dialog future that never completes) would otherwise
+/// hold the turn for the life of the process, because Tauri does not drop a running command. So
+/// the wait also ends when `cancelled` resolves (production: the invocation's origin, cancelled by
+/// Lock, unlock or a server replacement), which releases the turn; a still-open OS window is then
+/// orphaned and its answer discarded (re-review 2 residual).
+///
+/// Second review R2-M2: validation reads the chosen folder (its identity and the names in it) and
+/// can stall on a dead share. It used to run while the turn was still held and without watching
+/// `cancelled`, so one stalled check refused every later Save as until the filesystem answered.
+/// Now the turn ends with the dialog, validation runs on the blocking pool while `cancelled` is
+/// still observed, and a cancelled invocation stops waiting at once; its late result goes nowhere.
+/// The worker keeps one slot of a small process-wide pool until the filesystem answers, so stalled
+/// checks stay bounded; with every slot held, a new Save as is refused before any dialog opens.
+pub(super) async fn choose_destination(
+    chooser: &dyn DestinationChooser,
+    downloads: Option<PathBuf>,
+    name: &str,
+    cancelled: impl Future<Output = ()>,
+) -> Result<Option<ChosenDestination>, String> {
+    choose_destination_with(
+        validation_slots(),
+        chooser,
+        downloads,
+        name,
+        cancelled,
+        |picked| ChosenDestination::validate(&picked),
+    )
+    .await
+}
+
+/// Bound on Save as validation workers that may still be waiting on a stalled folder after their
+/// invocation stopped waiting for them (R2-M2).
+fn validation_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+}
+pub(super) const VALIDATION_BUSY: &str =
+    "Earlier Save as choices are still being checked. Try again shortly.";
+
+/// [`choose_destination`] with the validation pool and the validation itself as seams, so a test
+/// can hold a check behind a barrier and own its pool.
+pub(super) async fn choose_destination_with(
+    slots: Arc<tokio::sync::Semaphore>,
+    chooser: &dyn DestinationChooser,
+    downloads: Option<PathBuf>,
+    name: &str,
+    cancelled: impl Future<Output = ()>,
+    validate: impl FnOnce(PathBuf) -> Result<ChosenDestination, ChoiceRefusal> + Send + 'static,
+) -> Result<Option<ChosenDestination>, String> {
+    // Taken before the dialog, so the user is never asked for a place that cannot be checked.
+    let slot = slots
+        .try_acquire_owned()
+        .map_err(|_| VALIDATION_BUSY.to_string())?;
+    tokio::pin!(cancelled);
+    let picked = {
+        let _turn = DialogTurn::take().ok_or(DIALOG_BUSY)?;
+        // The suggestion is a peer-chosen name. The Windows file dialog expands `%VAR%` in its
+        // name box when the user presses Save, so "%APPDATA%_x" would turn into a path elsewhere
+        // that the user never saw or typed. A suggestion never carries `%` (picker review
+        // residual).
+        let suggested = safe_download_name(name).replace('%', "_");
+        // Cancellation is polled first (re-review 3 LOW 3): `NativeChooser` schedules the OS
+        // dialog on its first poll, so an invocation already cancelled must never reach it, or it
+        // would open an orphan window.
+        let answer = tokio::select! {
+            biased;
+            () = &mut cancelled => return Err(DIALOG_ABANDONED.into()),
+            answer = chooser.choose(downloads, suggested) => answer?,
+        };
+        match answer {
+            Some(picked) => picked,
+            None => return Ok(None),
+        }
+        // The turn ends here, with the dialog (R2-M2).
+    };
+    let validation = blocking(move || {
+        let _slot = slot;
+        validate(picked)
+    });
+    tokio::select! {
+        biased;
+        () = &mut cancelled => Err(DIALOG_ABANDONED.into()),
+        validated = validation => validated?.map(Some).map_err(|refusal| refusal.to_string()),
+    }
+}
+
+/// One chunk through `step` with the bounded local retry policy. `live` (original invocation and
+/// export lease) is checked before EVERY attempt, including after each backoff, so a session
+/// retired by Lock, Pause, Remove or a replacement never writes plaintext again. `step` moves the
+/// subject into a blocking worker and back; `Err` means that worker died.
+pub(super) async fn accept_with_retries<T, Step, StepFut, Sleep, SleepFut>(
+    mut subject: T,
+    mut step: Step,
+    live: impl Fn() -> bool,
+    sleep: Sleep,
+    session_retries: &mut u32,
+) -> Result<(T, Result<ExportProgress, ExportError>), String>
+where
+    Step: FnMut(T) -> StepFut,
+    StepFut: Future<Output = Result<(T, Result<ExportProgress, ExportError>), String>>,
+    Sleep: Fn(Duration) -> SleepFut,
+    SleepFut: Future<Output = ()>,
+{
+    let mut attempts = 0;
+    loop {
+        if !live() {
+            return Ok((subject, Err(ExportError::Inactive)));
+        }
+        let (returned, outcome) = step(subject).await?;
+        subject = returned;
+        match outcome {
+            Err(ExportError::Local {
+                retryable: true,
+                reason,
+            }) => match local_retry_delay(attempts, *session_retries) {
+                Some(delay) => {
+                    attempts += 1;
+                    *session_retries += 1;
+                    sleep(delay).await;
+                }
+                None => {
+                    let error = ExportError::Local {
+                        retryable: false,
+                        reason,
+                    };
+                    return Ok((subject, Err(error)));
+                }
+            },
+            other => return Ok((subject, other)),
+        }
+    }
+}
+
+/// Result of checking a saved journal before an explicit Resume spends allowance re-verifying
+/// the encrypted copy.
+pub(super) enum Preflight {
+    Continue,
+    /// The final name already holds our file (crash after the link), its content was verified
+    /// read-only against the saved plan, and Published is recorded. The preflight observation
+    /// still fences the response (review U-M4). The journal is the recovered save's, for its
+    /// saved-files list entry (PR #56).
+    Saved(PathBuf, Box<DownloadPreflight>, Box<ExportJournal>),
+}
+
+/// Destination preflight for Resume. Every effect is fenced by one [`DownloadPreflight`]
+/// observation (review U-M3): a probe released after freeze/thaw, Lock, remount or a newer
+/// Resume records nothing. A final name holding our identity is recorded as Published only after
+/// read-only verification against the saved plan (review U-M2).
+pub(super) async fn resume_preflight(
+    actor: &ServerActor,
+    id: DownloadId,
+    origin: &RequestCancellation,
+    check_plan: bool,
+) -> Result<Preflight, String> {
+    let preflight = actor.download_preflight(id, origin.clone()).await?;
+    let journal = match preflight.state() {
+        None => {
+            // A remembered choice is the destination; spare a doomed re-verification. Skipped
+            // when this invocation's own Save as choice will replace it (`check_plan` false).
+            if check_plan {
+                plan_preflight(preflight.planned()).await?;
+            }
+            return Ok(Preflight::Continue);
+        }
+        Some(ExportState::Published(_)) => return Err(ALREADY_SAVED.into()),
+        Some(ExportState::Writing(journal)) => journal.clone(),
+    };
+    let probe = journal.clone();
+    match blocking(move || ExportFile::probe(&probe)).await? {
+        ExportProbe::Ready => Ok(Preflight::Continue),
+        ExportProbe::Published(candidate) => {
+            // Without a decodable saved manifest, leave it to the reopen after re-verification,
+            // which verifies against the acquired manifest.
+            let Some(plan) = preflight.plan().cloned() else {
+                return Ok(Preflight::Continue);
+            };
+            match blocking(move || candidate.verify(&plan)).await? {
+                Ok(path) => {
+                    // PR51 M2: the interrupted session's link may not be durable yet; flush the
+                    // folder (best effort, on the pool) before Published is recorded.
+                    let flushed = journal.clone();
+                    let _ = blocking(move || flush_destination(&flushed)).await;
+                    let recovered = Box::new(journal.clone());
+                    actor
+                        .download_export_edge(
+                            preflight.clone(),
+                            journal,
+                            DownloadExportEdge::RecoverPublished,
+                            origin.clone(),
+                        )
+                        .await
+                        .map_err(user_message)?;
+                    Ok(Preflight::Saved(path, Box::new(preflight), recovered))
+                }
+                Err(ExportError::Halted(halt)) => {
+                    Err(record_preflight_halt(actor, &preflight, journal, halt, origin).await)
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        ExportProbe::Halt(halt) => {
+            Err(record_preflight_halt(actor, &preflight, journal, halt, origin).await)
+        }
+        // Review L5: the probe's text is already a complete message; never prefix it again.
+        ExportProbe::Local(reason) => Err(reason),
+    }
+}
+
+/// Re-review 2 LOW 3: check a remembered "Save as" choice read-only, on the blocking pool, before
+/// an explicit Resume spends allowance re-verifying the encrypted copy. An unplugged, swapped or
+/// occupied chosen place is refused here with the same message creation would give, so repeated
+/// "Save to chosen place" clicks cannot exhaust the allowance. No choice: nothing to check.
+pub(super) async fn plan_preflight(
+    planned: Option<Result<Arc<ChosenDestination>, ChoiceRefusal>>,
+) -> Result<(), String> {
+    match planned {
+        None => Ok(()),
+        Some(Err(refusal)) => Err(refusal.to_string()),
+        Some(Ok(choice)) => blocking(move || choice.preflight())
+            .await?
+            .map_err(|refusal| refusal.to_string()),
+    }
+}
+
+/// Review L5: storage refusals reach the actor boundary as terse internal texts. Show the user
+/// what they mean instead.
+pub(super) fn user_message(error: String) -> String {
+    let malformed = catcoms_storage::StorageError::Malformed.to_string();
+    if error == malformed {
+        STALE_DOWNLOAD.to_string()
+    } else if let Some(reason) = error.strip_prefix("io error: ") {
+        reason.to_string()
+    } else {
+        error
+    }
+}
+
+/// Finish a save the preflight recovered (crash after the link): inspect and reveal the verified
+/// file, clear the record, and return the path only if the original invocation, UI session and
+/// the observed actor/Root generation are all still current AFTER that cleanup (review U-M4).
+/// A cleanup failure in a live session is reported as a warning on the success, never discarded.
+pub(super) async fn finish_recovered_save<A, R, F>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    path: &Path,
+    allowed: A,
+    reveal: R,
+    cleanup: F,
+) -> Result<SavedFileResult, String>
+where
+    A: Fn() -> bool,
+    R: FnOnce(&Path) -> Result<(), String>,
+    F: Future<Output = Result<(), String>>,
+{
+    let saved = finish_saved_read_if(
+        state,
+        generation,
+        origin,
+        path,
+        "application/octet-stream",
+        inspect_published,
+        reveal,
+        || !origin.is_cancelled() && allowed(),
+    )
+    .await?;
+    finish_download_response(state, generation, origin, saved, allowed, cleanup).await
+}
+
+/// Shown with a successful save whose temporary staging name could not be removed (review L3).
+/// Said only when our staging name could not be checked or deleted right now (review M-5), the one
+/// case in which a later Clear can still remove it.
+pub(super) const STAGING_LEFT: &str = "A temporary second name for the saved file could not be removed yet. Clear this file in Transfers to remove it.";
+
+/// Shown when Save new copy goes ahead although the old partial could not be reached.
+const OLD_PARTIAL_UNREACHABLE: &str =
+    "The folder with the old partly saved file is unavailable, so that file was left in place.";
+/// The same for Save another copy of a saved row (combined review LOW 1): the earlier save's
+/// files are its saved file and possibly a temporary copy, never "a partly saved file".
+const OLD_SAVED_UNREACHABLE: &str =
+    "The folder of the earlier saved copy is unavailable, so its files there were left in place.";
+
+/// "Save new copy" / "Save another copy": remove our proven partial (never the final name), then
+/// forget the journal. Returns the intent to use next and, when a file of the old save stays on
+/// disk, the notice to attach to the new save's result.
+pub(super) async fn abandon_partial(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    generation: u64,
+    actor: &ServerActor,
+    id: DownloadId,
+    expected_intent: u64,
+) -> Result<(u64, Option<&'static str>), String> {
+    let claim = CleanupClaim::acquire(server, id)?;
+    let ports = ActorCleanup {
+        state,
+        server,
+        instance,
+        generation,
+        actor,
+        id,
+        // Save another copy keeps the earlier saved file on disk, so it stays listed.
+        forget_saved: false,
+    };
+    abandon_sequence(&ports, claim, expected_intent).await
+}
+
+/// Save new copy under a held [`CleanupClaim`] (review U-H1). The intent CAS and the retirement
+/// of every observer of the old journal happen in one actor step BEFORE the external delete, so
+/// a delayed click, a concurrent Resume or a live writer of the old journal cannot act on it
+/// while it is being deleted. The journal stays durable until that delete is settled; only then
+/// is it forgotten. A failed delete leaves the journal (with its new intent) naming the partial.
+pub(super) async fn abandon_sequence(
+    ports: &impl CleanupPorts,
+    claim: CleanupClaim,
+    expected_intent: u64,
+) -> Result<(u64, Option<&'static str>), String> {
+    if ports.export_state().await?.is_none() {
+        return Ok((expected_intent, None));
+    }
+    let retired = ports.retire(expected_intent).await?;
+    // Re-read under the new intent: the journal being deleted is the one just retired, and
+    // whether it was already Published comes from this same read (combined review LOW 2: a live
+    // writer can record Published between the first read and the retire, and a stale "not
+    // published" would delete a staging name without first proving the final name ours).
+    let Some(saved) = ports.export_state().await? else {
+        return Err(STALE_DOWNLOAD.into());
+    };
+    let published = matches!(saved, ExportState::Published(_));
+    let journal = saved.journal().clone();
+    // A folder that cannot be reached is usually why the user wants a new copy; the old partial
+    // then stays wherever it is, and the user is told. A reachable partial that cannot be checked
+    // is not forgotten.
+    let notice =
+        match delete_owned(ports, journal, published, &claim).await? {
+            Ok(PartialRemoval::FolderUnreachable) if published => Some(OLD_SAVED_UNREACHABLE),
+            Ok(PartialRemoval::FolderUnreachable) => Some(OLD_PARTIAL_UNREACHABLE),
+            Ok(outcome) if outcome.settled() => outcome.notice(published),
+            Ok(_) | Err(_) => return Err(
+                "The partly saved file could not be removed. Close any app using it and try again."
+                    .into(),
+            ),
+        };
+    let intent = ports.abandon(retired).await?;
+    drop(claim);
+    Ok((intent, notice))
+}
+
+/// Add one sentence to a save result's warning, keeping any warning already there.
+pub(super) fn append_warning(saved: &mut SavedFileResult, note: &str) {
+    saved.warning = Some(match saved.warning.take() {
+        Some(warning) => format!("{warning} {note}"),
+        None => note.to_string(),
+    });
+}
+
+/// Second review R2-M3: once Save new copy has abandoned the old journal, the notice about a file
+/// that save left on disk (for example an old partial on an unplugged drive) exists nowhere else.
+/// So every result of the replacement carries it: a warning on success, and an extra sentence on
+/// every failure after the abandon, so a replacement that then fails (a FAT drive refused at the
+/// link probe, Lock, a lost member) never hides it. The result has already passed (or failed) its
+/// own session fences; this adds text only.
+pub(super) fn report_left_behind(
+    result: Result<SavedFileResult, String>,
+    left_behind: Option<&'static str>,
+) -> Result<SavedFileResult, String> {
+    match (result, left_behind) {
+        (Ok(mut saved), Some(note)) => {
+            append_warning(&mut saved, note);
+            Ok(saved)
+        }
+        (Ok(saved), None) => Ok(saved),
+        (Err(error), left_behind) => Err(with_left_behind(error, left_behind)),
+    }
+}
+
+/// The error text of [`report_left_behind`].
+fn with_left_behind(error: String, left_behind: Option<&'static str>) -> String {
+    match left_behind {
+        Some(note) => format!("{error} {note}"),
+        None => error,
+    }
+}
+
+/// What an explicit Resume settled before acquisition.
+pub(super) struct Prepared {
+    /// The preflight found the file already saved (crash after the link): the save is finished.
+    pub(super) saved: Option<SavedFileResult>,
+    /// A file of an abandoned earlier save stays on disk; append this to the result.
+    pub(super) notice: Option<&'static str>,
+    /// PR #56: the saved-files list could not record the recovered save; append this too.
+    pub(super) unlisted: Option<&'static str>,
+}
+
+/// Everything an explicit Resume does before acquisition: optional "Save new copy", the
+/// destination preflight, then the intent CAS that clears Pause and any halt. Returns a finished
+/// result when the preflight found the file already saved (crash after the link); that record is
+/// then cleared, removing only our staging name.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn prepare_resume(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    generation: u64,
+    actor: &ServerActor,
+    origin: &RequestCancellation,
+    id: DownloadId,
+    expected_intent: u64,
+    fresh_copy: bool,
+    chosen: bool,
+) -> Result<Prepared, String> {
+    // A chosen destination always starts a new file. Continuing an existing partial at its own
+    // place is plain Resume; redirecting it requires the explicit Save new copy semantics.
+    if chosen && !fresh_copy && actor.download_export_state(id).await?.is_some() {
+        return Err(JOURNAL_EXISTS.into());
+    }
+    let mut notice = None;
+    let intent = if fresh_copy {
+        let (intent, left) = abandon_partial(
+            state,
+            server,
+            instance,
+            generation,
+            actor,
+            id,
+            expected_intent,
+        )
+        .await?;
+        notice = left;
+        intent
+    } else {
+        // Re-review 3 MEDIUM: the destination preflight runs WITHOUT the cleanup claim. Its reads
+        // (folder identity, the read-only verify of a saved file) can block until the OS gives
+        // up, forever on a hard NFS mount, and holding the claim there would make Remove, Save
+        // new copy and Keep report "still being removed" for as long as it hangs. Its only
+        // effects (recording a halt, recovering a publication) are fenced by its observation,
+        // which Remove's Deleting step and Save new copy's retire both invalidate, so a
+        // preflight that started before a cleanup cannot act on that journal afterwards. The
+        // claim is taken only around the intent CAS (`plain_resume_commit` below).
+        if let Preflight::Saved(path, preflight, recovered) =
+            resume_preflight(actor, id, origin, !chosen).await?
+        {
+            // PR #56: a recovered publication is a publication, so it is listed, before anything
+            // else can stop this invocation. It never replaces an older copy (design section 5).
+            let unlisted = match preflight.plan() {
+                Some(plan) => crate::saved_files::record_save(
+                    state,
+                    server,
+                    instance,
+                    crate::saved_files::PublishedSave {
+                        cid: plan.cid(),
+                        size: plan.total(),
+                        location: catcoms_storage::kept::SavedLocation::from_journal(&recovered),
+                    },
+                    None,
+                )
+                .await
+                .note(),
+                None => Some(crate::saved_files::NOT_RECORDED),
+            };
+            // Final review L1: clear the recovered record only while it is still the one this
+            // preflight recovered (see `recovered_cleanup`).
+            let cleanup = remove_recovered(state, server, instance, generation, actor, id, || {
+                preflight.is_current()
+            });
+            let saved = finish_recovered_save(
+                state,
+                generation,
+                origin,
+                &path,
+                || preflight.invocation_current(),
+                reveal_path,
+                cleanup,
+            )
+            .await?;
+            return Ok(Prepared {
+                saved: Some(saved),
+                notice: None,
+                unlisted,
+            });
+        }
+        expected_intent
+    };
+    let resume = commit_kept_command(
+        state,
+        server,
+        instance,
+        generation,
+        actor.set_download_paused(id, intent, false),
+    );
+    if fresh_copy {
+        // Save new copy already held the claim through its own retire and delete. The old
+        // journal is already abandoned here, so a failure still reports what it left (R2-M3).
+        resume
+            .await
+            .map_err(|error| with_left_behind(error, notice))?;
+    } else {
+        plain_resume_commit(server, id, resume).await?;
+    }
+    Ok(Prepared {
+        saved: None,
+        notice,
+        unlisted: None,
+    })
+}
+
+/// Clear the record of a save the Resume preflight recovered (crash after the link), but only
+/// while it is still that record (final review L1).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn remove_recovered(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    generation: u64,
+    actor: &ServerActor,
+    id: DownloadId,
+    still_current: impl Fn() -> bool,
+) -> Result<(), String> {
+    let ports = ActorCleanup {
+        state,
+        server,
+        instance,
+        generation,
+        actor,
+        id,
+        // The recovered save was just recorded in the saved-files list; releasing its record is
+        // tidying up, not the user's Clear, so its entry stays.
+        forget_saved: false,
+    };
+    recovered_cleanup(&ports, CleanupClaim::acquire(server, id), still_current).await
+}
+
+/// The conditional cleanup behind [`remove_recovered`], over [`CleanupPorts`].
+///
+/// A plain Remove here released whatever record held this Download ID with no compare-and-swap.
+/// Between the preflight's RecoverPublished and this cleanup, a Save new copy from another window
+/// could retire and forget that published journal and start re-saving the same record; the late
+/// Remove then released it, cancelling that save's active run and deleting its encrypted copy, and
+/// the recovered save reported a false "could not be removed" warning. Now:
+/// - another cleanup holding the claim (a Remove, or a Save new copy in progress) owns the record:
+///   leave it to that cleanup, without a warning;
+/// - under our own claim nothing else can retire or remove the record, and the preflight's
+///   observation (`still_current`) proves it is still the one recovered: Save new copy's retire,
+///   Remove's Deleting step and any re-verification all invalidate it. If it moved on, this is a
+///   no-op without a warning; the user already has the recovered file.
+pub(super) async fn recovered_cleanup(
+    ports: &impl CleanupPorts,
+    claim: Result<CleanupClaim, String>,
+    still_current: impl Fn() -> bool,
+) -> Result<(), String> {
+    let Ok(claim) = claim else {
+        return Ok(());
+    };
+    if !still_current() {
+        return Ok(());
+    }
+    remove_sequence(ports, claim, false).await.map(|_| ())
+}
+
+/// The intent CAS of a plain Resume, under the process-wide cleanup claim (re-review 2 LOW 2,
+/// narrowed by re-review 3 MEDIUM). Busy while Remove, Keep or Save new copy owns the Download:
+/// after Save new copy has retired the journal, a Resume carrying the new intent (a second window,
+/// or a list refreshed meanwhile) must not clear Pause and go on to reopen and lock the partial
+/// its delete worker is about to remove. Only this short actor step holds the claim; nothing that
+/// reads the destination does.
+pub(super) async fn plain_resume_commit(
+    server: u64,
+    id: DownloadId,
+    resume: impl Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    let _claim = CleanupClaim::acquire(server, id)?;
+    resume.await
+}
+
+/// Record a halt the preflight found, fenced by its observation. Best effort: a refusal means
+/// something newer (a remount, a newer Resume, Lock) already moved on.
+async fn record_preflight_halt(
+    actor: &ServerActor,
+    preflight: &DownloadPreflight,
+    journal: ExportJournal,
+    halt: ExportHalt,
+    origin: &RequestCancellation,
+) -> String {
+    if journal.halt() != Some(halt) {
+        let _ = actor
+            .download_export_edge(
+                preflight.clone(),
+                journal,
+                DownloadExportEdge::Halt(halt),
+                origin.clone(),
+            )
+            .await;
+    }
+    ExportError::Halted(halt).to_string()
+}
+
+/// Native context of one save invocation.
+pub(super) struct ExportContext<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) app: &'a AppHandle,
+    pub(super) actor: &'a ServerActor,
+    pub(super) server: u64,
+    pub(super) instance: u64,
+    pub(super) generation: u64,
+    pub(super) origin: &'a RequestCancellation,
+    pub(super) cid: &'a str,
+    pub(super) operation: Option<&'a str>,
+}
+/// What one save's journaled export needs from outside the sequence, behind a seam so the real
+/// sequence runs in tests across its awaits with real files. Production is [`ActorExport`].
+#[async_trait::async_trait]
+pub(super) trait ExportPorts: Send + Sync {
+    /// The record's saved export state now.
+    async fn export_state(&self) -> Result<Option<ExportState>, String>;
+    /// One lease-fenced journal transition on the actor.
+    async fn transition(&self, transition: DownloadExportTransition) -> Result<(), String>;
+    /// Plaintext of chunk `index`, regenerated from the retained encrypted copy.
+    async fn chunk(&self, index: usize) -> Result<Vec<u8>, String>;
+    /// The original invocation and the export lease are still current.
+    fn live(&self) -> bool;
+    /// The same check as an owned value a blocking worker can carry and evaluate when it starts.
+    fn liveness(&self) -> Liveness;
+    /// Take the session commit guard (Pause, Remove and Lock take it too) and confirm the
+    /// invocation, lease and registry entry under it. Held until the returned value drops.
+    async fn commit(&self) -> Result<Box<dyn Send + '_>, String>;
+    fn progress(&self, progress: ExportProgress);
+    /// Sanctioned-clock backoff between bounded local retries.
+    async fn backoff(&self, delay: Duration);
+    /// Best-effort flush of the destination folder after the link and before Published (PR51
+    /// M2). Production runs it on the blocking pool; a refusal does not fail the save.
+    async fn flush(&self, journal: ExportJournal);
+    /// The export capacity this save holds, kept alive by a session closed on the blocking pool
+    /// until that close finishes (R2-L1). Production: the `DownloadReady`'s custody.
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive>;
+}
+
+/// An owned liveness check for blocking workers (see [`ExportPorts::liveness`]).
+pub(super) type Liveness = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Production export effects for one save invocation and its acquired copy.
+pub(super) struct ActorExport<'a> {
+    pub(super) ctx: &'a ExportContext<'a>,
+    pub(super) ready: &'a DownloadReady,
+}
+#[async_trait::async_trait]
+impl ExportPorts for ActorExport<'_> {
+    async fn export_state(&self) -> Result<Option<ExportState>, String> {
+        self.ctx.actor.download_export_state(self.ready.id()).await
+    }
+    async fn transition(&self, transition: DownloadExportTransition) -> Result<(), String> {
+        self.ctx
+            .actor
+            .download_export_transition(self.ready.clone(), transition, self.ctx.origin.clone())
+            .await
+    }
+    async fn chunk(&self, index: usize) -> Result<Vec<u8>, String> {
+        Ok(self
+            .ctx
+            .actor
+            .read_download_chunk(self.ready.clone(), index, self.ctx.origin.clone())
+            .await?
+            .into_bytes())
+    }
+    fn live(&self) -> bool {
+        !self.ctx.origin.is_cancelled() && self.ready.is_current()
+    }
+    fn liveness(&self) -> Liveness {
+        let (origin, ready) = (self.ctx.origin.clone(), self.ready.clone());
+        Arc::new(move || !origin.is_cancelled() && ready.is_current())
+    }
+    async fn commit(&self) -> Result<Box<dyn Send + '_>, String> {
+        let commit = require_ui_session_generation(self.ctx.state, self.ctx.generation).await?;
+        let current_entry = self
+            .ctx
+            .state
+            .servers
+            .lock()
+            .await
+            .get(&self.ctx.server)
+            .is_some_and(|entry| entry.instance == self.ctx.instance);
+        if !self.live() || !current_entry {
+            return Err("The download is no longer active.".into());
+        }
+        Ok(Box::new(commit))
+    }
+    fn progress(&self, progress: ExportProgress) {
+        if !self.ready.is_current() {
+            return;
+        }
+        let ctx = self.ctx;
+        keep_session::publish_progress(ctx.origin, || {
+            let _ = ctx.app.emit(
+                "download-progress",
+                DownloadProgressEvt {
+                    server: ctx.server,
+                    cid: ctx.cid.to_owned(),
+                    cancellation: ctx.operation.map(str::to_owned),
+                    done: progress.done,
+                    total: progress.total,
+                    bytes_done: progress.bytes,
+                    bytes_total: self.ready.total_size(),
+                    network_bytes_done: 0,
+                    provider: None,
+                },
+            );
+        });
+    }
+    async fn backoff(&self, delay: Duration) {
+        SystemClock.sleep(delay).await;
+    }
+    async fn flush(&self, journal: ExportJournal) {
+        let _ = blocking(move || flush_destination(&journal)).await;
+    }
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        self.ready.export_custody()
+    }
+}
+
+/// Owns a value whose drop does destination I/O (an [`ExportFile`] closes its OS handle and
+/// releases its lock, which can stall on a dead share) on the async side of the export sequence.
+/// Whatever path drops it there, an early `?` return or an error, closes it on the blocking pool
+/// instead of a runtime worker (re-review 2 LOW 7). A value moved into a blocking step leaves
+/// with [`OnPool::take`] and comes back with [`OnPool::put`]; while it is inside that step the
+/// step owns it, so a dropped invocation also lets it close on the pool.
+///
+/// Second review R2-L1: a deferred close can outlive the invocation (an early error returns and
+/// drops the `DownloadReady` that holds the export permit while the close still waits on the
+/// destination). The export custody given to [`OnPool::with_custody`] therefore moves into the
+/// deferred disposal and is released only when the close has really finished, so no more than the
+/// export capacity of closes can pile up on a stalled destination.
+pub(super) struct OnPool<T: Send + 'static> {
+    value: Option<T>,
+    custody: Option<catcoms_rt::SharedRequestKeepalive>,
+}
+impl<T: Send + 'static> OnPool<T> {
+    /// Test-only: an `OnPool` with no export custody. Every production session carries the
+    /// custody of its save (R2-L1), so production code uses [`OnPool::with_custody`].
+    #[cfg(test)]
+    pub(super) fn new(value: T) -> Self {
+        Self::with_custody(value, None)
+    }
+    /// Like [`OnPool::new`], keeping `custody` (the export permit) alive until the value is
+    /// closed, wherever that happens.
+    pub(super) fn with_custody(
+        value: T,
+        custody: Option<catcoms_rt::SharedRequestKeepalive>,
+    ) -> Self {
+        Self {
+            value: Some(value),
+            custody,
+        }
+    }
+    /// Move the value out for one blocking step. Only called between steps, when it is present.
+    pub(super) fn take(&mut self) -> T {
+        self.value
+            .take()
+            .expect("the session value is present between steps")
+    }
+    pub(super) fn put(&mut self, value: T) {
+        self.value = Some(value);
+    }
+    /// Hand the value (if a step has not consumed it) to a caller that closes it on the pool
+    /// itself, for example together with removing the file it names. That caller awaits the
+    /// close while the invocation (and its custody) is still alive.
+    pub(super) fn release(&mut self) -> Option<T> {
+        self.value.take()
+    }
+    fn get(&self) -> &T {
+        self.value
+            .as_ref()
+            .expect("the session value is present between steps")
+    }
+    fn get_mut(&mut self) -> &mut T {
+        self.value
+            .as_mut()
+            .expect("the session value is present between steps")
+    }
+}
+impl<T: Send + 'static> Drop for OnPool<T> {
+    fn drop(&mut self) {
+        let custody = self.custody.take();
+        if let Some(value) = self.value.take() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    // Fire and forget: closing needs no answer. If the runtime is shutting down
+                    // the closure (and the value) is dropped where it stands. The custody is
+                    // released only after the close (R2-L1).
+                    drop(runtime.spawn_blocking(move || {
+                        drop(value);
+                        drop(custody);
+                    }));
+                }
+                Err(_) => drop(value),
+            }
+        }
+    }
+}
+
+/// Persist this session's durable progress through the checkpoint CAS.
+async fn checkpoint(ports: &impl ExportPorts, file: &mut OnPool<ExportFile>) -> Result<(), String> {
+    let mut session = file.take();
+    let (session, journal) = blocking(move || {
+        let journal = session.checkpoint();
+        (session, journal)
+    })
+    .await?;
+    file.put(session);
+    let journal = journal.map_err(|error| error.to_string())?;
+    ports
+        .transition(DownloadExportTransition::Checkpoint {
+            expected: file.get().journal().clone(),
+            next: journal.clone(),
+        })
+        .await?;
+    file.get_mut().checkpointed(journal);
+    Ok(())
+}
+
+/// Record a halt found during the session, fenced by its export lease. Best effort: a refusal
+/// means something newer already changed the record.
+async fn record_halt(ports: &impl ExportPorts, journal: ExportJournal, halt: ExportHalt) -> String {
+    if journal.halt() != Some(halt) {
+        let _ = ports
+            .transition(DownloadExportTransition::Halt {
+                expected: journal,
+                halt,
+            })
+            .await;
+    }
+    ExportError::Halted(halt).to_string()
+}
+
+/// End a session on an error. A halt is persisted. Only a transient local failure (after its
+/// bounded retries) checkpoints what is durable. Review L4: a verification failure (a CID or
+/// layout mismatch, `Storage`), a conflict, disk full or an inactive session never advance the
+/// checkpoint, so a mismatched stream can never reach the every-chunk journal that recovery
+/// would accept.
+async fn stop(
+    ports: &impl ExportPorts,
+    mut file: OnPool<ExportFile>,
+    error: ExportError,
+) -> String {
+    match error {
+        ExportError::Halted(halt) => record_halt(ports, file.get().journal().clone(), halt).await,
+        ExportError::Local { .. } => {
+            let message = error.to_string();
+            let _ = checkpoint(ports, &mut file).await;
+            message
+        }
+        other => other.to_string(),
+    }
+}
+
+/// A completed journaled save.
+pub(super) struct Exported {
+    pub(super) path: PathBuf,
+    /// The caller may release the record. Review L3: when false (our staging name could not be
+    /// checked or deleted right now), the caller keeps the Published record and says so with
+    /// [`STAGING_LEFT`], so the leftover second plaintext name stays visible until Clear removes
+    /// it.
+    pub(super) staging_cleared: bool,
+    /// Review M-5: what to tell the user when the record is released but a file stays (a folder
+    /// other accounts can modify, where Clear could not remove it either, or a name that no longer
+    /// holds our file).
+    pub(super) staging_note: Option<&'static str>,
+    /// PR #56: where the saved file is, with its identities, for the saved-files list.
+    pub(super) location: catcoms_storage::kept::SavedLocation,
+    /// The reopen found an interrupted session's publication instead of publishing now. Listed,
+    /// but never a replace (design section 5).
+    pub(super) recovered: bool,
+    /// The name a fresh one-click save into Downloads asked for (before numbering), which lets
+    /// "Replace my older saved copy" give the new copy the old copy's name. `None` for a name
+    /// chosen in Save as and for any reopened journal, whose name may be one the user typed
+    /// (adversarial review M2: a Save as journal resumed by a plain Resume is never renamed).
+    pub(super) started_from: Option<String>,
+}
+
+/// Review M-5: map what happened to our staging name after publication to (may the record be
+/// released, what to tell the user). Only a name that could not be checked or deleted right now
+/// keeps the record, because only then can a later Clear still remove it; a folder other accounts
+/// may change (`SharedFolder`, where Clear would not delete it either) releases the record with
+/// the saved-row notice about the temporary copy.
+///
+/// It takes the blocking worker's own result too (combined review LOW 4): Published is already
+/// recorded here, so a worker that panicked must not turn the committed save into an error; it
+/// keeps the record (a later Clear settles the staging name) like any outcome that could not be
+/// checked.
+fn after_publication(
+    worker: Result<Result<PartialRemoval, catcoms_storage::kept::ExportError>, String>,
+) -> (bool, Option<&'static str>) {
+    match worker {
+        Ok(Ok(PartialRemoval::Unchecked | PartialRemoval::FolderUnreachable))
+        | Ok(Err(_))
+        | Err(_) => (false, None),
+        Ok(Ok(outcome)) => (true, outcome.notice(true)),
+    }
+}
+
+/// Journaled export of a verified private copy. `Ok(None)` means a fresh save cannot be journaled
+/// on this destination and the caller keeps today's non-resumable writer; a save that already has
+/// a journal never falls back (storage also refuses to release a Writing journal that way).
+pub(super) async fn export_journaled(
+    ctx: &ExportContext<'_>,
+    ready: &DownloadReady,
+    destination: &Destination,
+    name: &str,
+) -> Result<Option<Exported>, String> {
+    let plan = ready.export_plan()?;
+    export_sequence(&ActorExport { ctx, ready }, plan, destination, name).await
+}
+
+/// The export sequence itself, over [`ExportPorts`].
+pub(super) async fn export_sequence(
+    ports: &impl ExportPorts,
+    plan: ExportPlan,
+    destination: &Destination,
+    name: &str,
+) -> Result<Option<Exported>, String> {
+    let base = safe_download_name(name);
+    let mut started_from = None;
+    let mut file = match ports.export_state().await? {
+        None => {
+            let plan = plan.clone();
+            let created = match destination {
+                Destination::Downloads(folder) => {
+                    started_from = Some(base.clone());
+                    let (folder, name) = (folder.clone(), base.clone());
+                    blocking(move || ExportFile::create(&folder, &name, plan, &mut OsCryptoRng))
+                        .await?
+                }
+                Destination::Chosen(choice) => {
+                    let choice = choice.clone();
+                    blocking(move || ExportFile::create_chosen(&choice, plan, &mut OsCryptoRng))
+                        .await?
+                }
+            };
+            let file = match created {
+                Ok(file) => file,
+                Err(ExportError::Unsupported) => return Ok(None),
+                Err(error) => return Err(error.to_string()),
+            };
+            let begun = ports
+                .transition(DownloadExportTransition::Begin {
+                    journal: file.journal().clone(),
+                    presence: file.presence(),
+                })
+                .await;
+            if let Err(error) = begun {
+                let _ = blocking(move || file.discard(&mut OsCryptoRng)).await;
+                return Err(user_message(error));
+            }
+            OnPool::with_custody(file, ports.custody())
+        }
+        Some(ExportState::Writing(_)) if matches!(destination, Destination::Chosen(_)) => {
+            // A chosen destination is only ever a new file; it never redirects an existing
+            // partial. prepare_resume forgets the old journal first when Save as means a new copy.
+            return Err(JOURNAL_EXISTS.into());
+        }
+        Some(ExportState::Writing(journal)) => {
+            let (saved, plan) = (journal.clone(), plan.clone());
+            match blocking(move || ExportFile::reopen(&saved, plan))
+                .await?
+                .map_err(|error| error.to_string())?
+            {
+                ExportReopen::Ready(file) => {
+                    let file = OnPool::with_custody(*file, ports.custody());
+                    ports
+                        .transition(DownloadExportTransition::Resume {
+                            journal,
+                            presence: file.get().presence(),
+                        })
+                        .await
+                        .map_err(user_message)?;
+                    file
+                }
+                // The reopen verified the content read-only against this manifest (review U-M2).
+                ExportReopen::Published(path) => {
+                    // PR51 M2: the final name an interrupted session linked may not be durable
+                    // yet; flush the folder before Published is recorded, as a fresh link does.
+                    ports.flush(journal.clone()).await;
+                    ports
+                        .transition(DownloadExportTransition::RecoverPublished {
+                            expected: journal.clone(),
+                        })
+                        .await
+                        .map_err(user_message)?;
+                    // The caller releases the record next; drop our second (staging) name first,
+                    // and keep the record if that cannot be settled (review L3, M-5).
+                    let location = catcoms_storage::kept::SavedLocation::from_journal(&journal);
+                    let (staging_cleared, staging_note) = after_publication(
+                        blocking(move || remove_partial(&journal, true, &mut OsCryptoRng)).await,
+                    );
+                    return Ok(Some(Exported {
+                        path,
+                        staging_cleared,
+                        staging_note,
+                        location,
+                        recovered: true,
+                        started_from: None,
+                    }));
+                }
+                ExportReopen::Halt(halt) => return Err(record_halt(ports, journal, halt).await),
+            }
+        }
+        Some(ExportState::Published(_)) => return Err(ALREADY_SAVED.into()),
+    };
+    ports.progress(file.get().progress());
+    let mut session_retries = 0;
+    while let Some(index) = file.get().next_index() {
+        let chunk = Arc::new(ports.chunk(index).await?);
+        // Liveness is checked before each dispatch AND again when the blocking worker actually
+        // starts: a step queued behind a busy blocking pool may begin after Lock, Pause or a
+        // replacement retired this session, and then it writes nothing. A step that has already
+        // started runs to completion (its write is fsynced and only the next checkpoint, which
+        // is lease-fenced, could ever describe it).
+        let liveness = ports.liveness();
+        let (returned, outcome) = accept_with_retries(
+            file.take(),
+            |mut file: ExportFile| {
+                let chunk = chunk.clone();
+                let liveness = liveness.clone();
+                async move {
+                    blocking(move || {
+                        if !liveness() {
+                            return (file, Err(ExportError::Inactive));
+                        }
+                        let outcome = file.accept(index, &chunk);
+                        (file, outcome)
+                    })
+                    .await
+                }
+            },
+            || ports.live(),
+            |delay| ports.backoff(delay),
+            &mut session_retries,
+        )
+        .await?;
+        file.put(returned);
+        let progress = match outcome {
+            Ok(progress) => progress,
+            Err(error) => return Err(stop(ports, file, error).await),
+        };
+        ports.progress(progress);
+        if progress.done % EXPORT_CHECKPOINT_CHUNKS == 0 && file.get().next_index().is_some() {
+            checkpoint(ports, &mut file).await?;
+        }
+    }
+    // Review U-L1: publication retries are charged to the same per-session budget as chunk
+    // retries and wait on the sanctioned clock, never a separate unpaced allowance.
+    let mut publication_attempts = 0;
+    let path = loop {
+        let mut session = file.take();
+        let (session, prepared) = blocking(move || {
+            let prepared = session.prepare_publication();
+            (session, prepared)
+        })
+        .await?;
+        file.put(session);
+        let (journal, already) = match prepared {
+            Ok(Publication::Ready(journal)) => (journal, None),
+            Ok(Publication::AlreadyPublished(journal, path)) => (journal, Some(path)),
+            Err(error) => return Err(stop(ports, file, error).await),
+        };
+        // The every-chunk checkpoint, including any new final name, is durable before linking.
+        if &journal != file.get().journal() {
+            ports
+                .transition(DownloadExportTransition::Checkpoint {
+                    expected: file.get().journal().clone(),
+                    next: journal.clone(),
+                })
+                .await
+                .map_err(user_message)?;
+            file.get_mut().checkpointed(journal);
+        }
+        let linked = {
+            // Guard: the staging recheck, the link and the final-name check. Pause, Remove and
+            // Lock take the same guard, so exactly one of them or the link wins.
+            let _commit = ports.commit().await?;
+            match already {
+                Some(path) => Ok(path),
+                None => {
+                    let mut session = file.take();
+                    let (session, linked) = blocking(move || {
+                        let linked = session.link();
+                        (session, linked)
+                    })
+                    .await?;
+                    file.put(session);
+                    linked
+                }
+            }
+        };
+        let linked = match linked {
+            Ok(path) => {
+                // PR51 M2: make the new name durable BEFORE recording Published, so an
+                // acknowledged save cannot lose its final name to a power failure that a later
+                // folder flush would have prevented. Outside the guard, so a slow flush cannot
+                // delay Lock (best effort: some network filesystems refuse folder flushes).
+                ports.flush(file.get().published_journal()).await;
+                // Second guard: Published. A Lock that wins the gap leaves Writing(all) with our
+                // final name linked: crash-table row 6, which the next Resume recovers.
+                let _commit = ports.commit().await?;
+                ports
+                    .transition(DownloadExportTransition::Publish {
+                        expected: file.get().published_journal(),
+                    })
+                    .await
+                    .map_err(user_message)?;
+                Ok(path)
+            }
+            Err(error) => Err(error),
+        };
+        match linked {
+            Ok(path) => break path,
+            Err(ExportError::Local {
+                retryable: true,
+                reason,
+            }) => match local_retry_delay(publication_attempts, session_retries) {
+                Some(delay) => {
+                    publication_attempts += 1;
+                    session_retries += 1;
+                    if !ports.live() {
+                        return Err("The download is no longer active.".into());
+                    }
+                    ports.backoff(delay).await;
+                }
+                None => {
+                    let error = ExportError::Local {
+                        retryable: false,
+                        reason,
+                    };
+                    return Err(stop(ports, file, error).await);
+                }
+            },
+            Err(error) => return Err(stop(ports, file, error).await),
+        }
+    };
+    // After the guard: removal of our staging name (verified, PR51 H1). The folder was flushed
+    // before Published; the removal flushes the folder itself on Unix.
+    let location =
+        catcoms_storage::kept::SavedLocation::from_journal(&file.get().published_journal());
+    let session = file.take();
+    let (staging_cleared, staging_note) =
+        after_publication(blocking(move || session.finish(&mut OsCryptoRng)).await);
+    Ok(Some(Exported {
+        path,
+        staging_cleared,
+        staging_note,
+        location,
+        recovered: false,
+        started_from,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catcoms_storage::kept::{KeepAllowance, KeepPlan, KeptTransfer};
+
+    fn download(
+        phase: KeepPhase,
+        export: ExportView,
+        edit: impl FnOnce(&mut KeptTransfer),
+        checked: bool,
+    ) -> DownloadStatus {
+        let mut state = KeptTransfer {
+            plan: KeepPlan {
+                cid: catcoms_storage::Cid::of(b"plaintext"),
+                version: [1; 32],
+                manifest: Vec::new(),
+                chunks: vec![
+                    (catcoms_storage::Cid::of(b"a"), 5),
+                    (catcoms_storage::Cid::of(b"b"), 5),
+                ],
+            },
+            listing: [0; 32],
+            transfer: [2; 32],
+            phase,
+            verified_chunks: 2,
+            running: false,
+            user_paused: false,
+            blocked: false,
+            intent: 3,
+            exhausted: false,
+            grant: 1,
+            remaining: KeepAllowance {
+                requests: 1,
+                pages: 1,
+                bytes: 1,
+                slices: 1,
+            },
+        };
+        edit(&mut state);
+        DownloadStatus {
+            id: DownloadId::from_bytes([2; 32]),
+            state,
+            checked,
+            export,
+            planned: false,
+            bytes: Some(catcoms_storage::kept::DownloadBytes {
+                received: 3_100_000,
+                saved: 1_000_000,
+                total: 12_400_000,
+            }),
+        }
+    }
+    #[test]
+    fn storage_refusals_become_user_messages_without_doubled_prefixes() {
+        // Review L5.
+        let malformed = catcoms_storage::StorageError::Malformed.to_string();
+        assert_eq!(user_message(malformed), STALE_DOWNLOAD);
+        assert_eq!(
+            user_message("io error: This file is already being saved. Try again shortly.".into()),
+            "This file is already being saved. Try again shortly."
+        );
+        assert_eq!(user_message("Server stopped".into()), "Server stopped");
+        let probe = ExportError::Local {
+            retryable: true,
+            reason: "busy".into(),
+        }
+        .to_string();
+        assert_eq!(probe.matches("failed").count(), 1, "{probe}");
+    }
+
+    fn writing(halt: Option<ExportHalt>, active: bool) -> ExportView {
+        ExportView::Writing {
+            saved_chunks: 1,
+            halt,
+            active,
+        }
+    }
+
+    #[test]
+    fn projection_keeps_completed_resumable_and_deleting_states_distinct_and_path_free() {
+        let cases = [
+            (
+                download(KeepPhase::Deleting, ExportView::Published, |_| {}, true),
+                "removing",
+            ),
+            (
+                download(KeepPhase::Completed, ExportView::Published, |_| {}, true),
+                "saved",
+            ),
+            (
+                download(
+                    KeepPhase::Completed,
+                    writing(Some(ExportHalt::Changed), false),
+                    |_| {},
+                    true,
+                ),
+                "destination-changed",
+            ),
+            (
+                download(
+                    KeepPhase::Completed,
+                    writing(Some(ExportHalt::Unavailable), false),
+                    |s| s.user_paused = true,
+                    true,
+                ),
+                "destination-unavailable",
+            ),
+            (
+                download(
+                    KeepPhase::Completed,
+                    writing(None, false),
+                    |s| s.exhausted = true,
+                    false,
+                ),
+                "exhausted",
+            ),
+            (
+                download(
+                    KeepPhase::Completed,
+                    writing(None, false),
+                    |s| s.user_paused = true,
+                    true,
+                ),
+                "save-paused",
+            ),
+            (
+                download(
+                    KeepPhase::Resumable,
+                    ExportView::None,
+                    |s| s.user_paused = true,
+                    false,
+                ),
+                "paused",
+            ),
+            (
+                download(
+                    KeepPhase::Resumable,
+                    ExportView::None,
+                    |s| s.blocked = true,
+                    false,
+                ),
+                "blocked",
+            ),
+            (
+                download(
+                    KeepPhase::Completed,
+                    writing(None, false),
+                    |s| s.running = true,
+                    false,
+                ),
+                "receiving",
+            ),
+            (
+                download(KeepPhase::Completed, writing(None, true), |_| {}, true),
+                "saving",
+            ),
+            (
+                download(KeepPhase::Completed, writing(None, false), |_| {}, false),
+                "save-interrupted",
+            ),
+            (
+                download(KeepPhase::Completed, ExportView::None, |_| {}, true),
+                "ready",
+            ),
+            (
+                download(KeepPhase::Resumable, ExportView::None, |_| {}, false),
+                "incomplete",
+            ),
+        ];
+        for (download, expected) in cases {
+            // `in_downloads` and the list entry are ignored for every state but saved.
+            let projected = project(download, Some(true), Some("ab".repeat(16)));
+            assert_eq!(projected.status, expected);
+            let json = serde_json::to_string(&projected).unwrap();
+            assert!(!json.contains("path") && !json.contains("folder"), "{json}");
+            assert!(
+                json.contains("\"receivedBytes\":3100000")
+                    && json.contains("\"savedBytes\":1000000")
+                    && json.contains("\"totalBytes\":12400000"),
+                "{json}"
+            );
+            if expected == "saved" {
+                assert_eq!(projected.saved_chunks, projected.total_chunks);
+                assert_eq!(projected.saved_to, Some("downloads"));
+                assert_eq!(projected.saved_entry, Some("ab".repeat(16)));
+            } else {
+                assert!(json.contains("\"savedTo\":null"), "{json}");
+                assert!(json.contains("\"savedEntry\":null"), "{json}");
+            }
+        }
+        let json = serde_json::to_string(&project(
+            download(KeepPhase::Completed, writing(None, false), |_| {}, true),
+            Some(false),
+            None,
+        ))
+        .unwrap();
+        assert!(json.contains("\"savedChunks\":1"), "{json}");
+        // A saved row whose journal was read and whose folder differs says "other"; one where
+        // nothing could be told (no Downloads folder, an unreadable journal) says nothing.
+        let saved = || download(KeepPhase::Completed, ExportView::Published, |_| {}, true);
+        assert_eq!(project(saved(), Some(false), None).saved_to, Some("other"));
+        assert_eq!(project(saved(), None, None).saved_to, None);
+    }
+
+    #[test]
+    fn local_write_retries_are_bounded_per_chunk_and_per_session() {
+        assert!(local_retry_delay(0, 0).is_some());
+        assert!(local_retry_delay(LOCAL_RETRIES_PER_CHUNK - 1, 0).is_some());
+        assert!(local_retry_delay(LOCAL_RETRIES_PER_CHUNK, 0).is_none());
+        assert!(local_retry_delay(0, LOCAL_RETRIES_PER_SESSION).is_none());
+        let mut session = 0;
+        let mut chunks = 0;
+        // A destination that always fails transiently stops after the session bound.
+        'outer: loop {
+            let mut attempts = 0;
+            while let Some(delay) = local_retry_delay(attempts, session) {
+                assert!(delay <= Duration::from_secs(4));
+                attempts += 1;
+                session += 1;
+            }
+            chunks += 1;
+            if session >= LOCAL_RETRIES_PER_SESSION || chunks > 10 {
+                break 'outer;
+            }
+        }
+        assert_eq!(session, LOCAL_RETRIES_PER_SESSION);
+    }
+
+    fn transient() -> ExportError {
+        ExportError::Local {
+            retryable: true,
+            reason: "locked".into(),
+        }
+    }
+    fn done() -> ExportProgress {
+        ExportProgress {
+            done: 1,
+            total: 1,
+            bytes: 1,
+        }
+    }
+    /// Scripted step: the subject counts attempts; each attempt pops the next outcome.
+    async fn scripted(
+        outcomes: Vec<Result<ExportProgress, ExportError>>,
+        live: impl Fn(u32) -> bool,
+        session: &mut u32,
+    ) -> (u32, Result<ExportProgress, ExportError>) {
+        let outcomes = std::sync::Mutex::new(outcomes.into_iter());
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        accept_with_retries(
+            0u32,
+            |count: u32| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let next = outcomes.lock().unwrap().next().expect("scripted outcome");
+                async move { Ok((count + 1, next)) }
+            },
+            || live(calls.load(Ordering::SeqCst)),
+            |_| async {},
+            session,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transient_failures_retry_within_the_bound_then_stop_non_retryable() {
+        let mut session = 0;
+        let (attempts, outcome) = scripted(
+            vec![Err(transient()), Err(transient()), Ok(done())],
+            |_| true,
+            &mut session,
+        )
+        .await;
+        assert_eq!((attempts, session), (3, 2));
+        assert_eq!(outcome.unwrap(), done());
+        let mut session = 0;
+        let (attempts, outcome) = scripted(
+            (0..10).map(|_| Err(transient())).collect(),
+            |_| true,
+            &mut session,
+        )
+        .await;
+        assert_eq!(attempts, LOCAL_RETRIES_PER_CHUNK + 1);
+        assert!(matches!(
+            outcome,
+            Err(ExportError::Local {
+                retryable: false,
+                ..
+            })
+        ));
+        // Disk full and halts are never retried.
+        let mut session = 0;
+        let (attempts, outcome) = scripted(
+            vec![Err(ExportError::Full), Ok(done())],
+            |_| true,
+            &mut session,
+        )
+        .await;
+        assert_eq!(attempts, 1);
+        assert!(matches!(outcome, Err(ExportError::Full)));
+    }
+
+    #[tokio::test]
+    async fn no_write_attempt_happens_after_the_invocation_or_lease_retires() {
+        // Lock (or Pause/Remove/replacement) lands while the first attempt backs off: the retry
+        // must not run, so no plaintext is written by a retired session.
+        let mut session = 0;
+        let (attempts, outcome) = scripted(
+            vec![Err(transient()), Ok(done())],
+            |calls| calls == 0,
+            &mut session,
+        )
+        .await;
+        assert_eq!(attempts, 1, "only the attempt made while live");
+        assert!(matches!(outcome, Err(ExportError::Inactive)));
+        let mut session = 0;
+        let (attempts, outcome) = scripted(vec![Ok(done())], |_| false, &mut session).await;
+        assert_eq!(attempts, 0, "a retired session never starts a write");
+        assert!(matches!(outcome, Err(ExportError::Inactive)));
+    }
+}
+
+#[cfg(test)]
+#[path = "private_downloads/cleanup_tests.rs"]
+mod cleanup_tests;
+
+#[cfg(test)]
+#[path = "private_downloads/export_tests.rs"]
+mod export_tests;
+
+#[cfg(test)]
+#[path = "private_downloads/chooser_tests.rs"]
+mod chooser_tests;
+
+#[cfg(test)]
+#[path = "private_downloads/saved_check_tests.rs"]
+mod saved_check_tests;

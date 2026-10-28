@@ -94,9 +94,22 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, resumeGroupFile, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadLabel, type PrivateDownload } from "./private-downloads";
+  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatLabel, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
+  import { SAVED_ROW_GROUPS, TRANSFER_ICONS, compactControls, compactListControls, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type CompactControl, type CompactControls, type SavedListRowAction, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type SavedRowView, type TransferIcon } from "./transfer-rows";
+  import {
+    REPLACE_OLDER_HELP, REPLACE_OLDER_KEY, REPLACE_OLDER_LABEL, SAVED_LIMIT_CHOICES, SAVED_LIMIT_HELP,
+    SAVED_LIMIT_LABEL, SAVED_MARK_LABEL, SAVED_MARK_TITLE,
+    checkedSavedFileChecks, checkedSavedFiles, checkedSavedFilesLimit, checkedSavedLimitChange,
+    liveTransferShown, replaceOlderFrom, savedCidSet, savedFileCheckKey, savedLimitDone, savedLimitLabel,
+    savedLimitWarning, savedListNotice, savedListRowView, savedListRows, type SavedFile, type SavedFilesList,
+    type SavedFilesLimit, type SavedListAction,
+  } from "./saved-files";
+  import {
+    CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cacheShown, checkedCacheStatus, leaveLoss,
+    leaveReportText, limitLabel, lowerLimitWarning, pinnedSummary, type CacheStatus, type LeaveLoss,
+  } from "./cache-status";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -593,6 +606,7 @@
     { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
     { id: "filetrust", label: "File Trust", cat: "Content" },
+    { id: "storage", label: "Storage", cat: "Content" },
     { id: "studio", label: "Studio", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
@@ -3824,9 +3838,56 @@
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
   let privateDownloads = $state<PrivateDownload[]>([]);
-  let privateDownloadBusy = $state<symbol | null>(null);
+  // Cache housekeeping for the selected server, as the native planner reports it (footer segment
+  // and Storage settings page). Never recomputed here: the counts are what the planner would do.
+  let cacheStatus = $state<CacheStatus | null>(null);
+  let cacheStatusSeq = 0;
+  // The Storage page's limit picker: the chosen option's bytes as a string ("null" = No limit),
+  // plus whether the user has seen the "removes files now" warning for that choice.
+  let cacheLimitDraft = $state("");
+  let cacheLimitConfirming = $state(false);
+  let cacheLimitBusy = $state(false);
+  // The Storage page's "Remember saved files" picker (PR #56 follow-up): the stored setting, the
+  // chosen count as a string, and, once native previewed a lower choice, how many of the oldest
+  // entries it forgets (shown before the user confirms; `null` = not asked yet).
+  let savedLimit = $state<SavedFilesLimit | null>(null);
+  let savedLimitDraft = $state("");
+  let savedLimitForgets = $state<number | null>(null);
+  let savedLimitBusy = $state(false);
+  // Leave confirmation: what leaving will permanently delete from this device, loaded on request.
+  let leaveConfirm = $state<{ id: number; name: string; loss: LeaveLoss | null } | null>(null);
+  // Second review R2-M1: the Pause/Remove/Keep (and pre-acquisition Resume) owner of each row, by
+  // download ID. Native removal can wait indefinitely on an external folder, so one row's pending
+  // mutation must never disable or refuse actions on another row; native also claims per download.
+  let privateDownloadBusy = $state<Record<string, symbol>>({});
   let privateDownloadSaves = $state<Record<string, symbol>>({});
+  // User decision, 23 October: what native's read-only check found at each Saved row's file, for
+  // the exact row revision it checked and the Transfers visit it ran in. A row only shows a result
+  // whose revision matches its own. `savedChecking` is the in-flight owner per row (not rendered);
+  // `savedCheckVisit` counts Transfers visits, so each visit checks every Saved row once again.
+  let savedChecks = $state<Record<string, { intent: string; result: SavedCheck; visit: number }>>({});
+  let savedChecking: Record<string, symbol> = {};
+  let savedCheckVisit = 0;
   let privateDownloadError = $state("");
+  // PR #56: this server's saved-files list on this device (display data only; native keeps the
+  // folders), the latest check of each entry keyed by ID and name (`savedFileCheckKey`) with the
+  // Transfers visit it ran in, and the per-entry owner of a pending Clear or Show in folder.
+  let savedFiles = $state<SavedFilesList>({ state: "ok", files: [] });
+  let savedFileChecks = $state<Record<string, { result: SavedCheck; visit: number }>>({});
+  let savedFilesChecking: { visit: number; server: number } | null = null;
+  let savedFileBusy = $state<Record<string, boolean>>({});
+  // "Replace my older saved copy" (PR #56): a device preference, off by default.
+  let replaceOlder = $state(readReplaceOlder());
+  function readReplaceOlder(): boolean {
+    try { return replaceOlderFrom(localStorage.getItem(REPLACE_OLDER_KEY)); } catch { return false; }
+  }
+  function setReplaceOlder(on: boolean) {
+    replaceOlder = on;
+    try {
+      if (on) localStorage.setItem(REPLACE_OLDER_KEY, "on");
+      else localStorage.removeItem(REPLACE_OLDER_KEY);
+    } catch { /* the choice still holds for this session */ }
+  }
   const fileInventoryGate = fileInventoryRequests();
   let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
   // A primitive identity survives Svelte's deep state proxies unchanged.
@@ -4355,7 +4416,9 @@
   }
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
-    missing_chunks: number; unreadable_chunks: number; invalid_manifests: number;
+    // `missing` = absent chunks of this device's own uploads (damage); `not_cached` = absent
+    // chunks of other members' files, which is normal for a size-limited cache.
+    missing_chunks: number; not_cached_chunks: number; unreadable_chunks: number; invalid_manifests: number;
     verified_bytes: number; has_peers: boolean;
     checked_at_ms: number; unique_files: number; logical_bytes: number;
     local_estimated_bytes: number; pinned_files: number; pinned_logical_bytes: number;
@@ -6197,6 +6260,7 @@
     void wikiMap;
     void ensureWikiMap(); // fills the page summaries the wiki cards below want
     void profiles; // cards name the author, so a renamed member re-reads
+    void savedCids; // PR #56: cards built before the saved-files list loaded get their mark
     void view; // switching tabs destroys + recreates this DOM (fresh, unresolved placeholders)
     void inboxView; // returning from the inbox recreates the chat DOM too
     tick().then(() => {
@@ -6208,6 +6272,8 @@
       resolveRemoteMedia(statusEl);
       resolveEmoji(statusEl);
       resolveRefCards(statusEl);
+      markSavedCards(messagesEl);
+      markSavedCards(statusEl);
       // Every one of those can add height to the log. Re-pin rather than leave the reader looking
       // at whatever the newly inserted cards pushed the newest message past.
       chatMediaSettled();
@@ -7099,8 +7165,17 @@
     keptFiles = null;
     privateDownloads = [];
     privateDownloadError = "";
-    privateDownloadBusy = null;
+    privateDownloadBusy = {};
     privateDownloadSaves = {};
+    savedChecks = {};
+    savedChecking = {};
+    confirmRemove = {};
+    revealingSaved = {};
+    // PR #56: another server's saved files must never mark this server's files or rows.
+    savedFiles = { state: "ok", files: [] };
+    savedFileChecks = {};
+    savedFilesChecking = null;
+    savedFileBusy = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -7373,8 +7448,11 @@
     if (inCall && callServer === id) leaveVoice();
     const operation = { session, closed: false };
     leavingServers.set(id, operation);
+    // Captured now: once the leave lands the server is gone from the rail and its name with it.
+    const leftName = servers.find((s) => s.id === id)?.name ?? "the server";
+    let leaveReport: unknown = null;
     try {
-      await invoke("leave_server", { server: id });
+      leaveReport = await invoke("leave_server", { server: id });
     } catch (e) {
       const owns = leavingServers.get(id) === operation;
       if (owns) leavingServers.delete(id);
@@ -7394,6 +7472,158 @@
     fileTrustPolicies = remainingTrust;
     serverGone(id, true); // first, so the continuity saved next no longer carries its Studio work
     void saveUiStateImmediately();
+    toast(leaveReportText(leftName, checkedLeaveReport(leaveReport)), "ok", 6000);
+  }
+
+  /** Native's leave report, or `null` when it is missing or malformed (the toast then claims nothing). */
+  function checkedLeaveReport(raw: unknown): { freed_bytes: number; kept_bytes: number; failed: number; cleaned: boolean } | null {
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const n = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+    return n(r.freed_bytes) && n(r.kept_bytes) && n(r.failed) && typeof r.cleaned === "boolean"
+      ? { freed_bytes: r.freed_bytes as number, kept_bytes: r.kept_bytes as number, failed: r.failed as number, cleaned: r.cleaned }
+      : null;
+  }
+
+  /** Every Leave entry point comes here first: load what leaving would permanently delete from
+   * this device (Keep copies and unfinished Downloads, by name) and ask before leaving. */
+  async function requestLeave(id: number) {
+    const name = servers.find((s) => s.id === id)?.name ?? "this server";
+    leaveConfirm = { id, name, loss: null };
+    const [kept, downloads, listed] = await Promise.allSettled([
+      invoke<KeptFiles>("get_kept_files", { server: id }),
+      invoke<unknown>("get_private_downloads", { server: id }).then(checkedPrivateDownloads),
+      invoke<UiFile[]>("get_files", { server: id }),
+    ]);
+    if (leaveConfirm?.id !== id) return; // dismissed or replaced meanwhile
+    leaveConfirm = {
+      id,
+      name,
+      // An inventory that could not be read is passed as null, so the dialog says it could not
+      // check instead of claiming there is nothing to lose.
+      loss: leaveLoss(
+        kept.status === "fulfilled" ? kept.value : null,
+        downloads.status === "fulfilled" ? downloads.value : null,
+        listed.status === "fulfilled" ? listed.value : [],
+      ),
+    };
+  }
+
+  function confirmLeave() {
+    const target = leaveConfirm;
+    if (!target) return;
+    leaveConfirm = null;
+    showServerSettings = false;
+    void leaveServer(target.id);
+  }
+
+  /** This server's cache status (cheap natively). A stale reply for another server is dropped. */
+  async function refreshCacheStatus(server: number | null = activeServerId) {
+    const seq = ++cacheStatusSeq;
+    if (server === null || locked) {
+      cacheStatus = null;
+      return;
+    }
+    try {
+      const status = checkedCacheStatus(await invoke<unknown>("get_cache_status", { server }));
+      if (seq === cacheStatusSeq && server === activeServerId) cacheStatus = status;
+    } catch {
+      if (seq === cacheStatusSeq) cacheStatus = null;
+    }
+  }
+
+  // The footer follows the selected server; native pushes changes as `cache-status` events.
+  $effect(() => {
+    const server = activeServerId;
+    untrack(() => void refreshCacheStatus(server));
+  });
+  // Opening the Storage page re-reads the status and seeds the picker with the current limit.
+  $effect(() => {
+    if (!showServerSettings || serverSettingsPage !== "storage") return;
+    untrack(() => {
+      cacheLimitConfirming = false;
+      void refreshCacheStatus().then(() => {
+        cacheLimitDraft = !cacheStatus ? "" : cacheStatus.unlimited ? "null" : String(cacheStatus.limit_bytes ?? "");
+      });
+      void refreshSavedLimit();
+    });
+  });
+
+  /** This server's "Remember saved files" setting for the Storage page, seeding its picker. A
+   * reply for a server that is no longer selected is dropped. */
+  async function refreshSavedLimit(server: number | null = activeServerId) {
+    savedLimitForgets = null;
+    if (server === null || locked) {
+      savedLimit = null;
+      return;
+    }
+    try {
+      const view = checkedSavedFilesLimit(await invoke<unknown>("get_saved_files_limit", { server }));
+      if (server !== activeServerId) return;
+      savedLimit = view;
+      savedLimitDraft = view.limit === null ? "" : String(view.limit);
+    } catch {
+      if (server === activeServerId) savedLimit = null;
+    }
+  }
+
+  /** Apply the Storage page's "Remember saved files". Native first previews the choice (nothing
+   * changes); when it would forget entries, the page says how many before the user confirms. */
+  async function applySavedLimit() {
+    const server = activeServerId;
+    const limit = Number(savedLimitDraft);
+    if (server === null || !savedLimit || savedLimitBusy || !savedLimitDraft || !Number.isSafeInteger(limit)) return;
+    savedLimitBusy = true;
+    try {
+      // The count the user confirmed (or a preview's zero): native applies only while the choice
+      // still forgets exactly that many, so saves made meanwhile can never be forgotten unseen.
+      let expectedForgets = savedLimitForgets;
+      if (expectedForgets === null) {
+        const preview = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit",
+          { server, limit, apply: false, expectedForgets: null }));
+        if (preview.forgets > 0) {
+          if (server === activeServerId) savedLimitForgets = preview.forgets;
+          return;
+        }
+        expectedForgets = 0;
+      }
+      const done = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit",
+        { server, limit, apply: true, expectedForgets }));
+      toast(savedLimitDone(done), "ok", 4000);
+      // A shorter list: Transfers and the chat mark follow it.
+      if (done.forgets > 0 && server === activeServerId) void refreshFiles();
+      await refreshSavedLimit(server);
+    } catch (e) {
+      savedLimitForgets = null;
+      // A failure after the list was shortened says so; the list on screen follows the disk.
+      if (server === activeServerId) void refreshFiles();
+      toast(`Couldn't change how many saved files are remembered: ${e}`, "err", 6000);
+    } finally {
+      savedLimitBusy = false;
+    }
+  }
+
+  /** Apply the Storage page's limit. Lowering below what is cached asks once before applying. */
+  async function applyCacheLimit() {
+    const server = activeServerId;
+    if (server === null || !cacheStatus || cacheLimitBusy) return;
+    const bytes = cacheLimitDraft === "null" ? null : Number(cacheLimitDraft);
+    if (bytes !== null && !Number.isSafeInteger(bytes)) return;
+    if (lowerLimitWarning(cacheStatus, bytes) && !cacheLimitConfirming) {
+      cacheLimitConfirming = true;
+      return;
+    }
+    cacheLimitBusy = true;
+    try {
+      const status = checkedCacheStatus(await invoke<unknown>("set_cache_limit", { server, bytes }));
+      if (server === activeServerId) cacheStatus = status;
+      toast(`Cache limit on this device: ${limitLabel(bytes)}`, "ok", 3500);
+    } catch (e) {
+      toast(`Couldn't change the cache limit: ${e}`, "err", 6000);
+    } finally {
+      cacheLimitBusy = false;
+      cacheLimitConfirming = false;
+    }
   }
 
   /// `server-closed`: the server's actor stopped. During this server's own leave the leave decides
@@ -7960,11 +8190,13 @@
       // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
       // file embedded in a live page never drops out of circulation, whatever its expiry says. It
       // is a second round-trip, so it rides alongside the listing rather than after it.
-      const [listing, pinned, kept, savedDownloads] = await Promise.allSettled([
+      const [listing, pinned, kept, savedDownloads, savedList] = await Promise.allSettled([
         invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
         invoke<string[]>("get_wiki_pinned_cids", { server }),
         invoke<KeptFiles>("get_kept_files", { server }),
         invoke<unknown>("get_private_downloads", { server }).then(checkedPrivateDownloads),
+        // PR #56: the saved-files list (local only, no network): Saved rows and the chat mark.
+        invoke<unknown>("get_saved_files", { server }).then(checkedSavedFiles),
       ]);
       if (!fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) return; // another group's shared files
       // Applied independently: a failing pin lookup must not blank the listing it only decorates.
@@ -7978,6 +8210,13 @@
       keptFiles = kept.status === "fulfilled" ? kept.value : null;
       privateDownloads = savedDownloads.status === "fulfilled" ? savedDownloads.value : [];
       privateDownloadError = savedDownloads.status === "fulfilled" ? "" : "Download progress could not be read. Open Transfers again to retry.";
+      // An answer that could not be read keeps the last list on screen rather than claiming none.
+      if (savedList.status === "fulfilled") savedFiles = savedList.value;
+      // Saved rows are checked only while Transfers is shown, once per visit and revision.
+      if (view === "downloads") {
+        void checkSavedRows();
+        void checkSavedListRows();
+      }
     } catch (e) {
       if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
@@ -8778,6 +9017,7 @@
     }
     view = v;
     if (v === "wiki") refreshWiki();
+    if (v === "downloads") savedCheckVisit++; // each visit checks every Saved row's file again
     if (v === "files" || v === "downloads") refreshFiles(); // includes saved private progress after restart
     // The policy is read with the surface rather than with the server, because it is only ever
     // needed by the surface and a server switch already carries enough round-trips.
@@ -9650,11 +9890,17 @@
     });
   }
 
+  /** The plain save item's label for `f`: "Save to chosen place" while its row remembers a Save as
+   * choice that this item would use, else "Download" (`privateDownloadChatLabel`). */
+  function downloadLabel(f: UiFile): string {
+    return privateDownloadChatLabel(privateDownloads.find((row) => row.cid === f.cid));
+  }
   function fileMenu(f: UiFile): MenuItem[] {
     const items: MenuItem[] = [
       { head: true, kind: "file", title: f.name },
       { label: "Open details", icon: "info", onSelect: () => openFileInfo(f) },
-      { label: "Download", icon: "down", onSelect: () => downloadFile(f) },
+      { label: downloadLabel(f), icon: "down", onSelect: () => downloadFile(f) },
+      { label: "Save as", icon: "down", onSelect: () => downloadFile(f, true) },
       { label: "Post to chat", icon: "reply", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
       { divider: true },
       { label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(f.cid) },
@@ -9709,7 +9955,9 @@
       label: "Leave server",
       icon: "leave",
       danger: true,
-      onSelect: () => confirmInMenu(`Leave ${s.name}`, () => leaveServer(s.id)),
+      // A full confirmation, not the in-menu one: it has to name the Keep copies and unfinished
+      // Downloads that leaving permanently deletes from this device.
+      onSelect: () => void requestLeave(s.id),
     });
     return items;
   }
@@ -10049,7 +10297,10 @@
         items.push({ label: "View image", icon: "img", onSelect: () => openLightbox(el) });
       }
       items.push({ label: "Properties", icon: "info", onSelect: () => openFileRef(cid) });
-      if (embedded) items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+      if (embedded) {
+        items.push({ label: downloadLabel(embedded), icon: "down", onSelect: () => downloadFile(embedded) });
+        items.push({ label: "Save as", icon: "down", onSelect: () => downloadFile(embedded, true) });
+      }
       items.push({ label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) });
       // An image can cover its whole message row, so keep the message actions reachable here:
       // right-clicking the picture offers the same Reply/Edit/Delete as right-clicking the text.
@@ -12022,6 +12273,26 @@
     }
   }
 
+  /** PR #56: the "already saved" mark on file cards already built in `container`. Cards are built
+   * once (`resolveRefCards`), so a list that loads or changes later is applied here: a small
+   * element added or removed, its text and attributes set as text, never as markup. */
+  function markSavedCards(container: HTMLElement | undefined) {
+    if (!container) return;
+    for (const card of Array.from(container.querySelectorAll<HTMLElement>(".ref-card.file-card[data-file-cid]"))) {
+      const saved = savedCids.has((card.getAttribute("data-file-cid") ?? "").toLowerCase());
+      const mark = card.querySelector<HTMLElement>(":scope > .ref-card-saved");
+      if (saved && !mark) {
+        const badge = document.createElement("span");
+        badge.className = "ref-card-saved";
+        badge.title = SAVED_MARK_TITLE;
+        badge.textContent = SAVED_MARK_LABEL;
+        card.appendChild(badge);
+      } else if (!saved && mark) {
+        mark.remove();
+      }
+    }
+  }
+
   function enterFolder(seg: string) {
     folder = folder === "" ? seg : `${folder}/${seg}`;
   }
@@ -12029,15 +12300,26 @@
     folder = breadcrumbs.slice(0, i + 1).join("/");
   }
 
-  async function downloadFile(f: UiFile) {
+  // `saveAs`: native opens the OS "Save as" dialog itself (no path is ever sent from here). A
+  // default value, never an optional parameter: `x?: T` in a .svelte script breaks the app at load.
+  async function downloadFile(f: UiFile, saveAs = false) {
     if (activeServerId === null) return;
     const server = activeServerId;
     const key = dlKey(server, f.cid);
     if (saveInProgress(f.cid)) return;
     const existing = privateDownloads.find(row => row.cid === f.cid);
     if (existing) {
-      if (existing.status === "exhausted") { switchView("downloads"); return; }
-      await resumePrivateDownload(existing);
+      // Rows that need an explicit choice open Transfers instead. For Save as that is any row that
+      // does not offer it (running, removing, exhausted, partly saved); for a plain save, running,
+      // halted, saved, removing or exhausted rows. Decided before the row resumes: switching view
+      // once that has begun would take a fresh navigation claim (studio-exit-routes.test.ts scans
+      // this function's text, comments included).
+      const direct = saveAs
+        ? privateDownloadOffers(existing, "saveAs")
+        : privateDownloadChatSave(existing) !== "transfers";
+      if (!direct) { switchView("downloads"); return; }
+      // Save as on a known file goes through its row; native opens the dialog itself.
+      await resumePrivateDownload(existing, false, saveAs);
       return;
     }
     const gen = viewGeneration;
@@ -12066,16 +12348,22 @@
       ts: started,
     };
     try {
-      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation });
+      // PR #56: the "Replace my older saved copy" preference travels as a flag; native decides.
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation, saveAs, replaceOlder });
       if (!unlockedViewCurrent(gen, server)) return;
       if (downloads[key]?.operation === operation) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
-      const notice = downloadSavedNotice(f.name, saved);
+      const notice = downloadSavedNotice(f.name, saved, !saveAs);
       toast(notice.text, notice.kind, notice.ms);
       refreshFiles();
     } catch (e) {
       if (!unlockedViewCurrent(gen, server)) return;
+      // Closing the dialog started nothing: drop the pending row quietly, no error.
+      if (saveAs && isSaveAsCancelled(e)) {
+        if (downloads[key]?.operation === operation) delete downloads[key];
+        return;
+      }
       error = String(e);
       if (downloads[key]?.operation === operation) {
         downloads[key].status = "failed";
@@ -12089,12 +12377,16 @@
     }
   }
 
-  async function resumePrivateDownload(row: PrivateDownload) {
+  // `saveAs` asks native to open the OS dialog for this save; on a halted or saved row it also
+  // means a new copy (the old journal is forgotten, exactly as for Save new copy).
+  async function resumePrivateDownload(row: PrivateDownload, fresh = false, saveAs = false) {
     const server = activeServerId, gen = viewGeneration;
-    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || row.status === "receiving" || row.status === "removing") return;
+    const offer = saveAs ? "saveAs" : fresh ? "fresh" : "resume";
+    if (server === null || locked || privateDownloadBusy[row.id] || privateDownloadSaves[row.id] || saveInProgress(row.cid) || !privateDownloadOffers(row, offer)) return;
+    const newCopy = fresh || (saveAs && privateDownloadSaveAsIsNewCopy(row));
     const mutation = Symbol("private download");
     error = "";
-    privateDownloadBusy = mutation;
+    privateDownloadBusy[row.id] = mutation;
     privateDownloadSaves[row.id] = mutation;
     fileInventoryGate.invalidate();
     const operation = `save-${crypto.randomUUID()}`;
@@ -12108,19 +12400,27 @@
       const name = filesByCid.get(row.cid)?.name ?? `download-${row.cid.slice(0, 12)}`;
       const file = filesByCid.get(row.cid), started = Date.now();
       activeSaves[key] = operation;
-      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "",
+      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "", fresh: newCopy,
         status: "queued", progress: row.verifiedChunks / row.totalChunks, done: row.verifiedChunks,
         total: row.totalChunks, heldBefore: row.verifiedChunks, bytesDone: 0, bytesTotal: file?.size ?? 0,
         networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
       // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
       // this separate token blocks only a duplicate Save of this same native owner.
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
-      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation);
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
+      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation, newCopy, saveAs, replaceOlder);
       if (!unlockedViewCurrent(gen, server)) return;
       if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
-      const notice = downloadSavedNotice(name, saved);
+      // A resumed row may be saving anywhere (a remembered choice or an earlier partial), so the
+      // notice names Downloads only for a plain first save of a row that never chose a place.
+      const toDownloads = !saveAs && !row.chosenPlace && row.status === "ready" && row.savedChunks === 0;
+      const notice = downloadSavedNotice(name, saved, toDownloads);
       toast(notice.text, notice.kind, notice.ms);
     } catch (e) {
+      // Closing the dialog started nothing: drop the pending row quietly, no error.
+      if (saveAs && isSaveAsCancelled(e)) {
+        if (downloads[key]?.operation === operation) delete downloads[key];
+        return;
+      }
       if (unlockedViewCurrent(gen, server)) {
         error = String(e);
         if (downloads[key]?.operation === operation) Object.assign(downloads[key], { status: "failed", error: String(e), updatedAt: Date.now() });
@@ -12128,26 +12428,605 @@
     } finally {
       if (activeSaves[key] === operation) delete activeSaves[key];
       if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
       if (privateDownloadSaves[row.id] === mutation) delete privateDownloadSaves[row.id];
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
-  async function changePrivateDownload(row: PrivateDownload, remove: boolean) {
+  async function changePrivateDownload(row: PrivateDownload, remove: boolean, keepPartial = false) {
     const server = activeServerId, gen = viewGeneration;
-    if (server === null || locked || privateDownloadBusy) return;
+    // R2-M1: only a second action on this same row is refused while one is pending; a Remove
+    // stalled on an external folder leaves every other row's actions available.
+    if (server === null || locked || privateDownloadBusy[row.id]) return;
     const mutation = Symbol("private download intent");
-    privateDownloadBusy = mutation;
+    privateDownloadBusy[row.id] = mutation;
     fileInventoryGate.invalidate();
     try {
-      if (remove) await invoke("cancel_private_download", { server, download: row.id });
-      else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
+      // Remove deletes encrypted progress and only a partly saved file native proves it created;
+      // keepPartial releases the record and leaves that file in place. Native returns a notice
+      // when a file of this save stays on disk, so a removal never silently leaves plaintext.
+      if (remove) {
+        const notice = await invoke<string | null>("cancel_private_download", { server, download: row.id, ...(keepPartial ? { keepPartial: true } : {}) });
+        if (typeof notice === "string" && notice && unlockedViewCurrent(gen, server)) toast(notice, "info", 9000);
+      } else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
     } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
     finally {
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
+  // User decision, 23 October: check each Saved row's file once per Transfers visit and row
+  // revision, off the async runtime natively (bounded, read-only). An answer is kept only while
+  // the view and the row are still the ones it was asked for, so a stale answer never relabels a
+  // newer row; a failed or stale check claims nothing.
+  async function checkSavedRows(rerun = true) {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked) return;
+    let dropped = false;
+    const due = privateDownloads.filter((row) => row.status === "saved" && !savedChecking[row.id] &&
+      !(savedChecks[row.id]?.intent === row.intent && savedChecks[row.id]?.visit === visit));
+    // One check at a time (decisions review M1): native runs at most two workers and waits for a
+    // free one within its bound, so a burst of rows never turns into "could not check". The whole
+    // batch is claimed up front, so an overlapping refresh never asks for the same rows again.
+    const token = Symbol("saved checks");
+    for (const row of due) savedChecking[row.id] = token;
+    try {
+      for (const row of due) {
+        if (!unlockedViewCurrent(gen, server)) return;
+        let result: SavedCheck = "unknown";
+        try {
+          result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+            { server, download: row.id, expectedIntent: row.intent }));
+        } catch {
+          // Native refused (a changed row, Lock) or the answer was unreadable: claim nothing new.
+          result = "unknown";
+        }
+        if (!unlockedViewCurrent(gen, server)) return;
+        const now = privateDownloads.find((other) => other.id === row.id);
+        if (!now || now.status !== "saved" || now.intent !== row.intent) {
+          dropped = true;
+          continue;
+        }
+        savedChecks[row.id] = { intent: row.intent, result, visit };
+      }
+    } finally {
+      for (const row of due) if (savedChecking[row.id] === token) delete savedChecking[row.id];
+    }
+    // Re-review LOW 2: a row that changed while the batch ran (its answer was dropped) was skipped
+    // by any refresh in the meantime because the batch held it; check it once more now. Only once,
+    // so a row that keeps changing cannot keep this going.
+    if (rerun && dropped && view === "downloads" && unlockedViewCurrent(gen, server)) {
+      await checkSavedRows(false);
+    }
+  }
+  /** The latest check of `row`'s file for this exact revision, or `null`. */
+  function savedCheckFor(row: PrivateDownload): SavedCheck | null {
+    const checked = savedChecks[row.id];
+    return checked && checked.intent === row.intent && row.status === "saved" ? checked.result : null;
+  }
+
+  // PR #56: the saved-files list's rows. Native checks every checkable entry read-only in one
+  // bounded batch, once per Transfers visit; an answer is kept for the entry's ID and name only
+  // (a replace that moved a file changes its name), and an entry native did not reach in time has
+  // no answer at all, so it reads as not checked yet, never as "could not check".
+  async function checkSavedListRows() {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked || savedFiles.state !== "ok") return;
+    if (!savedFiles.files.some((file) => file.checkable && savedFileChecks[savedFileCheckKey(file)]?.visit !== visit)) return;
+    if (savedFilesChecking && savedFilesChecking.visit === visit && savedFilesChecking.server === server) return;
+    const claim = { visit, server };
+    savedFilesChecking = claim;
+    try {
+      const answers = checkedSavedFileChecks(await invoke<unknown>("check_saved_files", { server }));
+      if (!unlockedViewCurrent(gen, server)) return;
+      for (const answer of answers) savedFileChecks[savedFileCheckKey(answer)] = { result: answer.check, visit };
+    } catch {
+      // Refused (Lock, a changed list) or unreadable: claim nothing new.
+    } finally {
+      if (savedFilesChecking === claim) savedFilesChecking = null;
+    }
+  }
+  function savedFileCheckFor(file: SavedFile): SavedCheck | null {
+    return savedFileChecks[savedFileCheckKey(file)]?.result ?? null;
+  }
+  /** Locale day for a list row's where line, for example "26 Oct". */
+  function savedDay(ms: number): string {
+    return new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  }
+  let savedListFiles = $derived(savedListRows(savedFiles, privateDownloads));
+  let savedListViews = $derived(savedListFiles.map((file) => savedListRowView(file, savedFileCheckFor(file),
+    filesByCid.has(file.cid), savedDay,
+    { busy: !!savedFileBusy[file.id], saving: saveInProgress(file.cid) })));
+  // The chat mark: files this device recorded saving (the list only; no network, no disk).
+  let savedCids = $derived(savedCidSet(savedFiles));
+
+  /** A list row's action: Save again is the ordinary chat save of that file (still listed);
+   * Clear forgets the entry and never touches the file. */
+  async function runSavedListAction(file: SavedFile, action: SavedListAction) {
+    if (action.disabled) return; // aria-disabled stays focusable, so its reason can be read
+    if (action.kind === "again") {
+      const listed = filesByCid.get(file.cid);
+      if (listed) await downloadFile(listed);
+      return;
+    }
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || savedFileBusy[file.id]) return;
+    savedFileBusy[file.id] = true;
+    try {
+      await invoke("forget_saved_file", { server, entry: file.id });
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) toast(String(e), "warn", 6000);
+    } finally {
+      delete savedFileBusy[file.id];
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  /** Show in folder for a list row: native checks the file read-only first, then shows it selected
+   * in the system file manager. No path comes back; a refusal is one fixed sentence, and the row is
+   * checked again so it says what is there now. */
+  async function revealSavedListRow(file: SavedFile) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || savedFileBusy[file.id]) return;
+    savedFileBusy[file.id] = true;
+    try {
+      await invoke("reveal_saved_file", { server, entry: file.id });
+    } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
+      toast(String(e), "warn", 6000);
+      delete savedFileChecks[savedFileCheckKey(file)];
+      void checkSavedListRows();
+    } finally {
+      delete savedFileBusy[file.id];
+    }
+  }
+  /** "Start a new list": only offered for a damaged record; native refuses anything else. */
+  async function resetSavedList() {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked) return;
+    try {
+      await invoke("reset_saved_files", { server });
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) toast(String(e), "warn", 6000);
+    } finally {
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  function runPrivateDownloadAction(row: PrivateDownload, kind: PrivateDownloadActionKind) {
+    // Acting on a Saved row checks its file again when the list refreshes afterwards. The last
+    // answer stays on screen until then (decisions review L3): a row known to be missing never
+    // flashes back to plain "Saved".
+    const checked = savedChecks[row.id];
+    if (row.status === "saved" && checked) savedChecks[row.id] = { ...checked, visit: -1 };
+    if (kind === "resume") return resumePrivateDownload(row);
+    if (kind === "fresh") return resumePrivateDownload(row, true);
+    if (kind === "saveAs") return resumePrivateDownload(row, false, true);
+    if (kind === "pause") return changePrivateDownload(row, false);
+    return changePrivateDownload(row, true, kind === "keep");
+  }
+
+  // Transfers UX (PR #51): one row per file. A save of a private download shows its live progress
+  // in that download's row (the renderer's own record of the active invocation, the same one the
+  // live list used to show), and the live list leaves that file out (`liveTransferList`). A save
+  // that finishes releases its record natively, so its row goes and the live list shows it done,
+  // as before; `savedRowView` takes any row, so keeping finished saves listed later only needs rows.
+  function liveSaveFor(row: PrivateDownload): SavedRowLive | null {
+    if (activeServerId === null) return null;
+    const key = dlKey(activeServerId, row.cid);
+    const live = downloads[key];
+    // Only once this save has written something: before that the row keeps native's state.
+    return live && activeSaves[key] === live.operation && live.savedDone !== undefined
+      ? { done: live.savedDone, total: live.total, bytesDone: live.savedBytes ?? 0, bytesTotal: live.bytesTotal,
+          fresh: live.fresh === true }
+      : null;
+  }
+  function savedRowName(row: PrivateDownload): string {
+    return filesByCid.get(row.cid)?.name ?? `File ${row.cid.slice(0, 12)}`;
+  }
+  let savedRowViews = $derived(privateDownloads.map((row) => savedRowView(row, savedCheckFor(row),
+    savedRowName(row), liveSaveFor(row),
+    { busy: !!privateDownloadBusy[row.id], saving: !!privateDownloadSaves[row.id] || saveInProgress(row.cid) })));
+  let savedRowGroups = $derived(groupSavedRows(savedRowViews));
+  let privateDownloadCids = $derived(new Set(privateDownloads.map((row) => row.cid)));
+
+  // Inline confirmation of Remove (or Clear) per row: the button becomes "Confirm remove" and
+  // "Cancel". It holds only while the row is still the state and revision it was asked for, so a
+  // row that changed meanwhile never confirms on stale terms; Escape and Cancel clear it.
+  let confirmRemove = $state<Record<string, string>>({});
+  const confirmToken = (row: PrivateDownload) => `${row.status}:${row.intent}`;
+  function confirmingRemove(row: PrivateDownload): boolean {
+    return confirmRemove[row.id] === confirmToken(row);
+  }
+  async function askRemove(row: PrivateDownload) {
+    confirmRemove[row.id] = confirmToken(row);
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-sdl-confirm="${row.id}"]`)?.focus();
+  }
+  async function cancelRemove(row: PrivateDownload) {
+    delete confirmRemove[row.id];
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-sdl-remove="${row.id}"]`)?.focus();
+  }
+  /** Where focus goes when the control that had it disappeared: while the row is still there, its
+   * Remove (back from a confirmation) or its first action; else the next row of the same group,
+   * the group's heading, the first row of any group, and last the tab's own heading. */
+  function rowFocusTarget(rowId: string, group: SavedRowGroup, nextId: string | undefined, fromConfirm: boolean): HTMLElement | null {
+    // A row's controls are its icon buttons (primary, more, the x) or, while confirming, the pair.
+    const control = ":is(.sdl-ico-btn, .sdl-act)";
+    const remove = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] [data-sdl-remove]`);
+    const first = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] ${control}`);
+    return (fromConfirm ? remove ?? first : first)
+      ?? (nextId ? document.querySelector<HTMLElement>(`[data-sdl-row="${nextId}"] ${control}`) : null)
+      ?? document.getElementById(`sdl-${group}`)
+      ?? document.querySelector<HTMLElement>(`.sdl-row ${control}`)
+      ?? document.getElementById("transfers-title");
+  }
+  const focusLost = () => document.activeElement === document.body || !document.activeElement;
+  /** Run a row's action. Focus moves only when the control that had it was taken away (the
+   * confirmation, or the row itself) and focus fell to `<body>`, never otherwise: a long save that
+   * finishes while the user is elsewhere moves nothing. */
+  async function runSavedRowAction(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    const had = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement : null;
+    delete confirmRemove[row.id];
+    const rows = savedRowGroups[group];
+    const next = rows[rows.findIndex((view) => view.id === row.id) + 1];
+    await tick();
+    let holder = had;
+    // The confirmation that had focus is gone now; keep focus on this row meanwhile.
+    if (had && !had.isConnected && focusLost()) {
+      holder = rowFocusTarget(row.id, group, next?.id, action.confirm);
+      holder?.focus();
+    }
+    // Only this press's own marker is cleared: a later press on the same row (Remove while a
+    // resumed save still runs) keeps its busy ring when this action settles.
+    const press = pressedBy.get(row.id);
+    try {
+      await runPrivateDownloadAction(row, action.kind);
+    } finally {
+      if (press !== undefined && pressedBy.get(row.id) === press) {
+        pressedBy.delete(row.id);
+        delete pressedControl[row.id];
+      }
+    }
+    await tick();
+    if (holder && !holder.isConnected && focusLost()) rowFocusTarget(row.id, group, next?.id, action.confirm)?.focus();
+  }
+  // A control that had focus can also disappear on its own, for example Confirm clear when a
+  // check finds the saved file present. Remember the focused row control and, when it leaves the
+  // page while focus falls to <body>, put focus back on that row (or its neighbours). Moving focus
+  // anywhere else, or leaving Transfers, forgets it, so nothing is restored the user did not lose.
+  let lastRowFocus: { element: HTMLElement; row: string; group: SavedRowGroup } | null = null;
+  function noteRowFocus(event: FocusEvent) {
+    const element = event.target instanceof HTMLElement ? event.target : null;
+    const row = element?.closest<HTMLElement>("[data-sdl-row]")?.dataset.sdlRow;
+    const group = savedRowViews.find((view) => view.id === row)?.group;
+    lastRowFocus = element && row && group ? { element, row, group } : null;
+  }
+  function forgetRowFocus(event: FocusEvent) {
+    const element = event.target;
+    // A control taken out of the page may report focus leaving too; only a control that is still
+    // there means the user moved away.
+    queueMicrotask(() => {
+      if (lastRowFocus?.element === element && element instanceof HTMLElement && element.isConnected) lastRowFocus = null;
+    });
+  }
+  function rowButtonClick(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    if (action.disabled) return; // aria-disabled stays focusable, so its reason can be read
+    if (action.kind === "remove" && clearingSaved[row.id]) return; // Clear's re-check is running
+    if (action.confirm && !confirmingRemove(row)) return void askRemove(row);
+    // Clear of a Saved row is unconfirmed only while its file was found present, and that answer
+    // can be from earlier in this visit: check again before releasing the private copy.
+    if (!action.confirm && action.kind === "remove" && row.status === "saved") return void clearSavedRow(row, action, group);
+    pressRowControl(row.id, action.kind === "remove" ? "remove" : "primary");
+    void runSavedRowAction(row, action, group);
+  }
+
+  // Compact Transfers rows (design compact.md): which control of a row started its running action,
+  // so that control (and only it) shows the busy ring. Each press gets its own number in
+  // `pressedBy`, and an action clears the marker only while it is still its own.
+  let pressedControl = $state<Record<string, "primary" | "more" | "remove">>({});
+  const pressedBy = new Map<string, number>();
+  let pressCount = 0;
+  function pressRowControl(rowId: string, slot: "primary" | "more" | "remove") {
+    pressedBy.set(rowId, ++pressCount);
+    pressedControl[rowId] = slot;
+  }
+  // One "more" menu open at a time across the tab, mounted at the top level and positioned fixed
+  // from its button (`top` or `bottom`, and `right`); `key` is the row's state, group and menu
+  // items when it opened, so a row whose state or menu changes closes it; `group` lets focus fall
+  // back to a neighbouring row when this one goes.
+  /** A compact row's controls, for a private download row or a saved-files list row (PR #56). */
+  type AnyCompactControls = CompactControls<SavedRowAction | SavedListRowAction>;
+  let rowMenu = $state<{ rowId: string; group: SavedRowGroup; top: number | null; bottom: number | null; right: number; up: boolean; key: string } | null>(null);
+  let rowMenuFocus = $state(0);
+  // Whether focus has been inside the open menu: the menu is mounted outside the tab, and by the
+  // time a refresh removes it the focused item is already gone, so this is what tells the stale
+  // close (below) to put focus back.
+  let rowMenuHadFocus = false;
+  let rowMenuView = $derived(rowMenu ? savedRowViews.find((view) => view.id === rowMenu?.rowId) ?? null : null);
+  // PR #56: a saved-files list row in SAVED uses the same menu, button and focus machinery under
+  // the row id `saved-<entry id>` (never a private download's 64-digit id).
+  let rowMenuListView = $derived(rowMenu?.rowId.startsWith("saved-")
+    ? savedListViews.find((view) => `saved-${view.id}` === rowMenu?.rowId) ?? null : null);
+  let rowMenuShown = $derived(rowMenuView ? { name: rowMenuView.name, menu: compactControls(rowMenuView).menu as AnyCompactControls["menu"] }
+    : rowMenuListView ? { name: rowMenuListView.name, menu: compactListControls(rowMenuListView).menu as AnyCompactControls["menu"] } : null);
+  const menuKey = (view: { state: string; group: string }, controls: AnyCompactControls) => `${view.state}:${view.group}:` + controls.menu
+    .map((item) => item.kind === "action" ? item.action.kind : item.kind).join(",");
+  /** Where the menu goes for a More button: below it, or above when there is no room. */
+  function rowMenuPlace(button: HTMLElement): { top: number | null; bottom: number | null; right: number; up: boolean } {
+    const rect = button.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const up = spaceBelow < 160 && rect.top > spaceBelow; // five items is about 160px
+    return {
+      up,
+      right: Math.max(8, window.innerWidth - rect.right),
+      top: up ? null : rect.bottom + 4,
+      bottom: up ? window.innerHeight - rect.top + 4 : null,
+    };
+  }
+  /** The reason every menu item is unavailable (the row's busy reason), or `null` when at least
+   * one item can run. A More button with nothing to run is `aria-disabled` with that reason. */
+  function rowMenuDisabled(controls: AnyCompactControls): string | null {
+    const items = controls.menu.filter((item) => item.kind !== "separator");
+    const off = items.every((item) => item.kind === "action" && item.action.disabled);
+    return off ? items.find((item) => item.kind === "action")?.action.disabledReason ?? null : null;
+  }
+  const rowMenuItems = () => [...document.querySelectorAll<HTMLElement>(".sdl-menu [role=menuitem]")];
+  const rowMoreButton = (rowId: string) => document.querySelector<HTMLElement>(`[data-sdl-more="${rowId}"]`);
+  const focusInRowMenu = () => !!document.activeElement?.closest?.(".sdl-menu");
+  /** Open a row's menu below its button (above when there is no room) and focus its first item,
+   * or its last for ArrowUp. Opening by click focuses the first item too. */
+  async function openRowMenu(rowId: string, controls: AnyCompactControls, button: HTMLElement, last = false) {
+    // A private download row, or (PR #56) a saved-files list row, which always sits in SAVED.
+    const view = savedRowViews.find((v) => v.id === rowId)
+      ?? (savedListViews.some((v) => `saved-${v.id}` === rowId) ? { state: "saved", group: "saved" as const } : null);
+    if (!view) return;
+    rowMenuHadFocus = false;
+    rowMenu = { rowId, group: view.group, key: menuKey(view, controls), ...rowMenuPlace(button) };
+    const items = controls.menu.filter((item) => item.kind !== "separator");
+    rowMenuFocus = controls.menu.indexOf(last ? items[items.length - 1] : items[0]);
+    await tick();
+    const elements = rowMenuItems();
+    (last ? elements[elements.length - 1] : elements[0])?.focus();
+  }
+  /** Close the open menu; with `refocus`, focus goes back to its More button if it is still there. */
+  function closeRowMenu(refocus: boolean) {
+    const open = rowMenu;
+    if (!open) return;
+    rowMenu = null;
+    rowMenuHadFocus = false;
+    if (refocus) rowMoreButton(open.rowId)?.focus();
+  }
+  function moreClick(rowId: string, controls: AnyCompactControls, event: MouseEvent) {
+    if (rowMenu?.rowId === rowId) return closeRowMenu(true);
+    if (rowMenuDisabled(controls) !== null || pressedControl[rowId] === "more") return;
+    void openRowMenu(rowId, controls, event.currentTarget as HTMLElement);
+  }
+  function moreKeydown(rowId: string, controls: AnyCompactControls, event: KeyboardEvent) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    if (rowMenuDisabled(controls) !== null) return;
+    void openRowMenu(rowId, controls, event.currentTarget as HTMLElement, event.key === "ArrowUp");
+  }
+  /** Keys inside the menu: arrows move with wrap-around, Home and End jump, Escape closes and
+   * returns focus to the More button. Tab closes too: the menu is mounted at the end of the page,
+   * so focus first goes back to More and the browser's own Tab then moves on from there (to the x,
+   * or with Shift to the primary) instead of leaving the page (review HIGH 1). */
+  function rowMenuKeydown(event: KeyboardEvent) {
+    const items = rowMenuItems();
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const move = (index: number) => {
+      event.preventDefault();
+      items[(index + items.length) % items.length]?.focus();
+    };
+    switch (event.key) {
+      case "ArrowDown": return move(at + 1);
+      case "ArrowUp": return move(at < 0 ? items.length - 1 : at - 1);
+      case "Home": return move(0);
+      case "End": return move(items.length - 1);
+      case "Escape":
+        event.preventDefault();
+        event.stopPropagation();
+        return closeRowMenu(true);
+      case "Tab": return closeRowMenu(true);
+    }
+  }
+  /** Activate a menu item: close the menu (focus back on More), then run it. A disabled item does
+   * nothing and leaves the menu open, its reason in the title. */
+  async function runRowMenuItem(rowId: string, item: CompactControl<SavedRowAction | SavedListRowAction>) {
+    if (item.kind === "action" && item.action.disabled) return;
+    closeRowMenu(true);
+    const row = privateDownloads.find((r) => r.id === rowId);
+    const view = savedRowViews.find((v) => v.id === rowId);
+    if (!row || !view) return runListMenuItem(rowId, item);
+    if (item.kind === "reveal") return revealSavedRow(row);
+    pressRowControl(rowId, "more");
+    await runSavedRowAction(row, item.action as SavedRowAction, view.group);
+  }
+  /** A saved-files list row's menu item (PR #56): Save again, or Show in folder when it is not the
+   * row's primary. The entry is looked up again by its row id, so an entry cleared meanwhile does
+   * nothing. */
+  async function runListMenuItem(rowId: string, item: CompactControl<SavedRowAction | SavedListRowAction>) {
+    const file = savedListFiles.find((f) => `saved-${f.id}` === rowId);
+    if (!file) return;
+    if (item.kind === "reveal") return revealSavedListRow(file);
+    await runSavedListAction(file, item.action as SavedListRowAction);
+  }
+  /** A pointer press outside the open menu and its More button closes it; focus stays wherever
+   * the pointer put it. */
+  function rowMenuPointerDown(event: PointerEvent) {
+    const open = rowMenu;
+    if (!open) return;
+    const target = event.target as Node | null;
+    if (target && (document.querySelector(".sdl-menu")?.contains(target) || rowMoreButton(open.rowId)?.contains(target))) return;
+    closeRowMenu(false);
+  }
+  /** A resize, or a scroll of something holding the More button (the Transfers panel, the page),
+   * makes the menu's fixed position stale: close it, returning focus to More when focus was in the
+   * menu. Scrolls elsewhere (the chat, the menu itself) leave it open (review LOW 5). */
+  function rowMenuMoved(event: Event) {
+    const open = rowMenu;
+    if (!open) return;
+    if (event.type === "scroll") {
+      const target = event.target as Node | null;
+      const more = rowMoreButton(open.rowId);
+      const holdsMore = !target || target === document || !more || target.contains?.(more);
+      if (!holdsMore) return;
+    }
+    closeRowMenu(focusInRowMenu());
+  }
+  /** Whether the open menu must close: Transfers was left, its row left the list or is being
+   * confirmed for removal, or the row's state, group or menu items changed since it opened. */
+  function rowMenuStale(views: SavedRowView[], shown: boolean): boolean {
+    const open = rowMenu;
+    if (!open) return false;
+    // PR #56: a list row's menu is stale once its entry left the list or its items changed.
+    if (open.rowId.startsWith("saved-")) {
+      const listed = savedListViews.find((v) => `saved-${v.id}` === open.rowId);
+      return !shown || !listed || menuKey({ state: "saved", group: "saved" }, compactListControls(listed)) !== open.key;
+    }
+    const current = views.find((v) => v.id === open.rowId);
+    const row = privateDownloads.find((r) => r.id === open.rowId);
+    return !shown || !current || !row || confirmingRemove(row) || menuKey(current, compactControls(current)) !== open.key;
+  }
+  /** After a refresh: close a stale menu, and when focus was in it put focus back on its More
+   * button or, if that went with the row's change, on the row or its neighbours (review MEDIUM 2),
+   * but only if focus fell to `<body>`. A menu that stays open follows its button, which a list
+   * reflow can move without any scroll. */
+  function settleRowMenu(views: SavedRowView[], shown: boolean) {
+    const open = rowMenu;
+    if (!open) return;
+    if (!rowMenuStale(views, shown)) {
+      void tick().then(() => {
+        const more = rowMoreButton(open.rowId);
+        if (rowMenu !== open || !more) return;
+        const place = rowMenuPlace(more);
+        if (place.top !== open.top || place.bottom !== open.bottom || place.right !== open.right || place.up !== open.up) {
+          rowMenu = { ...open, ...place };
+        }
+      });
+      return;
+    }
+    const refocus = rowMenuHadFocus || focusInRowMenu();
+    rowMenu = null;
+    rowMenuHadFocus = false;
+    if (!refocus || !shown) return;
+    void tick().then(() => {
+      if (!focusLost()) return;
+      const rows = savedRowGroups[open.group];
+      const at = rows.findIndex((v) => v.id === open.rowId);
+      (rowMoreButton(open.rowId) ?? rowFocusTarget(open.rowId, open.group, at >= 0 ? rows[at + 1]?.id : rows[0]?.id, false))?.focus();
+    });
+  }
+  $effect(() => {
+    if (!rowMenu) return;
+    window.addEventListener("pointerdown", rowMenuPointerDown, true);
+    window.addEventListener("resize", rowMenuMoved);
+    document.addEventListener("scroll", rowMenuMoved, true);
+    return () => {
+      window.removeEventListener("pointerdown", rowMenuPointerDown, true);
+      window.removeEventListener("resize", rowMenuMoved);
+      document.removeEventListener("scroll", rowMenuMoved, true);
+    };
+  });
+  // Each refresh settles the open menu (closes it when stale, else keeps it by its button).
+  $effect(() => {
+    const views = savedRowViews;
+    void savedListViews; // PR #56: a list row's menu settles with the list too
+    const shown = view === "downloads";
+    untrack(() => settleRowMenu(views, shown));
+  });
+  // Fix-the-lows round, review L9: Clear releases a Saved row's private copy, which is the only
+  // copy left once the saved file is gone. The row skips the confirmation when a check found the
+  // file present, but that check ran once per visit, so a file deleted since would be released
+  // without asking. Clear now checks the file again first and runs at once only on a fresh
+  // "present"; any other answer (missing, replaced, unknown, a refused or unreadable check) is
+  // recorded on the row and turns the press into the inline confirmation instead. The remaining
+  // window is this check's own round trip. While it runs (up to native's 3 s bound) the Clear
+  // button is marked busy, like Show in folder, and a second press does nothing.
+  let clearingSaved = $state<Record<string, boolean>>({});
+  async function clearSavedRow(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked || clearingSaved[row.id]) return;
+    clearingSaved[row.id] = true;
+    let result: SavedCheck = "unknown";
+    try {
+      result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+        { server, download: row.id, expectedIntent: row.intent }));
+    } catch {
+      result = "unknown"; // a refused or failed check proves nothing, so it asks
+    } finally {
+      delete clearingSaved[row.id];
+    }
+    if (!unlockedViewCurrent(gen, server)) return;
+    // A row that changed while it was checked has other actions now; do nothing on stale terms.
+    const now = privateDownloads.find((other) => other.id === row.id);
+    if (!now || now.status !== "saved" || now.intent !== row.intent) return;
+    savedChecks[row.id] = { intent: row.intent, result, visit };
+    if (result === "present") {
+      pressRowControl(row.id, "remove");
+      return runSavedRowAction(now, action, group);
+    }
+    await askRemove(now);
+  }
+
+  // "Show in folder" for a Saved row: native checks the file read-only first and shows it selected
+  // in the system file manager. No path comes back; a refusal is one fixed sentence, and the row
+  // is checked again so it says what is there now.
+  let revealingSaved = $state<Record<string, boolean>>({});
+  async function revealSavedRow(row: PrivateDownload) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || revealingSaved[row.id]) return;
+    revealingSaved[row.id] = true;
+    try {
+      await invoke("reveal_saved_download", { server, download: row.id, expectedIntent: row.intent });
+    } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
+      toast(String(e), "warn", 6000);
+      const checked = savedChecks[row.id];
+      if (checked) savedChecks[row.id] = { ...checked, visit: -1 };
+      void checkSavedRows();
+    } finally {
+      delete revealingSaved[row.id];
+    }
+  }
+
+  // State transitions, announced politely through one live region (never chunk ticks). The region
+  // is emptied first, so the same sentence later is read out again. Each refresh also drops
+  // confirmations that no longer match their row and restores focus lost with a removed control.
+  let transfersAnnouncement = $state("");
+  let announcedRowWords: Map<string, string> | null = null;
+  $effect(() => {
+    const views = savedRowViews;
+    const shown = view === "downloads";
+    untrack(() => {
+      for (const id of Object.keys(confirmRemove)) {
+        const row = privateDownloads.find((r) => r.id === id);
+        if (!row || confirmRemove[id] !== confirmToken(row)) delete confirmRemove[id];
+      }
+      if (!shown) {
+        announcedRowWords = null;
+        lastRowFocus = null;
+        return;
+      }
+      const { announcement, words } = savedRowTransitions(announcedRowWords, views);
+      announcedRowWords = words;
+      if (announcement) {
+        transfersAnnouncement = "";
+        void tick().then(() => { transfersAnnouncement = announcement; });
+      }
+      const lost = lastRowFocus;
+      void tick().then(() => {
+        if (lost && lastRowFocus === lost && !lost.element.isConnected && focusLost()) {
+          lastRowFocus = null;
+          const rows = savedRowGroups[lost.group];
+          const at = rows.findIndex((v) => v.id === lost.row);
+          rowFocusTarget(lost.row, lost.group, at >= 0 ? rows[at + 1]?.id : rows[0]?.id,
+            lost.element.hasAttribute("data-sdl-confirm"))?.focus();
+        }
+      });
+    });
+  });
 
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
   let fileInfo = $state<UiFile | null>(null);
@@ -12190,8 +13069,9 @@
   }
 
   // The "Circulates until" row. Precedence: a wiki embed pins the file regardless of any recorded
-  // deadline; then an explicit keep-forever; then a date; then a legacy listing that never
-  // recorded one. `kind` drives the styling, `text` is the row's wording.
+  // deadline; then an explicit "never expires"; then a date; then a legacy listing that never
+  // recorded one. `kind` drives the styling, `text` is the row's wording. None of these is a
+  // cache pin: circulation is server-wide, while each device's cache follows its own limit.
   type ExpiryView = { kind: "pinned" | "forever" | "date" | "unknown"; text: string };
   let fileInfoExpiry = $derived.by((): ExpiryView => {
     const f = fileInfo;
@@ -12199,23 +13079,23 @@
     if (isPinned(f.cid) || fileInfoUsage?.pinned)
       return { kind: "pinned", text: "pinned: embedded in the wiki, never drops from sharing" };
     if (!f.expires_known) return { kind: "unknown", text: "not recorded (older share)" };
-    if (f.expires === null) return { kind: "forever", text: "forever" };
+    if (f.expires === null) return { kind: "forever", text: "never expires" };
     return { kind: "date", text: `${fmtDay(f.expires)} · ${relDay(f.expires, nowTick)}` };
   });
   // Expiry is per listing and the gate is uploader / owner / admin, matching the backend.
   let canSetExpiry = $derived(
     !!fileInfo && (fileInfo.author === myFp || myRole === "owner" || myRole === "admin")
   );
-  let keptForever = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
+  let neverExpires = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
 
-  /** Toggle this listing between "keep forever" and a fresh 30-day circulation window. */
-  async function toggleKeepForever() {
+  /** Toggle this listing between "never expires" and a fresh 30-day circulation window. */
+  async function toggleNeverExpires() {
     if (activeServerId === null || !fileInfo) return;
     const f = fileInfo;
-    const forever = !keptForever; // the state we're moving TO
+    const forever = !neverExpires; // the state we're moving TO
     const expires = forever ? null : Date.now() + FILE_EXPIRY_DEFAULT_MS;
     fileInfoExpiryBusy = true;
-    const tid = toast(forever ? "Keeping forever…" : "Restoring 30-day expiry…", "info", 0);
+    const tid = toast(forever ? "Marking it never expires…" : "Restoring 30-day expiry…", "info", 0);
     try {
       await invoke("set_file_expiry", { server: activeServerId, cid: f.cid, path: f.path, expires });
       await refreshFiles();
@@ -12225,7 +13105,7 @@
       updateToast(
         tid,
         forever
-          ? `${f.name} will be kept in circulation forever`
+          ? `${f.name} never expires from circulation`
           : `${f.name} circulates until ${fmtDay(expires as number)}`,
         "ok"
       );
@@ -12250,6 +13130,13 @@
     done: number;
     total: number;
     heldBefore: number;
+    /** Chunks and bytes this save has written to the file so far (Transfers UX), unset before
+     * any; `done` and `bytesDone` above also count chunks already held locally. */
+    savedDone?: number;
+    savedBytes?: number;
+    /** This save starts a new file (Save new copy, Save again, Save another copy, or Save as on a
+     * row with a journal): the row's durable saved counts belong to the earlier file. */
+    fresh?: boolean;
     bytesDone: number;
     bytesTotal: number;
     networkBytesDone: number;
@@ -12309,6 +13196,23 @@
       ...uploadList.map((u): TransferRow => ({ ...u, direction: "upload", key: `upload:${u.id}` })),
     ].sort((a, b) => b.ts - a.ts)
   );
+  // The Transfers tab's live list: everything except a download whose private row is listed
+  // above it, which carries that save's progress itself (one row per file). The status bar keeps
+  // counting every transfer.
+  // PR #56: a finished download whose file is now listed as saved shows once, in the Saved group.
+  let liveTransferList = $derived(
+    transferList.filter((t) => (t.direction !== "download" || !privateDownloadCids.has(t.cid)) &&
+      liveTransferShown(t, savedCids))
+  );
+  let liveMovingTransfers = $derived(
+    liveTransferList.filter((t) => transferIsActive(t) && transferConnected(t)).length
+  );
+  let liveWaitingTransfers = $derived(Math.max(0, liveTransferList.filter((t) =>
+    t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
+    t.status === "verifying" || t.status === "reading" || t.status === "uploading" ||
+    t.status === "publishing"
+  ).length - liveMovingTransfers));
+  let liveFinishedTransfers = $derived(liveTransferList.filter((t) => t.status === "done" || t.status === "failed").length);
   let activeTransfers = $derived(
     transferList.filter((t) =>
       t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
@@ -21605,6 +22509,12 @@
         // being viewed, which is precisely when the active-server refresh above does nothing.
         if (e.payload.server === callServer) void refreshCallProfiles();
       }),
+      listen<{ server: number; status: unknown }>("cache-status", (e) => {
+        if (e.payload.server !== activeServerId) return;
+        // Newer than any get_cache_status still in flight: retire those replies.
+        cacheStatusSeq++;
+        cacheStatus = checkedCacheStatus(e.payload.status);
+      }),
       listen<{ server: number }>("files-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) {
@@ -21654,6 +22564,10 @@
         d.networkBytesDone = e.payload.network_bytes_done;
         d.total = e.payload.total;
         d.done = Math.max(d.heldBefore, e.payload.done);
+        // The chunks written to the file by this save (native emits these events only while
+        // writing), without the already-held floor above: the merged Transfers row counts them.
+        d.savedDone = Math.max(d.savedDone ?? 0, e.payload.done);
+        d.savedBytes = Math.max(d.savedBytes ?? 0, e.payload.bytes_done);
         d.bytesTotal = e.payload.bytes_total;
         d.bytesDone = Math.max(d.bytesDone, e.payload.bytes_done);
         d.progress = d.total > 0 ? Math.min(1, d.done / d.total) : 0;
@@ -23491,6 +24405,15 @@
   </svg>
 {/snippet}
 
+{#snippet transferIcon(name: TransferIcon)}
+  <!-- Transfers UX (PR #51): the 16x16 transfer state icons (design icons.md). The round caps turn
+       the `h.01` / `v.01` dots into discs, so keep this wrapper as it is. -->
+  <svg class="ico sdl-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    {#each TRANSFER_ICONS[name] as shape}
+      {#if "d" in shape}<path d={shape.d} />{:else}<rect x={shape.rect.x} y={shape.rect.y} width={shape.rect.width} height={shape.rect.height} rx={shape.rect.rx} />{/if}
+    {/each}
+  </svg>
+{/snippet}
 {#snippet icoStorage()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <ellipse cx="12" cy="5.5" rx="8" ry="3" /><path d="M4 5.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="M4 11.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="m9 17.2 1.8 1.8 4-4" />
@@ -27408,7 +28331,7 @@
                 <div><h3>{!storageHealth.missing_chunks && !storageHealth.unreadable_chunks && !storageHealth.invalid_manifests ? "Storage is healthy" : "Storage needs attention"}</h3><p>{storageHealth.verified_chunks} of {storageHealth.referenced_chunks} unique chunks verified · {fmtSize(storageHealth.verified_bytes)} encrypted content</p></div>
               </div>
               <div class="health-cards">
-                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing chunks</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
+                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing from your uploads</span></article><article><b>{storageHealth.not_cached_chunks ?? 0}</b><span>not cached on this device</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
               </div>
               <div class="storage-breakdown">
                 <section class="storage-categories">
@@ -27661,7 +28584,7 @@
                 <div class="kept-copy-row">
                   <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}… (unlisted)`} · {keptCopyLabel(copy)}</span>
                   <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => saved?.exhausted ? retryKeptFile(saved) : checkKeptFile(copy.cid)}>{saved?.exhausted ? "Retry check" : "Check and repair"}</button>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)} title="Deletes this device's kept copy. A checked kept copy replaces the cache's duplicate, so this can remove the last copy on this device; members who still have the file can send it again.">Release kept copy</button>
                 </div>
               {/each}
               {#each keptTransferRows(keptFiles) as copy (copy.cid)}
@@ -27701,6 +28624,10 @@
                 </button>
                 {#if isPinned(f.cid)}
                   <span class="file-pin" title="Embedded in a wiki page: never drops out of circulation">📌</span>
+                {/if}
+                {#if savedCids.has(f.cid)}
+                  <!-- PR #56: saved on this device (from the local list; no network, no disk). -->
+                  <span class="file-saved" title={SAVED_MARK_TITLE}>{@render transferIcon("saved")}<span>{SAVED_MARK_LABEL}</span></span>
                 {/if}
                 <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)} · <span class="avail-text {av.cls}">{av.label}</span></span>
               </li>
@@ -28230,27 +29157,207 @@
             {/if}
           </div>
         {:else if view === "downloads"}
-          <h2>Transfers</h2>
-          <div class="downloads-tab tab-pane">
+          <h2 id="transfers-title" tabindex="-1">Transfers</h2>
+          <div class="downloads-tab tab-pane" onfocusin={noteRowFocus} onfocusout={forgetRowFocus}>
             {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
-            {#if privateDownloads.length}
-              <h3>Saved download progress</h3>
-              <p class="muted small">If a save was interrupted, check Downloads before saving again. Saving again creates another copy.</p>
-              <ul class="dl-list">
-                {#each privateDownloads as saved (saved.id)}
-                  <li class="dl-item">
-                    <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
-                    <span>{privateDownloadLabel(saved)} · {saved.verifiedChunks}/{saved.totalChunks} chunks</span>
-                    <div>
-                      <button disabled={!!privateDownloadBusy || !!privateDownloadSaves[saved.id] || saveInProgress(saved.cid) || saved.status === "receiving" || saved.status === "removing"}
-                        onclick={() => resumePrivateDownload(saved)}>{saved.status === "exhausted" ? "Retry download" : saved.status === "ready" ? "Save to Downloads" : "Resume download"}</button>
-                      {#if saved.status === "receiving"}<button disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, false)}>Pause</button>{/if}
-                      <button class="ghost" disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, true)}>Remove progress</button>
-                    </div>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
+            <!-- Transfers UX (PR #51): one polite live region announces state changes of the rows
+                 below (never chunk ticks). -->
+            <div class="sdl-sr" aria-live="polite" aria-atomic="true">{transfersAnnouncement}</div>
+            {#each SAVED_ROW_GROUPS as group (group.id)}
+              {@const listNotice = group.id === "saved" ? savedListNotice(savedFiles.state) : null}
+              {#if savedRowGroups[group.id].length || (group.id === "saved" && (savedListViews.length || listNotice))}
+                <section class="sdl" aria-labelledby={`sdl-${group.id}`}>
+                  <h3 class="sdl-group" id={`sdl-${group.id}`} tabindex="-1">{group.heading}</h3>
+                  {#if listNotice}
+                    <!-- PR #56: the saved-files list could not be read; only a damaged one can be
+                         started anew (native refuses anything else). -->
+                    <p class="sdl-why sdl-list-note" role="status">
+                      {listNotice}
+                      {#if savedFiles.state === "damaged"}
+                        <button class="sdl-act ghost" type="button" onclick={resetSavedList}>Start a new list</button>
+                      {/if}
+                    </p>
+                  {/if}
+                  <ul class="sdl-list" aria-labelledby={`sdl-${group.id}`}>
+                    {#each savedRowGroups[group.id] as saved (saved.id)}
+                      {@const row = privateDownloads.find((r) => r.id === saved.id)}
+                      {#if row}
+                        {@const controls = compactControls(saved)}
+                        {@const remove = controls.remove}
+                        {@const confirming = !!remove && remove.confirm && confirmingRemove(row)}
+                        {@const offId = `sdl-why-off-${saved.id}`}
+                        <!-- Compact row (design compact.md): status symbol, name, then one cluster of
+                             controls: the primary icon, the chip word, "more" and the red x. -->
+                        <li class="sdl-row" data-sdl-row={saved.id} data-state={saved.state} data-tone={saved.tone}
+                          data-check={saved.check ?? undefined} aria-busy={saved.busy ? "true" : undefined}>
+                          <div class="sdl-head">
+                            <span class="sdl-status" title={saved.statusTitle}>
+                              {@render transferIcon(saved.icon)}
+                              {#if !saved.showWhy}<span class="sdl-sr">{saved.statusTitle}</span>{/if}
+                            </span>
+                            <span class="sdl-name" title={saved.name}>{saved.name}</span>
+                            <span class="sdl-ctl">
+                              {#if !confirming && controls.primary}
+                                {@const primary = controls.primary}
+                                {#if primary.kind === "reveal"}
+                                  <button class="sdl-ico-btn" type="button" data-sdl-primary={saved.id}
+                                    title={revealingSaved[saved.id] ? "Checking the saved file" : primary.label}
+                                    aria-label={primary.accessibleName}
+                                    aria-disabled={revealingSaved[saved.id] ? "true" : undefined}
+                                    aria-busy={revealingSaved[saved.id] ? "true" : undefined}
+                                    onclick={() => revealSavedRow(row)}>{@render transferIcon(primary.icon)}</button>
+                                {:else}
+                                  <button class="sdl-ico-btn" class:go={primary.look === "go"} class:stop={primary.look === "stop"}
+                                    type="button" data-sdl-primary={saved.id}
+                                    title={primary.action.disabledReason ?? primary.action.label}
+                                    aria-label={primary.action.accessibleName}
+                                    aria-disabled={primary.action.disabled || (saved.busy && pressedControl[saved.id] === "primary") ? "true" : undefined}
+                                    aria-busy={saved.busy && pressedControl[saved.id] === "primary" ? "true" : undefined}
+                                    aria-describedby={primary.action.disabled ? offId : undefined}
+                                    onclick={() => rowButtonClick(row, primary.action, saved.group)}>{@render transferIcon(primary.icon)}</button>
+                                {/if}
+                              {/if}
+                              <span class="sdl-chip">{saved.word}</span>
+                              {#if confirming && remove}
+                                {@const words = confirmWords(remove, saved.name)}
+                                <!-- Escape on either button cancels, like Cancel. -->
+                                <span class="sdl-confirm" role="group" aria-label={words.group}>
+                                  <button class="sdl-act danger" type="button" data-sdl-confirm={saved.id}
+                                    aria-label={words.confirmName}
+                                    aria-disabled={remove.disabled ? "true" : undefined}
+                                    aria-describedby={remove.disabled ? offId : undefined}
+                                    title={remove.disabledReason ?? undefined}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => rowButtonClick(row, remove, saved.group)}>{words.confirm}</button>
+                                  <button class="sdl-act ghost" type="button" aria-label={words.cancelName}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => cancelRemove(row)}>Cancel</button>
+                                </span>
+                              {:else}
+                                {#if controls.menu.length}
+                                  {@const menuOff = rowMenuDisabled(controls)}
+                                  <button class="sdl-ico-btn sdl-more" type="button" data-sdl-more={saved.id}
+                                    aria-haspopup="menu" aria-expanded={rowMenu?.rowId === saved.id ? "true" : "false"}
+                                    aria-controls={rowMenu?.rowId === saved.id ? `sdl-menu-${saved.id}` : undefined}
+                                    title={menuOff ?? "More actions"} aria-label={`More actions for ${saved.name}`}
+                                    aria-disabled={menuOff || (saved.busy && pressedControl[saved.id] === "more") ? "true" : undefined}
+                                    aria-busy={saved.busy && pressedControl[saved.id] === "more" ? "true" : undefined}
+                                    aria-describedby={menuOff ? offId : undefined}
+                                    onclick={(e) => moreClick(saved.id, controls, e)}
+                                    onkeydown={(e) => moreKeydown(saved.id, controls, e)}>{@render transferIcon("more")}</button>
+                                {/if}
+                                {#if remove}
+                                  {@const removeBusy = clearingSaved[saved.id] || (saved.busy && pressedControl[saved.id] === "remove")}
+                                  <button class="sdl-ico-btn danger" type="button" data-sdl-remove={saved.id}
+                                    title={clearingSaved[saved.id] ? "Checking the saved file" : remove.disabledReason ?? remove.label}
+                                    aria-label={remove.accessibleName}
+                                    aria-disabled={remove.disabled || removeBusy ? "true" : undefined}
+                                    aria-busy={removeBusy ? "true" : undefined}
+                                    aria-describedby={remove.disabled ? offId : undefined}
+                                    onclick={() => rowButtonClick(row, remove, saved.group)}>{@render transferIcon("cancel-x")}</button>
+                                {/if}
+                              {/if}
+                            </span>
+                          </div>
+                          {#if saved.bar}
+                            <div class="sdl-bar" role="progressbar" aria-label={saved.bar.accessibleName}
+                              aria-valuemin="0" aria-valuemax={saved.bar.valueMax} aria-valuenow={saved.bar.valueNow}
+                              aria-valuetext={saved.bar.valueText}>
+                              <span class="sdl-bar-fill" style:--p={saved.bar.fraction}></span>
+                              {#if saved.bar.label}<span class="sdl-bar-label" aria-hidden="true">{saved.bar.label}</span>{/if}
+                            </div>
+                            <span class="sdl-chunks">{saved.chunks}</span>
+                          {/if}
+                          {#if saved.showWhy}<p class="sdl-why">{saved.why}</p>{/if}
+                          {#if saved.actions.some((a) => a.disabled)}
+                            <span class="sdl-sr" id={offId}>{saved.actions.find((a) => a.disabled)?.disabledReason}</span>
+                          {/if}
+                          {#if saved.where || saved.hint}
+                            <p class="sdl-where">
+                              {#if saved.where}<span>{saved.where}</span>{/if}
+                              {#if saved.hint}<span class="sdl-hint">{saved.hint}</span>{/if}
+                            </p>
+                          {/if}
+                        </li>
+                      {/if}
+                    {/each}
+                    {#if group.id === "saved"}
+                      <!-- PR #56: finished saves from the saved-files list, newest first, as the same
+                           compact rows as a Saved private row in SAVED (compactListControls): status
+                           symbol, name, Show in folder as the primary, the chip, "more" (Save again)
+                           and the red x (Clear, which only forgets the entry). A copy a Saved private
+                           row stands for is that row instead. -->
+                      {#each savedListViews as listed (listed.id)}
+                        {@const file = savedListFiles.find((f) => f.id === listed.id)}
+                        {#if file}
+                          {@const listRowId = `saved-${listed.id}`}
+                          {@const listControls = compactListControls(listed)}
+                          {@const forget = listControls.remove}
+                          {@const listOffId = `sdl-why-off-${listRowId}`}
+                          <li class="sdl-row" data-sdl-row={listRowId} data-state="saved" data-tone={listed.tone}
+                            data-check={listed.check ?? undefined} data-saved-entry={listed.id}
+                            aria-busy={listed.busy ? "true" : undefined}>
+                            <div class="sdl-head">
+                              <span class="sdl-status" title={listed.statusTitle}>
+                                {@render transferIcon(listed.icon)}
+                                <span class="sdl-sr">{listed.statusTitle}</span>
+                              </span>
+                              <span class="sdl-name" title={listed.name}>{listed.name}</span>
+                              <span class="sdl-ctl">
+                                {#if listControls.primary?.kind === "reveal"}
+                                  {@const reveal = listControls.primary}
+                                  <button class="sdl-ico-btn" type="button" data-sdl-primary={listRowId}
+                                    title={savedFileBusy[listed.id] ? "Checking the saved file" : reveal.label}
+                                    aria-label={reveal.accessibleName}
+                                    aria-disabled={savedFileBusy[listed.id] ? "true" : undefined}
+                                    aria-busy={savedFileBusy[listed.id] ? "true" : undefined}
+                                    onclick={() => revealSavedListRow(file)}>{@render transferIcon(reveal.icon)}</button>
+                                {:else if listControls.primary?.kind === "action"}
+                                  {@const again = listControls.primary}
+                                  <button class="sdl-ico-btn" class:go={again.look === "go"} type="button" data-sdl-primary={listRowId}
+                                    title={again.action.disabledReason ?? again.action.label}
+                                    aria-label={again.action.accessibleName}
+                                    aria-disabled={again.action.disabled ? "true" : undefined}
+                                    aria-describedby={again.action.disabled ? listOffId : undefined}
+                                    onclick={() => runSavedListAction(file, again.action)}>{@render transferIcon(again.icon)}</button>
+                                {/if}
+                                <span class="sdl-chip">{listed.word}</span>
+                                {#if listControls.menu.length}
+                                  {@const listMenuOff = rowMenuDisabled(listControls)}
+                                  <button class="sdl-ico-btn sdl-more" type="button" data-sdl-more={listRowId}
+                                    aria-haspopup="menu" aria-expanded={rowMenu?.rowId === listRowId ? "true" : "false"}
+                                    aria-controls={rowMenu?.rowId === listRowId ? `sdl-menu-${listRowId}` : undefined}
+                                    title={listMenuOff ?? "More actions"} aria-label={`More actions for ${listed.name}`}
+                                    aria-disabled={listMenuOff ? "true" : undefined}
+                                    aria-describedby={listMenuOff ? listOffId : undefined}
+                                    onclick={(e) => moreClick(listRowId, listControls, e)}
+                                    onkeydown={(e) => moreKeydown(listRowId, listControls, e)}>{@render transferIcon("more")}</button>
+                                {/if}
+                                {#if forget}
+                                  <button class="sdl-ico-btn danger" type="button" data-sdl-remove={listRowId}
+                                    title={forget.disabledReason ?? forget.label}
+                                    aria-label={forget.accessibleName}
+                                    aria-disabled={forget.disabled ? "true" : undefined}
+                                    aria-describedby={forget.disabled ? listOffId : undefined}
+                                    onclick={() => runSavedListAction(file, forget)}>{@render transferIcon("cancel-x")}</button>
+                                {/if}
+                              </span>
+                            </div>
+                            {#if listed.actions.some((a) => a.disabled)}
+                              <span class="sdl-sr" id={listOffId}>{listed.actions.find((a) => a.disabled)?.disabledReason}</span>
+                            {/if}
+                            <p class="sdl-where">
+                              <span>{listed.where}</span>
+                              {#if listed.hint}<span class="sdl-hint">{listed.hint}</span>{/if}
+                            </p>
+                          </li>
+                        {/if}
+                      {/each}
+                    {/if}
+                  </ul>
+                </section>
+              {/if}
+            {/each}
             <button class="transfer-health" onclick={() => switchView("storage")}>
               {@render icoStorage()}
               {#if storageHealth}
@@ -28260,14 +29367,16 @@
               {/if}
               <i>Open →</i>
             </button>
-            {#if transferList.length === 0}
-              <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
+            {#if liveTransferList.length === 0}
+              {#if privateDownloads.length === 0 && savedListViews.length === 0}
+                <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
+              {/if}
             {:else}
               <div class="dl-toolbar">
                 <span class="muted small">
-                  {movingTransfers} active{#if waitingTransfers} · {waitingTransfers} waiting{/if} · {transferList.length} total
+                  {liveMovingTransfers} active{#if liveWaitingTransfers} · {liveWaitingTransfers} waiting{/if} · {liveTransferList.length} total
                 </span>
-                <button class="ghost small" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
+                <button class="ghost small" disabled={liveFinishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
               </div>
               <div class="transfer-legend" aria-label="Transfer piece colours">
                 <span><i class="transfer-piece held"></i>ready</span>
@@ -28276,7 +29385,7 @@
                 <span><i class="transfer-piece offline"></i>no connection</span>
               </div>
               <ul class="dl-list">
-                {#each transferList as d (d.key)}
+                {#each liveTransferList as d (d.key)}
                   {@const pieces = transferPieceStates(d)}
                   <li class="dl-item">
                     <div class="dl-item-main">
@@ -28391,6 +29500,22 @@
         </button>
       {/if}
       <span class="sb-spacer"></span>
+      {#if cur && !dmHome && !inboxView && cacheShown(cacheStatus)}
+        {@const foot = cacheFooter(cacheStatus)}
+        <button
+          class="seg sb-cache"
+          data-tone={foot.tone}
+          title={foot.title}
+          onclick={() => openServerSettings(activeServerId, "storage")}
+        >
+          <span class="sb-cache-label">cache</span>
+          {#if foot.bar !== null}
+            <span class="sb-cache-bar" role="progressbar" aria-label="Cache used on this device" aria-valuemin="0" aria-valuemax="100" aria-valuenow={foot.bar}><i style={`width:${foot.bar}%`}></i></span>
+          {/if}
+          <span class="sb-cache-value">{foot.value}</span>
+          {#if foot.chip}<span class="sb-cache-chip">{foot.chip}</span>{/if}
+        </button>
+      {/if}
       {#if myFp}<span class="seg" title="Your fingerprint on this server: click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
     </footer>
 
@@ -29039,6 +30164,42 @@
             </div>
           </div>
         {/if}
+      </div>
+    {/if}
+
+    {#if leaveConfirm}
+      {@const leaving = leaveConfirm}
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => (leaveConfirm = null)}>
+        <div class="overlay-card leave-confirm" role="alertdialog" aria-modal="true" aria-labelledby="leave-confirm-title">
+          <header class="overlay-head">
+            <div><span class="name-studio-label">LEAVE // {leaving.name.toUpperCase()}</span><h2 id="leave-confirm-title">Leave {leaving.name}?</h2></div>
+            <button class="ghost" title="Stay" onclick={() => (leaveConfirm = null)}>✕</button>
+          </header>
+          <p>Leaving forgets this server on this device and removes its cached files from this device. Coming back needs a fresh invite. Studio work keeps the files it still uses.</p>
+          <!-- PR #56: leaving forgets the server's list of saved files, never the files. -->
+          <p class="muted small">Files you saved from it stay where they are. Mewtual forgets where they went.</p>
+          {#if !leaving.loss}
+            <p class="muted small">Checking what this device keeps for it…</p>
+          {:else}
+            {#if leaving.loss.keep.length}
+              <h3>These Keep copies will be permanently deleted</h3>
+              <ul class="leave-loss">{#each leaving.loss.keep as name (name)}<li>{name}</li>{/each}</ul>
+            {/if}
+            {#if leaving.loss.downloads.length}
+              <h3>These unfinished downloads will be permanently deleted</h3>
+              <ul class="leave-loss">{#each leaving.loss.downloads as name (name)}<li>{name}</li>{/each}</ul>
+            {/if}
+            {#if leaving.loss.unknown}
+              <p class="warn-t small">Keep copies or unfinished downloads could not be checked. Leaving may delete any this device has for this server.</p>
+            {:else if !leaving.loss.keep.length && !leaving.loss.downloads.length}
+              <p class="muted small">No Keep copies or unfinished downloads on this device.</p>
+            {/if}
+          {/if}
+          <div class="leave-confirm-actions">
+            <button class="ghost" onclick={() => (leaveConfirm = null)}>Stay</button>
+            <button class="danger-btn" disabled={!leaving.loss} onclick={confirmLeave}>Leave and delete</button>
+          </div>
+        </div>
       </div>
     {/if}
 
@@ -30405,6 +31566,20 @@
                   <b>Server settings → File Trust</b>.
                 </p>
               </section>
+              <!-- PR #56: off by default. The renderer only passes a flag; native replaces only a
+                   copy its sealed list names and that it proves is its own and unchanged. -->
+              <section class="set-section saved-files-set">
+                <h3>Saved files</h3>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={replaceOlder}
+                    onchange={(e) => setReplaceOlder(e.currentTarget.checked)}
+                  />
+                  <span>{REPLACE_OLDER_LABEL}</span>
+                </label>
+                <p class="muted small">{REPLACE_OLDER_HELP}</p>
+              </section>
             {:else if settingsPage === "keybinds"}
               <div class="stx-crumb">SETTINGS // APP // KEYBINDS</div>
               <h1>Keybinds</h1>
@@ -31297,13 +32472,90 @@
               </form>
               <p class="muted small">Size sets how big <code>:code:</code> renders in messages (reactions stay small).</p>
               </section>
+            {:else if serverSettingsPage === "storage"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // STORAGE</div>
+              <h1>Storage on this device</h1>
+              <section class="set-section cache-set">
+                <h3>Cache</h3>
+                {#if cacheStatus}
+                  {@const foot = cacheFooter(cacheStatus)}
+                  <div class="cache-meter" data-tone={foot.tone}>
+                    {#if foot.bar !== null}
+                      <span class="cache-bar" role="progressbar" aria-label="Cache used" aria-valuemin="0" aria-valuemax="100" aria-valuenow={foot.bar}><i style={`width:${foot.bar}%`}></i></span>
+                    {/if}
+                    <b>{cacheBytes(cacheStatus.usage_bytes)}</b>
+                    <span class="muted small">{cacheStatus.unlimited ? "cached, no limit" : cacheStatus.limit_bytes !== null ? `of ${cacheBytes(cacheStatus.limit_bytes)}` : "cached"}</span>
+                    {#if foot.chip}<span class="cache-chip">{foot.chip}</span>{/if}
+                  </div>
+                  {#if cacheStatus.paused && cacheStatus.paused !== "not-ready"}
+                    <p class="warn-t small">{cachePauseText(cacheStatus.paused)}</p>
+                  {/if}
+                  {#if cacheStatus.leaving_soon_files > 0 && !cacheStatus.held_by_pins}
+                    <p class="small">{cacheStatus.leaving_soon_files} {cacheStatus.leaving_soon_files === 1 ? "file is" : "files are"} next to leave ({cacheBytes(cacheStatus.leaving_soon_bytes)}) when new files arrive.</p>
+                  {/if}
+                  <p class="muted small">{pinnedSummary(cacheStatus)}</p>
+                {:else}
+                  <p class="muted small">This device's cache has not been measured yet.</p>
+                {/if}
+                <p class="muted small">Files you open or save stay here so they show without fetching again, and this device can share them with members. Over the limit, the files shared longest ago leave first; anyone who still has them can send them again.</p>
+              </section>
+              <section class="set-section">
+                <h3>Limit on this device</h3>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); void applyCacheLimit(); }}>
+                  <select bind:value={cacheLimitDraft} onchange={() => (cacheLimitConfirming = false)} aria-label="Cache limit on this device" disabled={!cacheStatus || cacheLimitBusy}>
+                    {#if cacheStatus && !cacheStatus.unlimited && cacheStatus.limit_bytes !== null && !CACHE_LIMIT_CHOICES.some((c) => c.bytes === cacheStatus?.limit_bytes)}
+                      <option value={String(cacheStatus.limit_bytes)}>{limitLabel(cacheStatus.limit_bytes)}</option>
+                    {/if}
+                    {#each CACHE_LIMIT_CHOICES as choice (choice.label)}
+                      <option value={String(choice.bytes)}>{choice.label}</option>
+                    {/each}
+                  </select>
+                  <button class="ghost small" disabled={!cacheStatus || cacheLimitBusy || !cacheLimitDraft}>
+                    {cacheLimitBusy ? "Saving…" : cacheLimitConfirming ? "Remove and apply" : "Apply"}
+                  </button>
+                </form>
+                {#if cacheLimitConfirming && cacheStatus}
+                  <p class="warn-t small">{lowerLimitWarning(cacheStatus, cacheLimitDraft === "null" ? null : Number(cacheLimitDraft))}</p>
+                {/if}
+                <p class="muted small">Only this device. Other members choose their own, and nothing here changes what the server shares.</p>
+              </section>
+              <!-- PR #56 follow-up: how many saves this server's list keeps on this device. Native
+                   clamps the choice into its range; a lower one is previewed first, and the page
+                   says how many of the oldest entries go (never files) before the user confirms. -->
+              <section class="set-section saved-limit-set">
+                <h3>Saved files</h3>
+                <label class="saved-limit-label" for="saved-limit">{SAVED_LIMIT_LABEL}</label>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); void applySavedLimit(); }}>
+                  <select id="saved-limit" bind:value={savedLimitDraft} onchange={() => (savedLimitForgets = null)} disabled={!savedLimit || savedLimitBusy}>
+                    {#if savedLimit?.state === "unreadable"}
+                      <option value="" disabled>Choose again</option>
+                    {/if}
+                    {#if savedLimit && savedLimit.limit !== null && !SAVED_LIMIT_CHOICES.includes(savedLimit.limit)}
+                      <option value={String(savedLimit.limit)}>{savedLimitLabel(savedLimit.limit, savedLimit.default)}</option>
+                    {/if}
+                    {#each SAVED_LIMIT_CHOICES as choice (choice)}
+                      <option value={String(choice)}>{savedLimitLabel(choice, savedLimit?.default ?? 256)}</option>
+                    {/each}
+                  </select>
+                  <button class="ghost small" disabled={!savedLimit || savedLimitBusy || !savedLimitDraft || (savedLimitForgets === null && savedLimit.limit !== null && String(savedLimit.limit) === savedLimitDraft)}>
+                    {savedLimitBusy ? "Saving…" : savedLimitForgets !== null ? "Forget and apply" : "Apply"}
+                  </button>
+                </form>
+                {#if savedLimitForgets !== null}
+                  <p class="warn-t small">{savedLimitWarning(savedLimitForgets)}</p>
+                {/if}
+                {#if savedLimit?.state === "unreadable"}
+                  <p class="warn-t small">Mewtual could not read this setting, so it lists no new saves for this server until you choose one again.</p>
+                {/if}
+                <p class="muted small">{savedLimit && savedLimit.listed !== null ? `The list holds ${savedLimit.listed} saved ${savedLimit.listed === 1 ? "file" : "files"} now. ` : ""}{SAVED_LIMIT_HELP}</p>
+              </section>
             {:else if serverSettingsPage === "leave"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LEAVE</div>
               <h1>Leave Server</h1>
               {#if activeServerId !== null}
                 <section class="set-section danger">
-                  <p class="muted small">Leaving forgets this server on this device. Coming back needs a fresh invite.</p>
-                  <button class="ghost leave" onclick={() => { const id = activeServerId; showServerSettings = false; if (id !== null) leaveServer(id); }}>
+                  <p class="muted small">Leaving forgets this server on this device and removes its cached files, Keep copies and unfinished downloads from this device. Files you saved from it stay where they are. Coming back needs a fresh invite.</p>
+                  <button class="ghost leave" onclick={() => { const id = activeServerId; if (id !== null) void requestLeave(id); }}>
                     Leave this server
                   </button>
                 </section>
@@ -31339,7 +32591,8 @@
           </button>
           <button class="ghost small" onclick={() => lightbox && openFileRef(lightbox.cid)}>Properties</button>
           {#if lightboxFile}
-            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>Download</button>
+            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>{lightboxFile ? downloadLabel(lightboxFile) : "Download"}</button>
+            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile, true)}>Save as</button>
           {/if}
           <span class="lightbox-div" aria-hidden="true"></span>
           <button class="ghost small" aria-label="Close" title="Close (Esc)" onclick={closeLightbox}>✕</button>
@@ -31389,6 +32642,10 @@
         <div class="overlay-card">
           <header class="overlay-head">
             <h2 class="file-info-title">📄 {fileInfo.name}</h2>
+            {#if savedCids.has(fileInfo.cid)}
+              <!-- PR #56: saved on this device; Transfers shows where. -->
+              <span class="file-saved" title={SAVED_MARK_TITLE}>{@render transferIcon("saved")}<span>{SAVED_MARK_LABEL}</span></span>
+            {/if}
             <button class="ghost" onclick={closeFileInfo}>✕</button>
           </header>
           <div class="overlay-body file-info">
@@ -31559,10 +32816,19 @@
               {#if mediaKind(fileInfo.name, fileInfo.mime) === "pixa"}
                 <button class="primary" disabled={!mayFetchPixa(fileInfo.size)} onclick={() => fileInfo && openPixaViewer(fileInfo)}>Open flipnote</button>
               {/if}
-              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
+              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ {fileInfo ? downloadLabel(fileInfo) : "Download"}</button>
+              <button class="ghost" onclick={() => fileInfo && downloadFile(fileInfo, true)}>Save as</button>
               {#if canSetExpiry}
-                <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>
-                  {fileInfoExpiryBusy ? "Saving…" : keptForever ? "Restore 30-day expiry" : "♾ Keep forever"}
+                <!-- "Never expires" is a server-wide circulation flag, not a promise that this or
+                     any device keeps the bytes: caches still drop it under their limit. Keep is
+                     the per-device pin. The old "Keep forever" label read as the latter. -->
+                <button
+                  class="ghost"
+                  disabled={fileInfoExpiryBusy}
+                  onclick={toggleNeverExpires}
+                  title={neverExpires ? "Give this listing a fresh 30-day circulation window" : "Keep this listing in circulation for everyone with no end date. Devices can still drop it from their cache; use Keep to hold a copy here."}
+                >
+                  {fileInfoExpiryBusy ? "Saving…" : neverExpires ? "Restore 30-day expiry" : "♾ Never expires"}
                 </button>
               {/if}
               {#if myRole === "owner" || myRole === "admin"}
@@ -31711,6 +32977,39 @@
       >
         {@render menuRows(menu.items, 0)}
         <div class="ctx-foot" aria-hidden="true"><span>↑↓ move</span><span>⏎ pick</span><span>type to jump</span><span class="sp"></span><span>esc</span></div>
+      </div>
+    {/if}
+
+    {#if rowMenu && rowMenuShown}
+      {@const menuRowId = rowMenu.rowId}
+      <!-- Compact Transfers rows: a row's "more" menu, mounted here (not inside the row) and fixed
+           from its button, so the scrolling panel never clips it (design compact.md, 5.5). A
+           saved-files list row (PR #56) uses the same menu with its own items. -->
+      <div class="sdl-menu" class:up={rowMenu.up} id={`sdl-menu-${rowMenu.rowId}`} role="menu"
+        aria-label={`More actions for ${rowMenuShown.name}`} tabindex="-1"
+        style:top={rowMenu.top === null ? undefined : `${rowMenu.top}px`}
+        style:bottom={rowMenu.bottom === null ? undefined : `${rowMenu.bottom}px`}
+        style:right={`${rowMenu.right}px`}
+        onfocusin={() => (rowMenuHadFocus = true)}
+        onkeydown={rowMenuKeydown}>
+        {#each rowMenuShown.menu as item, index (index)}
+          {#if item.kind === "separator"}
+            <div class="sdl-menu-sep" role="separator"></div>
+          {:else if item.kind === "reveal"}
+            <button class="sdl-menu-item" role="menuitem" type="button" data-sdl-item={index}
+              tabindex={rowMenuFocus === index ? 0 : -1} aria-label={item.accessibleName}
+              onfocus={() => (rowMenuFocus = index)}
+              onclick={() => runRowMenuItem(menuRowId, item)}>{@render transferIcon(item.icon)} {item.label}</button>
+          {:else}
+            <button class="sdl-menu-item" role="menuitem" type="button" data-sdl-item={index}
+              tabindex={rowMenuFocus === index ? 0 : -1} aria-label={item.action.accessibleName}
+              aria-disabled={item.action.disabled ? "true" : undefined}
+              aria-describedby={item.action.disabled ? `sdl-why-off-${menuRowId}` : undefined}
+              title={item.action.disabledReason ?? undefined}
+              onfocus={() => (rowMenuFocus = index)}
+              onclick={() => runRowMenuItem(menuRowId, item)}>{@render transferIcon(item.icon)} {item.action.label}</button>
+          {/if}
+        {/each}
       </div>
     {/if}
   {/if}
