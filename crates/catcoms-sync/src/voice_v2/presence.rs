@@ -12,6 +12,7 @@ use catcoms_rt::{Clock, CryptoRngCore};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod admission;
 mod confirmation;
 mod snapshot;
 pub use confirmation::{
