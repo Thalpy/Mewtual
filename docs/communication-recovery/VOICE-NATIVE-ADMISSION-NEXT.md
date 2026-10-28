@@ -3,9 +3,13 @@
 Status,28 October: Root registration and browser preclaim are reviewable leaves in
 PRs79/80. They are joined at `a44b51b2` on `communication-v2-native-admission`.
 The subsequent Actor staging implementation compiles; both new Root preparation tests
-and all eight Actor staging regressions pass in that checkout. Complete gates are pending.
+and all eight Actor staging regressions pass in that checkout. The complete Root suite now
+passes4,002 tests with25 existing ignores. The complete native suite passes1,032 library
+tests plus six ACL tests, with zero failures/ignores.
 The subsequent native mode-only Control29/version10 fence has seven passing focused
-tests. Production V2 remains OFF. This document describes the remaining connection,
+tests. The canonical Slot continuation has thirteen passing regressions;
+strict native Clippy and explicit check/build/startup pass. Production V2
+remains OFF. This document describes implemented native custody and the remaining connection,
 not completed native admission, signed readiness, media relay or physical acceptance.
 
 ## Implemented Actor boundary
@@ -30,7 +34,7 @@ Root registration3KiB, Actor RPC4KiB and native worker8KiB are separate contribu
 within the existing group/process pool. Measure the concrete native Publisher BEFORE
 Box construction. Source/intake metadata and physical Control are not free slack.
 
-## Canonical native slot
+## Canonical native slot (local implementation draft)
 
 Keep one small slot inside the original bootstrap Row, paid by that Row's8KiB fee:
 
@@ -72,17 +76,18 @@ Row and Root guards. Closing persists through that destruction and actual old wo
 Do not publish Returned because an index was removed, a receiver disappeared or a boolean
 changed. Do not report channel collection while admission work or reclamation remains.
 
-Extend original-owner End, bootstrap finish/retire_channel, registry collection and
-stop_and_wait_for_physical. Close first, retain exact cleanup routing, then collect work.
+The current draft extends original-owner End, bootstrap finish/retire_channel, registry
+collection and stop_and_wait_for_physical. Close first, retain exact cleanup routing, then collect work.
 The first close fence must release UI commit before awaiting Actor work or destroying
 Root capacity; otherwise the returning worker could wait on that same commit.
 
 ## Protocol pinning and browser coupling
 
 The existing pilot starts automatic discovery after authenticated bootstrap Status ACK.
-Pinning a new admission mode afterward would race that old producer. A candidate design
-is now an explicit authenticated short mode-only Register operation before ACK, followed
-by inert waiting. Actual Root work after ACK is still unimplemented. First Register after ACK must refuse an
+Pinning a new admission mode afterward would race that old producer. The implemented
+mode-only Register occurs before ACK, followed by inert waiting. The local Slot draft can
+start its same paid Root continuation after ACK, but no capacity wire adapter exists yet.
+First mode Register after ACK must refuse an
 upgrade. A valid first Cancel before ACK must select the SAME sticky admission mode,
 so a delayed ACK cannot turn negative admission debt into pilot discovery. Observe
 alone never creates a mode or ordinal. First Register/Cancel on an already ACKed
@@ -117,12 +122,24 @@ capacity returned nor ends independently held media. Per-generation cancellation
 to operation30. No implementation of operation30 exists at this checkpoint.
 
 Actual Work retirement proves callback/argument teardown, not destruction of every Work
-clone or return of its4KiB fee. Native may advance only after its owned Work/capacity are
-detached and destroyed and its actual native position returns. Residual plain Actor payer
+clone or return of its4KiB fee. The reviewed continuation uses ONE persistent8KiB task and
+actual native position per physical Session, rather than reacquiring a task/position for
+each generation. Native may advance only after its generation's owned Work/capacity are
+detached and destroyed. Per-generation Returned does not claim task/position or fee return;
+that stronger boundary is required at final physical channel collection. Future positive
+Ready/SDP work must explicitly compose with this same owner; a second worker is not free.
+Residual plain Actor payer
 metadata can remain independently charged; neither a Returned reply nor retirement may
 claim its refund. No residual payer may contain a Slot/Route/effect backedge. Acquire the
 actual NativeHold outside Row, then validate that owned hold; checking global idle AFTER
 acquisition would incorrectly block the producer on its own position.
+
+Unexpected task destruction transfers its SAME native position into Slot when original
+work remains. That Session has no Row backedge. The original plain8KiB funding remains;
+terminal-only exclusive recovery creates no task/credit/Root attempt. It preserves the
+position through actual owner destruction, including unwind, and only then permits final
+collection. Shutdown must actively recover and await SAME Work retirement outside guards
+before physical idle; maintenance has already stopped and cannot supply that cleanup.
 
 ## Required adversarial evidence
 

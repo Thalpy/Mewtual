@@ -160,6 +160,7 @@ fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
     // Include retained row, its Arc, preparation, Session result/projection and a second
     // returned descriptor copy. SelectedHandoffOwner has its separate original paid owner.
     let row = std::mem::size_of::<Row>()
+        + super::admission_slot::retained_layout_bytes()
         + std::mem::size_of::<SessionIdentity>() + 2 * std::mem::size_of::<usize>()
         + arc_words
         + std::mem::size_of::<Ticket>()

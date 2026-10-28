@@ -272,6 +272,13 @@ impl Session {
 pub(super) struct NativeHold {
     session: Arc<Session>,
 }
+impl NativeHold {
+    /// The actual owned position, not a global idle snapshot after acquiring it.
+    /// This guard cannot be cloned or manufactured from a copied Session label.
+    pub(super) fn belongs_to(&self, session: &Arc<Session>) -> bool {
+        Arc::ptr_eq(&self.session, session)
+    }
+}
 impl Drop for NativeHold {
     fn drop(&mut self) {
         let mut counters = self

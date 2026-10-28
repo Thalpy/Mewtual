@@ -41,6 +41,7 @@ impl Cursor {
             let Ok(route) = registry.route(slot + 1) else {
                 continue;
             };
+            route.nudge_admission();
             if !route.native_ready() {
                 continue;
             }
@@ -99,6 +100,7 @@ impl Cursor {
             let Ok(route) = registry.route(slot + 1) else {
                 continue;
             };
+            route.nudge_admission();
             if !route.native_ready() {
                 continue;
             }

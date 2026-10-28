@@ -1,5 +1,45 @@
 # Chat, files and voice implementation evidence
 
+## Native canonical admission continuation (28 October; inactive draft)
+
+The integration branch now retains the exact Actor invocation/outcome and stable Root
+registration inside the original bootstrap Row. One paid8KiB task/physical native position
+serves the Session. Lost observations coalesce; ordinary generation cancellation preserves
+the same incarnation; Busy attachment retains the same affine candidate. Actual old Work,
+capacity and reclamation must return before the next generation. Per-generation Returned
+does not claim the permanent task/position or residual4KiB Actor payer has been refunded.
+
+All thirteen focused Slot regressions pass, including actual parked Actor cancellation,
+reply loss, host-only next-generation retry, both final close variants, actual Store/resumable
+removal at both UI fences, full-capacity cleanup, concurrent recovery, abort before first
+poll, emergency reclamation unwind and shutdown after maintenance stops. The concrete
+RPC/task inventories fit their unchanged4KiB/8KiB fees. Read-only design/adversarial review
+and re-review have no remaining blocker/high/medium. Strict native all-target/all-feature
+Clippy passes. The COMPLETE current native suite passes1,032 library tests plus six ACL
+tests, with zero failures/ignores (2,333.77s). Explicit native checking (1m11s), native build
+(3m43s) and real application startup also pass. The first sandboxed startup timed out
+without output; the SAME20s probe passes with desktop permissions, without code/timeout changes.
+
+The complete Root suite passes4,002 tests with25 existing ignores on unchanged Root/Cargo
+inputs. Current frontend3,580 tests, Svelte checks (zero diagnostics), production build,
+formatting and ambient dependency gate pass. All ten real Edge flows pass after an initial
+browser/CDP launch failure; the successful rerun used local-browser permissions.
+
+Separate test-only timeout reporting now retains a bounded latest pipe/Node/callback trace
+and original-owner nonblocking native snapshots. Thirteen diagnostic checks, the actual
+acknowledged parked-child30s wrapper/End/reap/service-collection regression and the original
+media-adoption scenario all pass locally on Windows. Confirmation diagnostics explicitly
+exclude the real SDP children; latest-only100ms sampling cannot exhaust callback allowance
+inside fast Capacity loops. No protocol deadline, retry allowance or authority is renewed.
+
+PR76's current Linux975-pass/37-failure result remains unresolved: one native/WebCrypto
+media control-step timeout precedes36 fail-closed fixture admissions. Its root cause has
+not been established; a local Windows pass and better diagnostics do not resolve it.
+
+Operation30/version11 capacity IPC, paired browser cancellation, native ledger preclaim,
+bilateral agreement/RoundRef/KDF, operational audio/RTC composition, member relay and combined
+physical acceptance remain unfinished. Only one physical desktop is available. V2 stays OFF.
+
 ## Microphone device IDs own their storage (27 October; helper inactive)
 
 The inactive capture helper now copies admitted device IDs into independent numeric UTF16

@@ -1,5 +1,30 @@
 # Mewtual; Architecture
 
+## Native canonical admission continuation draft (28 October; inactive)
+
+The original bootstrap Row owns Slot, while one independently paid persistent native task
+per physical Session invokes Root through the existing4KiB Actor staging seam. Slot retains
+the original registration across successive canceled generations and quarantines one exact
+Work/outcome. It retains local Busy candidates without reminting. Row/Control/native task
+layout guards account for the concrete retained and overlapping temporary graphs.
+
+Per-generation cancellation returns only that generation's owners; final channel collection
+also requires the permanent task/native position to return. On unexpected task destruction,
+Slot can retain that SAME position (Session has no Row backedge). End/host/shutdown performs
+exclusive negative-only synchronous cleanup using the original funding. Shutdown awaits
+original Actor retirement before physical idle rather than depending on stopped maintenance.
+Actual owner destruction and position release precede collection markers.
+
+This is the logical application-owned graph, not allocator/RSS collection. Production drops
+both task observers immediately. Once the completed output/captures are destroyed, Tokio may
+still retain an empty scheduler cell briefly; Row/Control fees do not claim to fund that
+opaque tail indefinitely. A future API retaining any task observer across Row collection
+must independently keep its original funding through that observer's return.
+
+No capacity wire operation, paired browser admission, native ledger preclaim, signed bilateral
+agreement or live V2 audio/relay is supplied by this draft. Existing local mode operation29
+and all resource ceilings are unchanged. Production V2 remains OFF.
+
 ## Inert V2 progression capacity (28 October; candidate, inactive)
 
 One exact group claim now spans the original Workflow, independently prepared/transferred

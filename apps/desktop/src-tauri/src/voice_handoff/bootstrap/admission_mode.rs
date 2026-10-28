@@ -9,6 +9,11 @@ pub(super) struct AdmissionPin {
     generation: u64,
     cancelled_through: u64,
 }
+impl AdmissionPin {
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancelled_through != 0
+    }
+}
 
 /// The observation owns no additional heap graph. Row's fixed8KiB pays its new
 /// inline pin; the physical Control guard must count this actual borrowed frame.
@@ -53,6 +58,11 @@ impl Route {
                 pin.cancelled_through = pin.cancelled_through.max(request.generation);
             }
         }
+        if request.kind == Kind::Cancel && state.admission.is_some() {
+            // Whole-mode cancellation fences all current/future Slot attachment.
+            // This is negative only: the mode reply never certifies reclamation.
+            state.admission_slot.close();
+        }
         let mut snapshot = [0; REPLY_BYTES];
         snapshot[0] = 10;
         snapshot[1] = if closed {
@@ -69,6 +79,10 @@ impl Route {
         if let Some(pin) = &state.admission {
             snapshot[2..10].copy_from_slice(&pin.generation.to_be_bytes());
             snapshot[10..].copy_from_slice(&pin.cancelled_through.to_be_bytes());
+        }
+        drop(state);
+        if request.kind == Kind::Cancel {
+            self.row.admission_changed.notify_waiters();
         }
         Ok(snapshot)
     }

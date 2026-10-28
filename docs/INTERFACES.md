@@ -1,5 +1,25 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native admission custody draft (28 October; V2 inactive)
+
+The bootstrap Row now retains a canonical generation, cancellation floor, exact Actor Work,
+one original affine outcome and the same Root registration across capacity retries. This
+native-only API is not connected to browser Control yet. One persistent8KiB task owns the
+physical Session's actual native position. Repeated Register observations coalesce; local
+Busy retains the same candidate and host nudges do not requeue an accepted invocation.
+Per-generation Returned certifies that generation's work/capacity return, not task refund.
+
+Final attachment rechecks actual mounted/unlocked state, selected owner, original server
+instance and exact Session/generation under UI -> Coordinator -> Row. Ordinary Cancel
+preserves the registration for the next canonical generation. Whole-mode/End closure is
+terminal. End fences first effects before collection and preserves authenticated Control
+while original work remains. Unexpected task destruction retains its same position/funding;
+negative recovery and shutdown drain original owners outside native guards before release.
+
+Operation29/version10 remains mode-only. There is no operation30/version11 capacity wire
+adapter, browser pairing, native ledger reservation or signed Ready in this draft. Existing
+Row8KiB/Control12KiB and all group/process limits remain unchanged. V2 stays OFF.
+
 ## Local admission mode selection (28 October; V2 inactive)
 
 Physical Control operation29/version10 uses the exact Session as its header logical ID,

@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native admission custody draft (28 October; inactive)
+
+Canonical Slot admission coalesces the exact invocation in the original physical Row.
+Only an exact never-entered Actor refusal permits a new factory attempt; lost observers,
+entered unwind and staged outcomes never prove absence. A failed local attachment retains
+the SAME HIGH candidate. Final publication checks the actual UI mutex, mounted Store and
+resumable state, server instance, selected owner, registration and current generation.
+No Root callback/Clock/factory or heavy destructor runs under that final native fence.
+
+Actual retirement and actual resource return are separate. Reclamation destroys original
+owners outside guards before clearing its marker. Pending work keeps authenticated Control
+open after first effects close. Unexpected task destruction transfers the SAME native
+position to its Row, which retains the original independent payment. Exclusive terminal
+recovery cannot enqueue Root or publish capacity; service shutdown actively drains it before
+physical idle. This prevents pressure-dependent replacement tasks and premature collection.
+
+The draft has no browser capacity protocol, ledger preclaim or bilateral round. Capacity
+does not establish peer orientation, signed Ready, SDP/RTC or media permission. V2 is OFF.
+
 ## Sticky local voice mode selection (28 October; inactive V2)
 
 Authenticated Session-level Control29/version10 selects only a restrictive mode. First

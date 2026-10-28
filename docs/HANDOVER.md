@@ -1,5 +1,63 @@
 # Mewtual; Handover
 
+## Native Slot continuation (28 October; inactive, complete local suites pass)
+
+Draft PR81 extends the reviewed `6c6c483c` checkpoint. The COMPLETE Root command passes
+4,002 tests with zero failures and25 existing ignores. Git confirms Root runtime/Cargo
+inputs stayed unchanged throughout this native-only continuation. The previous interrupted
+command remains excluded. The COMPLETE current native command passes1,032 library tests
+and six ACL tests, with zero failures/ignores, in2,333.77s. Logs and separate exit markers:
+`target/admission-root-full.log` and `target/native-admission-full.log`. Explicit native
+checking passes (1m11s), the native build passes (3m43s), and real application startup passes.
+The first sandboxed startup probe timed out without output; the SAME20s probe passes with
+desktop permissions. No timeout or runtime behavior was changed to obtain that result.
+
+The new local `bootstrap/admission_slot.rs` implementation is part of this continuation.
+It stores exact invocation/Work, one affine Root outcome and a stable registration
+under original Row.state. One persistent paid8KiB task/native position serves a
+physical Session; busy retries never replace its task or requeue an accepted Root
+factory. A callback-free nonblocking final UI/server-instance/Coordinator/State
+fence attaches original capacity. Local pressure retains the SAME candidate.
+Affine reclamation destroys owners before publishing its exact return, including
+unwind. Known round cancellation preserves registration; uncertainty closes it.
+
+Read-only review corrected interrupted reclamation, waiting while holding UI, lost
+next-generation demand, missing mounted-state checks and closing Control before pending
+work returned. Both closure variants now fence first effects while preserving negative/
+history routing until collection. Tests use the actual Actor, UI mutex, Store and resumable
+state at the real boundaries. Original resource limits and exact-return assertions remain.
+
+The implementation also transfers the SAME native position into Slot if its persistent task
+is destroyed before original work drains. Synchronous recovery is terminal/negative only;
+it uses the original8KiB funding, no new task, Root invocation or credit. End/host recovery
+runs outside native guards. Shutdown actively recovers and awaits SAME Work retirement before
+physical idle, even after maintenance stops. Actual position release precedes collection.
+All thirteen Slot regressions now pass, including added abort-before-first-poll and emergency
+reclamation-unwind cases. Concrete4KiB RPC/8KiB task inventories pass. Read-only review and
+re-review have no blocker/high/medium. Strict native all-target/all-feature Clippy passes;
+its initial run required four equivalent boolean simplifications and one `?` rewrite.
+All thirteen cases also pass inside the COMPLETE native suite. Current frontend3,580 tests, zero-diagnostic
+Svelte checking, production build and all ten real Edge flows pass. The first Edge attempt
+lost its CDP connection during launch; its successful rerun used local-browser permissions.
+
+PR76 is NOT green: current head `c8066137` fails Linux native acceptance at the real
+native/WebCrypto media-adoption test's30s control-step bound;36 later failures cascade from
+the fail-closed fixture guard. Root cause is not established. A separate reviewable test-only
+diagnostics change records fixed latest Node/native pipe/callback phases and nonblocking
+original-owner confirmation/SDP/Session snapshots on the SAME timeout path. It neither
+extends deadlines nor retries/replaces uncertain work. The acknowledged-wedge regression
+now uses that actual wrapper and retains explicit End/child-reap/service-collection checks.
+All thirteen diagnostic tests and the acknowledged-wedge regression pass. The original
+media-adoption scenario also passes locally in20.05s and in the full Windows suite; that does not establish
+the Linux cause or resolve its failure. Latest-only100ms progress sampling keeps diagnostics
+independent of fast Capacity attempts, and actual SDP children are excluded from confirmation
+counts. Read-only re-review has no blocker/high/medium in that test-only boundary.
+
+Mode-only operation29 remains unchanged. Capacity operation30/version11, its real-HTTP
+adapter/codec and browser pairing are not complete. Native ledger preclaim,
+bilateral agreement/RoundRef/KDF, operational
+SDP/RTC/audio, member relay and combined/physical acceptance remain open. V2 is OFF.
+
 ## Native admission mode fence (28 October; focused checks passed)
 
 Authenticated local Control29/version10 now pins the original physical Session to

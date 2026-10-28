@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 mod admission_mode;
+mod admission_slot;
 #[cfg(test)]
 mod diagnostics;
 pub(super) use admission_mode::observation_layout_bytes as admission_mode_layout_bytes;
@@ -36,6 +37,7 @@ struct Row {
     slot: u8,
     state: Mutex<State>,
     projection_busy: AtomicBool,
+    admission_changed: tokio::sync::Notify,
     _credit: Arc<Credit>,
 }
 struct State {
@@ -53,6 +55,7 @@ struct State {
     // Mode selection and setup ACK MUST share this mutex. Selection is sticky;
     // cancellation or a lost reply cannot restore an old automatic producer.
     admission: Option<AdmissionPin>,
+    admission_slot: admission_slot::Slot,
 }
 /// Direct Session/header/reply and public-output owners can outlive Row references. Paid
 /// weak witnesses keep their control blocks attributable until actual strong owners drain.
@@ -131,6 +134,7 @@ impl MetadataProjection {
     pub(super) fn require_reply_memory(&self, reply_bytes: usize) -> Result<(), Refused> {
         let arc_words = 2 * std::mem::size_of::<usize>();
         let retained = std::mem::size_of::<Row>()
+            + admission_slot::retained_layout_bytes()
             + std::mem::size_of::<SessionIdentity>()
             + arc_words * 2
             + std::mem::size_of::<Ticket>()
@@ -187,6 +191,31 @@ struct Ticket {
 }
 
 impl Registry {
+    /// Exact retained cleanup provenance only, including closed shutdown rows.
+    /// This grants no first effect and never creates a row, Session or selection.
+    fn original_route(&self, owner: &str, executor: [u8; 32]) -> Option<Route> {
+        let row = {
+            let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            held.as_ref()?
+                .rows
+                .iter()
+                .flatten()
+                .find(|row| row.selected.id() == owner && row.selected.executor() == executor)?
+                .clone()
+        };
+        Self::row_route(row)
+    }
+    fn row_route(row: Arc<Row>) -> Option<Route> {
+        let (session, public) = {
+            let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            (state.session.clone()?, state.public.clone()?)
+        };
+        Some(Route {
+            row,
+            session,
+            public,
+        })
+    }
     /// Cleanup-only routing under the caller's ORIGINAL UI commit. End/lock may revoke the
     /// call lease while its authenticated Control session still has final delivery work.
     /// Do not reuse first-effect require_open here, and do not weaken it for factories.
@@ -233,20 +262,44 @@ impl Registry {
     /// Caller holds the SAME UI commit as final publication; release these registry guards
     /// before consulting the ledger or destroying any Root owner.
     fn close_effects(&self, owner: &str, executor: [u8; 32]) -> Option<Arc<SelectedHandoffOwner>> {
-        self.index
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()?
-            .rows
-            .iter()
-            .flatten()
-            .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
-            .map(|row| {
+        let row = {
+            let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            held.as_ref()?
+                .rows
+                .iter()
+                .flatten()
+                .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
+                .cloned()
+        }?;
+        {
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.effects_closed = true;
+            state.admission_slot.close();
+        }
+        // Direct wake after guards; shutdown/close cannot depend on a future
+        // maintenance cadence, nor wake a task while retaining its State lock.
+        row.admission_changed.notify_waiters();
+        Some(row.selected.clone())
+    }
+
+    /// Pure readiness before terminating authenticated Control routing. First
+    /// effects must already be fenced/woken; pending Slot work keeps closed=false.
+    fn admission_may_close(&self, owner: &str, executor: [u8; 32]) -> bool {
+        let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        held.as_ref()
+            .and_then(|index| {
+                index
+                    .rows
+                    .iter()
+                    .flatten()
+                    .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
+            })
+            .is_none_or(|row| {
                 row.state
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .effects_closed = true;
-                row.selected.clone()
+                    .admission_slot
+                    .collected()
             })
     }
 
@@ -415,8 +468,10 @@ impl Registry {
                 browser_setup: None,
                 retirement: None,
                 admission: None,
+                admission_slot: admission_slot::Slot::default(),
             }),
             projection_busy: AtomicBool::new(false),
+            admission_changed: tokio::sync::Notify::new(),
             _credit: Arc::new(credit),
         });
         index.serial = serial;
@@ -437,8 +492,15 @@ impl Registry {
         executor: [u8; 32],
         selected: Option<Arc<SelectedHandoffOwner>>,
     ) -> Result<Status, Refused> {
-        self.close_row(owner, executor, selected)
-            .map(|row| row.status())
+        self.close_row(owner, executor, selected).map(|row| {
+            row.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .admission_slot
+                .close();
+            row.admission_changed.notify_waiters();
+            row.status()
+        })
     }
     /// Hold the actual Row across post-guard retirement; a collector cannot turn an admitted
     /// exact close into an ambiguous missing-row error between the two operations.
@@ -501,8 +563,10 @@ impl Registry {
                 browser_setup: None,
                 retirement: None,
                 admission: None,
+                admission_slot: admission_slot::Slot::default(),
             }),
             projection_busy: AtomicBool::new(false),
+            admission_changed: tokio::sync::Notify::new(),
             _credit: Arc::new(credit),
         });
         index.serial = serial;
@@ -542,6 +606,7 @@ impl Registry {
                         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                         state.closed
                             && !state.pending
+                            && state.admission_slot.collected()
                             && state.retirement.as_ref().is_some_and(|owners| {
                                 owners.session.strong_count() == 0
                                     && owners.public.strong_count() == 0
@@ -585,11 +650,21 @@ impl Registry {
             self.stopping.store(true, Ordering::Release);
             if let Some(index) = held.as_ref() {
                 for row in index.rows.iter().flatten() {
-                    row.state
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .closed = true;
+                    let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.closed = true;
+                    state.admission_slot.close();
                 }
+            }
+        }
+        // Wake EVERY permanent admission task before waiting for ANY Session.
+        // One transient Row owner at a time avoids a second64-entry snapshot.
+        for slot in 0..ROWS {
+            let row = {
+                let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+                held.as_ref().and_then(|index| index.rows[slot].clone())
+            };
+            if let Some(row) = row {
+                row.admission_changed.notify_waiters();
             }
         }
         // One paid Session/waiter at a time; no heap registry, detached waiter or 64-owner
@@ -598,6 +673,40 @@ impl Registry {
         // Retired Sessions can have no Row references while a reply/worker still
         // owns them, so consult the original weak witness as well as live State.session.
         for slot in 0..ROWS {
+            let row = {
+                let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+                held.as_ref().and_then(|index| index.rows[slot].clone())
+            };
+            if let Some(route) = row.and_then(Self::row_route) {
+                loop {
+                    let notified = route.row.admission_changed.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    let recovered = route.recover_terminal_admission();
+                    if route
+                        .row
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .admission_slot
+                        .collected()
+                    {
+                        break;
+                    }
+                    if let Some(work) = route.admission_work() {
+                        if !work.is_retired() {
+                            work.wait_retired().await;
+                            continue;
+                        }
+                    }
+                    // Recovery may have unwound after partial real destruction.
+                    // Retry that SAME terminal custody, with no new allocation.
+                    if recovered {
+                        continue;
+                    }
+                    notified.await;
+                }
+            }
             let session = {
                 let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
                 held.as_ref()
@@ -748,6 +857,11 @@ impl Row {
                 return Err(Refused::Binding);
             }
             if state.pending {
+                return Err(Refused::Capacity);
+            }
+            if !state.admission_slot.collected() {
+                // The direct close wake was already sent. Metadata closure cannot
+                // certify channel collection ahead of its original admission work.
                 return Err(Refused::Capacity);
             }
             if state.retirement.is_none() {
@@ -969,6 +1083,11 @@ async fn finish(
     executor: [u8; 32],
     closure: Closure,
 ) -> Result<Status, Refused> {
+    // An aborted permanent task transferred its actual position into the Row.
+    // Cleanup is negative only and must run OUTSIDE UI/Coordinator/State guards.
+    if let Some(route) = state.voice_channels.original_route(owner, executor) {
+        route.recover_terminal_admission();
+    }
     let _commit = state.ui_session_commit.clone().lock_owned().await;
     if let Some(original) = state.voice_channels.close_effects(owner, executor) {
         // Both setup-failure cleanup and final channel collection stop first effects now,
@@ -976,7 +1095,9 @@ async fn finish(
         // ACK/settlement/phase closure could become unreachable. All factory admissions use
         // this SAME UI commit, so a new Pending row cannot race the pure preflight below.
         // No Registry/Coordinator guard overlaps the ledger check or original-owner drop.
-        if !state.voice_handoff.channel_may_close(&original) {
+        if !state.voice_handoff.channel_may_close(&original)
+            || !state.voice_channels.admission_may_close(owner, executor)
+        {
             return Err(Refused::Capacity);
         }
     }
@@ -1013,6 +1134,9 @@ async fn finish(
             Err(error) => return Err(error),
         }
     };
+    // All first-effect fences are already closed. Keep that actual Row, release
+    // UI before retirement/Root destruction/collection, and never reopen it.
+    drop(_commit);
     match closure {
         Closure::Setup => row.retire_setup()?,
         Closure::Channel => row.retire_channel()?,
