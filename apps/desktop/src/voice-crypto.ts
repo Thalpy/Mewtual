@@ -1,5 +1,8 @@
 import { VoiceAppSession, VOICE_APP_SESSION_BYTES, type VoiceAppCalls, type VoiceAppNative } from "./voice-app-session.ts";
 import { VoiceHandleCell } from "./voice-handle-cell.ts";
+import { VoiceAdmissionWake } from "./voice-admission-wake.ts";
+import { decodeVoiceAdmissionMode, decodeVoiceNegotiationCapacity, encodeVoiceAdmissionMode,
+  encodeVoiceNegotiationCapacity, type VoiceCapacityReceipt } from "./voice-ipc-negotiation.ts";
 import { VoiceSharedExecution } from "./voice-shared-execution.ts";
 import { VoiceSdkPositions, type VoiceSdkPositionRequest } from "./voice-sdk-positions.ts";
 import { VoiceByteLedger } from "./voice-byte-ledger.ts";
@@ -228,6 +231,12 @@ const IPC_CONTROL_BYTES = 8 * 1024;
 // can enable native maintenance, including when End precedes first Input.
 // This bounds application-owned graphs, not the framework/SDK/GC heaps.
 const IPC_WORK_BYTES = 16 * 1024;
+// Admission-mode Session coordinator, independently prepaid before construction. It
+// owns the remembered incarnation, ordinal, one capacity task/cadence and negative
+// continuation after public handle retirement. It cannot borrow the pilot's nearly
+// full work/intake metadata. This still does not fund Ready/SDP/media composition.
+const IPC_NEGOTIATION_BYTES = 8 * 1024;
+type IpcMode = "pilot" | "admission";
 // Only exact, already-started cleanup is retried automatically. A completed refusal starts
 // one new cadence interval; missed ticks cannot create catch-up work or overlap native RPCs.
 const IPC_CLEANUP_RETRY_MS = 1_000;
@@ -293,6 +302,10 @@ type BrowserPreclaim = {
   retired: boolean; transferred: boolean; converting: boolean; disposing: boolean; released: boolean;
   fixedBytes: number; variable: boolean; rows: number; unsubscribe: () => void;
   drained: Signal<void>; conversion: ChainIntake | null; retire(): void;
+  // Immutable pairing identity is installed BEFORE publication/subscription callouts.
+  // A bare preclaim has no native effects and retains its existing local disposal.
+  readonly pairing: null | { readonly ordinal: string; receipt: VoiceCapacityReceipt | null;
+    certified: boolean; returned: boolean; release(): void };
 };
 function browserPreclaimHandle(cell: VoiceHandleCell<BrowserPreclaim>): VoiceBrowserPreclaim {
   return Object.freeze({ inspect: () => cell.dispatch(record => record.transferred ? "transferred" as const :
@@ -512,7 +525,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 47;
+  readonly version = 49;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -795,6 +808,18 @@ export class VoiceCryptoBroker {
    * Setup status and historical reads grant no Root, remote-member, action, SDP or RTC authority. */
   nativeChannel(owner: VoiceCryptoOwner, handle: VoiceJoinKeyHandle, native: VoiceIpcNative,
     transport: typeof fetch = globalThis.fetch): VoiceIpcChannel {
+    return this.createNativeChannel(owner, handle, native, transport, "pilot");
+  }
+
+  /** Inactive capacity-only path: select admission mode BEFORE bootstrap ACK.
+   * This constructor never upgrades a retained pilot channel, nor starts its discovery,
+   * action, SDP or RTC drivers. The original physical Session survives lost replies. */
+  nativeAdmissionChannel(owner: VoiceCryptoOwner, handle: VoiceJoinKeyHandle, native: VoiceIpcNative,
+    transport: typeof fetch = globalThis.fetch): VoiceIpcChannel {
+    return this.createNativeChannel(owner, handle, native, transport, "admission");
+  }
+  private createNativeChannel(owner: VoiceCryptoOwner, handle: VoiceJoinKeyHandle, native: VoiceIpcNative,
+    transport: typeof fetch, mode: IpcMode): VoiceIpcChannel {
     current(owner);
     const selected = this.selectedKeys.get(owner.token);
     const key = this.joinKeys.get(handle);
@@ -803,7 +828,7 @@ export class VoiceCryptoBroker {
         !key.join || !key.key) throw new Error("selected voice key required");
     const previous = this.ipcChannels.get(owner.token);
     if (previous) {
-      if (!previous.belongsTo(selected, native, transport)) throw new Error("voice channel identity changed");
+      if (!previous.belongsTo(selected, native, transport, mode)) throw new Error("voice channel identity changed");
       return previous.handle;
     }
     // Reserve from the existing two execution positions BEFORE the first native setup call.
@@ -812,7 +837,8 @@ export class VoiceCryptoBroker {
         this.executionPositions() >= MAX_ACTIVE) {
       throw new Error("voice channel capacity reached");
     }
-    this.charge(owner, IPC_SETUP_BYTES + IPC_CONTROL_BYTES + IPC_WORK_BYTES);
+    const admissionBytes = mode === "admission" ? IPC_NEGOTIATION_BYTES : 0;
+    this.charge(owner, IPC_SETUP_BYTES + IPC_CONTROL_BYTES + IPC_WORK_BYTES + admissionBytes);
     this.ipcPositions++; selected.channelUsers++;
     let setupPaid = true, position = true, historyPaid = true, compactPaid = 0, lifecyclePaid = false;
     const channel = new RetainedIpcChannel(selected, native, transport, this.subtle, this.ipcClock, {
@@ -836,7 +862,7 @@ export class VoiceCryptoBroker {
         // the actual coordinator/timer/IO/SDK return through channel activity.
         if (lifecyclePaid) { lifecyclePaid = false; this.refund(owner, VOICE_SESSION_LIFECYCLE_BYTES); }
         if (compactPaid) { this.refund(owner, compactPaid * COMPACT_PLAN_BYTES); compactPaid = 0; }
-        if (historyPaid) { historyPaid = false; this.refund(owner, IPC_CONTROL_BYTES + IPC_WORK_BYTES); }
+        if (historyPaid) { historyPaid = false; this.refund(owner, IPC_CONTROL_BYTES + IPC_WORK_BYTES + admissionBytes); }
         this.ipcChannels.delete(owner.token);
       },
       prepareCompaction: async chain => {
@@ -892,7 +918,7 @@ export class VoiceCryptoBroker {
         this.charge(owner, VOICE_NATIVE_MEDIA_BYTES);
         return originalMediaFee(this.refund.bind(this, owner, VOICE_NATIVE_MEDIA_BYTES));
       },
-    });
+    }, mode);
     this.ipcChannels.set(owner.token, channel);
     try { channel.observe(); }
     catch (error) { channel.abandon(); throw error; }
@@ -1095,7 +1121,7 @@ export class VoiceCryptoBroker {
       if (previous.retired || previous.transferred || previous.released) throw new Error("voice preclaim is draining");
       return previous.handle;
     }
-    if (!channel.canLend(owner, key, generation)) throw new Error("ready voice preclaim channel required");
+    if (!channel.canLend(owner, key, generation, true)) throw new Error("ready voice preclaim channel required");
     // The owner predicate above may retire/reenter. Repeat all pure publication fences.
     const reentered = channel.preclaim(generation);
     if (reentered) {
@@ -1108,9 +1134,12 @@ export class VoiceCryptoBroker {
       throw new Error("voice preclaim capacity reached");
     const fixed = CHAIN_HISTORY + CHAIN_METADATA;
     this.charge(owner, fixed + CHAIN_VARIABLE);
+    const ordinal = channel.preclaimOrdinal();
     const claim: BrowserPreclaim = { cell: null!, handle: null!, owner, key, channel, generation,
       retired: false, transferred: false, converting: false, disposing: false, released: false, fixedBytes: fixed,
-      variable: true, rows: CHAIN_ROWS, unsubscribe: voiceNoop, drained: signal<void>(), conversion: null, retire: null! };
+      variable: true, rows: CHAIN_ROWS, unsubscribe: voiceNoop, drained: signal<void>(), conversion: null, retire: null!,
+      pairing: ordinal === null ? null : { ordinal, receipt: null, certified: false, returned: false,
+        release: () => this.releasePreclaim(claim) } };
     claim.cell = new VoiceHandleCell(claim);
     claim.handle = browserPreclaimHandle(claim.cell);
     claim.retire = () => this.retirePreclaim(claim);
@@ -1124,7 +1153,20 @@ export class VoiceCryptoBroker {
       // unsubscribe. The cell is already negative, but that returned observer still joins.
       if (claim.retired || claim.transferred) this.unsubscribePreclaim(claim);
     } catch (error) { claim.retire(); throw error; }
+    channel.startPreclaim(claim);
     return claim.handle;
+  }
+
+  /** Authenticated capacity observation only, never a signed Ready/action/RTC grant.
+   * Retired public cells are inert; their private cancellation owner stays paid. */
+  nativeNegotiationCapacity(owner: VoiceCryptoOwner, channel: VoiceIpcChannel,
+    preclaim: VoiceBrowserPreclaim): VoiceCapacityReceipt | null {
+    const cell = this.preclaims.get(preclaim);
+    return cell?.dispatch(claim => {
+      if (claim.owner !== owner || claim.channel.handle !== channel || !claim.pairing)
+        throw new Error("original paired voice preclaim required");
+      return claim.pairing.receipt;
+    }, null) ?? null;
   }
 
   /** Convert this exact inert envelope into an ordinary retained intake. The native
@@ -1142,6 +1184,7 @@ export class VoiceCryptoBroker {
         // Latch BEFORE purpose getters, current predicates or Clock callbacks. A
         // nested caller must neither convert twice nor run THIS frame's detach tail.
         if (claim.converting) throw new Error("voice preclaim conversion is already in progress");
+        if (claim.pairing) throw new Error("paired voice capacity is not a pilot derivation grant");
         if (claim.retired || claim.transferred || claim.released || claim.owner !== owner ||
             claim.channel.handle !== channel || this.joinKeys.get(key) !== claim.key)
           throw new Error("voice preclaim identity changed");
@@ -1187,6 +1230,11 @@ export class VoiceCryptoBroker {
   }
   private releasePreclaim(claim: BrowserPreclaim): void {
     if (claim.transferred || claim.released) return;
+    if (!claim.cell.detached) return; // An entered public dispatch still owns the graph.
+    if (claim.pairing && !claim.pairing.returned) {
+      claim.channel.startPreclaim(claim); // Private negative flight outlives the public cell.
+      return;
+    }
     claim.released = true;
     this.unsubscribePreclaim(claim);
     this.preclaims.delete(claim.handle);
@@ -2512,6 +2560,14 @@ function ipcBytes(hex: string): Uint8Array<ArrayBuffer> {
   for (let index = 0; index < bytes.length; index++) bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   return bytes;
 }
+// Isolated callback factory: deadline completion retains only its own paid timer
+// and actual controller, not framed plaintext or the channel activation scope.
+function admissionDeadlineAbort(waiting: VoiceAdmissionWake, controller: AbortController): Promise<void> {
+  return waiting.join().then(() => { if (waiting.elapsed) controller.abort(); });
+}
+function admissionDeadlineFault(channel: RetainedIpcChannel, controller: AbortController): () => void {
+  return () => { try { channel.admissionClockFault(); } finally { controller.abort(); } };
+}
 
 /** Original per-pair lifecycle. Async methods capture THIS actual owner once; old
  * callbacks/finally blocks cannot write a later negotiation through channel-global fields.
@@ -2616,11 +2672,30 @@ class RetainedIpcChannel {
   // The physical controller may belong to indexed media while a new intake waits for
   // the codec. Only that exact Input owner may cancel it; actionBusy is merely queueing.
   private controllerIntake: ChainIntake | null = null;
+  // Independently paid8KiB admission coordinator. Only the current preclaim is
+  // retained, never a queue or old negotiation graph. A negative certificate does
+  // not release its browser envelope until the actual RPC/task finally returns.
+  private modePinned = false;
+  private capacitySupported = false;
+  private modeCanceled = false;
+  private admissionClosed = false;
+  private admissionOrdinal = 1n;
+  private admissionIncarnation: string | null = null;
+  private admissionClaim: BrowserPreclaim | null = null;
+  private admissionFlight: Promise<void> | null = null;
+  private admissionWake: VoiceAdmissionWake | null = null;
+  private admissionClockFailed = false;
+  private admissionAvailability: Signal<void> | null = null;
+  // Published ONLY in the frame's terminal finally. Availability may retry a
+  // failed cancel here, but can never disarm a live request's5s deadline.
+  private admissionDeadlineCleanup: VoiceAdmissionWake | null = null;
+  private readonly mode: IpcMode;
 
   constructor(selected: SelectedKeyRecord, native: VoiceIpcNative,
-    transport: typeof fetch, subtle: SubtleCrypto, clock: VoiceIpcClock, custody: IpcCustody) {
+    transport: typeof fetch, subtle: SubtleCrypto, clock: VoiceIpcClock, custody: IpcCustody,
+    mode: IpcMode) {
     this.selected = selected; this.native = native; this.transport = transport;
-    this.subtle = subtle; this.clock = clock; this.custody = custody;
+    this.subtle = subtle; this.clock = clock; this.custody = custody; this.mode = mode;
     this.execution = { run: work => custody.execute(async () => {
       this.beginActivity();
       try { return await work(); } finally { this.endActivity(); }
@@ -2629,12 +2704,13 @@ class RetainedIpcChannel {
       this.retire(); this.wake(); return this.completion.promise;
     } });
   }
-  belongsTo(selected: SelectedKeyRecord, native: VoiceIpcNative, transport: typeof fetch): boolean {
-    return this.selected === selected && this.native === native && this.transport === transport;
+  belongsTo(selected: SelectedKeyRecord, native: VoiceIpcNative, transport: typeof fetch, mode: IpcMode): boolean {
+    return this.selected === selected && this.native === native && this.transport === transport && this.mode === mode;
   }
   owns(owner: VoiceCryptoOwner): boolean { return this.selected.owner === owner; }
   private retainedLifecycle(): VoiceSessionLifecycle | null { return this.lifecycle; }
   observeLifecycle(broker: VoiceCryptoBroker, key: VoiceJoinKeyHandle): VoiceSessionLifecycleObserver {
+    if (this.mode !== "pilot") throw new Error("admission capacity is not a pilot lifecycle grant");
     const prior = this.retainedLifecycle(); if (prior) return prior.handle;
     if (!this.live() || this.retired || this.drained || !this.readyAcknowledged || !this.keys || !this.bootstrap)
       throw new Error("authenticated ready voice channel required");
@@ -2726,6 +2802,7 @@ class RetainedIpcChannel {
   private retainedWorkPump(): NativeWorkPump | null {
     const pairState = this.negotiation; return pairState.workPump; }
   observeWork(broker: VoiceCryptoBroker, key: VoiceJoinKeyHandle): VoiceNativeWorkObserver {
+    if (this.mode !== "pilot") throw new Error("admission capacity is not a pilot work grant");
     const pairState = this.negotiation;
     const reentrant = this.retainedWorkPump();
     if (reentrant) return reentrant.handle;
@@ -2812,7 +2889,117 @@ class RetainedIpcChannel {
     return this.negotiation.generation === generation ? this.negotiation.preclaim : null;
   }
   canPreclaim(generation: object): boolean {
+    if (this.mode === "admission") return this.negotiation.generation === generation &&
+      this.modePinned && this.capacitySupported && !this.modeCanceled && !this.admissionClosed && !this.admissionClaim &&
+      !this.admissionFlight && !this.negotiation.preclaim && !this.negotiation.intake &&
+      !this.negotiation.linked && !this.driving && !this.request && !this.historyRequest &&
+      !this.retired && !this.drained && this.readyAcknowledged && this.keys !== null;
     return !this.negotiation.workPump && this.canLink(null, generation);
+  }
+  preclaimOrdinal(): string | null { return this.mode === "admission" ? this.admissionOrdinal.toString() : null; }
+  /** One private flight for the original paired claim. Retirement detaches the
+   * public handle immediately, but cannot refund native ambiguity or actual IO.
+   * This driver never waits for status()/the pilot driver or holds execution while
+   * awaiting cadence/drainage: End needs this SAME codec to cancel its preclaim. */
+  startPreclaim(claim: BrowserPreclaim): void {
+    const pair = claim.pairing;
+    if (!pair || pair.returned || pair.certified || this.admissionClaim !== claim) return;
+    if (this.admissionFlight) {
+      if (claim.retired) { this.wakeIdentity = {}; this.admissionWake?.wake(); this.admissionAvailability?.resolve(); }
+      return;
+    }
+    this.beginActivity();
+    const work = Promise.resolve().then(() => this.drivePreclaim(claim));
+    const flight = work.finally(() => {
+      if (this.admissionFlight === flight) this.admissionFlight = null;
+      this.endActivity();
+    });
+    this.admissionFlight = flight;
+    void flight.then(() => {
+      // The actual framed/read/cancel and driver finally have returned. The broker
+      // also checks entered public-cell/unsubscription return before refunding.
+      if (pair.certified) { pair.returned = true; pair.release(); }
+    }, () => { /* Keep the same paid claim. A later availability wake retries it. */ });
+  }
+  private async drivePreclaim(claim: BrowserPreclaim): Promise<void> {
+    const pair = claim.pairing!;
+    while (this.admissionClaim === claim && !pair.certified) {
+      const observed = this.wakeIdentity;
+      try {
+        // End is a Session-wide negative fence. It precedes per-generation proof,
+        // but never substitutes for that proof or for actual browser IO return.
+        if (this.retired && !this.modeCanceled) {
+          await this.execution.run(async () => {
+            const reply = await this.admissionModeRpc("cancel", true);
+            if (reply.state !== "canceled" && reply.state !== "closed") throw new Error("voice mode cancellation unresolved");
+            this.modeCanceled = true;
+          });
+          continue;
+        }
+        const receipt = await this.execution.run(async () => {
+          if (this.admissionClaim !== claim) throw new Error("old voice admission claim");
+          if (this.retired && !this.modeCanceled) throw new Error("voice Session fence precedes capacity cancellation");
+          // Select again AFTER queueing: End/retirement may have won the codec.
+          const kind = claim.retired || this.retired ? "cancel" as const :
+            !pair.receipt || pair.receipt.state === "unstarted" ? "register" as const : "observe" as const;
+          const encoded = encodeVoiceNegotiationCapacity(this.bootstrap!.session, kind, pair.ordinal);
+          try { return await this.framed(30, 0, encoded.logical, encoded.body, kind !== "register",
+            (kind, length) => kind === 0 && length === 75,
+            opened => decodeVoiceNegotiationCapacity(opened, { generation: pair.ordinal, incarnation: this.admissionIncarnation }),
+            undefined, undefined, kind === "register" ? claim : undefined); }
+          finally { encoded.body.fill(0); }
+        });
+        if (receipt.incarnation !== null) this.admissionIncarnation = receipt.incarnation;
+        pair.receipt = receipt;
+        if (receipt.state === "closed" || receipt.state === "uncertain") this.admissionClosed = true;
+        if (["returned", "superseded", "closed", "uncertain"].includes(receipt.state)) claim.retire();
+        if (this.retired && !this.modeCanceled) continue;
+        if (claim.retired && (receipt.state === "returned" || receipt.state === "superseded" || receipt.state === "closed")) {
+          pair.certified = true; break;
+        }
+      } catch { /* Lost/malformed/refused reply retains the SAME ordinal, key, bytes and rows. */ }
+      // Unstarted must retry Register: pure Observe cannot acquire a native task
+      // after ordinary-pool pressure clears. Preparing/Waiting reuse their owner.
+      // Neither state nor a timeout ever returns browser capacity.
+      if (this.wakeIdentity === observed) {
+        if (this.admissionClockFailed) {
+          // A broken local scheduler must not turn negative recovery into a busy
+          // loop. Keep original debt until explicit native availability/End.
+          const waiting = signal<void>(); this.admissionAvailability = waiting;
+          if (this.wakeIdentity !== observed) waiting.resolve();
+          try { await waiting.promise; }
+          finally { if (this.admissionAvailability === waiting) this.admissionAvailability = null; }
+          continue;
+        }
+        const waiting = new VoiceAdmissionWake(this.clock);
+        this.admissionWake = waiting; // BEFORE any Clock registration/callback.
+        waiting.start();
+        if (this.wakeIdentity !== observed) waiting.wake();
+        try {
+          await waiting.join();
+          if (waiting.faulted) this.admissionClockFault();
+        }
+        finally { if (this.admissionWake === waiting) this.admissionWake = null; }
+      }
+    }
+  }
+  /** Private class's timer observer; not exposed on any browser capability. */
+  admissionClockFault(): void {
+    // One transition permits one immediate negative recovery attempt after the
+    // original timer joins, including when End retired the claim first. Repeated
+    // faults cannot fabricate further availability or spin the native loop.
+    if (!this.admissionClockFailed) this.wakeIdentity = {};
+    this.admissionClockFailed = true; this.admissionClosed = true;
+    this.admissionClaim?.retire();
+    // Before ACK there may be no claim to retire. Never acknowledge a channel
+    // whose original mode/deadline construction already failed locally.
+    if (!this.readyAcknowledged) this.retire();
+  }
+  private async admissionModeRpc(kind: "register" | "cancel", afterEnd: boolean) {
+    const encoded = encodeVoiceAdmissionMode(this.bootstrap!.session, kind);
+    try { return await this.framed(29, 0, encoded.logical, encoded.body, afterEnd,
+      (kind, length) => kind === 0 && length === 34, opened => decodeVoiceAdmissionMode(opened)); }
+    finally { encoded.body.fill(0); }
   }
   reservePreclaim(claim: BrowserPreclaim): void {
     const state = this.negotiation;
@@ -2820,17 +3007,28 @@ class RetainedIpcChannel {
         claim.owner !== this.selected.owner || claim.key !== this.selected.key)
       throw new Error("voice preclaim channel changed");
     state.preclaim = claim;
+    if (claim.pairing) this.admissionClaim = claim;
   }
   releasePreclaim(claim: BrowserPreclaim): void {
     if (this.negotiation.preclaim === claim) this.negotiation.preclaim = null;
+    if (this.admissionClaim === claim) {
+      // Called only after certificate AND actual worker return. Old finally/handles
+      // compare the original allocation, not merely a reused browser generation.
+      this.admissionClaim = null;
+      if (this.admissionOrdinal === 0xffff_ffff_ffff_ffffn) this.admissionClosed = true;
+      else this.admissionOrdinal++;
+    }
   }
-  canLend(owner: VoiceCryptoOwner, key: JoinKeyRecord, generation = this.negotiation.generation): boolean {
+  canLend(owner: VoiceCryptoOwner, key: JoinKeyRecord, generation = this.negotiation.generation,
+    preclaim = false): boolean {
     const pairState = this.negotiation;
-    return pairState.generation === generation && this.negotiationCurrent(pairState) && !this.retired && !this.drained && this.keys !== null &&
+    return (this.mode === "pilot" || preclaim && this.modePinned && this.capacitySupported && this.readyAcknowledged) &&
+      pairState.generation === generation && this.negotiationCurrent(pairState) && !this.retired && !this.drained && this.keys !== null &&
       this.selected.owner === owner && this.selected.key === key;
   }
   canLink(intake: ChainIntake | null = null, generation = intake?.generation ?? this.negotiation.generation,
     preclaim: BrowserPreclaim | null = null): boolean {
+    if (this.mode !== "pilot") return false;
     const pairState = this.negotiation;
     if (pairState.generation !== generation || pairState.preclaim !== preclaim) return false;
     // This pilot owns ONE original terminal plan. Historical Input may release its variable
@@ -4019,7 +4217,11 @@ class RetainedIpcChannel {
   wake(): void {
     const pairState = this.negotiation;
     this.wakeIdentity = {}; this.retry?.resolve();
+    this.admissionWake?.wake();
+    this.admissionAvailability?.resolve();
+    this.admissionDeadlineCleanup?.wake();
     pairState.workPump?.wake();
+    if (this.admissionClaim) this.startPreclaim(this.admissionClaim);
     // Availability is one bounded wake for retained rows, never a new computation or timer.
     if (pairState.linked) for (const record of pairState.linked.records.values()) record.retry?.resolve();
   }
@@ -4086,7 +4288,35 @@ class RetainedIpcChannel {
           if (this.live() && this.keys && this.bootstrap) historical = await this.exchange(history);
         });
       } else if (this.live() && await this.setup()) {
-        await this.execution.run(async () => { if (this.live()) outcome = await this.exchange(null); });
+        await this.execution.run(async () => {
+          if (this.live() && this.mode === "admission" && !this.modePinned) {
+            const receipt = await this.admissionModeRpc("register", false);
+            if (receipt.state !== "pinned") {
+              this.admissionClosed = true; this.retired = true;
+              throw new Error("voice admission mode unavailable");
+            }
+            this.modePinned = true;
+          }
+          if (this.live() && this.mode === "admission" && !this.capacitySupported) {
+            // Mode29 existed before capacity30. An older native process may pin
+            // mode but cannot return/cancel a paired reservation. Probe WITHOUT
+            // creating work before ACK or any browser preclaim can exist.
+            const encoded = encodeVoiceNegotiationCapacity(this.bootstrap!.session, "observe", "1");
+            let receipt: VoiceCapacityReceipt;
+            try { receipt = await this.framed(30, 0, encoded.logical, encoded.body, false,
+              (kind, length) => kind === 0 && length === 75,
+              opened => decodeVoiceNegotiationCapacity(opened, { generation: "1" })); }
+            finally { encoded.body.fill(0); }
+            this.check(); // Include actual framing/timer finally before publication.
+            if (receipt.state !== "unstarted" || receipt.canonical !== "0" || receipt.floor !== "0" || receipt.incarnation !== null) {
+              this.admissionClosed = true; this.retire();
+              throw new Error("voice capacity capability probe refused");
+            }
+            this.capacitySupported = true;
+          }
+          // Same serialized turn: a lost pin reply cannot fall through to pilot ACK.
+          if (this.live()) outcome = await this.exchange(null);
+        });
       }
     } catch {
       // Engine/setup validation failure cannot restart construction. Transport/body failures
@@ -4111,6 +4341,7 @@ class RetainedIpcChannel {
         // may already be queued behind our aborting read and still need this SAME position.
         // Framing keys and the selected-key/control payment remain until cleanup is last.
         if (pairState.preclaim) await pairState.preclaim.drained.promise;
+        if (this.admissionFlight) await this.admissionFlight;
         if (pairState.intake) await pairState.intake.drained.promise;
         if (pairState.linked) await pairState.linked.drained.promise;
         // Ordinary Return comprises several serialized RPCs. Acquiring the lane between
@@ -4251,7 +4482,8 @@ class RetainedIpcChannel {
   private framed<T>(operation: VoiceIpcHeader["operation"], kind: VoiceIpcHeader["kind"],
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
-    decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T, input?: undefined, inputIntake?: ChainIntake): Promise<T>;
+    decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T, input?: undefined,
+    inputIntake?: ChainIntake, admissionClaim?: BrowserPreclaim): Promise<T>;
   private framed<T>(operation: VoiceIpcHeader["operation"], kind: VoiceIpcHeader["kind"],
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
@@ -4261,11 +4493,19 @@ class RetainedIpcChannel {
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
     decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T,
-    input?: Readonly<{ loan: VoiceSdpInputLoan; expected: VoiceSdpInputExpectation; current(): void }>, inputIntake?: ChainIntake): Promise<T | null> {
+    input?: Readonly<{ loan: VoiceSdpInputLoan; expected: VoiceSdpInputExpectation; current(): void }>,
+    inputIntake?: ChainIntake, admissionClaim?: BrowserPreclaim): Promise<T | null> {
     const keys = this.keys, bootstrap = this.bootstrap;
     const check = () => {
       if (!keys || !bootstrap || this.keys !== keys || this.bootstrap !== bootstrap || this.drained) throw new Error("original voice channel unavailable");
       if (!afterEnd) this.check();
+      // Register is a fresh native effect, even though it grants only capacity.
+      // A local retirement during encrypt/sign/Clock must fence the FIRST fetch.
+      // Observe/Cancel retain their exact private negative route after retirement.
+      if (admissionClaim && (this.admissionClaim !== admissionClaim || admissionClaim.retired ||
+          admissionClaim.released || admissionClaim.pairing?.ordinal !== this.admissionOrdinal.toString() ||
+          !this.modePinned || this.modeCanceled || this.admissionClosed || this.retired))
+        throw new Error("original paired voice preclaim retired");
       // Repeat after the owner callback and every physical await. Cancellation while
       // queued must not submit a fresh Input when this same codec turn eventually starts.
       if (inputIntake && (inputIntake.retired || inputIntake.released || inputIntake.transferred ||
@@ -4286,18 +4526,30 @@ class RetainedIpcChannel {
     let result: T | null = null, transfer = false;
     const controller = new AbortController(); this.controller = controller; this.controllerIntake = inputIntake ?? null;
     let timer: unknown = null;
+    let admissionDeadline: VoiceAdmissionWake | null = null, admissionExpiry: Promise<void> | null = null;
     try { try {
       sealed = new Uint8Array(await this.subtle.encrypt({ name: "AES-GCM", iv: voiceIpcNonce(request), additionalData: header }, keys!.requestBody, plaintext));
       check(); plaintext.fill(0);
       const mac = new Uint8Array(await step(this.subtle.sign("HMAC", keys!.requestMac, header)));
       const admission = encodeVoiceIpcAdmission(request, mac); mac.fill(0);
-      const deadline = this.clock.now() + 5_000;
-      const expire = () => {
-        const remaining = deadline - this.clock.now();
-        if (remaining <= 0) controller.abort();
-        else timer = this.clock.schedule(expire, remaining);
-      };
-      timer = this.clock.schedule(expire, 5_000);
+      if (this.mode === "admission") {
+        // A registered-then-thrown deadline also owns its original frame/channel.
+        // Join the exact registration in finally, even when no fetch was started.
+        admissionDeadline = new VoiceAdmissionWake(this.clock, 5_000, admissionDeadlineFault(this, controller));
+        admissionExpiry = admissionDeadlineAbort(admissionDeadline, controller);
+        admissionDeadline.start();
+        if (admissionDeadline.faulted) {
+          this.admissionClockFault(); throw new Error("voice admission deadline unavailable");
+        }
+      } else {
+        const deadline = this.clock.now() + 5_000;
+        const expire = () => {
+          const remaining = deadline - this.clock.now();
+          if (remaining <= 0) controller.abort();
+          else timer = this.clock.schedule(expire, remaining);
+        };
+        timer = this.clock.schedule(expire, 5_000);
+      }
       check(); // Clock callbacks may retire the intake; AbortSignal alone is not admission.
       response = await this.transport("http://127.0.0.1:" + this.port + "/voice/v2", {
         method: "POST", mode: "cors", credentials: "omit", redirect: "error", cache: "no-store",
@@ -4328,9 +4580,21 @@ class RetainedIpcChannel {
       try { if (response?.body && !response.body.locked) await response.body.cancel(); }
       catch { /* Keep the original error; actual cancellation has settled. */ }
       finally {
-        if (timer !== null) this.clock.cancel(timer);
-        plaintext.fill(0); sealed?.fill(0); body?.fill(0);
-        if (this.controller === controller) { this.controller = null; this.controllerIntake = null; }
+        try {
+          if (admissionDeadline) {
+            this.admissionDeadlineCleanup = admissionDeadline;
+            try {
+              admissionDeadline.wake();
+              await admissionExpiry;
+              if (admissionDeadline.faulted) this.admissionClockFault();
+            } finally {
+              if (this.admissionDeadlineCleanup === admissionDeadline) this.admissionDeadlineCleanup = null;
+            }
+          } else if (timer !== null) this.clock.cancel(timer);
+        } finally {
+          plaintext.fill(0); sealed?.fill(0); body?.fill(0);
+          if (this.controller === controller) { this.controller = null; this.controllerIntake = null; }
+        }
       }
     }
       if (transfer) {
@@ -4620,7 +4884,7 @@ export function windowVoiceCryptoBroker(
   // null or swapped slots cannot publish a second pool beside its unresolved original.
   if (expected !== undefined && previous !== expected) throw new Error("voice crypto broker changed; reload required");
   if (previous) {
-    if (previous.version !== 47 || typeof previous.preclaimNativeNegotiation !== "function" || typeof previous.nativeDerivationFromPreclaim !== "function" || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 49 || typeof previous.nativeAdmissionChannel !== "function" || typeof previous.nativeNegotiationCapacity !== "function" || typeof previous.preclaimNativeNegotiation !== "function" || typeof previous.nativeDerivationFromPreclaim !== "function" || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

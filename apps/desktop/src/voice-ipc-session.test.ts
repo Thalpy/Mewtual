@@ -72,6 +72,10 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   let now = 0, timerSerial = 0, hostileHeaders = false, hangFetch = false, fetchAborted = false, fetchEntered = false;
   const timers = new Map<number, { at: number; run(): void }>();
   let timerPeak = 0, scheduleHook: (() => void) | null = null, cancelHook: (() => void) | null = null, nowHook: (() => void) | null = null;
+  let refuseTimerCancel = false;
+  let timerCancelRefusals = 0;
+  let removeBeforeCancelFailure = false;
+  let inlineCadence = false;
   let brokerNowHook: (() => void) | null = null;
   let fetchCancel: ReturnType<typeof gate> | null = null;
   const engine = new Proxy(real, { get(target, name) {
@@ -112,9 +116,16 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   }, {
     now() { const hook = nowHook; nowHook = null; hook?.(); return now; }, schedule(run, ms) {
       const id = ++timerSerial; timers.set(id, { at: now + ms, run }); timerPeak = Math.max(timerPeak, timers.size);
+      if (inlineCadence && ms === 1_000) run();
       const hook = scheduleHook; scheduleHook = null; hook?.(); return id;
     },
-    cancel(id) { timers.delete(id as number); const hook = cancelHook; cancelHook = null; hook?.(); },
+    cancel(id) {
+      if (refuseTimerCancel) {
+        if (removeBeforeCancelFailure) timers.delete(id as number);
+        timerCancelRefusals++; throw new Error("timer cancellation uncertain");
+      }
+      timers.delete(id as number); const hook = cancelHook; cancelHook = null; hook?.();
+    },
   });
   const selectedNative: VoiceSelectedKeyNative = {
     async admit(owner, value) { executor = value; return { owner, executor, permit: "permit", join: hash(2), kind: "admitted" }; },
@@ -293,6 +304,14 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     onResponse(hook: (header: VoiceIpcHeader, mode: number) => Promise<void>) { responseHook=hook; },
     cleanup(work: () => void) { cleanups.push(work); },
     channel() { return broker.nativeChannel(owner, selected.key, native, transport); },
+    admissionChannel() { return broker.nativeAdmissionChannel(owner, selected.key, native, transport); },
+    holdCodec() {
+      const held = gate(); let entered = false;
+      const execution = (broker as unknown as { ipcExecution: { run(work: () => Promise<void>): Promise<void> } }).ipcExecution;
+      const returned = execution.run(async () => { entered = true; await held.promise; });
+      cleanups.push(held.release);
+      return { entered: () => entered, release: held.release, returned };
+    },
     counts: () => ({ ordinary, setups, settlements, collections, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
     historyBytes(value: Uint8Array) { historyBody = Buffer.from(value); },
     actions(responder: typeof actionResponder) { actionResponder = responder; },
@@ -305,6 +324,16 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     physicalIdle(): boolean {
       const session = (broker as unknown as { ipcChannels: Map<string, { controller: AbortController | null }> }).ipcChannels.get(owner.token);
       return !!session && session.controller === null && providerActive === 0;
+    },
+    admissionState() {
+      const session = (broker as unknown as { ipcChannels: Map<string, {
+        admissionClockFailed: boolean; admissionAvailability: unknown; admissionFlight: unknown;
+        modeCanceled: boolean; admissionClaim: { pairing: { receipt: unknown; certified: boolean } } | null;
+      }> }).ipcChannels.get(owner.token);
+      return { faulted: session?.admissionClockFailed, availability: !!session?.admissionAvailability,
+        flight: !!session?.admissionFlight, canceled: session?.modeCanceled,
+        receipt: session?.admissionClaim?.pairing.receipt, certified: session?.admissionClaim?.pairing.certified,
+        requests: [...operations], timers: timers.size };
     },
     rowBudget() {
       // Read-only unit observation of actual retained claims. Public counts intentionally
@@ -329,11 +358,490 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     },
     onSchedule(work: () => void) { scheduleHook = work; },
     onCancel(work: () => void) { cancelHook = work; },
+    refuseTimerCancel(value: boolean) { refuseTimerCancel = value; },
+    timerCancelRefusals: () => timerCancelRefusals,
+    removeBeforeCancelFailure(value: boolean) { removeBeforeCancelFailure = value; },
+    inlineCadence(value: boolean) { inlineCadence = value; },
     onNow(work: () => void) { nowHook = work; },
+    setClock(value: number) { now = value; },
     onIntakeNow(work: () => void) { brokerNowHook = work; },
     advance(ms: number) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.run(); } },
   };
 }
+
+/** Independent capacity endpoint model on the ACTUAL authenticated WebCrypto/HTTP
+ * framing above. It cannot inspect browser keys/counters or manufacture local drain.
+ * Rust's real Actor/TCP tests separately establish these native state transitions. */
+async function admissionFixture(t: TestContext,
+  hooks: { subscribe?(): void; unsubscribe?(): void } | null = null) {
+  const f = await fixture(t, undefined, 1, null, hooks);
+  let pinned = false, canceled = false, canonical = 0n, floor = 0n;
+  let pressure = false, heldNative = false, identity = hash(42);
+  const requests: Array<{ kind: number; generation: bigint }> = [];
+  const probes: Array<{ kind: number; generation: bigint }> = [];
+  f.actions((header, body) => {
+    assert.equal(header.logical, "04".repeat(16)); assert.equal(header.kind, 0);
+    assert.equal(body.length, 10);
+    const data = new DataView(body.buffer, body.byteOffset, body.byteLength), generation = data.getBigUint64(2);
+    if (header.operation === 29) {
+      assert.equal(body[0], 10); assert.equal(generation, 1n);
+      if (body[1] === 0) {
+        assert.ok(pinned || !f.operations().includes(9), "mode precedes first ACK"); pinned = true;
+      } else if (body[1] === 2) { pinned = true; canceled = true; }
+      const reply = new Uint8Array(18), view = new DataView(reply.buffer);
+      reply[0] = 10; reply[1] = canceled ? 2 : 1;
+      view.setBigUint64(2, 1n); view.setBigUint64(10, canceled ? 1n : 0n);
+      return { kind: 0, body: reply };
+    }
+    assert.equal(header.operation, 30); assert.equal(body[0], 11); assert.equal(pinned, true);
+    // Keep capability observations separate from started capacity work. Both
+    // still traverse the real authenticated frame and physical nonce allocator.
+    (f.operations().includes(9) ? requests : probes).push({ kind: body[1], generation });
+    if (body[1] === 0 && !pressure && !canceled && generation > canonical) canonical = generation;
+    if (body[1] === 2) { canonical = generation > canonical ? generation : canonical; floor = generation > floor ? generation : floor; }
+    const state = generation < canonical ? 8 : floor >= generation ? heldNative ? 4 : 5 :
+      canonical < generation ? 0 : heldNative ? 1 : 3;
+    const reply = new Uint8Array(59), view = new DataView(reply.buffer);
+    reply[0] = 11; reply[1] = state;
+    view.setBigUint64(2, generation); view.setBigUint64(10, canonical); view.setBigUint64(18, floor);
+    if (canonical !== 0n) { reply[26] = 1; reply.set(Buffer.from(identity, "hex"), 27); }
+    return { kind: 0, body: reply };
+  });
+  f.cleanup(() => { pressure = false; heldNative = false; identity = hash(42); });
+  return { ...f, requests: () => [...requests], probes: () => [...probes], pressure(value: boolean) { pressure = value; },
+    holdNative(value: boolean) { heldNative = value; }, incarnation(value: string) { identity = value; } };
+}
+
+test("admission pairing pins before ACK and constructor mode survives remount", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel();
+  assert.equal(f.admissionChannel(), channel);
+  assert.throws(() => f.channel(), /identity changed/);
+  assert.equal((await channel.status()).kind, "ready");
+  assert.deepEqual(f.operations(), [29, 30, 9]);
+  assert.deepEqual(f.probes(), [{ kind: 1, generation: 1n }]);
+  const baseline = f.broker.counts().bytes;
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  assert.equal(f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), claim);
+  assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved");
+  assert.equal(f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.generation, "1");
+  assert.equal(f.rowBudget().reserved, 12);
+  assert.throws(() => f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, claim,
+    historyPurpose, "0".repeat(31) + "1", { action: "1", version: "1", inputTag: hash(11) }), /not a pilot/);
+  assert.throws(() => f.broker.observeNativeWork(f.owner, channel, f.key), /not a pilot/);
+  assert.throws(() => f.broker.observeNativeLifecycle(f.owner, channel, f.key), /not a pilot/);
+  assert.equal(f.counts().ordinary, 0);
+});
+
+test("admission pairing cannot upgrade an already retained pilot", async t => {
+  const f = await admissionFixture(t), channel = f.channel();
+  await channel.status();
+  assert.throws(() => f.admissionChannel(), /identity changed/);
+  assert.deepEqual(f.operations(), [9]);
+});
+
+test("admission pairing lost or held mode reply never submits pilot ACK", async t => {
+  const f = await admissionFixture(t), held = gate(); let entered = false, lose = true;
+  f.cleanup(held.release);
+  f.onResponse(async header => {
+    if (header.operation === 29 && lose) { entered = true; await held.promise; lose = false; throw new Error("lost pin reply"); }
+  });
+  const channel = f.admissionChannel(), first = channel.status();
+  await until(() => entered);
+  assert.equal(f.admissionChannel(), channel);
+  assert.deepEqual(f.operations(), [29]); assert.equal(f.counts().setups, 1);
+  held.release(); assert.equal((await first).kind, "uncertain");
+  assert.deepEqual(f.operations(), [29]);
+  const tx = f.counts().tx[0];
+  assert.equal((await channel.status()).kind, "ready");
+  assert.deepEqual(f.operations(), [29, 29, 30, 9]);
+  assert.equal(f.counts().setups, 1); assert.ok(f.counts().tx[1] > tx);
+});
+
+test("admission pairing mode29-only native cannot ACK or strand a paid preclaim", async t => {
+  const f = await admissionFixture(t), native = f.actionHandler()!;
+  f.actions((header, body) => {
+    if (header.operation === 30) throw new Error("older native does not support capacity control");
+    return native(header, body);
+  });
+  const channel = f.admissionChannel(), paid = f.broker.counts().bytes;
+  assert.equal((await channel.status()).kind, "uncertain");
+  assert.equal(f.admissionChannel(), channel);
+  assert.deepEqual(f.operations(), [29, 30]);
+  assert.equal(f.broker.counts().bytes, paid);
+  assert.equal(f.rowBudget().reserved, 0);
+  assert.throws(() => f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), /ready voice preclaim/);
+  await channel.close();
+  assert.equal(f.counts().collections, 1); assert.equal(f.rowBudget().reserved, 0);
+  assert.equal(f.operations().includes(9), false);
+});
+
+test("admission pairing lost or held capacity probe keeps the original channel unacknowledged", async t => {
+  const f = await admissionFixture(t), held = gate(); let entered = false, lose = true;
+  f.cleanup(held.release);
+  f.onResponse(async (header, kind) => {
+    if (header.operation === 30 && kind === 1 && lose) {
+      entered = true; await held.promise; lose = false; throw new Error("lost capability probe");
+    }
+  });
+  const channel = f.admissionChannel(), paid = f.broker.counts().bytes, status = channel.status();
+  await until(() => entered);
+  assert.equal(f.admissionChannel(), channel); assert.equal(f.counts().setups, 1);
+  assert.deepEqual(f.operations(), [29, 30]); assert.equal(f.rowBudget().reserved, 0);
+  assert.equal(f.broker.counts().bytes, paid);
+  assert.throws(() => f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), /ready voice preclaim/);
+  held.release(); assert.equal((await status).kind, "uncertain");
+  assert.equal((await channel.status()).kind, "ready");
+  assert.deepEqual(f.operations(), [29, 30, 30, 9]); assert.equal(f.counts().setups, 1);
+  assert.equal(f.requests().length, 0, "both probes created no capacity work");
+});
+
+test("admission pairing End during held probe joins original IO without a preclaim dependency", async t => {
+  const f = await admissionFixture(t), held = gate(); let entered = false;
+  f.cleanup(held.release);
+  f.onResponse(async (header, kind) => {
+    if (header.operation === 30 && kind === 1) { entered = true; await held.promise; }
+  });
+  const channel = f.admissionChannel(), paid = f.broker.counts().bytes, status = channel.status();
+  await until(() => entered);
+  let ended = false; const end = channel.close().then(() => { ended = true; }); await flush();
+  assert.equal(ended, false); assert.equal(f.counts().collections, 0);
+  assert.equal(f.broker.counts().bytes, paid); assert.equal(f.rowBudget().reserved, 0);
+  held.release(); await end; await status;
+  assert.equal(f.counts().collections, 1); assert.equal(f.operations().includes(9), false);
+});
+
+test("admission pairing malformed capability probe cannot ACK and retries the same original", async t => {
+  const f = await admissionFixture(t), native = f.actionHandler()!; let malformed = true;
+  f.actions(async (header, body) => {
+    const result = await native(header, body);
+    if (header.operation === 30 && malformed) { malformed = false; result.body[0] = 12; }
+    return result;
+  });
+  const channel = f.admissionChannel();
+  assert.equal((await channel.status()).kind, "uncertain");
+  assert.deepEqual(f.operations(), [29, 30]); assert.equal(f.rowBudget().reserved, 0);
+  assert.equal((await channel.status()).kind, "ready");
+  assert.deepEqual(f.operations(), [29, 30, 30, 9]); assert.equal(f.counts().setups, 1);
+  assert.equal(f.requests().length, 0);
+});
+
+for (const shape of ["reserved", "returned", "nonfresh"] as const)
+test(`admission pairing capability probe refuses ${shape} history before ACK`, async t => {
+  const f = await admissionFixture(t), native = f.actionHandler()!;
+  f.actions(async (header, body) => {
+    const result = await native(header, body);
+    if (header.operation === 30) {
+      const view = new DataView(result.body.buffer, result.body.byteOffset, result.body.byteLength);
+      if (shape === "reserved") { result.body[1] = 3; view.setBigUint64(10, 1n); result.body[26] = 1; }
+      else if (shape === "returned") { result.body[1] = 5; view.setBigUint64(10, 1n); view.setBigUint64(18, 1n); }
+      else view.setBigUint64(10, 1n);
+    }
+    return result;
+  });
+  const channel = f.admissionChannel(); await channel.status();
+  assert.equal(f.operations().includes(9), false); assert.equal(f.rowBudget().reserved, 0);
+  await channel.close(); // Early negative status is not actual framing/collection return.
+  assert.equal(f.counts().collections, 1);
+});
+
+test("admission pairing rejects retained pre-probe ABI48 without replacing its cleanup owner", async t => {
+  const f = await admissionFixture(t), channel = f.channel(); await channel.status();
+  const symbol = Symbol.for("mewtual.voice.crypto-broker.v2"), host: Record<symbol, unknown> = { [symbol]: f.broker };
+  Object.defineProperty(f.broker, "version", { value: 48 });
+  const paid = f.broker.counts().bytes;
+  assert.throws(() => windowVoiceCryptoBroker(f.admission, host, real), /version changed/);
+  assert.equal(host[symbol], f.broker); assert.equal(f.broker.counts().bytes, paid);
+  await channel.close(); assert.equal(f.counts().collections, 1);
+});
+
+test("admission pairing lost Register retains bytes and exact ordinal through cancellation", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  const baseline = f.broker.counts().bytes, held = gate(); let entered = false, lose = true;
+  f.cleanup(held.release);
+  f.onResponse(async (header, mode) => {
+    if (header.operation === 30 && mode === 0 && lose) { entered = true; await held.promise; lose = false; throw new Error("lost capacity reply"); }
+  });
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  await until(() => entered);
+  claim.retire(); await flush();
+  assert.equal(claim.inspect(), "retired");
+  assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  assert.equal(f.rowBudget().reserved, 12);
+  assert.throws(() => f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), /draining/);
+  held.release();
+  await until(() => f.broker.counts().bytes === baseline);
+  assert.deepEqual(f.requests(), [{ kind: 0, generation: 1n }, { kind: 2, generation: 1n }]);
+  const replacement = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, replacement)?.state === "reserved");
+  assert.equal(f.broker.nativeNegotiationCapacity(f.owner, channel, replacement)?.generation, "2");
+  claim.retire();
+  assert.equal(replacement.inspect(), "reserved");
+});
+
+test("admission pairing Closing and lost Cancel are never return certificates", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  const baseline = f.broker.counts().bytes;
+  f.holdNative(true);
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "preparing");
+  claim.retire(); f.broker.retrySelectedJoinKeys();
+  await until(() => f.requests().some(request => request.kind === 2) && f.physicalIdle());
+  assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  assert.equal(f.rowBudget().reserved, 12);
+  f.holdNative(false);
+  let lose = true;
+  f.onResponse(async (header, mode) => {
+    if (header.operation === 30 && mode === 2 && lose) { lose = false; throw new Error("lost cancellation certificate"); }
+  });
+  f.broker.retrySelectedJoinKeys();
+  await until(() => !lose && f.physicalIdle());
+  assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  f.broker.retrySelectedJoinKeys();
+  await until(() => f.broker.counts().bytes === baseline);
+});
+
+test("admission pairing Unstarted retries Register on its original cadence after pressure", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  f.pressure(true);
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), paid = f.broker.counts().bytes;
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "unstarted" && f.timers().pending === 1);
+  f.pressure(false); f.advance(1_000);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved");
+  assert.deepEqual(f.requests(), [{ kind: 0, generation: 1n }, { kind: 0, generation: 1n }]);
+  assert.equal(f.broker.counts().bytes, paid);
+  assert.equal(f.timers().peak, 1);
+});
+
+test("admission pairing changed authenticated incarnation cannot refund an old claim", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  const baseline = f.broker.counts().bytes;
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved");
+  f.incarnation(hash(43)); claim.retire(); f.broker.retrySelectedJoinKeys();
+  await until(() => f.requests().some(request => request.kind === 2) && f.physicalIdle());
+  assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  f.incarnation(hash(42)); f.broker.retrySelectedJoinKeys();
+  await until(() => f.broker.counts().bytes === baseline);
+});
+
+test("admission pairing End joins actual held SDK before native cancellation and collection", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  const held = f.holdWhen((name, args) => name === "encrypt" && (args[2] as Uint8Array)?.[0] === 11);
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), paid = f.broker.counts().bytes;
+  await until(held.entered);
+  const end = channel.close(); let done = false; void end.then(() => { done = true; });
+  await flush();
+  assert.equal(claim.inspect(), "retired"); assert.equal(done, false);
+  assert.equal(f.broker.counts().bytes, paid); assert.equal(f.rowBudget().reserved, 12);
+  assert.equal(f.counts().collections, 0);
+  held.release();
+  await end;
+  assert.equal(f.rowBudget().reserved, 0); assert.equal(f.counts().collections, 1);
+  const operations = f.operations();
+  assert.deepEqual(operations.slice(-2), [29, 30], "whole Session fence precedes exact cancellation proof");
+  assert.equal(f.providers().active, 0);
+});
+
+test("admission pairing subscription reentry sees paired kind before any conversion", async t => {
+  const hooks: { subscribe?(): void; unsubscribe?(): void } = {};
+  const f = await admissionFixture(t, hooks), channel = f.admissionChannel(); await channel.status();
+  const baseline = f.broker.counts().bytes;
+  let nested: ReturnType<VoiceCryptoBroker["preclaimNativeNegotiation"]> | null = null;
+  hooks.subscribe = () => {
+    hooks.subscribe = undefined;
+    nested = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+    assert.throws(() => f.broker.nativeDerivationFromPreclaim(f.owner, channel, f.key, nested!,
+      historyPurpose, "0".repeat(31) + "1", { action: "1", version: "1", inputTag: hash(11) }), /not a pilot/);
+  };
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  assert.equal(claim, nested); assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  assert.equal(f.rowBudget().reserved, 12);
+});
+
+test("admission pairing coordinator has an independent bounded original payment", () => {
+  // Application-owned graph projection; not a promise about VM/WebCrypto heap size.
+  // Existing framing and physical IO scratch stay in the original Control payment.
+  const scalarsAndStrings = 512 + 2 * 128 + 4 * 64;
+  const taskAndFinally = 3 * 256 + 512;
+  const originalClaimAndReceiptRefs = 256 + 512;
+  const cadenceSignalTimerAndCallouts = 256 + 256 + 512 + 512;
+  const encoderDecoderAndRpcFrames = 512 + 512 + 1024;
+  assert.ok(scalarsAndStrings + taskAndFinally + originalClaimAndReceiptRefs +
+    cadenceSignalTimerAndCallouts + encoderDecoderAndRpcFrames <= 8 * 1024);
+});
+
+for (const seam of ["encrypt", "sign", "clock", "queued codec"] as const)
+for (const end of [false, true])
+test(`admission pairing ${end ? "End" : "claim cancellation"} at ${seam} fences first Register fetch`, async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  const baseline = f.broker.counts().bytes;
+  const queued = seam === "queued codec" ? f.holdCodec() : null;
+  if (queued) await until(queued.entered);
+  const held = seam === "encrypt" || seam === "sign" ? f.holdWhen(name => name === seam) : null;
+  let claim: ReturnType<VoiceCryptoBroker["preclaimNativeNegotiation"]>;
+  let ending: Promise<void> | null = null;
+  const cancel = () => { if (end) ending = channel.close(); else claim.retire(); };
+  let clockEntered = false;
+  if (seam === "clock") f.onSchedule(() => {
+    cancel(); clockEntered = true;
+    assert.equal(claim.inspect(), "retired");
+    assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+    assert.equal(f.rowBudget().reserved, 12, "Clock callback has not returned");
+  });
+  claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  if (held) await until(held.entered);
+  if (seam !== "clock") cancel();
+  else await until(() => clockEntered);
+  await flush();
+  assert.equal(claim.inspect(), "retired");
+  if (seam !== "clock") assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  held?.release(); queued?.release();
+  if (end) { await until(() => ending !== null); await ending; }
+  else await until(() => f.broker.counts().bytes === baseline);
+  assert.equal(f.requests().filter(request => request.kind === 0).length, 0,
+    "no first native admission after a proven local cancellation");
+  assert.deepEqual(f.requests(), [{ kind: 2, generation: 1n }]);
+  assert.equal(f.rowBudget().reserved, 0);
+});
+
+test("admission pairing negative cleanup needs no fresh browser group credits", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved");
+  const ledger = f.broker as unknown as { charge(owner: VoiceCryptoOwner, bytes: number): void;
+    refund(owner: VoiceCryptoOwner, bytes: number): void };
+  const filler = 256 * 1024 - f.broker.counts().bytes; ledger.charge(f.owner, filler);
+  let filled = true;
+  f.cleanup(() => { if (filled) { filled = false; ledger.refund(f.owner, filler); } });
+  claim.retire();
+  await until(() => f.rowBudget().reserved === 0);
+  assert.equal(f.broker.counts().bytes, 128 * 1024, "only the actual original envelope returned");
+  filled = false; ledger.refund(f.owner, filler);
+});
+
+test("admission pairing register-then-throw cadence retains End until its actual callback", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  f.onResponse(async (header, kind) => {
+    if (header.operation === 30 && kind === 0) f.onSchedule(() => { throw new Error("lost cadence registration handle"); });
+  });
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), paid = f.broker.counts().bytes;
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved" && f.timers().pending === 1);
+  const pending = f.timers().callbacks[0];
+  let ended = false; const end = channel.close().then(() => { ended = true; });
+  await flush(); f.broker.retrySelectedJoinKeys(); await flush();
+  assert.equal(ended, false); assert.equal(f.counts().collections, 0);
+  assert.equal(f.broker.counts().bytes, paid); assert.equal(f.rowBudget().reserved, 12);
+  assert.equal(f.timers().pending, 1, "no replacement cadence while original registration is unknown");
+  f.advance(1_000); await end;
+  assert.equal(f.timers().pending, 0); assert.equal(f.rowBudget().reserved, 0);
+  const counts = f.counts(), remaining = f.broker.counts().bytes;
+  pending(); await flush();
+  assert.deepEqual(f.counts(), counts); assert.equal(f.broker.counts().bytes, remaining, "queued old callback is detached");
+});
+
+test("admission pairing always-inline cadence never spins the outer native polling loop", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  f.inlineCadence(true);
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved" && f.physicalIdle());
+  const requests = f.requests();
+  for (let count = 0; count < 20; count++) await flush();
+  assert.deepEqual(f.requests(), requests, "inline callback did not certify one second elapsed");
+  assert.equal(f.timers().pending, 0);
+  await channel.close();
+  assert.deepEqual(f.requests(), [{ kind: 0, generation: 1n }, { kind: 2, generation: 1n }]);
+  assert.equal(claim.inspect(), "retired"); assert.equal(f.rowBudget().reserved, 0);
+});
+
+for (const beforeAck of [false, true])
+test(`admission pairing unknown IO deadline ${beforeAck ? "before ACK" : "at Register"} retains original frame until callback`, async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel();
+  if (!beforeAck) await channel.status();
+  f.onSchedule(() => { throw new Error("deadline registered but handle lost"); });
+  const status = beforeAck ? channel.status() : null;
+  const claim = beforeAck ? null : f.broker.preclaimNativeNegotiation(f.owner, channel, f.key);
+  const paid = f.broker.counts().bytes;
+  await until(() => f.timers().pending === 1);
+  const requests = f.requests();
+  let ended = false; const end = channel.close().then(() => { ended = true; }); await flush();
+  assert.equal(ended, false); assert.equal(f.broker.counts().bytes, paid);
+  assert.equal(f.counts().collections, 0); assert.deepEqual(f.requests(), requests);
+  if (beforeAck) assert.deepEqual(f.operations(), [], "failed mode deadline cannot reach ACK or native pin");
+  else { assert.equal(claim!.inspect(), "retired"); assert.equal(f.rowBudget().reserved, 12); }
+  f.advance(5_000); await end; if (status) await status;
+  assert.equal(f.counts().collections, 1); assert.equal(f.rowBudget().reserved, 0);
+  if (beforeAck) assert.equal(f.operations().includes(9), false);
+  else assert.equal(f.requests().some(request => request.kind === 0), false);
+});
+
+test("admission pairing failed IO deadline cancellation holds actual frame and fees", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  f.onResponse(async (header, kind) => { if (header.operation === 30 && kind === 0) f.refuseTimerCancel(true); });
+  f.cleanup(() => { f.refuseTimerCancel(false); });
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), paid = f.broker.counts().bytes;
+  await until(() => f.timerCancelRefusals() > 0);
+  let ended = false; const end = channel.close().then(() => { ended = true; }); await flush();
+  assert.equal(ended, false); assert.equal(f.broker.counts().bytes, paid);
+  assert.equal(f.rowBudget().reserved, 12); assert.equal(f.counts().collections, 0);
+  f.advance(5_000); f.refuseTimerCancel(false);
+  try { await until(() => ended); } catch { throw new Error("deadline close stalled: " + JSON.stringify(f.admissionState())); }
+  await end;
+  assert.equal(claim.inspect(), "retired"); assert.equal(f.rowBudget().reserved, 0);
+  assert.equal(f.timers().pending, 0);
+});
+
+test("admission pairing late invalid Clock aborts captured IO but joins actual fetch cancellation", async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  const hung = f.hangFetch();
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), paid = f.broker.counts().bytes;
+  await until(hung.entered);
+  const oldCallback = f.timers().callbacks[0];
+  f.setClock(Number.NaN); f.fireTimerEarly();
+  assert.equal(hung.aborted(), true, "fault notification precedes actual timer/frame return");
+  assert.equal(claim.inspect(), "retired");
+  assert.equal(f.broker.counts().bytes, paid); assert.equal(f.rowBudget().reserved, 12);
+  assert.equal(f.admissionState().faulted, true);
+  let ended = false; const end = channel.close().then(() => { ended = true; }); await flush();
+  assert.equal(ended, false); assert.equal(f.counts().collections, 0);
+  f.setClock(0); hung.release(); await end;
+  assert.equal(f.rowBudget().reserved, 0); assert.equal(f.providers().active, 0);
+  assert.equal(f.requests().some(request => request.kind === 0), false);
+  const counts = f.counts(); oldCallback(); await flush(); assert.deepEqual(f.counts(), counts);
+});
+
+for (const removed of [false, true])
+test(`admission pairing retries original IO cancel without time advancement (removed=${removed})`, async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  f.removeBeforeCancelFailure(removed);
+  f.onResponse(async (header, kind) => { if (header.operation === 30 && kind === 0) f.refuseTimerCancel(true); });
+  f.cleanup(() => { f.refuseTimerCancel(false); });
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), paid = f.broker.counts().bytes;
+  await until(() => f.timerCancelRefusals() > 0);
+  let ended = false; const end = channel.close().then(() => { ended = true; }); await flush();
+  assert.equal(ended, false); assert.equal(f.broker.counts().bytes, paid);
+  assert.equal(f.rowBudget().reserved, 12); assert.equal(f.counts().collections, 0);
+  assert.equal(f.timers().pending, removed ? 0 : 1);
+  f.refuseTimerCancel(false); f.broker.retrySelectedJoinKeys(); await end;
+  assert.equal(claim.inspect(), "retired"); assert.equal(f.rowBudget().reserved, 0);
+  assert.equal(f.counts().collections, 1); assert.equal(f.timers().peak, 1);
+});
+
+for (const release of ["retry", "callback"] as const)
+test(`admission pairing failed cadence cancellation joins the SAME ${release}`, async t => {
+  const f = await admissionFixture(t), channel = f.admissionChannel(); await channel.status();
+  const claim = f.broker.preclaimNativeNegotiation(f.owner, channel, f.key), paid = f.broker.counts().bytes;
+  await until(() => f.broker.nativeNegotiationCapacity(f.owner, channel, claim)?.state === "reserved" && f.timers().pending === 1);
+  f.refuseTimerCancel(true); f.cleanup(() => { f.refuseTimerCancel(false); });
+  let ended = false; const end = channel.close().then(() => { ended = true; });
+  await flush();
+  assert.equal(ended, false); assert.equal(f.broker.counts().bytes, paid);
+  assert.equal(f.rowBudget().reserved, 12); assert.equal(f.timers().pending, 1);
+  if (release === "callback") f.advance(1_000);
+  f.refuseTimerCancel(false); f.broker.retrySelectedJoinKeys(); await end;
+  assert.equal(f.counts().collections, 1); assert.equal(f.rowBudget().reserved, 0);
+  assert.equal(f.timers().pending, 0);
+});
 
 /** Real selected keys and provider work, with mock Root action replies. Status inside the
  * action hooks exercises same-channel RPC progress; these tests do NOT establish native
