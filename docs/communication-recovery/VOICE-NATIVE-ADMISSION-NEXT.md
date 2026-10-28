@@ -1,6 +1,17 @@
 # Native admission integration
 
-Status,28 October: Root registration and browser preclaim are reviewable leaves in
+The current code checkpoint (`6245af85`, draft PR81) adds native capacity Control30/version11, strict shared
+browser codecs and retained capacity-only browser pairing.38 focused native tests and the
+assembled Control graph guard pass.17 codec/frame tests,37 actual-WebCrypto pairing tests
+and nine cadence units pass. Browser re-review has no remaining blocker/high/medium;
+the complete Root/native/frontend suites pass4,002/1,049/3,635 tests respectively, with
+25 existing Root ignores. Svelte check, frontend build, all ten Edge flows, strict
+Root/native Clippy, explicit native check, formatting, ambient dependency checking and
+the fresh dependency audit pass. Native build (3m44s) and actual startup also pass. Control29 stays
+mode-only. Native ledger reservation, signed Ready/bilateral
+admission, operational SDP/RTC/media composition and production activation are unfinished.
+
+Earlier pushed checkpoint (`e14f3996`),28 October: Root registration and browser preclaim are reviewable leaves in
 PRs79/80. They are joined at `a44b51b2` on `communication-v2-native-admission`.
 The subsequent Actor staging implementation compiles; both new Root preparation tests
 and all eight Actor staging regressions pass in that checkout. The complete Root suite now
@@ -11,6 +22,29 @@ tests. The canonical Slot continuation has thirteen passing regressions;
 strict native Clippy and explicit check/build/startup pass. Production V2
 remains OFF. This document describes implemented native custody and the remaining connection,
 not completed native admission, signed readiness, media relay or physical acceptance.
+
+## Next native ledger and agreement boundary (design only)
+
+The next reviewed slice is an inert affine native parent-row claim, retained by the
+SAME Slot alongside RootHighPreclaim. Reserve one of the existing32 positions without a
+dummy selector, Pending row, work projection or signature. Pay the existing2304-byte Row
+fee plus the SAME PreparedPhase2KiB contribution (4352 bytes). Every allocator, including
+SDP children, must exclude reserved serial stamps. Eventual private upgraded consumption
+moves the SAME serial/payment/preparation into the real Row; no refund/recharge or
+deadline reset. Slot reclamation/emergency recovery/Returned/Closed must include actual
+claim return. Measure Index against its1024-byte guard and all original native envelopes.
+One parent claim does not promise descendant capacity.
+
+Do not call the pilot producer to consume this claim: its legacy PreparedChain constructor
+requests another group progression claim already held by RootHighPreclaim. RootHighPreclaim
+has no operational consume API and reserves HIGH layout only; LOW requires actual Actor
+orientation/evidence and its own correct backing. Existing signed Ready authenticates an
+actual post-Finish transition. It is not a pre-agreement capability advertisement. Complete
+bilateral binding, RoundRef/KDF domain, role-specific consume, immutable RoundGate,
+Request/Grant/Commit, lost-Commit recovery and failed-round Forget remain required.
+The separately charged browser8KiB remains a real deficit in the previously full
+configured/audio composition; removing only the old2KiB lifecycle does not make it fit.
+This design review authorizes neither an unspecified wire protocol nor activation.
 
 ## Implemented Actor boundary
 
@@ -86,7 +120,8 @@ Root capacity; otherwise the returning worker could wait on that same commit.
 The existing pilot starts automatic discovery after authenticated bootstrap Status ACK.
 Pinning a new admission mode afterward would race that old producer. The implemented
 mode-only Register occurs before ACK, followed by inert waiting. The local Slot draft can
-start its same paid Root continuation after ACK, but no capacity wire adapter exists yet.
+start its same paid Root continuation after ACK; the current draft adds the capacity wire
+adapter and the capacity-only browser pairing described below.
 First mode Register after ACK must refuse an
 upgrade. A valid first Cancel before ACK must select the SAME sticky admission mode,
 so a delayed ACK cannot turn negative admission debt into pilot discovery. Observe
@@ -98,28 +133,36 @@ Old clients that never select that mode retain the existing pilot behavior. Mode
 selection is irreversible through cancellation, pressure, lost replies and epoch
 changes. This mode-only boundary and both ACK orders now have focused native/real-TCP
 coverage and read-only adversarial review. It accepts only ordinal1 until the canonical
-Slot and actual return machinery below exist; no progression or capacity is acknowledged.
+Slot and actual return machinery below exist. This restriction applies to mode29 only;
+distinct capacity30 now acknowledges canonical generations.
 
 Header admission must select the new short Control grammar by operation and exact physical
 Session logical ID BEFORE RowId decoding/counter admission. No renderer peer/role/profile
 boolean substitutes for that native selector. Unknown versions fail closed without fallback.
 
-Browser must retain its original preclaim through an ambiguous Register and fence native
-cancellation BEFORE releasing paired browser capacity. The currently reviewed bare preclaim
-has no native effects; adding that pairing requires new ownership/retirement tests. Do not
-hide a new Session coordinator in the nearly full intake8KiB or IPC16KiB metadata. Measure
-its independent payment and update the retained broker ABI on the SAME window symbol.
+The browser draft retains its original preclaim through ambiguous Register and fences
+native cancellation BEFORE releasing paired browser capacity. Its immutable admission
+constructor pins29 before ACK9, installs paired kind before publication/subscription and
+rejects pilot conversion/work/lifecycle. An independent prepaid8KiB Session coordinator
+owns one flight/ordinal and sticky remembered incarnation. Public retirement detaches its
+cell; the private negative continuation joins exact native certificates AND actual
+SDK/IO/task/cell/unsubscribe return. Broker ABI49 uses the SAME retained window symbol.
+Unknown/cancel-failed timer registrations remain owned until actual return; inline or
+invalid cadence cannot drive an outer poll loop. Clock faults close positive admission,
+including before ACK, then retain negative debt with bounded/manual availability recovery.
+The later already-full configured/audio composition still needs a measured solution.
 
 Reserved is capacity only. It is NOT signed Ready, a native32-row ledger reservation,
 DeviceId orientation, bilateral Request/Grant/Commit or RoundRef/KDF permission. Those
 remain separate requirements before any production V2 activation.
 
-The next candidate uses a DISTINCT Session Control30/version11 for canonical capacity
+The current candidate uses a DISTINCT Session Control30/version11 for canonical capacity
 Register/Observe/Cancel, keeping mode-only operation29 unchanged. First capacity admission
 requires an uncanceled mode pin and completed setup ACK. Mode29 Cancel closes negotiation
 admission for that physical Session, including existing Slot attachment; it neither reports
 capacity returned nor ends independently held media. Per-generation cancellation belongs
-to operation30. No implementation of operation30 exists at this checkpoint.
+to operation30. The current uncommitted implementation and shared browser grammar are in
+INTERFACES; the actual browser pairing is capacity-only and grants no signed readiness.
 
 Actual Work retirement proves callback/argument teardown, not destruction of every Work
 clone or return of its4KiB fee. The reviewed continuation uses ONE persistent8KiB task and

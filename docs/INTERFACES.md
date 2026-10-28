@@ -1,10 +1,79 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Local native capacity Control (28 October; implementation draft, V2 inactive)
+
+Physical operation30/version11 is distinct from mode-only operation29. Its exact10-byte
+request is version11, kind0/Register or1/Observe or2/Cancel, then a nonzero big-endian u64
+capacity generation. Header admission requires Control class, the SAME physical Session
+logical ID and26 ciphertext bytes before counters or RowId parsing. The encrypted body
+uses only version11; no mode/legacy decoder fallback exists.
+
+The59-byte response is version11, state, echoed requested generation, canonical generation,
+cancellation floor (three big-endian u64s), incarnation-present0/1 and32 public Root-RNG
+incarnation bytes. Absent bytes are zero; present all-zero randomness is valid. States are
+0/Unstarted,1/Preparing,2/Waiting,3/Reserved,4/Closing,5/Returned,6/Closed,7/Uncertain,
+8/Superseded. This is a capacity observation, not Ready, peer orientation, a native ledger
+position, bilateral agreement or RTC permission. Mode29 continues to use ordinal1;
+capacity30 uses its independently advancing generation.
+
+All30 requests require an existing admission-mode pin. Register additionally requires an
+uncanceled pin and completed setup ACK. Observe creates no work and never selects a mode.
+Cancel/Observe remain available before ACK, after canceled pin and after End. Register's
+local capacity refusal projects retained state; it does not manufacture a return receipt.
+Skipped/future/wrapped ordinals refuse before floor mutation; a previously staged immediate
+successor remains observable when whole-session close wins before Pending installation.
+
+Reserved refers only to requested==canonical, current matching original capacity and no
+reclamation. Returned requires the requested generation's actual owned work/output/capacity
+return plus its cancellation fence. Superseded requires requested<canonical and floor>=requested;
+canonical advancement already certified that old return. Closed requires terminal fencing
+AND Slot collection. Closing/Uncertain, Unstarted and Waiting are not return certificates.
+None of these certificates proves browser SDK/IO drainage or task/Actor payer refund.
+
+Browser codecs bind the echoed request and full-width ordinals, reject changed present
+incarnations, and allow omitted destroyed identities only on negative snapshots. The retained
+owner must preserve its remembered identity across omission. Intrinsic fixed views and32-byte
+numeric copying prevent caller properties/subarray/species from substituting unauthenticated
+or unbounded input. Shared Rust/TypeScript vectors are included in the container context.
+`VoiceCryptoBroker.nativeAdmissionChannel` fixes mode before constructor publication and
+completes/recover mode29 before ACK9 in the same serialized turn. Remounts coalesce only
+the exact selected key/native adapter/transport/mode; a retained pilot cannot be upgraded
+or vice versa. `preclaimNativeNegotiation` installs its paired kind/ordinal before any
+subscription callout on this mode. `nativeNegotiationCapacity` exposes only the current
+authenticated capacity snapshot. Public retirement detaches immediately; its private
+negative driver retains the original128KiB and twelve rows until native Returned,
+Superseded or Closed AND actual physical/driver/cell/unsubscribe return. Closing/Uncertain
+never refund. The SAME separately paid8KiB Session coordinator keeps the remembered
+incarnation across omitted negative identities and increments only after actual return.
+Unstarted retries Register at the same ordinal; no observation buys a new native task.
+Mode29 End cancellation always uses ordinal1 before capacity30 cancellation. Fresh Register
+rechecks original owner/claim/ordinal before first fetch and after every SDK await. Only
+negative operations retain post-retirement routing. Pilot conversion/work/lifecycle refuse
+this mode. Retained broker ABI49 uses the unchanged window symbol. Signed Ready, native
+ledger/SDP/RTC integration and production activation remain open.
+
+Before ACK the admission constructor also requires a pure30/Observe1 probe with exact
+Unstarted/request1/canonical0/floor0/absent-incarnation. Mode29 support alone does not
+establish capacity30 support. Lost/unsupported/malformed probes cannot ACK or charge
+a128KiB/twelve-row preclaim; the original channel remains recoverable/closable. Probe
+success is capability metadata, never capacity, Work, Ready or future availability.
+ABI49 refuses retained pre-probe48 producers without replacing their original cleanup.
+
+The admission coordinator pays separate one-shot cadence/IO-deadline custody. Unknown
+schedule results retain their original callback; failed cancellation retains its original
+handle. Only IO terminal finally publishes its cancellation retry guard, so availability
+cannot disarm a live5s deadline. A separate fault observer promptly fences positive work
+and aborts the captured original controller; notification does not join timer or fetch
+cancellation. Frame return joins both. Inline/invalid cadence waits for explicit availability
+instead of certifying elapsed time. Clock faults permit one immediate negative recovery
+transition, then no automatic polling until availability/End. Pre-ACK faults close the
+original channel even when no browser preclaim exists.
+
 ## Native admission custody draft (28 October; V2 inactive)
 
 The bootstrap Row now retains a canonical generation, cancellation floor, exact Actor Work,
 one original affine outcome and the same Root registration across capacity retries. This
-native-only API is not connected to browser Control yet. One persistent8KiB task owns the
+API is exposed by the fixed Control adapter above. One persistent8KiB task owns the
 physical Session's actual native position. Repeated Register observations coalesce; local
 Busy retains the same candidate and host nudges do not requeue an accepted invocation.
 Per-generation Returned certifies that generation's work/capacity return, not task refund.
@@ -16,8 +85,8 @@ terminal. End fences first effects before collection and preserves authenticated
 while original work remains. Unexpected task destruction retains its same position/funding;
 negative recovery and shutdown drain original owners outside native guards before release.
 
-Operation29/version10 remains mode-only. There is no operation30/version11 capacity wire
-adapter, browser pairing, native ledger reservation or signed Ready in this draft. Existing
+Operation29/version10 remains mode-only. The operation30/version11 adapter is described above;
+native ledger reservation and signed Ready remain open. Existing
 Row8KiB/Control12KiB and all group/process limits remain unchanged. V2 stays OFF.
 
 ## Local admission mode selection (28 October; V2 inactive)
@@ -33,8 +102,8 @@ First Register OR Cancel selects admission only before original setup ACK. Selec
 ACK serialize under the same native Row.state. A first post-ACK selection refuses without
 mutation; exact existing selection survives retry/ACK/cancellation. Observe never selects.
 Pilot producers require ACK completed and admission unselected at final publication.
-The browser does not yet select this mode; canonical Slot/worker and paired browser
-cancellation remain unfinished. This local operation number is not a P2P wire kind.
+The capacity-only browser constructor above selects this mode; production activation
+remains off. This local operation number is not a P2P wire kind.
 
 ## Actor admission invocation draft (28 October; not native IPC)
 

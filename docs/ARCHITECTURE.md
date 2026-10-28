@@ -1,5 +1,33 @@
 # Mewtual; Architecture
 
+## Native capacity control adapter draft (28 October; inactive)
+
+Operation30/version11 exposes the existing canonical Slot through fixed authenticated
+Session Control. Register stages bounded demand outside Row guards; the SAME persistent
+native task owns Root preparation. Observe allocates nothing, and Cancel only latches the
+exact negative floor/wakes original work. Native errors project canonical custody rather
+than reporting guessed absence. Mode29 and its pre-ACK ordinal1 pin remain unchanged.
+
+The fixed59-byte snapshot separates requested/canonical generations and an optional public
+Root incarnation. The native12KiB Control guard includes the new synchronous adapter and
+prepayment/commit frames. Rust/browser codecs share vectors; their presence is audited by
+the container build. The browser draft selects an immutable admission constructor before
+ACK and pairs the existing128KiB/twelve-row preclaim to one native ordinal. A separate
+prepaid8KiB Session coordinator retains its original identity through lost replies and
+private cancellation after the public cell detaches. Refund requires an exact native
+negative certificate AND actual RPC/driver/cell/unsubscription return. End cannot wait
+for preclaim drainage while holding the codec needed by that negative continuation.
+Register revalidates the exact claim/owner after each SDK await and before first fetch;
+only Observe/Cancel may use the original route after retirement. Broker ABI49 rejects
+older producers on the same window symbol. Pilot work/conversion/lifecycle cannot use
+admission channels. Its one-shot cadence and IO deadline preserve known/unknown timer
+custody through actual callback/cancel return; inline callbacks cannot certify elapsed
+cadence. A clock fault closes positive admission, retains negative debt and permits no
+unbounded automatic retry. Pre-ACK faults close rather than falling through to ACK.
+The later already-full configured/audio composition still requires
+measuring this separate8KiB fee; no extra group capacity is promised.
+Native ledger preclaim, bilateral agreement and activation remain open. V2 stays OFF.
+
 ## Native canonical admission continuation draft (28 October; inactive)
 
 The original bootstrap Row owns Slot, while one independently paid persistent native task
@@ -21,8 +49,8 @@ still retain an empty scheduler cell briefly; Row/Control fees do not claim to f
 opaque tail indefinitely. A future API retaining any task observer across Row collection
 must independently keep its original funding through that observer's return.
 
-No capacity wire operation, paired browser admission, native ledger preclaim, signed bilateral
-agreement or live V2 audio/relay is supplied by this draft. Existing local mode operation29
+The earlier Slot-only checkpoint predates the capacity wire/browser adapter above. No native
+ledger preclaim, signed bilateral agreement or live V2 audio/relay is supplied. Local mode operation29
 and all resource ceilings are unchanged. Production V2 remains OFF.
 
 ## Inert V2 progression capacity (28 October; candidate, inactive)

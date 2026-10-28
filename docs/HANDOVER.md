@@ -1,5 +1,107 @@
 # Mewtual; Handover
 
+## Native capacity Control and browser pairing (28 October; inactive, local gates pass)
+
+The code checkpoint is `6245af85` in draft PR81, following pushed baseline `e14f3996`.
+Native capacity/codec is `4f3bc42c`, browser pairing is `83f3958a`, and the test-only SDP
+barrier correction is `6245af85`. This continuation implements distinct
+Session Control30/version11 over the canonical Slot; mode29/version10 remains unchanged.
+Its10-byte request carries Register/Observe/Cancel plus full-width ordinal. Its59-byte
+snapshot echoes requested/canonical ordinals, cancellation floor and an optional public
+Root incarnation. Exact Session/class/length is checked before nonce/RowId admission.
+Reserved is exact-generation capacity only. Returned/Superseded/Closed rely on original
+work/collection barriers and never assert browser drainage or task/Actor payer refund.
+
+Observe is noncreating. Early Cancel before ACK fences a delayed Register without buying
+a native task. Historical requests cannot see a successor's reservation. A cancellation
+race found by review at Pending->Actor acceptance now uses narrowly proven
+CancelledUnstarted; generic Stopped stays terminal. This preserves a current registration
+for g3 after g2 is canceled before enqueue. Actual Actor/native-position/payment barriers
+cover both initial-no-mint cancellation and known-incarnation reuse.
+
+All38 focused native capacity tests pass after correcting the TCP pressure fixture to fill
+actual group counts (process totals included independently paid infrastructure and underfilled
+that group). The final Control graph guard passes. All17 focused browser
+codec/frame tests pass: shared vectors, ordinal boundaries, changed/omitted/all-zero public
+identity, caller getter substitution and shadowed typed-array metadata/subarray are covered.
+The container allowlist and vector audit include the new JSON. Read-only review/re-review
+has no remaining blocker/high/medium in this boundary. Complete suite results are below.
+
+The local browser draft now pairs its original128KiB/twelve-row envelope to capacity30.
+`nativeAdmissionChannel` has an immutable mode and completes/recover mode29 BEFORE ACK9
+in the same serialized turn. Both constructor mismatch directions refuse. A separately
+prepaid8KiB Session coordinator owns one original claim/ordinal, remembered incarnation,
+flight and cadence; no existing metadata fee or resource ceiling increases. Paired binding
+precedes publication/subscription, and paired handles cannot use pilot conversion/work or
+lifecycle. Broker ABI49 uses the SAME retained window symbol and refuses old producers.
+
+Public retirement immediately detaches its cell; private Cancel retains all original bytes
+and rows through native ambiguity, Closing/Uncertain and actual framing/SDK/task return.
+End's mode29 fence precedes exact30 cancellation; negative work uses the codec independently
+of the status driver which waits for that browser drainage. Authenticated Unstarted retries
+Register at the same ordinal; ordinary observations reuse the existing native task.
+Review found and corrected a fresh-Register race after local cancellation during WebCrypto:
+Register now rechecks owner, exact claim/ordinal and negative flags after every await and
+before first fetch. Observe/Cancel alone keep the post-retirement route. All37 focused
+actual-WebCrypto pairing tests pass, including lost replies, full group pressure, changed
+incarnation, held SDK, subscription reentry, and Cancel/End at encrypt/sign/Clock/queued-codec
+barriers. A separate one-shot cadence/deadline owner now joins registered-then-thrown
+and failed-cancel timers before returning its actual frame. Inline/invalid cadence cannot
+drive an outer polling loop. Timer faults close positive admission; after one immediate
+negative recovery attempt, outstanding debt waits for explicit availability. Pre-ACK faults
+close the original channel without ACK. Nine focused timer units and actual pairing
+barriers cover unknown/cancel-failed IO deadlines, unknown cadence, late callbacks and
+always-inline scheduling. Browser re-review has no remaining blocker/high/medium. The
+complete3,635-test frontend suite, Svelte checking (zero errors/warnings), production build
+and all ten real Edge flows pass. Root/native formatting, ambient dependency gate and fresh
+dependency audit pass. The final complete Root suite passes4,002 with25 existing ignores;
+the final complete native suite passes1,043 library plus six ACL/parser tests with zero
+failures/ignores (2,489.58s library). Strict Root and native Clippy and explicit native
+checking pass. The final native build passes (3m44s), as does actual application startup
+with desktop permissions and the unchanged startup probe. The app was not unlocked.
+The first complete native run ended1,037 passed/six failed. Its originating
+failure was `native_v2_sdp_empty_result_cannot_replace_nonempty_original_open`: the SDP
+fixture assumed Task.execute's first poll must be Pending, but its real server-map
+observation can synchronously refuse Capacity before mailbox admission. The five other
+failures were closed fixture admission, not independent SDP/WebCrypto failures. The
+originating case passes in isolation. The test correction now forces that early refusal
+while retaining original Body/Task, then obtains an actual mailbox Pending using the SAME
+production publisher/body and genuine original grant before testing the UI-wins fence.
+It also forces an actual full mailbox: only a proven pre-enqueue sender may be canceled,
+then the Actor drains/reparks with the same Body/Task/grant/tag. Admission, UI and return
+waits use the original intent deadline with a fresh post-await check. The Open fixture
+uses the same bounded original Actor observation. No deadline or runtime behavior changes.
+The final bounded mailbox family passes all three focused cases (33.96s); deadline/Open
+corrections have no remaining blocker/high/medium on re-review. All three also pass in the
+complete native run. Logs use `target/capacity-root-verified.log`,
+`target/capacity-native-sdp-final.log`, `target/capacity-native-verified.log` and their
+separate exit markers. Final check/lint/build logs use `target/capacity-final-*.log` with
+`.log.exit` markers; real startup uses `target/capacity-final-startup.log` and `.exit`.
+The later already-full configured/audio composition still needs a measured solution.
+
+Mixed-native support now requires a pure30/Observe1 capability probe AFTER mode29 pin
+and BEFORE ACK9. Only exact Unstarted/request1/canonical0/floor0/no-incarnation permits
+ACK or a paired browser reservation. A mode29-only native cannot strand128KiB/twelve rows;
+unsupported/lost/held/malformed probes retain the SAME keys/counters and no preclaim.
+End can settle/collect without waiting for nonexistent capacity control. ABI49 on the
+same window symbol rejects retained pre-probe48 producers and preserves their cleanup.
+All37 pairing tests pass, including old native, probe loss/End, nonfresh positive/negative
+receipts, malformed replay and retained-old-broker refusal. Native TCP setup now verifies
+the noncreating pre-ACK probe and passes in the complete native suite. The final3,635-test
+frontend suite, static/build and all ten Edge flows pass after this correction. Compatibility
+re-review has no blocker/high/medium; retained old48 cleanup remains callable.
+
+Native ledger reservation, bilateral agreement/RoundRef/KDF, operational SDP/RTC/audio,
+member relay and combined/physical acceptance remain open. One desktop is available.
+V2 remains OFF. External download resume is outside this continuation.
+
+Backlog provenance: PR74 merged at `85b345cf` on 27 October at 23:48 UTC. The seventeen
+incorporated PRs48/52/53/58/59/61/62/63/64/65/66/67/68/69/70/71/72 were closed at 23:50-23:51
+after that merge. Every exact source head is an ancestor of both that merge and `main`;
+their original commits remain present. Their red Closed status records incorporation
+through PR74, not loss of the code or completion of the unfinished V2 programme.
+Those closures are separate from the later PR81 validation recorded above.
+
 ## Native Slot continuation (28 October; inactive, complete local suites pass)
 
 Draft PR81 extends the reviewed `6c6c483c` checkpoint. The COMPLETE Root command passes
@@ -53,8 +155,8 @@ the Linux cause or resolve its failure. Latest-only100ms progress sampling keeps
 independent of fast Capacity attempts, and actual SDP children are excluded from confirmation
 counts. Read-only re-review has no blocker/high/medium in that test-only boundary.
 
-Mode-only operation29 remains unchanged. Capacity operation30/version11, its real-HTTP
-adapter/codec and browser pairing are not complete. Native ledger preclaim,
+This earlier checkpoint predates the capacity adapter and browser pairing described above.
+Mode-only operation29 remains unchanged. Native ledger preclaim,
 bilateral agreement/RoundRef/KDF, operational
 SDP/RTC/audio, member relay and combined/physical acceptance remain open. V2 is OFF.
 

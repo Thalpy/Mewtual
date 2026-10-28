@@ -1,5 +1,66 @@
 # Chat, files and voice implementation evidence
 
+## Capacity Control and browser pairing continuation (28 October; inactive draft)
+
+The canonical native Slot now has authenticated Session Control30/version11, separate
+from pre-ACK mode29/version10. Fixed header/class/Session/length admission precedes nonce
+consumption and RowId parsing. Its snapshot distinguishes requested/canonical generation,
+negative floor and optional public incarnation. Historical callers cannot observe a
+successor's Reserved capacity. Observe creates nothing; cancellation and collection
+certificates depend on original Work/output/capacity return. Per-generation return is
+not a task/Actor payer refund. Review corrected the Pending-to-accepted cancellation race
+without treating generic Stopped as proven unstarted.
+
+The browser's immutable capacity-only constructor pins mode before ACK on the SAME retained
+channel. Its separately prepaid8KiB coordinator pairs the existing128KiB/twelve-row envelope
+before publication/subscription. Detached public handles cannot convert through pilot
+actions. Private negative work retains the original ordinal, incarnation and all fees
+through lost replies, native Closing/Uncertain, actual SDK/IO/task/cell/subscription return.
+Fresh Register repeats exact owner/claim checks through crypto and first fetch. End's
+negative path can use the codec independently of the driver waiting for browser drainage.
+
+Known/unknown admission timer registrations remain joined through actual cancellation or
+callback return. Terminal IO cleanup publishes only its SAME cancel-retry guard; live
+deadlines cannot be disarmed by availability. Fault notification promptly fences positives
+and aborts the captured controller, separately from return. Inline/invalid cadence cannot
+spin the outer native loop. Pre-ACK faults close without ACK.
+
+Focused evidence:38 native capacity tests, the concrete Control graph guard,17 shared
+codec/frame tests,37 actual-WebCrypto pairing regressions and nine timer units pass.
+Read-only adversarial review/re-review has no remaining blocker/high/medium in these
+boundaries. The complete Root suite passes4,002 tests with25 existing ignores. The complete
+native suite passes1,043 library plus six ACL/parser tests, with zero failures/ignores;
+the library run takes2,489.58s. The complete frontend suite passes3,635 tests, Svelte reports
+zero errors/warnings, the production build passes and all ten real Edge flows pass.
+Root/native formatting, strict Root/native Clippy, explicit native checking, the ambient
+dependency gate and a fresh dependency audit pass. Native build passes (3m44s), followed
+by actual application startup with desktop permissions and the unchanged probe; the app
+was not unlocked. Code is retained in commits `4f3bc42c`, `83f3958a` and `6245af85`.
+Complete suite logs are `target/capacity-root-verified.log`,
+`target/capacity-native-verified.log` and `target/capacity-frontend-probe-final.log`;
+each has a separate `.exit` marker. Final native check/lint/build and startup logs are
+under `target/capacity-final-*`, with separate exit markers.
+The first complete native run remains recorded as1,037 passes/six failures: the empty-SDP
+fixture assumed first-poll Pending despite a valid local Capacity refusal, followed by five
+fixture-admission cascades. The test-only correction forces that refusal and full-mailbox
+admission while preserving the original Task/body/grant/tag and absolute deadline. All
+three focused SDP cases pass (33.96s), as do those cases in the final complete native run.
+No runtime deadline, retry allowance or publication authority changed.
+The TypeScript endpoint in pairing units models native responses; Rust actual-Actor/TCP
+tests and shared vectors verify the native side separately. These are not a new combined
+native/browser Ready/SDP/RTC or physical-audio acceptance claim.
+
+Compatibility is checked before ACK: mode29 pin is followed by a noncreating30/Observe1
+probe, and only exact Unstarted/request1/canonical0/floor0/no-incarnation permits ACK or
+browser reservation. An old mode29-only native cannot strand a paired reservation.
+Lost/held/malformed probes keep the original keys/counters without a preclaim. ABI49
+rejects retained pre-probe48 producers on the same window symbol while preserving cleanup.
+
+Native ledger reservation, bilateral agreement/RoundRef/KDF, operational Ready/SDP/RTC,
+configured multi-peer/audio budget composition, member relay and combined/physical
+acceptance remain open. Production V2 stays OFF. Only one physical desktop is available;
+external download resume is outside this continuation.
+
 ## Native canonical admission continuation (28 October; inactive draft)
 
 The integration branch now retains the exact Actor invocation/outcome and stable Root
@@ -36,9 +97,11 @@ PR76's current Linux975-pass/37-failure result remains unresolved: one native/We
 media control-step timeout precedes36 fail-closed fixture admissions. Its root cause has
 not been established; a local Windows pass and better diagnostics do not resolve it.
 
-Operation30/version11 capacity IPC, paired browser cancellation, native ledger preclaim,
-bilateral agreement/RoundRef/KDF, operational audio/RTC composition, member relay and combined
-physical acceptance remain unfinished. Only one physical desktop is available. V2 stays OFF.
+At that earlier checkpoint, Operation30/version11 and paired browser cancellation were
+still unfinished; their current capacity-only implementation is recorded above. Native
+ledger preclaim, bilateral agreement/RoundRef/KDF, operational audio/RTC composition,
+member relay and combined/physical acceptance remain unfinished. Only one physical desktop
+is available. V2 stays OFF.
 
 ## Microphone device IDs own their storage (27 October; helper inactive)
 

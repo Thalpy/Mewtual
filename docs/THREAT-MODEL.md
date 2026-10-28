@@ -1,5 +1,44 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Local capacity observation draft (28 October; inactive)
+
+Authenticated operation30/version11 is a strict Session-level Control grammar selected
+before counter/RowId admission. It cannot select peers, roles, profiles, deadlines or action
+identities. Every form requires the already-pinned mode; Register also requires original
+setup ACK. Observe is noncreating and does not nudge Root factories. Root registration and
+native capacity are never inferred from a successful mode29 reply or an empty snapshot.
+
+Reply generation echo and canonical ordinal are separate: an old caller receives Superseded
+instead of a successor's Reserved. Return certificates require the exact original Session,
+cancellation fence and actual owned return/collection barriers. Native Closed is not browser
+SDK/IO drainage. Root public incarnation is not the private physical Session nonce. Missing
+negative incarnation cannot clear a remembered identity or authorize a replacement mint.
+
+Ordinary cancellation at Pending->Actor acceptance now carries a distinct proven-unstarted
+disposition. Generic Stopped remains terminal; whole-mode/End closure still overrides it.
+This preserves a live original registration without refunding ambiguous entered work.
+
+The browser decoder captures expected primitives once and reads intrinsic fixed buffer
+metadata/numeric offsets. Caller getters, subarray, iterators or species cannot substitute
+the authenticated body or expand a32-byte incarnation into an unbounded retained string.
+The paired browser draft prepays its independent8KiB coordinator before constructor or
+subscription callbacks. Immutable constructor mode prevents an old pilot producer sharing
+the admission channel. A paired preclaim cannot be converted by pilot actions/lifecycle.
+Local retirement detaches its public cell without refunding native ambiguity. The private
+negative continuation uses the SAME channel/keys/ordinal and remains independent of the
+status/End driver that waits for its drainage. No native certificate alone proves actual
+browser SDK/IO/task/cell/subscription return. Register repeats exact owner/claim/ordinal
+checks after SDK/Clock callbacks and before first fetch; negative cleanup alone may ignore
+retired owner currency. These draft observations grant no signed Ready, native ledger
+reservation, bilateral round, SDK/RTC or media authority. Production V2 remains OFF.
+
+Admission cadence and physical IO deadlines retain the same known or unknown registration
+through cancel failure or schedule-then-throw. Actual timer/callback return precedes frame
+refund; late canceled callbacks retain only a detached capsule. Inline or invalid Clock
+callbacks cannot certify elapsed cadence or spin the outer native polling loop. Clock
+faults fence positive admission, including before ACK without a preclaim. After one bounded
+negative attempt they require explicit availability, preserving original debt meanwhile.
+
 ## Native admission custody draft (28 October; inactive)
 
 Canonical Slot admission coalesces the exact invocation in the original physical Row.
