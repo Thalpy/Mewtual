@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Root admission registration leaf (28 October; focused checks and review passed)
+
+`communication-v2-admission-registration` adds native-only Root registration and
+inert HIGH-preclaim APIs. The affine session owner has a stable Root-RNG public
+incarnation; paid observers retain its exact allocation, immutable epoch, actual
+Actor identity, call/watch leases and original Resources/action-pool identity.
+HIGH reservation reborrows the current LocalJoin's packet/action pools. No peer,
+role boolean, row, agreement, transcript, deadline or packet is supplied/created.
+
+A monotone cancellation floor fences old uncommitted generations without treating
+cancellation as return. Closing registration leaves call/media custody independent.
+The original metadata anchor follows core destruction/deallocation through every
+observer. The first structural guard measured2,168B and correctly refused the proposed
+2KiB payment. The independent registration payment is now explicitly3KiB, debited
+from the same ordinary group/process pool; no chain/Source slack or new pool is used.
+
+Nine genuine Root fixture regressions and a graph guard are implemented; formatting passes.
+The suite covers final-allocation revocation/unwind, actual room deletion/recreation and
+runtime lock/reattachment while original capacity stays held. The first2KiB guard failed
+as above. All86 focused admission tests pass (7.79s), including the corrected graph.
+The final allocation callback asserts the real Group/Policy locks are free before
+revocation. Strict Root all-target/all-feature Clippy passes (1m51s); its earlier
+manual-bits lint was fixed by expressing the eight-word allocation as an array size.
+Read-only design/adversarial review and re-review have no blocker/high/medium finding.
+Complete Root/native/frontend validation of this new leaf remains pending.
+This leaf still lacks Actor command integration, native canonical registration/ordinal
+recovery/cancel ordering, browser preclaim transfer, native-row reservation, LOW candidate
+selection, bilateral agreement/RoundRef/KDF, audio and relay. V2 remains OFF.
+
 ## Combined admission/audio checkpoint (28 October; native gates passed)
 
 Frozen `56122a4f` passes the complete native suite:1,011 library tests and six ACL

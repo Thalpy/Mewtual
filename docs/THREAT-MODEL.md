@@ -1,5 +1,27 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Root admission registration (28 October; draft capacity-only leaf)
+
+The new original registration binds actual Actor/local identity, scope, join/key,
+call/watch allocations, immutable epoch observation and original Resources/action
+pool. Current packet pools are reborrowed at HIGH reservation. Preparation samples
+Root RNG outside native/Group/Policy guards and repeats current membership/gates
+after allocation; failed owners drop outside the borrowed final fence.
+
+The public incarnation is independently random, not a private native Session hash.
+Opaque paid observers cannot manufacture registration. A cancellation floor only
+denies uncommitted capacity: it neither returns an outstanding owner nor ends sibling
+media. Registration owner Drop closes its own gate; the paired plain payment survives
+actual core body destruction/deallocation. Call/epoch revocation remains independent.
+
+These trusted Rust APIs do not implement the canonical native Session/generation
+admission fence. Native must validate exact ordinal/allocation before invoking the
+negative floor and must coalesce registration before Actor work. No signed grant,
+LOW/HIGH agreement, native-row permission or protocol effect is exposed. The proposed
+independent3KiB payment follows the initial guard's2,168B measurement/refusal of2KiB.
+Corrected focused tests and read-only re-review pass; full suites remain pending. No live security or
+availability guarantee follows. Wire formats and production V2 activation are unchanged.
+
 ## V2 progression custody before bilateral admission (28 October; candidate)
 
 The group progression gate follows an affine claim shared only by genuine original and

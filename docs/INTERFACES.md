@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Root admission preparation (28 October; draft leaf, not live IPC)
+
+`ChannelSync::prepare_voice_admission_session(grant)` mints an opaque affine
+`RootAdmissionSession` for the actual current participant. Native canonical Pending
+must coalesce that call and retain the same owner across lost replies; calling it
+again intentionally creates a different registration. `observer()` retains the
+same paid core. Scope/local identity, join/key, leases, epoch and concrete pool
+identity come from the Root, never a renderer. Owner Drop closes registration.
+
+`reserve_voice_high_preclaim(grant, observer, generation)` reserves HIGH layout
+only after reborrowing current LocalJoin pools and rechecking the original registration.
+The result has no action/effect/consume API. `cancel_through(g)` is a negative-only
+monotone fence; native must validate its canonical expected ordinal first. Zero refuses,
+MAX exhausts registration, and stale cancellation cannot clear a later generation.
+Neither cancellation nor a false current observation proves actual capacity return.
+
+No Actor/IPC command, signed availability, native ledger row, bilateral round or
+production call is implemented by these APIs. HIGH capacity does not establish the
+future requester's DeviceId orientation. The separate3KiB payment covers a measured2,168B
+Windows graph including complete watch allocations. All86 focused admission tests
+and strict Root Clippy pass; complete suites remain pending. Existing wire grammars
+and Broker46 remain unchanged on this Root-only leaf.
+
 ## Compact local media encoding (28 October; App V2 inactive)
 
 `VoiceMediaEncoding` stores a private canonical226-byte original request and an
