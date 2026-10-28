@@ -112,7 +112,7 @@ pub(super) async fn ensure_derivation_row(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         require_current_selection(context.gate(), &authority, &selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     // Weak grant upgrade and all affine destruction occur outside Coordinator/ledger fences.
     let grant = selected.grant()?;
@@ -173,7 +173,7 @@ pub(super) async fn preflight_binding(
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             require_current_selection(live.gate(), &authority, selected)?;
-            route.require_open().map_err(|_| Refused::Closed)?;
+            route.require_pilot_open().map_err(|_| Refused::Closed)?;
         }
         let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
         let binding = selected.binding();
@@ -199,7 +199,7 @@ pub(super) async fn preflight_binding(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         require_current_selection(live.gate(), &authority, selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     Ok(live.commit.clone())
 }

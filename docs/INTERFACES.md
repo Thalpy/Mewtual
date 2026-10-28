@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Local admission mode selection (28 October; V2 inactive)
+
+Physical Control operation29/version10 uses the exact Session as its header logical ID,
+with10 plaintext bytes: version10, mode0/Register or1/Observe or2/Cancel, then big-endian
+u64 ordinal. Canonical native admission currently accepts only ordinal1. The18-byte reply
+is version10, state0/unselected or1/pinned or2/canceled or3/closed, selected ordinal and
+cancellation floor as big-endian u64s. It proves neither Root registration nor capacity,
+native ledger availability, peer orientation, signed Ready or protocol effect.
+
+First Register OR Cancel selects admission only before original setup ACK. Selection and
+ACK serialize under the same native Row.state. A first post-ACK selection refuses without
+mutation; exact existing selection survives retry/ACK/cancellation. Observe never selects.
+Pilot producers require ACK completed and admission unselected at final publication.
+The browser does not yet select this mode; canonical Slot/worker and paired browser
+cancellation remain unfinished. This local operation number is not a P2P wire kind.
+
 ## Actor admission invocation draft (28 October; not native IPC)
 
 `AdmissionRpcPermit` reserves a fixed4KiB from the canonical selected group/pool.
@@ -15,7 +31,8 @@ retirement follows that callback. `VoiceAdmissionWork` gives exact identity and 
 retirement observations only. The native Publisher's Drop after Root entry must preserve
 uncertainty; it cannot report absence or remint. Native must separately validate the
 concrete Publisher inventory, canonical Session/generation and final UI fence. The
-canonical native adapter and wire grammar remain unimplemented; no live readiness follows.
+canonical native capacity adapter and its wire grammar remain unimplemented; mode-only
+operation29 above supplies neither capacity nor live readiness.
 
 ## Root admission preparation (28 October; draft leaf, not live IPC)
 

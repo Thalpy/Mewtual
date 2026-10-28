@@ -192,7 +192,7 @@ fn spawn_inner(
         NATIVE_TASK_BYTES,
         ResourceKind::Retained,
     )?;
-    route.require_open().map_err(|_| Refused::Closed)?;
+    route.require_pilot_open().map_err(|_| Refused::Closed)?;
     let native = route.session().native_hold().map_err(|error| match error {
         super::super::channel::Refused::Capacity => Refused::Protocol(VoiceError::Capacity),
         _ => Refused::Closed,
@@ -378,7 +378,7 @@ async fn execute_confirmation(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         require_current_selection(live.gate(), &authority, &selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     let grant = selected.grant()?;
     let handshake = continuation.parent.confirmation_handshake()?;
@@ -527,7 +527,7 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
         route.session().fixture_native_stage(11);
         let authority = context.authority.lock().unwrap_or_else(|e| e.into_inner());
         require_current_selection(context.gate(), &authority, &selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     let grant = selected.grant()?;
     // Recheck AFTER the Actor/UI waits, before any new counted Pending or Root

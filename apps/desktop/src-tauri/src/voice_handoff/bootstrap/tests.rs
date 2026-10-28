@@ -7,6 +7,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod action_history;
+mod admission_mode;
 pub(in crate::voice_handoff) use action_history::{installed, installed_when_available, retire};
 mod collection;
 

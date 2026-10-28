@@ -1,5 +1,37 @@
 # Mewtual; Handover
 
+## Native admission mode fence (28 October; focused checks passed)
+
+Authenticated local Control29/version10 now pins the original physical Session to
+admission mode BEFORE setup ACK. Register and Cancel both select that sticky mode;
+Observe creates nothing. First selection after ACK refuses. Exact pinned retries remain
+available after ACK, and cancellation never restores the pilot. Only ordinal1 is
+implemented; zero, skipped and MAX ordinals refuse before mutation. Its18-byte reply
+reports unselected, pinned, canceled or closed, never capacity/Ready.
+
+Every native pilot producer now requires completed setup ACK at preflight AND final
+publication. That monotone condition is mutually exclusive with first admission-mode
+selection. Mode pinning uses the SAME Row.state mutex as ACK. Cleanup/history keeps
+ordinary routing. No Actor/Root/Clock/factory/SDK work is created by this operation.
+Header admission binds exact Session, Control class and10+16-byte length before counters;
+post-AEAD decoding selects only version10. The existing Row8KiB and Control12KiB complete
+inventory guards include the inline pin and synchronous handler; limits are unchanged.
+
+All seven new mode tests pass, including actual TCP/MAC/AEAD dispatch, counter behavior,
+lost pin reply, both ACK orders, Cancel-before-Register, real End and direct pilot-factory
+refusal with no new row. Read-only review/re-review has no blocker/high/medium. The first
+broader run passed385/386: its one pre-ACK maintenance fixture had accidentally used the
+new already-ACKed factory helper. It now uses an explicit unacknowledged setup; assertions
+are unchanged. The386-test rerun passes in23.58s. Fresh cargo-deny and the ambient
+dependency gate pass. Strict Root/native all-target/all-feature Clippy passes; the first
+Root lint run required an explicit lexical lock scope in its new async test helper.
+The affected eight Actor tests pass again after that correction. Explicit native checking
+and final complete current backend gates remain pending.
+
+This is mode selection only. Canonical native Slot/invocation recovery, actual HIGH
+capacity attachment/cancellation/reclamation, browser pairing, native ledger reservation,
+bilateral agreement, SDP/RTC/audio composition and relay are still unfinished. V2 is OFF.
+
 ## Actor admission outcome staging (28 October; focused checks passed)
 
 `communication-v2-native-admission` joins the reviewed Root and browser leaves at
@@ -15,7 +47,7 @@ same Work; pre-enqueue refusal carries none. Actor apply removes the publisher B
 entering Root. Only an untouched queued publisher may report never-entered Stopped;
 post-entry unwind must quarantine uncertainty, never authorize another mint. Paid field
 order keeps actual arguments/callbacks alive through retirement. Native canonical Slot,
-concrete Publisher/worker, authenticated Control operation and browser cancellation fence
+concrete Publisher/worker, capacity Control operation and browser cancellation fence
 are NOT implemented yet. Staging alone supplies no Reserved/Ready or ledger row.
 
 Root/Actor regression drafts cover pressure retaining the same registration, foreign
@@ -30,7 +62,7 @@ adversarial review and re-review have no blocker/high/medium finding. All3,579 f
 tests pass on this integration checkout. Formatting/diff checks pass. Complete current
 backend validation is still required: the earlier frozen Root command at `fb53c00f`
 stopped without a final result and is NOT counted as passing. Native mode pinning is a
-separate subsequent draft, not canonical Slot/invocation or browser integration.
+separate subsequent boundary, not canonical Slot/invocation or browser integration.
 V2 remains OFF; bilateral admission, audio, relay and physical acceptance remain open.
 
 ## Root admission registration leaf (28 October; focused checks and review passed)

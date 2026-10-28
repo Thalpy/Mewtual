@@ -4,8 +4,9 @@ Status,28 October: Root registration and browser preclaim are reviewable leaves 
 PRs79/80. They are joined at `a44b51b2` on `communication-v2-native-admission`.
 The subsequent Actor staging implementation compiles; both new Root preparation tests
 and all eight Actor staging regressions pass in that checkout. Complete gates are pending.
-Production V2 remains OFF. This document describes the next connection, not completed
-native admission, signed readiness, media relay or physical acceptance.
+The subsequent native mode-only Control29/version10 fence has seven passing focused
+tests. Production V2 remains OFF. This document describes the remaining connection,
+not completed native admission, signed readiness, media relay or physical acceptance.
 
 ## Implemented Actor boundary
 
@@ -80,8 +81,8 @@ Root capacity; otherwise the returning worker could wait on that same commit.
 
 The existing pilot starts automatic discovery after authenticated bootstrap Status ACK.
 Pinning a new admission mode afterward would race that old producer. A candidate design
-is an explicit authenticated short Register operation before ACK, followed by inert
-waiting and actual Root work only after ACK. First Register after ACK must refuse an
+is now an explicit authenticated short mode-only Register operation before ACK, followed
+by inert waiting. Actual Root work after ACK is still unimplemented. First Register after ACK must refuse an
 upgrade. A valid first Cancel before ACK must select the SAME sticky admission mode,
 so a delayed ACK cannot turn negative admission debt into pilot discovery. Observe
 alone never creates a mode or ordinal. First Register/Cancel on an already ACKed
@@ -90,7 +91,9 @@ and subsequent permitted ordinals on an ALREADY pinned Session may occur after A
 the pre-ACK requirement applies to initial mode selection, not every generation.
 Old clients that never select that mode retain the existing pilot behavior. Mode
 selection is irreversible through cancellation, pressure, lost replies and epoch
-changes. Read-only design review accepts these conditions; implementation is pending.
+changes. This mode-only boundary and both ACK orders now have focused native/real-TCP
+coverage and read-only adversarial review. It accepts only ordinal1 until the canonical
+Slot and actual return machinery below exist; no progression or capacity is acknowledged.
 
 Header admission must select the new short Control grammar by operation and exact physical
 Session logical ID BEFORE RowId decoding/counter admission. No renderer peer/role/profile
@@ -105,6 +108,21 @@ its independent payment and update the retained broker ABI on the SAME window sy
 Reserved is capacity only. It is NOT signed Ready, a native32-row ledger reservation,
 DeviceId orientation, bilateral Request/Grant/Commit or RoundRef/KDF permission. Those
 remain separate requirements before any production V2 activation.
+
+The next candidate uses a DISTINCT Session Control30/version11 for canonical capacity
+Register/Observe/Cancel, keeping mode-only operation29 unchanged. First capacity admission
+requires an uncanceled mode pin and completed setup ACK. Mode29 Cancel closes negotiation
+admission for that physical Session, including existing Slot attachment; it neither reports
+capacity returned nor ends independently held media. Per-generation cancellation belongs
+to operation30. No implementation of operation30 exists at this checkpoint.
+
+Actual Work retirement proves callback/argument teardown, not destruction of every Work
+clone or return of its4KiB fee. Native may advance only after its owned Work/capacity are
+detached and destroyed and its actual native position returns. Residual plain Actor payer
+metadata can remain independently charged; neither a Returned reply nor retirement may
+claim its refund. No residual payer may contain a Slot/Route/effect backedge. Acquire the
+actual NativeHold outside Row, then validate that owned hold; checking global idle AFTER
+acquisition would incorrectly block the producer on its own position.
 
 ## Required adversarial evidence
 

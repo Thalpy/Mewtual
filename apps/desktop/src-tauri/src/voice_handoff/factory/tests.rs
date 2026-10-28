@@ -21,6 +21,20 @@ pub(in crate::voice_handoff) async fn channel_route(
     f: &Fixture,
     selected: &SelectedHandoffOwner,
 ) -> Route {
+    let route = unacknowledged_channel_route(f, selected).await;
+    // Factory tests begin AFTER the original browser setup has drained. Native
+    // production now enforces this same ACK boundary, so a pre-ACK old producer
+    // cannot race admission-mode selection. Setup/ACK order has dedicated tests.
+    route.acknowledge_setup().unwrap();
+    route
+}
+
+/// Preserve real outstanding browser setup for tests of the ACK boundary itself.
+/// Do not silently use an already-ACKed factory fixture in those scenarios.
+pub(in crate::voice_handoff) async fn unacknowledged_channel_route(
+    f: &Fixture,
+    selected: &SelectedHandoffOwner,
+) -> Route {
     let status = crate::voice_handoff::bootstrap::ensure(
         &f.state,
         selected.id(),

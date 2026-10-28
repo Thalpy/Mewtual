@@ -414,7 +414,8 @@ async fn pending_rotation_retries_every_original_across_interleaved_discovery_tu
         let f = Fixture::new().await;
         let context = Context::new(&f.state);
         let (_, selected, original) = selection(&f).await;
-        let route = channel_route(&f, &selected).await;
+        let route =
+            crate::voice_handoff::factory::tests::unacknowledged_channel_route(&f, &selected).await;
         let mut rows = Vec::new();
         for number in 0..count {
             let selector = PairSelector {

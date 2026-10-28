@@ -13,8 +13,11 @@ use catcoms_sync::voice_v2::resources::{Credit, ProcessRetainedCredit, ResourceK
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+mod admission_mode;
 #[cfg(test)]
 mod diagnostics;
+pub(super) use admission_mode::observation_layout_bytes as admission_mode_layout_bytes;
+use admission_mode::AdmissionPin;
 
 const ROWS: usize = 64;
 const INDEX_BYTES: usize = 4096;
@@ -47,6 +50,9 @@ struct State {
     // Lease revocation and caller loss are NOT evidence that this work has drained.
     browser_setup: Option<Credit>,
     retirement: Option<Retirement>,
+    // Mode selection and setup ACK MUST share this mutex. Selection is sticky;
+    // cancellation or a lost reply cannot restore an old automatic producer.
+    admission: Option<AdmissionPin>,
 }
 /// Direct Session/header/reply and public-output owners can outlive Row references. Paid
 /// weak witnesses keep their control blocks attributable until actual strong owners drain.
@@ -408,6 +414,7 @@ impl Registry {
                 public: None,
                 browser_setup: None,
                 retirement: None,
+                admission: None,
             }),
             projection_busy: AtomicBool::new(false),
             _credit: Arc::new(credit),
@@ -493,6 +500,7 @@ impl Registry {
                 public: None,
                 browser_setup: None,
                 retirement: None,
+                admission: None,
             }),
             projection_busy: AtomicBool::new(false),
             _credit: Arc::new(credit),
@@ -640,6 +648,7 @@ impl Route {
             && !state.effects_closed
             && !state.pending
             && state.browser_setup.is_none()
+            && state.admission.is_none()
             && self.row.selected.lease().is_live()
     }
     /// Only this immutable native row supplies selection. Request labels are lookup hints,

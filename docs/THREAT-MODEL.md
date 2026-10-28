@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Sticky local voice mode selection (28 October; inactive V2)
+
+Authenticated Session-level Control29/version10 selects only a restrictive mode. First
+selection requires outstanding setup ACK, while every pilot factory's final fence requires
+ACK completed. ACK is monotone and selection is sticky under the SAME bootstrap State
+mutex, so releasing that mutex cannot allow both a positive pilot check and later first pin.
+Cancel-before-Register installs the same negative mode fence; late ACK cannot start pilot.
+Observe is noncreating. Invalid/skipped/MAX ordinals refuse before any floor mutation.
+
+Exact Session/class/length checks precede physical counter admission; malformed encrypted
+plaintext cannot choose a legacy decoder or refund already reserved nonces. Cleanup/history
+remains separately available after End. The fixed existing Row/Control inventories include
+the new inline mode and synchronous handler. The mode reply contains no Root registration,
+native capacity, Ready, bilateral agreement or RTC permission. Canonical Slot/worker and
+browser/native cancellation pairing are still unimplemented; production V2 stays OFF.
+
 ## Actor admission staging draft (28 October; not activated)
 
 The fixed RPC payer is opaque, exact-pool/scope checked and independent of registration

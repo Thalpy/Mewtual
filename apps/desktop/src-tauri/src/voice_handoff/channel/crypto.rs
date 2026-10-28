@@ -56,6 +56,8 @@ pub(in crate::voice_handoff) enum Operation {
     SdpDelivery = 26,
     SdpResolve = 27,
     Media = 28,
+    /// Local physical-Session admission mode; unrelated to P2P file protocol kinds.
+    NegotiationAdmission = 29,
 }
 impl Operation {
     pub(in crate::voice_handoff) fn is_sdp(self) -> bool {
@@ -106,6 +108,7 @@ impl Operation {
             26 => Ok(Self::SdpDelivery),
             27 => Ok(Self::SdpResolve),
             28 => Ok(Self::Media),
+            29 => Ok(Self::NegotiationAdmission),
             _ => Err(Refused::Header),
         }
     }
