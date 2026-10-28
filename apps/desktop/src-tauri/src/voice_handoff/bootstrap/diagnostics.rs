@@ -4,6 +4,32 @@ use super::*;
 use catcoms_sync::voice_v2::presence::PairSelector;
 
 impl Registry {
+    pub(in crate::voice_handoff) fn fixture_sdp_session_diagnostic(
+        &self,
+        selected: &SelectedHandoffOwner,
+    ) -> String {
+        let observed: Result<_, &'static str> = (|| {
+            let guard = self.index.try_lock().map_err(|_| "registry contended")?;
+            let index = guard.as_ref().ok_or("registry absent")?;
+            let row = index
+                .rows
+                .iter()
+                .flatten()
+                .find(|row| std::ptr::eq(row.selected.as_ref(), selected))
+                .ok_or("selected channel absent")?;
+            let state = row.state.try_lock().map_err(|_| "channel row contended")?;
+            Ok(state
+                .session
+                .as_ref()
+                .map(|session| session.fixture_native_snapshot()))
+        })();
+        // Parent Index/row contention cannot hide this independent original Session
+        // observation. No guard or strong Session owner survives into formatting.
+        match observed {
+            Ok(native) => format!("session={:?}", native.map(|native| native.describe_sdp())),
+            Err(reason) => reason.into(),
+        }
+    }
     pub(in crate::voice_handoff) fn fixture_native_diagnostic(
         &self,
         selected: &SelectedHandoffOwner,

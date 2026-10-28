@@ -74,6 +74,39 @@ fn pure_sdp_observation_waits_for_index_and_revalidates_original_row() {
 }
 
 #[test]
+fn sdp_failure_diagnostics_refuse_contended_and_equal_label_foreign_parents() {
+    let (_coordinator, selected, selector) = selection();
+    let (_foreign_coordinator, foreign, _) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let id = registration.id();
+    let before = selected.resources().counts();
+    let index = ledger.index.lock().unwrap();
+    assert_eq!(
+        ledger.fixture_sdp_diagnostic(&selected, Some(id)).1,
+        "ledger index contended"
+    );
+    let row = index.rows[id.slot].as_ref().unwrap().clone();
+    drop(index);
+    let state = row.state.lock().unwrap();
+    assert_eq!(
+        ledger.fixture_sdp_diagnostic(&selected, Some(id)).1,
+        "parent row contended"
+    );
+    drop(state);
+    assert_eq!(
+        ledger.fixture_sdp_diagnostic(&foreign, Some(id)).1,
+        "original parent absent"
+    );
+    assert_eq!(
+        ledger.fixture_sdp_diagnostic(&selected, Some(id)).1,
+        "parent has no plan"
+    );
+    assert_eq!(selected.resources().counts(), before);
+    assert_eq!(registration.id(), id);
+}
+
+#[test]
 fn derivation_diagnostics_do_not_create_or_retire_original_pending_and_refuse_contention() {
     let (_coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());

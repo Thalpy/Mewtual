@@ -464,12 +464,25 @@ async fn native_browser_failed_media_peer_preserves_original_session_and_indexed
     Box::pin(two_browser_peer_cycle(SecondPeer::FailedMedia)).await;
 }
 
+/// A real local discovery refusal must not leave the alternate native pair unable to
+/// fund storage/SDK/media. This reaches the branch of the Linux failure deliberately;
+/// no fixture-selected row, Ready flag or replacement key is supplied to production.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_local_discovery_refusal_selects_other_media_peer_and_preserves_indexed_sibling(
+) {
+    Box::pin(two_browser_peer_cycle(
+        SecondPeer::FailedMediaAfterDiscoveryRefusal,
+    ))
+    .await;
+}
+
 #[derive(Clone, Copy)]
 enum SecondPeer {
     Complete,
     FailedAttached,
     FailedAttachedAfterDiscoveryRefusal,
     FailedMedia,
+    FailedMediaAfterDiscoveryRefusal,
 }
 
 async fn two_browser_peer_cycle(second: SecondPeer) {
@@ -486,7 +499,15 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
     // The refusal regression labels native identity order so cursor1 means the other
     // endpoint. This arranges observations only; no selector is supplied to a producer.
     // Ordinary cases follow whichever original pair C naturally selects.
-    let forced_refusal = matches!(second, SecondPeer::FailedAttachedAfterDiscoveryRefusal);
+    let forced_refusal = matches!(
+        second,
+        SecondPeer::FailedAttachedAfterDiscoveryRefusal
+            | SecondPeer::FailedMediaAfterDiscoveryRefusal
+    );
+    let media_failure = matches!(
+        second,
+        SecondPeer::FailedMedia | SecondPeer::FailedMediaAfterDiscoveryRefusal
+    );
     let (ai, bi) = if forced_refusal
         && scenario.clients[2].identity.as_ref().unwrap().1
             < scenario.clients[1].identity.as_ref().unwrap().1
@@ -608,7 +629,7 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
                 Box::pin(c.automatic_pair(ac[1]))
             );
             eprintln!("two-peer fixture: naturally selected newcomer pair confirmed");
-            let (failed_id, _) = if matches!(second, SecondPeer::FailedMedia) {
+            let (failed_id, _) = if media_failure {
                 bounded(
                     "both genuine failed-peer Ready/core owners drain before RTC",
                     async {
@@ -638,13 +659,13 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
             assert_eq!(failed_id[..8], old.0[..8]);
             assert_ne!(failed_id, old.0);
             a.assert_collected_pair_known(ab[0]);
-            if matches!(second, SecondPeer::FailedMedia) {
+            if media_failure {
                 a.surviving_peer(false).await;
             } else {
                 a.current_peers(1).await;
             }
             b.current_peers(1).await;
-            if matches!(second, SecondPeer::FailedMedia) {
+            if media_failure {
                 a.surviving_peer(true).await;
             } else {
                 a.end_browser_peers(1).await;

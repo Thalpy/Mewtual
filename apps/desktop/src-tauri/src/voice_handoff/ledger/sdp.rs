@@ -412,6 +412,21 @@ impl ResolvedRow {
     pub(in crate::voice_handoff) fn sdp_test_phase(&self) -> Option<Arc<Phase>> {
         self.sdp_test_phase_with_contention(|| {}).unwrap()
     }
+    pub(in crate::voice_handoff) fn sdp_test_preparation(
+        &self,
+    ) -> Option<(u64, [u8; 32], bool, bool)> {
+        let _index = self.test_observation_index(|| {}).unwrap();
+        let state = self.row.state.lock().unwrap();
+        let sdp = state
+            .plan()?
+            .transition
+            .as_ref()?
+            .key
+            .as_ref()?
+            .sdp
+            .as_ref()?;
+        Some((sdp.sequence, sdp.proof, sdp.worker, sdp.phase.is_some()))
+    }
     /// Expose the actual contention boundary to the deterministic observer regression.
     /// This remains a read-only fixture path and cannot grant native/browser work.
     pub(super) fn sdp_test_phase_with_contention(

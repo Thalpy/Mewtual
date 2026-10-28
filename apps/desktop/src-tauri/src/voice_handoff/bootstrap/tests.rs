@@ -108,6 +108,10 @@ async fn native_diagnostic_report_refuses_held_registry_and_row_without_waiting_
     assert!(registry
         .fixture_native_diagnostic(&selected, expected)
         .contains("registry contended"));
+    assert_eq!(
+        registry.fixture_sdp_session_diagnostic(&selected),
+        "registry contended"
+    );
     let row = index
         .as_ref()
         .unwrap()
@@ -122,10 +126,21 @@ async fn native_diagnostic_report_refuses_held_registry_and_row_without_waiting_
     assert!(registry
         .fixture_native_diagnostic(&selected, expected)
         .contains("channel row contended"));
+    assert_eq!(
+        registry.fixture_sdp_session_diagnostic(&selected),
+        "channel row contended"
+    );
     drop(state);
     assert!(registry
         .fixture_native_diagnostic(&selected, expected)
         .contains("pending/effects_closed/closed/browser_setup=(false, false, false, true)"));
+    assert!(registry
+        .fixture_sdp_session_diagnostic(&selected)
+        .contains("diagnostic_present="));
+    assert_eq!(
+        registry.fixture_sdp_session_diagnostic(&_foreign),
+        "selected channel absent"
+    );
     assert_eq!(
         selected.resources().counts(),
         before,

@@ -4,7 +4,9 @@
 
 The isolated `score-backlog-integration` worktree combines PR #47's layered Score,
 composer and batched saves with the recovery/storage integration. It is still a
-candidate: the complete Root and native gates must pass before merge. V2 remains OFF.
+candidate: the complete native gates must pass before merge. The full Root suite at
+`c27e7694` passes (3,960 tests, 25 ignored); the Root source is unchanged by the
+following native diagnostic merge. V2 remains OFF.
 
 Integration preserves the accepted departure contract: save the current document,
 keep it open on refusal, and only then switch. The independent Index half can finish
@@ -46,12 +48,54 @@ fence stale clicks/notices. The regression fails before this correction at the f
 "Saving" text. All 13 mounted navigation cases pass, including reentrant clicks, target-only
 replacement, reset, unmount and mixed held/blocked/uncertain records without retry or
 reauthoring. Architecture, interface and threat-model descriptions now match the retained
-Save-before-switch contract. Complete combined backend gates and native startup remain pending.
+Save-before-switch contract. Complete combined native gates and native startup remain pending.
 
 Layered Score operations require every member to run a compatible build before use.
 Older builds reject the new bodies/seeds; clearing current notes does not make retained
-operation history and recovery archives safe to downgrade. Complete Root/native validation
+operation history and recovery archives safe to downgrade. Complete native validation
 and the native build/startup gate remain required before acceptance.
+
+## Second-peer native admission failure (28 October; diagnosis in progress)
+
+The corrected `c3877704` Linux native gate completed with 963 passes and 40
+failures. The first real failure is
+`native_browser_failed_media_peer_preserves_original_session_and_indexed_sibling`:
+the initial media pair and its history collection completed, a newcomer naturally
+selected the other original endpoint, and that pair's confirmation/Ready completed.
+Its storage request (opcode12, before SDK13) then repeatedly received authenticated
+Capacity. The other 39 failures are subsequent fixture admission refusals after that
+failure; keep this fail-closed behavior. The cause remains unproven. This is not a
+green native gate or evidence that the second peer is operational.
+
+Test-only diagnostics now preserve the exact authenticated parent and the failed
+storage boundary in the existing bounded harness table. Independent original-Session
+and parent snapshots use try-locks, retain no authority/credit owners and omit blocking
+pool counts. The Node observer attributes Capacity to the actual response AAD's
+operation, full parent and original request sequence. An indexed sibling's Current
+cannot authorize storage retry, and duplicate observations cannot count twice. The
+former global counter was a fixture defect; it does not explain away the genuine
+repeated opcode12 refusals. Thirteen focused Node tests and Svelte checks pass;
+read-only review has no remaining findings in this diagnostic/regression scope.
+
+The native regression now requires an actual authenticated opcode12 reservation
+refusal under held ordinary-pool pressure, drained preparation without a Phase,
+then funding/recovery of the same parent/action/key/sequence proof after that pressure
+is released. It explicitly checks the reservation boundary, so preflight/UI/attach
+contention cannot pass as the intended failure. This is a pressure/recovery check,
+not an atomic one-byte-limit proof. This actual framed native/real-TCP regression
+passes (10.64s), as do all 376 native handoff module tests (22.73s). The original
+second-media scenario passes locally on Windows (77.33s), selecting the first peer.
+A new case uses the existing genuine local discovery refusal to force the alternate
+native peer, then exercises storage, SDK, media, failure cleanup and the indexed
+sibling's fresh Current; it also passes (77.54s). No row, Ready flag or key is
+injected into admission, and the original topology/bounds remain unchanged. These
+local passes do not establish the cause of the Linux failure. Complete frontend
+tests (3,314), static checks and production build pass. Do not merge or enable V2
+until the actual failure and complete native/CI gates pass.
+
+The Score integration at `c27e7694` completed the full Root suite with 3,960 passes,
+25 ignored and no failures. Its strict Root Clippy and complete frontend suite
+(3,537 passes) also passed. Those results do not replace the pending native gate.
 
 ## Shared actor Control inventory correction (28 October; under validation)
 
