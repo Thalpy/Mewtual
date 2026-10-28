@@ -74,6 +74,112 @@ not whether the free admission slot is open. Admission-only cancellation cannot 
 healthy indexed media. Full End/lock/epoch owns the separate all-round fence. Ordinary
 30/Cancel(g) closes only that generation, never the registration as a substitute.
 
+### Required Root-wide profile gate, before a fresh call delegates keys
+
+The physical channel pin above is not the Root call's protocol authority. The current
+native path already canonicalizes its normal setup: `Coordinator::selected_handoff_owner`
+in `voice_authority/join_key.rs` requires the published generation's exact executor and
+Weak<CallGrant>, and returns the SAME cached selected Arc. `bootstrap::Registry::begin`
+then coalesces that selected id/executor/Arc before new Session payment or RNG. Existing
+`native_handoff_selection_requires_actual_published_generation_and_reuses_its_owner`,
+`lost_setup_reply_and_duplicate_ensure_recover_original_session_without_rng_or_crypto`,
+`pending_is_visible_before_rng_and_duplicate_begin_allocates_no_second_work`, and
+`live_owner_keeps_closed_fence_and_wrong_executor_cannot_detach_original_session` pin
+parts of that guarantee. No browser Map is being treated as the native authority.
+
+This does NOT establish admitted-versus-pilot isolation at Root. In the inspected source,
+`CallGrant` (`voice_v2.rs`) and `LocalJoin` (`presence.rs`) have no admission-profile field.
+`prepare_voice_pair` (`voice_endpoint/pair.rs`) validates the actual grant, participant,
+implicit watcher and epoch, then invokes the existing protected-pair factory; derivation
+and subsequent legacy-profile factories likewise use that existing join. One packet-ledger
+claim per lease prevents a second allocator, not a second protocol writer using the first
+allocator. A local31 pin on one physical Row cannot make those older APIs safe for an
+admitted join, or authorize an alternate Registry/channel to create a competing profile.
+This is a REQUIRED operational-profile implementation gate, not a newly demonstrated
+production bypass: the proposed profile is not active.
+
+Use a FRESH trusted native activation with an immutable Root-owned call-profile choice.
+Root must record it in the actual issued child/call authority BEFORE any lease/grant escapes,
+native join-key permission/delegation, LocalJoin/participant publication, presence or positive
+legacy-profile producer. Grant and LocalJoin inherit that original choice. A proposed
+closed `CallProfile::{Existing, BilateralCompleteV1}` distinguishes the current call/pilot
+factories from this new profile; `Existing` preserves their current bytes and behavior.
+The Root native owner, not renderer-supplied peer/role/profile data, selects the new trusted
+activation entry point. The exact new native command and issuer representation remain an
+implementation gate. A scoped source-level API proposal is:
+
+```rust
+// Trusted native lifecycle adapter only; actual Actor/directory issues a FRESH child.
+// The distinct factory chooses the profile, not a renderer enum or a mutable Row flag.
+fn voice_admitted_call_grant(&mut self, room: u128) -> Result<CallGrant, VoiceError>;
+// Existing voice_call_grant remains Existing-profile only. The issuer's sealed profile
+// follows the actual child identity through CallGrant::from_lease custody wrapping;
+// from_lease cannot choose, relabel, or downgrade the original issued child's profile.
+fn require_call_profile(&self, grant: &Arc<CallGrant>, expected: CallProfile)
+    -> Result<RootCallProfileProof<'_>, VoiceError>;
+// Nonconstructible borrowed proof: SAME selected Root call-activation identity/profile,
+// actual current Actor/issued child, exact grant/lease/scope; no new grant, signature,
+// readiness, or pool reservation.
+```
+
+The public factory above is a trusted Rust boundary; a Tauri command cannot forward a
+renderer profile bool into it. The native activation adapter must validate controller,
+UI generation, current Actor/group/room/policy and the exact candidate before creating and
+installing this fresh grant under the existing activation fences. Issuer provenance must
+survive `CallGrant::from_lease`; checking only a new field on a caller-built custody wrapper
+is insufficient because `directory::validate_call_grant` recognizes the actual issued child.
+If the immutable choice cannot be recorded before escape, the factory must refuse, not
+publish an unselected authority that another channel can later upgrade.
+
+The choice is exclusive at the SAME selected Root call activation, not merely a label on
+each issued child. The directory can recognize several live issued child leases; therefore
+membership/room/current-Actor validation alone must not let a different old Existing child
+replace the admitted participant through `start_voice_endpoint`. The Root current-activation
+fence binds exact grant/lease/profile before publication and is rechecked by every creator
+and commit. Already-issued foreign-to-this-activation children cannot select, install or
+replace that join even if their directory validation still succeeds. They retain only the
+separately authorized observation/helper or exact historical cleanup they originally owned.
+New call activation must retire/fence the previous selected activation in the SAME Root
+transaction before its child/grant can escape; actual old physical owners keep their own
+charged cleanup and never regain publication authority. This Root state/proof and all its
+copies/retirement owners belong in the full inventory gate, not an uncharged global flag.
+
+There is NO in-place upgrade of an already installed healthy Existing call/join, even if
+no known pair currently appears active. A new operational factory refuses that call;
+explicit End/close and actual original-owner cleanup precede a distinct activation with
+fresh lease/grant/join/key/incarnation. The new activation uses current authorization and
+does not adopt retained old round or media owners. `Coordinator::Owner`/accepted activation
+and `SelectedHandoffOwner` must preserve or revalidate the actual Root profile provenance
+after every await. Operation31 Select checks that SAME grant/LocalJoin profile BEFORE its
+physical pre-ACK pin and BEFORE neutral backing is chosen; it does not change Root mode.
+An Existing/capacity-only channel cannot satisfy that check, regardless of a genuine grant,
+same room, another executor, another physical channel or a lost earlier reply.
+
+The gate must cover ALL endpoint positive creators/writers, not only `prepare_voice_pair`:
+existing pair/`prepare_crypto_chain`, derivation, confirmation, Ready, SDP/media, endpoint
+Source/lower APIs and ingress INTO that join require their original Existing profile;
+admitted variants require the actual BilateralCompleteV1 call/join plus the committed
+immutable RoundGate/new tags/domains. A direct old Root API with a genuine admitted grant
+must refuse before allocating/signing/debiting. Relay-only helpers instead use the separate
+authenticated support/consent/profile gate below: they need no endpoint CallGrant, room
+join, slot or endpoint key. Discovery/helper observations may observe presence without
+mutating a Round. Old history/cleanup stays usable for its exact original owner; it cannot
+set the new profile, publish new work or revoke a replacement call.
+
+Preserve the stronger existing kind8 exclusion: `start_voice_endpoint` clears queued legacy
+call signals in the same Root turn, and `has_live_v2_participant` fences both
+`send_call_signal` and `serve_call_signal`, including when routing is paused. The current
+`voice_normal_dispatch_excludes_legacy_writers_from_live_and_paused_v2_endpoints` test pins
+that behavior. The new admitted activation must ALSO fence kind8 and pending legacy
+delivery during the earlier selected-profile/key-delegation interval, before a LocalJoin
+exists; absence of a participant cannot temporarily reopen legacy writers for that
+activated call. Refusal/cancellation cannot restore them into that same admitted activation.
+This does not replace admitted-versus-pilot checks on kind28/direct APIs.
+Likewise preserve `stop_voice_endpoint`'s exact Weak<CallGrant> identity: delayed old End,
+finally and collection can close/collect only their old allocation, never the new call's
+profile, join, rounds or media. The negative recovery handle retains historical profile
+identity without becoming a current positive CallGrant.
+
 ## Capacity and orientation
 
 Introduce `RootRoundPreclaim`, for the newly selected operational profile only. Reuse
@@ -650,6 +756,49 @@ No Root limit increase is assumed. If measured accounting requires one, review t
 change separately and keep per-packet/action/attempt limits fixed. The unexplained hosted
 native media-capacity refusal must not be hidden by raising limits.
 
+### Required native SDP sidecar pressure gate
+
+Neutral6/6 packet backing plus a native parent row is NOT whole-chain SDP/RTC capacity.
+The inspected existing path `EstablishedKeyCustody::prepare_sdp_handoff`
+(`voice_v2/chain/established.rs:73`) calls `sdp_handoff::Phase::prepare` (line335), whose
+line341 takes a NEW ordinary `resources.reserve(scope.group, BYTES)` of64KiB. Native
+`voice_handoff/ledger/sdp.rs::Preparation::prepare` (line145) invokes it after the existing
+`begin_sdp` gate requires actual old core drainage (line219). Draining the old core may
+make room, but it does not reserve that room against unrelated ordinary-pool users. The
+reported Linux capacity refusal reaches this boundary; changing a limit or a memory-
+available snapshot is not evidence that an accepted round owns its successor storage.
+
+Before any operational Request/Grant promises the complete chain, choose, implement and
+measure ONE real ownership mechanism: prepay an inert64KiB sidecar reserve before the
+promise, or transfer SAME original prepaid capacity through an affine phase transition
+after all old owners that borrow it actually return. The latter must prevent unrelated
+ordinary users from taking the promised capacity in between; release-then-reserve is not
+a transfer. Bind the inert owner to the actual pool/group/call/generation and, at consume,
+the exact committed round and original native parent. It creates no dummy PlanBinding,
+effect lease, key/RTC permission or second GroupProgressClaim. Ordinary preparation or
+binding refusal returns the SAME inert owner/candidate under the original deadline and
+terminal rules, never a silently dropped promise or a new allowance on retry.
+
+Until that mechanism and complete overlap inventory are proven, admission remains
+EXPLICITLY PARTIAL and no whole-chain positive producer may be enabled. A separately
+reserved sidecar gate can remain a later named prerequisite only if Request/Grant/Ready
+and diagnostics do not claim whole-chain readiness before it; it cannot be hidden after
+accepted Commit while consuming the original attempt/deadline. Any additional64KiB reserve
+or larger native local budget must include the full sidecar/copies/metadata, neutral/Ready/
+Source/Control/native task/Row ownership, actual old-key/SDK/HTTP owners and transition
+frames in its measured peak. The user permits reviewed measured budget increases, not
+unaccounted ownership or peer-controlled raises. Browser ABI50's512KiB policy is a
+separate ledger and cannot pay this Root/native reserve.
+
+The required regression traverses the ACTUAL Root/native Request/Grant/Commit -> Ready ->
+authenticated native SDP preparation/storage path, holding the ordinary pool full after
+the promise and through sidecar consumption. Both roles, retained old SDK/IO/core owners,
+lost replies, cancellation and epoch/End orderings must retain the same paid capacity or
+return the original exact refusal. No fresh ordinary allocation may silently exhaust an
+already accepted round, spend retries without handoff, or restart its deadline. Assert
+actual pool/allocation identity, original fee retention and destructor-barrier return;
+isolated `Phase::prepare` success or fabricated PlanBinding does not establish this gate.
+
 ## Focused implementation/acceptance order
 
 1. Canonical signed/new-tag/profile/503-byte agreement and789-byte transcript vectors,
@@ -658,6 +807,17 @@ native media-capacity refusal must not be hidden by raising limits.
    pressure, all allocator identities and actual destruction barriers; no second group claim.
 3.31 pre-ACK ordering, cancelled-before-profile, ACK-first, lost replies, old native support,
    capacity-only late upgrade refusal, and unused versus intent-bearing generation cleanup.
+   Trace two physical channels with the SAME genuine grant: same/different executors,
+   duplicate canonical setup, an alternate old adapter/Registry and direct Root APIs.
+   All must preserve one immutable issuer-owned profile and refuse old positive factories
+   for an admitted join before payment/signing. Race profile selection against old key
+   delegation/participant publication and pre-ACK worker choice; an existing healthy
+   wrong-profile call cannot upgrade. Keep an older different Existing child genuinely
+   directory-recognized, then attempt `start_voice_endpoint` and every old creator after
+   new admitted activation: it cannot replace the selected Root call/join. Test old
+   Body4/5/6, kind8 and direct old crypto/SDP/
+   Source writers after selection, and old End/finally after a fresh replacement. Preserve
+   original Existing-profile canonical vectors and current kind8-paused-routing exclusion.
 4. Actual Actor candidate and Request/Grant/Commit: bidirectional/simultaneous joins,
    crossed intents, LOW-only Hello, lost Grant, lost Commit/accepted/refused replies,
    duplicate/reordered encrypted input before acceptance, wall skew and monotonic expiry.
@@ -685,6 +845,9 @@ native media-capacity refusal must not be hidden by raising limits.
    absent C, simultaneous replacement, changed join/key and parked old media/SDK return.
 8. Full integrated suites and existing original two-peer bounds, then real WebView RTC,
    audible capture/playback, member media relay and two-machine/physical acceptance.
+   Before whole-chain producer enablement, pass the actual post-Grant/Commit full-ordinary-
+   pressure Ready-to-native64KiB sidecar test above; neutral packet/Row-only tests are not
+   a substitute, and any chosen affine transfer needs held-owner/destructor-barrier tests.
 
 No Rust/TypeScript/runtime tests were run for this documentation-only proposal. Its numbers
 are source-backed byte calculations and proposed memory gates, not implementation evidence.
@@ -694,7 +857,8 @@ are source-backed byte calculations and proposed memory gates, not implementatio
 The primary native/browser handoff owner (`/root`) has approved this proposal for STAGED
 implementation under its explicit gates. Pure codecs/neutral backing/profile work may
 proceed; no positive producer or activation is approved until cleanup/recovery authority,
-closed enum/wire allocation, complete inventories and runtime acceptance pass.
+Root-wide fresh-activation profile isolation, native SDP-sidecar ownership, closed enum/wire
+allocation, complete inventories and runtime acceptance pass.
 
 The implementing agent's own read-only adversarial design review/re-review reports no
 remaining blocker/high/medium after corrections. It challenged lost LinkACK recovery,
@@ -705,3 +869,11 @@ Unsupported semantics and the no-successor terminal escape. The short re-review 
 those directions; its low acceptance-wording ambiguity (physical stop without finalforget
 versus lost reply after APPLIED finalforget) is corrected above. This review is not a
 memory-layout pass, implemented protocol, physical result or blanket rollout approval.
+
+The subsequent read-only design re-review inspected the actual issuer/directory/endpoint,
+native canonicalization and64KiB sidecar paths. It reports no remaining blocker/high/
+medium/low in the scoped follow-up after adding exact CURRENT Root-activation authority,
+the still-recognized old-child replacement case, pre-participant legacy exclusion and the
+sidecar prepayment/affine-transfer pressure gate. The concrete representation, atomic
+enforcement on every positive path, inventories and listed regressions remain required
+implementation work; this conclusion approves none of them as already implemented.
