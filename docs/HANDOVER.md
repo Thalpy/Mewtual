@@ -16,8 +16,9 @@ A failed observer registration detaches the target, prevents deferred SDK entry 
 the real finalizer; it never invents no-task completion. No OS permission task borrows the
 shared RTC position, configuration loan, native channel activity or Call cleanup join.
 
-All90 focused byte-ledger/funding/capture/crypto/App-session tests pass. Static checks pass
-on the first slice; final static/full frontend checks remain required after composition.
+All90 focused byte-ledger/funding/capture/crypto/App-session tests and the complete3,557
+frontend tests pass. Final static checks report zero errors/warnings; production build
+passes in41.05s (existing chunk-size warning). These do not establish captured audio.
 Read-only adversarial review and re-review have no remaining finding. Fixed logical
 metadata is3776 retained /4032 binding bytes under4096; capture stages are6592/6944/6176
 under8192. Group materialization uses captured non-reentrant intrinsics and owned64-byte
@@ -27,7 +28,10 @@ This branch does NOT yet construct audio through a broker factory or attach send
 or playback. App V2 stays OFF. Production App wiring, bilateral admission/native registration,
 relay and physical acceptance remain open. The complete Root run validates frozen Rust
 `d55fa0db` in the admission checkout; this browser work does not change those inputs.
-Complete native acceptance and all final combined gates remain pending.
+Complete native acceptance and all final combined gates remain pending. The parent's
+hosted Linux native run has two causal failures under investigation: the inherited
+forced-alternate discovery fixture and an exact custody-accounting assertion. This
+browser-only slice neither changes those inputs nor clears their failed validation.
 
 ## Inert admission capacity groundwork (28 October; validation in progress)
 
