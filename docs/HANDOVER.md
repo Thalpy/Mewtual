@@ -8,7 +8,7 @@ failures. The first real failure is
 the initial media pair and its history collection completed, a newcomer naturally
 selected the other original endpoint, and that pair's confirmation/Ready completed.
 Its storage request (opcode12, before SDK13) then repeatedly received authenticated
-Capacity. The other39 failures are subsequent fixture admission refusals after that
+Capacity. The other 39 failures are subsequent fixture admission refusals after that
 failure; keep this fail-closed behavior. The cause remains unproven. This is not a
 green native gate or evidence that the second peer is operational.
 
@@ -27,10 +27,18 @@ refusal under held ordinary-pool pressure, drained preparation without a Phase,
 then funding/recovery of the same parent/action/key/sequence proof after that pressure
 is released. It explicitly checks the reservation boundary, so preflight/UI/attach
 contention cannot pass as the intended failure. This is a pressure/recovery check,
-not an atomic one-byte-limit proof. Native compilation and focused execution are
-in progress. Do not merge or enable V2 until the actual failure and complete gates pass.
+not an atomic one-byte-limit proof. This actual framed native/real-TCP regression
+passes (10.64s), as do all 376 native handoff module tests (22.73s). The original
+second-media scenario passes locally on Windows (77.33s), selecting the first peer.
+A new case uses the existing genuine local discovery refusal to force the alternate
+native peer, then exercises storage, SDK, media, failure cleanup and the indexed
+sibling's fresh Current; it also passes (77.54s). No row, Ready flag or key is
+injected into admission, and the original topology/bounds remain unchanged. These
+local passes do not establish the cause of the Linux failure. Complete frontend
+tests (3,314), static checks and production build pass. Do not merge or enable V2
+until the actual failure and complete native/CI gates pass.
 
-The Score integration at `c27e7694` completed the full Root suite with3,960 passes,
+The Score integration at `c27e7694` completed the full Root suite with 3,960 passes,
 25 ignored and no failures. Its strict Root Clippy and complete frontend suite
 (3,537 passes) also passed. Those results do not replace the pending native gate.
 
