@@ -12,6 +12,186 @@ fn store_in(dir: &Path) -> ServerStore {
     ServerStore::open(dir, b"saved files", &mut ChaCha20Rng::seed_from_u64(56)).unwrap()
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SessionMutation {
+    Forget,
+    Reset,
+    Limit,
+}
+
+impl SessionMutation {
+    /// The production paths behind the three Tauri commands, including their entry checks.
+    async fn apply(self, state: &AppState) -> Result<(), String> {
+        match self {
+            Self::Forget => forget_saved_file_in_session(state, 1, hex::encode([1u8; 16])).await,
+            Self::Reset => reset_saved_files_in_session(state, 1).await,
+            Self::Limit => set_saved_files_limit_in_session(state, 1, 16, true, Some(4))
+                .await
+                .map(|_| ()),
+        }
+    }
+}
+
+struct SessionWriteCase {
+    root: tempfile::TempDir,
+    state: AppState,
+    actor: ServerActor,
+    task: tokio::task::JoinHandle<()>,
+    drain: tokio::task::JoinHandle<()>,
+}
+
+impl SessionWriteCase {
+    async fn new(action: SessionMutation) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = store_in(root.path());
+        let (server, task, drain) = crate::leaving::tests::running(56_001);
+        let actor = server.actor.clone();
+        let owner = [server.group_id.as_slice(), server.device_id.as_bytes()].concat();
+        let mut list = SavedFiles::new(&owner);
+        for id in 1..=20 {
+            list.record_default(entry(
+                id,
+                &[id],
+                root.path(),
+                &format!("file-{id}"),
+                id as u64,
+            ));
+        }
+        store
+            .save_saved_files(1, &owner, &list, &mut OsCryptoRng)
+            .unwrap();
+        store
+            .save_saved_files_limit(1, &owner, SavedLimit::DEFAULT, &mut OsCryptoRng)
+            .unwrap();
+        if matches!(action, SessionMutation::Reset) {
+            std::fs::write(root.path().join("servers/1.saved"), b"damaged list").unwrap();
+        }
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        state.servers.lock().await.insert(1, server);
+        Self {
+            root,
+            state,
+            actor,
+            task,
+            drain,
+        }
+    }
+
+    fn sealed(&self) -> [Vec<u8>; 2] {
+        ["1.saved", "1.saved-limit"]
+            .map(|name| std::fs::read(self.root.path().join("servers").join(name)).unwrap())
+    }
+
+    async fn finish(self) {
+        self.state.servers.lock().await.clear();
+        self.actor.shutdown().await;
+        self.task.await.unwrap();
+        self.drain.await.unwrap();
+    }
+}
+
+/// Poll once, without moving time or relying on a scheduler delay.
+async fn still_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) -> bool {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx).is_pending())).await
+}
+
+async fn mutation_rechecks_lock_at_the_actual_sealed_write(action: SessionMutation) {
+    let case = SessionWriteCase::new(action).await;
+    let before = case.sealed();
+    let servers = case.state.servers.lock().await;
+    let mut write = Box::pin(action.apply(&case.state));
+    // Entry authorization has passed; actor_instance_of is waiting on Servers.
+    assert!(still_pending(write.as_mut()).await, "{action:?}");
+    let store = case.state.store.lock().await;
+    drop(servers);
+    // Final UI authorization now owns commit but is waiting on Store.
+    assert!(still_pending(write.as_mut()).await, "{action:?}");
+    let mut next_store = Box::pin(case.state.store.lock());
+    assert!(still_pending(next_store.as_mut()).await);
+    drop(store);
+    // Tokio's FIFO mutex admits authorization first, then next_store, then the
+    // command's mutation. Thus Lock races the real mutation, not its entry guard.
+    assert!(still_pending(write.as_mut()).await, "{action:?}");
+    let store = next_store.await;
+    assert!(
+        case.state.ui_session_commit.try_lock().is_err(),
+        "{action:?}: mutation must still own its final authorization guard"
+    );
+    let mut lock = Box::pin(lock_session_inner(&case.state, None));
+    assert!(
+        still_pending(lock.as_mut()).await,
+        "{action:?}: Lock must wait for the command's retained commit fence"
+    );
+    drop(store);
+    assert!(
+        write.await.is_err(),
+        "{action:?}: Lock registered before final admission"
+    );
+    lock.await.unwrap();
+    assert_eq!(
+        case.sealed(),
+        before,
+        "{action:?}: sealed records stay unchanged"
+    );
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn forget_saved_file_rechecks_lock_at_the_actual_sealed_write() {
+    mutation_rechecks_lock_at_the_actual_sealed_write(SessionMutation::Forget).await;
+}
+
+#[tokio::test]
+async fn reset_saved_files_rechecks_lock_at_the_actual_sealed_write() {
+    mutation_rechecks_lock_at_the_actual_sealed_write(SessionMutation::Reset).await;
+}
+
+#[tokio::test]
+async fn saved_files_limit_rechecks_lock_at_the_actual_sealed_write() {
+    mutation_rechecks_lock_at_the_actual_sealed_write(SessionMutation::Limit).await;
+}
+
+#[tokio::test]
+async fn saved_file_mutations_apply_while_the_original_session_is_open() {
+    for action in [
+        SessionMutation::Forget,
+        SessionMutation::Reset,
+        SessionMutation::Limit,
+    ] {
+        let case = SessionWriteCase::new(action).await;
+        action.apply(&case.state).await.unwrap();
+        let SavedFilesLoad::Found(list) = stored(&case.state).await else {
+            panic!("{action:?}: the sealed list must read back");
+        };
+        let expected = match action {
+            SessionMutation::Forget => 19,
+            SessionMutation::Reset => 0,
+            SessionMutation::Limit => 16,
+        };
+        assert_eq!(list.entries().len(), expected, "{action:?}");
+        if matches!(action, SessionMutation::Forget) {
+            assert!(list
+                .entries()
+                .iter()
+                .all(|e| e.id != SavedFileId::from_bytes([1; 16])));
+        }
+        if matches!(action, SessionMutation::Limit) {
+            let servers = case.state.servers.lock().await;
+            let server = servers.get(&1).unwrap();
+            let owner = [server.group_id.as_slice(), server.device_id.as_bytes()].concat();
+            drop(servers);
+            let store = case.state.store.lock().await;
+            assert_eq!(
+                store.as_ref().unwrap().load_saved_files_limit(1, &owner),
+                SavedLimitLoad::Found(SavedLimit::clamped(16))
+            );
+        }
+        case.finish().await;
+    }
+}
+
 /// Recording at the default setting, which most rules here are about.
 trait RecordDefault {
     fn record_default(&mut self, entry: SavedFile) -> bool;

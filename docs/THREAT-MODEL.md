@@ -1,5 +1,31 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native settings versus Lock and Leave (28 October; candidate)
+
+Cache-limit and saved-file metadata commands carry the UI generation captured before
+their first authorization await. They also capture the original server incarnation;
+the cache command checks the exact actor identity at its synchronous sealed write.
+A numeric server ID alone never authorizes a queued command against a replacement.
+
+Mutations retain UI commit while taking Store then Servers, with a pure atomic
+generation check after those waits. Lock registers its new generation before waiting
+for commit, so a queued write cannot pass through an ordinary lock/unlock cycle.
+The cache setter takes the existing per-server persistence lock before UI commit,
+matching Leave. Removal therefore cannot be followed by a stale `.storage` rewrite.
+
+After cache-setting admission, a retained worker owns serialization, persistence and
+UI commit through the actual actor reply, independently of the IPC waiter. This is
+required because dropping an actor reply receiver does not cancel its queued command.
+Store and Servers are released before waiting for that reply: the actor's bounded
+event consumer can need both. Registration's cache-setting adoption does not take
+the setter serialization lock; it already owns UI commit and must not invert the order.
+Saved-file mutations perform only synchronous sealed I/O under their retained guard;
+background save-recording helpers keep their existing membership/incarnation rules.
+
+These are local session and lifecycle boundaries, with no wire or persistence format
+change. All 39 focused cache/saved tests and five negative/restored controls pass;
+complete combined Root/native validation remains pending on this candidate.
+
 ## Native dependency follow-up (27 October; candidate)
 
 The native graph now omits the updater's unused legacy ZIP extractor, uses patched H2,

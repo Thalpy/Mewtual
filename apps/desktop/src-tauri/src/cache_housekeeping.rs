@@ -39,7 +39,11 @@ pub(super) struct CacheBridge {
     studio: tokio::sync::Mutex<StudioScans>,
     /// Serialises `set_cache_limit`'s save-then-apply, so two quick choices cannot leave the actor
     /// on a different limit from the sealed record.
-    limit_writes: tokio::sync::Mutex<()>,
+    limit_writes: Arc<tokio::sync::Mutex<()>>,
+    /// A read-only test observation of the retained worker starting. Never grants
+    /// admission or replaces actor work; the production build has no observer.
+    #[cfg(test)]
+    limit_apply_entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 #[derive(Default)]
@@ -602,19 +606,32 @@ pub(super) async fn set_cache_limit(
     server: u64,
     bytes: Option<u64>,
 ) -> Result<UiCacheStatus, String> {
-    require_unlocked_session(&state).await?;
+    set_cache_limit_in_session(&state, server, bytes).await
+}
+
+/// The command's actual write path, also exercised without constructing a Tauri window.
+/// A numeric server ID is reusable; queued work must keep its original session and actor.
+async fn set_cache_limit_in_session(
+    state: &AppState,
+    server: u64,
+    bytes: Option<u64>,
+) -> Result<UiCacheStatus, String> {
+    let generation = keep_session::invocation_generation(state).await?;
     if !cache_plan::valid_limit(bytes) {
         return Err("Choose a limit between 1 GiB and 1 TiB, or no limit.".into());
     }
+    let (actor, instance) = actor_instance_of(state, server).await?;
     // Save and apply as one step per process, so the actor always ends on the sealed value.
-    let _serial = state.cache.limit_writes.lock().await;
-    let (actor, group) = {
-        let servers = state.servers.lock().await;
-        let entry = servers
-            .get(&server)
-            .ok_or_else(|| "That server is not open.".to_string())?;
-        (entry.actor.clone(), entry.group_id.clone())
-    };
+    let serial = state.cache.limit_writes.clone().lock_owned().await;
+    // Leave takes this same persistence lock BEFORE the UI commit. Keep that order:
+    // an admitted choice completes before removal, or finds its original row gone.
+    // Waiting for either serialization lock must not adopt a newer unlock generation.
+    let persist = persist_lock_for(state, server).lock_owned().await;
+    // Owned counterpart of require_ui_session_generation: actual actor application must
+    // retain this fence even if its IPC waiter disappears. Recheck again after all locks.
+    let session = state.ui_session_commit.clone().lock_owned().await;
+    require_unlocked_session(state).await?;
+    state.ui_session_gate().check_generation(generation)?;
     let setting = CacheSetting {
         limit: bytes,
         origin: CacheSettingOrigin::User,
@@ -624,13 +641,38 @@ pub(super) async fn set_cache_limit(
         let store = guard
             .as_ref()
             .ok_or_else(|| "The vault is locked.".to_string())?;
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .filter(|entry| entry.instance == instance && entry.actor.same_instance(&actor))
+            .ok_or_else(|| {
+                "That server changed while the cache setting was waiting.".to_string()
+            })?;
+        // Lock registers its generation before waiting for commit. A request registered
+        // while Store/Servers were busy wins before this synchronous write admission.
+        state.ui_session_gate().check_generation(generation)?;
         store
-            .save_cache_setting(server, &group, &setting, &mut OsCryptoRng)
+            .save_cache_setting(server, &entry.group_id, &setting, &mut OsCryptoRng)
             .map_err(|e| e.to_string())?;
     }
-    Ok(bridge_status(
-        &actor.set_cache_limit(setting.as_limit()).await?,
-    ))
+    // No await between the sealed write and this ownership transfer. Actor commands keep
+    // running after their reply receiver is dropped; the retained worker therefore owns
+    // all three fences through the actual reply, independently of the public caller.
+    // Store/Servers have already dropped: the actor's bounded event consumer needs them.
+    #[cfg(test)]
+    let entered = state.cache.limit_apply_entered.lock().unwrap().take();
+    tokio::spawn(async move {
+        let guards = (serial, persist, session);
+        #[cfg(test)]
+        if let Some(entered) = entered {
+            let _ = entered.send(());
+        }
+        let result = actor.set_cache_limit(setting.as_limit()).await;
+        drop(guards);
+        result.map(|status| bridge_status(&status))
+    })
+    .await
+    .map_err(|_| "The cache setting worker did not finish.".to_string())?
 }
 
 #[cfg(test)]

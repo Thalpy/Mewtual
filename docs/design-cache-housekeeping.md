@@ -264,6 +264,12 @@ through the composite store.
   recomputes at most once a second) and `set_cache_limit(server, bytes|null)`, which refuses values
   outside 1 GiB to 1 TiB natively. Both are registered in the command policy, the capability and the
   frontend security ledger.
+- **Queued choices** keep the invoking UI generation and original actor/incarnation. The
+  setter serializes with Leave using the per-server persistence lock before UI commit,
+  then checks generation and actor again under Store/Servers at the sealed write. A
+  retained apply worker owns those fences through the actor reply, even if the IPC
+  caller disappears. Store/Servers are released before actor I/O. Registration's
+  adoption path does not take the setter serialization lock (it already owns UI commit).
 - **Settings page**: Server settings → **Storage** ("Storage on this device"), for servers and DMs:
   the same bar, a limit picker (1, 2, 5, 10, 20, 50, 100 GiB, 1 TiB, No limit), what is pinned, and
   the leaving-soon count. Lowering below current usage confirms with what will go.

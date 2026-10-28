@@ -2,6 +2,7 @@
 //! store. Studio-reference retention itself is covered in `catcoms-app` (it needs Studio saves).
 
 use super::*;
+use catcoms_app::TracedEvent;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
@@ -15,6 +16,279 @@ fn store_in(dir: &std::path::Path) -> ServerStore {
 }
 
 const GROUP: [u8; 32] = [0x5a; 32];
+
+/// Real sealed setting and actor; only event draining is controlled by these regressions.
+struct LimitWriteCase {
+    root: tempfile::TempDir,
+    state: Arc<AppState>,
+    actor: ServerActor,
+    group: Vec<u8>,
+    task: tokio::task::JoinHandle<()>,
+    events: Option<tokio::sync::mpsc::Receiver<TracedEvent>>,
+    drain: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl LimitWriteCase {
+    async fn new(hold_events: bool) -> Self {
+        use catcoms_rt::{Hub, ManualClock};
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        *state.store.lock().await = Some(store_in(root.path()));
+        *state.session_resumable.lock().await = true;
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(55_001)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(55_001),
+            Box::new(ManualClock::new(1_000)),
+            "cache write",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, events, task) = spawn(server);
+        state.servers.lock().await.insert(
+            1,
+            crate::tests::snapshot_test_entry(55_001, actor.clone(), group.clone(), device),
+        );
+        let mut case = Self {
+            root,
+            state,
+            actor,
+            group,
+            task,
+            events: Some(events),
+            drain: None,
+        };
+        if !hold_events {
+            case.start_drain();
+        }
+        case.actor
+            .set_cache_limit(CacheLimit::Unlimited)
+            .await
+            .unwrap();
+        case.state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .save_cache_setting(
+                1,
+                &case.group,
+                &CacheSetting {
+                    limit: None,
+                    origin: CacheSettingOrigin::User,
+                },
+                &mut OsCryptoRng,
+            )
+            .unwrap();
+        case
+    }
+
+    fn start_drain(&mut self) {
+        if let Some(mut events) = self.events.take() {
+            self.drain = Some(tokio::spawn(async move {
+                while events.recv().await.is_some() {}
+            }));
+        }
+    }
+
+    fn sealed(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.root.path().join("servers/1.storage")).ok()
+    }
+
+    async fn finish(mut self) {
+        self.start_drain();
+        self.state.servers.lock().await.clear();
+        self.actor.shutdown().await;
+        self.task.await.unwrap();
+        self.drain.take().unwrap().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cache_limit_queued_before_lock_cannot_write_or_revive_after_unlock() {
+    for unlock_again in [false, true] {
+        let case = LimitWriteCase::new(false).await;
+        let before = case.sealed();
+        let serial = case.state.cache.limit_writes.lock().await;
+        let mut write = Box::pin(set_cache_limit_in_session(&case.state, 1, Some(1 << 30)));
+        assert!(
+            still_pending(write.as_mut()).await,
+            "actual setter is queued"
+        );
+        lock_session_inner(&case.state, None).await.unwrap();
+        if unlock_again {
+            let generation = case.state.ui_session_generation.load(Ordering::Acquire);
+            finalize_unlock_session(&case.state, generation, false)
+                .await
+                .unwrap();
+            assert!(!ui_session_closed(&case.state));
+        }
+        drop(serial);
+        assert!(write.await.is_err());
+        assert_eq!(
+            case.sealed(),
+            before,
+            "old request must not rewrite sealed settings"
+        );
+        assert!(case.actor.cache_status().await.unwrap().unlimited);
+        case.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn cache_limit_rechecks_lock_after_waiting_for_the_sealed_store() {
+    let case = LimitWriteCase::new(false).await;
+    let before = case.sealed();
+    let servers = case.state.servers.lock().await;
+    let mut write = Box::pin(set_cache_limit_in_session(&case.state, 1, Some(1 << 30)));
+    assert!(still_pending(write.as_mut()).await);
+    let store = case.state.store.lock().await;
+    drop(servers);
+    assert!(still_pending(write.as_mut()).await);
+    let mut next_store = Box::pin(case.state.store.lock());
+    assert!(still_pending(next_store.as_mut()).await);
+    drop(store);
+    // FIFO Store admission lets the final UI authorization finish, then holds the
+    // actual sealed write behind next_store. Lock registers while commit is owned.
+    assert!(still_pending(write.as_mut()).await);
+    let store = next_store.await;
+    assert!(case.state.ui_session_commit.try_lock().is_err());
+    let mut lock = Box::pin(lock_session_inner(&case.state, None));
+    assert!(still_pending(lock.as_mut()).await);
+    drop(store);
+    assert!(write.await.is_err());
+    lock.await.unwrap();
+    assert_eq!(case.sealed(), before);
+    assert!(case.actor.cache_status().await.unwrap().unlimited);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn queued_cache_limit_cannot_select_a_replacement_server() {
+    let case = LimitWriteCase::new(false).await;
+    let before = case.sealed();
+    let serial = case.state.cache.limit_writes.lock().await;
+    let mut write = Box::pin(set_cache_limit_in_session(&case.state, 1, Some(1 << 30)));
+    assert!(still_pending(write.as_mut()).await);
+    let (replacement, task, drain) = crate::leaving::tests::running(55_002);
+    let replacement_actor = replacement.actor.clone();
+    let replacement_group = replacement.group_id.clone();
+    replacement_actor
+        .set_cache_limit(CacheLimit::Unlimited)
+        .await
+        .unwrap();
+    case.state.servers.lock().await.insert(1, replacement);
+    drop(serial);
+    assert!(write.await.is_err());
+    assert_eq!(
+        case.sealed(),
+        before,
+        "replacement's settings are not written by old UI work"
+    );
+    assert!(replacement_actor.cache_status().await.unwrap().unlimited);
+    assert_ne!(replacement_group, case.group);
+    case.state.servers.lock().await.clear();
+    replacement_actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn cache_limit_cannot_recreate_a_record_after_committed_leave() {
+    let case = LimitWriteCase::new(false).await;
+    let serial = case.state.cache.limit_writes.lock().await;
+    let mut write = Box::pin(set_cache_limit_in_session(&case.state, 1, Some(1 << 30)));
+    assert!(still_pending(write.as_mut()).await);
+    let stopped = crate::leaving::stop_server(&case.state, 1, &SystemClock)
+        .await
+        .unwrap()
+        .unwrap();
+    // The same order and real retirement/store operations used by leave_server. Store is
+    // deliberately held until the old command has resumed, exposing the former late write.
+    let persist = persist_lock_for(&case.state, 1).lock_owned().await;
+    let generation = case.state.ui_session_generation.load(Ordering::Acquire);
+    let session = require_ui_session_generation(&case.state, generation)
+        .await
+        .unwrap();
+    let store = case.state.store.lock().await;
+    drop(serial);
+    assert!(still_pending(write.as_mut()).await);
+    let removed = stopped
+        .remove(&mut *case.state.servers.lock().await)
+        .unwrap();
+    store.as_ref().unwrap().remove_server(1).unwrap();
+    drop((removed, store, session, persist));
+    assert!(write.await.is_err());
+    assert!(
+        case.sealed().is_none(),
+        "a committed leave must stay removed"
+    );
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn admitted_cache_limit_outlives_its_waiter_and_precedes_actual_lock() {
+    let mut case = LimitWriteCase::new(true).await;
+    let mut sequence = 0;
+    while case.events.as_ref().unwrap().capacity() > 0 {
+        case.actor
+            .set_server_name(format!("cache barrier {sequence}"))
+            .await
+            .unwrap();
+        sequence += 1;
+    }
+    let actor = case.actor.clone();
+    let mut barrier =
+        Box::pin(async move { actor.set_server_name("last cache barrier".into()).await });
+    assert!(still_pending(barrier.as_mut()).await);
+    let before = case.sealed();
+    let (entered, started) = tokio::sync::oneshot::channel();
+    *case.state.cache.limit_apply_entered.lock().unwrap() = Some(entered);
+    let mut write = Box::pin(set_cache_limit_in_session(&case.state, 1, Some(1 << 30)));
+    assert!(still_pending(write.as_mut()).await);
+    assert_ne!(
+        case.sealed(),
+        before,
+        "final admission has written the actual setting"
+    );
+    drop(write); // Only the waiting command disappears; actual apply owns all commit fences.
+                 // Observe the worker itself, not merely spawn: otherwise an unpolled worker
+                 // could retain the guards accidentally and make an early-drop mutant pass.
+    started.await.unwrap();
+    let state = case.state.clone();
+    let mut lock = Box::pin(lock_session_inner(&state, None));
+    assert!(
+        still_pending(lock.as_mut()).await,
+        "lock waits for admitted actor application"
+    );
+    assert!(case.state.cache.limit_writes.try_lock().is_err());
+    assert!(persist_lock_for(&case.state, 1).try_lock_owned().is_err());
+    case.start_drain();
+    lock.await.unwrap();
+    barrier.await.unwrap();
+    let status = case.actor.cache_status().await.unwrap();
+    assert_eq!(status.limit_bytes, Some(1 << 30));
+    assert!(!status.unlimited);
+    let stored = case
+        .state
+        .store
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .load_cache_setting(1, &case.group);
+    assert_eq!(
+        stored,
+        CacheSettingLoad::Found(CacheSetting {
+            limit: Some(1 << 30),
+            origin: CacheSettingOrigin::User,
+        })
+    );
+    case.finish().await;
+}
 
 #[test]
 fn attach_migrates_a_missing_setting_once_and_honours_saved_and_damaged_ones() {

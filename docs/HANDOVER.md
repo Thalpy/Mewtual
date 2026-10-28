@@ -1,5 +1,41 @@
 # Mewtual; Handover
 
+## Recovery gap completion candidate (28 October)
+
+PR #74 merged into `main` at `85b345cf`. The `communication-gap-completion` branch
+preserves that foundation and the original #51 external-download, #55 cache and #56
+saved-files histories. This combination is under validation; the older results below
+do not establish that these additional features pass together.
+
+The native setting fixes bind queued cache and saved-file changes to their original
+UI generation and server incarnation. Cache setting writes use Leave's persistence
+lock before the UI commit; an admitted write retains both fences through the actual
+actor application even if its caller disappears. Store/registry locks are released
+before actor I/O. Saved-file forget, reset and limit changes retain UI commit through
+their synchronous sealed writes and repeat the generation check after lock waits.
+Lock registered before final admission prevents the write; an earlier admitted
+application completes before Lock can return. Unlock never revives the old request.
+
+Focused regressions exercise the real sealed records, actors and Lock path, including
+server replacement, committed Leave, lock/unlock and an abandoned cache caller behind
+a full actor event queue. All 15 cache and 24 saved-file tests pass. Five exact
+negative controls fail at their intended assertions; all five restored controls pass
+after byte-exact restoration and a fresh build. Read-only review has no remaining
+findings in these fixes. The earlier #51 six-client recovery failure still needs
+current-source validation; that real-TCP scenario is running.
+
+The combined frontend suite passes 3,312 tests, with zero Svelte diagnostics and a
+successful production build. All ten ordinary rendered Edge flows and the dedicated
+download-resume/Pause/exact-Retry/completion scenario pass. The latter exposed a
+broken nested template literal in its existing harness; the quoting fix has three
+parser regressions and a read-only review. The initial sandbox debugger failure ran
+no scenarios; successful flows used the isolated harness outside that sandbox.
+Complete combined Root/native gates and final native build/startup remain pending.
+
+App V2 remains OFF. Production audio/RTC composition, multi-peer admission, member
+media relay and physical acceptance remain open; merging the foundations did not
+complete those boundaries. Only one desktop is currently available for physical tests.
+
 ## Backlog integration checkpoint (27 October)
 
 PRs #26/#54 have landed in main; #57 has landed in the chat-recovery branch. PR #74

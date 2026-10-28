@@ -1099,18 +1099,32 @@ pub(super) async fn forget_saved_file(
     server: u64,
     entry: String,
 ) -> Result<(), String> {
-    let generation = keep_session::invocation_generation(&state).await?;
+    forget_saved_file_in_session(&state, server, entry).await
+}
+
+/// Keep the real command path usable by native concurrency regressions without a window.
+async fn forget_saved_file_in_session(
+    state: &AppState,
+    server: u64,
+    entry: String,
+) -> Result<(), String> {
+    let generation = keep_session::invocation_generation(state).await?;
     let id = entry_id(&entry)?;
-    let (_, instance) = actor_instance_of(&state, server).await?;
-    // The session must still be the one that asked. Checked, not held: the guard is never held
-    // across the store lock, so this cannot wait behind (or hold up) Lock.
-    drop(require_ui_session_generation(&state, generation).await?);
-    with_list(&state, server, instance, |list| match list {
-        Loaded::Readable(list) => {
-            let changed = list.forget(id);
-            (Ok(()), changed)
+    let (_, instance) = actor_instance_of(state, server).await?;
+    // Commit -> Store -> Servers is the mutation order. Lock may register while those
+    // locks are busy; its atomic fence is repeated inside the synchronous mutation.
+    let _session = require_ui_session_generation(state, generation).await?;
+    with_list(state, server, instance, |list| {
+        if let Err(error) = state.ui_session_gate().check_generation(generation) {
+            return (Err(error), false);
         }
-        Loaded::Unreadable(_) => (Err(LIST_UNREADABLE.to_string()), false),
+        match list {
+            Loaded::Readable(list) => {
+                let changed = list.forget(id);
+                (Ok(()), changed)
+            }
+            Loaded::Unreadable(_) => (Err(LIST_UNREADABLE.to_string()), false),
+        }
     })
     .await?
     .ok_or_else(|| "server changed".to_string())?
@@ -1123,9 +1137,13 @@ pub(super) async fn reset_saved_files(
     state: State<'_, AppState>,
     server: u64,
 ) -> Result<(), String> {
-    let generation = keep_session::invocation_generation(&state).await?;
-    let (_, instance) = actor_instance_of(&state, server).await?;
-    drop(require_ui_session_generation(&state, generation).await?);
+    reset_saved_files_in_session(&state, server).await
+}
+
+async fn reset_saved_files_in_session(state: &AppState, server: u64) -> Result<(), String> {
+    let generation = keep_session::invocation_generation(state).await?;
+    let (_, instance) = actor_instance_of(state, server).await?;
+    let _session = require_ui_session_generation(state, generation).await?;
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
@@ -1136,6 +1154,7 @@ pub(super) async fn reset_saved_files(
         .filter(|entry| entry.instance == instance)
         .ok_or_else(|| "server changed".to_string())?;
     let owner = [entry.group_id.as_slice(), entry.device_id.as_bytes()].concat();
+    state.ui_session_gate().check_generation(generation)?;
     if store
         .reset_saved_files(server, &owner, &mut OsCryptoRng)
         .map_err(|error| error.to_string())?
@@ -1178,17 +1197,26 @@ pub(super) async fn set_saved_files_limit(
     apply: bool,
     expected_forgets: Option<u64>,
 ) -> Result<UiSavedLimitChange, String> {
+    set_saved_files_limit_in_session(&state, server, limit, apply, expected_forgets).await
+}
+
+async fn set_saved_files_limit_in_session(
+    state: &AppState,
+    server: u64,
+    limit: u64,
+    apply: bool,
+    expected_forgets: Option<u64>,
+) -> Result<UiSavedLimitChange, String> {
     let apply = match (apply, expected_forgets) {
         (false, _) => None,
         (true, Some(expected)) => Some(expected),
         (true, None) => return Err(LIMIT_LIST_CHANGED.into()),
     };
-    let generation = keep_session::invocation_generation(&state).await?;
-    let (_, instance) = actor_instance_of(&state, server).await?;
-    // The session must still be the one that asked. Checked, not held: the guard is never held
-    // across the store lock, so this cannot wait behind (or hold up) Lock.
-    drop(require_ui_session_generation(&state, generation).await?);
-    with_owner(&state, server, instance, |store, owner| {
+    let generation = keep_session::invocation_generation(state).await?;
+    let (_, instance) = actor_instance_of(state, server).await?;
+    let _session = require_ui_session_generation(state, generation).await?;
+    with_owner(state, server, instance, |store, owner| {
+        state.ui_session_gate().check_generation(generation)?;
         change_limit(store, server, owner, limit, apply)
     })
     .await

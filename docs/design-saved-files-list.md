@@ -81,6 +81,13 @@ count times, oldest first:
     bytes file_id   25 bytes, likewise
 ```
 
+Native forget, reset and limit commands retain the original UI-generation commit guard
+through Store then Servers and the synchronous sealed mutation. They repeat the atomic
+generation check after the mutex waits. Lock registers its new generation before
+waiting for commit; a stale command cannot write after an ordinary lock/unlock cycle.
+The server incarnation and owner checks remain required. Background recording after
+an admitted publication retains its separate existing ownership rules.
+
 Rules checked on decode: ids unique, **one entry per saved copy** (no two entries name the same
 place: the same folder and name, or the same file identity), count and lengths in their version's
 bounds, no trailing bytes, and the whole plaintext within its version's bytes (an entry of maximal
