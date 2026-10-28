@@ -1,12 +1,39 @@
 # Mewtual; Handover
 
+## Native fixture corrections (28 October; complete rerun pending)
+
+The complete local native run at `324bda42` had993 passes and15 failures. Its real
+failure was the pressure regression expecting immediate post-release storage funding;
+the three-byte refusal code was not printed. The remaining14 were fixture admission
+refusals. Linux `f4ec9165` separately had994 passes and11 failures: its real failure
+was a weak-owner assertion racing the sender's paid Work after receiver wake, with
+the remaining10 fixture admission refusals. Neither run is green.
+
+`c023658a` retries ONLY exact authenticated Capacity using the same logical request,
+SDP sequence and proof under the original Claim setup deadline. A real UI-commit
+barrier and same-physical-request stage4 observation prove the forced retry; stage5
+reservation refusal, drained worker, absent Phase and same-proof recovery remain.
+An eight-yield fixture-pressure setup handles genuine snapshot/charge races with
+deterministic real-credit tests. `56e86c6a` joins the same actor's FIFO before checking
+sender/publication drainage; production sender custody is unchanged. Its existing
+synchronous receiver-waker unit oracle also passes. Read-only reviews have no
+remaining findings in these corrections.
+
+All379 handoff module checks plus the two causal native cases pass together (381,
+35.68s); the full frontend passes3,539 again. Current native check, strict native
+Clippy across all targets/features and the Root construction scan pass (0.47s).
+A corrected complete native run remains required. No original deadline, Source allowance or memory ceiling was
+raised; App V2 remains OFF. The separate admission checkout has no runtime edits.
+
 ## Score backlog integration candidate (28 October)
 
 The isolated `score-backlog-integration` worktree combines PR #47's layered Score,
 composer and batched saves with the recovery/storage integration. It is still a
 candidate: the complete native gates must pass before merge. The full Root suite at
-`c27e7694` passes (3,960 tests, 25 ignored); the Root source is unchanged by the
-following native diagnostic merge. V2 remains OFF.
+`c27e7694` passes (3,960 tests, 25 ignored); compiled Root sources and lockfiles are
+unchanged by the native diagnostic merge. The Root construction gate also scans
+native Rust; its existing compiled test was rerun against the current merged tree
+and passes again after both corrections (0.47s). V2 remains OFF.
 
 Integration preserves the accepted departure contract: save the current document,
 keep it open on refusal, and only then switch. The independent Index half can finish
@@ -23,8 +50,9 @@ key preserves the mounted composer across ordinary revisions. Actual mounted wra
 editor regressions check equal-valued fresh scopes, DOM identity, undo, an active press,
 group-only and generation-only replacement, A-B-A and reset while still mounted.
 
-All 3,537 frontend tests pass, with zero Svelte errors/warnings and a passing production
-build. Integration test expectations and an error-literal collision were resolved without
+All 3,539 frontend tests pass after the native diagnostic merge. Static checks and
+the production build passed before this test/diagnostic-only merge, with no production
+frontend changes. Integration test expectations and an error-literal collision were resolved without
 weakening the production source guard. Read-only UI review has no remaining findings;
 its additional regression-precision suggestions are included. New native acceptance
 tests cover the real batch parser/invoke/custody, concrete wrong epoch, admission after

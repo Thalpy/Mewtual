@@ -41,7 +41,7 @@ diagram, a failed direct dial, or a selected candidate label alone.
 | Forced TURN | Apply rules that forbid direct endpoint media and retain the permitted TURN route. Speak both ways, interrupt that route, then restore it. | Recorded rules and selected candidate pair, received packet progression and audible audio; truthful unavailable state during interruption; automatic recovery or a clearly recorded bounded failure. |
 | Member bridge | Put A and C on separate networks, forbid their direct signalling/media edge and allow only B as a member helper. B does not join the room. Replace B with D while endpoints remain joined. | Endpoint receipt and audible traffic through the enforced graph, recovery via D, relay-only members receive no endpoint media keys, and revoked/expired scope cannot forward new traffic. Requires additional isolated member processes. |
 | Peer isolation | Keep A-B media active while A negotiates with C. Expire or fail only C, then negotiate another permitted peer. | B's actual Current/audio progresses throughout; failed work remains bounded and paid until real drainage; no global teardown or silently stranded pending row. |
-| Combined load | During a call, send chat in another group and transfer a file through its permitted providers. Interrupt and restore the bridge. | Measured progress for the other group, exact chat ledger recovery and verified file bytes. Record durable transfer/restart evidence separately; external-download resume is owned by its separate branch. |
+| Combined load | During a call, send chat in another group and transfer a file through its permitted providers. Interrupt and restore the bridge. | Measured progress for the other group, exact chat ledger recovery and verified file bytes. Record durable transfer/restart evidence separately; verify that the tested binary includes the external-download integration from #75. |
 | Version and rollback | Pair the candidate with the supported older build, then restore the candidate. Repeat with an interrupted call. | Explicit compatible behavior or refusal; no legacy packet mutates an upgraded session and no silent protocol downgrade. Record profile and persistence compatibility. |
 
 For each case retain the timestamped steps, outcome, sanitized diagnostics, actual selected
@@ -54,6 +54,9 @@ Do not record microphone content unless both participants consent.
 The primary voice implementation still owns operational Ready/admission and negotiation
 retirement, production App/native/RTC composition, peer-local failure recovery, member media
 relay and combined acceptance. Native two-peer TCP acceptance is under active validation.
-External-download resume and the dependency/toolchain upgrade are separate branches; verify
-their integration rather than assuming their existence changes this head. Physical acceptance
+External-download resume is now included in draft #75 and its stacked Score candidate #76;
+their combined gates/merge are still pending. The refreshed dependency audits pass on that
+candidate. Verify the tested binary's ancestry rather than assuming another branch changes
+it. Operational admission, production audio composition and member relay remain entry
+blockers; a passing controlled two-peer fixture does not remove them. Physical acceptance
 remains unrun because only one desktop is currently available.
