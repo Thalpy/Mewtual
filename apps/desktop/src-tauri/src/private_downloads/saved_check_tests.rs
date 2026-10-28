@@ -5,6 +5,216 @@ use catcoms_storage::kept::ExportPlan;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+/// A genuine Published download and its real UI/server state. Only the final
+/// platform launch is injected; journal publication and authorization are real.
+struct RevealCase {
+    root: tempfile::TempDir,
+    state: AppState,
+    actor: ServerActor,
+    task: tokio::task::JoinHandle<()>,
+    drain: tokio::task::JoinHandle<()>,
+    id: DownloadId,
+    intent: u64,
+    journal: ExportJournal,
+    path: PathBuf,
+    _ready: DownloadReady,
+    _signal: tokio::sync::watch::Sender<bool>,
+}
+impl RevealCase {
+    async fn new() -> Self {
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await = Some(
+            ServerStore::open(
+                root.path(),
+                b"reveal",
+                &mut rand_chacha::ChaCha20Rng::seed_from_u64(51_077),
+            )
+            .unwrap(),
+        );
+        *state.session_resumable.lock().await = true;
+        let (entry, task, drain, cid) =
+            crate::leaving::tests::running_with_file(51_077, &state, b"published private file")
+                .await;
+        let actor = entry.actor.clone();
+        state.servers.lock().await.insert(1, entry);
+        let (signal, watch) = tokio::sync::watch::channel(false);
+        let origin = RequestCancellation::new(watch, None);
+        let ready = actor
+            .acquire_download(cid, None, origin.clone())
+            .await
+            .unwrap()
+            .with_export_custody(Arc::new(()));
+        let folder = root.path().join("Downloads");
+        catcoms_storage::kept::create_folder(&folder).unwrap();
+        let mut file = ExportFile::create(
+            &folder,
+            "private.txt",
+            ready.export_plan().unwrap(),
+            &mut OsCryptoRng,
+        )
+        .unwrap();
+        actor
+            .download_export_transition(
+                ready.clone(),
+                DownloadExportTransition::Begin {
+                    journal: file.journal().clone(),
+                    presence: file.presence(),
+                },
+                origin.clone(),
+            )
+            .await
+            .unwrap();
+        while let Some(index) = file.next_index() {
+            let bytes = actor
+                .read_download_chunk(ready.clone(), index, origin.clone())
+                .await
+                .unwrap()
+                .into_bytes();
+            file.accept(index, &bytes).unwrap();
+        }
+        let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+            panic!("verified plaintext must be ready");
+        };
+        actor
+            .download_export_transition(
+                ready.clone(),
+                DownloadExportTransition::Checkpoint {
+                    expected: file.journal().clone(),
+                    next: journal.clone(),
+                },
+                origin.clone(),
+            )
+            .await
+            .unwrap();
+        file.checkpointed(journal);
+        let path = file.link().unwrap();
+        let journal = file.published_journal();
+        actor
+            .download_export_transition(
+                ready.clone(),
+                DownloadExportTransition::Publish {
+                    expected: journal.clone(),
+                },
+                origin,
+            )
+            .await
+            .unwrap();
+        file.finish(&mut OsCryptoRng).unwrap();
+        let status = actor
+            .downloads()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == ready.id())
+            .unwrap();
+        Self {
+            root,
+            state,
+            actor,
+            task,
+            drain,
+            id: status.id,
+            intent: status.state.intent,
+            journal,
+            path,
+            _ready: ready,
+            _signal: signal,
+        }
+    }
+    fn request(&self, generation: u64) -> ActorSavedCheck<'_> {
+        ActorSavedCheck {
+            state: &self.state,
+            server: 1,
+            instance: 51_077,
+            generation,
+            actor: &self.actor,
+            id: self.id,
+        }
+    }
+    async fn finish(self) {
+        self.state.servers.lock().await.clear();
+        self.actor.shutdown().await;
+        self.task.await.unwrap();
+        self.drain.await.unwrap();
+        assert!(self.path.starts_with(self.root.path()));
+    }
+}
+
+async fn poll_pending<F: Future>(mut future: std::pin::Pin<&mut F>) -> bool {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx).is_pending())).await
+}
+
+#[tokio::test]
+async fn download_reveal_rejects_lock_registered_during_the_final_registry_wait() {
+    let case = RevealCase::new().await;
+    let servers = case.state.servers.lock().await;
+    let request = case.request(0);
+    let called = AtomicBool::new(false);
+    let mut reveal = Box::pin(reveal_download_in_session(
+        &request,
+        &case.path,
+        case.intent,
+        &case.journal,
+        |_| {
+            called.store(true, AtomicOrdering::Release);
+            Ok(())
+        },
+    ));
+    // Real actor reads may first suspend; a queued observation runs behind them.
+    assert!(poll_pending(reveal.as_mut()).await);
+    case.actor.downloads().await.unwrap();
+    assert!(poll_pending(reveal.as_mut()).await);
+    case.actor.download_export_state(case.id).await.unwrap();
+    assert!(poll_pending(reveal.as_mut()).await);
+    assert!(case.state.ui_session_commit.try_lock().is_err());
+    let mut lock = Box::pin(lock_session_inner(&case.state, None));
+    assert!(poll_pending(lock.as_mut()).await);
+    drop(servers);
+    assert_eq!(reveal.await, Err(RevealError::Stale));
+    lock.await.unwrap();
+    assert!(!called.load(AtomicOrdering::Acquire));
+    drop(request);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn download_reveal_holds_commit_and_masks_platform_errors() {
+    let case = RevealCase::new().await;
+    let request = case.request(0);
+    let called = AtomicBool::new(false);
+    let result =
+        reveal_download_in_session(&request, &case.path, case.intent, &case.journal, |path| {
+            assert!(case.state.ui_session_commit.try_lock().is_err());
+            assert!(case.state.servers.try_lock().is_err());
+            called.store(true, AtomicOrdering::Release);
+            Err(format!("platform error at {}", path.display()))
+        })
+        .await;
+    assert_eq!(result, Err(RevealError::Launch));
+    assert_eq!(result.unwrap_err().message(), REVEAL_FAILED);
+    assert!(called.load(AtomicOrdering::Acquire));
+    // A row removed after the outer sequence read is not final reveal authority.
+    case.actor
+        .finish_download_export(case._ready.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        reveal_download_in_session(
+            &request,
+            &case.path,
+            case.intent,
+            &case.journal,
+            |_| panic!("a cleared download must never launch")
+        )
+        .await,
+        Err(RevealError::Stale)
+    );
+    drop(request);
+    case.finish().await;
+}
+
 /// Two distinct real journals (two partials in one temporary Downloads folder).
 fn journals() -> (tempfile::TempDir, ExportJournal, ExportJournal) {
     let root = tempfile::tempdir().unwrap();
@@ -206,12 +416,14 @@ impl SavedRevealPorts for RevealFake {
             None => std::future::pending().await,
         }
     }
-    fn reveal(&self, path: &Path) -> Result<(), String> {
+    async fn reveal(
+        &self,
+        path: &Path,
+        _intent: u64,
+        _journal: &ExportJournal,
+    ) -> Result<(), RevealError> {
         if self.reveal_fails.load(AtomicOrdering::SeqCst) {
-            return Err(format!(
-                "could not start a file manager for {}",
-                path.display()
-            ));
+            return Err(RevealError::Launch);
         }
         self.revealed.lock().unwrap().push(path.to_owned());
         Ok(())

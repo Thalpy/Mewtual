@@ -727,6 +727,21 @@ pub(super) const REVEAL_UNCHECKED: &str =
     "Mewtual could not check the saved file right now. Try again shortly.";
 pub(super) const REVEAL_FAILED: &str = "The folder could not be opened.";
 
+/// Only fixed outcomes cross IPC; platform launch errors may contain a private path.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RevealError {
+    Stale,
+    Launch,
+}
+impl RevealError {
+    pub(super) fn message(self) -> String {
+        match self {
+            Self::Stale => "The download is no longer active.".into(),
+            Self::Launch => REVEAL_FAILED.into(),
+        }
+    }
+}
+
 /// The effects of "Show in folder" beyond a saved-file check, behind a seam for tests.
 #[async_trait::async_trait]
 pub(super) trait SavedRevealPorts: SavedCheckPorts {
@@ -737,8 +752,14 @@ pub(super) trait SavedRevealPorts: SavedCheckPorts {
         &self,
         journal: ExportJournal,
     ) -> Result<Result<PathBuf, SavedPresence>, String>;
-    /// Show `path` selected in the system file manager. Never opens or runs the file.
-    fn reveal(&self, path: &Path) -> Result<(), String>;
+    /// Revalidate the exact saved record under original UI commit, then synchronously
+    /// show its path. A boolean currentness observation alone is not reveal authority.
+    async fn reveal(
+        &self,
+        path: &Path,
+        intent: u64,
+        journal: &ExportJournal,
+    ) -> Result<(), RevealError>;
 }
 
 /// "Show in folder" for a Saved row: the same fenced, bounded, read-only identity check as
@@ -768,7 +789,10 @@ pub(super) async fn reveal_saved_sequence(
         return Err("The download is no longer active.".into());
     }
     match located {
-        Some(Ok(path)) => ports.reveal(&path).map_err(|_| REVEAL_FAILED.into()),
+        Some(Ok(path)) => ports
+            .reveal(&path, intent, &journal)
+            .await
+            .map_err(RevealError::message),
         Some(Err(SavedPresence::Missing)) => Err(REVEAL_MISSING.into()),
         Some(Err(SavedPresence::Replaced)) => Err(REVEAL_REPLACED.into()),
         Some(Err(SavedPresence::Ours | SavedPresence::Unknown)) | None => {
@@ -792,9 +816,62 @@ impl SavedRevealPorts for ActorSavedCheck<'_> {
         })
         .await
     }
-    fn reveal(&self, path: &Path) -> Result<(), String> {
-        reveal_path(path)
+    async fn reveal(
+        &self,
+        path: &Path,
+        intent: u64,
+        journal: &ExportJournal,
+    ) -> Result<(), RevealError> {
+        reveal_download_in_session(self, path, intent, journal, reveal_path).await
     }
+}
+
+/// Final Show-in-folder admission, after read-only filesystem probing. UI commit
+/// excludes Lock and foreground Clear/retry while the actor record is re-read.
+/// Never hold Servers across actor I/O: its bounded event consumer needs that map.
+async fn reveal_download_in_session(
+    request: &ActorSavedCheck<'_>,
+    path: &Path,
+    intent: u64,
+    journal: &ExportJournal,
+    reveal: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), RevealError> {
+    let state = request.state;
+    let _session = require_ui_session_generation(state, request.generation)
+        .await
+        .map_err(|_| RevealError::Stale)?;
+    let rows = request
+        .actor
+        .downloads()
+        .await
+        .map_err(|_| RevealError::Stale)?;
+    if !rows
+        .iter()
+        .any(|row| row.id == request.id && row.state.intent == intent)
+    {
+        return Err(RevealError::Stale);
+    }
+    let saved = request
+        .actor
+        .download_export_state(request.id)
+        .await
+        .map_err(|_| RevealError::Stale)?;
+    if !matches!(saved, Some(ExportState::Published(ref now)) if now == journal) {
+        return Err(RevealError::Stale);
+    }
+    let servers = state.servers.lock().await;
+    if !servers.get(&request.server).is_some_and(|entry| {
+        entry.instance == request.instance && entry.actor.same_instance(request.actor)
+    }) {
+        return Err(RevealError::Stale);
+    }
+    state
+        .ui_session_gate()
+        .check_generation(request.generation)
+        .map_err(|_| RevealError::Stale)?;
+    // No await after the last generation/record checks. Lock cannot finish before
+    // the OS launch; neither private path nor its raw launch error leaves native.
+    reveal(path).map_err(|_| RevealError::Launch)
 }
 
 /// Show a Saved row's file in the system file manager (Transfers UX, PR #51), after the same

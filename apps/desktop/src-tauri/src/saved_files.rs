@@ -888,8 +888,13 @@ pub(super) trait SavedListPorts: Send + Sync {
     async fn wait(&self, delay: Duration);
     /// The UI session and server entry are still the ones that asked.
     async fn current(&self) -> bool;
-    /// Show `path` selected in the system file manager. Never opens or runs the file.
-    fn reveal(&self, path: &Path) -> Result<(), String>;
+    /// Revalidate this exact entry under original UI commit, then synchronously
+    /// launch the file manager. Never opens/runs the file or returns a path.
+    async fn reveal(
+        &self,
+        path: &Path,
+        expected: &SavedFile,
+    ) -> Result<(), private_downloads::RevealError>;
 }
 
 /// Check every checkable entry read-only, newest first, for at most [`LIST_CHECK_WAIT`]. Answers
@@ -984,8 +989,9 @@ pub(super) async fn reveal_entry_sequence(
     }
     match located {
         Some(Ok(path)) => ports
-            .reveal(&path)
-            .map_err(|_| private_downloads::REVEAL_FAILED.into()),
+            .reveal(&path, &entry)
+            .await
+            .map_err(private_downloads::RevealError::message),
         Some(Err(SavedPresence::Missing)) => Err(private_downloads::REVEAL_MISSING.into()),
         Some(Err(SavedPresence::Replaced)) => Err(private_downloads::REVEAL_REPLACED.into()),
         Some(Err(SavedPresence::Ours | SavedPresence::Unknown)) | None => {
@@ -1042,9 +1048,45 @@ impl SavedListPorts for ActorSavedList<'_> {
     async fn current(&self) -> bool {
         still_current(self.state, self.server, self.instance, self.generation).await
     }
-    fn reveal(&self, path: &Path) -> Result<(), String> {
-        reveal_path(path)
+    async fn reveal(
+        &self,
+        path: &Path,
+        expected: &SavedFile,
+    ) -> Result<(), private_downloads::RevealError> {
+        reveal_entry_in_session(self, path, expected, reveal_path).await
     }
+}
+
+/// The final saved-list reveal is one UI -> Store -> Servers transaction. Reading
+/// the exact entry here prevents a queued click from surviving Clear/rename, and
+/// retaining all guards through the synchronous launch excludes background list
+/// recording as well as foreground mutations. Filesystem probing stays outside.
+async fn reveal_entry_in_session(
+    request: &ActorSavedList<'_>,
+    path: &Path,
+    expected: &SavedFile,
+    reveal: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), private_downloads::RevealError> {
+    use private_downloads::RevealError;
+    let state = request.state;
+    let _session = require_ui_session_generation(state, request.generation)
+        .await
+        .map_err(|_| RevealError::Stale)?;
+    with_owner(state, request.server, request.instance, |store, owner| {
+        let SavedFilesLoad::Found(list) = store.load_saved_files(request.server, owner) else {
+            return Err(RevealError::Stale);
+        };
+        if list.get(expected.id) != Some(expected) {
+            return Err(RevealError::Stale);
+        }
+        state
+            .ui_session_gate()
+            .check_generation(request.generation)
+            .map_err(|_| RevealError::Stale)?;
+        reveal(path).map_err(|_| RevealError::Launch)
+    })
+    .await
+    .ok_or(RevealError::Stale)?
 }
 
 /// Check every saved file of this server read-only (bounded). Entries not reached in time are

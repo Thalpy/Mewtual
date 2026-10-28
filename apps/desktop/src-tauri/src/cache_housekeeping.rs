@@ -623,10 +623,10 @@ async fn set_cache_limit_in_session(
     let (actor, instance) = actor_instance_of(state, server).await?;
     // Save and apply as one step per process, so the actor always ends on the sealed value.
     let serial = state.cache.limit_writes.clone().lock_owned().await;
-    // Leave takes this same persistence lock BEFORE the UI commit. Keep that order:
-    // an admitted choice completes before removal, or finds its original row gone.
-    // Waiting for either serialization lock must not adopt a newer unlock generation.
-    let persist = persist_lock_for(state, server).lock_owned().await;
+    // Do not take the actor snapshot persistence mutex here. Registration retains
+    // UI commit while persisting its newly visible row; waiting for UI with that
+    // persistence mutex held would deadlock registration. UI commit already orders
+    // this write/application against Leave's row removal and record deletion.
     // Owned counterpart of require_ui_session_generation: actual actor application must
     // retain this fence even if its IPC waiter disappears. Recheck again after all locks.
     let session = state.ui_session_commit.clone().lock_owned().await;
@@ -657,12 +657,12 @@ async fn set_cache_limit_in_session(
     }
     // No await between the sealed write and this ownership transfer. Actor commands keep
     // running after their reply receiver is dropped; the retained worker therefore owns
-    // all three fences through the actual reply, independently of the public caller.
+    // both fences through the actual reply, independently of the public caller.
     // Store/Servers have already dropped: the actor's bounded event consumer needs them.
     #[cfg(test)]
     let entered = state.cache.limit_apply_entered.lock().unwrap().take();
     tokio::spawn(async move {
-        let guards = (serial, persist, session);
+        let guards = (serial, session);
         #[cfg(test)]
         if let Some(entered) = entered {
             let _ = entered.send(());

@@ -192,6 +192,103 @@ async fn saved_file_mutations_apply_while_the_original_session_is_open() {
     }
 }
 
+#[tokio::test]
+async fn saved_entry_reveal_rejects_lock_registered_during_the_final_registry_wait() {
+    let case = SessionWriteCase::new(SessionMutation::Forget).await;
+    let SavedFilesLoad::Found(list) = stored(&case.state).await else {
+        panic!("stored list");
+    };
+    let expected = list.entries()[0].clone();
+    let request = ActorSavedList {
+        state: &case.state,
+        server: 1,
+        instance: 56_001,
+        generation: 0,
+    };
+    let path = case.root.path().join("file-1");
+    let called = AtomicBool::new(false);
+    let servers = case.state.servers.lock().await;
+    let mut reveal = Box::pin(reveal_entry_in_session(&request, &path, &expected, |_| {
+        called.store(true, Ordering::Release);
+        Ok(())
+    }));
+    assert!(still_pending(reveal.as_mut()).await);
+    assert!(case.state.ui_session_commit.try_lock().is_err());
+    let mut lock = Box::pin(lock_session_inner(&case.state, None));
+    assert!(still_pending(lock.as_mut()).await);
+    drop(servers);
+    assert_eq!(reveal.await, Err(private_downloads::RevealError::Stale));
+    lock.await.unwrap();
+    assert!(!called.load(Ordering::Acquire));
+    drop(request);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn saved_entry_reveal_holds_commit_and_an_unlock_cannot_revive_it() {
+    let case = SessionWriteCase::new(SessionMutation::Forget).await;
+    let SavedFilesLoad::Found(list) = stored(&case.state).await else {
+        panic!("stored list");
+    };
+    let expected = list.entries()[0].clone();
+    let request = ActorSavedList {
+        state: &case.state,
+        server: 1,
+        instance: 56_001,
+        generation: 0,
+    };
+    let path = case.root.path().join("file-1");
+    reveal_entry_in_session(&request, &path, &expected, |_| {
+        assert!(case.state.ui_session_commit.try_lock().is_err());
+        assert!(case.state.store.try_lock().is_err());
+        assert!(case.state.servers.try_lock().is_err());
+        Ok(())
+    })
+    .await
+    .unwrap();
+    lock_session_inner(&case.state, None).await.unwrap();
+    let generation = case.state.ui_session_generation.load(Ordering::Acquire);
+    finalize_unlock_session(&case.state, generation, false)
+        .await
+        .unwrap();
+    assert!(!ui_session_closed(&case.state));
+    assert_eq!(
+        reveal_entry_in_session(&request, &path, &expected, |_| panic!(
+            "unlock cannot authorize an old reveal"
+        ))
+        .await,
+        Err(private_downloads::RevealError::Stale)
+    );
+    drop(request);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn saved_entry_reveal_rechecks_the_actual_entry_after_waiting_for_commit() {
+    let case = SessionWriteCase::new(SessionMutation::Forget).await;
+    let SavedFilesLoad::Found(list) = stored(&case.state).await else {
+        panic!("stored list");
+    };
+    let expected = list.entries()[0].clone();
+    let request = ActorSavedList {
+        state: &case.state,
+        server: 1,
+        instance: 56_001,
+        generation: 0,
+    };
+    let path = case.root.path().join("file-1");
+    let commit = require_ui_session_generation(&case.state, 0).await.unwrap();
+    let mut reveal = Box::pin(reveal_entry_in_session(&request, &path, &expected, |_| {
+        panic!("a cleared entry must never launch")
+    }));
+    assert!(still_pending(reveal.as_mut()).await);
+    assert!(forget_entry(&case.state, 1, 56_001, expected.id).await);
+    drop(commit);
+    assert_eq!(reveal.await, Err(private_downloads::RevealError::Stale));
+    drop(request);
+    case.finish().await;
+}
+
 /// Recording at the default setting, which most rules here are about.
 trait RecordDefault {
     fn record_default(&mut self, entry: SavedFile) -> bool;
@@ -1136,10 +1233,14 @@ impl SavedListPorts for FakeList {
     async fn current(&self) -> bool {
         self.current.load(Ordering::SeqCst)
     }
-    fn reveal(&self, path: &Path) -> Result<(), String> {
+    async fn reveal(
+        &self,
+        path: &Path,
+        _expected: &SavedFile,
+    ) -> Result<(), private_downloads::RevealError> {
         self.revealed.lock().unwrap().push(path.to_owned());
         if self.reveal_fails {
-            Err("no file manager".into())
+            Err(private_downloads::RevealError::Launch)
         } else {
             Ok(())
         }

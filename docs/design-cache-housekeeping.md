@@ -265,11 +265,13 @@ through the composite store.
   outside 1 GiB to 1 TiB natively. Both are registered in the command policy, the capability and the
   frontend security ledger.
 - **Queued choices** keep the invoking UI generation and original actor/incarnation. The
-  setter serializes with Leave using the per-server persistence lock before UI commit,
-  then checks generation and actor again under Store/Servers at the sealed write. A
+  setter retains UI commit, which also orders Leave's row removal/deletion, and
+  checks generation and actor again under Store/Servers at the sealed write. A
   retained apply worker owns those fences through the actor reply, even if the IPC
   caller disappears. Store/Servers are released before actor I/O. Registration's
   adoption path does not take the setter serialization lock (it already owns UI commit).
+  The setter must not take the actor snapshot persistence mutex before waiting for UI:
+  admitted registration owns UI and still needs that mutex to persist the new row.
 - **Settings page**: Server settings → **Storage** ("Storage on this device"), for servers and DMs:
   the same bar, a limit picker (1, 2, 5, 10, 20, 50, 100 GiB, 1 TiB, No limit), what is pinned, and
   the leaving-soon count. Lowering below current usage confirms with what will go.

@@ -138,6 +138,36 @@ async fn cache_limit_queued_before_lock_cannot_write_or_revive_after_unlock() {
 }
 
 #[tokio::test]
+async fn queued_cache_choice_does_not_deadlock_admitted_registration_persistence() {
+    let case = LimitWriteCase::new(false).await;
+    let serial = case.state.cache.limit_writes.lock().await;
+    let mut write = Box::pin(set_cache_limit_in_session(&case.state, 1, Some(1 << 30)));
+    assert!(still_pending(write.as_mut()).await);
+    // Found/join/connect retain UI commit after making the row visible and then
+    // call persist_server. Reproduce that real lock order after the cache command
+    // has captured the visible row, without constructing a Tauri window.
+    let admitted = require_ui_session_generation(&case.state, 0).await.unwrap();
+    drop(serial);
+    assert!(still_pending(write.as_mut()).await);
+    let saved = tokio::select! {
+        biased;
+        saved = persist_server(&case.state, 1) => Some(saved),
+        () = SystemClock.sleep(Duration::from_secs(5)) => None,
+    };
+    // Always release and join the old command before reporting a broken lock order.
+    drop(admitted);
+    write.await.unwrap();
+    let limit = case.actor.cache_status().await.unwrap().limit_bytes;
+    case.finish().await;
+    assert_eq!(
+        saved,
+        Some(PersistOutcome::Durable),
+        "registration persistence must finish while its original UI commit is held"
+    );
+    assert_eq!(limit, Some(1 << 30));
+}
+
+#[tokio::test]
 async fn cache_limit_rechecks_lock_after_waiting_for_the_sealed_store() {
     let case = LimitWriteCase::new(false).await;
     let before = case.sealed();
@@ -265,7 +295,7 @@ async fn admitted_cache_limit_outlives_its_waiter_and_precedes_actual_lock() {
         "lock waits for admitted actor application"
     );
     assert!(case.state.cache.limit_writes.try_lock().is_err());
-    assert!(persist_lock_for(&case.state, 1).try_lock_owned().is_err());
+    assert!(case.state.ui_session_commit.try_lock().is_err());
     case.start_drain();
     lock.await.unwrap();
     barrier.await.unwrap();

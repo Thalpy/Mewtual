@@ -14,6 +14,13 @@ preserved. Five PRs remain open: #47, #51, #55, #56 and #73. A new isolated
 the native Lock/Leave write findings. Combined validation is still pending; historical
 passes below must not be reused as acceptance of these newly combined features.
 
+The separate #74 store-repair follow-up is now complete on both hosted OSes at
+`91d29aa1`: [Linux](https://github.com/Thalpy/Mewtual/actions/runs/40604428160/job/122540272407)
+and [Windows](https://github.com/Thalpy/Mewtual/actions/runs/40604428160/job/122540272656)
+both pass all 22 negative/restored pairs. This supersedes the partial Windows evidence
+below for that unchanged store checkpoint. The earlier cancelled 90-minute job is
+still not a pass, and these results do not validate the new #51/#55/#56 combination.
+
 ## Landed and prepared work
 
 - PR #26 merged into main at `701da398`. It included all PR #54 commits, and GitHub

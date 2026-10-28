@@ -8,9 +8,11 @@ saved-files histories. This combination is under validation; the older results b
 do not establish that these additional features pass together.
 
 The native setting fixes bind queued cache and saved-file changes to their original
-UI generation and server incarnation. Cache setting writes use Leave's persistence
-lock before the UI commit; an admitted write retains both fences through the actual
-actor application even if its caller disappears. Store/registry locks are released
+UI generation and server incarnation. Cache choices retain serialization and UI
+commit through the actual actor application even if the caller disappears. UI commit
+also orders Leave's row removal/deletion; the cache setter does not take the actor
+snapshot persistence mutex. Registration already holds UI while using that mutex,
+so taking it before UI would deadlock an admitted new-server save. Store/registry locks are released
 before actor I/O. Saved-file forget, reset and limit changes retain UI commit through
 their synchronous sealed writes and repeat the generation check after lock waits.
 Lock registered before final admission prevents the write; an earlier admitted
@@ -18,11 +20,24 @@ application completes before Lock can return. Unlock never revives the old reque
 
 Focused regressions exercise the real sealed records, actors and Lock path, including
 server replacement, committed Leave, lock/unlock and an abandoned cache caller behind
-a full actor event queue. All 15 cache and 24 saved-file tests pass. Five exact
+a full actor event queue. At `5340c04a`, all 15 cache and 24 saved-file tests pass. Five exact
 negative controls fail at their intended assertions; all five restored controls pass
 after byte-exact restoration and a fresh build. Read-only review has no remaining
-findings in these fixes. The earlier #51 six-client recovery failure still needs
-current-source validation; that real-TCP scenario is running.
+findings in that scoped review. Broader integration review then found the registration
+deadlock above and a Show-in-folder race. Its new registration-shaped test fails before
+the correction. The follow-up passes 16 cache, 27 saved-file and eight saved-download
+check/reveal tests; re-review has no remaining blocker/high/medium finding. Expanded
+seven-case negative/restored controls and complete backend gates are pending.
+The original #51 hostile six-client scenario now passes on the combined stack in
+228.48 seconds, including bridge/reunion and independent sealed reopens. That validates
+the current graceful-close path; it does not establish the cause of the old Linux failure
+or abrupt-crash custody. The complete combined native suite still needs to pass.
+
+Show in folder now takes original-generation UI commit for final admission, revalidates
+the exact saved entry or Published journal/intent, and repeats incarnation/generation
+checks before synchronous OS launch. Filesystem probing stays outside commit. Native
+actor reads never hold Servers; saved-list revalidation/launch retains Store then Servers.
+Only typed fixed errors cross IPC, including platform launch errors that contain paths.
 
 The combined frontend suite passes 3,312 tests, with zero Svelte diagnostics and a
 successful production build. All ten ordinary rendered Edge flows and the dedicated

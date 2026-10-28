@@ -10,10 +10,13 @@ A numeric server ID alone never authorizes a queued command against a replacemen
 Mutations retain UI commit while taking Store then Servers, with a pure atomic
 generation check after those waits. Lock registers its new generation before waiting
 for commit, so a queued write cannot pass through an ordinary lock/unlock cycle.
-The cache setter takes the existing per-server persistence lock before UI commit,
-matching Leave. Removal therefore cannot be followed by a stale `.storage` rewrite.
+UI commit also orders Leave's row removal and sealed-record deletion. Removal cannot
+be followed by a stale `.storage` rewrite: a queued setter finds its original row gone.
+The cache setter must not retain the actor snapshot persistence mutex while awaiting
+UI commit. Registration owns UI while persisting a newly visible row; the opposite
+order would deadlock both commands. The actual registration-shaped regression pins it.
 
-After cache-setting admission, a retained worker owns serialization, persistence and
+After cache-setting admission, a retained worker owns serialization and
 UI commit through the actual actor reply, independently of the IPC waiter. This is
 required because dropping an actor reply receiver does not cancel its queued command.
 Store and Servers are released before waiting for that reply: the actor's bounded
@@ -22,9 +25,18 @@ the setter serialization lock; it already owns UI commit and must not invert the
 Saved-file mutations perform only synchronous sealed I/O under their retained guard;
 background save-recording helpers keep their existing membership/incarnation rules.
 
+Show-in-folder final admission also retains original UI commit. The Published download
+journal/intent or saved-list entry is revalidated there, followed by exact server
+incarnation and final atomic generation checks. Synchronous OS launch runs before
+those guards drop. Slow filesystem identity probing remains outside commit, and no
+Servers guard is held across actor I/O. Platform errors become a typed fixed failure;
+private locations and raw path-containing errors never cross IPC.
+
 These are local session and lifecycle boundaries, with no wire or persistence format
-change. All 39 focused cache/saved tests and five negative/restored controls pass;
-complete combined Root/native validation remains pending on this candidate.
+change. The 39 focused cache/saved tests and five negative/restored controls pass at
+`5340c04a`. The registration/reveal follow-up passes all 51 focused tests and has no
+remaining blocker/high/medium review finding; expanded mutation controls and complete
+combined validation remain pending.
 
 ## Native dependency follow-up (27 October; candidate)
 
