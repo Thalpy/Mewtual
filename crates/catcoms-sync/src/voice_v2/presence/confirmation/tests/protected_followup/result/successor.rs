@@ -1050,13 +1050,13 @@ fn sdp_successor_actual_lower_delays_retirement_without_reopening_or_renewing_ol
 }
 
 #[test]
-fn sdp_successor_registry_refusal_keeps_same_native_owner_and_quiet_housekeeping_expires_it() {
+fn sdp_successor_progression_refusal_preserves_same_pending_owner_and_quiet_expiry() {
     let mut p = confirmed_high();
     let pool = p._runtimes[1].resources();
     let group = p.f.high.context.scope.group;
     // Preserve the genuine pending owner through a refused final fence, then let actual
-    // old packet custody retire. Stacking both192KiB exchanges on that old96KiB Workflow
-    // plus infrastructure would hit the earlier byte gate, never the registry under test.
+    // old packet custody retire. The group progression claim now refuses an independent
+    // foreign Exchange BEFORE registration; it cannot displace or block this original.
     assert_eq!(
         prepare(&mut p, |_, _| Err(VoiceError::Capacity)).err(),
         Some(VoiceError::Capacity)
@@ -1064,22 +1064,19 @@ fn sdp_successor_registry_refusal_keeps_same_native_owner_and_quiet_housekeeping
     let original = pending(&p);
     p.f.clock.advance_ms(20_001);
     p.f.high.join.collect_expired(&p.f.clock);
-    let blocker =
-        Exchange::new_for_test(pool.clone(), group, p.f.high.join.ledger.action_slots()).unwrap();
-    pool.register_exchange(group, &blocker).unwrap();
+    let before = pool.counts();
     assert_eq!(
-        prepare(&mut p, |_, _| Ok(())).err(),
+        Exchange::new_for_test(pool.clone(), group, p.f.high.join.ledger.action_slots()).err(),
         Some(VoiceError::Capacity)
     );
+    assert_eq!(pool.counts(), before);
     assert!(Arc::ptr_eq(&original, &pending(&p)));
-    assert!(Arc::ptr_eq(&pool.exchange(group).unwrap(), &blocker));
-    assert_eq!(
-        prepare(&mut p, |_, _| Ok(())).err(),
-        Some(VoiceError::Capacity)
-    );
+    let recovered = prepare(&mut p, |_, _| Ok(())).unwrap();
+    assert!(Arc::ptr_eq(&original, &recovered.owner));
+    assert!(Arc::ptr_eq(&pool.exchange(group).unwrap(), &original));
     assert!(Arc::ptr_eq(&original, &pending(&p)));
-    // This is the actual permission-independent LocalJoin housekeeping used by Root. The
-    // original pending owner is NOT in the global weak index; collection must not rely on it.
+    // Actual permission-independent LocalJoin housekeeping must close this SAME original
+    // even after its final-fence retry registered it. Historical outputs retain its index.
     p.f.clock.advance_ms(9_999);
     p.f.high.join.collect_expired(&p.f.clock);
     assert!(!original.successor_current_at(
@@ -1089,7 +1086,7 @@ fn sdp_successor_registry_refusal_keeps_same_native_owner_and_quiet_housekeeping
         &pool,
         31_000
     ));
-    drop(blocker);
+    drop(recovered);
     assert_eq!(
         prepare(&mut p, |_, _| Ok(())).err(),
         Some(VoiceError::Unauthorized)
@@ -1098,16 +1095,18 @@ fn sdp_successor_registry_refusal_keeps_same_native_owner_and_quiet_housekeeping
         .sdp_successor
         .is_none());
     assert!(!original.is_live());
-    assert!(
-        pool.exchange(group).is_none(),
-        "expired pending cannot newly register"
-    );
+    assert!(Arc::ptr_eq(&pool.exchange(group).unwrap(), &original));
     // The unused lane has returned although historical native/observation owners remain.
     let crypto: Vec<_> = (0..4)
         .map(|_| pool.charge(group, 0, ResourceKind::Crypto).unwrap())
         .collect();
     assert!(pool.charge(group, 0, ResourceKind::Crypto).is_err());
     drop(crypto);
+    drop(original);
+    assert!(
+        pool.exchange(group).is_none(),
+        "actual last output unregisters"
+    );
 }
 
 #[test]
@@ -1253,18 +1252,18 @@ fn sdp_successor_registered_expiry_releases_native_registry_custody_but_not_real
         31_000,
         "history never renews the window"
     );
-    let next =
-        Exchange::new_for_test(pool.clone(), group, p.f.high.join.ledger.action_slots()).unwrap();
     assert_eq!(
-        pool.register_exchange(group, &next),
-        Err(VoiceError::Capacity),
-        "actual historical output still retains its original allocation"
+        Exchange::new_for_test(pool.clone(), group, p.f.high.join.ledger.action_slots()).err(),
+        Some(VoiceError::Capacity),
+        "actual historical output still retains the original progression claim"
     );
     drop(output);
     assert!(
         pool.exchange(group).is_none(),
         "native custody did not strand the registry"
     );
+    let next =
+        Exchange::new_for_test(pool.clone(), group, p.f.high.join.ledger.action_slots()).unwrap();
     pool.register_exchange(group, &next).unwrap();
     assert!(Arc::ptr_eq(&pool.exchange(group).unwrap(), &next));
     assert_eq!(

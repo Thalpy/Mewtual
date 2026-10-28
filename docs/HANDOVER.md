@@ -1,5 +1,79 @@
 # Mewtual; Handover
 
+## Ready funding compatibility assertions (28 October; focused reruns passed)
+
+The full Root command on `d55fa0db` stopped with3,915 passes, one failure and25
+existing ignores (36 result groups). The failing sync expiry test expected only
+16KiB at final HandoffLoan return; it actually returned20KiB. Remaining workspace
+groups were not run after that failure. This is not a passing complete Root result.
+
+The hosted Linux native command on the same checkpoint had972 passes and40 failures:
+the inherited discovery fixture below, the matching native custody expectation,
+and38 fail-closed fixture admission refusals. The ownership review confirms that
+the final loan retains Workflow/progression custody and Ready's original4KiB fee.
+Actual loan return releases16KiB, then final Workflow/claim destruction returns4KiB.
+With no loan, expiry collection already returns that metadata; dropping None returns0.
+
+Both exact test expectations now cover that ownership contract. Held-owner counts
+and negative drainage assertions remain unchanged; full-tuple and repeated collection/
+close checks strengthen the tests. No production payment, bound, deadline or authority
+was changed. Read-only ownership review/re-review has no finding. The affected complete
+sync suite passes1,383 tests in ten result groups, including1,334 library tests and ten
+compile-fail documentation checks. All379 focused native handoff tests pass24.41s.
+Both real-transport forced-alternate scenarios pass144.51s, including preserved indexed
+media and the genuine discovery-to-late-Capacity negative control. Full native, refreshed
+native checks/Clippy and a clean complete Root command remain required before sign-off.
+The reviewed discovery correction is integrated as `f8425239`.
+
+## Inert admission capacity groundwork (28 October; validation in progress)
+
+The isolated `communication-v2-admission-completion` branch adds reviewed group progression
+custody (`82a83ae3`) and an inert reserve/consume split. The same claim survives actual old
+Workflow work and independent prepared/transferred/Exchange owners. Native factories cannot
+substitute another same-group progression. Release follows actual final cell deallocation;
+plain outer payments survive the claim tail and enclosing Box destruction. Old retained work
+keeps the original Ready4KiB metadata fee until its actual return.
+
+`ChainCapacity` reserves original bytes/positions without a binding, lease or transcript
+clock. Consume reborrows CURRENT Resources/action/packet owners and validates group/role/live
+Binding before moving the exact prepayment and original deadline into the bound chain.
+Root metadata precedes packet allocations and survives its funded objects. No capacity,
+Source allowance or deadline was increased. Root1984/2048 and Ready2344/4096 structural guards
+pass, including inert/decomposition overlap. All729 focused V2 tests pass in20.97s, with
+actual final-release barriers, foreign-owner/pressure/refusal cases and decomposition unwind.
+Read-only design/adversarial review and re-review have no remaining finding.
+
+Strict Root Clippy across all targets/features and the complete frontend (3,539 tests)
+pass. Complete Root/native validation and separate native checks remain pending for this
+NEW source. The green combined candidate below predates these changes. Initial frontend
+invocation found missing worktree dependencies and executed no test bodies; a verified
+same-lockfile junction shares the existing installation, and the real rerun passes74.84s.
+This branch still has no native preclaim registration, signed bilateral Request/Grant/Commit,
+failed-round Forget, production audio composition or member relay. V2 stays OFF; #73's red
+all-three reproduction is not incorporated. One desktop remains available.
+
+## Linux alternate-discovery fixture correction (28 October; validation pending)
+
+The hosted Linux native run at `fa3107d2` failed with973 passes and39 failures.
+The causal failure was the forced-alternate discovery fixture expecting the first
+worker after one local refusal to publish successfully; the other38 tests hit the
+fixture's fail-closed admission gate. The log reports Capacity without its exact
+completed stage. Server-map contention is plausible, not an established cause.
+
+Production rotates discovery on worker admission, before asynchronous local checks.
+The corrected fixture retains one Cursor and one original10s observer deadline,
+forces repeated real server-map pressure, and permits only an exact worker's
+pre-selection Capacity to continue. A test-only completion field records that
+negative boundary; lossy global diagnostics never authorize a retry. Even discovery
+cursors remain refused so eventual success must still select the alternate peer.
+No selector, grant, cursor reset, new intent, attempt refund or larger bound is added.
+Failures after selection/publication remain failures. Focused/native gates are pending.
+
+PR #76 is back in draft until this correction passes. PR #75 is ready for review;
+its corrected Linux native run passed1,008 library tests plus six ACL tests. Its
+overlay rerun with the45-minute aggregate allowance also passed. Other hosted gates
+remain in progress. These results do not clear #76's separate failed run.
+
 ## Corrected combined validation passed locally (28 October)
 
 The stacked Score candidate at `fa3107d2` passes the complete native command:

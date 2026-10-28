@@ -1,5 +1,27 @@
 # Mewtual; Architecture
 
+## Inert V2 progression capacity (28 October; candidate, inactive)
+
+One exact group claim now spans the original Workflow, independently prepared/transferred
+successor, Exchange and their actual credited work. Weak lookup indices are housekeeping,
+not proof that the slot is free. The claim's private shared cell publishes release only
+after actual final deallocation; every wrapper retains a separate plain metadata payment
+through that publication. A refused candidate stays unarmed, including address reuse.
+
+`ChainCapacity` prepays the existing history bytes and twelve Action positions, role-specific
+packet positions, core/Ready progression, Crypto/shared Lower capacity and the group claim.
+It creates no binding, lease, protocol action or deadline. Trusted consumption rechecks the
+exact current Resources/action/packet pools, group, role and live binding, then moves the SAME
+owners into the bound chain with the original deadline. Native `new` retains its early
+Unauthorized check. Shared Lower ownership does not promise immediately idle execution.
+
+The original Root fee survives all its funded objects; Ready's outer fee survives inert and
+prepared Box destruction/deallocation. Actual held old work keeps the existing Ready4KiB
+claim payment after close until final return. Structural guards measure Root1984/2048 and
+Ready2344/4096 bytes, with unchanged byte/slot limits. Full validation is pending for this
+candidate. Signed bilateral admission, exact native preclaim registration/cancellation,
+failed-round Forget and production audio/relay composition remain open; V2 remains OFF.
+
 ## Owned microphone device setting (27 October; inactive)
 
 The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after

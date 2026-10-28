@@ -18,9 +18,11 @@ pub const GROUP_BYTES: usize = 512 * 1024;
 const GROUP_RECORDS: usize = 1024;
 const SLOT_KINDS: usize = 8;
 mod group_lanes;
+mod progress;
 pub(crate) use group_lanes::GroupForwardLanes;
 #[cfg(test)]
 pub(super) use group_lanes::GROUP_FORWARD_METADATA_BYTES;
+pub(in crate::voice_v2) use progress::{GroupProgressClaim, ProgressFunding};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResourceKind {
@@ -56,6 +58,9 @@ struct Counts {
     exchange: std::sync::Weak<super::negotiation::Exchange>,
     workflow: std::sync::Weak<super::chain::Workflow>,
     outgoing_lanes: std::sync::Weak<GroupForwardLanes>,
+    // Affine claim's exact opaque stamp, retained through actual final destruction.
+    // Lookup Weak owners above are housekeeping indices, never capacity certificates.
+    progress: usize,
 }
 #[derive(Default)]
 struct State {
@@ -315,6 +320,9 @@ impl Resources {
             .groups
             .get_mut(&group)
             .expect("prepaid workflow group");
+        if !workflow.progress_matches(self, group, counts.progress) {
+            return Err(VoiceError::Scope);
+        }
         if counts.workflow.strong_count() != 0 {
             return Err(VoiceError::Capacity);
         }
@@ -366,6 +374,9 @@ impl Resources {
                 .groups
                 .get_mut(&group)
                 .expect("prepaid exchange group");
+            if !exchange.progress_matches(self, group, counts.progress) {
+                return Err(VoiceError::Scope);
+            }
             if counts.exchange.strong_count() != 0 {
                 return if counts.exchange.ptr_eq(&candidate) {
                     Ok(())
@@ -803,7 +814,8 @@ impl Credit {
         state.total.bytes -= bytes;
         let counts = state.groups.get_mut(&self.group).expect("retained reserve");
         counts.bytes -= bytes;
-        if counts.bytes == 0 && counts.slots.iter().all(|count| *count == 0) {
+        if counts.bytes == 0 && counts.progress == 0 && counts.slots.iter().all(|count| *count == 0)
+        {
             state.groups.remove(&self.group);
         }
     }
@@ -829,7 +841,10 @@ impl Drop for Credit {
             if let Some((slot, _, _)) = self.kind.slot() {
                 counts.slots[slot] -= 1;
             }
-            if counts.bytes == 0 && counts.slots.iter().all(|count| *count == 0) {
+            if counts.bytes == 0
+                && counts.progress == 0
+                && counts.slots.iter().all(|count| *count == 0)
+            {
                 state.groups.remove(&self.group);
             }
         }
