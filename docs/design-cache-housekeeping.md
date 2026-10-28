@@ -35,7 +35,8 @@ First round:
   removes anything Studio still references.
 - **A per-server cache limit.** When it is reached, newer files take priority and the oldest are
   dropped first, ordered by listing time, not last viewed. Never evicted: Keep, Studio references,
-  files in use right now, in-flight Downloads, and whatever the saved-files list PR agrees.
+  files in use right now and in-flight Downloads (the saved-files list PR decided the list is not
+  a pin).
 - **Footer warning** for the selected server: a bar of the limit used and a count of files "leaving
   soon", shown before the cache is full.
 - **Truthful docs.** Expiry stays a displayed date.
@@ -149,7 +150,9 @@ class above, including unclaimed blobs and Keep duplicates:
   become ordinary unclaimed blobs.
 - **Studio**: the group's protected set from `ProtectedBlobs` (durable references plus live job
   holds). The deletion guard also re-checks it under its mutex through each unlink.
-- **Saved-files list**: added by PR #56 to the same input.
+- **Saved-files list**: not a pin (decided in PR #56). The list records copies saved outside the
+  vault and names nothing the cache needs; a saved file's chunks stay as long as any rule above
+  keeps them, like any file this device has displayed.
 
 **Not pins: wiki embeds and "Never expires".** Both are circulation rules members set for every
 device: any member can embed a listed file in a wiki page (even a pending edit pins it in

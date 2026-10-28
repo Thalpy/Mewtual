@@ -387,6 +387,8 @@ async fn a_save_as_choice_saves_at_the_exact_chosen_name_through_the_same_sequen
     assert_eq!(exported.path, folder.join("Renamed report.bin"));
     assert!(exported.staging_cleared);
     assert_eq!(std::fs::read(&exported.path).unwrap(), DATA.concat());
+    // PR #56: a typed name never counts as the listed name asked for.
+    assert_eq!(exported.started_from, None);
     assert_eq!(
         fake.events(),
         [
@@ -423,6 +425,50 @@ async fn a_refused_begin_at_a_chosen_place_discards_the_new_partial() {
         0,
         "no partial left at the chosen place"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_fresh_one_click_save_names_what_it_asked_for() {
+    // PR #56 adversarial review M2: "Replace my older saved copy" may give the new copy the old
+    // copy's name only for a fresh one-click save into Downloads. A Save as journal resumed by a
+    // plain Resume (Begin consumed the choice, so the destination reads as Downloads) reopens the
+    // user's typed name and must never count as having asked for the listed name.
+    let (root, downloads) = downloads();
+    let (folder, chosen) = chosen_place(&root, "My typed name.bin");
+    let fake = Fake::new(&folder);
+    fake.lock_at_publication.store(true, AtomicOrdering::SeqCst);
+    assert!(
+        export_sequence(&fake, good_plan(), &chosen, "listed name.bin")
+            .await
+            .is_err()
+    );
+    fake.live.store(true, AtomicOrdering::SeqCst);
+    let resumed = export_sequence(
+        &fake,
+        good_plan(),
+        &Destination::Downloads(downloads.clone()),
+        "listed name.bin",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(resumed.path, folder.join("My typed name.bin"));
+    assert_eq!(resumed.started_from, None);
+    assert!(!resumed.recovered);
+    assert_eq!(resumed.location.leaf(), "My typed name.bin");
+    // A fresh one-click save names its sanitized listed name.
+    let fresh_fake = Fake::new(&downloads);
+    let fresh = export_sequence(
+        &fresh_fake,
+        good_plan(),
+        &Destination::Downloads(downloads.clone()),
+        "listed name.bin",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(fresh.started_from.as_deref(), Some("listed name.bin"));
+    assert!(fresh.location.identified());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -495,6 +541,8 @@ async fn a_publish_failure_after_the_link_is_recovered_by_the_next_resume_withou
         .unwrap();
     assert_eq!(exported.path, folder.join("notes.txt"));
     assert!(exported.staging_cleared);
+    // PR #56: a recovered publication is listed but never replaces anything.
+    assert!(exported.recovered && exported.started_from.is_none());
     // PR51 M2: the recovered final name is flushed before Published is recorded, too.
     assert!(fake.events().ends_with(&[Event::Flush, Event::Recover]));
     assert!(fake.published());

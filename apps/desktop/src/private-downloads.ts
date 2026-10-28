@@ -24,6 +24,9 @@ export type PrivateDownload = {
   /** Saved rows only: native proved the file sits in the resolved Downloads folder
    * (`"downloads"`) or not (`"other"`). `null` for every other state. Never a folder name. */
   savedTo: "downloads" | "other" | null;
+  /** Saved rows only (PR #56): the saved-files list entry that is exactly this saved file. This
+   * row stands for it, so the entry is not drawn as a second row. `null` otherwise. */
+  savedEntry: string | null;
 };
 const labels: Record<PrivateDownloadStatus, string> = {
   receiving: "Receiving", incomplete: "Interrupted", ready: "Ready to save",
@@ -184,14 +187,18 @@ export function checkedPrivateDownloads(value: unknown): PrivateDownload[] {
     const bytes = checkedBytes(row);
     // Where a saved file went: one of two words on a saved row, nothing on any other row.
     const savedTo = row.savedTo ?? null;
+    // The list entry a saved row stands for: an entry ID on a saved row, nothing elsewhere.
+    const savedEntry = row.savedEntry ?? null;
     if (bytes === null || (savedTo !== null &&
-        (row.status !== "saved" || (savedTo !== "downloads" && savedTo !== "other")))) {
+        (row.status !== "saved" || (savedTo !== "downloads" && savedTo !== "other"))) ||
+        (savedEntry !== null && (row.status !== "saved" || typeof savedEntry !== "string" ||
+          !/^[0-9a-f]{32}$/.test(savedEntry)))) {
       throw new Error("Download progress could not be read.");
     }
     seen.add(row.id);
     // Closed projection: unexpected native properties must not become renderer-held secrets.
     return { id: row.id, cid: row.cid, intent: row.intent, grant: row.grant, status: row.status,
       verifiedChunks: row.verifiedChunks, savedChunks: row.savedChunks, totalChunks: row.totalChunks,
-      chosenPlace: row.chosenPlace, ...bytes, savedTo } as PrivateDownload;
+      chosenPlace: row.chosenPlace, ...bytes, savedTo, savedEntry } as PrivateDownload;
   });
 }

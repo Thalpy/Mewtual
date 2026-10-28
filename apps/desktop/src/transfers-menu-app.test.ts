@@ -10,8 +10,8 @@ const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 const script = source.slice(source.indexOf(">", source.indexOf("<script")) + 1, source.indexOf("</script>"));
 const tree = ts.createSourceFile("App.ts", script, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
 const names = new Set(["rowMenuDisabled", "rowMenuPlace", "openRowMenu", "closeRowMenu", "moreClick", "moreKeydown",
-  "rowMenuKeydown", "runRowMenuItem", "rowMenuPointerDown", "rowMenuMoved", "rowMenuStale", "settleRowMenu",
-  "pressRowControl"]);
+  "rowMenuKeydown", "runRowMenuItem", "runListMenuItem", "rowMenuPointerDown", "rowMenuMoved", "rowMenuStale",
+  "settleRowMenu", "pressRowControl"]);
 const handlers = tree.statements.filter((n) => ts.isFunctionDeclaration(n) && n.name && names.has(n.name.text));
 assert.equal(handlers.length, names.size);
 const constant = (name: string) => {
@@ -29,6 +29,8 @@ const production = ts.transpileModule(
 
 const ROW = "d".repeat(64);
 const OTHER = "e".repeat(64);
+/** A saved-files list entry (PR #56); its row id is `saved-<entry id>`. */
+const LIST = "f".repeat(32);
 const action = (kind: string, label: string, disabled = false) =>
   ({ kind, label, accessibleName: `${label} a.bin`, confirm: false, disabled, disabledReason: disabled ? "Another action on this file is running" : null });
 const saveAs = { kind: "action", action: action("saveAs", "Save as"), icon: "save-as", look: "" };
@@ -39,7 +41,7 @@ const controls = (menu: unknown[]) => ({ primary: null, remove: null, menu });
 /** The handlers plus a stand-in DOM: one More button per row, the open menu with one element per
  * item, `document.activeElement`, and a window 900 x 640. Every focus is recorded. */
 function app(moreBottom = 128) {
-  return new Function("ROW", "OTHER", "moreBottom", `
+  return new Function("ROW", "OTHER", "LIST", "moreBottom", `
     let rowMenu = null, rowMenuFocus = 0, rowMenuHadFocus = false, view = "downloads", pressCount = 0;
     let pressedControl = {}, confirmRemove = {};
     let savedRowViews = [
@@ -55,6 +57,12 @@ function app(moreBottom = 128) {
     const compactControls = (view) => ({ menu: view.menuItems.split(",").filter(Boolean).map((kind) => ({ kind: "action", action: { kind } })) });
     const runSavedRowAction = async (row, action, group) => { ran.push([row.id, action.kind, group, pressedControl[row.id]]); delete pressedControl[row.id]; };
     const revealSavedRow = async (row) => { revealed.push(row.id); };
+    // PR #56: saved-files list rows (row id "saved-<entry id>") share the menu.
+    let savedListViews = [{ id: LIST, menuItems: "again" }];
+    let savedListFiles = [{ id: LIST }];
+    const compactListControls = compactControls;
+    const runSavedListAction = async (file, action) => { ran.push(["list", file.id, action.kind]); };
+    const revealSavedListRow = async (file) => { revealed.push("list:" + file.id); };
     // The rows of each group, from the views; the focus fallback names where it would go.
     const savedRowGroups = new Proxy({}, { get: (_, group) => savedRowViews.filter((v) => v.group === group) });
     const rowFocusTarget = (rowId, group, nextId) => new Element(nextId ? "next:" + nextId : "heading:" + group);
@@ -64,7 +72,8 @@ function app(moreBottom = 128) {
       closest(selector) { return selector === ".sdl-menu" && this.key.startsWith("item") ? menu : null; }
       contains(node) { return node === this; }
     }
-    const buttons = new Map([[ROW, new Element("more:" + ROW)], [OTHER, new Element("more:" + OTHER)]]);
+    const buttons = new Map([[ROW, new Element("more:" + ROW)], [OTHER, new Element("more:" + OTHER)],
+      ["saved-" + LIST, new Element("more:saved-" + LIST)]]);
     let moreTop = moreBottom - 28;
     for (const button of buttons.values()) button.getBoundingClientRect = () => ({ top: moreTop, bottom: moreTop + 28, right: 300 });
     let items = [];
@@ -84,7 +93,7 @@ function app(moreBottom = 128) {
       },
       querySelector(selector) {
         if (selector === ".sdl-menu") return rowMenu ? menu : null;
-        const more = selector.match(/data-sdl-more="([0-9a-f]+)"/);
+        const more = selector.match(/data-sdl-more="([0-9a-z-]+)"/);
         if (more) return buttons.get(more[1]) ?? null;
         throw new Error("unexpected " + selector);
       },
@@ -98,6 +107,7 @@ function app(moreBottom = 128) {
       get active() { return document.activeElement; },
       get pressedControl() { return pressedControl; },
       set view(value) { view = value; }, set savedRowViews(value) { savedRowViews = value; },
+      set savedListViews(value) { savedListViews = value; }, set savedListFiles(value) { savedListFiles = value; },
       set moreTop(value) { moreTop = value; },
       // What the menu's focusin does, and what a removed menu leaves: focus on <body>.
       menuFocused() { rowMenuHadFocus = true; },
@@ -108,7 +118,7 @@ function app(moreBottom = 128) {
       stale() { return rowMenuStale(savedRowViews, view === "downloads"); },
       settle() { settleRowMenu(savedRowViews, view === "downloads"); },
     };
-  `)(ROW, OTHER, moreBottom);
+  `)(ROW, OTHER, LIST, moreBottom);
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -256,6 +266,40 @@ test("leaving Transfers, a changed menu, a confirmation or a removed row make th
   await b.openRowMenu(ROW, controls([fresh, saveAs]), b.buttons.get(ROW));
   b.savedRowViews = [];
   assert.equal(b.stale(), true, "the row left the list");
+});
+
+test("a saved-files list row uses the same menu: it opens, runs its item, and goes stale with its entry", async () => {
+  // PR #56 merged with the compact rows: a list row in SAVED opens the one shared menu under its
+  // row id, an item runs the list's own action (never a private download's), and the menu closes
+  // once the entry leaves the list or its items change.
+  const a = app();
+  const listId = `saved-${LIST}`;
+  const again = { kind: "action", action: action("again", "Save another copy"), icon: "save-copy", look: "" };
+  a.menuFor(1);
+  await a.openRowMenu(listId, controls([again]), a.buttons.get(listId));
+  assert.equal(a.rowMenu?.rowId, listId);
+  assert.equal(a.rowMenu?.group, "saved");
+  assert.equal(a.focused.at(-1), "item0");
+  assert.equal(a.stale(), false);
+  await a.runRowMenuItem(listId, again);
+  assert.equal(a.rowMenu, null);
+  assert.equal(a.focused.at(-1), `more:${listId}`);
+  assert.deepEqual(a.ran, [["list", LIST, "again"]], "the list's own action, not a private download's");
+  await a.openRowMenu(listId, controls([again, reveal]), a.buttons.get(listId));
+  await a.runRowMenuItem(listId, reveal);
+  assert.deepEqual(a.revealed, [`list:${LIST}`]);
+  // Stale: the items changed, or the entry left the list; a cleared entry runs nothing.
+  await a.openRowMenu(listId, controls([again]), a.buttons.get(listId));
+  a.savedListViews = [{ id: LIST, menuItems: "" }];
+  assert.equal(a.stale(), true, "the row's menu changed");
+  a.savedListViews = [];
+  assert.equal(a.stale(), true, "the entry left the list");
+  a.savedListFiles = [];
+  await a.runRowMenuItem(listId, again);
+  assert.equal(a.ran.length, 1, "nothing runs for an entry that is gone");
+  // A row id the menu does not know opens nothing.
+  await a.openRowMenu(`saved-${"0".repeat(32)}`, controls([again]), a.buttons.get(listId));
+  assert.equal(a.rowMenu, null);
 });
 
 test("a stale menu that had focus puts it back on More, or on the row's neighbours", async () => {

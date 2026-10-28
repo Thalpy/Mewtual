@@ -232,19 +232,34 @@ function statusLine(state: PrivateDownloadStatus, check: SavedCheck | null, why:
   }
 }
 
-/** One control of a compact row: an action drawn as an icon, or Show in folder. */
-export type CompactControl =
-  | { kind: "action"; action: SavedRowAction; icon: TransferIcon; look: "go" | "stop" | "" }
+/** An action of a saved-files list row (PR #56): Save again (the file is gone from its name) or
+ * Save another copy (it may still be there), both the ordinary save and offered only while the
+ * file is still shared in the server; or Clear, which forgets the list entry and never touches a
+ * file, so it never asks first. */
+export type SavedListRowAction = {
+  kind: "again" | "forget";
+  label: string;
+  /** "Clear report.pdf", for assistive technology. */
+  accessibleName: string;
+  disabled: boolean;
+  disabledReason: string | null;
+};
+
+/** One control of a compact row: an action drawn as an icon, or Show in folder. `A` is the row's
+ * action type: a private download row's [`SavedRowAction`], or a list row's
+ * [`SavedListRowAction`]. */
+export type CompactControl<A = SavedRowAction> =
+  | { kind: "action"; action: A; icon: TransferIcon; look: "go" | "stop" | "" }
   | { kind: "reveal"; icon: "show-in-folder"; look: ""; label: string; accessibleName: string };
 /** The compact row's controls (design `compact.md`, section 5.1): the primary icon left of the
  * chip, the red x, and the "more" menu in order. */
-export type CompactControls = {
+export type CompactControls<A = SavedRowAction> = {
   /** The icon left of the chip, or `null` (Removing: the x is its retry). */
-  primary: CompactControl | null;
+  primary: CompactControl<A> | null;
   /** The red x: the row's remove-kind action (Remove or Clear), or `null`. */
-  remove: SavedRowAction | null;
+  remove: A | null;
   /** The "more" menu in order; empty means the row has no More button. */
-  menu: (CompactControl | { kind: "separator" })[];
+  menu: (CompactControl<A> | { kind: "separator" })[];
 };
 
 /** Menu icon per action kind. */
@@ -277,6 +292,31 @@ export function compactControls(view: SavedRowView): CompactControls {
     if (menu.length > 0) menu.push({ kind: "separator" });
     menu.push(reveal);
   }
+  return { primary, remove, menu };
+}
+
+/** Arrange a saved-files list row (PR #56) as a compact row, by the same rules as a Saved private
+ * row ([`compactControls`]): a file gone from its name (`gone`) gets Save again as the primary,
+ * like a Saved row whose file is missing; otherwise Show in folder is the primary while the file
+ * may still be at its name, and Save another copy goes in the menu. Clear (forget the entry) is the
+ * red x. Every action appears exactly once; a row native cannot check offers no Show in folder. */
+export function compactListControls(view: {
+  name: string;
+  canReveal: boolean;
+  gone: boolean;
+  actions: readonly SavedListRowAction[];
+}): CompactControls<SavedListRowAction> {
+  const remove = view.actions.find((action) => action.kind === "forget") ?? null;
+  const again = view.actions.find((action) => action.kind === "again") ?? null;
+  let primary: CompactControl<SavedListRowAction> | null = null;
+  if (view.gone && again) {
+    primary = { kind: "action", action: again, icon: "saving", look: "go" };
+  } else if (view.canReveal) {
+    primary = { kind: "reveal", icon: "show-in-folder", look: "", label: "Show in folder", accessibleName: `Show ${view.name} in folder` };
+  }
+  const menu: CompactControls<SavedListRowAction>["menu"] = view.actions
+    .filter((action) => action.kind !== "forget" && (primary?.kind !== "action" || action !== primary.action))
+    .map((action) => ({ kind: "action", action, icon: "save-copy", look: "" }));
   return { primary, remove, menu };
 }
 

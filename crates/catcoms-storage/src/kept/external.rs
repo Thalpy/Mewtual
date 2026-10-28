@@ -752,6 +752,11 @@ thread_local! {
     #[cfg(unix)]
     pub(in crate::kept) static AFTER_ASIDE: std::cell::RefCell<AsideHook> =
         const { std::cell::RefCell::new(None) };
+    /// Test-only interleaving point in [`remove_unchanged`] (PR #56), after the old copy was
+    /// proven and hashed and before it is deleted (Unix: before the rename aside): a test edits,
+    /// swaps or renames the old copy there. The hook gets the old copy's path.
+    pub(in crate::kept) static BEFORE_REPLACE_DELETE: std::cell::RefCell<LinkHook> =
+        const { std::cell::RefCell::new(None) };
     /// Test-only interleaving point in Windows [`remove_verified`] with `keep`: after the kept
     /// name was pinned and verified and before the delete (published-staging review). A test tries
     /// to delete the kept name there. The hook gets the kept name's path.
@@ -767,6 +772,17 @@ fn while_kept(path: &Path) {
         }
     });
 }
+
+#[cfg(test)]
+fn before_replace_delete(path: &Path) {
+    BEFORE_REPLACE_DELETE.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
+}
+#[cfg(not(test))]
+fn before_replace_delete(_path: &Path) {}
 #[cfg(all(test, unix))]
 pub(in crate::kept) type AsideHook = Option<Box<dyn FnMut(&Path, &Path)>>;
 
@@ -1030,9 +1046,10 @@ pub(super) enum Verified {
     /// Unix: the folder opened at this path is no longer the expected one.
     #[cfg_attr(not(unix), allow(dead_code))]
     FolderChanged,
-    /// The name the caller asked to keep (`keep`, the published final name) no longer holds the
+    /// The name the caller asked to keep (`keep`: a published save's final name, or for
+    /// [`remove_second_name`] the old copy's name the new copy was linked to) no longer holds the
     /// verified object, so nothing was deleted: `leaf` may now be the object's only name, and the
-    /// only copy of the saved file (published-staging review, 26 October).
+    /// only copy of the saved file (published-staging review, 26 October; PR #56 review H1).
     KeepGone,
 }
 
@@ -1239,6 +1256,468 @@ pub(super) fn remove_verified(
             "verified removal is unavailable on this platform",
         ))
     }
+}
+
+/// "Replace my older saved copy" step 6 (PR #56, design review H1): after the new copy was linked
+/// to the old copy's name `other`, its first name `leaf` goes only while `other` still holds it,
+/// because `other` could have been deleted or replaced since the link, and then `leaf` is the only
+/// copy. This is [`remove_verified`] with `keep: other`, the same rule the published-staging Clear
+/// uses for a save's final name (Windows: `other` pinned and verified across the delete, since a
+/// delete-denying handle on one hard link does not protect another; Unix: `other` checked relative
+/// to the pinned folder right before the unlink, the documented same-account residual).
+/// [`Verified::KeepGone`] when `other` does not hold the object; nothing was deleted then.
+pub(super) fn remove_second_name(
+    folder: &Path,
+    folder_id: FileIdentity,
+    leaf: &str,
+    other: &str,
+    identity: FileIdentity,
+    rng: &mut dyn catcoms_rt::CryptoRngCore,
+) -> io::Result<Verified> {
+    remove_verified(
+        folder,
+        Some(folder_id),
+        leaf,
+        Some(other),
+        Expected::Journal(identity),
+        rng,
+    )
+}
+
+/// The earlier saved copy "Replace my older saved copy" may delete, as the saved-files list
+/// recorded it, and the new copy's identity (PR #56).
+#[derive(Clone, Copy)]
+pub(super) struct UnchangedCopy {
+    /// The old copy's persisted identity.
+    pub identity: FileIdentity,
+    /// Its exact plaintext length and CID, as saved.
+    pub size: u64,
+    pub cid: crate::Cid,
+    /// The new copy's identity: the old name holding it means the old copy is already gone.
+    pub newer: FileIdentity,
+}
+
+/// What [`remove_unchanged`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Unchanged {
+    /// The proven, unchanged old copy was deleted through the verified object.
+    Removed,
+    /// Nothing is at the name.
+    Missing,
+    /// The name holds the new copy (the new save took the free name).
+    AlreadyNew,
+    /// Another object is at the name (another file, a link, a folder, no identity).
+    NotOurs,
+    /// Ours by identity, but its content is not exactly what Mewtual saved, or it changed while
+    /// it was being checked.
+    Changed,
+    /// Ours, but it has more than one name.
+    MoreNames,
+    /// Ours, but read-only (the user protected it).
+    ReadOnly,
+    /// Windows: a reparse point of any kind (cloud placeholder, deduplicated or compressed file):
+    /// its data would not be read through the handle that deletes it.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Reparse,
+    /// Unix: ours, but other accounts can (or may) change the folder or the file.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Shared,
+    /// The folder at the path is not the identified one.
+    FolderChanged,
+    /// `keep_going` answered false; nothing was deleted.
+    Stopped,
+    /// Unix: moved aside for its last check and could not be put back.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Stranded,
+    /// The new copy no longer holds its name right before the delete (deleted, quarantined or
+    /// moved meanwhile): nothing was deleted, so a copy always remains (adversarial review H1).
+    NewGone,
+}
+
+/// The new copy of a replace, held open from before the old copy is checked until its name is
+/// given the old name (adversarial review H1). On Windows the handle is the delete-denying pin of
+/// publication: while it is held nobody can delete, rename or replace the new copy's name, so the
+/// old copy is only ever deleted beside a copy that is still there. Elsewhere it is an open
+/// descriptor (Linux and Android link from it), and the name is checked again right before the
+/// delete; a process of the same account could still remove it in between (the documented Unix
+/// residual).
+pub(super) struct CopyPin {
+    file: File,
+    identity: FileIdentity,
+}
+
+/// Pin `folder/leaf` as the new copy: a regular file with `identity` and exactly `size` bytes.
+/// `Ok(None)` when it is not there, or not that file.
+pub(super) fn pin_copy(
+    folder: &Path,
+    leaf: &str,
+    identity: FileIdentity,
+    size: u64,
+) -> io::Result<Option<CopyPin>> {
+    #[cfg(windows)]
+    let opened = open_leaf_pinned(&folder.join(leaf))?;
+    #[cfg(not(windows))]
+    let opened = open_leaf(&folder.join(leaf), false)?;
+    match opened {
+        Leaf::Opened(file, observed)
+            if observed.identity == identity && file.metadata()?.len() == size =>
+        {
+            Ok(Some(CopyPin { file, identity }))
+        }
+        _ => Ok(None),
+    }
+}
+
+impl CopyPin {
+    /// Read-only: whether `folder/leaf` still names the pinned copy. An error means it could not
+    /// be read, which callers must never report as "gone" (re-review LOW 1).
+    pub(super) fn still_named(&self, folder: &Path, leaf: &str) -> io::Result<bool> {
+        names_copy(folder, leaf, self.identity)
+    }
+}
+
+/// Read-only: whether `folder/leaf` names the file with `identity` (PR #56). `Ok(false)` when
+/// nothing, or another object, is at the name; an error when the name could not be read right now
+/// (a sharing violation, a permission error), which says nothing about whether the copy is there.
+pub(super) fn names_copy(folder: &Path, leaf: &str, identity: FileIdentity) -> io::Result<bool> {
+    match open_nofollow(&folder.join(leaf), false)? {
+        AtName::Object(found) => Ok(verify(&found, Expected::Journal(identity))?.is_some()),
+        AtName::Missing | AtName::Foreign => Ok(false),
+    }
+}
+
+/// Read `file` from the start: exactly `size` bytes hashing to `cid`. `None` when `keep_going`
+/// answered false; it is asked before every 1 MiB, so a slow share or a large file cannot hold the
+/// caller (and, on Windows, the delete-denying handle) past its deadline (PR #56 review L9).
+fn content_is(
+    file: &mut File,
+    size: u64,
+    cid: crate::Cid,
+    keep_going: &dyn Fn() -> bool,
+) -> io::Result<Option<bool>> {
+    use std::io::{Read, Seek, SeekFrom};
+    if file.metadata()?.len() != size {
+        return Ok(Some(false));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut hasher = crate::CidHasher::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut seen = 0u64;
+    loop {
+        if !keep_going() {
+            return Ok(None);
+        }
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        seen += read as u64;
+        if seen > size {
+            return Ok(Some(false));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(Some(seen == size && hasher.cid() == cid))
+}
+
+/// PR #56, "Replace my older saved copy" steps 1 to 3: prove that `folder/leaf` is the earlier
+/// saved copy, exactly as saved, then delete it through the verified object. Read-only until the
+/// final delete; `keep_going` is asked before it (and while hashing).
+///
+/// - Windows: one handle does everything. It is opened with `DELETE | FILE_READ_DATA |
+///   FILE_READ_ATTRIBUTES | SYNCHRONIZE`, share mode `FILE_SHARE_READ` only, without following a
+///   reparse point. Opening fails while another program has the file open for writing or deleting,
+///   and while it is held nobody can write, rename or delete the file or rename its folders, so
+///   the content hashed is the content deleted and the folder re-read by path afterwards is the
+///   one that holds it (design review L1). A regular file, no reparse point of any kind, no
+///   read-only attribute, one name and the recorded identity are required before the content is
+///   read, and the delete goes through `fs_at`'s `delete_by_handle` on that handle.
+/// - Unix: the folder is pinned and classified; the name is opened without following a link; the
+///   recorded identity, one name, the owner write bit and no group or other write bit are
+///   required, and a folder other accounts can modify refuses only after the copy was seen to be
+///   ours (design review M3(a)). The content is hashed through that descriptor with its size,
+///   modification and change times read before and after (design review L8), BEFORE the name is
+///   renamed aside (PR #51 review H3: the user's file is never hidden while it is read). At the
+///   aside name the identity, one name, size and modification time must still match, else it is
+///   put back without replacing; then `unlinkat`.
+///
+/// Both: `new_copy` (the new copy, pinned by the caller, named `new_leaf`) must still hold its name
+/// right before the delete, else nothing is deleted (`NewGone`, adversarial review H1).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn remove_unchanged(
+    folder: &Path,
+    folder_id: FileIdentity,
+    leaf: &str,
+    copy: UnchangedCopy,
+    new_copy: (&CopyPin, &str),
+    keep_going: &dyn Fn() -> bool,
+    rng: &mut dyn catcoms_rt::CryptoRngCore,
+) -> io::Result<Unchanged> {
+    let (pin, new_leaf) = new_copy;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_READ_DATA: u32 = 0x0001;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_ATTRIBUTE_READONLY: u64 = 0x1;
+        let _ = &rng;
+        // Adversarial review L4: the folder first, so a folder that went (or moved) reads as
+        // changed, never as "the old copy is missing" (which would forget an entry whose file
+        // still exists elsewhere).
+        match folder_identity(folder) {
+            Ok(id) if id == folder_id => {}
+            Ok(_) => return Ok(Unchanged::FolderChanged),
+            Err(error) if unreachable(&error) => return Ok(Unchanged::FolderChanged),
+            Err(error) => return Err(error),
+        }
+        let path = folder.join(leaf);
+        let mut file = match OpenOptions::new()
+            .access_mode(DELETE | FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Unchanged::Missing),
+            Err(error) => return Err(error),
+        };
+        // The held handle pins its folders against rename, so this proves the name is in the
+        // identified folder (design review L1).
+        if folder_identity(folder)? != folder_id {
+            return Ok(Unchanged::FolderChanged);
+        }
+        let observed = match observe(&file) {
+            Ok(observed) => observed,
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                return Ok(Unchanged::NotOurs)
+            }
+            Err(error) => return Err(error),
+        };
+        if observed.regular && observed.identity == copy.newer {
+            return Ok(Unchanged::AlreadyNew);
+        }
+        if !observed.regular || observed.identity != copy.identity {
+            return Ok(Unchanged::NotOurs);
+        }
+        let attributes = winapi_util::file::information(&file)?.file_attributes();
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(Unchanged::Reparse);
+        }
+        if attributes & FILE_ATTRIBUTE_READONLY != 0 {
+            return Ok(Unchanged::ReadOnly);
+        }
+        if observed.links != 1 {
+            return Ok(Unchanged::MoreNames);
+        }
+        match content_is(&mut file, copy.size, copy.cid, keep_going)? {
+            None => return Ok(Unchanged::Stopped),
+            Some(false) => return Ok(Unchanged::Changed),
+            Some(true) => {}
+        }
+        if !keep_going() {
+            return Ok(Unchanged::Stopped);
+        }
+        before_replace_delete(&path);
+        // The caller's pin keeps the new copy's name in place, so this holds through the delete.
+        // A name that cannot be read is an error ("could not be checked"), never "gone".
+        if !pin.still_named(folder, new_leaf)? {
+            return Ok(Unchanged::NewGone);
+        }
+        inject(Effect::Remove)?;
+        use fs_at::os::windows::FileExt;
+        file.delete_by_handle().map_err(|(_, error)| error)?;
+        Ok(Unchanged::Removed)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Some(pinned) = pin_folder(folder, Some(folder_id), true)? else {
+            return Ok(Unchanged::FolderChanged);
+        };
+        let mut file = match open_at_nofollow(&pinned.dir, leaf) {
+            Ok(Some(file)) => file,
+            Ok(None) => return Ok(Unchanged::NotOurs),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Unchanged::Missing),
+            // In a shared folder a name we may not read was put there by another account.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && pinned.shared => {
+                return Ok(Unchanged::NotOurs)
+            }
+            Err(error) => return Err(error),
+        };
+        let observed = match observe(&file) {
+            Ok(observed) => observed,
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                return Ok(Unchanged::NotOurs)
+            }
+            Err(error) => return Err(error),
+        };
+        if observed.regular && observed.identity == copy.newer {
+            return Ok(Unchanged::AlreadyNew);
+        }
+        if !observed.regular || observed.identity != copy.identity {
+            return Ok(Unchanged::NotOurs);
+        }
+        if observed.links != 1 {
+            return Ok(Unchanged::MoreNames);
+        }
+        let metadata = file.metadata()?;
+        if metadata.mode() & 0o200 == 0 {
+            return Ok(Unchanged::ReadOnly);
+        }
+        // Adversarial review L1: the file gets the folder's rule (owner, mode bits, a proven
+        // user-private group without an extended ACL), so a umask-002 export in the user's own
+        // folder is not refused, while a file other accounts may write is.
+        let me = rustix::process::geteuid().as_raw();
+        let file_shared = shared_folder(
+            FolderOwnership {
+                owner: metadata.uid(),
+                group: metadata.gid(),
+                // A file's sticky bit means nothing for who may write it.
+                mode: metadata.mode() & !0o1000,
+            },
+            me,
+            rustix::process::getegid().as_raw(),
+            |gid| !extended_acl_present(&file) && system_group_is_private(gid, me),
+        );
+        if pinned.shared || file_shared {
+            return Ok(Unchanged::Shared);
+        }
+        let stamp = |metadata: &fs::Metadata| {
+            (
+                metadata.len(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        };
+        let before = stamp(&metadata);
+        match content_is(&mut file, copy.size, copy.cid, keep_going)? {
+            None => return Ok(Unchanged::Stopped),
+            Some(false) => return Ok(Unchanged::Changed),
+            Some(true) => {}
+        }
+        if stamp(&file.metadata()?) != before {
+            return Ok(Unchanged::Changed);
+        }
+        if !keep_going() {
+            return Ok(Unchanged::Stopped);
+        }
+        before_replace_delete(&folder.join(leaf));
+        if !pin.still_named(folder, new_leaf)? {
+            return Ok(Unchanged::NewGone);
+        }
+        let aside = aside_name(rng);
+        match rename_no_replace(&pinned.dir, leaf, &aside) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Unchanged::Missing),
+            Err(error) => return Err(error),
+        }
+        after_aside(&folder.join(leaf), &folder.join(&aside));
+        // A rename changes the change time, so only identity, names, size and modification time
+        // are compared at the aside name.
+        let still = match open_at_nofollow(&pinned.dir, &aside) {
+            Ok(Some(found)) => match (observe(&found), found.metadata()) {
+                (Ok(seen), Ok(metadata)) => {
+                    seen.regular
+                        && seen.identity == copy.identity
+                        && seen.links == 1
+                        && (metadata.len(), metadata.mtime(), metadata.mtime_nsec())
+                            == (before.0, before.1, before.2)
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if !still {
+            return Ok(match rename_back(&pinned.dir, &aside, leaf) {
+                Ok(()) => Unchanged::Changed,
+                Err(_) => Unchanged::Stranded,
+            });
+        }
+        // Once more right before the unlink: the new copy must still have its name. Gone puts the
+        // old copy back and refuses; unreadable puts it back and reports the error (could not be
+        // checked).
+        let named = pin.still_named(folder, new_leaf);
+        if !matches!(named, Ok(true)) {
+            return match rename_back(&pinned.dir, &aside, leaf) {
+                Ok(()) => named.map(|_| Unchanged::NewGone),
+                Err(_) => Ok(Unchanged::Stranded),
+            };
+        }
+        let removed = inject(Effect::Remove).and_then(|()| {
+            rustix::fs::unlinkat(&pinned.dir, aside.as_str(), rustix::fs::AtFlags::empty())
+                .map_err(io::Error::from)
+        });
+        if let Err(error) = removed {
+            return match rename_back(&pinned.dir, &aside, leaf) {
+                Ok(()) => Err(error),
+                Err(_) => Ok(Unchanged::Stranded),
+            };
+        }
+        let _ = pinned.dir.sync_all();
+        Ok(Unchanged::Removed)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (
+            folder, folder_id, leaf, copy, pin, new_leaf, keep_going, rng,
+        );
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "verified removal is unavailable on this platform",
+        ))
+    }
+}
+
+/// What [`link_name`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LinkName {
+    /// `to` now names the new copy too.
+    Linked,
+    /// Nothing was linked (the name was taken, or the link failed); `still_named` says whether
+    /// the new copy still has its own name (`None`: it could not be read), so the note never
+    /// names a name that is gone or unconfirmed.
+    NotLinked { still_named: Option<bool> },
+}
+
+/// PR #56, "Replace my older saved copy" step 4: give the pinned new copy (named `from`) the
+/// absent name `to` in the same folder, never replacing anything, and confirm that `to` holds it.
+/// [`link_open`] links from the pin's own handle (Windows: under its delete-denying share; Linux
+/// and Android: from its descriptor). A taken name, a failed link, or another object at `to` right
+/// after the link is `NotLinked` (nothing of ours is claimed then).
+pub(super) fn link_name(
+    folder: &Path,
+    folder_id: FileIdentity,
+    pin: &CopyPin,
+    from: &str,
+    to: &str,
+) -> LinkName {
+    let not_linked = || LinkName::NotLinked {
+        still_named: pin.still_named(folder, from).ok(),
+    };
+    let linked = match link_open(&pin.file, folder, Some(folder_id), from, to) {
+        Ok(linked) => linked,
+        Err(_) => return not_linked(),
+    };
+    match linked.open_leaf(to) {
+        Ok(Leaf::Opened(_, observed)) if observed.identity == pin.identity => LinkName::Linked,
+        _ => not_linked(),
+    }
+}
+
+/// What [`HeldFolder::name_state`] found at a name, by persisted identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HeldName {
+    Ours,
+    Absent,
+    /// Another file, a link, a folder, or an object without identity.
+    Other,
+    /// It could not be checked right now.
+    Unknown,
 }
 
 /// What [`sweep_aside`] found.
@@ -2291,6 +2770,41 @@ impl HeldFolder {
             Ok(None) => Ok(false),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Read-only: what `leaf` inside this folder holds, compared with a persisted identity (the
+    /// saved-files list's check, PR #56). The same attributes-only, no-follow open relative to
+    /// this handle as [`Self::holds_session`]: no read access, so antivirus scans and other
+    /// programs' share modes do not delay or fail it (design review L6), and a link at the name is
+    /// opened as itself and is never ours.
+    pub(super) fn name_state(&self, leaf: &str, identity: FileIdentity) -> HeldName {
+        #[cfg(unix)]
+        let opened = open_at_nofollow(&self.dir, leaf);
+        #[cfg(windows)]
+        let opened = {
+            use fs_at::os::windows::OpenOptionsExt;
+            const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+            fs_at::OpenOptions::default()
+                .desired_access(FILE_READ_ATTRIBUTES)
+                .open_path_at(&self.dir, leaf)
+                .map(Some)
+        };
+        #[cfg(not(any(windows, unix)))]
+        let opened: io::Result<Option<File>> = {
+            let _ = (leaf, identity);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        };
+        match opened {
+            Ok(Some(found)) => match verify(&found, Expected::Journal(identity)) {
+                Ok(Some(_)) => HeldName::Ours,
+                Ok(None) => HeldName::Other,
+                Err(_) => HeldName::Unknown,
+            },
+            // A link, or (Unix) a FIFO, at the name.
+            Ok(None) => HeldName::Other,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => HeldName::Absent,
+            Err(_) => HeldName::Unknown,
         }
     }
 

@@ -98,8 +98,8 @@ pub use pairing::{
 // `PairingSecrets` and duplicates its device per granted server.
 pub use catcoms_mls::MlsDevice as PairedDevice;
 pub use store::{
-    ReconnectPolicy, ReconnectRoute, ServerNet, ServerRecord, ServerStore, MAX_RECONNECT_ROUTES,
-    MAX_RECONNECT_ROUTE_BYTES,
+    ReconnectPolicy, ReconnectRoute, SavedFilesLoad, SavedLimitLoad, ServerNet, ServerRecord,
+    ServerStore, MAX_RECONNECT_ROUTES, MAX_RECONNECT_ROUTE_BYTES,
 };
 
 /// The Display prefix of [`AppError::CommittedButNotDurable`], published so a boundary that only

@@ -43,6 +43,10 @@ pub(super) struct UiDownload {
     /// Downloads folder, `"other"` otherwise (a place chosen in Save as, or a Downloads folder
     /// that moved since). `None` for every other state. Never a path or folder name.
     saved_to: Option<&'static str>,
+    /// Saved rows only (PR #56): the ID of the saved-files list entry for exactly this saved
+    /// file (same folder and file identity as the published journal). The renderer draws that
+    /// entry as this row, never as a second one. `None` when no entry matches.
+    saved_entry: Option<String>,
 }
 
 /// Closed renderer status, highest precedence first. Typed storage state decides it; nothing is
@@ -88,7 +92,11 @@ fn status(download: &DownloadStatus) -> &'static str {
 /// resolved Downloads folder (`Some(true)`), proven elsewhere (`Some(false)`), or could not be
 /// told (`None`: no resolvable Downloads folder, or the journal could not be read); see
 /// [`UiDownload::saved_to`]. It is ignored for every other state.
-fn project(download: DownloadStatus, in_downloads: Option<bool>) -> UiDownload {
+fn project(
+    download: DownloadStatus,
+    in_downloads: Option<bool>,
+    saved_entry: Option<String>,
+) -> UiDownload {
     let status = status(&download);
     let total_chunks = download.state.plan.chunks.len();
     let saved_chunks = match download.export {
@@ -118,6 +126,7 @@ fn project(download: DownloadStatus, in_downloads: Option<bool>) -> UiDownload {
         saved_bytes: bytes.map(|bytes| bytes.saved),
         total_bytes: bytes.map(|bytes| bytes.total),
         saved_to,
+        saved_entry: saved_entry.filter(|_| status == "saved"),
     }
 }
 pub(super) fn id(text: &str) -> Result<DownloadId, String> {
@@ -162,17 +171,41 @@ pub(super) async fn get_private_downloads(
     // cheap generation check so nothing from another session is returned. No filesystem access:
     // the journal's folder is compared as recorded.
     let folder = app.path().download_dir().ok();
-    let mut rows = Vec::with_capacity(downloads.len());
+    let mut read = Vec::with_capacity(downloads.len());
+    let mut journals = Vec::new();
     for download in downloads {
-        let in_downloads = match (&folder, download.export == ExportView::Published) {
-            (Some(folder), true) => match actor.download_export_state(download.id).await {
-                Ok(Some(ExportState::Published(journal))) => Some(journal.is_in_folder(folder)),
+        let journal = match download.export == ExportView::Published {
+            true => match actor.download_export_state(download.id).await {
+                Ok(Some(ExportState::Published(journal))) => Some(journal),
                 _ => None,
             },
+            false => None,
+        };
+        let in_downloads = match (&folder, &journal) {
+            (Some(folder), Some(journal)) => Some(journal.is_in_folder(folder)),
             _ => None,
         };
-        rows.push(project(download, in_downloads));
+        if let Some(journal) = journal {
+            journals.push((read.len(), journal));
+        }
+        read.push((download, in_downloads));
     }
+    // PR #56: which list entry each Saved row stands for (one locked read of the sealed list).
+    let entries = if journals.is_empty() {
+        Vec::new()
+    } else {
+        let only: Vec<ExportJournal> = journals.iter().map(|(_, j)| j.clone()).collect();
+        crate::saved_files::entries_for_journals(&state, server, instance, &only).await
+    };
+    let mut saved_entries = vec![None; read.len()];
+    for ((at, _), entry) in journals.iter().zip(entries) {
+        saved_entries[*at] = entry;
+    }
+    let rows: Vec<UiDownload> = read
+        .into_iter()
+        .zip(saved_entries)
+        .map(|((download, in_downloads), entry)| project(download, in_downloads, entry))
+        .collect();
     if keep_session::invocation_generation(&state).await? != generation {
         return Err("the UI session changed while the operation was in progress".into());
     }
@@ -279,6 +312,7 @@ pub(super) async fn remove_download(
         generation,
         actor,
         id,
+        forget_saved: true,
     };
     remove_sequence(&ports, claim, keep_partial).await
 }
@@ -368,6 +402,10 @@ pub(super) trait CleanupPorts: Send + Sync {
     async fn retire(&self, expected_intent: u64) -> Result<u64, String>;
     /// Save new copy, step two: forget the journal under the intent CAS.
     async fn abandon(&self, expected_intent: u64) -> Result<u64, String>;
+    /// PR #56: a Clear of a Saved row whose record was just released also forgets the saved-files
+    /// list entry of exactly that saved file, so the row goes away instead of a list row for the
+    /// same copy appearing in its place. Best effort; a no-op unless the ports opt in.
+    async fn forget_saved(&self, _journal: ExportJournal) {}
 }
 
 /// Production cleanup effects for one Download of one server instance and UI generation.
@@ -378,6 +416,10 @@ pub(super) struct ActorCleanup<'a> {
     pub(super) generation: u64,
     pub(super) actor: &'a ServerActor,
     pub(super) id: DownloadId,
+    /// PR #56: this is the user's Clear or Remove, so a released Saved row also forgets its list
+    /// entry ([`CleanupPorts::forget_saved`]). False for the cleanup of a recovered save, whose
+    /// entry was just recorded and must stay.
+    pub(super) forget_saved: bool,
 }
 #[async_trait::async_trait]
 impl CleanupPorts for ActorCleanup<'_> {
@@ -449,6 +491,12 @@ impl CleanupPorts for ActorCleanup<'_> {
         )
         .await
     }
+    async fn forget_saved(&self, journal: ExportJournal) {
+        if self.forget_saved {
+            crate::saved_files::forget_journal(self.state, self.server, self.instance, &journal)
+                .await;
+        }
+    }
 }
 const STALE_DOWNLOAD: &str = "This download changed. Open Transfers and try again.";
 
@@ -459,8 +507,9 @@ fn cleanup_slot() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
         .try_acquire_owned()
         .map_err(|_| CLEANUP_BUSY.into())
 }
-/// The process-wide pool behind [`cleanup_slot`].
-fn cleanup_slots() -> Arc<tokio::sync::Semaphore> {
+/// The process-wide pool behind [`cleanup_slot`]. "Replace my older saved copy" (PR #56,
+/// `saved_files.rs`) holds one of these for its whole sequence too: it deletes, like a cleanup.
+pub(super) fn cleanup_slots() -> Arc<tokio::sync::Semaphore> {
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     SLOTS
         .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
@@ -568,8 +617,9 @@ pub(super) async fn saved_check_sequence(
 }
 
 /// Small dedicated bound on saved-file check workers, separate from cleanup and export slots, so
-/// a renderer cannot pin more blocking threads on a stalled share by asking repeatedly.
-fn check_slots() -> Arc<tokio::sync::Semaphore> {
+/// a renderer cannot pin more blocking threads on a stalled share by asking repeatedly. The
+/// saved-files list's checks and Show in folder (PR #56, `saved_files.rs`) share these two slots.
+pub(super) fn check_slots() -> Arc<tokio::sync::Semaphore> {
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     SLOTS
         .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
@@ -806,6 +856,7 @@ pub(super) async fn remove_sequence(
     };
     let published = matches!(saved, ExportState::Published(_));
     let journal = saved.journal().clone();
+    let saved_journal = journal.clone();
     let notice = if keep_partial {
         // Re-review 2 MEDIUM: the check only decides whether to say "already removed". A hung
         // share (folder identity can block until the OS gives up, forever on a hard NFS mount), a
@@ -836,6 +887,11 @@ pub(super) async fn remove_sequence(
         }
     };
     ports.finish_cleanup().await?;
+    // PR #56 (design review L5): only once the record is released (a Clear stuck in Removing
+    // returned above), and never for Keep, which keeps the file and so its entry.
+    if published && !keep_partial {
+        ports.forget_saved(saved_journal).await;
+    }
     drop(claim);
     Ok(notice)
 }
@@ -1166,8 +1222,9 @@ pub(super) enum Preflight {
     Continue,
     /// The final name already holds our file (crash after the link), its content was verified
     /// read-only against the saved plan, and Published is recorded. The preflight observation
-    /// still fences the response (review U-M4).
-    Saved(PathBuf, Box<DownloadPreflight>),
+    /// still fences the response (review U-M4). The journal is the recovered save's, for its
+    /// saved-files list entry (PR #56).
+    Saved(PathBuf, Box<DownloadPreflight>, Box<ExportJournal>),
 }
 
 /// Destination preflight for Resume. Every effect is fenced by one [`DownloadPreflight`]
@@ -1208,6 +1265,7 @@ pub(super) async fn resume_preflight(
                     // folder (best effort, on the pool) before Published is recorded.
                     let flushed = journal.clone();
                     let _ = blocking(move || flush_destination(&flushed)).await;
+                    let recovered = Box::new(journal.clone());
                     actor
                         .download_export_edge(
                             preflight.clone(),
@@ -1217,7 +1275,7 @@ pub(super) async fn resume_preflight(
                         )
                         .await
                         .map_err(user_message)?;
-                    Ok(Preflight::Saved(path, Box::new(preflight)))
+                    Ok(Preflight::Saved(path, Box::new(preflight), recovered))
                 }
                 Err(ExportError::Halted(halt)) => {
                     Err(record_preflight_halt(actor, &preflight, journal, halt, origin).await)
@@ -1327,6 +1385,8 @@ pub(super) async fn abandon_partial(
         generation,
         actor,
         id,
+        // Save another copy keeps the earlier saved file on disk, so it stays listed.
+        forget_saved: false,
     };
     abandon_sequence(&ports, claim, expected_intent).await
 }
@@ -1414,6 +1474,8 @@ pub(super) struct Prepared {
     pub(super) saved: Option<SavedFileResult>,
     /// A file of an abandoned earlier save stays on disk; append this to the result.
     pub(super) notice: Option<&'static str>,
+    /// PR #56: the saved-files list could not record the recovered save; append this too.
+    pub(super) unlisted: Option<&'static str>,
 }
 
 /// Everything an explicit Resume does before acquisition: optional "Save new copy", the
@@ -1461,9 +1523,27 @@ pub(super) async fn prepare_resume(
         // which Remove's Deleting step and Save new copy's retire both invalidate, so a
         // preflight that started before a cleanup cannot act on that journal afterwards. The
         // claim is taken only around the intent CAS (`plain_resume_commit` below).
-        if let Preflight::Saved(path, preflight) =
+        if let Preflight::Saved(path, preflight, recovered) =
             resume_preflight(actor, id, origin, !chosen).await?
         {
+            // PR #56: a recovered publication is a publication, so it is listed, before anything
+            // else can stop this invocation. It never replaces an older copy (design section 5).
+            let unlisted = match preflight.plan() {
+                Some(plan) => crate::saved_files::record_save(
+                    state,
+                    server,
+                    instance,
+                    crate::saved_files::PublishedSave {
+                        cid: plan.cid(),
+                        size: plan.total(),
+                        location: catcoms_storage::kept::SavedLocation::from_journal(&recovered),
+                    },
+                    None,
+                )
+                .await
+                .note(),
+                None => Some(crate::saved_files::NOT_RECORDED),
+            };
             // Final review L1: clear the recovered record only while it is still the one this
             // preflight recovered (see `recovered_cleanup`).
             let cleanup = remove_recovered(state, server, instance, generation, actor, id, || {
@@ -1482,6 +1562,7 @@ pub(super) async fn prepare_resume(
             return Ok(Prepared {
                 saved: Some(saved),
                 notice: None,
+                unlisted,
             });
         }
         expected_intent
@@ -1505,6 +1586,7 @@ pub(super) async fn prepare_resume(
     Ok(Prepared {
         saved: None,
         notice,
+        unlisted: None,
     })
 }
 
@@ -1527,6 +1609,9 @@ pub(super) async fn remove_recovered(
         generation,
         actor,
         id,
+        // The recovered save was just recorded in the saved-files list; releasing its record is
+        // tidying up, not the user's Clear, so its entry stays.
+        forget_saved: false,
     };
     recovered_cleanup(&ports, CleanupClaim::acquire(server, id), still_current).await
 }
@@ -1864,6 +1949,16 @@ pub(super) struct Exported {
     /// other accounts can modify, where Clear could not remove it either, or a name that no longer
     /// holds our file).
     pub(super) staging_note: Option<&'static str>,
+    /// PR #56: where the saved file is, with its identities, for the saved-files list.
+    pub(super) location: catcoms_storage::kept::SavedLocation,
+    /// The reopen found an interrupted session's publication instead of publishing now. Listed,
+    /// but never a replace (design section 5).
+    pub(super) recovered: bool,
+    /// The name a fresh one-click save into Downloads asked for (before numbering), which lets
+    /// "Replace my older saved copy" give the new copy the old copy's name. `None` for a name
+    /// chosen in Save as and for any reopened journal, whose name may be one the user typed
+    /// (adversarial review M2: a Save as journal resumed by a plain Resume is never renamed).
+    pub(super) started_from: Option<String>,
 }
 
 /// Review M-5: map what happened to our staging name after publication to (may the record be
@@ -1908,11 +2003,13 @@ pub(super) async fn export_sequence(
     name: &str,
 ) -> Result<Option<Exported>, String> {
     let base = safe_download_name(name);
+    let mut started_from = None;
     let mut file = match ports.export_state().await? {
         None => {
             let plan = plan.clone();
             let created = match destination {
                 Destination::Downloads(folder) => {
+                    started_from = Some(base.clone());
                     let (folder, name) = (folder.clone(), base.clone());
                     blocking(move || ExportFile::create(&folder, &name, plan, &mut OsCryptoRng))
                         .await?
@@ -1975,6 +2072,7 @@ pub(super) async fn export_sequence(
                         .map_err(user_message)?;
                     // The caller releases the record next; drop our second (staging) name first,
                     // and keep the record if that cannot be settled (review L3, M-5).
+                    let location = catcoms_storage::kept::SavedLocation::from_journal(&journal);
                     let (staging_cleared, staging_note) = after_publication(
                         blocking(move || remove_partial(&journal, true, &mut OsCryptoRng)).await,
                     );
@@ -1982,6 +2080,9 @@ pub(super) async fn export_sequence(
                         path,
                         staging_cleared,
                         staging_note,
+                        location,
+                        recovered: true,
+                        started_from: None,
                     }));
                 }
                 ExportReopen::Halt(halt) => return Err(record_halt(ports, journal, halt).await),
@@ -2122,6 +2223,8 @@ pub(super) async fn export_sequence(
     };
     // After the guard: removal of our staging name (verified, PR51 H1). The folder was flushed
     // before Published; the removal flushes the folder itself on Unix.
+    let location =
+        catcoms_storage::kept::SavedLocation::from_journal(&file.get().published_journal());
     let session = file.take();
     let (staging_cleared, staging_note) =
         after_publication(blocking(move || session.finish(&mut OsCryptoRng)).await);
@@ -2129,6 +2232,9 @@ pub(super) async fn export_sequence(
         path,
         staging_cleared,
         staging_note,
+        location,
+        recovered: false,
+        started_from,
     }))
 }
 
@@ -2302,8 +2408,8 @@ mod tests {
             ),
         ];
         for (download, expected) in cases {
-            // `in_downloads` is ignored for every state but saved.
-            let projected = project(download, Some(true));
+            // `in_downloads` and the list entry are ignored for every state but saved.
+            let projected = project(download, Some(true), Some("ab".repeat(16)));
             assert_eq!(projected.status, expected);
             let json = serde_json::to_string(&projected).unwrap();
             assert!(!json.contains("path") && !json.contains("folder"), "{json}");
@@ -2316,21 +2422,24 @@ mod tests {
             if expected == "saved" {
                 assert_eq!(projected.saved_chunks, projected.total_chunks);
                 assert_eq!(projected.saved_to, Some("downloads"));
+                assert_eq!(projected.saved_entry, Some("ab".repeat(16)));
             } else {
                 assert!(json.contains("\"savedTo\":null"), "{json}");
+                assert!(json.contains("\"savedEntry\":null"), "{json}");
             }
         }
         let json = serde_json::to_string(&project(
             download(KeepPhase::Completed, writing(None, false), |_| {}, true),
             Some(false),
+            None,
         ))
         .unwrap();
         assert!(json.contains("\"savedChunks\":1"), "{json}");
         // A saved row whose journal was read and whose folder differs says "other"; one where
         // nothing could be told (no Downloads folder, an unreadable journal) says nothing.
         let saved = || download(KeepPhase::Completed, ExportView::Published, |_| {}, true);
-        assert_eq!(project(saved(), Some(false)).saved_to, Some("other"));
-        assert_eq!(project(saved(), None).saved_to, None);
+        assert_eq!(project(saved(), Some(false), None).saved_to, Some("other"));
+        assert_eq!(project(saved(), None, None).saved_to, None);
     }
 
     #[test]

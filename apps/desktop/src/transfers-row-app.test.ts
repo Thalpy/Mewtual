@@ -317,8 +317,9 @@ test("Clear of a Saved row checks the file again and asks unless it is present r
 });
 
 test("the Transfers markup keeps one row per file and the new contracts", () => {
-  // The live list leaves out a download whose private row carries its save.
-  assert.match(source, /let liveTransferList = \$derived\(\s*transferList\.filter\(\(t\) => t\.direction !== "download" \|\| !privateDownloadCids\.has\(t\.cid\)\)/);
+  // The live list leaves out a download whose private row carries its save, and (PR #56) a
+  // finished download whose file the saved-files list already shows in Saved.
+  assert.match(source, /let liveTransferList = \$derived\(\s*transferList\.filter\(\(t\) => \(t\.direction !== "download" \|\| !privateDownloadCids\.has\(t\.cid\)\) &&\s*liveTransferShown\(t, savedCids\)\)/);
   assert.match(source, /\{#each liveTransferList as d \(d\.key\)\}/);
   assert.doesNotMatch(source, /\{#each transferList as d/);
   // Rows come from the pure view, grouped and labelled by their headings.
@@ -329,8 +330,11 @@ test("the Transfers markup keeps one row per file and the new contracts", () => 
   assert.equal(source.match(/class="sdl-sr" aria-live="polite"/g)?.length, 1);
   // The old dense paragraph is gone; its one-line replacements live in transfer-rows.ts.
   assert.doesNotMatch(source, /Resume continues a partly saved file only if it is still the file Mewtual created/);
-  // The replace setting was deferred to a follow-up PR: no trace of it here.
-  assert.doesNotMatch(source, /Replace my older saved copy|replaceOlder/);
+  // The replace setting, deferred from PR #51, arrived with PR #56: a device preference shown in
+  // Chat & Media and passed to every save as a flag (native decides what may be replaced).
+  assert.match(source, /<span>\{REPLACE_OLDER_LABEL\}<\/span>/);
+  assert.match(source, /saveGroupFile\(invoke, server, f\.cid, f\.name, \{ operation, saveAs, replaceOlder \}\)/);
+  assert.match(source, /resumeGroupFile\([^)]*saveAs, replaceOlder\)/);
   // Compact rows (design compact.md): the old text-button row and the inline link are gone; every
   // control is an icon button with a verb as its tooltip and the file in its accessible name.
   assert.doesNotMatch(source, /class="sdl-actions"|class="sdl-link"/);

@@ -103,6 +103,11 @@ export const TAURI_COMMAND_GROUPS = {
       "get_dm_requests", "file_available", "get_kept_files", "get_private_downloads",
       // Read-only check of a Saved row's file: one of four words, never a path; bounded natively.
       "check_saved_download",
+      // PR #56: this device's saved-files list as display data (entry IDs, CIDs, file names, when
+      // and whether Downloads; never a folder or identity), and its bounded read-only batch check.
+      "get_saved_files", "check_saved_files",
+      // The list's "Remember saved files" setting and how many entries it holds: numbers only.
+      "get_saved_files_limit",
       "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
@@ -285,6 +290,14 @@ export const TAURI_COMMAND_GROUPS = {
       "keep_file", "request_kept_file", "set_kept_paused", "forget_kept_file", "retry_kept_file",
       // Private encrypted progress, independent of Keep; exact revision/grant CAS, no paths/keys.
       "set_private_download_paused", "retry_private_download", "cancel_private_download",
+      // PR #56: this device's saved-files list. Forget drops one entry by its random ID (the file
+      // is never touched); reset writes an empty list only while native reads the record as
+      // damaged, never over a newer version's. Neither takes a path or reaches a file.
+      "forget_saved_file", "reset_saved_files",
+      // How many saved files the list remembers: clamped natively into 16 to 4096 whatever the
+      // page sends, sealed per device. Lowering forgets the oldest entries (never a file), and a
+      // preview (`apply: false`) changes nothing.
+      "set_saved_files_limit",
       // This device's cache limit for one server: range-checked natively (1 GB to 1 TB or none),
       // sealed before the actor applies it. Never replicated; pins still protect Keep, Studio,
       // Downloads, own uploads and files in use whatever the page sends.
@@ -364,6 +377,8 @@ export const TAURI_COMMAND_GROUPS = {
       // after the same bounded read-only identity check as `check_saved_download`. It takes only
       // the Download ID and revision; the path stays native and only fixed refusals come back.
       "reveal_saved_download",
+      // PR #56: the same for a saved-files list entry, by its random entry ID only.
+      "reveal_saved_file",
     ],
   },
 } as const;

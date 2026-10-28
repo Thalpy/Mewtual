@@ -4434,6 +4434,60 @@ keys through final ACK, and actual Actor/MLS/WebView action acceptance. Engine a
 needs a synchronous native/Root commit boundary with Clock callbacks outside locks; it must not
 authorize work using a stale UI/route check. Exact action settlement cannot wait for whole-chain
 retirement. Live V2/RTC, relay, combined rollout and independent physical acceptance remain open.
+## Saved-files list (26 October, PR #56, stacked on #55)
+
+Finished saves of shared files are now remembered per server on this device
+([design](design-saved-files-list.md), owner decisions and both reviews recorded there).
+
+- **Record.** `servers/<id>.saved`, sealed under the vault `db_key`, bound to the group and this
+  device's member id, one entry per saved copy. Written by native right after each publication
+  (journaled, recovered and non-resumable writers) under the store and registry locks for the
+  saving incarnation; identities only from a journal. Newer, damaged or unreadable records are
+  never written over; "Start a new list" replaces only a damaged one; `remove_server` (leave)
+  deletes it. Not a cache pin.
+- **Remember saved files** (owner request, 27 October): a per-server setting in Server settings,
+  Storage, 16 to 4096 files (default 256), sealed in `servers/<id>.saved-limit`. The list keeps at
+  most that many entries and 4 KiB of plaintext per allowed entry, and is read with at most
+  `max(1 MiB, limit * 4 KiB)`. Lowering previews natively and says how many of the oldest entries go
+  (never files) before the user confirms; the list is trimmed before the setting is stored. A list
+  within 256 entries and 1 MiB stays version 1; a longer one is version 2. An unreadable setting
+  stops recording until the user chooses again.
+- **Transfers.** The Saved group shows list rows (newest first) as PR #51's compact rows, arranged
+  by the same action model (`compactListControls`): Saved, Saved file missing or replaced, could
+  not check, or cannot check (no identity). Show in folder (by entry ID, with PR #51's read-only
+  check) is the primary icon, or Save again once the file is gone; Save another copy is in the
+  "more" menu while the file is still shared; the red x Clears (forgets the entry). A Saved private row stands for its own entry (`savedEntry`) and its Clear
+  forgets it; a finished download whose file is listed leaves the live list.
+- **Chat mark.** "Saved" on file cards in chat (also cards built earlier), the Files list and the
+  file details, from the list only.
+- **Replace my older saved copy** (Settings, Chat & Media, off by default, a `localStorage`
+  preference passed as `replaceOlder`). Native replaces only the newest older listed copy of the
+  same file in the same folder that it proves is its own and unchanged (identity, one name, not
+  read-only, no reparse point, exact length and CID; Unix not writable by other accounts), deletes
+  it through the verified object (Windows: the hashed handle; Unix: rename aside, recheck,
+  unlinkat) only while the pinned new copy still has its name, and gives the new copy the old name
+  by a no-replace link only for a fresh one-click save into Downloads that asked for that name. The
+  first name goes only while the old name still holds the copy. Every refusal keeps the old copy
+  and says why.
+- **Found:** on Windows a delete-denying handle on one hard link does not protect another link of
+  the same file; the replace pins the other name. PR #51 fixed the same gap in its Clear of a
+  published row (`a670275f`, merged here with #55 at `d58c52c1`), and the replace's first-name
+  removal now uses that fix's `remove_verified` `keep` rule. #55's `bc891185` (a Download fills the cache only once its save publishes) is
+  merged here; it also fixed the two six-client private download tests that failed on #55's
+  earlier head. A replace releases the record (`FinishDownloadExport`, which now promotes the
+  staged chunks) before it runs, exactly as an ordinary save does afterwards.
+- **Contract changes:** `save_group_file` gains `replace_older` (signature pin updated);
+  private download rows gain `savedEntry`; four commands plus `reset_saved_files`; the Transfers
+  refresh also checks the list; PR #51's "no trace of the replace setting" assertion became a
+  positive one.
+- **Limits:** see the design's residuals (old copy's streams and metadata go with it, Unix
+  same-account windows including removal of the new copy just before the unlink, Windows memory
+  mappings and late read-only attribute, the bulk check holding PR #51's check slots, Unix crash leftover
+  at a `mewtual-removing-` name, unreached entries stay unchecked, `save_group_file` itself is
+  covered by its port seams and a text-order test, not end to end).
+
+Validation: see the design's ledger.
+
 ## Cache housekeeping (26 October, PR #55, stacked on #51)
 
 Each server's encrypted cache on a device now has a per-server size limit, crash-safe writes and

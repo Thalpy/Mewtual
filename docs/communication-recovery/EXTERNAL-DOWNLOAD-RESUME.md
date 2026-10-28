@@ -1516,6 +1516,7 @@ agents' `row.md` and `icons.md` (class contract `.sdl`, tokens only, motion and 
   effect, read-only and reparse files, fencing of a new `RenamePublished` journal edge, claim order,
   lost alternate streams and metadata, and wording. The follow-up adds a durable record of copies
   Mewtual saved first. Nothing of the setting was built: no setting UI, copy or code here.
+  Since built in PR #56 (`docs/design-saved-files-list.md`), which answers each of these findings.
 - **On hold (owner): keeping finished saves listed.** Unchanged: a finished save releases its row
   and shows done in the live list. `savedRowView` takes any row, so listing finished saves later
   only needs rows fed in.

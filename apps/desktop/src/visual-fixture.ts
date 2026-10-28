@@ -3,7 +3,7 @@ import type { InvokeArgs } from "@tauri-apps/api/core";
 import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging.ts";
 import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
 import { createVisualFileUploads } from "./visual-file-uploads.ts";
-import { visualTransfersResponse } from "./visual-transfers-fixture.ts";
+import { VISUAL_SAVED_FILES, visualTransfersResponse } from "./visual-transfers-fixture.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -63,6 +63,16 @@ const CHANNEL_MESSAGES: Record<string, Message[]> = {
     message("dm-2", ME, "Perfect — one stable URL per state is the goal.", 22),
   ],
 };
+
+/** A channel's messages. The Transfers fixture (`transfers=1`) adds one message sharing a file
+ * the device already saved, so its chat card shows the "Saved" mark (PR #56). */
+function channelMessages(key: string, transfers: boolean): Message[] {
+  const rows = CHANNEL_MESSAGES[key] ?? [];
+  if (!transfers || key !== "general") return rows;
+  const saved = VISUAL_SAVED_FILES[0].file;
+  // A file reference on a line of its own renders as a file card (`[label](file:CID)`).
+  return [...rows, message("msg-6", JUNIPER, `Here is the kit again:\n[${saved.name}](file:${saved.cid})`, 3)];
+}
 
 const PROFILES = [
   {
@@ -256,9 +266,9 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         },
       ]);
     case "get_messages":
-      return clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []);
+      return clone(channelMessages(server === 2 ? "dm" : channel, transfers));
     case "get_message_page": {
-      const rows = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Message[];
+      const rows = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Message[];
       const request: PageRequest = {
         anchor: (args.anchor as PageRequest["anchor"]) ?? { kind: "tail" },
         before: typeof args.before === "number" ? args.before : 0,
@@ -268,11 +278,11 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       return pageOfList(rows, request, ME, "@[Rowan]", 1, probe);
     }
     case "get_pinned_messages":
-      return clone((CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []).filter((m) => m.pinned));
+      return clone((channelMessages(server === 2 ? "dm" : channel, transfers)).filter((m) => m.pinned));
     case "get_messages_by_id": {
       // The arrival read: the named rows wherever they sort, each with its addressing bit. Ids
       // that name nothing are absent, exactly as the native command answers.
-      const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{
+      const all = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Array<{
         id: string;
         text: string;
       }>;
@@ -282,7 +292,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         .map((row) => ({ ...row, targets_me: row.text.includes("@[Rowan]") }));
     }
     case "get_message_tail": {
-      const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{ id: string; text: string }>;
+      const all = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Array<{ id: string; text: string }>;
       const limit = typeof args.limit === "number" && args.limit > 0 ? Math.trunc(args.limit) : all.length;
       const cursor = typeof args.afterId === "string" ? args.afterId : "";
       const at = cursor ? all.findIndex((row) => row.id === cursor) : -1;
@@ -335,6 +345,29 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
     case "check_saved_download": return "present";
     // Show in folder: native checks the file and opens the system file manager; nothing returns.
     case "reveal_saved_download": return null;
+    // PR #56: the saved-files list. The chat fixture has saved nothing; `transfers=1` lists one
+    // entry per row state. Its check answers nothing, and the list actions change nothing.
+    case "get_saved_files": return { state: "ok", files: [] };
+    case "check_saved_files": return [];
+    case "reveal_saved_file":
+    case "forget_saved_file":
+    case "reset_saved_files":
+      return null;
+    // "Remember saved files" (Server settings, Storage). Lantern Room's list is said to hold 212
+    // entries (display data for that page only), so a lower choice previews what it forgets. A
+    // choice is clamped and echoed back like native, never persisted.
+    case "get_saved_files_limit":
+      return { state: "ok", limit: 256, listed: server === 1 ? 212 : 0, min: 16, max: 4096, default: 256 };
+    case "set_saved_files_limit": {
+      const asked = typeof args.limit === "number" ? args.limit : 256;
+      const limit = Math.min(4096, Math.max(16, Math.trunc(asked)));
+      const forgets = Math.max(0, (server === 1 ? 212 : 0) - limit);
+      // Like native, an apply holds only for the count the user confirmed.
+      if (args.apply === true && args.expectedForgets !== forgets) {
+        throw new Error("The list of saved files changed meanwhile, so Mewtual kept the current setting. Choose again.");
+      }
+      return { limit, forgets, applied: args.apply === true };
+    }
     case "save_group_file": {
       // Mirrors the native contract: the renderer sends a name and an optional `saveAs` flag,
       // never a path or folder. A fixture "Save as" behaves as if the user closed the dialog, so

@@ -68,6 +68,8 @@ pub(crate) use epoch_registry::{
 mod epoch_studio;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
 mod leave_cleanup;
+#[cfg(test)]
+mod saved_files_tests;
 pub(crate) use epoch_intents::inspection::{
     StudioInspectedDraft, StudioInspectionCapture, StudioInspectionPurpose, StudioInspectionStamp,
 };
@@ -1298,6 +1300,20 @@ mod persistence {
         ) -> Result<(), AppError> {
             atomic_write(&self.cache_setting_path(id), bytes)
         }
+        pub(super) fn write_saved_files_record(
+            &self,
+            id: u64,
+            bytes: &[u8],
+        ) -> Result<(), AppError> {
+            atomic_write(&self.saved_files_path(id), bytes)
+        }
+        pub(super) fn write_saved_limit_record(
+            &self,
+            id: u64,
+            bytes: &[u8],
+        ) -> Result<(), AppError> {
+            atomic_write(&self.saved_limit_path(id), bytes)
+        }
         pub(super) fn write_registry_record(&self, bytes: &[u8]) -> Result<(), AppError> {
             atomic_write(&self.registry_path(), bytes)
         }
@@ -1394,6 +1410,61 @@ pub(in crate::store) use persistence::{
     atomic_write_with_hook_and_sync_for_test, atomic_write_with_hook_for_test,
     create_staging_file_for_test, staging_candidate_for_test, write_for_test,
 };
+
+/// What [`ServerStore::load_saved_files`] found (PR #56, `docs/design-saved-files-list.md`).
+///
+/// Only `Missing` and `Found` may be written over. The other three are left exactly as they are
+/// (only leaving the server removes them), so a list a newer build wrote survives a downgrade and
+/// a record that merely could not be read right now is never lost; saves are then not recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedFilesLoad {
+    /// No record, or a stale record naming another owner (another group, or an earlier membership
+    /// of this one): an empty list, safe to write over.
+    Missing,
+    Found(catcoms_storage::kept::SavedFiles),
+    /// A version this build does not know (a newer Mewtual wrote it). Never written over.
+    Newer,
+    /// It does not unseal, or unseals to something that is not a valid list. Written over only by
+    /// the user's explicit "Start a new list" ([`ServerStore::reset_saved_files`]).
+    Damaged,
+    /// It could not be read right now (an I/O error). The next attempt reads again.
+    Unavailable,
+}
+
+/// What [`ServerStore::load_saved_files_limit`] found: the per-server "Remember saved files"
+/// setting (`servers/<id>.saved-limit`, sealed like the list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedLimitLoad {
+    /// No record, or one naming another owner: the default applies.
+    Missing,
+    Found(catcoms_storage::kept::SavedLimit),
+    /// A record that exists but cannot be read (damaged, a newer version, an I/O error). No save
+    /// is recorded meanwhile, because recording trims to the setting and an unknown setting could
+    /// forget entries the user chose to keep; the list is still read (under the largest bound).
+    /// Only the user's own choice in Storage settings writes over it.
+    Unreadable,
+}
+impl SavedLimitLoad {
+    /// The bound a reader uses for the list: the stored setting's, the default's when there is
+    /// none, the largest when it cannot be read (still bounded, and never narrower than a list
+    /// this vault may hold).
+    pub fn read_bound(self) -> usize {
+        use catcoms_storage::kept::SavedLimit;
+        match self {
+            Self::Found(limit) => limit.read_bound(),
+            Self::Missing => SavedLimit::DEFAULT.read_bound(),
+            Self::Unreadable => SavedLimit::LARGEST.read_bound(),
+        }
+    }
+    /// The setting a recorded save trims to; `None` when it cannot be read.
+    pub fn limit(self) -> Option<catcoms_storage::kept::SavedLimit> {
+        match self {
+            Self::Found(limit) => Some(limit),
+            Self::Missing => Some(catcoms_storage::kept::SavedLimit::DEFAULT),
+            Self::Unreadable => None,
+        }
+    }
+}
 
 /// A passphrase-gated, on-disk store for a member's servers.
 pub struct ServerStore {
@@ -1515,6 +1586,19 @@ impl ServerStore {
     /// The per-server, per-device cache limit record (never replicated).
     fn cache_setting_path(&self, id: u64) -> PathBuf {
         self.dir.join("servers").join(format!("{id}.storage"))
+    }
+
+    /// The per-server, per-device saved-files list (PR #56; never replicated).
+    fn saved_files_path(&self, id: u64) -> PathBuf {
+        self.dir.join("servers").join(format!("{id}.saved"))
+    }
+
+    /// The list's own "Remember saved files" setting (never replicated). It sits beside the cache
+    /// setting rather than inside it: extending `{id}.storage` would make a build before this one
+    /// read its cache limit as unreadable (pausing eviction) and drop the new field on its next
+    /// write.
+    fn saved_limit_path(&self, id: u64) -> PathBuf {
+        self.dir.join("servers").join(format!("{id}.saved-limit"))
     }
 
     fn registry_path(&self) -> PathBuf {
@@ -1719,17 +1803,24 @@ impl ServerStore {
         Ok(Zeroizing::new(unseal(&self.keys.db_key()?, &sealed)?))
     }
 
-    /// Delete a server's on-disk snapshot, its network record, its address cache **and** its cache
-    /// limit (e.g. on leave): leaving a stale identity seed behind would hand a re-founded server
-    /// the old server's peer id, and leaving the cache behind would have it dialling a group it
-    /// left. Its blob namespace is cleaned separately (see `cache_namespace_dir`), because that
-    /// cleanup must consult Studio references first.
+    /// Delete a server's on-disk snapshot, its network record, its address cache, its cache limit
+    /// **and** its saved-files list (e.g. on leave): leaving a stale identity seed behind would
+    /// hand a re-founded server the old server's peer id, leaving the cache behind would have it
+    /// dialling a group it left, and the saved-files list names folders on this device that a
+    /// left server has no reason to keep (the saved files themselves are never touched). This is
+    /// also the only way an unreadable saved-files list (for example one a newer build wrote) is
+    /// ever removed. Its blob namespace is cleaned separately (see `cache_namespace_dir`), because
+    /// that cleanup must consult Studio references first. The list goes before its setting, so a
+    /// removal that stops part way never leaves a large list without the setting that bounds its
+    /// read.
     pub fn remove_server(&self, id: u64) -> Result<(), AppError> {
         for p in [
             self.server_path(id),
             self.server_net_path(id),
             self.address_cache_path(id),
             self.cache_setting_path(id),
+            self.saved_files_path(id),
+            self.saved_limit_path(id),
         ] {
             if p.exists() {
                 fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;
@@ -1824,6 +1915,133 @@ impl ServerStore {
             }
             Some(_) => CacheSettingLoad::Missing,
             None => CacheSettingLoad::Unreadable,
+        }
+    }
+
+    /// Seal + atomically write a server's saved-files list under the vault `db_key` (PR #56).
+    ///
+    /// The caller (native, under the store lock and then the registry lock, for the server
+    /// incarnation that saved) must only write a list it loaded as `Missing` or `Found` (see
+    /// [`SavedFilesLoad`]). The list must name `owner` (the group id followed by this device's
+    /// member id in it); one naming another owner is refused, so a record can never be written
+    /// under the wrong server number or membership.
+    pub fn save_saved_files(
+        &self,
+        id: u64,
+        owner: &[u8],
+        list: &catcoms_storage::kept::SavedFiles,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if list.owner() != owner {
+            return Err(AppError::Invalid(
+                "the saved-files list names another membership".into(),
+            ));
+        }
+        let plain = Zeroizing::new(list.encode());
+        // Adversarial review M1, backstop: never write a list this build would read back as
+        // damaged (it would stop recording and offer to start anew over every entry). That
+        // includes a list larger than the stored setting lets a reader read.
+        if catcoms_storage::kept::SavedFiles::decode(&plain).as_ref() != Ok(list)
+            || plain.len() > self.load_saved_files_limit(id, owner).read_bound()
+        {
+            return Err(AppError::Invalid(
+                "the saved-files list would not read back".into(),
+            ));
+        }
+        let sealed = seal(&self.keys.db_key()?, &plain, rng)?;
+        self.write_saved_files_record(id, &frame(&sealed))
+    }
+
+    /// Seal + atomically write a server's "Remember saved files" setting for `owner` (the list's
+    /// own binding). The caller trims and writes the list first when lowering it (so the list
+    /// always fits what the stored setting lets a reader read), under the same locks as a list
+    /// write.
+    pub fn save_saved_files_limit(
+        &self,
+        id: u64,
+        owner: &[u8],
+        limit: catcoms_storage::kept::SavedLimit,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let sealed = seal(&self.keys.db_key()?, &limit.encode_for(owner), rng)?;
+        self.write_saved_limit_record(id, &frame(&sealed))
+    }
+
+    /// Read a server's "Remember saved files" setting; see [`SavedLimitLoad`].
+    pub fn load_saved_files_limit(&self, id: u64, owner: &[u8]) -> SavedLimitLoad {
+        use catcoms_storage::kept::SavedLimit;
+        let path = self.saved_limit_path(id);
+        let bytes = match catcoms_storage::blob::read_bounded(&path, 4096) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return SavedLimitLoad::Missing,
+            Err(_) => return SavedLimitLoad::Unreadable,
+        };
+        let Ok(key) = self.keys.db_key() else {
+            return SavedLimitLoad::Unreadable;
+        };
+        let plain = match unframe(&bytes).and_then(|sealed| Ok(unseal(&key, &sealed)?)) {
+            Ok(plain) => Zeroizing::new(plain),
+            Err(_) => return SavedLimitLoad::Unreadable,
+        };
+        match SavedLimit::decode(&plain) {
+            Ok((record_owner, limit)) if record_owner == owner => SavedLimitLoad::Found(limit),
+            Ok(_) => SavedLimitLoad::Missing,
+            Err(_) => SavedLimitLoad::Unreadable,
+        }
+    }
+
+    /// "Start a new list" (PR #56 design review L4): replace a **damaged** record with an empty
+    /// list. Re-reads first and refuses anything that is not `Damaged` now, so a list a newer
+    /// build wrote, one that reads again, or one that could merely not be read right now is never
+    /// replaced. Returns whether it wrote.
+    pub fn reset_saved_files(
+        &self,
+        id: u64,
+        owner: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        if self.load_saved_files(id, owner) != SavedFilesLoad::Damaged {
+            return Ok(false);
+        }
+        self.save_saved_files(
+            id,
+            owner,
+            &catcoms_storage::kept::SavedFiles::new(owner),
+            rng,
+        )?;
+        Ok(true)
+    }
+
+    /// Read a server's saved-files list (PR #56); see [`SavedFilesLoad`] for what each answer lets
+    /// the caller do. A record naming another owner is `Missing`. At most the stored setting's
+    /// [`SavedLimitLoad::read_bound`] is read (1 to 16 MiB plus the seal), never more.
+    pub fn load_saved_files(&self, id: u64, owner: &[u8]) -> SavedFilesLoad {
+        use catcoms_storage::kept::{SavedFiles, SavedListError};
+        use catcoms_storage::StorageError;
+        let path = self.saved_files_path(id);
+        let bound = self.load_saved_files_limit(id, owner).read_bound();
+        // The frame is the 24-byte nonce plus the ciphertext, which adds a 16-byte tag.
+        let bytes = match catcoms_storage::blob::read_bounded(&path, bound + 40) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return SavedFilesLoad::Missing,
+            // Larger than any list, or not a regular file: not a list this build can read.
+            Err(StorageError::BlobSizeLimit | StorageError::Malformed) => {
+                return SavedFilesLoad::Damaged
+            }
+            Err(_) => return SavedFilesLoad::Unavailable,
+        };
+        let Ok(key) = self.keys.db_key() else {
+            return SavedFilesLoad::Unavailable;
+        };
+        let plain = match unframe(&bytes).and_then(|sealed| Ok(unseal(&key, &sealed)?)) {
+            Ok(plain) => Zeroizing::new(plain),
+            Err(_) => return SavedFilesLoad::Damaged,
+        };
+        match SavedFiles::decode(&plain) {
+            Ok(list) if list.owner() == owner => SavedFilesLoad::Found(list),
+            Ok(_) => SavedFilesLoad::Missing,
+            Err(SavedListError::Version(_)) => SavedFilesLoad::Newer,
+            Err(SavedListError::Malformed) => SavedFilesLoad::Damaged,
         }
     }
 

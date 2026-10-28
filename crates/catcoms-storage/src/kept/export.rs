@@ -1248,6 +1248,14 @@ impl ExportPlan {
             cid: manifest.plaintext_cid,
         })
     }
+    /// The plaintext CID a save of this plan publishes, and its exact length: what native
+    /// records in the saved-files list for a recovered save (PR #56).
+    pub fn cid(&self) -> Cid {
+        self.cid
+    }
+    pub fn total(&self) -> u64 {
+        self.total
+    }
     #[cfg(test)]
     pub(super) fn for_test(chunks: &[&[u8]]) -> Self {
         Self {

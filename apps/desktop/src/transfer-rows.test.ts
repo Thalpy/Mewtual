@@ -2,14 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { checkedPrivateDownloads, type PrivateDownload, type PrivateDownloadStatus, type SavedCheck } from "./private-downloads.ts";
 import {
-  SAVED_ROW_GROUPS, TRANSFER_ICONS, byteLabel, byteValueText, chunkLabel, compactControls, confirmWords, formatDecimalBytes,
-  groupSavedRows, savedRowTransitions, savedRowView, type CompactControl, type SavedRowView,
+  SAVED_ROW_GROUPS, TRANSFER_ICONS, byteLabel, byteValueText, chunkLabel, compactControls, compactListControls, confirmWords,
+  formatDecimalBytes, groupSavedRows, savedRowTransitions, savedRowView, type CompactControl, type SavedListRowAction,
+  type SavedRowView,
 } from "./transfer-rows.ts";
+import { savedListRowView } from "./saved-files.ts";
 
 const base: PrivateDownload = {
   id: "ab".repeat(32), cid: "cd".repeat(32), intent: "3", grant: "1", status: "incomplete",
   verifiedChunks: 12, savedChunks: 4, totalChunks: 40, chosenPlace: false,
   receivedBytes: 3_100_000, savedBytes: 1_000_000, totalBytes: 12_400_000, savedTo: null,
+  savedEntry: null,
 };
 const row = (status: PrivateDownloadStatus, extra: Partial<PrivateDownload> = {}): PrivateDownload =>
   ({ ...base, status, savedTo: status === "saved" ? "downloads" : null, ...extra });
@@ -275,6 +278,51 @@ test("compact controls put every action of every state in exactly one place", ()
   const keep = compactControls(view("removing", null, { savedChunks: 40, totalChunks: 40 })).menu[0];
   assert.equal(keep.kind === "action" && keep.action.label, "Keep the file");
   assert.equal(keep.kind === "action" && keep.icon, "keep");
+});
+
+test("a saved-files list row is arranged by the same rules as a Saved private row", () => {
+  // PR #56 merged with the compact rows: one model for both kinds of row in SAVED.
+  type Want = { primary: string | null; look?: string; icon?: string; menu: string[] };
+  const file = { id: "a".repeat(32), cid: "c".repeat(64), name: "report.pdf", savedAt: 1, size: 1,
+    savedTo: "downloads" as const, checkable: true };
+  const cases: [string, SavedCheck | null, boolean, boolean, Want][] = [
+    // Still there (or not checked yet, or could not check): Show in folder, Save another copy in More.
+    ["present", "present", true, true, { primary: "Show in folder", look: "", icon: "show-in-folder", menu: ["Save another copy"] }],
+    ["not checked", null, true, true, { primary: "Show in folder", look: "", icon: "show-in-folder", menu: ["Save another copy"] }],
+    ["unknown", "unknown", true, true, { primary: "Show in folder", look: "", icon: "show-in-folder", menu: ["Save another copy"] }],
+    // Gone: Save again is the primary, as on a Saved private row whose file is missing.
+    ["missing", "missing", true, true, { primary: "Save again", look: "go", icon: "saving", menu: [] }],
+    ["replaced", "replaced", true, true, { primary: "Save again", look: "go", icon: "saving", menu: [] }],
+    // Gone and no longer shared: nothing to save or show, only Clear.
+    ["missing, not shared", "missing", false, true, { primary: null, menu: [] }],
+    // Present but no longer shared: Show in folder only.
+    ["present, not shared", "present", false, true, { primary: "Show in folder", look: "", icon: "show-in-folder", menu: [] }],
+    // Native cannot check it: never Show in folder.
+    ["not checkable", "missing", true, false, { primary: null, menu: ["Save another copy"] }],
+  ];
+  for (const [key, check, listed, checkable, want] of cases) {
+    const v = savedListRowView({ ...file, checkable }, check, listed, () => "today", idle);
+    const c = compactListControls(v);
+    const label = (item: CompactControl<SavedListRowAction> | { kind: "separator" }) =>
+      item.kind === "action" ? item.action.label : item.kind === "reveal" ? item.label : "---";
+    assert.equal(c.primary ? label(c.primary) : null, want.primary, `${key}: primary`);
+    if (c.primary) {
+      assert.equal(c.primary.look, want.look, `${key}: look`);
+      assert.equal(c.primary.icon, want.icon, `${key}: icon`);
+      assert.ok(c.primary.icon in TRANSFER_ICONS);
+    }
+    assert.equal(c.remove?.label, "Clear", `${key}: the x is Clear`);
+    assert.deepEqual(c.menu.map(label), want.menu, `${key}: menu`);
+    for (const item of c.menu) if (item.kind !== "separator") assert.ok(item.icon in TRANSFER_ICONS, `${key}: menu icon`);
+    // Every action exactly once.
+    const shown = [c.primary, c.remove ? { kind: "action" as const, action: c.remove } : null, ...c.menu]
+      .filter((item): item is CompactControl<SavedListRowAction> => !!item && item.kind === "action").map((item) => item.action.kind);
+    assert.deepEqual([...shown].sort(), v.actions.map((a) => a.kind).sort(), `${key}: every action exactly once`);
+  }
+  // The reveal names the file; the actions carry their file-specific names.
+  const present = compactListControls(savedListRowView(file, "present", true, () => "today", idle));
+  assert.equal(present.primary?.kind === "reveal" && present.primary.accessibleName, "Show report.pdf in folder");
+  assert.equal(present.remove?.accessibleName, "Clear report.pdf");
 });
 
 test("saved rows say where the file went without naming a folder native did not prove", () => {
