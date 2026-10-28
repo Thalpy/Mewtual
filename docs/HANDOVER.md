@@ -1,5 +1,42 @@
 # Mewtual; Handover
 
+## Native fixture retry and sender-tail corrections (28 October)
+
+Two complete runs stopped on distinct fixture assumptions. Score `324bda42` had
+993 passes and 15 failures: the real failure was
+`native_v2_pc_intent_lost_publication_recovers_original_outcome_after_parent_close`
+in the new pressure regression's immediate post-release retry (three-byte reply,
+expected170); the other14 were fail-closed fixture refusals. That log does not
+identify the three-byte refusal code. Its focused rerun passes13.14s; that alone
+does not diagnose the intermittent response.
+
+Linux at `f4ec9165` had994 passes and11 failures. Its real failure was
+`native_v2_pc_intent_recorded_actor_outcomes_retire_before_actual_io_collection`:
+the receiver reached a weak-owner assertion while the sender still owned its paid
+Work. `sdp_rpc::complete` intentionally wakes the receiver BEFORE dropping that
+sender owner. The corrected test joins the SAME actor's FIFO after caller owners
+drop, then keeps both weak-owner and UI-lock assertions. It neither shortens
+production custody nor polls weak counts as a substitute for collection. The existing
+synchronous receiver-waker regression pins this ownership window and passes.
+
+`c023658a` retries only exact authenticated Capacity on the SAME storage request,
+parent/action/key/SDP sequence/proof and original Claim setup deadline. Every other
+response fails immediately; exchanges/backoff and positive observation share that
+original cutoff. A held real UI commit forces a retry after reserve pressure ends;
+only stage4 evidence for the SAME authenticated physical sequence releases that guard.
+Past/missing observations cannot satisfy the oracle. The stage5 reserve refusal,
+drained worker, absent Phase and same-proof recovery assertions remain. Pressure
+setup retries a lost snapshot/charge race at most eight yields; deterministic real
+credit tests cover one winning race and bounded repeated losses without early refund.
+
+`56e86c6a` adds the sender FIFO correction. On the combined Score source, all379
+handoff module checks plus both causal native cases pass (381 total,35.68s). The
+complete frontend passes3,539 tests again. Native check, strict native Clippy across
+all targets/features and the current-source Root construction scan (0.47s) pass.
+A corrected complete native run remains required; the failed complete runs are not sign-off evidence. Read-only
+review finds no remaining issue in either correction. Production behavior, resource
+ceilings, Source attempts and protocol deadlines are unchanged; App V2 remains OFF.
+
 ## Second-peer native admission failure (28 October; diagnosis in progress)
 
 The corrected `c3877704` Linux native gate completed with 963 passes and 40
