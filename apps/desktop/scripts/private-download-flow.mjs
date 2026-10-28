@@ -57,7 +57,7 @@ export const privateDownloadFlowExpression = String.raw`(async () => {
   const rows = () => [...document.querySelectorAll('.downloads-tab .sdl-row, .downloads-tab .dl-item')];
   const row = name => rows().find(r => r.textContent.includes(name));
   const action = (name,label) => [...(row(name)?.querySelectorAll('button') ?? [])]
-    .find(b => b.textContent.trim() === label || b.getAttribute('aria-label') === `${label} ${name}`);
+    .find(b => b.textContent.trim() === label || b.getAttribute('aria-label') === label + ' ' + name);
   const off = button => !button || button.disabled || button.getAttribute('aria-disabled') === 'true';
   const click = async (name,label) => { await wait(() => action(name,label) && !off(action(name,label)),label); action(name,label).click(); };
   await wait(() => row('Interrupted drawing.bin'),'saved progress after opening Transfers');
