@@ -220,7 +220,6 @@ async fn saved_entry_reveal_rejects_lock_registered_during_the_final_registry_wa
     assert_eq!(reveal.await, Err(private_downloads::RevealError::Stale));
     lock.await.unwrap();
     assert!(!called.load(Ordering::Acquire));
-    drop(request);
     case.finish().await;
 }
 
@@ -259,7 +258,6 @@ async fn saved_entry_reveal_holds_commit_and_an_unlock_cannot_revive_it() {
         .await,
         Err(private_downloads::RevealError::Stale)
     );
-    drop(request);
     case.finish().await;
 }
 
@@ -285,7 +283,6 @@ async fn saved_entry_reveal_rechecks_the_actual_entry_after_waiting_for_commit()
     assert!(forget_entry(&case.state, 1, 56_001, expected.id).await);
     drop(commit);
     assert_eq!(reveal.await, Err(private_downloads::RevealError::Stale));
-    drop(request);
     case.finish().await;
 }
 

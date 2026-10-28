@@ -27,7 +27,10 @@ findings in that scoped review. Broader integration review then found the regist
 deadlock above and a Show-in-folder race. Its new registration-shaped test fails before
 the correction. The follow-up passes 16 cache, 27 saved-file and eight saved-download
 check/reveal tests; re-review has no remaining blocker/high/medium finding. Expanded
-seven-case negative/restored controls and complete backend gates are pending.
+seven-case negative/restored controls all pass after exact restoration and a fresh
+build, as do the three complete focused modules. Strict native Clippy passes after
+removing redundant non-Drop markers in the tests; review confirms no guard/assertion
+or cleanup change. Complete combined backend gates remain pending.
 The original #51 hostile six-client scenario now passes on the combined stack in
 228.48 seconds, including bridge/reunion and independent sealed reopens. That validates
 the current graceful-close path; it does not establish the cause of the old Linux failure
