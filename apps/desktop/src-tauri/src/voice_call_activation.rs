@@ -14,14 +14,24 @@ use catcoms_sync::voice_v2::call_activation::{
 use catcoms_sync::voice_v2::{CallGrant, VoiceError};
 use std::collections::HashMap;
 use std::future::{poll_fn, Future};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::task::Poll;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 pub(crate) const MAX_ACTIVATIONS: usize = 32;
-const NATIVE_BYTES: usize = 16 * 1024;
+// The complete native graph needs more than 17 KiB on the current Windows test
+// build. Reserve 18 KiB before construction; the old provisional 16 KiB cannot
+// pay this graph. This is one local fee within unchanged group/process ceilings.
+const NATIVE_BYTES: usize = 18 * 1024;
 const CADENCE_MS: u64 = 250;
+// The only production source is the sanctioned SystemClock through Runtime's
+// EffectiveClock. ManualClock is the deterministic test source. Their boxed sleep
+// bodies are independently measured below; arbitrary Clock implementations are a
+// trusted Rust seam, not an untrusted extensibility/memory-budget promise.
+const CLOCK_SLEEP_BYTES: usize = 1024;
+const CLOCK_OWNER_BYTES: usize = 256;
 struct Funding {
     _credit: catcoms_sync::voice_v2::resources::Credit,
 }
@@ -94,7 +104,14 @@ struct Invocation {
 }
 struct TaskTicket {
     serial: u64,
-    returned: Arc<AtomicBool>,
+    // ONE original stamp allocation for every negative recovery. Creating a fresh
+    // Arc per retry would let paused old marker destructors accumulate heap tails.
+    returned: Arc<AtomicU64>,
+}
+impl TaskTicket {
+    fn has_returned(&self) -> bool {
+        self.returned.load(Ordering::Acquire) == self.serial
+    }
 }
 struct State {
     owner: Option<ActivationOwner>,
@@ -119,6 +136,9 @@ impl Handle {
         prepared: PreparedVoiceCall,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, VoiceError> {
+        if native_layout_bytes() > NATIVE_BYTES {
+            return Err(VoiceError::Capacity);
+        }
         // These are trusted native identities, not wire data. Still pin every
         // retained allocation before construction; a large caller capacity must
         // not silently become an unaccounted owned String/Vec in the Cell.
@@ -162,7 +182,7 @@ impl Handle {
                     cleanup_done: false,
                     task: TaskTicket {
                         serial: 1,
-                        returned: Arc::new(AtomicBool::new(false)),
+                        returned: Arc::new(AtomicU64::new(0)),
                     },
                     task_started: false,
                 }),
@@ -348,7 +368,7 @@ impl Handle {
                 .storage
                 .as_ref()
                 .is_some_and(|proof| proof.matches(self.original()))
-            && state.task.returned.load(Ordering::Acquire)
+            && state.task.has_returned()
     }
 }
 /// Local trusted receiver receipt. Dropping a lost reply does NOT acknowledge it.
@@ -545,12 +565,13 @@ impl LiveContext {
 /// Marker owns no Cell/Root/Actor backedge. It follows all actual task arguments,
 /// before the final plain payer. The original signal is never a caller-supplied bool.
 struct TaskReturned {
-    signal: Arc<AtomicBool>,
+    signal: Arc<AtomicU64>,
+    serial: u64,
     _funding: Arc<Funding>,
 }
 impl Drop for TaskReturned {
     fn drop(&mut self) {
-        self.signal.store(true, Ordering::Release);
+        self.signal.store(self.serial, Ordering::Release);
     }
 }
 struct Worker {
@@ -558,8 +579,9 @@ struct Worker {
     context: Context,
     handle: Handle,
     negative_only: bool,
-    // LAST owned argument: every actual Context/Handle/guard alias returns first.
-    returned: TaskReturned,
+    // Before run(), this is LAST so an abandoned Worker returns its arguments
+    // first. run() moves it OUTSIDE the boxed execution future before polling.
+    returned: Option<TaskReturned>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -574,30 +596,31 @@ impl Drop for Worker {
 }
 impl Handle {
     fn initial_worker(&self, context: Context, commit: OwnedMutexGuard<()>) -> Worker {
-        let signal = {
+        let (signal, serial) = {
             let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
             assert!(!state.task_started, "one canonical task");
             state.task_started = true;
-            state.task.returned.clone()
+            (state.task.returned.clone(), state.task.serial)
         };
         Worker {
             commit: Some(commit),
             context,
             handle: self.clone(),
             negative_only: false,
-            returned: TaskReturned {
+            returned: Some(TaskReturned {
                 signal,
+                serial,
                 _funding: self.funding.clone(),
-            },
+            }),
         }
     }
     fn negative_worker(&self, context: Context) -> Option<Worker> {
-        let signal = {
+        let (signal, serial) = {
             let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
             if !self.original().is_closed()
                 || state.cleanup_done
                 || !state.task_started
-                || !state.task.returned.load(Ordering::Acquire)
+                || !state.task.has_returned()
             {
                 return None;
             }
@@ -605,22 +628,19 @@ impl Handle {
             // close/prepare/recovery hooks cannot allocate overlapping workers on
             // one payer. No positive path is reachable from a replacement task.
             let serial = state.task.serial.checked_add(1)?;
-            let signal = Arc::new(AtomicBool::new(false));
-            state.task = TaskTicket {
-                serial,
-                returned: signal.clone(),
-            };
-            signal
+            state.task.serial = serial;
+            (state.task.returned.clone(), serial)
         };
         Some(Worker {
             commit: None,
             context,
             handle: self.clone(),
             negative_only: true,
-            returned: TaskReturned {
+            returned: Some(TaskReturned {
                 signal,
+                serial,
                 _funding: self.funding.clone(),
-            },
+            }),
         })
     }
     fn control(&self) -> Option<VoiceActivationControl> {
@@ -675,6 +695,17 @@ impl Handle {
     }
 }
 impl Worker {
+    fn run(mut self) -> RunningWorker {
+        // Arm the return owner BEFORE allocating or first polling. An inner Drop
+        // marker would publish return before its future's backing was freed, and
+        // could let a replacement reuse the SAME fee while that backing survived.
+        let mut running = RunningWorker {
+            future: None,
+            returned: self.returned.take(),
+        };
+        running.future = Some(Box::pin(self.execute()));
+        running
+    }
     fn release_commit(&mut self) {
         drop(self.commit.take());
     }
@@ -742,7 +773,7 @@ impl Worker {
             cadence_tick(self.handle.cell.clock.as_ref()).await?;
         }
     }
-    async fn run(mut self) {
+    async fn execute(mut self) {
         if !self.negative_only && !self.handle.original().is_closed() {
             let queued = match (
                 self.handle.control(),
@@ -933,6 +964,82 @@ impl Worker {
         drop(owners);
         self.handle.cell.changed.notify_waiters();
     }
+}
+
+/// Own the actual execution allocation outside its future. Returning means that
+/// the SAME Box and all its captures have been destroyed, not just that a marker
+/// inside it started dropping. A completed outer executor shell has no native
+/// captures; this does not claim synchronous Tokio scheduler-cell collection.
+struct RunningWorker {
+    future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    returned: Option<TaskReturned>,
+}
+impl RunningWorker {
+    fn retire(&mut self) {
+        drop(self.future.take());
+        drop(self.returned.take());
+    }
+}
+impl Future for RunningWorker {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        let Some(future) = &mut self.future else {
+            return Poll::Ready(());
+        };
+        if future.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        self.retire();
+        Poll::Ready(())
+    }
+}
+impl Drop for RunningWorker {
+    fn drop(&mut self) {
+        self.retire();
+        // If inner destruction unwinds, Rust still drops the remaining return
+        // owner only after Box's own allocation teardown has unwound completely.
+    }
+}
+
+/// Complete separately paid native graph, including weak-retained Context Arc
+/// allocations, actual opaque execution storage and its independently boxed Clock
+/// sleeper. Root preparation, actor control and each RPC have their own original
+/// payments; only their native aliases belong here. Allocator/RSS slack is excluded.
+fn native_layout_bytes() -> usize {
+    use std::mem::size_of;
+    #[repr(C, align(2))]
+    struct ArcAllocation<T> {
+        strong: usize,
+        weak: usize,
+        value: T,
+    }
+    fn execution_bytes<F: Future>(_: fn(Worker) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let weak_context = size_of::<ArcAllocation<Mutex<HashMap<u64, ServerEntry>>>>()
+        + size_of::<ArcAllocation<Mutex<Option<crate::ServerStore>>>>()
+        + size_of::<ArcAllocation<Mutex<bool>>>()
+        + size_of::<ArcAllocation<AtomicBool>>()
+        + 2 * size_of::<ArcAllocation<AtomicU64>>()
+        + size_of::<ArcAllocation<Mutex<()>>>()
+        + size_of::<ArcAllocation<StdMutex<voice_authority::Coordinator>>>();
+    size_of::<ArcAllocation<Cell>>()
+        + size_of::<ArcAllocation<Funding>>()
+        + size_of::<ArcAllocation<AtomicU64>>() // SAME exact stamped allocation forever
+        + MAX_ACTIVATIONS * size_of::<Handle>() // entire actual index backing, not one slot
+        + 64 + 64 + 128 // constructor-capped owned id/controller/group buffers
+        + 64 + 128 // current Coordinator Owner duplicates its id and binding.group
+        + execution_bytes(Worker::execute)
+        + size_of::<RunningWorker>() + size_of::<Worker>() // construction and return frames
+        + 2 * size_of::<Context>() + size_of::<LiveContext>() + size_of::<UiSessionGate<'_>>()
+        + 2 * size_of::<Publisher>() // callback/Box construction and completion overlap
+        + 2 * size_of::<Outcome>() + size_of::<Invocation>()
+        + 2 * size_of::<Reply>() + size_of::<VoiceActivation>() + 3 * 64
+        + size_of::<voice_authority::DetachedActivation>()
+        + weak_context + CLOCK_OWNER_BYTES + CLOCK_SLEEP_BYTES
+        // Pinned Tokio1.53.3 task header/trailer, Box/Pin/callout and Notify waiter
+        // bookkeeping. The large execution body is measured above, not hidden here.
+        + 1024
 }
 
 /// One sanctioned positive-duration Clock registration. A broken inline/early/

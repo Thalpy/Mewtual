@@ -117,6 +117,8 @@ pub(crate) enum CandidateKind {
     },
     // Selected only by the inactive trusted native entry. Ordinary IPC cannot
     // choose a profile or reinterpret this candidate through activate().
+    #[allow(dead_code)]
+    // Private admitted activation is staged; no production command selects it yet.
     AdmittedCall {
         controller: String,
         binding: Binding,
@@ -148,6 +150,21 @@ pub(crate) struct Owner {
 pub(crate) struct DetachedActivation {
     _allocation: Vec<crate::voice_call_activation::Handle>,
     _original: crate::voice_call_activation::Handle,
+}
+impl DetachedActivation {
+    fn destroy_backing(&mut self, after_deallocation: impl FnOnce()) {
+        // The original Handle is deliberately still a field here. Vec drops its
+        // elements BEFORE freeing its backing; a payer inside those elements alone
+        // would therefore return too early when the last index owner disappears.
+        drop(std::mem::take(&mut self._allocation));
+        after_deallocation(); // production is empty; tests observe the actual return boundary
+    }
+}
+impl Drop for DetachedActivation {
+    fn drop(&mut self) {
+        self.destroy_backing(|| {});
+        // Empty Vec, then SAME original Handle/funding, in declaration order.
+    }
 }
 impl Owner {
     /// Cleanup only: the original affine allocation remains usable after synchronous End
@@ -234,10 +251,41 @@ impl Default for Coordinator {
 }
 impl Drop for Coordinator {
     fn drop(&mut self) {
-        self.revoke_all();
+        self.destroy_activation_index(Self::revoke_all, || {});
     }
 }
 impl Coordinator {
+    /// Sponsor the entire actual index allocation through normal teardown and
+    /// inherited revocation callback unwind. No new Handle, payment or allocation
+    /// is created: move the SAME final original out before revocation can panic.
+    pub(super) fn destroy_activation_index(
+        &mut self,
+        revoke: impl FnOnce(&mut Self),
+        after_deallocation: impl FnOnce(),
+    ) {
+        struct Retirement<F: FnOnce()> {
+            detached: Option<DetachedActivation>,
+            after: Option<F>,
+        }
+        impl<F: FnOnce()> Drop for Retirement<F> {
+            fn drop(&mut self) {
+                if let Some(detached) = &mut self.detached {
+                    detached.destroy_backing(self.after.take().expect("one backing return"));
+                }
+                // DetachedActivation drops its empty backing before its original,
+                // including if the test callback unwinds. Production callback is ZST.
+            }
+        }
+        let retirement = Retirement {
+            detached: self.activations.pop().map(|original| DetachedActivation {
+                _allocation: std::mem::take(&mut self.activations),
+                _original: original,
+            }),
+            after: Some(after_deallocation),
+        };
+        revoke(self); // production is exactly revoke_all; tests pin its unwind boundary
+        drop(retirement);
+    }
     pub fn with_runtime(runtime: Arc<Runtime>) -> Self {
         Self {
             serial: 0,
@@ -314,6 +362,7 @@ impl Coordinator {
     }
     /// Trusted negative/result recovery. History is bound to this original native
     /// candidate, independent of current UI authorization or replacement calls.
+    #[allow(dead_code)] // Inactive trusted result-recovery entry; never a renderer command.
     pub(crate) fn admitted_activation(
         &self,
         id: &str,
@@ -325,6 +374,7 @@ impl Coordinator {
     }
     /// Stage the separately paid canonical owner BEFORE native selection. The map
     /// is bounded custody/history only; inserting it grants no Root permission.
+    #[allow(dead_code)] // Staged canonical admission; production integration remains gated.
     pub(crate) fn retain_admitted_activation(
         &mut self,
         handle: &crate::voice_call_activation::Handle,
@@ -355,6 +405,7 @@ impl Coordinator {
     /// Native CAS for the inactive admitted entry, while holding its ORIGINAL UI
     /// guard. Prepared grants stay inert before this turn; Root selection follows
     /// on the canonical task. Return the old owner for destruction AFTER guards.
+    #[allow(dead_code)] // Staged native CAS; production integration remains gated.
     pub(crate) fn activate_admitted(
         &mut self,
         handle: &crate::voice_call_activation::Handle,
@@ -471,6 +522,7 @@ impl Coordinator {
     /// Explicit trusted local Forget, never End/TTL/absence. The returned paid
     /// handle must be dropped after Coordinator; live reply copies retain their
     /// SAME payer independently. Unknown or foreign originals create no history.
+    #[allow(dead_code)] // Staged explicit result ACK/Forget; End is not an ACK.
     pub(crate) fn forget_admitted_activation(
         &mut self,
         handle: &crate::voice_call_activation::Handle,
