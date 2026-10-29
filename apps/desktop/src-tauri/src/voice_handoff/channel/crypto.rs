@@ -60,6 +60,8 @@ pub(in crate::voice_handoff) enum Operation {
     NegotiationAdmission = 29,
     /// Canonical capacity custody on that exact local physical Session; never Ready.
     NegotiationCapacity = 30,
+    /// Separately keyed admitted Session, closed version12; never an Existing route.
+    AdmittedAdmission = 31,
 }
 impl Operation {
     pub(in crate::voice_handoff) fn is_sdp(self) -> bool {
@@ -112,6 +114,7 @@ impl Operation {
             28 => Ok(Self::Media),
             29 => Ok(Self::NegotiationAdmission),
             30 => Ok(Self::NegotiationCapacity),
+            31 => Ok(Self::AdmittedAdmission),
             _ => Err(Refused::Header),
         }
     }

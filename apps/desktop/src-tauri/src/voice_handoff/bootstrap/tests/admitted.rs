@@ -5,6 +5,7 @@ use crate::voice_call_activation::Handle;
 use catcoms_rt::{Clock, ManualClock};
 
 mod parent_claim;
+mod slot;
 
 async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::select! {

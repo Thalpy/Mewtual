@@ -1,0 +1,313 @@
+//! Actual admitted Actor/Root/physical owners, not a published-capacity stub.
+use super::*;
+use crate::voice_handoff::bootstrap::AdmittedRoute;
+use crate::voice_handoff::context::Context;
+use crate::voice_handoff::requests::admitted_admission::{Kind, Request, State as View};
+use catcoms_rt::Clock;
+use catcoms_sync::voice_v2::resources::{ResourceKind, GROUP_BYTES};
+
+async fn setup() -> (Fixture, Arc<ManualClock>, Handle, AdmittedRoute, Context) {
+    let clock = Arc::new(ManualClock::new(1000));
+    let f = Fixture::with_voice_clock(clock.clone()).await;
+    let handle = activate(&f, &controller(&f).await).await;
+    let output = ready(
+        ensure_admitted(&f.state, handle.id(), [9; 32], &mut Rng::new())
+            .await
+            .unwrap(),
+    );
+    let route = f
+        .state
+        .voice_channels
+        .admitted_route(output.public().slot)
+        .unwrap();
+    let context = Context::new(&f.state);
+    drop(output);
+    (f, clock, handle, route, context)
+}
+fn command(
+    route: &AdmittedRoute,
+    context: &Context,
+    kind: Kind,
+    g: u64,
+) -> super::super::super::super::requests::admitted_admission::Snapshot {
+    route
+        .admitted_control(
+            context,
+            Request {
+                kind,
+                generation: g,
+            },
+        )
+        .unwrap()
+}
+async fn observed(
+    route: &AdmittedRoute,
+    g: u64,
+    wanted: View,
+) -> super::super::super::super::requests::admitted_admission::Snapshot {
+    bounded(async {
+        loop {
+            route.nudge_admitted();
+            let snapshot = route.admitted_snapshot(g).unwrap();
+            if snapshot.state == wanted {
+                return snapshot;
+            }
+            assert!(
+                !matches!(snapshot.state, View::Closed | View::Uncertain),
+                "unexpected terminal {:?}",
+                snapshot
+            );
+            catcoms_rt::SystemClock
+                .sleep(std::time::Duration::from_millis(1))
+                .await;
+        }
+    })
+    .await
+}
+async fn cleanup(f: Fixture, clock: Arc<ManualClock>, handle: Handle, route: AdmittedRoute) {
+    handle.close();
+    route.nudge_admitted();
+    end(&f, &clock, &handle).await;
+    bounded(async {
+        while !route.admitted_drained_for_test() {
+            route.nudge_admitted();
+            catcoms_rt::SystemClock
+                .sleep(std::time::Duration::from_millis(1))
+                .await;
+        }
+    })
+    .await;
+    drop(route);
+    settle_admitted_setup(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    collect_admitted_channel(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    bounded(f.close()).await;
+}
+
+#[test]
+fn admitted_slot_complete_task_and_concrete_publisher_invoices_fit_before_allocation() {
+    let (task, rpc) = AdmittedRoute::admitted_graphs_for_test();
+    eprintln!("admitted native Slot/task {task}/8192; concrete RPC/publisher {rpc}/4096");
+    assert!(
+        task <= 8192,
+        "never cut task/return/reclamation terms to fit"
+    );
+    assert!(
+        rpc <= 4096,
+        "never hide concrete native publisher behind a trait size"
+    );
+}
+#[tokio::test]
+async fn admitted_setup_ack_and_observation_never_create_a_slot_or_root_registration() {
+    let (f, clock, handle, route, context) = bounded(setup()).await;
+    let resources = route.selected().resources();
+    let before = resources.counts();
+    assert_eq!(
+        command(&route, &context, Kind::Observe, 1).state,
+        View::Unstarted
+    );
+    assert!(
+        route
+            .admitted_control(
+                &context,
+                Request {
+                    kind: Kind::Register,
+                    generation: 1
+                }
+            )
+            .is_err(),
+        "SDK setup not acknowledged"
+    );
+    assert_eq!(resources.counts(), before);
+    let ack = command(&route, &context, Kind::SetupAck, 0);
+    assert_eq!(ack.canonical, 0);
+    assert!(ack.incarnation.is_none());
+    let after = resources.counts();
+    assert_eq!(command(&route, &context, Kind::SetupAck, 0), ack);
+    assert_eq!(resources.counts(), after);
+    assert_eq!(
+        command(&route, &context, Kind::Cancel, 1).state,
+        View::Returned
+    );
+    assert!(route
+        .admitted_control(
+            &context,
+            Request {
+                kind: Kind::Cancel,
+                generation: u64::MAX
+            }
+        )
+        .is_err());
+    assert_eq!(command(&route, &context, Kind::Observe, 1).cancelled, 1);
+    command(&route, &context, Kind::Register, 2);
+    let reserved = observed(&route, 2, View::Reserved).await;
+    assert_eq!(reserved.canonical, 2);
+    assert!(reserved.incarnation.is_some());
+    cleanup(f, clock, handle, route).await;
+}
+#[tokio::test]
+async fn admitted_slot_reuses_whole_root_candidate_after_ledger_busy_and_canceled_generation() {
+    let (f, clock, handle, route, context) = bounded(setup()).await;
+    command(&route, &context, Kind::SetupAck, 0);
+    let ledger = f.state.voice_handoff.clone();
+    let mut admitted = Vec::new();
+    let mut existing = Vec::new();
+    for g in 10..26 {
+        admitted.push(
+            ledger
+                .reserve_admitted_parent(
+                    route.selected().clone(),
+                    route.session().identity().clone(),
+                    g,
+                )
+                .unwrap(),
+        );
+        existing.push(crate::voice_handoff::ledger::fixture_existing_claim(
+            &ledger,
+        ));
+    }
+    command(&route, &context, Kind::Register, 1);
+    let incarnation = bounded(async {
+        loop {
+            route.nudge_admitted();
+            let snapshot = route.admitted_snapshot(1).unwrap();
+            if let Some(incarnation) = snapshot.incarnation {
+                assert_ne!(snapshot.state, View::Reserved);
+                break incarnation;
+            }
+            catcoms_rt::SystemClock
+                .sleep(std::time::Duration::from_millis(1))
+                .await;
+        }
+    })
+    .await;
+    let before = route.selected().resources().counts();
+    for _ in 0..8 {
+        command(&route, &context, Kind::Register, 1);
+        route.nudge_admitted();
+        catcoms_rt::SystemClock
+            .sleep(std::time::Duration::from_millis(1))
+            .await;
+        assert_eq!(
+            route.admitted_snapshot(1).unwrap().incarnation,
+            Some(incarnation)
+        );
+    }
+    assert_eq!(
+        route.selected().resources().counts(),
+        before,
+        "local Busy cannot remint or replace the original candidate"
+    );
+    drop(existing.pop());
+    assert_eq!(
+        observed(&route, 1, View::Reserved).await.incarnation,
+        Some(incarnation)
+    );
+    command(&route, &context, Kind::Cancel, 1);
+    observed(&route, 1, View::Returned).await;
+    drop(admitted);
+    drop(existing);
+    command(&route, &context, Kind::Register, 2);
+    assert_eq!(
+        observed(&route, 2, View::Reserved).await.incarnation,
+        Some(incarnation)
+    );
+    assert_eq!(
+        command(&route, &context, Kind::Observe, 1).state,
+        View::Superseded
+    );
+    cleanup(f, clock, handle, route).await;
+}
+#[tokio::test]
+async fn actual_admitted_task_abort_recovers_same_native_hold_under_full_ordinary_pool() {
+    let (f, clock, handle, route, context) = bounded(setup()).await;
+    command(&route, &context, Kind::SetupAck, 0);
+    let task = super::super::super::admitted_slot::register_observing_task(&context, &route, 1)
+        .unwrap()
+        .unwrap();
+    observed(&route, 1, View::Reserved).await;
+    let resources = route.selected().resources();
+    let group = route.selected().binding().scope.group;
+    let pressure = resources
+        .charge(
+            group,
+            GROUP_BYTES - resources.group_counts(group).unwrap().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
+    let ordinary_sender = f.actor.clone();
+    task.abort();
+    bounded(async {
+        while !route.admitted_task_returned_for_test() {
+            catcoms_rt::SystemClock
+                .sleep(std::time::Duration::from_millis(1))
+                .await;
+        }
+    })
+    .await;
+    route.nudge_admitted();
+    assert!(route.admitted_drained_for_test());
+    assert!(
+        route.selected().lease().is_live(),
+        "Slot cancellation cannot end the underlying call"
+    );
+    assert!(
+        resources.group_counts(group).unwrap().0 < GROUP_BYTES,
+        "only actual retained owners return capacity"
+    );
+    assert!(
+        route
+            .admitted_control(
+                &context,
+                Request {
+                    kind: Kind::Register,
+                    generation: 1
+                }
+            )
+            .is_err(),
+        "no replacement task after unexpected return"
+    );
+    drop(pressure);
+    drop(ordinary_sender);
+    cleanup(f, clock, handle, route).await;
+}
+#[tokio::test]
+async fn admitted_actual_reclamation_unwind_returns_owned_candidate_without_a_replacement_task() {
+    let (f, clock, handle, route, context) = bounded(setup()).await;
+    command(&route, &context, Kind::SetupAck, 0);
+    command(&route, &context, Kind::Register, 1);
+    observed(&route, 1, View::Reserved).await;
+    route.unwind_admitted_reclamation_for_test();
+    command(&route, &context, Kind::Cancel, 1);
+    bounded(async {
+        while !route.admitted_drained_for_test() {
+            route.nudge_admitted();
+            catcoms_rt::SystemClock
+                .sleep(std::time::Duration::from_millis(1))
+                .await;
+        }
+    })
+    .await;
+    assert_eq!(route.admitted_snapshot(1).unwrap().state, View::Uncertain);
+    assert!(
+        route
+            .admitted_control(
+                &context,
+                Request {
+                    kind: Kind::Register,
+                    generation: 2
+                }
+            )
+            .is_err(),
+        "unwind cannot replace the original task/registration"
+    );
+    assert!(
+        handle.active(),
+        "admission cleanup cannot terminate the whole call"
+    );
+    cleanup(f, clock, handle, route).await;
+}

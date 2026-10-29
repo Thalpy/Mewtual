@@ -18,7 +18,9 @@ mod admission_slot;
 mod channel_owner;
 pub(in crate::voice_handoff) use channel_owner::{ChannelOwner, ChannelProfile};
 mod admitted;
+mod admitted_slot;
 pub(crate) use admitted::{collect_admitted_channel, ensure_admitted, settle_admitted_setup};
+pub(super) use admitted_slot::control_layout_bytes as admitted_control_layout_bytes;
 #[cfg(test)]
 mod diagnostics;
 pub(super) use admission_mode::observation_layout_bytes as admission_mode_layout_bytes;
@@ -69,16 +71,18 @@ struct State {
 }
 /// Exhaustive collection gate. An operational admitted consumer must add its
 /// actual debt/return state here; an empty Existing Slot is not that evidence.
-#[derive(Clone, Copy)]
 enum AdmittedStage {
     BootstrapOnly,
+    /// A first Cancel is negative-only: no Box/task/RPC or Root mint exists.
+    CancelledBeforeStart,
+    Admission(admitted_slot::PaidSlot),
 }
 impl State {
     fn admitted_returned(&self) -> bool {
-        match self.admitted_stage {
+        match self.admitted_stage.as_ref() {
             None => true,
-            Some(AdmittedStage::BootstrapOnly) => {
-                self.admission.is_none() && self.admission_slot.collected()
+            Some(stage) => {
+                self.admission.is_none() && self.admission_slot.collected() && stage.collected()
             }
         }
     }
@@ -743,6 +747,9 @@ impl Registry {
                     let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                     state.closed = true;
                     state.admission_slot.close();
+                    if let Some(stage) = state.admitted_stage.as_mut() {
+                        stage.close();
+                    }
                 }
             }
         }
@@ -767,6 +774,36 @@ impl Registry {
                 let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
                 held.as_ref().and_then(|index| index.rows[slot].clone())
             };
+            if let Some(route) = row
+                .as_ref()
+                .and_then(|row| Self::admitted_row_route(row.clone()))
+            {
+                loop {
+                    let notified = route.row.admission_changed.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    // Do not notify our own armed waiter on every pass. Only
+                    // actual Work/owner return may wake this shutdown loop.
+                    route.recover_admitted();
+                    if route
+                        .row
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .admitted_returned()
+                    {
+                        break;
+                    }
+                    if let Some(work) = route.admitted_work() {
+                        if !work.is_retired() {
+                            work.wait_retired().await;
+                            route.row.admission_changed.notify_waiters();
+                            continue;
+                        }
+                    }
+                    notified.await;
+                }
+            }
             if let Some(route) = row.and_then(Self::row_route) {
                 loop {
                     let notified = route.row.admission_changed.notified();

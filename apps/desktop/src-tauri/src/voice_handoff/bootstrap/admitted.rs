@@ -39,15 +39,20 @@ impl Registry {
             .as_ref()
             .and_then(|index| index.rows[usize::from(slot)].as_ref())
             .ok_or(Refused::Binding)?;
-        row.selected.admitted().ok_or(Refused::Binding)?;
-        let state = row.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closed {
-            return Err(Refused::Binding);
-        }
-        Ok(AdmittedRoute {
-            row: row.clone(),
-            session: state.session.clone().ok_or(Refused::Binding)?,
-            public: state.public.clone().ok_or(Refused::Binding)?,
+        Self::admitted_row_route(row.clone()).ok_or(Refused::Binding)
+    }
+    pub(super) fn admitted_row_route(row: Arc<Row>) -> Option<AdmittedRoute> {
+        row.selected.admitted()?;
+        let (session, public) = {
+            let state = row.state.lock().unwrap_or_else(|e| e.into_inner());
+            (state.session.clone()?, state.public.clone()?)
+        };
+        // Closed retained Rows still service authenticated31 negative cleanup;
+        // Register independently requires current NativeActive and final fences.
+        Some(AdmittedRoute {
+            row,
+            session,
+            public,
         })
     }
     pub(in crate::voice_handoff) fn project_admitted(
@@ -168,7 +173,7 @@ async fn finish_admitted(
     closure: Closure,
 ) -> Result<Status, Refused> {
     let commit = state.ui_session_commit.clone().lock_owned().await;
-    let row = {
+    let (row, ready) = {
         let held = state
             .voice_channels
             .index
@@ -189,13 +194,25 @@ async fn finish_admitted(
             let mut current = row.state.lock().unwrap_or_else(|e| e.into_inner());
             current.effects_closed = true;
             current.closed = true;
-            if !current.admitted_returned() {
-                return Err(Refused::Capacity);
+            if let Some(stage) = current.admitted_stage.as_mut() {
+                stage.close();
             }
         }
-        row
+        let ready = row
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admitted_returned();
+        (row, ready)
     };
     drop(commit);
+    row.admission_changed.notify_waiters();
+    if let Some(route) = Registry::admitted_row_route(row.clone()) {
+        route.nudge_admitted();
+    }
+    if !ready {
+        return Err(Refused::Capacity);
+    }
     match closure {
         Closure::Setup => row.retire_setup()?,
         Closure::Channel => row.retire_channel()?,

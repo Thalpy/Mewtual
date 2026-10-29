@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Admitted operation31 draft (29 October; uncompiled)
+
+The admitted physical profile has separate version12 SetupAck/Register/Observe/
+Cancel Control and fixed10/59-byte request/response codecs. SetupAck is g0 only;
+all other kinds are nonzero. It never routes through old Status/operations1–30.
+The separate Slot retains affine Root/native capacity, not role/Ready/SDK-return
+authority. Native guards/tests/review remain pending; the trusted driver sender
+is not connected. [Exact grammar and custody](communication-recovery/VOICE-ADMITTED-SLOT.md).
+
 ## Distinct admitted native ledger claim (29 October; inactive)
 
 `reserve_admitted_parent` reserves one actual32-slot ledger position/serial for

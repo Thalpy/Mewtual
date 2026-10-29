@@ -25,6 +25,7 @@ const POINT: &str = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d
 const DOMAIN: &[u8] = b"Mewtual native voice handoff v1";
 mod admission_capacity;
 mod admission_mode;
+mod admitted_admission;
 
 // Wall time only bounds a broken test harness. All service/protocol time comes from Clock.
 async fn bounded<T>(future: impl Future<Output = T>) -> T {
@@ -512,6 +513,9 @@ pub(in crate::voice_handoff) fn opened_reply_kind(
 
 impl Client {
     fn new(public: &super::super::channel::bootstrap::PublicSetup) -> Self {
+        Self::with_label(public, b"Mewtual native voice bootstrap seed v1")
+    }
+    fn with_label(public: &super::super::channel::bootstrap::PublicSetup, label: &[u8]) -> Self {
         let mut scalar = [0; 32];
         scalar[31] = 1;
         let key = SecretKey::from_slice(&scalar).unwrap();
@@ -520,7 +524,7 @@ impl Client {
         let shared = p256::ecdh::diffie_hellman(key.to_nonzero_scalar(), native.as_affine());
         let mut seed = [0; 32];
         Hkdf::<Sha256>::new(Some(&public.hash), shared.raw_secret_bytes())
-            .expand(b"Mewtual native voice bootstrap seed v1", &mut seed)
+            .expand(label, &mut seed)
             .unwrap();
         Self {
             seed,

@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Admitted native Slot draft (29 October; uncompiled, OFF)
+
+An isolated typed operation31/version12 path stages genuine admitted neutral Root
+capacity and the distinct reserved native parent. It uses one paid boxed Slot,
+original Actor control/task/native hold and exact UI/Coordinator/Row fences.
+Existing routes/codecs remain closed to it. Native layout/tests/review are pending;
+`Reserved` supplies no RoundGate, Ready or RTC permission. See
+[the exact draft and unfinished consumers](communication-recovery/VOICE-ADMITTED-SLOT.md).
+
 ## Control7 Query/Support (29 October; focused draft, OFF)
 
 A separate typed Source/ingress/helper path implements protocol Query/Support

@@ -46,6 +46,10 @@ impl Cursor {
         for _ in 0..64 {
             let slot = self.ready_channel;
             self.ready_channel = (slot + 1) % 64;
+            if let Ok(route) = registry.admitted_route(slot + 1) {
+                route.nudge_admitted();
+                continue;
+            }
             let Ok(route) = registry.route(slot + 1) else {
                 continue;
             };
@@ -105,6 +109,10 @@ impl Cursor {
         for _ in 0..64 {
             let slot = self.channel;
             self.channel = (self.channel + 1) % 64;
+            if let Ok(route) = registry.admitted_route(slot + 1) {
+                route.nudge_admitted();
+                continue;
+            }
             let Ok(route) = registry.route(slot + 1) else {
                 continue;
             };

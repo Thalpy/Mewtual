@@ -1,0 +1,8 @@
+{
+  "requests": [
+    { "kind": "setup-ack", "generation": "0", "body": "0c000000000000000000" },
+    { "kind": "register", "generation": "1", "body": "0c010000000000000001" },
+    { "kind": "observe", "generation": "9007199254740993", "body": "0c020020000000000001" },
+    { "kind": "cancel", "generation": "18446744073709551615", "body": "0c03ffffffffffffffff" }
+  ]
+}
