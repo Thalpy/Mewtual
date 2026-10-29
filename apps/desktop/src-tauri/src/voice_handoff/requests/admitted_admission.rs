@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(&bytes[27..], &[0; 32]);
     }
     #[test]
-    fn admitted_v12_requests_match_the_shared_browser_vectors() {
+    fn admitted_v12_grammar_matches_the_shared_browser_vectors() {
         let vectors: serde_json::Value =
             serde_json::from_str(include_str!("admitted-admission-vectors.json")).unwrap();
         for vector in vectors["requests"].as_array().unwrap() {
@@ -141,6 +141,31 @@ mod tests {
                     kind,
                     generation: vector["generation"].as_str().unwrap().parse().unwrap()
                 })
+            );
+        }
+        for vector in vectors["responses"].as_array().unwrap() {
+            let state = match vector["state"].as_str().unwrap() {
+                "unstarted" => State::Unstarted,
+                "closing" => State::Closing,
+                "returned" => State::Returned,
+                _ => panic!("closed response vector"),
+            };
+            let incarnation = vector["incarnation"].as_str().map(|value| {
+                hex::decode(value)
+                    .unwrap()
+                    .try_into()
+                    .expect("fixed identity")
+            });
+            let snapshot = Snapshot {
+                state,
+                requested: vector["generation"].as_str().unwrap().parse().unwrap(),
+                canonical: vector["canonical"].as_str().unwrap().parse().unwrap(),
+                cancelled: vector["floor"].as_str().unwrap().parse().unwrap(),
+                incarnation,
+            };
+            assert_eq!(
+                hex::encode(snapshot.encode()),
+                vector["body"].as_str().unwrap()
             );
         }
     }

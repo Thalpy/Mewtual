@@ -19,6 +19,13 @@ test("admitted31 shared fixed vectors preserve full u64 and exclusive SetupAck0"
     assert.equal(request.operation, 31); assert.equal(request.kind, 0); assert.equal(request.logical, session);
     assert.equal(Buffer.from(request.body).toString("hex"), vector.body);
   }
+  for (const vector of vectors.responses) {
+    const decoded = decodeVoiceAdmittedAdmission(Buffer.from(vector.body, "hex"), vector);
+    assert.deepEqual(decoded, {
+      kind: vector.kind, generation: vector.generation, state: vector.state,
+      canonical: vector.canonical, floor: vector.floor, incarnation: vector.incarnation,
+    });
+  }
   for (const kind of ["register", "observe", "cancel"] as const) assert.throws(() => encodeVoiceAdmittedAdmission(session, kind, "0"));
   for (const generation of ["1", "00", "-1", "18446744073709551616"]) assert.throws(() => encodeVoiceAdmittedAdmission(session, "setup-ack", generation));
   for (const generation of ["01", "-1", "", "18446744073709551616"]) assert.throws(() => encodeVoiceAdmittedAdmission(session, "register", generation));

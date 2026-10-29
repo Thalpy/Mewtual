@@ -44,6 +44,8 @@ minted, that unknown work was refused, or that browser SDK/physical owners drain
 `voice-ipc-admitted-admission.ts` and `voice-ipc-admitted-frame.ts` are distinct
 pure helpers. The old frontend framing remains closed1–30. Shared request vectors
 pin the same native/browser version, kinds and full u64 values.
+Shared response vectors pin SetupAck without a registration, transient Closing
+after cancellation, and exact-next Returned with a present all-zero incarnation.
 
 ## Original task and affine results
 
@@ -115,7 +117,8 @@ and actual cancellation between acceptance/enqueue or native claim/final attachm
 They are unrun.
 
 The primary's early actual-diff review found the canceled-Waiting snapshot and
-lost-next-entry cleanup defects; this snapshot fixes both and awaits re-review.
+lost-next-entry cleanup defects; the fixes received a static re-review with no
+remaining blocker/high/medium finding in that cancellation delta.
 The independently owned paid RowRef/SessionRef prerequisite is not yet adopted.
 Native measurements/tests/lint and complete
 backend/frontend/integration gates remain pending with the primary. Operational
