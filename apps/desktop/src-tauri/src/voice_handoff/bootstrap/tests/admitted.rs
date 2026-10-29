@@ -5,6 +5,7 @@ use crate::voice_call_activation::Handle;
 use catcoms_rt::{Clock, ManualClock};
 
 mod parent_claim;
+mod slot;
 
 async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::select! {
@@ -109,7 +110,7 @@ async fn admitted_physical_setup_recovers_one_original_output_and_refuses_every_
                 .await
                 .unwrap(),
         );
-        assert!(Arc::ptr_eq(&output, &retry));
+        assert!(output.is_same(&retry));
         assert_eq!(unused.draws, 0);
     }
     assert_eq!(crate::voice_runtime(&f.state).resources().counts(), before);
@@ -394,7 +395,7 @@ async fn admitted_actual_weak_session_tail_keeps_the_original_row_payer_until_ou
         .voice_channels
         .admitted_route(output.public().slot)
         .unwrap();
-    let weak = Arc::downgrade(route.session());
+    let weak = route.session().downgrade();
     end(&f, &clock, &handle).await;
     settle_admitted_setup(&f.state, handle.id(), [9; 32])
         .await
@@ -409,9 +410,14 @@ async fn admitted_actual_weak_session_tail_keeps_the_original_row_payer_until_ou
     );
     drop(route);
     assert!(
-        weak.upgrade().is_none(),
-        "actual last strong Session returned"
+        weak.upgrade().is_some(),
+        "the admitted custodian keeps the real Session until its explicit weak witness returns"
     );
+    assert_eq!(resources.counts(), retained);
+    drop(weak);
+    f.state
+        .voice_channels
+        .collect_retired(&f.state.voice_handoff);
     assert_eq!(
         resources.counts().0,
         retained.0
@@ -429,7 +435,6 @@ async fn admitted_actual_weak_session_tail_keeps_the_original_row_payer_until_ou
             .admitted_identity(handle.id(), [9; 32]),
         "weak-only tail and held output still have the Row payer"
     );
-    drop(weak); // caller's own weak witness also returns before collection
     drop(output);
     f.state
         .voice_channels
@@ -442,5 +447,167 @@ async fn admitted_actual_weak_session_tail_keeps_the_original_row_payer_until_ou
     let before_selection_drop = resources.counts().0;
     drop(selected);
     assert_eq!(resources.counts().0, before_selection_drop - selected_fee);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn admitted_session_drop_inflight_is_not_collection_and_cannot_be_reaped_by_a_second_collector(
+) {
+    let clock = Arc::new(ManualClock::new(1000));
+    let f = Fixture::with_voice_clock(clock.clone()).await;
+    let handle = activate(&f, &controller(&f).await).await;
+    let output = ready(
+        ensure_admitted(&f.state, handle.id(), [9; 32], &mut Rng::new())
+            .await
+            .unwrap(),
+    );
+    let selected = f
+        .state
+        .voice_authority
+        .lock()
+        .unwrap()
+        .admitted_published_key(&handle, [9; 32])
+        .unwrap();
+    let route = f
+        .state
+        .voice_channels
+        .admitted_route(output.public().slot)
+        .unwrap();
+    let held = route.session().clone();
+    let (at_drop, release) = held.fixture_pause_final_drop();
+    drop(route);
+    end(&f, &clock, &handle).await;
+    settle_admitted_setup(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    collect_admitted_channel(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    let resources = selected.resources();
+    let before = resources.counts();
+    let registry = f.state.voice_channels.clone();
+    let ledger = f.state.voice_handoff.clone();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    drop(std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(held);
+            registry.collect_retired(&ledger);
+        }));
+        let _ = done.send(result);
+    }));
+    bounded(at_drop).await.unwrap();
+    drop(output);
+    // The last raw strong count is now0 INSIDE the actual Session destructor.
+    // The independent in-flight owner/marker, not weak absence, keeps this Row.
+    f.state
+        .voice_channels
+        .collect_retired(&f.state.voice_handoff);
+    assert!(f
+        .state
+        .voice_channels
+        .admitted_identity(handle.id(), [9; 32]));
+    assert_eq!(
+        resources.counts(),
+        before,
+        "no control/bootstrap/Row fee returns before actual destruction"
+    );
+    drop(release); // RAII also unblocks the producer if either assertion unwinds
+    bounded(finished).await.unwrap().unwrap();
+    assert!(!f
+        .state
+        .voice_channels
+        .admitted_identity(handle.id(), [9; 32]));
+    assert_eq!(
+        resources.counts().0,
+        before.0
+            - ROW_BYTES
+            - crate::voice_handoff::channel::CONTROL_BYTES
+            - crate::voice_handoff::channel::BOOTSTRAP_BYTES
+            - crate::voice_handoff::channel::BROWSER_CONTROL_BYTES
+    );
+    drop(selected);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn admitted_closed_live_call_releases_session_crypto_while_independent_output_remains_held() {
+    use catcoms_sync::voice_v2::resources::ResourceKind;
+    let clock = Arc::new(ManualClock::new(1000));
+    let f = Fixture::with_voice_clock(clock.clone()).await;
+    let handle = activate(&f, &controller(&f).await).await;
+    let output = ready(
+        ensure_admitted(&f.state, handle.id(), [9; 32], &mut Rng::new())
+            .await
+            .unwrap(),
+    );
+    let route = f
+        .state
+        .voice_channels
+        .admitted_route(output.public().slot)
+        .unwrap();
+    let held = route.session().clone();
+    let (at_drop, release) = held.fixture_pause_final_drop();
+    drop(route);
+    settle_admitted_setup(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    collect_admitted_channel(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    assert!(
+        handle.active(),
+        "independent Session retirement must not wait for whole-call End"
+    );
+    let resources = crate::voice_runtime(&f.state).resources();
+    let count = resources.counts().1;
+    assert!(count > 0 && count <= 8);
+    let mut other = Vec::new();
+    for i in 0..(8 - count) {
+        other.push(
+            resources
+                .charge([200 + (i / 4) as u8; 32], 1, ResourceKind::Crypto)
+                .unwrap(),
+        );
+    }
+    assert!(resources
+        .charge([211; 32], 1, ResourceKind::Crypto)
+        .is_err());
+    let before = resources.counts();
+    let registry = f.state.voice_channels.clone();
+    let ledger = f.state.voice_handoff.clone();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    drop(std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(held);
+            registry.collect_retired(&ledger);
+        }));
+        let _ = done.send(result);
+    }));
+    bounded(at_drop).await.unwrap();
+    assert_eq!(resources.counts(), before);
+    drop(release);
+    bounded(finished).await.unwrap().unwrap();
+    assert!(
+        f.state
+            .voice_channels
+            .admitted_identity(handle.id(), [9; 32]),
+        "live lease and actual held output still retain Row"
+    );
+    assert_eq!(
+        resources.counts().0,
+        before.0
+            - crate::voice_handoff::channel::CONTROL_BYTES
+            - crate::voice_handoff::channel::BOOTSTRAP_BYTES
+            - crate::voice_handoff::channel::BROWSER_CONTROL_BYTES
+    );
+    let progress = resources
+        .charge([211; 32], 1, ResourceKind::Crypto)
+        .unwrap();
+    drop((progress, other));
+    end(&f, &clock, &handle).await;
+    drop(output);
+    f.state
+        .voice_channels
+        .collect_retired(&f.state.voice_handoff);
     f.close().await;
 }

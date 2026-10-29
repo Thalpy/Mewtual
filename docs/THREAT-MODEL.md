@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Admitted Slot draft (29 October; uncompiled, OFF)
+
+Separate typed routes, original NativeActive/key/UI fences and sealed Actor
+control are intended to prevent old-profile adoption and registration remint.
+Entered uncertainty never becomes unstarted merely because Work returned.
+Known candidates/payments survive local Busy; actual negative owner destruction
+precedes slot reuse. These new native guards and lifecycle tests are unrun and
+require adversarial review; Reserved is inert and no operational grant/Ready/RTC
+consumer exists. [Draft scope and evidence](communication-recovery/VOICE-ADMITTED-SLOT.md).
+
 ## Admitted native reservation (29 October; inactive)
 
 Admitted claims are a separate opaque family, sharing only the real allocator's

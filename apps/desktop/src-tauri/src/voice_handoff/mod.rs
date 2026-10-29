@@ -3,6 +3,7 @@
 //! and confirmation work from original history or proven native actions. UI V2 activation and SDP/ICE/RTC
 //! integration remain unavailable; a working crypto handoff does not establish live calls.
 mod admission;
+mod admitted_admission;
 pub(crate) mod application;
 pub(crate) mod bootstrap;
 mod channel;
@@ -28,6 +29,7 @@ pub(crate) mod ledger;
 mod media;
 mod negotiation_admission;
 mod negotiation_capacity;
+mod owned;
 mod pc;
 mod pending_close;
 mod plan_final;

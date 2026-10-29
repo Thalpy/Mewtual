@@ -3,7 +3,7 @@
 use super::*;
 use crate::voice_activation_tests::Fixture;
 use crate::voice_authority::SelectedHandoffOwner;
-use crate::voice_handoff::bootstrap::{ensure, SetupOutput, Status as SetupStatus};
+use crate::voice_handoff::bootstrap::{ensure, SetupOutputRef, Status as SetupStatus};
 use crate::voice_handoff::factory::tests::{channel_route, selection};
 use crate::voice_handoff::ledger::{Begin, PendingStatus};
 use catcoms_sync::voice_v2::presence::PairSelector;
@@ -16,7 +16,7 @@ struct Case {
     native: Fixture,
     context: Context,
     route: Route,
-    public: Arc<SetupOutput>,
+    public: SetupOutputRef,
     selected: Arc<SelectedHandoffOwner>,
     selector: PairSelector,
 }

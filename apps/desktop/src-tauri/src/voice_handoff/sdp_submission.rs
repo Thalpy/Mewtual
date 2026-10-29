@@ -3,11 +3,12 @@
 //! The affine Writer retires before Registration or the final bound IO/payment can wake
 //! cleanup. Root repeats its own current authority; this module enables no listener opcode.
 use super::bootstrap::Route;
-use super::channel::{PhysicalHold, Session};
+use super::channel::PhysicalHold;
 use super::context::Context;
 use super::factory::{self, Refused};
 use super::ledger::{ResolvedRow, SdpPublicationTarget, SdpRegistration, SdpSubmissionOwners};
 use super::sdp_publication::{self, Publication};
+use crate::voice_handoff::channel::SessionRef;
 use catcoms_app::{
     voice_sdp_rpc_bytes, ServerActor, VoiceSdpBody, VoiceSdpPending, VoiceSdpPublication,
     VoiceSdpRecordedInput, VOICE_SDP_RPC_METADATA_BYTES,
@@ -154,7 +155,7 @@ impl Preparation {
     pub(super) fn new(
         registration: SdpRegistration,
         physical: PhysicalHold,
-        session: &Arc<Session>,
+        session: &SessionRef,
         payload: Payload,
     ) -> Result<Self, VoiceError> {
         Self::new_inner(
@@ -170,7 +171,7 @@ impl Preparation {
     pub(super) fn new_after_payment(
         registration: SdpRegistration,
         physical: PhysicalHold,
-        session: &Arc<Session>,
+        session: &SessionRef,
         payload: Payload,
         after_payment: impl FnOnce(),
     ) -> Result<Self, VoiceError> {
@@ -179,7 +180,7 @@ impl Preparation {
     fn new_inner(
         registration: SdpRegistration,
         physical: PhysicalHold,
-        session: &Arc<Session>,
+        session: &SessionRef,
         payload: Payload,
         #[cfg(test)] after_payment: impl FnOnce(),
     ) -> Result<Self, VoiceError> {

@@ -1,5 +1,15 @@
 # Mewtual; Handover
 
+## Admitted Slot isolated draft (29 October; native unrun)
+
+The new separate native Slot/31 implementation is drafted from0b5c6739 plus the
+typed admitted-parent prerequisite. Eight new pure-codec tests and17 adjacent
+framing/negotiation tests pass, as does targeted strict TypeScript and leaf-only
+formatting. Native compilation/layouts/tests, actual-diff review and all integrated
+gates remain pending under primary Rust coordination. No operation31 production
+browser sender, Ready/RoundGate consumption or activation is enabled. See
+[the current contract and limitations](communication-recovery/VOICE-ADMITTED-SLOT.md).
+
 ## Current admitted integration (29 October; V2 OFF, validation in progress)
 
 The separate admitted native parent primitive now reserves an actual shared

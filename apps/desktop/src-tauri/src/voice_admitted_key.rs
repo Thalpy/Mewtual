@@ -117,6 +117,9 @@ pub(super) async fn admit_inner(
     owner: &str,
     executor: [u8; 32],
 ) -> Result<crate::voice_authority::JoinKeyAdmission, String> {
+    // A closed old physical owner may become collectible after its last real
+    // header returns. Reap BEFORE fresh Crypto admission or UI/Coordinator locks.
+    state.voice_channels.collect_retired(&state.voice_handoff);
     crate::voice_admitted_call::collect_retired(state);
     let original = activation(state, owner)?;
     crate::check_voice_binding(state, original.binding()).await?;
