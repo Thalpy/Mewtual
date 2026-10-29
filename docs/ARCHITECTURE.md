@@ -5,8 +5,8 @@
 A separate typed Source/ingress/helper path implements protocol Query/Support
 without growing Existing wire/Source enums. Exact original query and selected
 helper proof survive actual paid Lower custody; current query32 differs from
-affine lifetime64/group256/process. Ten focused cases and new-family graph guards
-pass atf60d6bab; replacement/epoch additions are unrun. The inherited Group1024
+affine lifetime64/group256/process. Twelve focused cases and new-family graph guards
+pass atc5c8b7d8, including actual B→D replacement and epoch/rejoin refusal. The inherited Group1024
 invoice/escaping-ledger/Resources-backing custody gap remains open, as do lint and
 integration. See [the exact ownership, limits and operational boundaries](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
 

@@ -2,10 +2,10 @@
 
 ## Control7 Query/Support snapshot (29 October; focused draft, OFF)
 
-Ten focused cases pass atf60d6bab, including actual restricted A–B–C dispatch,
+Twelve focused cases pass atc5c8b7d8, including actual restricted A–B–C dispatch,
 unjoined B, q2/lateq1, duplicates/flood, expiry/old grammar, actual historical-owner
-return and3-submission exhaustion. New-family graph guards pass. Replacement-D/
-epoch additions are unrun. The measured inherited Group1024 invoice and escaping
+return and3-submission exhaustion. New-family graph guards and actual replacement-D/
+MLS epoch/rejoin refusal cases pass. The measured inherited Group1024 invoice and escaping
 ledger/Resources-backing custody gap is open; raising only its fee is insufficient.
 Strict lint/final review/full integration remain pending.
 [Exact ownership, fees, API and remaining V2 work](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).

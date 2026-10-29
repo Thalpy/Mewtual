@@ -6,8 +6,8 @@ Root has distinct endpoint and direct-helper ensure/refresh/observe APIs. Only t
 actual selected NativeActive original/Presence may create a query; endpoint evidence
 comes from its original Watcher. Opaque refresh identity closes q1 before q2 source
 publication. Observed feature bits are historical observations, never Availability,
-consent or reservation. Ten focused cases pass; inherited Group/Resources custody,
-new replacement/epoch cases, strict lint and full integration remain pending.
+consent or reservation. Twelve focused cases pass; inherited Group/Resources custody,
+strict lint and full integration remain pending.
 [Exact API ownership and pending gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
 
 ## Voice route ownership (29 October; focused passes)

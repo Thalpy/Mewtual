@@ -8,9 +8,9 @@ effects without refunding actual custody. Every original retains fresh affine8Ki
 payment, with const coupling to aggregate lifetime64/group256/process. Shared
 service/requester/issuer/Forward/route limits constrain duplicates and floods.
 Native approved driver lifetime callbacks remain trusted and pure; arbitrary
-reentrant custom transport authorities are outside this seam's guarantee. Ten
+reentrant custom transport authorities are outside this seam's guarantee. Twelve
 focused cases/new-family graphs pass; inherited Group/Resources backing and
-escaping-ledger custody remain unresolved. Replacement/epoch additions are unrun.
+escaping-ledger custody remain unresolved. Actual B→D/epoch refusal cases pass.
 [Enforcement trace and unfinished security/operational gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
 
 ## Route metadata tail custody (29 October; focused passes)

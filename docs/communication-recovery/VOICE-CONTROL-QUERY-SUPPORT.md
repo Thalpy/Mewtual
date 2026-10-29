@@ -1,9 +1,10 @@
 # Control7 Query/Support operational slice
 
-29 October 2026. Implementation draft, OFF. Ten focused tests PASS at snapshot
-`f60d6bab` (4.78s, Windows, `cargo test -p catcoms-sync --all-features --lib
-admitted_control -j1 -- --test-threads=1 --nocapture`). The current replacement-
-bridge/epoch regressions and helper-wrap correction are **UNRUN**. Early actual-
+29 October 2026. Implementation draft, OFF. Twelve focused tests PASS at snapshot
+`c5c8b7d8` (7.90s, Windows, `cargo test -p catcoms-sync --all-features --lib
+admitted_control -j1 -- --test-threads=1 --nocapture`), including actual restricted
+B→D replacement and MLS epoch/rejoin refusal. The first10 also passed atf60d6bab.
+Early actual-
 path review corrected three submissions and the final original-helper proof.
 The remaining full Group accounting defect below prevents a coherent payment
 claim; strict lint, final review and complete integration are still pending.
@@ -12,7 +13,8 @@ First compilation found adapter visibility/type/test-trait issues; the next foun
 one missing Result annotation. After those corrections,4 tests passed and6 failed
 at fixture setup because the restricted transport omitted `request_connected`.
 Delegating only permitted edges to the actual Mem driver produced the10-test
-green run. No rejection/positive assertion or deadline was weakened.
+green run. The added four-node fixture first needed a member-count type correction,
+then all12 passed. No rejection/positive assertion or deadline was weakened.
 
 Measured new graphs are record6992/8192, table1344/4096, ledger3888/8192,
 wrapper1088/4096, actual execution future224, prepared88, shared completion264 and
@@ -84,6 +86,12 @@ that forbids A–C requests and exposes no A–C connection lease, with B joinin
 nothing. They also pin q2 under Forward pressure/late q1, exact duplicate cache,
 malicious flood bounds, wrong room/old grammar/expiry, retained superseded-owner
 pressure/actual return, three original submissions, and discrete service budgets.
+The replacement case forces D below B in identity order, holds B's actual four
+Forward credits, and requires the SAME signed Query to traverse A→D→C and produce
+authenticated endpoint Support. The old wrap algorithm could repeat B ahead of D;
+the corrected cursor considers other helpers before last-used fallback. A real
+MLS Add closes old query/Lower before a new native call can issue a new query;
+a current authenticated outer wrapper cannot repair the old inner epoch/query.
 The intake-oracle negative cases are structural enforcement checks; the topology
 case is the actual production dispatch path. TCP integration remains primary-owned.
 
