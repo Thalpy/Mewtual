@@ -213,3 +213,38 @@ async fn admitted_native_parent_end_does_not_refund_an_actual_claim_and_unwind_r
     drop(identity);
     cleanup(f, clock, handle).await;
 }
+
+#[tokio::test]
+async fn admitted_native_parent_outlives_actual_physical_row_and_last_external_identity() {
+    let (f, clock, handle, selected, identity) = bounded(physical()).await;
+    let ledger = f.state.voice_handoff.clone();
+    let resources = selected.resources();
+    let claim = ledger
+        .reserve_admitted_parent(selected.clone(), identity.clone(), 1)
+        .unwrap();
+    let id = claim.fixture_id();
+    // No external Session or identity alias remains. The real claim must fund
+    // its retained identity allocation after the physical Row's payer returns.
+    drop(identity);
+    settle_admitted_setup(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    collect_admitted_channel(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    end(&f, &clock, &handle).await;
+    f.state.voice_channels.collect_retired(&ledger);
+    assert!(
+        !f.state
+            .voice_channels
+            .admitted_identity(handle.id(), [9; 32]),
+        "observe actual original physical Row removal, not a close response"
+    );
+    assert!(ledger.fixture_admitted_claim_has_only_reserved_stamp(id));
+    let retained = resources.counts();
+    drop(claim);
+    assert_eq!(resources.counts(), (retained.0 - 2304 - 2048, retained.1));
+    assert!(!ledger.fixture_parent_reserved(id));
+    drop(selected);
+    bounded(f.close()).await;
+}

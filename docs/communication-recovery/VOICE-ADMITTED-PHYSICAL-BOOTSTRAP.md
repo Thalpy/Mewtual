@@ -111,7 +111,7 @@ metadata; group/process ceilings do not change. The separate 8 KiB setup work,
 layout guards run before their allocations. Setup reply buffers have bounded
 actual String capacities and a 2,304-byte capped JSON writer; the full 2,048-byte
 hex scratch is counted. The concrete native future/graph guard passes. The
-corrected Row fee and lifecycle cases still require their integrated rerun.
+corrected Row fee and lifecycle cases pass their integrated admitted-filter rerun.
 Framework copies after handoff, opaque SDK/provider heaps and allocator/RSS are
 outside the application-owned inventory.
 
@@ -126,7 +126,9 @@ also pass. Scoped Rust formatting and diff whitespace checks pass.
 All three native crypto/layout cases pass. The first integrated admitted filter
 passed 34 cases and failed 16, including all six new lifecycle cases: the complete
 Row inventory exceeded its former fee before setup could proceed. The original
-failure log is retained; the increased prepaid Row fee has not yet been rerun.
+failure log is retained. The corrected prepaid Row fee then passes the integrated
+admitted filter54/0 (39.97s), including all six lifecycle cases and65 genuine call
+reuses, plus the separate shared native claim tests. Complete suites remain open.
 They are not physical audio, network, browser-to-native HTTP or RTC evidence.
 Full integrated suites, generated runtime ACL, native layout measurements and
 startup/build checks remain primary-owned gates before this leaf can be accepted.

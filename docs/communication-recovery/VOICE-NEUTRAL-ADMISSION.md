@@ -48,7 +48,9 @@ both legacy role refusals and partial rollback; all thirteen admitted-presence
 tests pass, including the complete 8,296/9,216-byte Presence guard. The exact
 Root-clear payment test accounts separately for Watcher's immediate 1,536-byte
 refund and its lease aliases' later release of the original Presence funding.
-Two further final-callback revocation/unwind cases have been added but not run.
+The two further final-callback revocation/unwind cases now also pass: the
+integrated neutral Root filter is13/0 (1.84s), including the same648/2,048 and
+1,600/3,072-byte guards on the combined Query/neutral source.
 Formatting and actual-diff review are separate evidence; the review's bounded
 test-wait and actual-composition findings were corrected. Complete integration,
 strict checks and the final re-review remain open.

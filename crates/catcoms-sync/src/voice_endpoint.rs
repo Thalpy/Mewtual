@@ -10,8 +10,8 @@ use voice_v2::{CallGrant, CallLease, JoinKey, Scope, VoiceError, WatchLease};
 
 const WATCHES: usize = 8;
 mod admission;
-mod admitted_control;
 mod admitted_admission;
+mod admitted_control;
 mod admitted_presence;
 mod call_activation;
 mod confirmation;

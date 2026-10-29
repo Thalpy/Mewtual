@@ -4,23 +4,31 @@
 
 The separate admitted native parent primitive now reserves an actual shared
 allocator position/serial and the original two fees, with no Existing owner or
-dummy Row conversion. Four actual native fixture tests are compiling; an extra
-claim-outliving-physical-Row case remains to add. No invoice fit or live SDP
-acceptance is claimed. [Contract and limits](communication-recovery/VOICE-ADMITTED-NATIVE-PARENT.md).
+dummy Row conversion. Four actual native fixture tests pass (complete claim graph
+1,160/2,304B), and the extra claim-outliving-physical-Row case passes its focused
+execution/re-review. This is no live SDP acceptance.
+[Contract and limits](communication-recovery/VOICE-ADMITTED-NATIVE-PARENT.md).
 
 The neutral Root factory and sealed Actor preparation are integrated with
 Control7 and the separate admitted physical bootstrap. The Actor bridge retains
 the whole registration/capacity result and distinguishes actual unstarted return
-from an entered callback loss; it is reviewed but awaits compiled tests. Native
+from an entered callback loss. Seven Actor cases pass on the pre-funding-fix
+source (2,720/4,096B), and the integrated neutral Root filter passes13/0 (1.84s).
+The separate outside-lifecycle-funding correction/eighth Actor test is reviewed
+but unrun. Native
 Slot/operation31, bilateral agreement/RoundGate, admitted KDF/Ready/RTC and relay
 remain open.
 
 Three native bootstrap crypto/layout cases pass. The integrated admitted filter
 passed34 and failed16 because the complete Row/reply inventory measured9,080B
 against its old8KiB payment. The fee is now10KiB before allocation, with every
-invoice term preserved and unchanged64-row/group/process caps; the correction
-and lifecycle cases await rerun. The original failure log is retained. Final
-Root/native/frontend suites and startup/flow gates remain required.
+invoice term preserved and unchanged64-row/group/process caps; the corrected
+integrated admitted filter passes54/0 (39.97s), including all six bootstrap
+lifecycle cases. The original failure log is retained. Full frontend3,695,
+Svelte check/build and10 real Edge flows pass. The first sandboxed flow attempt
+lost CDP, then the desktop-access rerun passed. Root/native dependency audits and
+the ambient gate pass. Complete Root/native suites, strict lint and native
+check/build/startup remain required; later source additions need their own gates.
 
 ## Control7 Query/Support snapshot (29 October; focused draft, OFF)
 

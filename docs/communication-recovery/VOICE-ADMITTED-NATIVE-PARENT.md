@@ -20,14 +20,18 @@ allocation. Owners are declared before Index and destroyed before the shared
 private final-return marker can make the position reusable, including refusal
 and unwinding destruction. Group/process/position limits are unchanged.
 
-Four native regressions are drafted against actual admitted activation, key
+Four native regressions pass against actual admitted activation, key
 publication and physical setup. They cover exact identity/fees, mixed16+16 claim
 pressure and Existing parent/child allocator exclusion, partial-payment refusal
 without serial debit, and End/unwind custody. The Existing pressure fixture tests
-allocator exclusion only; it is not live SDP execution. Tests are compiling and
-the inventory is not yet measured. Read-only design/actual-diff review found no
-blocker/high/medium; a claim-outliving-physical-Row case remains a requested
-coverage addition. Full suites and strict gates remain pending.
+allocator exclusion only; it is not live SDP execution. The complete Windows
+claim/preparation inventory measures1,160/2,304B. The integrated admitted filter
+passes54/0 (39.97s), including these four cases and the separate bootstrap tests.
+A fifth focused case also passes: the original physical Row actually returns
+with no external identity alias, while the SAME claim/stamp/fees remain until
+its own final drop. Design/actual-diff review and the coverage re-review are clear.
+Full suites and strict gates remain pending; these are separate source-bound
+focused checks, not a complete backend result.
 
 The admitted native Slot/operation31 consumer, bilateral agreement/RoundGate and
 admitted parent publication are not implemented by this primitive. It grants no
