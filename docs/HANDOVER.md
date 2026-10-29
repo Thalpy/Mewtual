@@ -1,5 +1,36 @@
 # Mewtual; Handover
 
+## Voice checkpoint while text chat takes priority (29 October)
+
+The user prioritised text-chat protocol work. Voice integration is parked at
+`85d26232` on `communication-v2-native-admission`; the separate browser SetupAck
+sender and prepared MLS-view drafts have not been merged here. V2 remains OFF.
+
+This checkpoint composes the native admitted Slot, paid Session/metadata owners,
+physical bootstrap/history and reaper correction. Native production checking,
+formatting and Root strict Clippy pass. The full frontend suite passes 3,719 tests,
+with clean Svelte checks and a production build. The native admitted filter passes
+73 tests; separate ownership, invoice and physical-history filters pass. The
+bootstrap filter's one stale weak-tail refund assertion was corrected and its
+focused rerun passes. These filters overlap and are not a complete native run.
+
+The full Root run was deliberately stopped when text chat became the priority;
+it is incomplete, not a passing run. Current complete Root/native validation,
+native strict Clippy and build/startup remain outstanding. Hosted Linux
+frontend/native validation passed for earlier pushed `a684e982`; hosted Root
+jobs failed test-only lock-scope lint errors, corrected here with passing local
+strict Clippy. Earlier CI's automatic browser-pump timeout has not been diagnosed;
+the new original-deadline diagnostic is evidence gathering, not a claimed fix.
+Its focused native regression passes (one test, 0.03s). The first compile stopped
+with LLVM's no-space-on-device error; after reclaiming 13GiB of stale native
+incremental caches, the `--lib` rerun compiled and passed. No full suite result
+is inferred from that rerun.
+
+Operational admission, bilateral agreement, admitted KDF/Ready/RTC, App/audio
+activation, relay and combined/physical acceptance remain open. One desktop is
+available. Older entries below describe their dated inputs; this paragraph
+supersedes their pending status only for the checks explicitly listed above.
+
 ## Admitted Slot isolated draft (29 October; native unrun)
 
 The new separate native Slot/31 implementation is drafted from0b5c6739 plus the

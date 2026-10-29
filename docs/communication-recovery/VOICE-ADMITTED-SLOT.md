@@ -1,7 +1,8 @@
 # Admitted native Slot and operation31
 
-29 October 2026. Implementation draft in an isolated worktree. Native code,
-layout guards and native tests are **uncompiled/unrun**. V2 remains OFF.
+29 October 2026. Integrated through `85d26232`; V2 remains OFF. Native production
+checking and focused admitted/ownership tests pass. Complete validation is still
+pending; this capacity primitive does not complete admission or RTC.
 
 This is inert capacity custody. `Reserved` means that the original native Slot
 owns BOTH a genuine neutral `RootRoundPreclaim` and an allocator-excluded
@@ -101,10 +102,11 @@ not weaken that independent retained-history requirement.
 The candidate task/Slot allowance is8KiB and the original Actor contribution4KiB.
 Production guards include the concrete task, Slot/Box construction, finisher,
 reclamation/return markers, parent preparation, actual publisher and Actor graph.
-The HTTP/control and enclosing future inventories include the new path. These
-are **not measured acceptance claims** until native compilation executes them;
-no existing term may be cut to fit. Original group/process/position caps are
-unchanged. Physical Row and admitted parent have their separate existing fees.
+The HTTP/control and enclosing future inventories include the new path. The
+executed Windows guards measure 7,784/8,192 bytes for the task/Slot and
+2,792/4,096 bytes for the RPC/publisher. No existing term was cut to fit. Original
+group/process/position caps are unchanged. Physical Row and admitted parent have
+their separate existing fees.
 
 Twenty-five focused Node tests pass: eight new admitted cases plus the existing
 framing/negotiation cases. Targeted strict TypeScript and leaf-only Rust formatting
@@ -117,7 +119,13 @@ and actual cancellation between acceptance/enqueue or native claim/final attachm
 A genuine durable-send Ready also parks the actual Actor while the original
 native task aborts: the retained original Work must prevent physical collection
 until that Actor returns its whole late result, with an ordinary Sender still held.
-These native cases are unrun.
+The integrated `admitted_` filter passes 73 tests, including the actual TCP
+cross-profile boundary. Separate owned-wrapper, Session-owner, invoice and
+physical-history filters pass. These overlapping focused filters do not replace
+the complete native suite. The first bootstrap filter passed 70 and failed one
+stale refund assertion: a retained paid Session weak tail legitimately returns
+with its Row. The corrected exact-refund regression passes. Complete current
+Root/native suites and native build/startup remain pending.
 
 The primary's early actual-diff review found the canceled-Waiting snapshot and
 lost-next-entry cleanup defects; the fixes received a static re-review with no
@@ -127,8 +135,8 @@ adopted: Slot task return, typed route lookup, HTTP routing and fixture output
 retain body-only paired owners. No raw metadata/Session Arc can escape this path.
 The exhaustive Slot drain checks remain required before strong admitted owner
 retirement; actual-return markers do not replace them. This custody integration
-still requires material re-review and native compilation/measurement.
-Native measurements/tests/lint and complete
-backend/frontend/integration gates remain pending with the primary. Operational
+passed material re-review, native compilation and the focused measurements above.
+Strict native lint and complete current backend/integration gates remain pending
+with the primary. Operational
 RoundGate binding/role trim/consumption, bilateral control, admitted KDF/tags8/9,
 Ready, RTC/media, real browser driver integration and activation remain unfinished.
