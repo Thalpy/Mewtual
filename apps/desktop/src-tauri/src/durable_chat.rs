@@ -235,25 +235,28 @@ pub(super) async fn mutation(
     target: String,
     generation: u64,
 ) -> Result<SendMessageResult, AppError> {
+    // Both actions share the durable transaction, but callers still need the action's
+    // existing diagnostic/remediation contract. Select before moving it into the request.
+    let rejected = match &action {
+        DurableMutationAction::Edit { .. } => codes::CHAT_EDIT_REJECTED,
+        DurableMutationAction::Delete => codes::CHAT_DELETE_REJECTED,
+    };
     let channel = channel
         .parse()
         .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
     let request = DurableMutationRequest {
-        token: fixed_hex(&retry_token).map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?,
-        expected_context: fixed_hex(&expected_context)
-            .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?,
+        token: fixed_hex(&retry_token).map_err(|e| op.fail(rejected, e))?,
+        expected_context: fixed_hex(&expected_context).map_err(|e| op.fail(rejected, e))?,
         channel,
         message_id: id,
-        target: fixed_hex(&target).map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?,
+        target: fixed_hex(&target).map_err(|e| op.fail(rejected, e))?,
         action,
     };
-    request
-        .validate()
-        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
+    request.validate().map_err(|e| op.fail(rejected, e))?;
     let original = DurableChatRequest::Mutation(request.clone());
     if let Some(terminal) = stop_request_at(state, server, original.clone(), generation, true)
         .await
-        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?
+        .map_err(|e| op.fail(rejected, e))?
     {
         return Ok(terminal);
     }
@@ -265,22 +268,22 @@ pub(super) async fn mutation(
     let ready = actor
         .prepare_durable_mutation(request)
         .await
-        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
+        .map_err(|e| op.fail(rejected, e))?;
     let lease = match authorize(state, server, instance, generation, Some(&identity)) {
         Ok(lease) => lease,
         Err(error) if error.starts_with("CHAT_SEND_STOPPED:") => {
             drop(ready);
             return stop_request_at(state, server, original, generation, true)
                 .await
-                .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?
-                .ok_or_else(|| op.fail(codes::CHAT_EDIT_REJECTED, "retired fence disappeared"));
+                .map_err(|e| op.fail(rejected, e))?
+                .ok_or_else(|| op.fail(rejected, "retired fence disappeared"));
         }
-        Err(error) => return Err(op.fail(codes::CHAT_EDIT_REJECTED, error)),
+        Err(error) => return Err(op.fail(rejected, error)),
     };
     let outcome = ready
         .commit(lease)
         .await
-        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
+        .map_err(|e| op.fail(rejected, e))?;
     op.succeeded(if !outcome.durable {
         "CHANNEL.MUTATION.PREPARED_PENDING"
     } else if outcome.disposition != ChatDisposition::Committed {
@@ -520,6 +523,88 @@ mod tests {
     use catcoms_rt::{Hub, ManualClock};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    /// Exercise the actual native boundary, rather than only the code-selection match:
+    /// each malformed field must preserve the operation's code and existing user message.
+    #[tokio::test]
+    async fn native_mutation_rejections_keep_edit_and_delete_error_contracts() {
+        let state = AppState::default();
+        for action in [
+            DurableMutationAction::Edit {
+                text: "changed text".into(),
+            },
+            DurableMutationAction::Delete,
+        ] {
+            let deleting = matches!(action, DurableMutationAction::Delete);
+            for invalid_field in 0..4 {
+                let op = Operation::start(
+                    None,
+                    catcoms_diagnostics::Section::Channels,
+                    if deleting {
+                        "delete_message"
+                    } else {
+                        "edit_message"
+                    },
+                    12,
+                    Some("5"),
+                );
+                let result = mutation(
+                    &state,
+                    &op,
+                    12,
+                    "5",
+                    if invalid_field == 3 { "" } else { "message" }.into(),
+                    action.clone(),
+                    if invalid_field == 0 {
+                        "bad".into()
+                    } else {
+                        "1".repeat(32)
+                    },
+                    if invalid_field == 1 {
+                        "bad".into()
+                    } else {
+                        "2".repeat(64)
+                    },
+                    if invalid_field == 2 {
+                        "bad".into()
+                    } else {
+                        "3".repeat(64)
+                    },
+                    0,
+                )
+                .await;
+                let Err(error) = result else {
+                    panic!("malformed mutation was accepted");
+                };
+                let encoded = serde_json::to_value(error).unwrap();
+                assert_eq!(
+                    encoded["code"],
+                    if deleting {
+                        "CHAT.DELETE.REJECTED"
+                    } else {
+                        "CHAT.EDIT.REJECTED"
+                    }
+                );
+                assert_eq!(encoded["retryable"], false);
+                assert_eq!(
+                    encoded["remediation"],
+                    if deleting {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!("amend_input")
+                    }
+                );
+                assert_eq!(
+                    encoded["message"],
+                    if invalid_field < 3 {
+                        "Invalid message retry identity."
+                    } else {
+                        "CHAT_MUTATION_INVALID: target or text length is outside the supported bound"
+                    }
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn native_durable_send_failure_retry_restart_and_stale_session() {
