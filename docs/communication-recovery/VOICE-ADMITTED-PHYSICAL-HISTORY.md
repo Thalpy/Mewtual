@@ -136,3 +136,11 @@ regressions remain unrun. See `VOICE-NATIVE-OWNED-SESSION.md` for the explicitly
 unresolved Existing weak classifier and whole-Registry browser-setup escrow
 shutdown limit; neither can mint an admitted receipt. The broker remains off
 the production App path and has no final window/executor consumer.
+
+Independent final actual-diff review cleared the physical history and Slot
+composition through `ddf24c72`, including the earlier funding-tail,
+actual-return, collector-overlap and reply-projection findings. The genuine
+HTTP fixture now chooses immutable Physical-purpose admission before key work,
+so it can reach the physical/31 dispatcher rather than fail at the purpose
+fence. Static review does not establish native compilation, graph fit, execution
+or physical-network acceptance; those gates remain pending.
