@@ -130,3 +130,24 @@ literal invokes/TypeScript security ledger and visual fixture tests before activ
 the actual retained case and verify both opposite arrival orders, resolved-case retention, proof-only
 revision invalidation, role/session/incarnation loss, bounded pages, exact detail scope and missing
 proof/body truth. Fixture coverage complements that backend path; it cannot replace it.
+
+## Frontend consumer checkpoint (inactive)
+
+`chat-review-audit.ts` and `ChatReviewAudit.svelte` implement bounded closed read decoding, one
+immutable mounted-scope reader, revision-bound page/detail reads, inert text, retained resolved cases,
+and explicit unavailable/incomplete/stale presentation. The component is **not imported by App**;
+native reads, literal IPC/policy/fixture integration and the actual committed held-case source remain
+pending. It cannot yet display these cases in the running application.
+
+Adversarial review found two MEDIUM issues during implementation. Both are fixed and re-reviewed:
+an older same-scope authorization-loss reply must erase bodies even with a newer read outstanding;
+and an outcome label cannot render as a confirmed approval/rejection/reopening while its required
+proof is pending, invalid or conflicting. Deferred-reply and compiled-component regressions cover
+those boundaries, including late replies after disposal and fully verified resolved-case retention.
+
+Focused reader/compiled-component tests pass **23/23**. The complete frontend passes **3,363 tests**
+with zero failures (79.02s), Svelte check reports **zero errors/warnings**, the focused TypeScript
+check passes, and the production build passes (39.42s). These frontend results do not establish
+native authorization, persistent admission or live integration. The actual App hook must capture
+original server/session scalars in its callbacks, key the component to that scope and role, unmount
+on lock/access loss, and complete the native and visual gates above before activation.
