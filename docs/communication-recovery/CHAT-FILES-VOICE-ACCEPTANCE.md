@@ -41,8 +41,9 @@ Both implementation leaves had their own read-only adversarial review and re-rev
 The integrated runtime review has no remaining blocker/high/medium; three low documentation
 findings were corrected. The complete Root suite passes 4,007 tests, with zero failures
 and 25 existing ignores. A fresh dependency audit passes all four categories. Complete
-native/frontend and final build/startup validation remain pending, with one heavy Rust
-process at a time.
+native and final build/startup validation remain pending, with one heavy Rust process at
+a time. The complete frontend suite passes 3,648 tests, and Svelte checking has zero
+errors/warnings.
 
 The first complete native library run records 1,045 passes and 13 failures (2,314.62s).
 One originating fixture unwraps local nonblocking admission `Capacity` in
@@ -57,11 +58,40 @@ pass (11.18s/11.60s). The failed evidence remains in `target/v2-final-native-ful
 exit 101. Focused corrected logs are `target/v2-sdp-admission-retry-{worker,completion}.log`,
 each with exit zero. A new complete native run and the remaining gates are still required.
 
+The second complete Windows native library run has 1,030 passes and 28 failures
+(2,028.91s; `target/v2-final2-native-full.log`, exit 101). Its sole origin is the
+two-peer/shared-Session history-collection scenario: repeated authenticated four-byte
+native media refusals precede the second peer's five-second freshness closure during
+retirement. The old bounded trace omitted refusal enums, so its source is unclassified;
+27 later failures are closed-fixture-gate cascades. Fixed enum diagnostics were added,
+without changing deadlines or authority. The origin remains open.
+
+Three isolated repeats pass. A fourth fails at a different fixture assumption: an
+immediate repeat of completed history still can encounter the shared Index's Capacity
+refusal. The test-only correction forces actual post-success Index contention and retries
+only Capacity on the SAME retained target, at most 32 observations/5ms cadence within
+the original three-second deadline. All proof, flag, tombstone and actual-return checks
+remain. Its read-only review has no findings; the corrected build, concrete layout guard
+(1,512/4,096-byte RPC, 4,656/8,192-byte task), two-peer scenario (75.00s) and independent
+collector scenario (45.80s) pass. These do not establish the original media-refusal cause.
+
+Hosted `0225cf8a` passes 1,059 Linux native library tests and six ACL/parser tests in
+[job 123233186254](https://github.com/Thalpy/Mewtual/actions/runs/40808552650/job/123233186254).
+The job subsequently fails strict Clippy on the enlarged inline admission `Outcome` enum.
+A scoped annotation preserves the already measured, runtime-checked 8 KiB graph rather
+than adding a Box allocation/destruction path. Local strict native Clippy now passes. Neither that
+annotation nor the hosted native pass resolves the Windows media-refusal origin.
+
+A separate review finding concerns individual-peer Close while positive media work is
+queued or encrypting: the shared Session can remain live until that work first fetches.
+An isolated exact-peer fence/regression leaf is in progress. No audio resurrection was
+demonstrated, and this checkpoint does not claim that boundary corrected or V2 activated.
+
 Hosted head `153c573f` has a separate frontend failure: 3,647 pass and one existing
 confirmation pressure test still assumes a fixed 256 KiB default. Its test-only correction
 explicitly chooses the supported 256 KiB local policy and preserves all original pressure,
 admission and actual-return assertions. The confirmation/policy subset then passes 36/36;
-read-only review reports no findings. The complete central frontend suite remains pending.
+read-only review reports no findings. The complete central frontend suite passes 3,648 tests.
 This correction changes no runtime source, and the failed hosted evidence remains at
 [job 123178420516](https://github.com/Thalpy/Mewtual/actions/runs/40791756301/job/123178420516).
 

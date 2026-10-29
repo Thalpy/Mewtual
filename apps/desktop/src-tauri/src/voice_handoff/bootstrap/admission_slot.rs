@@ -842,6 +842,11 @@ struct Invocation {
     work: Option<VoiceAdmissionWork>,
     outcome: Option<Outcome>,
 }
+// Retain the affine candidate inline: publishing a locally refused finalization must
+// not add a heap allocation or a new destruction/payment path. worker_layout includes
+// this complete enum and ParentClaim's preparation graph in the original8KiB fee;
+// admission refuses an oversized graph, and the concrete-layout regression pins it.
+#[allow(clippy::large_enum_variant)]
 enum Outcome {
     Prepared(Result<AdmissionPrepared, VoiceError>),
     /// The Actor's exact refusal certifies no Root entry, not actual return yet.

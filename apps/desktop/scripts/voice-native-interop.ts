@@ -135,6 +135,11 @@ const provider = new Proxy(webcrypto.subtle as unknown as SubtleCrypto, { get(ta
       if (name === "decrypt" && view.length === 3 && view[0] === 1 && view[1] === 3) {
         detail += "/refused-" + view[2];
       }
+      if (name === "decrypt" && view.length === 4 && view[0] === 9 && view[1] === 2) {
+        // Fixed refusal enums only. Distinguish repeated native Current refusals from
+        // missing transport completions without retaining a proof, row or plaintext.
+        detail += "/media-refused-" + view[2] + "/" + view[3];
+      }
       if (name === "decrypt") admissionObservations.observe((args[0] as AesGcmParams)?.additionalData, view);
     }
     stage(detail); return result;

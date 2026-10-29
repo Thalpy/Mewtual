@@ -40,7 +40,8 @@ Each implementation had its own read-only adversarial review. Browser focused te
 574/574; the diagnostic's five Root regressions pass. The complete Root suite now passes
 4,007 tests with zero failures and 25 existing ignores. Integrated native diagnostic/layout
 checks and the former Linux alternate-peer scenario also pass locally on Windows. Complete
-native/frontend suites and final build/startup remain pending. Primary owns those runs;
+native suite and final build/startup remain pending. The complete frontend suite passes
+3,648 tests; Svelte checking reports zero errors/warnings. Primary owns those runs;
 agents run focused checks only, with one heavy Rust process at a time.
 
 The first complete native library run has 1,045 passes and 13 failures. Its origin is
@@ -55,12 +56,43 @@ weakened. Read-only review has no findings; the test build and both actual TCP r
 pass (11.18s and 11.60s). The failed log remains `target/v2-final-native-full.log`; corrected
 complete validation will use separate logs and is still pending.
 
+The corrected Windows native rerun records 1,030 passes and 28 failures (2,028.91s).
+Its origin is `native_browser_two_peers_share_original_session_after_actual_history_collection`:
+the second peer closes during negotiation retirement after repeated authenticated native
+media refusals; 27 later cases encounter the closed fixture gate. The old trace omitted
+the four-byte refusal enums, so Capacity, closure and authorization cannot yet be
+distinguished. The bounded Node trace now records those enums without identifiers or
+plaintext. The five-second media freshness bound is unchanged. This failure remains open.
+
+Three isolated replays pass; a fourth instead exposes an immediate completed-history
+`retire_history().unwrap()` receiving legitimate Index contention. Its test-only correction
+forces that exact post-completion refusal, releases the real Index guard before waiting,
+and retries only Capacity on the SAME target within the existing three-second deadline
+and 32-observation/5ms bound. Proof, flags, no-revival and actual-destruction assertions
+remain. Read-only review finds no issues. The corrected native build, concrete layout
+guard (1,512/4,096-byte RPC and 4,656/8,192-byte task), two-peer scenario (75.00s) and
+independent collector scenario (45.80s) pass. The original media-refusal cause remains open.
+
+Hosted head `0225cf8a` passes all 1,059 Linux native library tests plus six ACL/parser
+tests. That job then fails strict Clippy because the inline admission `Outcome` grew with
+the affine parent claim. Its scoped lint annotation documents why the candidate stays
+inline: the concrete enum and preparation graph are already measured and runtime-checked
+against the original 8 KiB fee; boxing would introduce another allocation/custody path.
+Local strict native Clippy passes. The hosted pass does not explain the Windows failure.
+
+Review also identifies a separate per-peer positive-fetch fence gap: an individual media
+Close can precede the first fetch of an already queued Admit/Detach while its shared
+Session remains live. Cleanup prevents demonstrated audio resurrection. A separate
+inactive correction and deterministic queued/encrypt barriers are in progress before
+activation; this diagnostic/fixture correction does not claim to fix that boundary.
+
 The first hosted run of this integration (`153c573f`) stops in frontend testing:
 3,647 pass and one older confirmation pressure test assumes a fixed 256 KiB default.
 The test-only correction selects the existing 256 KiB local policy explicitly, preserving
 every original byte-cap, admission and cleanup assertion; all other fixtures keep the new
 default. Its confirmation/policy subset passes 36/36 and read-only review has no findings.
-The central complete frontend run will use that correction. No runtime source changed.
+The central complete frontend run now passes all 3,648 tests with that correction.
+No runtime source changed in the pressure-fixture correction.
 
 The next interface is documented in the reviewed
 [bilateral admission proposal](communication-recovery/VOICE-BILATERAL-ADMISSION-PROPOSAL.md).

@@ -1272,10 +1272,44 @@ impl Endpoint {
             }
         };
         assert!(receipt.admitted && !receipt.current && !receipt.closed && !receipt.released);
-        // Drop the successful observation. Exact repetition recovers completed tombstone,
+        // After a successful observation, exact repetition recovers completed tombstone,
         // without requiring any of its erased rows or pretending Session collection.
-        let recovered = target.retire_history().unwrap();
+        // Completion does not make the shared Index uncontended. Force a real refusal
+        // after success, then release its guard BEFORE any sanctioned Clock wait. The
+        // same retained target must recover within the original collection deadline;
+        // a Capacity snapshot must never manufacture a second retirement or a receipt.
+        let refuse_once = || {
+            let held = ledger.fixture_try_hold_index()?;
+            let refused = target.retire_history();
+            drop(held);
+            assert!(matches!(refused, Err(VoiceError::Capacity)));
+            Ok::<(), VoiceError>(())
+        };
+        for observation in 0..32 {
+            match refuse_once() {
+                Ok(()) => break,
+                Err(VoiceError::Capacity) if observation < 31 && clock.monotonic_ms() < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Err(error) => panic!("original completed-history barrier refused: {error:?}"),
+            }
+        }
+        let mut observations = 0;
+        let recovered = loop {
+            observations += 1;
+            match target.retire_history() {
+                Ok(recovered) => break recovered,
+                Err(VoiceError::Capacity) if observations < 32 && clock.monotonic_ms() < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Err(error) => panic!("original completed history did not recover: {error:?}"),
+            }
+        };
         assert_eq!(receipt.proof, recovered.proof);
+        assert!(
+            recovered.admitted && !recovered.current && !recovered.closed && !recovered.released
+        );
+        assert_eq!(receipt.retire_in, recovered.retire_in);
         assert!(ledger
             .lookup_original(&selected, ledger::Purpose::Derive(selector))
             .is_none());
