@@ -358,6 +358,171 @@ mod tests {
         unknown[0] = 255;
         assert!(DurableChatState::decode(&unknown, &n.device).is_err());
     }
+
+    fn receive_foreign(n: &mut Node, key: &str) {
+        let foreign = MlsDevice::generate().unwrap();
+        let mut graph = n.doc(DocType::Channel, 5).unwrap().doc().clone();
+        graph.set_actor(automerge::ActorId::from(
+            foreign.device_id().as_bytes().to_vec(),
+        ));
+        graph
+            .put(ROOT, key, "received while storage was uncertain")
+            .unwrap();
+        graph.commit();
+        let delta = graph.get_last_local_change().unwrap().raw_bytes().to_vec();
+        let op = catcoms_replication::SignedOp::sign(&foreign, DocType::Channel, 5, delta).unwrap();
+        let sealed = SealedOp::seal(&op, &n.group, &n.device, &mut n.rng).unwrap();
+        n.docs
+            .get_mut(&(DocType::Channel, 5))
+            .unwrap()
+            .ingest_tracked(&sealed, &n.group, &n.device)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_chat_uncertain_stop_merges_latest_foreign_receive_across_epoch() {
+        let mut n = node();
+        n.open_channel(DocType::Channel, 5).await.unwrap();
+        let context = n.durable_send_context().unwrap();
+        let prepared = prepare(&mut n, 1, 5);
+        let original = prepared.change;
+        n.commit_durable_chat([1; 16], |_, _| {
+            Err(ChatSaveError::ReplacedNotDurable("parent sync".into()))
+        })
+        .unwrap_err();
+        receive_foreign(&mut n, "foreign");
+        assert_eq!(n.doc(DocType::Channel, 5).unwrap().op_count(), 1);
+        assert!(n.snapshot().is_err());
+        let peer = MlsDevice::generate().unwrap();
+        n.with_observed_mls_transition(|n| {
+            n.group.add_member(&n.device, peer.key_package().unwrap())
+        })
+        .unwrap();
+        n.drain_durable_chat().await;
+        assert!(n.durable_chat_needs_repair());
+        let stopped = n
+            .stop_durable_chat(
+                [1; 16],
+                [1; 32],
+                context,
+                5,
+                "m1".into(),
+                ChatAction::Send,
+                None,
+                |bytes, _| {
+                    let disk = restore(bytes);
+                    assert_eq!(disk.doc(DocType::Channel, 5).unwrap().op_count(), 2);
+                    assert!(disk
+                        .doc(DocType::Channel, 5)
+                        .unwrap()
+                        .doc()
+                        .get(ROOT, "foreign")
+                        .unwrap()
+                        .is_some());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(stopped.durable);
+        assert_eq!(stopped.change, original);
+        assert_eq!(stopped.disposition, ChatDisposition::StoppedAfterCommit);
+        assert_eq!(n.doc(DocType::Channel, 5).unwrap().op_count(), 2);
+        assert!(n.snapshot().is_ok());
+        assert!(n.transport.published.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_chat_possible_stop_is_monotone_through_failure_epoch_and_late_positive() {
+        let mut n = node();
+        n.open_channel(DocType::Channel, 5).await.unwrap();
+        let context = n.durable_send_context().unwrap();
+        n.stop_durable_chat(
+            [7; 16],
+            [7; 32],
+            context,
+            5,
+            "m7".into(),
+            ChatAction::Send,
+            None,
+            |_, _| Err(ChatSaveError::ReplacedNotDurable("rename happened".into())),
+        )
+        .unwrap_err();
+        n.stop_durable_chat(
+            [7; 16],
+            [7; 32],
+            context,
+            5,
+            "m7".into(),
+            ChatAction::Send,
+            None,
+            |_, _| Err(ChatSaveError::NotReplaced("still unavailable".into())),
+        )
+        .unwrap_err();
+        assert!(n.snapshot().is_err());
+        let peer = MlsDevice::generate().unwrap();
+        n.with_observed_mls_transition(|n| {
+            n.group.add_member(&n.device, peer.key_package().unwrap())
+        })
+        .unwrap();
+        let possible = n
+            .prepare_durable_chat([7; 16], [7; 32], context, 5, "m7".into(), |_| {
+                panic!("a possible Stop cannot author")
+            })
+            .unwrap();
+        assert!(!possible.durable);
+        assert_eq!(possible.disposition, ChatDisposition::StoppedBeforeCommit);
+        n.commit_durable_chat([7; 16], |_, _| Ok(())).unwrap();
+        let saved = n
+            .durable_chat_lookup([7; 16], [7; 32], context, 5)
+            .unwrap()
+            .unwrap();
+        assert!(saved.durable);
+        assert_eq!(saved.disposition, ChatDisposition::StoppedBeforeCommit);
+        assert_eq!(n.doc(DocType::Channel, 5).unwrap().op_count(), 0);
+        let encoded = n.durable_chat.encode().unwrap();
+        assert_eq!(encoded[0], 2, "old v1 reader rejects before records");
+        let disk = restore(&n.snapshot().unwrap());
+        assert!(disk.durable_chat.records[&[7; 16]].explicit_stop);
+    }
+
+    #[tokio::test]
+    async fn durable_chat_save_unwind_restores_live_graph_and_latches_whole_possible_stop() {
+        let mut n = node();
+        n.open_channel(DocType::Channel, 5).await.unwrap();
+        let context = n.durable_send_context().unwrap();
+        prepare(&mut n, 1, 5);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            n.commit_durable_chat([1; 16], |_, _| panic!("save callback unwound"))
+        }));
+        assert!(panic.is_err());
+        assert_eq!(n.doc(DocType::Channel, 5).unwrap().op_count(), 0);
+        assert!(n.snapshot().is_err());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            n.stop_durable_chat(
+                [1; 16],
+                [1; 32],
+                context,
+                5,
+                "m1".into(),
+                ChatAction::Send,
+                None,
+                |_, _| panic!("stop save callback unwound"),
+            )
+        }));
+        assert!(panic.is_err());
+        assert_eq!(n.doc(DocType::Channel, 5).unwrap().op_count(), 0);
+        let possible = n
+            .durable_chat_lookup([1; 16], [1; 32], context, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(possible.disposition, ChatDisposition::StoppedAfterCommit);
+        n.repair_durable_chat(|_, _| Ok(())).unwrap();
+        assert_eq!(n.doc(DocType::Channel, 5).unwrap().op_count(), 1);
+        assert_eq!(
+            n.durable_chat.records[&[1; 16]].outcome(true).disposition,
+            ChatDisposition::StoppedAfterCommit
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -440,16 +605,31 @@ impl DurableChatState {
             .extend(self.replacement_uncertain.keys().copied());
     }
     pub(super) fn stop_obsolete(&mut self, context: Option<&[u8; 32]>) {
-        for (token, record) in &mut self.records {
-            if !self.replacement_uncertain.contains_key(token)
-                && context != Some(&record.context)
-                && !record.stopped
-            {
+        // Ordinary owner turns visit only bounded active work, not all non-evicting receipts.
+        // Uncertainty owns its original payload and possible terminal until a covering repair.
+        for token in self.active.clone() {
+            if self.replacement_uncertain.contains_key(&token) {
+                continue;
+            }
+            let Some(record) = self.records.get_mut(&token) else {
+                continue;
+            };
+            if context != Some(&record.context) && !record.stopped {
                 record.stopped = true;
                 record.sealed.clear();
+                if let ChatEffect::Signed { original, .. } = &mut record.effect {
+                    *original = None;
+                }
             }
         }
-        self.rebuild_active();
+        let records = &self.records;
+        let uncertain = &self.replacement_uncertain;
+        self.active.retain(|token| {
+            uncertain.contains_key(token)
+                || records
+                    .get(token)
+                    .is_some_and(|r| (!r.durable && !r.stopped) || !r.sealed.is_empty())
+        });
     }
     pub(crate) fn encode(&self) -> Result<Vec<u8>, SyncError> {
         let mut e = Encoder::new();

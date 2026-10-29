@@ -1039,4 +1039,79 @@ mod tests {
         assert_eq!(replay.disposition, ChatDisposition::StoppedAfterCommit);
         assert_eq!(ops(&n), 1);
     }
+
+    #[tokio::test]
+    async fn durable_mutation_target_ignores_text_but_rejects_substitution_and_duplicate_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(888)).unwrap();
+        let mut n = mutation_node().await;
+        let posted = n
+            .commit_chat_request(&send_request(&n, 1, "original"), &store, 9)
+            .unwrap();
+        let edit = mutation_request(
+            &n,
+            2,
+            &posted.message_id,
+            DurableMutationAction::Edit {
+                text: "retained intent".into(),
+            },
+        );
+        n.edit_message(5, &posted.message_id, "intervening edit")
+            .await
+            .unwrap();
+        assert!(
+            n.commit_chat_request(&edit, &store, 9).unwrap().durable,
+            "same object remains addressed across text edits"
+        );
+        let stale = mutation_request(&n, 3, &posted.message_id, DurableMutationAction::Delete);
+        let id = posted.message_id.clone();
+        let author = n.my_fingerprint();
+        n.sync
+            .post(DocType::Channel, 5, |doc| {
+                crate::delete_message_in_doc(doc, &id)?;
+                append_message(doc, &id, &author, "replacement", 2_000, "")
+            })
+            .await
+            .unwrap();
+        assert!(n
+            .commit_chat_request(&stale, &store, 9)
+            .unwrap_err()
+            .starts_with("CHAT_MUTATION_TARGET_CHANGED"));
+        let ambiguous = mutation_request(&n, 4, &posted.message_id, DurableMutationAction::Delete);
+        n.sync
+            .post(DocType::Channel, 5, |doc| {
+                append_message(doc, &id, &author, "duplicate", 2_001, "")
+            })
+            .await
+            .unwrap();
+        assert!(n
+            .commit_chat_request(&ambiguous, &store, 9)
+            .unwrap_err()
+            .contains("ambiguous"));
+        assert_eq!(n.messages(5).len(), 2);
+    }
+    #[tokio::test]
+    async fn durable_mutation_verified_creator_cannot_be_relabelled_by_author_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(889)).unwrap();
+        let mut n = mutation_node().await;
+        let post = n
+            .commit_chat_request(&send_request(&n, 1, "real author"), &store, 9)
+            .unwrap();
+        n.sync
+            .post(DocType::Channel, 5, |doc| {
+                let location = resolve_message(doc, &post.message_id)?.unwrap();
+                doc.put(&location.object, crate::AUTHOR, "another display author")
+            })
+            .await
+            .unwrap();
+        let request = mutation_request(&n, 2, &post.message_id, DurableMutationAction::Delete);
+        assert!(n
+            .commit_chat_request(&request, &store, 9)
+            .unwrap_err()
+            .starts_with("CHAT_MUTATION_AUTHOR_CONFLICT"));
+        assert_eq!(n.messages(5).len(), 1);
+    }
 }

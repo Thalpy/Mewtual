@@ -49,6 +49,13 @@ pub struct AppliedOp {
 /// it grants neither current membership nor publication authority.
 #[derive(Clone)]
 pub struct SavedLocalChatOp(SignedOp);
+impl fmt::Debug for SavedLocalChatOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SavedLocalChatOp")
+            .field("doc_id", &self.0.doc_id)
+            .finish_non_exhaustive()
+    }
+}
 
 impl SavedLocalChatOp {
     /// Restore a bounded preparation after its containing encrypted snapshot was authenticated.
