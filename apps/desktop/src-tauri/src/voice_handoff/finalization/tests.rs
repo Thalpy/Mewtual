@@ -2,7 +2,7 @@
 //! synthetic desktop grant fixture. No production opcode or normal Actor success is enabled.
 use super::*;
 use crate::voice_activation_tests::Fixture;
-use crate::voice_handoff::bootstrap::{fixture_installed as installed, SetupOutput};
+use crate::voice_handoff::bootstrap::{fixture_installed as installed, SetupOutputRef};
 use crate::voice_handoff::ledger::{
     tests::{actual_action, selection},
     Begin,
@@ -16,7 +16,7 @@ struct Case {
     native: Fixture,
     coordinator: crate::voice_authority::Coordinator,
     route: Route,
-    public: Arc<SetupOutput>,
+    public: SetupOutputRef,
     selector: PairSelector,
     id: RowId,
     input: Option<CryptoInputLease>,

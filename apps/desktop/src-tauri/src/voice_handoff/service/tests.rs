@@ -3,7 +3,7 @@
 //! layout already pinned by shared WebCrypto vectors; no native Session key is inspected.
 use super::*;
 use crate::voice_activation_tests::Fixture;
-use crate::voice_handoff::bootstrap::{ensure, SetupOutput, Status};
+use crate::voice_handoff::bootstrap::{ensure, SetupOutputRef, Status};
 use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
     Aes256Gcm,
@@ -41,7 +41,7 @@ async fn until(mut condition: impl FnMut() -> bool) {
     })
     .await;
 }
-async fn setup() -> (Fixture, String, Arc<SetupOutput>, Arc<Runtime>, Client) {
+async fn setup() -> (Fixture, String, SetupOutputRef, Arc<Runtime>, Client) {
     let f = Fixture::new().await;
     let owner = f.candidate().await;
     crate::activate_voice_owner_inner(&f.state, owner.clone())
@@ -374,7 +374,7 @@ async fn admitted_begin_worker_keeps_physical_ownership_ahead_of_newer_history()
 /// Fixture allocations are not application custody evidence; returned Incoming is the real
 /// original Session owner and has already passed header authentication and body opening.
 pub(in crate::voice_handoff) fn opened_frame(
-    public: &SetupOutput,
+    public: &SetupOutputRef,
     route: &super::super::bootstrap::Route,
     header: (u64, u8, u8, [u8; 16]),
     plaintext: &[u8],
@@ -395,7 +395,7 @@ pub(in crate::voice_handoff) fn opened_frame(
 /// Independent real MAC/AEAD wire without body admission. Large-SDP regressions can then
 /// exercise the actual authenticated capacity permit and coalesced-header/tail boundary.
 pub(in crate::voice_handoff) fn signed_frame(
-    public: &SetupOutput,
+    public: &SetupOutputRef,
     header: (u64, u8, u8, [u8; 16]),
     plaintext: &[u8],
 ) -> Vec<u8> {
@@ -462,7 +462,7 @@ async fn invalid_sdp_shape_and_unfunded_large_data_refuse_before_allocation_or_n
 /// Independently verify a sibling adapter's ACTUAL completed MAC/AEAD reply against its
 /// original request. Fixture Vecs are test scaffolding, not application copy-custody evidence.
 pub(in crate::voice_handoff) fn opened_reply(
-    public: &SetupOutput,
+    public: &SetupOutputRef,
     header: (u64, u8, u8, [u8; 16]),
     request_plaintext: &[u8],
     reply: &super::super::channel::CompletedReply,
@@ -470,7 +470,7 @@ pub(in crate::voice_handoff) fn opened_reply(
     opened_reply_kind(public, header, request_plaintext, reply, 0)
 }
 pub(in crate::voice_handoff) fn opened_reply_kind(
-    public: &SetupOutput,
+    public: &SetupOutputRef,
     header: (u64, u8, u8, [u8; 16]),
     request_plaintext: &[u8],
     reply: &super::super::channel::CompletedReply,
@@ -2068,7 +2068,7 @@ async fn completed_reply_without_a_row_reference_keeps_native_control_paid_throu
     use crate::voice_handoff::channel::{BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES, CONTROL_BYTES};
     let (f, owner, output, runtime, client) = setup().await;
     let route = f.state.voice_channels.route(client.slot).unwrap();
-    let session = Arc::downgrade(route.session());
+    let session = route.session().downgrade();
     let (_, admission, body) = client.status(1);
     let submitted = wire(41891, &admission, &body);
     let mut worker = route.session().header().unwrap();
@@ -2093,11 +2093,9 @@ async fn completed_reply_without_a_row_reference_keeps_native_control_paid_throu
     assert_eq!(session.strong_count(), 0);
     assert_eq!(
         runtime.resources().counts(),
-        (
-            paid - CONTROL_BYTES - BOOTSTRAP_BYTES - BROWSER_CONTROL_BYTES,
-            0
-        )
+        (paid - CONTROL_BYTES - BROWSER_CONTROL_BYTES, 0)
     );
+    drop(session); // the diagnostic weak allocation itself still owns bootstrap-tail bytes
     drop(output);
     collect_channel(&f.state, &owner, [9; 32]).await.unwrap();
     let collected = runtime.resources().counts();

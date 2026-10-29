@@ -148,10 +148,13 @@ pub(crate) async fn ensure_admitted(
         return Ok(status);
     };
     let (session, public, setup) = ticket.compute(rng)?;
-    let reply = Arc::new(SetupOutput {
-        public,
-        _credit: ticket.row._credit.clone(),
-    });
+    let reply = SetupOutputRef::new(
+        SetupOutput {
+            public,
+            _credit: ticket.row._credit.clone(),
+        },
+        ticket.row._credit.clone(),
+    );
     let mut output = Some((session, reply.clone(), setup));
     {
         let authority = state

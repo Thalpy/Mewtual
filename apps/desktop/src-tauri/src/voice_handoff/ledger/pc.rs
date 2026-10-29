@@ -5,6 +5,7 @@ use super::super::channel::{PhysicalHold, Session};
 use super::super::requests::pc::Request;
 use super::transition::try_lock;
 use super::*;
+use crate::voice_handoff::channel::SessionRef;
 use catcoms_sync::voice_v2::chain::{sdp_handoff, EstablishedKeyCustody};
 use catcoms_sync::voice_v2::sdp::InitialSdpIntent;
 use catcoms_sync::voice_v2::SdpRound;
@@ -164,7 +165,7 @@ impl ResolvedRow {
         &self,
         admission: &super::super::transition::Admission<'_>,
         physical: &PhysicalHold,
-        session: &Arc<Session>,
+        session: &SessionRef,
         request: &Request,
     ) -> Result<Option<Preparation>, VoiceError> {
         if !physical.belongs_to(session)

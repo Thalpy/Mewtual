@@ -14,8 +14,8 @@ async fn header_and_public_output_independently_keep_original_capacity_and_slot_
     );
     let slot = output.public().slot;
     let route = f.state.voice_channels.route(slot).unwrap();
-    let session = Arc::downgrade(route.session());
-    let public = Arc::downgrade(&output);
+    let session = route.session().downgrade();
+    let public = output.downgrade();
     let header = route.session().header().unwrap();
     drop(route); // Header owns Session directly, with no Row reference left.
     f.state.voice_authority.lock().unwrap().end(&owner);
@@ -66,7 +66,6 @@ async fn header_and_public_output_independently_keep_original_capacity_and_slot_
             before.0
                 - super::super::super::channel::bootstrap::SETUP_WORK_BYTES
                 - CONTROL_BYTES
-                - BOOTSTRAP_BYTES
                 - BROWSER_CONTROL_BYTES,
             0
         )
@@ -100,7 +99,18 @@ async fn header_and_public_output_independently_keep_original_capacity_and_slot_
         .all(Option::is_none));
     assert_eq!(
         selected.resources().counts(),
+        without_session,
+        "the test's explicit weak allocation owners retain their SAME payments"
+    );
+    drop(public);
+    assert_eq!(
+        selected.resources().counts(),
         (without_session.0 - ROW_BYTES, 0)
+    );
+    drop(session);
+    assert_eq!(
+        selected.resources().counts(),
+        (without_session.0 - ROW_BYTES - BOOTSTRAP_BYTES, 0)
     );
     let final_counts = selected.resources().counts();
     collect_channel(&f.state, &owner, [9; 32]).await.unwrap();
@@ -203,7 +213,7 @@ async fn more_than_sixty_four_real_selected_generations_reuse_slots_without_rese
                     .await
                     .unwrap(),
             );
-            assert!(Arc::ptr_eq(&output, &retry));
+            assert!(output.is_same(&retry));
         }
         drop(output);
         collect_channel(&f.state, &owner, [9; 32]).await.unwrap();

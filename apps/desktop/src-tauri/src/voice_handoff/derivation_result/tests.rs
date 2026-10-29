@@ -4,7 +4,7 @@
 use super::*;
 use crate::voice_activation_tests::Fixture;
 use crate::voice_authority::SelectedHandoffOwner;
-use crate::voice_handoff::bootstrap::{ensure, SetupOutput};
+use crate::voice_handoff::bootstrap::{ensure, SetupOutputRef};
 use crate::voice_handoff::custody::Phase;
 use crate::voice_handoff::factory::tests::{channel_route, park};
 use catcoms_sync::voice_v2::crypto_actions::{CryptoAction, CryptoOutcome};
@@ -20,7 +20,7 @@ pub(in crate::voice_handoff) struct Case {
     pub(in crate::voice_handoff) native: Fixture,
     pub(in crate::voice_handoff) context: Context,
     pub(in crate::voice_handoff) route: Route,
-    pub(in crate::voice_handoff) public: Arc<SetupOutput>,
+    pub(in crate::voice_handoff) public: SetupOutputRef,
     pub(in crate::voice_handoff) selected: Arc<SelectedHandoffOwner>,
     pub(in crate::voice_handoff) selector: PairSelector,
     pub(in crate::voice_handoff) join: LocalJoin,
@@ -218,7 +218,7 @@ async fn result_identity_purpose_and_shape_refuse_before_work_or_actor_admission
 async fn an_authenticated_foreign_session_cannot_publish_through_the_original_route() {
     let case = Case::new().await;
     let foreign = Case::new().await;
-    assert!(!Arc::ptr_eq(case.route.session(), foreign.route.session()));
+    assert!(!case.route.session().is_same(foreign.route.session()));
     let incoming = crate::voice_handoff::service::tests::opened_frame(
         &foreign.public,
         &foreign.route,

@@ -7,6 +7,7 @@ use super::{
 };
 use crate::voice_authority::{Binding, SelectedHandoffOwner};
 use crate::voice_handoff::bootstrap::{ChannelOwner, ChannelProfile};
+use crate::voice_handoff::channel::SessionRef;
 use catcoms_rt::CryptoRngCore;
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, WorkLane};
 use hkdf::Hkdf;
@@ -79,7 +80,8 @@ impl Prepared {
         // SETUP_WORK_BYTES payer and corresponding concrete-future guards.
         let bootstrap_layout = std::mem::size_of::<Session>()
             + std::mem::size_of::<SessionIdentity>()
-            + 4 * std::mem::size_of::<usize>();
+            + 4 * std::mem::size_of::<usize>()
+            + super::session_owner_layout_bytes();
         if bootstrap_layout > BOOTSTRAP_BYTES {
             return Err(Refused::Capacity);
         }
@@ -126,7 +128,7 @@ impl Prepared {
     pub fn compute(
         self,
         rng: &mut dyn CryptoRngCore,
-    ) -> Result<(Arc<Session>, PublicSetup, Credit), Refused> {
+    ) -> Result<(SessionRef, PublicSetup, Credit), Refused> {
         // The older selected-point publication validates encoding/reference only. Validate
         // this actual curve point before scalar multiplication, never just its 04 prefix.
         let point = self.selected.point();
@@ -148,29 +150,34 @@ impl Prepared {
         // The pinned types zeroize their own scalar/shared storage on Drop. This is not a
         // claim about arithmetic temporaries, provider heaps or later join-key compromise.
         drop(ephemeral);
-        let session = Arc::new(Session {
-            identity: Arc::new(SessionIdentity(public.hash)),
-            resources: self.selected.resources(),
-            group: self.selected.binding().scope.group,
-            slot: self.slot,
-            keys,
-            counters: Mutex::new(Counters {
-                closed: false,
-                busy: false,
-                native_busy: false,
-                request_floor: 0,
-                response_sequence: 0,
-            }),
-            idle: tokio::sync::Notify::new(),
-            _control: self.control,
-            _bootstrap: self.bootstrap,
-            _browser_control: self.browser_control,
-            control_lane: self.control_lane,
-            #[cfg(test)]
-            input_pressure: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
-            result_preflight_sequence: std::sync::atomic::AtomicU64::new(0),
-        });
+        let session = SessionRef::new(
+            Session {
+                identity: Arc::new(SessionIdentity(public.hash)),
+                resources: self.selected.resources(),
+                group: self.selected.binding().scope.group,
+                slot: self.slot,
+                keys,
+                counters: Mutex::new(Counters {
+                    closed: false,
+                    busy: false,
+                    native_busy: false,
+                    request_floor: 0,
+                    response_sequence: 0,
+                }),
+                idle: tokio::sync::Notify::new(),
+                funding: None,
+                control_lane: self.control_lane,
+                #[cfg(test)]
+                input_pressure: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                result_preflight_sequence: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                return_boundary: Mutex::new(None),
+            },
+            self.control,
+            self.bootstrap,
+            self.browser_control,
+        );
         // The browser has not performed ECDH/HKDF/sealing merely because native arithmetic
         // finished. Install this same credit before exposing public setup; do not re-charge.
         Ok((session, public, self.work))

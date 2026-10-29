@@ -1,6 +1,7 @@
 //! Actual native selected-key/actor fixtures; no Tauri serialization or live RTC is claimed.
 use super::*;
 use crate::voice_activation_tests::Fixture;
+use crate::voice_handoff::channel::SessionRef;
 use catcoms_rt::rng::RngError;
 use catcoms_rt::{CryptoRng, RngCore};
 use rand_chacha::ChaCha20Rng;
@@ -86,7 +87,7 @@ impl RngCore for Rng<'_> {
     }
 }
 impl CryptoRng for Rng<'_> {}
-fn ready(status: Status) -> Arc<SetupOutput> {
+fn ready(status: Status) -> SetupOutputRef {
     match status {
         Status::Ready(public) => public,
         _ => panic!("expected immutable setup"),
@@ -157,10 +158,7 @@ async fn native_diagnostic_report_refuses_held_registry_and_row_without_waiting_
 #[test]
 fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
     let arc_words = 2 * std::mem::size_of::<usize>();
-    let index = std::mem::size_of::<Registry>()
-        + std::mem::size_of::<Index>()
-        + arc_words
-        + std::mem::size_of::<[Option<Arc<Row>>; ROWS]>();
+    let index = index_layout_bytes();
     assert!(index <= INDEX_BYTES, "index requires {index}");
     // Include retained row, its Arc, preparation, Session result/projection and a second
     // returned descriptor copy. SelectedHandoffOwner has its separate original paid owner.
@@ -172,12 +170,14 @@ fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
         + std::mem::size_of::<SetupOutput>()
         + std::mem::size_of::<Credit>()
         + arc_words * 2
-        + std::mem::size_of::<Arc<Session>>()
+        + std::mem::size_of::<SessionRef>()
         + std::mem::size_of::<Session>() + arc_words // actual weak-only retired Session tail
+        + super::super::channel::session_owner_layout_bytes()
         + std::mem::size_of::<Begin>()
         + std::mem::size_of::<Status>()
         + std::mem::size_of::<PublicProjection>()
         + std::mem::size_of::<MetadataProjection>()
+        + 2 * std::mem::size_of::<ReturningOwner>()
         + std::mem::size_of::<Vec<u8>>() // hard-capped JSON writer
         + 64 // serializer references and fixed integer-format scratch
         + std::mem::size_of::<crate::voice_handoff::commands::SetupReply>()
@@ -200,7 +200,7 @@ async fn maximum_public_projection_fits_the_actual_fixed_json_capacity() {
     // registry's public owner before mutating its sole output. Even the full1024-byte buffer,
     // larger than a canonical transcript, must fit without native String growth.
     drop(projection.row.state.lock().unwrap().public.take());
-    let public = &mut Arc::get_mut(&mut output).unwrap().public;
+    let public = &mut output.get_mut().unwrap().public;
     public.transcript.fill(255);
     public.length = 1024;
     let reply = crate::voice_handoff::commands::SetupReply::new(
@@ -334,10 +334,13 @@ async fn process_stop_refuses_late_bootstrap_installation_without_publishing_a_s
             let (session, public, setup) = ticket.compute(&mut Rng::new()).unwrap();
             Some((
                 session,
-                Arc::new(SetupOutput {
-                    public,
-                    _credit: ticket.row._credit.clone(),
-                }),
+                SetupOutputRef::new(
+                    SetupOutput {
+                        public,
+                        _credit: ticket.row._credit.clone(),
+                    },
+                    ticket.row._credit.clone(),
+                ),
                 setup,
             ))
         } else {
