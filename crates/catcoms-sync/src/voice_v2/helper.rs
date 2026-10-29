@@ -98,6 +98,12 @@ pub struct HelperLedger {
     resources: Arc<Resources>,
     state: Mutex<State>,
 }
+impl Drop for HelperLedger {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        super::runtime::before_return_for_test(self as *const Self as usize);
+    }
+}
 enum RequestWork {
     Charge(DeviceId),
     Admitted(IngressTicket),
@@ -113,20 +119,16 @@ redacted_debug!(
 );
 
 impl HelperLedger {
-    pub(super) fn new(
-        group: [u8; 32],
-        clock: Arc<dyn Clock>,
-        resources: Arc<Resources>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    pub(super) fn new(group: [u8; 32], clock: Arc<dyn Clock>, resources: Arc<Resources>) -> Self {
+        Self {
             group,
             clock,
             resources,
             state: Mutex::new(State::default()),
-        })
+        }
     }
     fn current(&self, actor: &ActorOwner) -> Result<(), VoiceError> {
-        if !std::ptr::eq(Arc::as_ptr(&actor.helper()?), self) {
+        if !std::ptr::eq(&*actor.helper()?, self) {
             return Err(VoiceError::Unauthorized);
         }
         Ok(())

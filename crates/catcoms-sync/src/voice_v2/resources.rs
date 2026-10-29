@@ -166,6 +166,31 @@ struct State {
     total: Counts,
     groups: HashMap<[u8; 32], Counts>,
 }
+impl State {
+    /// Pure locked retirement of an ACTUALLY empty counter row. Every caller
+    /// holds the same pool fence, so no charge/observer can see returned budget
+    /// while its old buckets or shrink/growth overlap remain allocated.
+    fn remove_empty_group(&mut self, group: &[u8; 32]) {
+        if !self.groups.get(group).is_some_and(|counts| {
+            counts.bytes == 0
+                && counts.progress == 0
+                && counts.slots.iter().all(|count| *count == 0)
+        }) {
+            return;
+        }
+        drop(self.groups.remove(group));
+        #[cfg(test)]
+        retirement_tests::before_shrink(self as *const Self as usize);
+        if self.groups.is_empty() {
+            // with_hasher copies the EXISTING seeds: no ambient RNG, including
+            // final Credit/Progress release. Free all backing before unlock.
+            let empty = HashMap::with_hasher(self.groups.hasher().clone());
+            drop(std::mem::replace(&mut self.groups, empty));
+        } else {
+            self.groups.shrink_to(self.groups.len());
+        }
+    }
+}
 
 /// Native creates one pool for every actor/controller in its process. Creating a pool per call
 /// would multiply the limits; the native wiring must share this exact owner with helper actors.
@@ -422,6 +447,20 @@ impl ByteBudget {
 }
 
 impl Resources {
+    #[cfg(test)]
+    pub(crate) fn group_counter_capacity_for_test(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (state.groups.len(), state.groups.capacity())
+    }
+    /// Complete full-bucket/control/alignment allowance, including simultaneous
+    /// old/new growth or shrink tables. Pinned std HashMap's7/8 load and power-of-
+    /// two buckets require at most4 tuples per remaining live group at a shrink
+    /// boundary. Empty tables are freed synchronously by remove_empty_group.
+    pub(crate) fn group_index_invoice_bytes() -> usize {
+        let tuple = std::mem::size_of::<([u8; 32], Counts)>();
+        let align = std::mem::align_of::<([u8; 32], Counts)>().max(16);
+        4 * (tuple + 1) + 2 * (align - 1) + 32
+    }
     /// No allocation or new group entry. A real Root/record reservation must
     /// already own this group. Both buckets commit together or neither does.
     pub(crate) fn admit_voice_control(&self, group: [u8; 32], now: u64) -> Result<(), VoiceError> {
@@ -782,6 +821,9 @@ impl Resources {
     }
 }
 
+#[cfg(test)]
+mod retirement_tests;
+
 impl Reservation {
     #[cfg(test)]
     pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
@@ -1020,10 +1062,7 @@ impl Credit {
         state.total.bytes -= bytes;
         let counts = state.groups.get_mut(&self.group).expect("retained reserve");
         counts.bytes -= bytes;
-        if counts.bytes == 0 && counts.progress == 0 && counts.slots.iter().all(|count| *count == 0)
-        {
-            state.groups.remove(&self.group);
-        }
+        state.remove_empty_group(&self.group);
     }
 }
 
@@ -1047,13 +1086,8 @@ impl Drop for Credit {
             if let Some((slot, _, _)) = self.kind.slot() {
                 counts.slots[slot] -= 1;
             }
-            if counts.bytes == 0
-                && counts.progress == 0
-                && counts.slots.iter().all(|count| *count == 0)
-            {
-                state.groups.remove(&self.group);
-            }
         }
+        state.remove_empty_group(&self.group);
         // Never acquire the reservation mutex while holding the pool mutex: charge holds them
         // in the other order. Also release both before dropping the last reserve Arc, whose
         // original credit destructor must be able to acquire the pool mutex again.

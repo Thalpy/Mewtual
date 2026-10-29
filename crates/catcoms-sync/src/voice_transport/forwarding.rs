@@ -3,8 +3,9 @@
 use super::*;
 use catcoms_rt::{RequestAuthority, SharedRequestKeepalive};
 use futures::FutureExt;
-use voice_v2::helper::{ForwardJob, HelperLedger};
-use voice_v2::source::{SourceActivity, SourceHop, SourceJob, SourceLedger, SourceOutcome};
+use voice_v2::helper::ForwardJob;
+use voice_v2::runtime::{HelperOwner, SourceOwner};
+use voice_v2::source::{SourceActivity, SourceHop, SourceJob, SourceOutcome};
 use voice_v2::CallLease;
 
 const ROUTES: usize = 64;
@@ -206,7 +207,7 @@ impl RequestAuthority for FlightAuthority {
 enum Work {
     Helper {
         job: ForwardJob,
-        ledger: Arc<HelperLedger>,
+        ledger: HelperOwner,
     },
     Source {
         // Packet ciphertext remains in the original SourceJob. Only this immutable fixed
@@ -215,7 +216,7 @@ enum Work {
         // refusal before RouteGate has captured another keepalive owner.
         permit: Option<Box<voice_v2::RoutePermit>>,
         job: SourceJob,
-        ledger: Arc<SourceLedger>,
+        ledger: SourceOwner,
     },
 }
 
@@ -306,8 +307,8 @@ impl Work {
     }
     fn current(&self, actor: &voice_v2::runtime::ActorOwner) -> Result<(), VoiceError> {
         let current = match self {
-            Self::Helper { ledger, .. } => Arc::ptr_eq(ledger, &actor.helper()?),
-            Self::Source { ledger, .. } => Arc::ptr_eq(ledger, &actor.source()?),
+            Self::Helper { ledger, .. } => ledger.is_same(&actor.helper()?),
+            Self::Source { ledger, .. } => ledger.is_same(&actor.source()?),
         };
         if current {
             Ok(())

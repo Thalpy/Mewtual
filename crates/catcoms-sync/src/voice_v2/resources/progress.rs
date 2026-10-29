@@ -182,11 +182,9 @@ impl Drop for ProgressRelease {
         if let Some(counts) = state.groups.get_mut(&self.group) {
             if counts.progress == self.key {
                 counts.progress = 0;
-                if counts.bytes == 0 && counts.slots.iter().all(|count| *count == 0) {
-                    state.groups.remove(&self.group);
-                }
             }
         }
+        state.remove_empty_group(&self.group);
     }
 }
 
@@ -241,6 +239,7 @@ mod tests {
         assert_ne!(stamp(&pool, [2; 32]), 0);
         drop((other, claims, payment));
         assert_eq!(pool.counts(), (0, 0));
+        assert_eq!(pool.group_counter_capacity_for_test(), (0, 0));
     }
 
     #[test]
@@ -266,6 +265,7 @@ mod tests {
         }
         assert_eq!(pool.group_counts([1; 32]), None);
         assert_eq!(pool.counts(), (0, 0));
+        assert_eq!(pool.group_counter_capacity_for_test(), (0, 0));
     }
 
     #[test]
@@ -293,6 +293,7 @@ mod tests {
         assert_ne!(stamp(&pool, [1; 32]), 0);
         drop((successor, payment));
         assert_eq!(pool.counts(), (0, 0));
+        assert_eq!(pool.group_counter_capacity_for_test(), (0, 0));
     }
 
     #[test]
