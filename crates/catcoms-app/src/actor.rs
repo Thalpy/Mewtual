@@ -42,11 +42,12 @@ mod member_reconnect;
 mod voice_endpoint;
 use voice_endpoint::ActorInbox;
 pub use voice_endpoint::{
-    control_layout_bytes, voice_admission_rpc_bytes, voice_admitted_presence_rpc_bytes,
-    voice_call_activation_rpc_bytes, voice_context_queue_bytes, voice_initial_media_rpc_bytes,
-    voice_sdp_delivery_rpc_bytes, voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes,
-    voice_sdp_rpc_bytes, InitialSdpCompletion, InitialSdpPending, PreparedVoiceCall,
-    VoiceActivationControl, VoiceAdmissionPublisher, VoiceAdmissionWork,
+    control_layout_bytes, voice_admission_rpc_bytes, voice_admitted_admission_rpc_bytes,
+    voice_admitted_presence_rpc_bytes, voice_call_activation_rpc_bytes, voice_context_queue_bytes,
+    voice_initial_media_rpc_bytes, voice_sdp_delivery_rpc_bytes, voice_sdp_engine_rpc_bytes,
+    voice_sdp_input_rpc_bytes, voice_sdp_rpc_bytes, InitialSdpCompletion, InitialSdpPending,
+    PreparedVoiceCall, VoiceActivationControl, VoiceAdmissionPublisher, VoiceAdmissionWork,
+    VoiceAdmittedAdmissionPublisher, VoiceAdmittedAdmissionResult, VoiceAdmittedAdmissionWork,
     VoiceAdmittedPresencePublisher, VoiceAdmittedPresenceResult, VoiceAdmittedPresenceWork,
     VoiceCallActivationPublisher, VoiceCallActivationResult, VoiceCallActivationWork,
     VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceContextPending, VoiceEndpointCommand,

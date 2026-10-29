@@ -23,6 +23,16 @@ survives Vec deallocation. Prepared/driver owners keep the SAME payer after auth
 even after Root retirement; public rt signatures and wire bytes are unchanged. Quiet
 housekeeping releases idle process-wide Crypto custody. Crypto/Forward/route caps stay unchanged; see
 [the exact scope and pending validation](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+## Inert admitted neutral preparation (29 October; inactive)
+
+`ChannelSync::prepare_admitted_voice_admission_step` accepts the actual original
+admitted grant/activation, optional exact admitted observer, generation and original
+RPC payment. It takes no peer/role. `AdmittedAdmissionPrepared::into_parts` returns
+the affine registration independently of a later neutral-capacity refusal; native
+must retain it for exact retry. `None` requests a new registration and does not
+recover a lost native reply. These types cannot become an Existing HIGH preclaim.
+No public consume, role binding, Availability, Ready or RTC permission is supplied.
+See [the exact contract and remaining consumers](communication-recovery/VOICE-NEUTRAL-ADMISSION.md).
 
 ## Admitted native key commands (29 October; inactive call path)
 

@@ -1,6 +1,7 @@
 //! Inert progression prepayment. Waiting for a counterpart must not start a transcript
 //! deadline or consume a call/pair action. This carrier reserves the SAME bytes and
 //! positions consumed by the eventual chain; it grants no native/browser permission.
+use super::super::packets::PacketLayout;
 use super::*;
 
 /// Affine, opaque capacity for one group/role and its exact original native pools.
@@ -15,7 +16,7 @@ pub struct ChainCapacity {
 struct InertCapacity {
     resources: Arc<Resources>,
     group: [u8; 32],
-    low: bool,
+    layout: PacketLayout,
     slots: Arc<slots::Slots>,
     packets: super::super::packets::ConfirmationCapacity,
     history_bytes: Arc<Reservation>,
@@ -47,6 +48,25 @@ impl Drop for RootReturnBoundary {
 }
 
 impl ChainCapacity {
+    /// Admitted-profile capacity before peer orientation is known. No existing
+    /// chain consumer accepts this layout: it must later pass a distinct committed
+    /// round boundary rather than being relabelled by a renderer-selected role.
+    pub(in crate::voice_v2) fn reserve_neutral(
+        resources: Arc<Resources>,
+        group: [u8; 32],
+        slots: Arc<slots::Slots>,
+        packet_slots: &super::super::packets::PacketSlots,
+    ) -> Result<Self, VoiceError> {
+        Self::reserve_with_packet_layout(
+            resources,
+            group,
+            PacketLayout::Neutral,
+            slots,
+            packet_slots,
+            ROW_BYTES,
+            || {},
+        )
+    }
     /// Reserve capacity only: no lease, binding, protocol state, clock or native row is
     /// created. LOW/HIGH determines only the original packet-position allocation.
     pub(in crate::voice_v2) fn reserve(
@@ -92,6 +112,26 @@ impl ChainCapacity {
         row_bytes: usize,
         after_payment: impl FnOnce(),
     ) -> Result<Self, VoiceError> {
+        Self::reserve_with_packet_layout(
+            resources,
+            group,
+            PacketLayout::for_role(low),
+            slots,
+            packet_slots,
+            row_bytes,
+            after_payment,
+        )
+    }
+
+    fn reserve_with_packet_layout(
+        resources: Arc<Resources>,
+        group: [u8; 32],
+        layout: PacketLayout,
+        slots: Arc<slots::Slots>,
+        packet_slots: &super::super::packets::PacketSlots,
+        row_bytes: usize,
+        after_payment: impl FnOnce(),
+    ) -> Result<Self, VoiceError> {
         let action = super::super::crypto_actions::fixed_record_layout_bytes();
         let admission = super::admission::ADMISSION_RECORD_BYTES;
         let start = super::start::START_RECORD_BYTES;
@@ -107,7 +147,11 @@ impl ChainCapacity {
         let history_total = ROWS.checked_mul(row_bytes).ok_or(VoiceError::Capacity)?;
         let root_metadata = resources.charge(group, METADATA_BYTES, ResourceKind::Retained)?;
         after_payment();
-        let packets = packet_slots.reserve_confirmation(low)?;
+        let packets = match layout {
+            PacketLayout::Low => packet_slots.reserve_confirmation(true)?,
+            PacketLayout::High => packet_slots.reserve_confirmation(false)?,
+            PacketLayout::Neutral => packet_slots.reserve_confirmation_layout(layout)?,
+        };
         let history_bytes = resources.reserve(group, history_total)?;
         let history_slots = slots.reserve(ROWS)?;
         let core = resources.reserve(group, super::super::negotiation::EXCHANGE_BYTES)?;
@@ -129,7 +173,7 @@ impl ChainCapacity {
             inner: Some(Box::new(InertCapacity {
                 resources,
                 group,
-                low,
+                layout,
                 slots,
                 packets,
                 root_metadata,
@@ -176,7 +220,7 @@ impl ChainCapacity {
         if !Arc::ptr_eq(resources, &inner.resources)
             || !Arc::ptr_eq(slots, &inner.slots)
             || binding.scope.group != inner.group
-            || binding.low != inner.low
+            || inner.layout != PacketLayout::for_role(binding.low)
             || !inner.packets.uses_pools(packet_slots)
         {
             return Err(VoiceError::Scope);
@@ -188,7 +232,7 @@ impl ChainCapacity {
             root_metadata,
             resources: _,
             group: _,
-            low: _,
+            layout: _,
             slots,
             packets,
             history_bytes,

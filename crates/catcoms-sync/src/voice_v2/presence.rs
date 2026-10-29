@@ -26,6 +26,9 @@ pub(crate) use confirmation::{
 pub use snapshot::{PeerSnapshot, PeerSnapshotPermit, PeerSnapshotWaiter};
 
 const RECORD_BYTES: usize = 1536;
+/// Independent Watcher body payment. Lease aliases keep their own enclosing
+/// funding; they do not keep this record alive after the Watcher itself drops.
+pub(super) const WATCHER_BYTES: usize = RECORD_BYTES;
 const MAX_PENDING: usize = 32;
 const RENEW_MS: u64 = 5000;
 
@@ -186,7 +189,7 @@ impl Watcher {
         resources: Arc<Resources>,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Self, VoiceError> {
-        let credit = resources.charge(context.scope.group, RECORD_BYTES, ResourceKind::Watcher)?;
+        let credit = resources.charge(context.scope.group, WATCHER_BYTES, ResourceKind::Watcher)?;
         lease.claim()?;
         let mut incarnation = [0; 32];
         rng.fill_bytes(&mut incarnation);

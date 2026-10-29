@@ -39,6 +39,15 @@ impl AdmissionRpcPermit {
     pub fn scope(&self) -> Scope {
         self.scope
     }
+    /// Pure payment identity for the trusted Actor adapter, not call currency
+    /// or a native-generation/permission certificate. Queue and Root admission
+    /// independently validate the actual original activation and grant.
+    pub fn matches_activation(
+        &self,
+        original: &super::call_activation::ActivationObserver,
+    ) -> bool {
+        self.scope == original.scope() && original.uses_resources(&self.resources)
+    }
     pub(crate) fn matches(&self, resources: &Arc<Resources>, scope: Scope) -> bool {
         Arc::ptr_eq(&self.resources, resources) && self.scope == scope
     }
