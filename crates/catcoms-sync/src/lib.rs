@@ -76,6 +76,7 @@ pub mod checkpoint_exchange;
 pub mod durable_chat;
 pub mod epoch_service;
 mod group_policy;
+pub mod local_chat_scope;
 mod owner_tenure;
 mod voice_endpoint;
 mod voice_runtime;
@@ -2276,6 +2277,12 @@ pub enum SyncError {
     /// A prepared chat owns this document's next local actor sequence until it is committed.
     #[error("CHAT_SEND_DOCUMENT_PENDING: retry the outstanding send for this channel first")]
     ChatPreparationPending,
+    /// Scope-bearing snapshots remain unbound until the original mounted vault validates
+    /// independent current-admission lineage. A decoded Active label is not a permit.
+    #[error("CHAT_SEND_CONTEXT_CHANGED: managed chat admission is unbound or retired")]
+    ChatScopeUnavailable,
+    #[error("CHAT_SCOPE_MIGRATION_PENDING: retained original recovery needs another owner turn")]
+    ChatScopeMigrationPending,
     /// A join request was rejected by the inviter.
     #[error("join request rejected")]
     JoinRejected,
@@ -4340,6 +4347,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     ledger: InviteLedger,
     docs: HashMap<(DocType, u128), EncryptedDoc>,
     durable_chat: durable_chat::DurableChatState,
+    local_chat_scope: local_chat_scope::LocalChatScope,
+    /// Managed raw-post retries retain their ORIGINAL observer. They never fall back into the
+    /// unscoped generic outbox, and rebind/restart cannot authorize an old queued handoff.
+    managed_chat_outbox: Vec<(Topic, Vec<u8>, catcoms_rt::RequestCancellation)>,
     /// The **current** routing label's control topic (where this node publishes
     /// commits). Recomputed whenever the routing label changes.
     control_topic: Topic,
@@ -4880,6 +4891,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
             durable_chat: durable_chat::DurableChatState::default(),
+            local_chat_scope: local_chat_scope::LocalChatScope::default(),
+            managed_chat_outbox: Vec::new(),
             // Placeholder; set from `ns_secret_L` by `capture_routing_secret` below.
             control_topic: Topic::new(Vec::<u8>::new()),
             control_topics: HashSet::new(),
@@ -5098,6 +5111,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for id in &self.admin_roster {
             e.put_bytes(id.as_bytes()).map_err(|_| oversize())?;
         }
+        // Strict optional extension: no-tail legacy bytes stay unchanged. An old strict reader
+        // rejects even an empty scope-bearing snapshot rather than forgetting its lineage.
+        if let Some(scope) = self.local_chat_scope.encode(
+            &self.group.group_id(),
+            &self.device.public_key_bytes(),
+            &self.durable_chat,
+        )? {
+            e.put_bytes(&scope).map_err(|_| oversize())?;
+        }
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -5242,6 +5264,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
             }
         }
+        let local_scope_bytes = if d.is_empty() {
+            None
+        } else {
+            Some(d.get_bytes().map_err(|_| bad())?)
+        };
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -5250,7 +5277,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
         let (device, group) = restore_server(&mls)?;
-        let durable_chat = match durable_chat_bytes {
+        let mut durable_chat = match durable_chat_bytes {
             Some(bytes) => durable_chat::DurableChatState::decode(bytes, &device)?,
             None => Default::default(),
         };
@@ -5263,6 +5290,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             None => owner_tenure::OwnerTenure::unknown(&group),
         };
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.local_chat_scope = match local_scope_bytes {
+            None => Default::default(),
+            Some(bytes) => local_chat_scope::LocalChatScope::decode(
+                bytes,
+                &this.group,
+                &this.device,
+                &mut durable_chat,
+            )?,
+        };
         this.owner_tenure = tenure;
         this.durable_chat = durable_chat;
         let (label, secrets) = decode_routing_state(&routing_bytes)?;
@@ -5961,8 +5997,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         F: FnOnce(&mut AutoCommit) -> Result<(), AutomergeError>,
     {
         let current_context = self.durable_send_context();
-        self.durable_chat
-            .stop_obsolete(current_context.as_ref().ok());
+        let managed_chat = doc_type == DocType::Channel && self.local_chat_scope.managed();
+        // This check must precede the edit/signing callback. stop_obsolete alone previously
+        // swallowed context failure and then continued authoring a fresh operation.
+        let managed_authority = if managed_chat {
+            if current_context.is_err() {
+                return Err(SyncError::ChatScopeUnavailable);
+            }
+            Some(
+                self.local_chat_scope
+                    .authority()
+                    .ok_or(SyncError::ChatScopeUnavailable)?,
+            )
+        } else {
+            None
+        };
+        if !self.local_chat_scope.managed() || current_context.is_ok() {
+            self.durable_chat
+                .stop_obsolete(current_context.as_ref().ok());
+        }
         if self.durable_chat.blocks(doc_type, doc_id) {
             return Err(SyncError::ChatPreparationPending);
         }
@@ -5996,6 +6049,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             bytes = bytes.len(),
             "post op"
         );
+        if let Some(authority) = managed_authority {
+            if !matches!(
+                self.transport
+                    .publish_once_authorized(
+                        topic.clone(),
+                        Bytes::from(bytes.clone()),
+                        authority.clone()
+                    )
+                    .await,
+                Ok(catcoms_rt::PublishSubmission::Submitted)
+            ) {
+                self.managed_chat_outbox.push((topic, bytes, authority));
+                while self.managed_chat_outbox.len() > self.config.max_outbox {
+                    self.managed_chat_outbox.remove(0);
+                }
+            }
+            return Ok(change);
+        }
         if let Err(error) = self
             .transport
             .publish(topic.clone(), Bytes::from(bytes.clone()))
@@ -6710,10 +6781,40 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// by `max_outbox` (drop oldest on overflow so a persistently failing transport
     /// cannot grow the queue without bound).
     async fn drain_outbox(&mut self) {
+        // This bounded queue retains the original observer and never samples a replacement
+        // mount's authority. Revoked work cannot fall through into generic publish().
+        let mut index = 0;
+        let remaining = self.managed_chat_outbox.len();
+        for _ in 0..remaining {
+            let (topic, bytes, authority) = self.managed_chat_outbox[index].clone();
+            if authority.is_cancelled() {
+                self.managed_chat_outbox.remove(index);
+                continue;
+            }
+            if matches!(
+                self.transport
+                    .publish_once_authorized(topic, Bytes::from(bytes), authority)
+                    .await,
+                Ok(catcoms_rt::PublishSubmission::Submitted)
+            ) {
+                self.managed_chat_outbox.remove(index);
+            } else {
+                index += 1;
+            }
+        }
         let mut index = 0;
         let remaining = self.outbox.len();
         for _ in 0..remaining {
             let (topic, bytes) = self.outbox[index].clone();
+            // Pre-upgrade raw chat packets have no original managed permit. Keep their bounded
+            // local history/retry bytes without silently promoting them into the new lifetime.
+            // Membership/control recovery and other document types retain their existing path.
+            if self.local_chat_scope.managed()
+                && SealedOp::decode(&bytes).is_ok_and(|sealed| sealed.doc_type == DocType::Channel)
+            {
+                index += 1;
+                continue;
+            }
             // Queue ownership survives a cancelled actor poll, including a transport which
             // submitted its command but has not yet acknowledged it. Exact retries may duplicate
             // delivery; they cannot manufacture another signed operation or lose this one.

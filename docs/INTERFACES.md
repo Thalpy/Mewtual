@@ -1,5 +1,36 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Dormant managed local authoring scope (29 October; not activated)
+
+`sync::local_chat_scope` adds a strict optional snapshot tail and the existing opaque 32-byte
+context's epoch-independent derivation. The native request/RPC shapes, v1 send/mutation binding
+domains and v1 receipt encoder remain unchanged. Stable preparations explicitly retain original
+signed bytes through the existing durable v2 format. Exact accepted legacy publication uses a
+separate bounded alias in the new tail; its token, original context, binding and signed operation
+do not change. Tail/alias decode alone never creates a runtime permit.
+
+`ManagedChatScopeBinding` is a trusted Rust host seam, implemented in production only by the
+opaque mounted-store `ChatAdmissionBinding`. Arbitrary implementations are not authenticated by
+sync; a new production implementation requires authorization review. Saved labels and generic
+cancellation channels are not issuers. Managed-vault consumers must call
+`require_managed_chat_scope` before any await/run/publication, including no-tail legacy restore,
+then validate independent lineage and complete saved-before-exposure initialization before binding.
+The current desktop does not yet activate this integration. See
+[`CHAT-STABLE-AUTHORING-SCOPE-NEXT.md`](communication-recovery/CHAT-STABLE-AUTHORING-SCOPE-NEXT.md).
+
+The tail has closed Active/Retired/Initializing phases. Initializing carries the exact reserved
+domain/nonce while original recovery spans turns, has no aliases or runtime authority, and must
+be saved before exposing that instance to any negative/background writer. Resume it against the
+same sealed inventory reservation. Active requires every accepted old-context pending operation
+to have its exact alias; unknown phases refuse. A later Stop may save in Initializing without
+promoting Current. Host uncertainty repair must preserve the whole candidate and original custody.
+
+Accepted legacy original recovery is resumable, limited per step to 128 archive entries and 512 KiB
+of body comparisons per obligation, with at most 32 pending obligations. It reads exact retained
+signed envelopes and never decompresses the archive during metadata staging. Advance staging
+outside final save leases and retry unfinished work on another owner turn; missing/contradictory
+evidence refuses whole promotion. A pending uncertain Stop must be repaired first.
+
 ## Inactive exact Delete approval contract (29 October; validation pending)
 
 `ChatLedger::approve_delete(ActionId, VerifiedDeleteApproval)` attaches one opaque externally

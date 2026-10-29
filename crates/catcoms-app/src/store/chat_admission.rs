@@ -145,6 +145,24 @@ impl ChatAdmissionBinding {
     }
 }
 
+impl catcoms_sync::local_chat_scope::ManagedChatScopeBinding for ChatAdmissionBinding {
+    fn group(&self) -> &[u8] {
+        self.key.group()
+    }
+    fn signer(&self) -> &[u8; 32] {
+        self.key.signer()
+    }
+    fn domain(&self) -> [u8; 32] {
+        self.domain
+    }
+    fn nonce(&self) -> [u8; 32] {
+        self.nonce
+    }
+    fn publication_authority(&self) -> RequestCancellation {
+        self.publication.clone()
+    }
+}
+
 struct AdmissionOwner {
     nonce: [u8; 32],
     revision: u64,

@@ -415,3 +415,41 @@ The raw fresh-attempt fixture issuer is compiled only in unit tests; production
 still needs the opaque live completion coupled to its original capture. No native
 caller or `ServerStore::open` activates these APIs yet. Its storage/fault/reopen
 regressions are also unrun; independent static review does not claim execution.
+
+The dormant sync layer now stages a strict optional local-scope tail, keeps restored
+labels unbound, and requires an opaque actual Store result through a trusted host
+trait before lower authoring/publication. Explicit managed classification also
+blocks no-tail restores; the future native integration must apply it before any
+await or owner run. Stable Sends use the existing v2 original-payload retention.
+Legacy accepted publication keeps its exact original v1 bytes/identity through a
+separately saved alias, including original operation bytes. At most 32 aliases can
+retain 256 KiB each; temporary v2-plus-tail duplication is bounded by twice that
+payload budget. Submission/Stop filtering cannot drop committed signed history.
+Legacy recovery advances 128 archive entries/512 KiB of raw comparisons per step
+per obligation, outside final metadata/save leases, and yields genuine progress.
+No full-history scan/decompression is introduced under a final storage lease.
+
+The actual native saved-before-exposure transaction, original pre-await capture
+coupling, mounted-store activation and Leave/offline-restore wiring remain open.
+All new scope/lifecycle/migration tests are unrun pending primary execution; no
+feature activation or completed runtime property is claimed by this checkpoint.
+
+Implementation ordering refinement reviewed separately: migration can span owner
+turns. After external reservation, save a strict Initializing tail with the same
+domain/nonce before exposing the instance to negative/background snapshot workers.
+This phase contains no publication aliases/observer and cannot expose context or
+positive work. Restart resumes the matching inventory reservation without minting
+a fresh nonce or rehashing a changed no-tail legacy source. Complete bounded
+original recovery, save Active with every required exact alias, and only then
+promote inventory Current and bind. Unknown phases refuse. Retired remains offline
+and can retain incomplete original-recovery metadata without enabling publication.
+No ordinary writer may discard/downgrade an Initializing label; pre/post-rename
+uncertainty must retain the whole exact candidate for original-store repair.
+
+Before activation, integration tests still need actual native queued-driver
+revocation across restore/Leave, the full 32-alias combined-byte boundary, and
+Active/Initializing metadata faults through real Store repair. A fake trusted
+binding in the sync tests is not evidence for native mount/lineage custody. First
+initialization must also survive unrelated epochs after actual fresh attachment;
+the original authenticator is checked at that handoff, not reinterpreted as a
+later current-epoch requirement. Actual removal/Leave ends unused fresh provenance.

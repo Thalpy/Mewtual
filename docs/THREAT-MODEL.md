@@ -1,5 +1,26 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Dormant managed local lifetime boundary (29 October; host activation open)
+
+The isolated stable-scope foundation distinguishes local admission custody from historical MLS
+authority. A tail-bearing restore has metadata but no live publication observer. A managed host
+must classify even a captured no-tail legacy snapshot before any owner run; tail absence is not
+fresh admission evidence. Independent vault lineage, original mounted-store lifetime and an exact
+active own leaf must all match before positive use. The desktop activation, original pre-await
+capture coupling, metadata repair and durable Leave/offline-restore wiring remain open gates.
+
+Queued managed chat carries its original observer to driver admission, with no generic publish
+fallback. Actual local removal revokes it even if the synchronous transition unwinds. An already
+admitted transport attempt may still retain its original bytes/cache; revocation cannot recall it.
+Legacy publication migration associates only accepted, unstopped, unambiguous exact receipts;
+it never upgrades unaccepted intents or manufactures a lost historical operation.
+
+The independent admission fence prevents old-scope revival, not all snapshot rollback within a
+still-Current admission. A captured current snapshot can omit a later live-Actor Stop/receipt
+unless those facts or latest snapshot freshness are independently anchored. Rolling back all
+authorizing records with the same DEK is also undetectable without an external monotonic anchor.
+Neither limitation is claimed solved by this dormant foundation.
+
 ## Inactive exact moderation decision boundary (29 October; validation pending)
 
 An ordinary historical grant is not a reusable permission to delete another signer's typed Create.

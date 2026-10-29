@@ -32,7 +32,7 @@ impl VerifiedFreshChatAdmission {
             && self.signer.as_slice() == device.public_key_bytes()
             && self.admission_state == group.epoch_authenticator_id()
             && group.is_active()
-            && group.has_local_device(&device.device_id())
+            && group.has_local_signer(&device.public_key_bytes())
     }
     pub fn group(&self) -> &[u8] {
         &self.group
@@ -92,7 +92,7 @@ impl VerifiedFreshChatAdmission {
         device: &MlsDevice,
         kind: FreshKind,
     ) -> Result<Self, SyncError> {
-        if !group.is_active() || !group.has_local_device(&device.device_id()) {
+        if !group.is_active() || !group.has_local_signer(&device.public_key_bytes()) {
             return Err(SyncError::JoinRejected);
         }
         let group_state = group.epoch_authenticator_id();

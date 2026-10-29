@@ -794,6 +794,17 @@ impl ServerGroup {
         })
     }
 
+    /// Exact full signature-key binding of this instance's own leaf. Local managed authoring
+    /// uses this in addition to active membership rather than treating a decoded device label
+    /// or roster entry as proof that this particular MLS instance belongs to its signer.
+    pub fn has_local_signer(&self, public_key: &[u8]) -> bool {
+        public_key.len() == 32
+            && self
+                .group
+                .own_leaf()
+                .is_some_and(|leaf| leaf.signature_key().as_slice() == public_key)
+    }
+
     /// Whether this local MLS instance still belongs to the group after applied removals.
     pub fn is_active(&self) -> bool {
         self.group.is_active()
