@@ -135,6 +135,8 @@ async fn admit_for_purpose(
     executor: [u8; 32],
     physical: bool,
 ) -> Result<crate::voice_authority::JoinKeyAdmission, String> {
+    // Reap actual closed physical owners before fresh Crypto or UI/Coordinator guards.
+    state.voice_channels.collect_retired(&state.voice_handoff);
     crate::voice_admitted_call::collect_retired(state);
     let original = activation(state, owner)?;
     crate::check_voice_binding(state, original.binding()).await?;

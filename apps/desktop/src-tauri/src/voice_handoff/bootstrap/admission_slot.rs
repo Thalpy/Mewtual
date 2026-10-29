@@ -23,7 +23,7 @@ struct NativeCustody {
     returned: TaskReturned,
 }
 struct TaskReturned {
-    row: Arc<Row>,
+    row: RowRef,
     _funding: Arc<TaskFunding>,
     native: Option<crate::voice_handoff::channel::NativeHold>,
     armed: bool,

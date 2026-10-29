@@ -1,5 +1,6 @@
 //! Inert physical bootstrap for an ORIGINAL admitted published browser key.
-//! No operation31/ACK/worker or agreement/capacity permission exists in this leaf.
+//! The separate admitted Slot consumes operation31; this bootstrap publishes no
+//! agreement, RoundGate, role, Ready or RTC permission.
 use super::*;
 use crate::voice_authority::AdmittedPublishedKey;
 use crate::voice_call_activation::Handle;
@@ -22,7 +23,6 @@ impl Registry {
                 })
             })
     }
-    #[allow(dead_code)] // Future operation31 must use this typed route, never route().
     pub(in crate::voice_handoff) fn admitted_route(
         &self,
         slot: u8,
@@ -39,15 +39,20 @@ impl Registry {
             .as_ref()
             .and_then(|index| index.rows[usize::from(slot)].as_ref())
             .ok_or(Refused::Binding)?;
-        row.selected.admitted().ok_or(Refused::Binding)?;
-        let state = row.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closed {
-            return Err(Refused::Binding);
-        }
-        Ok(AdmittedRoute {
-            row: row.clone(),
-            session: state.session.clone().ok_or(Refused::Binding)?,
-            public: state.public.clone().ok_or(Refused::Binding)?,
+        Self::admitted_row_route(row.clone()).ok_or(Refused::Binding)
+    }
+    pub(super) fn admitted_row_route(row: RowRef) -> Option<AdmittedRoute> {
+        row.selected.admitted()?;
+        let (session, public) = {
+            let state = row.state.lock().unwrap_or_else(|e| e.into_inner());
+            (state.session.clone()?, state.public.clone()?)
+        };
+        // Closed retained Rows still service authenticated31 negative cleanup;
+        // Register independently requires current NativeActive and final fences.
+        Some(AdmittedRoute {
+            row,
+            session,
+            public,
         })
     }
     pub(in crate::voice_handoff) fn project_admitted(
@@ -146,10 +151,13 @@ pub(crate) async fn ensure_admitted(
         return Ok(status);
     };
     let (session, public, setup) = ticket.compute(rng)?;
-    let reply = Arc::new(SetupOutput {
-        public,
-        _credit: ticket.row._credit.clone(),
-    });
+    let reply = SetupOutputRef::new(
+        SetupOutput {
+            public,
+            _credit: ticket.row._credit.clone(),
+        },
+        ticket.row._credit.clone(),
+    );
     let mut output = Some((session, reply.clone(), setup));
     {
         let authority = state
@@ -171,7 +179,7 @@ async fn finish_admitted(
     closure: Closure,
 ) -> Result<Status, Refused> {
     let commit = state.ui_session_commit.clone().lock_owned().await;
-    let row = {
+    let (row, ready) = {
         let held = state
             .voice_channels
             .index
@@ -192,13 +200,25 @@ async fn finish_admitted(
             let mut current = row.state.lock().unwrap_or_else(|e| e.into_inner());
             current.effects_closed = true;
             current.closed = true;
-            if !current.admitted_returned() {
-                return Err(Refused::Capacity);
+            if let Some(stage) = current.admitted_stage.as_mut() {
+                stage.close();
             }
         }
-        row
+        let ready = row
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admitted_returned();
+        (row, ready)
     };
     drop(commit);
+    row.admission_changed.notify_waiters();
+    if let Some(route) = Registry::admitted_row_route(row.clone()) {
+        route.nudge_admitted();
+    }
+    if !ready {
+        return Err(Refused::Capacity);
+    }
     match closure {
         Closure::Setup => row.retire_setup()?,
         Closure::Channel => row.retire_channel()?,

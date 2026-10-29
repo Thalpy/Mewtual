@@ -164,6 +164,10 @@ pub(super) async fn observe_inner(
     owner: &str,
     executor: [u8; 32],
 ) -> Result<PhysicalReply, String> {
+    // Real Session/header return can make a closed original collectible without
+    // another positive call. Destructors/lane wakes run before any authority
+    // guard; observation itself still creates no history or new payment.
+    state.voice_channels.collect_retired(&state.voice_handoff);
     let _commit = state.ui_session_commit.clone().lock_owned().await;
     let authority = state
         .voice_authority
