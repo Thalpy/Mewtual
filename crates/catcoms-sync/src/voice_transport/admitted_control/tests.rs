@@ -96,6 +96,15 @@ impl MeshTransport for Chain {
             .request_connected_cancellable(peer, protocol, data, cancellation)
             .await
     }
+    async fn request_connected(
+        &self,
+        peer: PeerId,
+        protocol: ProtocolId,
+        data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        self.edge(peer, &data);
+        self.inner.request_connected(peer, protocol, data).await
+    }
     async fn next_event(&self) -> Option<TransportEvent> {
         let event = self.inner.next_event().await;
         if let Some(TransportEvent::Request { from, .. }) = &event {

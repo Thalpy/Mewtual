@@ -131,8 +131,30 @@ impl Queries {
         let deadline = mono
             .checked_add(record::LIFETIME_MS)
             .ok_or(VoiceError::Freshness)?;
+        let effect = actor.effect(context.local, peer, expires)?;
+        let epoch = actor.observe_epoch(context)?;
+        let check = |wall, now| -> Result<(), VoiceError> {
+            if !original.is_active()
+                || !epoch.is_live()
+                || !room.lease.is_live()
+                || !effect.authorized_at(wall, now)
+                || now >= deadline
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            match &binding {
+                Binding::Endpoint(fresh) => fresh.authorize_at(context, wall, now),
+                Binding::DirectHelper(route) if route.authorized() => Ok(()),
+                Binding::DirectHelper(_) => Err(VoiceError::Unauthorized),
+            }
+        };
+        check(clock.now_ms(), clock.monotonic_ms())?;
         let mut id = [0; 32];
         rng.fill_bytes(&mut id);
+        // A retained but expired watcher candidate must not cause even a paid
+        // stale signature. RNG/Clock callbacks can close the original, so repeat
+        // every pure binding after them and before the actual native signer.
+        check(clock.now_ms(), clock.monotonic_ms())?;
         let object = Object::query(
             context.scope,
             context.epoch,
@@ -145,8 +167,6 @@ impl Queries {
         if object.metadata().issuer() != context.local {
             return Err(VoiceError::Unauthorized);
         }
-        let effect = actor.effect(context.local, peer, expires)?;
-        let epoch = actor.observe_epoch(context)?;
         let owner = Owner::new(
             payment,
             object,
