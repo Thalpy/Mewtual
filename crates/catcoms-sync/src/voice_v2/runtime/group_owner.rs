@@ -4,9 +4,9 @@
 use super::*;
 use std::ops::Deref;
 
-// Windows pinned1.94 execution measured the COMPLETE3106-byte graph, including
-// the unwind retirement guard, above the first3KiB candidate. Preserve every
-// term and explicitly pay4KiB; group/process/work/record caps stay unchanged.
+// Windows pinned1.94 execution measured3106 bytes at the initial H4 checkpoint,
+// above the first3KiB candidate. The complete source-corrected H8 graph measures
+//3750 bytes. Preserve every term and explicitly pay4KiB; all caps stay unchanged.
 pub(super) const GROUP_METADATA_BYTES: usize = 4 * 1024;
 struct GroupFunding {
     _credit: Credit,

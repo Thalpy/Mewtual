@@ -2,12 +2,16 @@
 
 ## Control7 Query/Support snapshot (29 October; focused draft, OFF)
 
-Twelve focused cases pass atc5c8b7d8, including actual restricted A–B–C dispatch,
+Twelve focused cases pass at34336b2f, including actual restricted A–B–C dispatch,
 unjoined B, q2/lateq1, duplicates/flood, expiry/old grammar, actual historical-owner
 return and3-submission exhaustion. New-family graph guards and actual replacement-D/
-MLS epoch/rejoin refusal cases pass. The measured inherited Group1024 invoice and escaping
-ledger/Resources-backing custody gap is open; raising only its fee is insufficient.
-Strict lint/final review/full integration remain pending.
+MLS epoch/rejoin refusal cases pass. The inherited Group/escaping-ledger/counter
+backing correction passes rt authority11, Resources60, helper26, source32,
+runtime42 and route9 focused tests; the revised actual Root transport cases pass
+69/69 at4b9d2241. Its full3750-byte invoice prepays4KiB without changing caps.
+Final read-only review found no blocker/high/medium. Strict lint and complete
+integration remain primary-owned pending gates; earlier full suites cover earlier
+inputs. Counts are separate overlapping filters, not an aggregate unique total.
 [Exact ownership, fees, API and remaining V2 work](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
 
 ## Shared route registry custody prerequisite (29 October; focused passes)

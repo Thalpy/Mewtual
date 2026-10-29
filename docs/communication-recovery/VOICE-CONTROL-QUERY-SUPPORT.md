@@ -1,13 +1,13 @@
 # Control7 Query/Support operational slice
 
-29 October 2026. Implementation draft, OFF. Twelve focused tests PASS at snapshot
-`c5c8b7d8` (7.90s, Windows, `cargo test -p catcoms-sync --all-features --lib
+29 October 2026. Focused implementation, OFF. Twelve focused tests PASS at snapshot
+`34336b2f` (7.96s, Windows, `cargo test -p catcoms-sync --all-features --lib
 admitted_control -j1 -- --test-threads=1 --nocapture`), including actual restricted
-B→D replacement and MLS epoch/rejoin refusal. The first10 also passed atf60d6bab.
-Early actual-
-path review corrected three submissions and the final original-helper proof.
-The remaining full Group accounting defect below prevents a coherent payment
-claim; strict lint, final review and complete integration are still pending.
+B→D replacement and MLS epoch/rejoin refusal. They also passed atc5c8b7d8; the
+first10 passed atf60d6bab. Early actual-path review corrected three submissions
+and the final original-helper proof. The separate full Group accounting correction
+below now passes focused checks and final read-only review with no blocker/high/
+medium. Strict lint and complete integration remain primary-owned pending gates.
 
 First compilation found adapter visibility/type/test-trait issues; the next found
 one missing Result annotation. After those corrections,4 tests passed and6 failed
@@ -17,14 +17,19 @@ green run. The added four-node fixture first needed a member-count type correcti
 then all12 passed. No rejection/positive assertion or deadline was weakened.
 
 Measured new graphs are record6992/8192, table1344/4096, ledger3888/8192,
-wrapper1088/4096, actual execution future224, prepared88, shared completion264 and
-scheduler inline104. Actual enclosing Group304, ExistingHelper216, ExistingSource184,
-Runtime BTree tuple40, Resources Counts128/bucket tuple160/service24 expose an
-inherited fixed-fee gap: the complete constructor/Arc/BTree/hash-growth invoice is
-about2730 plus small handles against1024. Removing the new fields still exceeds
-1024. Raising the fee alone would not settle escaping ledger Arcs or retained
-empty Resources HashMap backing. Their separate custody correction is required;
-neither current Query tests nor the earlier route-registry tests prove it solved.
+wrapper1096/4096, actual execution future224, prepared88, shared completion272 and
+scheduler inline104. The original enclosing Group304, ExistingHelper216,
+ExistingSource184, BTree tuple40 and Resources Counts128/bucket tuple160/service24
+exposed an inherited1024-byte fixed-fee gap even without Control7's fields.
+Opaque paid owners now retain that SAME outside Group sponsor across escaped
+ledgers and actual body/header return; all three counter-removal paths retire
+real sparse/empty backing under the pool lock. The complete source-corrected
+H8 invoice measures3750 and prepays4096, without changing caps. Revised Group224
+and BTree tuple48 reflect those new owners. Runtime42, Resources60, helper26,
+source32, rt authority11 and route9 focused checks pass; actual Root transport69
+passes at4b9d2241. These filters overlap; their counts are not a unique total.
+[The exact accounting proof, red evidence and limits](VOICE-GROUP-LEDGER-CUSTODY.md)
+remain separate from the Query protocol's positive execution evidence.
 
 The production kind28 dispatcher selects a separate Control7 signed/envelope
 grammar after authenticating its current connected requester. Existing Body,
@@ -66,8 +71,9 @@ count mechanism. Separate paid fixed backing bounds Source32/helper64/cache32.
 Exact duplicates retain one original signed response, payer and remaining budget.
 Shared Forward4, routes64, metadata512 and completion backlog8 remain aggregate
 across both families. Paid Control completion indirection preserves the old inline
-variant footprint. New-family graph guards pass focused execution; the enclosing
-inherited Group/Resources invoice and lifetime gap above remains open.
+variant footprint. New-family and complete enclosing Group/Resources graph guards
+pass focused execution. The new Group infrastructure fee is4KiB even while OFF;
+the separate first-Root route-registry fee is another4KiB within the same caps.
 
 Authenticated Control service, including duplicates, additionally consumes shared
 process burst64/refill8 and group burst16/refill2 per250ms; periods preserve
@@ -81,7 +87,7 @@ existing native ingress seam: actual native/Mem driver lifetime observers are pu
 This does not claim deadlock safety for arbitrary reentrant custom implementations
 of the transport RequestAuthority trait.
 
-Draft regressions drive real run_once/kind28 dispatch over an in-memory transport
+Focused regressions drive real run_once/kind28 dispatch over an in-memory transport
 that forbids A–C requests and exposes no A–C connection lease, with B joining
 nothing. They also pin q2 under Forward pressure/late q1, exact duplicate cache,
 malicious flood bounds, wrong room/old grammar/expiry, retained superseded-owner
@@ -94,6 +100,14 @@ MLS Add closes old query/Lower before a new native call can issue a new query;
 a current authenticated outer wrapper cannot repair the old inner epoch/query.
 The intake-oracle negative cases are structural enforcement checks; the topology
 case is the actual production dispatch path. TCP integration remains primary-owned.
+
+The strong registry remains an actual paid owner after the last external alias
+returns. Ordinary Actor housekeeping, ingress and preparation prune sole rows
+before reserving shared lanes. Actual driver/byte/preparation owners still prevent
+refund during that production collection. A canceled upper may return its Gate
+authority while a responder keeps its independent Lower payer; collecting that
+sole row cannot return the responder's loan. Root transport tests now exercise
+both cases and retain exact original zero/refund/attempt oracles.
 
 This slice is not complete V2. Availability, bilateral Request/Grant/Commit,
 neutral6/6 consumption, immutable RoundGate/native parent consumption, operational

@@ -1,12 +1,17 @@
 # Original Group and ledger custody prerequisite
 
-29 October 2026. Correction draft. Runtime42 tests PASS; Resources57 tests PASS
-and1 capacity-profile diagnostic FAILS atd989ad21. The H8 correction and new churn
-regressions below are **UNRUN**. The first actual
-complete-invoice test measured3106 bytes and correctly failed the candidate3072
-guard. The fee is explicitly raised to4096, preserving every inventory term.
-Query/Support's previous12 focused
-passes remain exactly snapshotc5c8b7d8; they do not validate these changes.
+29 October 2026. Focused correction passes at production snapshot34336b2f:
+rt authority11, Resources60, helper26, source32, Query/Support12, runtime42 and
+route9. The revised actual Root transport tests pass69/69 (89.47s) at4b9d2241.
+These are separate overlapping filters, not an aggregate unique total. Final
+read-only adversarial review found no blocker/high/medium. Strict lint and complete
+integration remain primary-owned pending gates.
+
+The first actual invoice measured3106 bytes and correctly failed the candidate
+3072 guard. The fee was explicitly raised to4096, preserving every inventory term.
+The subsequent source-corrected H8 complete invoice measures3750/4096 and its
+production preallocation guard passes. This fixes a real underinvoice as well as
+the separate diagnostic mistake below; it is not merely a test correction.
 
 The inherited1024-byte Group payment covered Group, two separately allocated empty
 Existing ledgers, Runtime BTree nodes and Resources counter buckets without a full
@@ -38,7 +43,7 @@ Arc headers, opaque owners, collection/retirement overlap, full sparse BTree nod
 and complete Resources key/Counts buckets with old+new growth/shrink controls and
 alignment. The measured3106-byte H4 graph now has a4KiB fee guarded BEFORE payment
 or allocation. The source-corrected H8 allowance increases the COMPLETE invoice
-to3750/4096; actual compiled confirmation of that revised guard is pending. No
+to3750/4096; actual compiled confirmation of that revised guard passes. No
 formula or bound is trimmed to fit. Group/process byte and work/record caps remain
 unchanged; the first retained Group infrastructure costs more even while V2 is OFF.
 
@@ -77,7 +82,7 @@ H4's188 and remains within H8's376. The structural resize proof is not an
 allocator trace; actual sparse/empty backing and admission-fence tests remain
 separate execution oracles.
 
-Draft regressions pause actual Group/ledger destruction, hold escaped both-ledger
+Focused regressions pause actual Group/ledger destruction, hold escaped both-ledger
 owners across real Runtime return, concurrently return final aliases and require
 the fee until actual completion. A genuine request-authority revocation future
 uses a one-shot panic waker to exercise Runtime unwind. Other tests cover guarded
@@ -86,7 +91,35 @@ horizon, pool-fence serialization and the pinned1.94.0 counter-capacity profile 
 to1024 groups. Detached producer threads use RAII release and a sanctioned Clock
 watchdog, without blocking joins or ambient sleeps.
 
-Focused execution, actual revised invoice, strict lint and complete integration
-remain pending. This does not activate V2 or complete neutral/round/Ready/RTC/audio
-consumers, and makes no general guarantee for arbitrary reentrant custom transport
-or signer callbacks.
+The broader Root transport run initially passed59 and failed10 old assertions
+expecting refund at the last EXTERNAL alias return. A strong registry row is still
+an actual owner. Updated tests run ordinary Root collect_expired_voice, which
+prunes before its Clock/cadence test and is invoked by the real Actor loop as well
+as ingress/preparation. They preserve exact zero/refund/attempt oracles and also
+collect WHILE actual bytes/requests/preparations/responders remain held, requiring
+those loans to remain charged. One newly added assertion initially overexpected
+registry custody after a prior prune: upper cancellation had returned Gate
+authority while the two real responders retained both Lower loans. It now requires
+both loans after that prune and exact zero immediately on actual responder return.
+The corrected69-test run passes without a production change or weaker payment.
+
+Shared-target provenance matters: an older rt artifact from the native checkout
+initially produced two route failures, although that checkout lacked the c57 rt
+custody corrections. Touching only the unchanged local rt source forced a rebuild
+of the local dependency chain; all9 route and11 authority tests then passed,
+followed by the remaining focused filters. The failed logs remain retained. Final
+integration must include the actual rt corrections and build one coherent checkout;
+the warm cross-worktree artifact alone was insufficient evidence.
+
+Execution used the shared native target, -j1 and one test thread. Commands were
+`cargo test -p catcoms-rt --all-features --lib authority_tests -j1 -- --test-threads=1 --nocapture`
+and the equivalent catcoms-sync command with each filter:
+`voice_v2::resources::`, `voice_v2::helper::`, `voice_v2::source::`,
+`admitted_control`, `voice_v2::runtime::`, `voice_transport::forwarding::tests`,
+and `voice_runtime::tests`. Narrow formatting and diff checks passed. Strict lint,
+complete backend/frontend suites and TCP integration are still primary-owned gates.
+
+This declared application graph is not an allocator trace or proof that every
+generic Resources caller sponsors its own usage. It does not activate V2 or
+complete neutral/round/Ready/RTC/audio consumers, and makes no general guarantee
+for arbitrary reentrant custom transport or signer callbacks.

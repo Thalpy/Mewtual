@@ -6,8 +6,11 @@ Root has distinct endpoint and direct-helper ensure/refresh/observe APIs. Only t
 actual selected NativeActive original/Presence may create a query; endpoint evidence
 comes from its original Watcher. Opaque refresh identity closes q1 before q2 source
 publication. Observed feature bits are historical observations, never Availability,
-consent or reservation. Twelve focused cases pass; inherited Group/Resources custody,
-strict lint and full integration remain pending.
+consent or reservation. Twelve focused cases pass. Opaque HelperOwner/SourceOwner
+aliases now retain the SAME outside Group payer; they dereference the ledger body,
+never its Arc. Actual body/header destruction precedes payment return. The complete
+Group graph prepays4KiB, including empty-ledger and counter-backing custody, even
+while OFF. Focused ownership checks pass; strict lint/full integration remain pending.
 [Exact API ownership and pending gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
 
 ## Voice route ownership (29 October; focused passes)

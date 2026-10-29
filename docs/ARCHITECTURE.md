@@ -6,9 +6,12 @@ A separate typed Source/ingress/helper path implements protocol Query/Support
 without growing Existing wire/Source enums. Exact original query and selected
 helper proof survive actual paid Lower custody; current query32 differs from
 affine lifetime64/group256/process. Twelve focused cases and new-family graph guards
-pass atc5c8b7d8, including actual B→D replacement and epoch/rejoin refusal. The inherited Group1024
-invoice/escaping-ledger/Resources-backing custody gap remains open, as do lint and
-integration. See [the exact ownership, limits and operational boundaries](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+pass at34336b2f, including actual B→D replacement and epoch/rejoin refusal. The
+inherited Group/escaping-ledger/Resources backing correction also passes focused
+checks: its complete3750-byte graph prepays4KiB, even while OFF, within unchanged
+caps. Strict lint and full integration remain pending. See
+[the operational boundaries](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md)
+and [the exact Group custody evidence](communication-recovery/VOICE-GROUP-LEDGER-CUSTODY.md).
 
 ## Route registry custody prerequisite (29 October; focused passes)
 

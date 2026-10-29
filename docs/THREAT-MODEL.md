@@ -9,8 +9,14 @@ payment, with const coupling to aggregate lifetime64/group256/process. Shared
 service/requester/issuer/Forward/route limits constrain duplicates and floods.
 Native approved driver lifetime callbacks remain trusted and pure; arbitrary
 reentrant custom transport authorities are outside this seam's guarantee. Twelve
-focused cases/new-family graphs pass; inherited Group/Resources backing and
-escaping-ledger custody remain unresolved. Actual B→D/epoch refusal cases pass.
+focused cases/new-family graphs pass, including actual B→D/epoch refusal. The
+inherited Group/Resources backing and escaping-ledger gap now has a focused
+correction: strict same-payer wrappers outlive actual sponsored allocations,
+Runtime installs ordered map retirement before revocation callbacks, and all
+three empty-counter removals free/shrink backing under the pool fence. The full
+3750/4096 invoice includes pinned H8 tombstone growth/shrink overlap. Strict lint
+and full integration remain pending; this is a declared application graph, not
+an allocator trace or proof of every generic Resources caller's sponsorship.
 [Enforcement trace and unfinished security/operational gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
 
 ## Route metadata tail custody (29 October; focused passes)
