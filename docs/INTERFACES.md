@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Admitted key presence (29 October; draft, inactive)
+
+Trusted Root `start_admitted_voice_presence(grant, original, join, point)` accepts
+only the exact current selected NativeActive original and canonical native tuple.
+Exact retries return an opaque historical AdmittedPresenceReceipt; changed tuples
+refuse. Its `matches` authenticates original/Weak grant/tuple identity without granting
+present-time permission. Native supplies prior on-curve validation and rechecks its
+current Handle before a positive reply. Shared discovery adds no wire profile claim,
+renderer signer or old packet authority. Full operational round consumption remains
+open; see [the scoped contract](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+
 ## Normal Actor stop versus command return (29 October; focused checks pass)
 
 `ServerActor::stop_and_wait` acknowledges terminal first-effects closure. `AppEvent::Closed`

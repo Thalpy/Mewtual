@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Admitted Root presence (29 October; draft, inactive)
+
+The exact selected NativeActive Root residence can own a separate discovery-only
+AdmittedPresence and immutable first key. It contains no legacy packet ledger or
+confirmation/action queue. Its implicit watcher stays under that SAME residence;
+external plain payments survive Presence/proof Box deallocation. Shared tags1–3 and
+FreshPeer remain profile-neutral. Only the opaque new discovery Source entry admits
+admitted Announcement/Proof; final publication and flights require NativeActive.
+Compilation/inventory/runtime evidence is pending for this isolated draft. See
+[the contract and unfinished operational gates](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+V2 remains OFF.
+
 ## Normal Actor mailbox retirement (29 October; focused checks pass)
 
 Normal terminal paths close and synchronously discard queued commands before awaiting

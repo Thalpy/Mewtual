@@ -1,5 +1,6 @@
-//! Trusted inactive call-profile activation, before key delegation. No renderer adapter
-//! or admitted endpoint/packet producer is installed by these entry points.
+//! Trusted inactive call-profile activation, before key delegation. These entry
+//! points install no packet producer; separate admitted presence requires the
+//! actual selected NativeActive winner and the canonical native key tuple.
 use super::*;
 use voice_v2::call_activation::{ActivationObserver, PreparedAdmittedCall, RootSelectedCall};
 
@@ -47,7 +48,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Called only by the canonical paid native activation task while it owns the
-    /// ORIGINAL UI guard. Selection is inert; first key/packet admission is absent.
+    /// ORIGINAL UI guard. Selection is inert; key discovery requires a later,
+    /// separately checked NativeActive admitted-presence publication.
     pub fn select_admitted_voice_call(
         &mut self,
         grant: &Arc<CallGrant>,

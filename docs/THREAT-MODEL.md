@@ -1,5 +1,18 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Admitted presence boundary (29 October; inactive draft)
+
+The discovery-only admitted owner requires the SAME Root residence, current
+NativeActive original and immutable first native join/key. Historical publication
+receipts and shared FreshPeer liveness confer no remote profile support or round/RTC
+authority. Existing packet factories remain rejecting. Ingress pins original watcher
+recipients; replacement cannot adopt stale work. Dedicated admitted Ann/Proof Source
+publication and lower flights check NativeActive independently of `live`, including
+the first negative-store interval. Funding is external to Presence/proof Boxes and
+survives actual deallocation. Compilation, inventories and focused execution remain
+pending; operational agreement/consume/Ready/RTC/relay are separate gates. See
+[the scoped contract](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+
 ## Normal terminal mailbox custody (29 October; focused checks pass)
 
 Closing/dropping a Tokio bounded Receiver does not invalidate an already-held Permit's
