@@ -67,6 +67,12 @@ selection, bare peer-vector output and watcher-child payer-tail issues. The fina
 static re-review has no remaining findings. Nine drafted tests and all compiled
 measurements/lint remain unrun; narrow rustfmt and diff whitespace checks pass.
 
+A separate UNRUN follow-up exposes pure `ActivationObserver::uses_resources` pointer
+identity for native foreign-pool preflight before index/generation charges. It is
+historical identity only and never replaces exact current Handle/Root/grant checks.
+Its focused regression checks foreign/aliased pools, unchanged charges and no phase
+selection, including after closure. Native ordering enforcement is in the native leaf.
+
 Operational blockers remain sticky operation31 selection, complete neutral6/6 consume,
 native parent-row consume, immutable RoundGate, new control/encrypted/Ready producers
 and ingress, exact A/R/KDF agreement, SDP/ICE/RTC integration and production relay/audio.

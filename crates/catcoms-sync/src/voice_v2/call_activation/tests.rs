@@ -33,6 +33,35 @@ async fn fixture_clock() -> (Node, Arc<Runtime>, Arc<ManualClock>) {
 }
 
 #[tokio::test]
+async fn original_resources_identity_refuses_foreign_pool_without_charging_or_authorizing() {
+    let (mut node, runtime) = fixture().await;
+    let prepared = node.prepare_admitted_voice_call(1).unwrap();
+    let original = prepared.observer();
+    let own = runtime.resources();
+    let alias = own.clone();
+    let foreign = Arc::new(Resources::default());
+    let before = (own.counts(), foreign.counts());
+    for _ in 0..12 {
+        assert!(original.uses_resources(&own));
+        assert!(original.uses_resources(&alias));
+        assert!(!original.uses_resources(&foreign));
+    }
+    assert_eq!((own.counts(), foreign.counts()), before);
+    assert!(
+        !original.is_active(),
+        "funding identity never selects or activates a call"
+    );
+    original.close();
+    assert!(
+        original.uses_resources(&own),
+        "immutable history remains comparable after End"
+    );
+    assert!(!original.uses_resources(&foreign));
+    assert!(!original.is_active());
+    assert_eq!((own.counts(), foreign.counts()), before);
+}
+
+#[tokio::test]
 async fn other_room_canceled_prepare_is_reclaimed_before_successor_funding_under_pressure() {
     for keep_external in [false, true] {
         let (mut node, runtime, _) = fixture_clock().await;

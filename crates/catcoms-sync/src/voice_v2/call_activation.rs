@@ -245,7 +245,14 @@ impl ActivationObserver {
         self.core.call.wait_revoked().await;
     }
     pub(crate) fn belongs_to(&self, resources: &Arc<Resources>, instance: &Arc<()>) -> bool {
-        Arc::ptr_eq(&self.core.resources, resources) && Arc::ptr_eq(&self.core.instance, instance)
+        self.uses_resources(resources) && Arc::ptr_eq(&self.core.instance, instance)
+    }
+    /// Pure identity of the original funding pool, including after closure. Native
+    /// may refuse a foreign-pool Handle before reserving index/generation fees.
+    /// This grants no Root-instance, grant, selection or present-time authority;
+    /// those exact current checks remain independently required at every effect.
+    pub fn uses_resources(&self, resources: &Arc<Resources>) -> bool {
+        Arc::ptr_eq(&self.core.resources, resources)
     }
     pub(crate) fn root_instance(&self) -> &Arc<()> {
         &self.core.instance
