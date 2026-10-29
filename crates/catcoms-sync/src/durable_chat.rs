@@ -63,7 +63,7 @@ pub(crate) struct DurableChatState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use automerge::{transaction::Transactable, ROOT};
+    use automerge::{transaction::Transactable, ReadDoc, ROOT};
     use catcoms_rt::ManualClock;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
