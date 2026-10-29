@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Admitted native reservation (29 October; inactive)
+
+Admitted claims are a separate opaque family, sharing only the real allocator's
+scalar stamp/final-return mechanism. Equal labels or copied RowId bytes cannot
+create an Existing Row or claim. Actual owner/phase fees and retained identity
+allocation precede final stamp reuse; End invalidates authority without refunding
+still-held claims. No NativeActive or agreement is inferred from lease liveness.
+The complete guard and pending execution boundary are recorded in
+[the scoped contract](communication-recovery/VOICE-ADMITTED-NATIVE-PARENT.md).
+
 ## Control7 observation boundary (29 October; focused draft, OFF)
 
 FreshPeer/helper ACKs cannot infer support. A Source Lower retains the exact live

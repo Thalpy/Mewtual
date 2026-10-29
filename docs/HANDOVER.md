@@ -2,6 +2,12 @@
 
 ## Current admitted integration (29 October; V2 OFF, validation in progress)
 
+The separate admitted native parent primitive now reserves an actual shared
+allocator position/serial and the original two fees, with no Existing owner or
+dummy Row conversion. Four actual native fixture tests are compiling; an extra
+claim-outliving-physical-Row case remains to add. No invoice fit or live SDP
+acceptance is claimed. [Contract and limits](communication-recovery/VOICE-ADMITTED-NATIVE-PARENT.md).
+
 The neutral Root factory and sealed Actor preparation are integrated with
 Control7 and the separate admitted physical bootstrap. The Actor bridge retains
 the whole registration/capacity result and distinguishes actual unstarted return

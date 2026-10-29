@@ -4,6 +4,8 @@ use super::*;
 use crate::voice_call_activation::Handle;
 use catcoms_rt::{Clock, ManualClock};
 
+mod parent_claim;
+
 async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::select! {
         value = future => value,
