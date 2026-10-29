@@ -10,6 +10,11 @@ const MAX_SEALED_CHAT: usize = 256 * 1024;
 const MAX_NOOP_HEADS: usize = 256;
 const PUBLICATION_RETRY_MS: u64 = 1_000;
 
+/// Exact saved-request fence: retry token, canonical request binding, original context and
+/// channel. Keeping all four fields together prevents a token-only match from stopping a
+/// different request. This in-process alias does not change the persisted fence format.
+pub type SavedChatFenceIdentity = ([u8; 16], [u8; 32], [u8; 32], u128);
+
 /// Preserve the actual storage replacement boundary across crates. In particular, a parent
 /// sync failure follows a successful rename and cannot be reported as a failed replacement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1211,7 +1216,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// negative path only stops receipts already in this snapshot; it admits no new token.
     pub fn fence_saved_durable_chat<F>(
         &mut self,
-        identities: &[([u8; 16], [u8; 32], [u8; 32], u128)],
+        identities: &[SavedChatFenceIdentity],
         save: F,
     ) -> Result<(), ChatSaveError>
     where
@@ -1277,15 +1282,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 continue;
             };
             let key = (DocType::Channel, r.channel);
-            if !candidates.contains_key(&key) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = candidates.entry(key) {
                 let raw = self
                     .docs
                     .get_mut(&key)
                     .ok_or_else(|| ChatSaveError::NotReplaced("document not open".into()))?
                     .snapshot()
                     .map_err(|e| ChatSaveError::NotReplaced(e.to_string()))?;
-                candidates.insert(
-                    key,
+                entry.insert(
                     EncryptedDoc::restore_for_actor(&raw, &self.device.device_id())
                         .map_err(|e| ChatSaveError::NotReplaced(e.to_string()))?,
                 );
