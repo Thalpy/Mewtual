@@ -6,7 +6,12 @@ use catcoms_sync::voice_v2::call_activation::{
     ActivationObserver, ActivationRpcPermit, PreparedAdmittedCall, RootSelectedCall,
     ACTIVATION_RPC_BYTES,
 };
+mod admitted_key;
 mod control;
+pub use admitted_key::{
+    voice_admitted_presence_rpc_bytes, VoiceAdmittedPresencePublisher, VoiceAdmittedPresenceResult,
+    VoiceAdmittedPresenceWork,
+};
 pub use control::{
     control_layout_bytes, PreparedVoiceCall, VoiceActivationControl, VOICE_ACTIVATION_CONTROL_BYTES,
 };
@@ -89,6 +94,7 @@ pub(super) type Selection = Paid<Arguments, VoiceCallActivationWork>;
 type Preparing = Paid<Arguments, Option<ActivationRpcPermit>>;
 pub(super) enum Command {
     Selection(Selection),
+    AdmittedPresence(admitted_key::Submission),
     Prepare {
         room: u128,
         trace: Trace,
@@ -104,6 +110,7 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
     control: &mut ActorControl,
 ) {
     match command {
+        Command::AdmittedPresence(submission) => admitted_key::apply(submission, server),
         Command::Prepare {
             room,
             trace,

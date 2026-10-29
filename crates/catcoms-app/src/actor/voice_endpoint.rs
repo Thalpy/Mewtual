@@ -35,9 +35,10 @@ type Reply<T> = oneshot::Sender<Result<T, VoiceError>>;
 mod admission;
 mod call_activation;
 pub use call_activation::{
-    control_layout_bytes, voice_call_activation_rpc_bytes, PreparedVoiceCall,
-    VoiceActivationControl, VoiceCallActivationPublisher, VoiceCallActivationResult,
-    VoiceCallActivationWork, VOICE_ACTIVATION_CONTROL_BYTES,
+    control_layout_bytes, voice_admitted_presence_rpc_bytes, voice_call_activation_rpc_bytes,
+    PreparedVoiceCall, VoiceActivationControl, VoiceAdmittedPresencePublisher,
+    VoiceAdmittedPresenceResult, VoiceAdmittedPresenceWork, VoiceCallActivationPublisher,
+    VoiceCallActivationResult, VoiceCallActivationWork, VOICE_ACTIVATION_CONTROL_BYTES,
 };
 pub(in crate::actor) use call_activation::{ActorControl, ActorInbox};
 mod body;
