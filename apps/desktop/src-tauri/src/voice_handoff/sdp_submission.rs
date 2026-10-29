@@ -3,7 +3,7 @@
 //! The affine Writer retires before Registration or the final bound IO/payment can wake
 //! cleanup. Root repeats its own current authority; this module enables no listener opcode.
 use super::bootstrap::Route;
-use super::channel::{PhysicalHold, Session};
+use super::channel::PhysicalHold;
 use super::context::Context;
 use super::factory::{self, Refused};
 use super::ledger::{ResolvedRow, SdpPublicationTarget, SdpRegistration, SdpSubmissionOwners};

@@ -2065,7 +2065,7 @@ async fn shutdown_finds_a_retired_session_owned_only_by_an_uncollected_reply() {
 #[tokio::test]
 async fn completed_reply_without_a_row_reference_keeps_native_control_paid_through_final_close() {
     use crate::voice_handoff::bootstrap::collect_channel;
-    use crate::voice_handoff::channel::{BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES, CONTROL_BYTES};
+    use crate::voice_handoff::channel::{BROWSER_CONTROL_BYTES, CONTROL_BYTES};
     let (f, owner, output, runtime, client) = setup().await;
     let route = f.state.voice_channels.route(client.slot).unwrap();
     let session = route.session().downgrade();

@@ -2,9 +2,7 @@
 //! production dispatch is enabled here. Authentication/full-purpose/RowId resolution must
 //! precede this trusted adapter; this gate orders new intent against normal channel closure.
 use super::bootstrap::Route;
-use super::channel::{
-    self, BodyKind, CompletedReply, Incoming, Operation, Session, SessionIdentity,
-};
+use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation, SessionIdentity};
 use super::context::Context;
 use super::factory::Refused;
 use super::ledger::{FinalReceipt, Ledger, Purpose, ResolvedRow, RowId};

@@ -1,7 +1,7 @@
 //! One native-chosen first PC identity, nested in the original Session/key/storage.
 //! Permanent intent history and the actual native worker flag are distinct. In-flight
 //! Actor commands/completions also own their original phase Copy, even after waiter Drop.
-use super::super::channel::{PhysicalHold, Session};
+use super::super::channel::PhysicalHold;
 use super::super::requests::pc::Request;
 use super::transition::try_lock;
 use super::*;

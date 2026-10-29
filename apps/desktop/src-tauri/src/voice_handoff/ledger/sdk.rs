@@ -1,6 +1,6 @@
 //! Separately released browser SDK custody. Closing native storage or collecting its HTTP
 //! Session says nothing about a browser promise. This record owns fixed provenance only.
-use super::super::channel::{PhysicalHold, Session};
+use super::super::channel::PhysicalHold;
 use super::super::requests::sdk::Request;
 use super::transition::try_lock;
 use super::*;
