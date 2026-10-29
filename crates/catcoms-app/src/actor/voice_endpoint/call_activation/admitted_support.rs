@@ -39,17 +39,54 @@ pub trait VoiceAdmittedSupportPublisher: Send {
         payment: Option<ActivationRpcPermit>,
     );
 }
+// No raw Arc/Weak escapes. EVERY funding alias uses into_inner: concurrent final
+// drops free the funding allocation/header before returning its plain permit.
+struct FundingOwner(Option<Arc<ActivationRpcPermit>>);
+impl Clone for FundingOwner {
+    fn clone(&self) -> Self {
+        Self(Some(
+            self.0.as_ref().expect("original support funding").clone(),
+        ))
+    }
+}
+impl Drop for FundingOwner {
+    fn drop(&mut self) {
+        if let Some(permit) = self.0.take().and_then(Arc::into_inner) {
+            drop(permit);
+        }
+    }
+}
+/// Lifecycle metadata, not current Root authority. Every alias retains the SAME
+/// outside permit through actual invocation body AND Arc header deallocation.
 #[derive(Clone)]
-pub struct VoiceAdmittedSupportWork(Arc<InvocationState<ActivationRpcPermit>>);
+pub struct VoiceAdmittedSupportWork {
+    state: Option<Arc<InvocationState<()>>>,
+    _funding: FundingOwner,
+}
+impl Drop for VoiceAdmittedSupportWork {
+    fn drop(&mut self) {
+        drop(self.state.take());
+    }
+}
 impl VoiceAdmittedSupportWork {
     pub fn is_same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(self.state.as_ref().unwrap(), other.state.as_ref().unwrap())
     }
     pub fn is_retired(&self) -> bool {
-        self.0.is_retired()
+        self.state.as_ref().unwrap().is_retired()
     }
     pub async fn wait_retired(&self) {
-        self.0.wait_retired().await;
+        self.state.as_ref().unwrap().wait_retired().await;
+    }
+}
+struct Retirement {
+    marker: Option<InvocationRetirement<()>>,
+    // Even the marker's final Arc tail keeps the original sponsor outside it.
+    _funding: FundingOwner,
+}
+impl Drop for Retirement {
+    fn drop(&mut self) {
+        drop(self.marker.take());
     }
 }
 impl std::fmt::Debug for VoiceAdmittedSupportWork {
@@ -83,7 +120,7 @@ impl Drop for Body {
 struct Arguments {
     body: Option<Box<Body>>,
     // Outside the Box: actual argument ALLOCATION return precedes this marker.
-    _retirement: Option<InvocationRetirement<ActivationRpcPermit>>,
+    _retirement: Option<Retirement>,
 }
 impl Drop for Arguments {
     fn drop(&mut self) {
@@ -338,10 +375,15 @@ impl VoiceActivationControl {
             },
             payment: Some(payment),
         };
-        let work = VoiceAdmittedSupportWork(Arc::new(InvocationState::new(
-            preparing.payment.take().unwrap(),
-        )));
-        preparing.arguments._retirement = Some(InvocationRetirement(work.0.clone()));
+        let funding = FundingOwner(Some(Arc::new(preparing.payment.take().unwrap())));
+        let work = VoiceAdmittedSupportWork {
+            state: Some(Arc::new(InvocationState::new(()))),
+            _funding: funding.clone(),
+        };
+        preparing.arguments._retirement = Some(Retirement {
+            marker: Some(InvocationRetirement(work.state.as_ref().unwrap().clone())),
+            _funding: funding,
+        });
         let body = preparing.arguments.body.as_mut().unwrap();
         body.work = Some(work.clone());
         if let Err(error) = body.publisher.as_mut().unwrap().accepted(work.clone()) {
@@ -380,7 +422,10 @@ pub fn voice_admitted_support_rpc_bytes() -> usize {
         + std::mem::size_of::<Preparing>()
         + std::mem::size_of::<Submission>()
         + 2 * std::mem::size_of::<Body>()
+        // Preserve the earlier (larger) invocation allowance after moving its
+        // permit outside; add every new funding/retirement wrapper, no cuts.
         + std::mem::size_of::<(usize, usize, InvocationState<ActivationRpcPermit>)>()
+        + 2 * std::mem::size_of::<FundingOwner>() + std::mem::size_of::<Retirement>()
         + 4 * std::mem::size_of::<VoiceAdmittedSupportWork>()
         + std::mem::size_of::<VoiceAdmittedSupportResult>()
         + std::mem::size_of::<(usize, usize, ActivationRpcPermit)>()

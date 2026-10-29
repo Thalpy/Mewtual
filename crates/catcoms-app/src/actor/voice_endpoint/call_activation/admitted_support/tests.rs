@@ -273,6 +273,50 @@ async fn admitted_support_whole_root_refusal_and_actual_box_retirement_are_disti
     call.close().await;
 }
 struct Resume(Option<std::sync::mpsc::Sender<()>>);
+#[tokio::test]
+async fn admitted_support_same_rpc_fee_survives_retired_result_and_concurrent_work_aliases() {
+    let call = Call::new().await;
+    let sink = Sink::new(&call.pair.observer());
+    let pool = call.runtime.resources();
+    let before = pool.counts().0;
+    let work = call.queue(&sink);
+    bounded(sink.ready()).await;
+    bounded(work.wait_retired()).await;
+    {
+        let mut slot = sink.slot.lock().unwrap();
+        drop(slot.work.take());
+        drop(slot.result.take());
+    }
+    assert_eq!(
+        pool.counts().0,
+        before + ACTIVATION_RPC_BYTES,
+        "actual retired command keeps its original fee exactly once"
+    );
+    let first = work.clone();
+    let second = work.clone();
+    drop(work);
+    let (one, one_done) = oneshot::channel();
+    let (two, two_done) = oneshot::channel();
+    drop(std::thread::spawn(move || {
+        drop(first);
+        let _ = one.send(());
+    }));
+    drop(std::thread::spawn(move || {
+        drop(second);
+        let _ = two.send(());
+    }));
+    bounded(async {
+        one_done.await.unwrap();
+        two_done.await.unwrap();
+    })
+    .await;
+    assert_eq!(
+        pool.counts().0,
+        before,
+        "actual final allocation/funding return refunds one original fee"
+    );
+    call.close().await;
+}
 impl Drop for Resume {
     fn drop(&mut self) {
         if let Some(sender) = self.0.take() {

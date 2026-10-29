@@ -29,6 +29,26 @@ no term may be removed to fit. Concrete native publisher cells have their own
 independent payment. The TCP fixture's cell wrappers preserve that sponsor through
 actual body AND funding-header deallocation, including lost observing futures.
 
+Support Work also pairs its no-credit invocation Arc with the SAME outside
+FundingOwner. Both the Work and retirement-marker aliases carry that sponsor and
+drop the actual invocation allocation first. Every funding alias uses Arc::into_inner
+so the final funding allocation/header frees before its plain permit/Credit. The
+invoice preserves the previous larger invocation allowance and adds all new owner/
+marker terms. A sixth regression holds the exact RPC fee through retired outputs
+and concurrent escaped Work aliases, then requires one actual final refund.
+Older Activation/Presence and the separate AdmittedAdmission generic Work pattern
+still need their own allocation-tail correction; this leaf claims Support only.
+
+The complete ACTOR transport invoice is not a complete Root-operation accounting
+claim. Its existing reconciliation and paid peer-snapshot paths materialize full
+MLS member vectors and View BTreeSet/Presence HashSet scratch; OpenMLS members()
+also clones credentials/keys. The Group4096/member128 fees do not explicitly invoice
+that transient work. This inherited large-roster accounting/work gap remains a
+separate prerequisite, with the existing512-member cap and wire unchanged. Do not
+hide it by reducing that cap, cutting invoice terms, or moving Clock callbacks
+under Group/Policy guards. The disclosed gap does not create Support authority,
+and the four-member TCP scenario cannot certify its large-roster behavior.
+
 SupportQueryIdentity adds only pure original-allocation comparison and an immutable
 historical metadata copy: query ID, complete signed-object BLAKE3 hash, signed wall
 issued/expiry, LOCAL original monotonic deadline and ordinal. These values expose
@@ -69,10 +89,10 @@ oracle alone does not prove all historical behavior; the setup never calls a
 helper join/watch factory. All pressure, query, snapshot and publisher owners
 return through their actual paths before native End and Actor/TCP shutdown.
 
-Five new Actor tests cover the complete provisional invoice, foreign control/
+Six new Actor tests cover the complete provisional invoice, foreign control/
 payment/grant before Work creation, whole Root refusal, entered callback panic
 ambiguity, and an accepted producer paused across actual Actor abort while an
-ordinary Sender survives. Tests use sanctioned Clock watchdogs, RAII release and
+ordinary Sender survives, plus concurrent last-Work payment return. Tests use sanctioned Clock watchdogs, RAII release and
 detached producer completion, with no ambient sleeps or blocking joins.
 
 Planned focused execution, serialized in the coherent primary checkout:
