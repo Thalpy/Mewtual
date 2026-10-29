@@ -283,11 +283,11 @@ async fn admitted_real_full_group_refusal_preserves_the_original_key_and_serial(
         .unwrap();
     let resources = selected.resources();
     let group = selected.binding().scope.group;
-    let charged = resources.group_counts(&group).unwrap().0;
+    let charged = resources.group_counts(group).unwrap().0;
     let pressure = resources
         .charge(group, GROUP_BYTES - charged, ResourceKind::Retained)
         .unwrap();
-    assert_eq!(resources.group_counts(&group).unwrap().0, GROUP_BYTES);
+    assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
     let mut rng = Rng::new();
     assert!(matches!(
         ensure_admitted(&f.state, handle.id(), [9; 32], &mut rng).await,
