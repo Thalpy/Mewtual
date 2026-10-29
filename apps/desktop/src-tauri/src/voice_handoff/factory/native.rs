@@ -5,6 +5,8 @@ use super::*;
 use crate::voice_handoff::channel::NativeHold;
 use catcoms_sync::voice_v2::crypto_actions::{CryptoActionSnapshot, CryptoActionSnapshotPermit};
 use catcoms_sync::voice_v2::presence::PeerSnapshotPermit;
+#[cfg(test)]
+pub(in crate::voice_handoff) mod fixture;
 
 enum Selection {
     Exact(PairSelector),
@@ -45,6 +47,9 @@ pub(in crate::voice_handoff) struct NativeCompletion {
     // cannot have entered execute_selected, Begin, or publication.
     #[cfg(test)]
     discovery_refusal: Option<u8>,
+    // Harness-funded fixed capsule; only this handle belongs in the native8KiB graph.
+    #[cfg(test)]
+    fixture_witness: Option<Arc<fixture::Witness>>,
     _custody: NativeCustody,
 }
 impl NativeCompletion {
@@ -59,6 +64,10 @@ impl NativeCompletion {
         self.discovery_refusal == Some(cursor)
             && self.result == Err(Refused::Protocol(VoiceError::Capacity))
     }
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_witness(&self) -> Option<Arc<fixture::Witness>> {
+        self.fixture_witness.clone()
+    }
 }
 struct Worker {
     context: Option<Context>,
@@ -67,6 +76,8 @@ struct Worker {
     discovery_refusal: Option<u8>,
     #[cfg(test)]
     fixture_late_contention: bool,
+    #[cfg(test)]
+    fixture_witness: Option<Arc<fixture::Witness>>,
     custody: NativeCustody,
 }
 
@@ -151,7 +162,10 @@ pub(in crate::voice_handoff) fn produce_ready(
 fn spawn(context: &Context, route: &Route, selector: Selection) -> Result<NativeWaiter, Refused> {
     #[cfg(test)]
     let (kind, cursor) = diagnostic_selection(&selector);
+    #[cfg(not(test))]
     let result = spawn_inner(context, route, selector);
+    #[cfg(test)]
+    let result = spawn_inner(context, route, selector, None);
     #[cfg(test)]
     route
         .session()
@@ -176,6 +190,7 @@ fn spawn_inner(
     context: &Context,
     route: &Route,
     selector: Selection,
+    #[cfg(test)] fixture_witness: Option<Arc<fixture::Witness>>,
 ) -> Result<NativeWaiter, Refused> {
     let runtime = tokio::runtime::Handle::try_current().map_err(|_| Refused::Stopped)?;
     {
@@ -206,6 +221,8 @@ fn spawn_inner(
         discovery_refusal: None,
         #[cfg(test)]
         fixture_late_contention: false,
+        #[cfg(test)]
+        fixture_witness,
         custody: NativeCustody {
             _credit: credit,
             route: route.clone(),
@@ -297,6 +314,8 @@ async fn run_native(mut worker: Worker) -> NativeCompletion {
         result,
         #[cfg(test)]
         discovery_refusal: worker.discovery_refusal,
+        #[cfg(test)]
+        fixture_witness: worker.fixture_witness,
         _custody: worker.custody,
     }
 }
@@ -494,6 +513,10 @@ async fn discover(
 }
 
 async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<RowId, Refused> {
+    #[cfg(test)]
+    if let Some(witness) = &worker.fixture_witness {
+        witness.selected(selector);
+    }
     let context = worker.context.as_ref().ok_or(Refused::Closed)?;
     let route = &worker.custody.route;
     let selected = route.selected().clone();
@@ -558,16 +581,39 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
         .ledger
         .begin(selected.clone(), Purpose::Derive(selector))?
     {
-        Begin::Existing(id) => return Ok(id),
+        Begin::Existing(id) => {
+            #[cfg(test)]
+            if let Some(witness) = &worker.fixture_witness {
+                let original = context
+                    .ledger
+                    .resolve(&selected, Purpose::Derive(selector), id)?;
+                witness.parent(id, original.fixture_address());
+            }
+            return Ok(id);
+        }
         Begin::Factory(registration) => registration,
     };
+    #[cfg(test)]
+    if let Some(witness) = &worker.fixture_witness {
+        witness.parent(registration.id(), registration.fixture_address());
+    }
     drop(context);
     // Only this task's weak context remains; no mounted Store/registry/Coordinator crosses
     // Actor publication. Retain the original selected owner and UI commit to the end of
     // this scope, after the shared exact-publication path has collected its Actor replies.
     #[cfg(test)]
     route.session().fixture_native_stage(5);
+    #[cfg(not(test))]
     let result = publish_derivation(registration, actor, grant, selector).await;
+    #[cfg(test)]
+    let result = publish_derivation(
+        registration,
+        actor,
+        grant,
+        selector,
+        worker.fixture_witness.as_deref(),
+    )
+    .await;
     drop(commit);
     drop(selected);
     result

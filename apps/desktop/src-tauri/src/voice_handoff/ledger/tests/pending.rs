@@ -92,6 +92,60 @@ fn actual_publication_and_preparation_survive_busy_loan_then_attach_under_full_p
 }
 
 #[test]
+fn recovery_witness_requires_exact_owner_purpose_and_actual_attachment() {
+    let (coordinator, selected, selector) = selection();
+    let (_other, foreign, _) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let id = registration.id();
+    let address = registration.fixture_address();
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let loan = action.borrow_handoff(16 * 1024).unwrap();
+    assert!(matches!(
+        registration.attach(action.clone(), pair, 16 * 1024),
+        Err(VoiceError::Capacity)
+    ));
+    let original = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
+    assert_eq!(original.fixture_address(), address);
+    let before = original
+        .fixture_recovery_snapshot(&selected, selector)
+        .unwrap();
+    assert!(
+        !before.attached && before.prepared,
+        "Ok(RowId) alone is only Pending metadata"
+    );
+    assert_eq!(
+        before.action,
+        Some(crate::voice_handoff::factory::native::fixture::ActionIdentity::of(&action))
+    );
+    assert!(matches!(
+        original.fixture_recovery_snapshot(&foreign, selector),
+        Err(VoiceError::Unauthorized)
+    ));
+    let mut changed = selector;
+    changed.key_ref[0] ^= 1;
+    assert!(matches!(
+        original.fixture_recovery_snapshot(&selected, changed),
+        Err(VoiceError::Unauthorized)
+    ));
+    drop(loan);
+    let retry = ticket(&ledger, selected.clone(), selector);
+    assert_eq!(retry.id(), id);
+    assert_eq!(retry.fixture_address(), address);
+    assert_eq!(retry.attach_published(16 * 1024).unwrap(), id);
+    let after = original
+        .fixture_recovery_snapshot(&selected, selector)
+        .unwrap();
+    assert!(after.attached && !after.prepared);
+    assert_eq!(
+        before.action, after.action,
+        "same action/key/input tag/deadline and engine allowance"
+    );
+}
+
+#[test]
 fn a_foreign_equal_metadata_publication_cannot_replace_the_retained_original() {
     let (coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());

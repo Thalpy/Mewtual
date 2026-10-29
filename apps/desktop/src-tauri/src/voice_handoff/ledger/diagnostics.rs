@@ -2,6 +2,64 @@
 //! survives this synchronous snapshot; contention is reported rather than waited on.
 use super::*;
 
+/// Harness-owned scalar snapshot. It lends no Action/Row/Grant and never uses a
+/// lossy global observation to classify the actual worker being recovered.
+pub(in crate::voice_handoff) struct RecoverySnapshot {
+    pub attached: bool,
+    pub action: Option<crate::voice_handoff::factory::native::fixture::ActionIdentity>,
+    pub prepared: bool,
+}
+impl ResolvedRow {
+    pub(in crate::voice_handoff) fn fixture_recovery_snapshot(
+        &self,
+        selected: &SelectedHandoffOwner,
+        selector: PairSelector,
+    ) -> Result<RecoverySnapshot, VoiceError> {
+        let index = self
+            .ledger
+            .index
+            .try_lock()
+            .map_err(|_| VoiceError::Capacity)?;
+        if !index.rows[self.row.id.slot].as_ref().is_some_and(|row| {
+            Arc::ptr_eq(row, &self.row)
+                && row.id == self.row.id
+                && row.key.matches(selected, Purpose::Derive(selector))
+        }) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let state = self
+            .row
+            .state
+            .try_lock()
+            .map_err(|_| VoiceError::Capacity)?;
+        let (attached, action, prepared) = match &state.body {
+            Body::Pending(pending) if !pending.worker && pending.handed_off => {
+                (false, pending.published.clone(), pending.prepared.is_some())
+            }
+            Body::Live(live) if state.status.pending == PendingStatus::NotPending => {
+                (true, Some(live.action.clone()), false)
+            }
+            _ => return Err(VoiceError::Unauthorized),
+        };
+        drop(state);
+        drop(index);
+        // Immutable Action observations and their final Arc drop happen outside
+        // Index/State. This temporary belongs to the bounded harness frame.
+        let action = action.map(|action| {
+            assert!(
+                action.is_pending(),
+                "recovery must not spend original engine authority"
+            );
+            crate::voice_handoff::factory::native::fixture::ActionIdentity::of(&action)
+        });
+        Ok(RecoverySnapshot {
+            attached,
+            action,
+            prepared,
+        })
+    }
+}
+
 impl Ledger {
     /// Map only an independently discovered exact counterpart to its retained
     /// original row for diagnostics. No row is returned to a browser/factory.

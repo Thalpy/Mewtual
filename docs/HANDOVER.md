@@ -66,6 +66,23 @@ existing stop/freeze/cancellation/panic and payment guards. Scoped formatting an
 all-target/all-feature App Clippy pass. Read-only design and actual-diff reviews have no remaining
 findings. Primary owns complete integration suites; no full-suite result is claimed here.
 
+## Native discovery fixture recovery (29 October; reviewed, execution unrun)
+
+Hosted Linux `fbe53dab` failed the alternate-discovery helper after an unforced native
+Discover returned Capacity beyond its pre-selection boundary. That failure is real evidence;
+lossy global stage5/outcome counters do not establish whether Root pair, Derive or native
+attachment refused, and do not establish the older SDP storage-pressure cause.
+The separate harness leaf now retains exact worker-local selector/row/action evidence and
+drives the SAME normal Cursor to recover its original Pending within the unchanged10s
+observer bound. It preserves the forced pre-snapshot and alternate-peer/indexed-sibling
+oracles. A new real six-client case holds the actual published action's handoff loan to
+force native attach Capacity, then requires the same action/key/deadline/row to attach.
+Only cfg(test) hooks/test modules change behavior. Original native8KiB and all protocol
+limits remain; separate bounded harness graphs do not pay production work. Narrow formatting
+and static adversarial review pass. Compilation, actual layout guards, focused tests and
+lint are ALL UNRUN; primary owns integration and execution. See
+[the exact scope and test commands](communication-recovery/NATIVE-DISCOVERY-RECOVERY.md).
+
 ## Individual media closure (29 October; inactive, complete suites pass)
 
 `359a2eb0` integrates the reviewed exact-peer native-request fence. Queued or encrypting

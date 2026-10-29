@@ -390,6 +390,10 @@ pub(crate) struct ResolvedRow {
     row: Arc<Row>,
 }
 impl ResolvedRow {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_address(&self) -> usize {
+        Arc::as_ptr(&self.row) as usize
+    }
     /// Pure fixture snapshots may wait for the Index; they neither sample a Clock nor
     /// admit work. Production final admission must keep using `transition_index` and
     /// refuse contention, so a sampled deadline cannot become stale while waiting.
@@ -1366,6 +1370,10 @@ pub(super) fn pending_close_layout_bytes() -> usize {
     std::mem::size_of::<ClosePending>() + std::mem::size_of::<PendingRetirement>()
 }
 impl Registration {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_address(&self) -> usize {
+        Arc::as_ptr(&self.row) as usize
+    }
     pub(crate) fn id(&self) -> RowId {
         self.row.id
     }

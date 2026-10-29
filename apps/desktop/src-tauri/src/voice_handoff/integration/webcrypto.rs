@@ -476,6 +476,12 @@ impl Endpoint {
     }
 
     pub(crate) async fn discover_after_local_refusal(&mut self) {
+        self.discovery_refusal_cycle(false).await;
+    }
+    pub(crate) async fn discover_after_attachment_refusal(&mut self) {
+        self.discovery_refusal_cycle(true).await;
+    }
+    async fn discovery_refusal_cycle(&mut self, force_attachment: bool) {
         let selected = self.selected();
         let route = (1..=64)
             .find_map(|slot| {
@@ -491,6 +497,7 @@ impl Endpoint {
             &context::Context::new(&self.state),
             &route,
             clock.as_ref(),
+            force_attachment,
         )
         .await;
         // Resume the original, previously unpolled maintenance turn only AFTER the real

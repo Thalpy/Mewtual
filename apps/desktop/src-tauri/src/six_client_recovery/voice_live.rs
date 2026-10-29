@@ -463,6 +463,18 @@ async fn native_browser_local_discovery_refusal_selects_other_peer_and_preserves
     .await;
 }
 
+/// Hold the actual published Derive action's original handoff loan. The real
+/// native attach must refuse, then the normal Cursor must recover that SAME
+/// action/key/deadline/row after the harness releases the loan. Keep the existing
+/// alternate-peer and indexed-sibling oracle; no supplied selector enters native.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_discovery_attachment_capacity_recovers_original_and_indexed_sibling() {
+    Box::pin(two_browser_peer_cycle(
+        SecondPeer::FailedAttachedAfterAttachmentRefusal,
+    ))
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_browser_failed_media_peer_preserves_original_session_and_indexed_sibling() {
     Box::pin(two_browser_peer_cycle(SecondPeer::FailedMedia)).await;
@@ -485,6 +497,7 @@ enum SecondPeer {
     Complete,
     FailedAttached,
     FailedAttachedAfterDiscoveryRefusal,
+    FailedAttachedAfterAttachmentRefusal,
     FailedMedia,
     FailedMediaAfterDiscoveryRefusal,
 }
@@ -506,6 +519,7 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
     let forced_refusal = matches!(
         second,
         SecondPeer::FailedAttachedAfterDiscoveryRefusal
+            | SecondPeer::FailedAttachedAfterAttachmentRefusal
             | SecondPeer::FailedMediaAfterDiscoveryRefusal
     );
     let media_failure = matches!(
@@ -598,7 +612,9 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
         );
         eprintln!("two-peer fixture: newcomer discovered both; release");
         c.release_discovery();
-        if forced_refusal {
+        if matches!(second, SecondPeer::FailedAttachedAfterAttachmentRefusal) {
+            c.discover_after_attachment_refusal().await;
+        } else if forced_refusal {
             c.discover_after_local_refusal().await;
         }
         let choice = c.naturally_attached_pair([ac[1], bc[1]]).await;
