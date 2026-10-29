@@ -112,6 +112,74 @@ impl SavedLocalChatOp {
 mod saved_local_chat_tests {
     use super::*;
     #[test]
+    fn encrypted_chat_document_and_saved_proof_remain_send_sync() {
+        fn require_send_sync<T: Send + Sync>() {}
+        require_send_sync::<EncryptedDoc>();
+        require_send_sync::<SavedLocalChatOp>();
+    }
+
+    #[test]
+    fn poisoned_creator_evidence_rebuilds_and_reverifies_original_signed_log() {
+        let device = MlsDevice::generate().unwrap();
+        let mut document = EncryptedDoc::new(DocType::Channel, 5, &device.device_id());
+        let mut graph =
+            AutoCommit::new().with_actor(ActorId::from(device.device_id().as_bytes().to_vec()));
+        let object = graph
+            .put_object(ROOT, "message", automerge::ObjType::Map)
+            .unwrap();
+        graph.put(&object, "text", "verified original").unwrap();
+        graph.commit();
+        let op = SignedOp::sign(
+            &device,
+            DocType::Channel,
+            5,
+            graph.get_last_local_change().unwrap().raw_bytes().to_vec(),
+        )
+        .unwrap();
+        document
+            .apply_signed_tracked_observed(op, |_, _| {})
+            .unwrap();
+        assert_eq!(
+            document.verified_object_creator(&object).unwrap(),
+            Some(device.device_id())
+        );
+        let poison = |document: &EncryptedDoc| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut cache = document.creator_evidence.lock().unwrap();
+                // A stale partial cursor/range would panic or skip the original evidence if
+                // the next query merely trusted the poisoned value.
+                cache.indexed = usize::MAX;
+                let automerge::ObjId::Id(_, actor, _) = &object else {
+                    unreachable!()
+                };
+                cache
+                    .ranges
+                    .insert(actor.clone(), vec![(0, u64::MAX, usize::MAX)]);
+                panic!("interrupt creator-index update");
+            }));
+            assert!(result.is_err());
+            assert!(document.creator_evidence.is_poisoned());
+        };
+        poison(&document);
+        assert_eq!(
+            document.verified_object_creator(&object).unwrap(),
+            Some(device.device_id())
+        );
+        assert!(!document.creator_evidence.is_poisoned());
+        assert_eq!(
+            document.creator_evidence.lock().unwrap().indexed,
+            document.log.len()
+        );
+        document.log[0].signature[0] ^= 1;
+        poison(&document);
+        assert!(matches!(
+            document.verified_object_creator(&object),
+            Err(ReplError::BadSignature)
+        ));
+        assert!(!document.creator_evidence.is_poisoned());
+    }
+
+    #[test]
     fn saved_local_chat_proof_rejects_wrong_scope_device_hash_compression_and_size() {
         let device = MlsDevice::generate().unwrap();
         let mut graph = AutoCommit::new();
@@ -158,7 +226,9 @@ pub struct EncryptedDoc {
     change_authors: HashMap<ChangeHash, DeviceId>,
     /// How many entries of `log` are already reflected in `change_authors`.
     authors_indexed: usize,
-    creator_evidence: std::cell::RefCell<CreatorEvidenceIndex>,
+    // Disposable derived metadata must preserve EncryptedDoc's shared-read contract, which
+    // is also inherited by retained documents inside ServerStore.
+    creator_evidence: std::sync::Mutex<CreatorEvidenceIndex>,
     /// The last [`EncryptedDoc::snapshot`] and the exact document state it describes: the
     /// automerge heads plus the op-log length, which together are everything the serialization
     /// reads. Persistence re-serializes every open document of a server on every write, so an
@@ -394,7 +464,15 @@ impl EncryptedDoc {
         let automerge::ObjId::Id(counter, actor, _) = object else {
             return Err(ReplError::Malformed);
         };
-        let mut evidence = self.creator_evidence.borrow_mut();
+        let mut evidence = self.creator_evidence.lock().unwrap_or_else(|poisoned| {
+            // A panic may leave the derived cursor/ranges partially updated. They are not
+            // authority: discard every cached entry, then reparse and reverify the original
+            // signed log below. Clearing poison is safe only after that complete reset.
+            let mut evidence = poisoned.into_inner();
+            *evidence = CreatorEvidenceIndex::default();
+            self.creator_evidence.clear_poison();
+            evidence
+        });
         while evidence.indexed < self.log.len() {
             let index = evidence.indexed;
             let change = Change::from_bytes(self.log[index].delta.clone())

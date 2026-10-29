@@ -214,6 +214,12 @@ impl ServerStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mounted_server_store_remains_send_sync_with_retained_document_caches() {
+        fn require_send_sync<T: Send + Sync>() {}
+        require_send_sync::<ServerStore>();
+    }
+
     use crate::durable_chat::{DurableChatRequest, DurableSendRequest};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
