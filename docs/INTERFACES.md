@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Distinct admitted native ledger claim (29 October; inactive)
+
+`reserve_admitted_parent` reserves one actual32-slot ledger position/serial for
+the original admitted published key, physical Session identity and generation.
+The affine claim has no Existing lookup, Row or effect API. Future Slot attachment
+must separately recheck NativeActive/UI/current selection; future consumption
+must move the SAME stamp/payments. [Exact scope](communication-recovery/VOICE-ADMITTED-NATIVE-PARENT.md).
+
 ## Admitted protocol support (29 October; focused draft, OFF)
 
 Root has distinct endpoint and direct-helper ensure/refresh/observe APIs. Only the

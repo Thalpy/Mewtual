@@ -5,6 +5,13 @@
 use super::*;
 use std::num::NonZeroU64;
 
+mod admitted;
+pub(in crate::voice_handoff) use admitted::AdmittedParentClaim;
+#[cfg(test)]
+pub(in crate::voice_handoff) use admitted::{
+    fixture_existing_allocators_are_excluded, fixture_existing_claim,
+};
+
 /// Only bootstrap's original Slot/finalizer may retain this affine value. The
 /// ledger index stores a scalar stamp, never a back-reference to the claim or
 /// bootstrap Row. Ledger's existing action/media rows retain no bootstrap Route,

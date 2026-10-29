@@ -67,7 +67,11 @@ pub(in crate::voice_handoff) use sdp_rows::{
 };
 mod parent_claim;
 mod pc;
-pub(in crate::voice_handoff) use parent_claim::ParentClaim;
+pub(in crate::voice_handoff) use parent_claim::{AdmittedParentClaim, ParentClaim};
+#[cfg(test)]
+pub(in crate::voice_handoff) use parent_claim::{
+    fixture_existing_allocators_are_excluded, fixture_existing_claim,
+};
 pub(super) use pc::{Receipt as PcReceipt, State as PcState};
 mod plan;
 mod projection;
