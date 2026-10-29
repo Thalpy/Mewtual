@@ -32,6 +32,23 @@ execution gates are also unrun. Neither draft is ready for activation.
 V2 remains OFF. Operational bilateral admission/Ready/SDP/RTC/audio, member relay and
 combined/physical acceptance are still incomplete. Only one physical desktop is available.
 
+## Admitted wire codec leaf (29 October; focused checks pass, V2 OFF)
+
+This isolated private codec implements the proposed signed control7/encrypted8/Ready9
+grammar, fixed agreement503 and derived RoundRef/transcript/KDF material, with no public
+producer or operational consumer. Existing wire/profile/Source/dispatch enums do not grow.
+The new [codec note](communication-recovery/VOICE-ADMITTED-WIRE-CODEC.md) records exact
+draft allocations, structural limits and outstanding authority and inventory work.
+Leaf-only formatting and the focused all-feature sync library suite pass:26/26, no
+failures/ignores. Actual Windows inline sizes are Signed592, Body352, Control344,
+Header208, Request328, Encrypted320, Ready344, Agreement512, Endpoint136 and Recorded152
+bytes. Wire A503 is distinct from its512-byte in-memory struct. These observations are
+not a paid native graph inventory. Strict all-target/all-feature crate Clippy passes
+with warnings denied. Independent static
+adversarial review/re-review has no remaining findings. The primary owns complete
+backend/native/frontend suites; no full-suite result is claimed for this leaf. No V2
+activation or whole-chain readiness follows from the codec.
+
 ## V2 reservation and memory integration (28 October; integrated gates pending)
 
 The parallel continuation integrates browser budget policy `cb7ecd0b`, exact native SDP

@@ -11,6 +11,15 @@ waking incompatible work; original cleanup remains callable. Public method signa
 native command/wire formats, deadlines and caps are unchanged. See
 [the scoped contract and tests](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
 
+## Admitted wire codec draft (29 October; no public interface)
+
+The private `voice_v2::admitted_wire` leaf implements borrowed signature/syntax views
+for proposed tags7/8/9, fixed A503/R and transcript/KDF input bytes. It adds no production
+signer, envelope/Source adapter, IPC operation or native admission proof. Existing enums,
+tags1-6, SDP profile1 and their canonical encoders are unchanged. New profile2 is accepted
+only inside this inactive separate grammar. See [the codec note](communication-recovery/VOICE-ADMITTED-WIRE-CODEC.md)
+for exact draft Terminal allocations, limits and unimplemented operational contracts.
+
 ## Local V2 budget and native parent claim (28 October; inactive)
 
 `voiceBrowserBudget(groupKiB)` accepts safe integer KiB values from 256 through 1024.

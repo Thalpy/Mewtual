@@ -12,6 +12,16 @@ paid 8 KiB media inventory. See [the measured graph and tests](communication-rec
 Older brokers require reload without replacing their ledger or erasing cleanup debt.
 This does not enable V2 or complete operational admission, audio or relay.
 
+## Admitted-family codec leaf (29 October; private and inactive)
+
+`voice_v2::admitted_wire` separately decodes signed control7, encrypted8 and Ready9
+into immutable borrowed views. Fixed agreement503, derived RoundRef and transcript789
+use the proposed new domains. It supplies no signing, Source, dispatch, native profile,
+committed RoundGate or operational consumer; existing Body/SDP/profile paths remain
+separate and reject the new grammar. Exact draft allocations and unfinished authority,
+inventory and verification gates are in [the codec note](communication-recovery/VOICE-ADMITTED-WIRE-CODEC.md).
+V2 remains OFF.
+
 ## V2 reservation and browser budget continuation (28 October; inactive)
 
 Native capacity now includes a real inert parent-row reservation retained by the original

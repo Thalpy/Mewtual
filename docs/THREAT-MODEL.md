@@ -14,6 +14,19 @@ must not silently reuse the unfenced implementation. See
 [the scoped evidence and remaining limits](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
 This is an inactive handoff correction, not proof of operational V2 or audible media.
 
+## Inactive admitted wire syntax (29 October; no authority consumer)
+
+The new private codec checks exact signed bytes and bounded closed syntax, including
+one positive signed Availability nested in a Request. It cannot recursively parse a
+Request as a capability. Unknown terminal observation has no recorded result identity;
+a Recorded digest binds immutable context and excludes current observed state and
+wrapper time. These are syntax/hash properties, not current membership, query ownership,
+replay protection, native committed-round admission or proof that a historical state is
+current. Transcript point checks establish shape/reference only; actual original-key
+ownership and on-curve import remain mandatory. No new production signing, routing or
+profile activation exists. [The codec note](communication-recovery/VOICE-ADMITTED-WIRE-CODEC.md)
+records draft wire allocations and outstanding operational/inventory gates. V2 remains OFF.
+
 ## Native row reservation and local browser policy (28 October; inactive)
 
 The actual native parent claim adds no protocol permission. It binds one existing ledger

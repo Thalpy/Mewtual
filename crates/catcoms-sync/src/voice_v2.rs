@@ -49,6 +49,7 @@ pub const MAX_REMOTE_PACKET_REMAINING_MS: u64 = MAX_PACKET_LIFETIME_MS + 2 * CLO
 pub const MAX_REMOTE_DELEGATION_REMAINING_MS: u64 = MAX_DELEGATION_LIFETIME_MS + 2 * CLOCK_SKEW_MS;
 pub mod admission;
 pub mod call_activation;
+mod admitted_wire;
 pub mod chain;
 pub mod crypto_actions;
 pub mod crypto_authority;

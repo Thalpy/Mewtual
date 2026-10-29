@@ -244,6 +244,33 @@ wrong fixed lengths or cross-scope nested capability refuse. Present random inca
 nonces may be all zero; zero is not an absence sentinel. All generations/advert serials
 are nonzero and checked against overflow. A retry reuses the exact signed original object.
 
+The agreed staged codec grammar pins Support's known u16 mask to0x0007: bit0 is control7
+forwarding, bit1 encrypted8 forwarding and bit2 Ready9 forwarding. Zero or partial support
+is an observation, never reservation, key ownership or forwarding consent. Busy hints are
+0..1000ms scheduling hints only; they never extend original attempts or deadlines.
+
+Terminal decision0 is Unknown: reason0, GD/R absent with zero bytes, accepted_wall0,
+result_digest zero and observed_state6/Unknown. It is a distinct typed observation with
+no terminal-record identity and no positive or return proof. Decision1 is Accepted:
+reason0 and GD/R both present; accepted_wall may legitimately be0. Decision2 is Rejected:
+reasons1/Cancelled,2/Expired,3/Superseded,4/AuthorityChanged (including policy/epoch),
+5/ProtocolRejected, with accepted_wall0. R present requires GD present; GD present/R absent
+is permitted. Recorded observed states0..5 are HistoricalOnly, Negotiating, Established,
+Closing, Expired and Collected. Rejected forbids1/2; observations confer no authority.
+
+A Recorded result_digest is BLAKE3 over the36-byte domain
+`"mewtual/voice/admission/terminal/v1\0"` plus exactly263 raw bytes:
+`format1 | admission_profile1 | group32 | policy_present1 | policy32 | room16 | epoch8 |
+issuer32 | target32 | RD32 | GD_present1 | GD32 | R_present1 | R32 | decision1 | reason1 |
+accepted_wall8`. The total preimage is299 bytes. Absent policy/GD/R bytes are zero;
+present zero digests remain present. Exclude observed_state, result_digest and the
+re-signed wrapper's ID/issued/expires/signature. Historical accepted_wall and reason are
+immutable; never compare accepted_wall against a new wrapper's issued time after wall
+rollback. This is wire-record identity, not local native-operation authorization.
+These agreed inactive allocations do not enable producers or waive the remaining
+operational allocation, inventory, compatibility and activation gates. The private
+[codec checkpoint](VOICE-ADMITTED-WIRE-CODEC.md) records its exact implemented boundary.
+
 With the current encoder, SignedObject overhead for this single payload field is282 bytes
 without a policy pin,318 with one. This includes domain string's length, both version/kind
 bytes, Scope's own per-array lengths, three fixed identity fields, wall times, the payload
