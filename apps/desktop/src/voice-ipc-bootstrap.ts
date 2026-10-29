@@ -11,6 +11,8 @@ export type VoiceIpcBootstrap = Readonly<{
   nativePoint: Uint8Array<ArrayBuffer>; transcript: Uint8Array<ArrayBuffer>;
 }>;
 const DOMAIN = new TextEncoder().encode("Mewtual native voice bootstrap\0");
+const ADMITTED_DOMAIN = new TextEncoder().encode("Mewtual admitted native voice bootstrap\0");
+export type VoiceAdmittedIpcBootstrap = VoiceIpcBootstrap & Readonly<{ callProfile: "admitted" }>;
 const hex = (data: Uint8Array) => Array.from(data, byte => byte.toString(16).padStart(2, "0")).join("");
 const refused = (): never => { throw new Error("voice channel setup refused"); };
 
@@ -18,7 +20,19 @@ const refused = (): never => { throw new Error("voice channel setup refused"); }
  * Both points retain their fixed uncompressed encoding; WebCrypto must still validate the
  * native curve point before ECDH. This parser alone authenticates neither endpoint. */
 export function parseVoiceIpcBootstrap(text: string, expected: VoiceIpcBootstrapExpected): VoiceIpcBootstrap {
+  return parseBootstrap(text, expected, false);
+}
+
+/** New physical bootstrap grammar only. This public metadata parser creates no
+ * key/Session/role/ACK permission and cannot convert an Existing selected key.
+ * A future retained admitted-key factory must perform actual ECDH separately. */
+export function parseAdmittedVoiceIpcBootstrap(text: string, expected: VoiceIpcBootstrapExpected): VoiceAdmittedIpcBootstrap {
+  return parseBootstrap(text, expected, true) as VoiceAdmittedIpcBootstrap;
+}
+function parseBootstrap(text: string, expected: VoiceIpcBootstrapExpected, admitted: boolean): VoiceIpcBootstrap | VoiceAdmittedIpcBootstrap {
   if (typeof text !== "string" || text.length === 0 || text.length > 2048 || text.length % 2 || !/^[0-9a-f]+$/.test(text)) return refused();
+  // Actual room is u128BE (16 bytes), not an eight-byte JavaScript integer.
+  if (admitted && (text.length < 365 * 2 || text.length > 779 * 2)) return refused();
   const transcript = new Uint8Array(text.length / 2);
   for (let index = 0; index < transcript.length; index++) transcript[index] = Number.parseInt(text.slice(index * 2, index * 2 + 2), 16);
   let offset = 0;
@@ -29,7 +43,9 @@ export function parseVoiceIpcBootstrap(text: string, expected: VoiceIpcBootstrap
   const integer = (length: number): bigint => {
     let value = 0n; for (const byte of take(length)) value = (value << 8n) | BigInt(byte); return value;
   };
-  if (hex(take(DOMAIN.length)) !== hex(DOMAIN) || integer(1) !== 1n || integer(1) !== 1n) return refused();
+  const domain = admitted ? ADMITTED_DOMAIN : DOMAIN;
+  if (hex(take(domain.length)) !== hex(domain) || integer(1) !== (admitted ? 2n : 1n) || integer(1) !== 1n ||
+      (admitted && integer(1) !== 1n)) return refused();
   const session = hex(take(16)), slot = Number(integer(1));
   if (/^0+$/.test(session) || slot < 1 || slot > 64) return refused();
   const generation = integer(8), server = integer(8), instance = integer(8);
@@ -51,6 +67,10 @@ export function parseVoiceIpcBootstrap(text: string, expected: VoiceIpcBootstrap
       owner !== expected.owner || executor !== expected.executor || join !== expected.join ||
       group !== expected.group || expected.point.length !== 65 ||
       browser.some((byte, index) => byte !== expected.point[index])) return refused();
+  // One result object in either profile; do not retain/copy an intermediate
+  // metadata object when the future admitted channel funds this parser frame.
+  if (admitted) return Object.freeze({ session, slot, generation, server, instance, rawGroup, group, policy, room, device,
+    owner, executor, join, nativePoint: native.slice(), transcript, callProfile: "admitted" as const });
   return Object.freeze({ session, slot, generation, server, instance, rawGroup, group, policy, room, device,
     owner, executor, join, nativePoint: native.slice(), transcript });
 }

@@ -564,6 +564,7 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     // Original-owner channel closure/collection remain callable after lock/End. Native admits
     // no fresh effect and reports success only for actually drained, permanently closed setup.
     "settle_voice_channel_setup", "collect_voice_channel",
+    "settle_admitted_voice_channel_setup", "collect_admitted_voice_channel",
     // Own original-channel public work history is needed to recover unseen Pending after
     // End/lock. Native verifies the retained owner/executor and admits no new effect/data.
     "read_voice_channel_work",

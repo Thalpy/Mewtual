@@ -19,6 +19,7 @@ mod join_key;
 pub(crate) use join_key::SelectedHandoffOwner;
 pub(crate) use join_key::{
     AdmittedKeyCompletion, AdmittedKeyRetirement, AdmittedPublicationPlan, AdmittedPublicationWork,
+    AdmittedPublishedKey,
 };
 pub(crate) use join_key::{JoinKeyAdmission, JoinKeyPublication, PublicationPlan};
 

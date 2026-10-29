@@ -9,6 +9,7 @@ use rand_core::SeedableRng;
 mod action_history;
 mod admission_mode;
 pub(in crate::voice_handoff) use action_history::{installed, installed_when_available, retire};
+mod admitted;
 mod collection;
 
 const POINT: &str = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
@@ -119,7 +120,11 @@ async fn native_diagnostic_report_refuses_held_registry_and_row_without_waiting_
         .rows
         .iter()
         .flatten()
-        .find(|row| Arc::ptr_eq(&row.selected, &selected))
+        .find(|row| {
+            row.selected
+                .existing()
+                .is_some_and(|value| Arc::ptr_eq(value, &selected))
+        })
         .unwrap()
         .clone();
     drop(index);
@@ -168,6 +173,7 @@ fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
         + std::mem::size_of::<Credit>()
         + arc_words * 2
         + std::mem::size_of::<Arc<Session>>()
+        + std::mem::size_of::<Session>() + arc_words // actual weak-only retired Session tail
         + std::mem::size_of::<Begin>()
         + std::mem::size_of::<Status>()
         + std::mem::size_of::<PublicProjection>()

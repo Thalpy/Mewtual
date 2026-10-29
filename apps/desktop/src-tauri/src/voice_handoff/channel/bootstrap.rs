@@ -6,6 +6,7 @@ use super::{
     CONTROL_BYTES,
 };
 use crate::voice_authority::{Binding, SelectedHandoffOwner};
+use crate::voice_handoff::bootstrap::{ChannelOwner, ChannelProfile};
 use catcoms_rt::CryptoRngCore;
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, WorkLane};
 use hkdf::Hkdf;
@@ -20,6 +21,8 @@ pub(in crate::voice_handoff) const TRANSCRIPT_BYTES: usize = 1024;
 pub(in crate::voice_handoff) const SETUP_WORK_BYTES: usize = 8 * 1024;
 const DOMAIN: &[u8] = b"Mewtual native voice bootstrap\0";
 const SEED_LABEL: &[u8] = b"Mewtual native voice bootstrap seed v1";
+const ADMITTED_DOMAIN: &[u8] = b"Mewtual admitted native voice bootstrap\0";
+const ADMITTED_SEED_LABEL: &[u8] = b"Mewtual admitted native voice bootstrap seed v2";
 
 /// Public immutable setup only. It is not a Session, sequence allocator or permission to
 /// perform an action. The trusted bridge may project only transcript[..length], never padding.
@@ -43,7 +46,7 @@ impl PublicSetup {
 /// exact settlement/complete authenticated Status. Session's control lane is independent.
 /// This owner must never be constructed merely to recover an already Pending/Ready row.
 pub(in crate::voice_handoff) struct Prepared {
-    selected: Arc<SelectedHandoffOwner>,
+    selected: ChannelOwner,
     session: [u8; 16],
     slot: u8,
     device: [u8; 32],
@@ -60,6 +63,26 @@ impl Prepared {
         slot: u8,
         device: [u8; 32],
     ) -> Result<Self, Refused> {
+        if selected.lease().is_admitted() {
+            return Err(Refused::Binding);
+        }
+        Self::new_owner(ChannelOwner::Existing(selected), session, slot, device)
+    }
+    pub(in crate::voice_handoff) fn new_owner(
+        selected: ChannelOwner,
+        session: [u8; 16],
+        slot: u8,
+        device: [u8; 32],
+    ) -> Result<Self, Refused> {
+        // This payment owns the retained Session/body and its separate identity.
+        // Curve/transcript construction and outer async frames have the ordinary
+        // SETUP_WORK_BYTES payer and corresponding concrete-future guards.
+        let bootstrap_layout = std::mem::size_of::<Session>()
+            + std::mem::size_of::<SessionIdentity>()
+            + 4 * std::mem::size_of::<usize>();
+        if bootstrap_layout > BOOTSTRAP_BYTES {
+            return Err(Refused::Capacity);
+        }
         if session == [0; 16]
             || !(1..=64).contains(&slot)
             || selected.id().is_empty()
@@ -67,6 +90,7 @@ impl Prepared {
             || selected.binding().group.is_empty()
             || selected.binding().group.len() > 256
             || !selected.lease().is_live()
+            || (selected.profile() == ChannelProfile::Admitted) != selected.lease().is_admitted()
         {
             return Err(Refused::Binding);
         }
@@ -120,7 +144,7 @@ impl Prepared {
             .try_into()
             .map_err(|_| Refused::Binding)?;
         let public = self.transcript(native)?;
-        let keys = agree(&ephemeral, &browser, &public.hash)?;
+        let keys = agree_profile(&ephemeral, &browser, &public.hash, self.selected.profile())?;
         // The pinned types zeroize their own scalar/shared storage on Drop. This is not a
         // claim about arithmetic temporaries, provider heaps or later join-key compromise.
         drop(ephemeral);
@@ -153,17 +177,20 @@ impl Prepared {
     }
 
     fn transcript(&self, native: [u8; 65]) -> Result<PublicSetup, Refused> {
-        encode_transcript(Transcript {
-            binding: self.selected.binding(),
-            owner: self.selected.id(),
-            join: self.selected.join(),
-            executor: self.selected.executor(),
-            device: self.device,
-            browser: self.selected.point(),
-            native,
-            session: self.session,
-            slot: self.slot,
-        })
+        encode_transcript_profile(
+            Transcript {
+                binding: self.selected.binding(),
+                owner: self.selected.id(),
+                join: self.selected.join(),
+                executor: self.selected.executor(),
+                device: self.device,
+                browser: self.selected.point(),
+                native,
+                session: self.session,
+                slot: self.slot,
+            },
+            self.selected.profile(),
+        )
     }
 }
 
@@ -180,7 +207,14 @@ struct Transcript<'a> {
     session: [u8; 16],
     slot: u8,
 }
+#[cfg(test)]
 fn encode_transcript(fields: Transcript<'_>) -> Result<PublicSetup, Refused> {
+    encode_transcript_profile(fields, ChannelProfile::Existing)
+}
+fn encode_transcript_profile(
+    fields: Transcript<'_>,
+    profile: ChannelProfile,
+) -> Result<PublicSetup, Refused> {
     if fields.owner.is_empty()
         || fields.owner.len() > 128
         || fields.binding.group.is_empty()
@@ -211,8 +245,16 @@ fn encode_transcript(fields: Transcript<'_>) -> Result<PublicSetup, Refused> {
         Ok(())
     };
     let binding = fields.binding;
-    append(DOMAIN)?;
-    append(&[1, 1])?; // version1 / suite1: P256 + HKDF-SHA256 + framing-v1
+    match profile {
+        ChannelProfile::Existing => {
+            append(DOMAIN)?;
+            append(&[1, 1])?; // Existing version1/suite1 bytes stay unchanged.
+        }
+        ChannelProfile::Admitted => {
+            append(ADMITTED_DOMAIN)?;
+            append(&[2, 1, 1])?; // version2, P256/HKDF suite1, immutable admitted call1.
+        }
+    }
     append(&fields.session)?;
     append(&[fields.slot])?;
     for value in [binding.generation, binding.server, binding.instance] {
@@ -237,17 +279,32 @@ fn encode_transcript(fields: Transcript<'_>) -> Result<PublicSetup, Refused> {
     Ok(public)
 }
 
+#[cfg(test)]
 fn agree(
     ephemeral: &EphemeralSecret,
     browser: &PublicKey,
     hash: &[u8; 32],
+) -> Result<Keys, Refused> {
+    agree_profile(ephemeral, browser, hash, ChannelProfile::Existing)
+}
+fn agree_profile(
+    ephemeral: &EphemeralSecret,
+    browser: &PublicKey,
+    hash: &[u8; 32],
+    profile: ChannelProfile,
 ) -> Result<Keys, Refused> {
     let shared = ephemeral.diffie_hellman(browser);
     // Fixed-width big-endian field element, including leading zeroes. HKDF extracts it under
     // the complete injective transcript; this value is never used directly as an AES key.
     let mut seed = Zeroizing::new([0; 32]);
     Hkdf::<Sha256>::new(Some(hash), shared.raw_secret_bytes())
-        .expand(SEED_LABEL, seed.as_mut())
+        .expand(
+            match profile {
+                ChannelProfile::Existing => SEED_LABEL,
+                ChannelProfile::Admitted => ADMITTED_SEED_LABEL,
+            },
+            seed.as_mut(),
+        )
         .map_err(|_| Refused::Binding)?;
     Ok(Keys::new(&seed))
 }

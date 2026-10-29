@@ -15,6 +15,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 mod admission_mode;
 mod admission_slot;
+mod channel_owner;
+pub(in crate::voice_handoff) use channel_owner::{ChannelOwner, ChannelProfile};
+mod admitted;
+pub(crate) use admitted::{collect_admitted_channel, ensure_admitted, settle_admitted_setup};
 #[cfg(test)]
 mod diagnostics;
 pub(super) use admission_mode::observation_layout_bytes as admission_mode_layout_bytes;
@@ -32,7 +36,7 @@ struct Index {
     _credit: ProcessRetainedCredit,
 }
 struct Row {
-    selected: Arc<SelectedHandoffOwner>,
+    selected: ChannelOwner,
     device: [u8; 32],
     session_id: [u8; 16],
     slot: u8,
@@ -57,6 +61,23 @@ struct State {
     // cancellation or a lost reply cannot restore an old automatic producer.
     admission: Option<AdmissionPin>,
     admission_slot: admission_slot::Slot,
+    admitted_stage: Option<AdmittedStage>,
+}
+/// Exhaustive collection gate. An operational admitted consumer must add its
+/// actual debt/return state here; an empty Existing Slot is not that evidence.
+#[derive(Clone, Copy)]
+enum AdmittedStage {
+    BootstrapOnly,
+}
+impl State {
+    fn admitted_returned(&self) -> bool {
+        match self.admitted_stage {
+            None => true,
+            Some(AdmittedStage::BootstrapOnly) => {
+                self.admission.is_none() && self.admission_slot.collected()
+            }
+        }
+    }
 }
 /// Direct Session/header/reply and public-output owners can outlive Row references. Paid
 /// weak witnesses keep their control blocks attributable until actual strong owners drain.
@@ -87,7 +108,10 @@ impl CollectedChannel {
         self.identity.as_ref()
     }
     pub(super) fn selected(&self) -> &SelectedHandoffOwner {
-        &self.row.selected
+        self.row
+            .selected
+            .existing()
+            .expect("Existing collection witness")
     }
 }
 /// Exact retries share ONE immutable projection/allocation. Every returned owner retains the
@@ -125,14 +149,21 @@ pub(super) struct MetadataProjection {
 impl MetadataProjection {
     /// Original registry allocation, including after End. This is historical provenance,
     /// not a live grant upgrade or permission to construct replacement work.
-    pub(super) fn selected(&self) -> &SelectedHandoffOwner {
-        &self.row.selected
+    pub(super) fn existing_selected(&self) -> Result<&SelectedHandoffOwner, Refused> {
+        self.row
+            .selected
+            .existing()
+            .map(AsRef::as_ref)
+            .ok_or(Refused::Binding)
     }
 
     /// Conservative complete original Row/preparation/output inventory plus ONE serial
     /// metadata reply. General allocator, framework copies after handoff and OS overhead
     /// are outside this application-owner bound. Refuse rather than raise its8KiB payment.
     pub(super) fn require_reply_memory(&self, reply_bytes: usize) -> Result<(), Refused> {
+        Self::require_layout(reply_bytes)
+    }
+    fn require_layout(reply_bytes: usize) -> Result<(), Refused> {
         let arc_words = 2 * std::mem::size_of::<usize>();
         let retained = std::mem::size_of::<Row>()
             + admission_slot::retained_layout_bytes()
@@ -143,6 +174,10 @@ impl MetadataProjection {
             + std::mem::size_of::<Credit>()
             + arc_words * 2
             + std::mem::size_of::<Arc<Session>>()
+            // Retirement's Weak outlives Session's internal Credits. It retains
+            // the WHOLE emptied Arc allocation, not just a pointer/control word.
+            // Row's original payer must cover that tail until the Weak is freed.
+            + std::mem::size_of::<Session>() + arc_words
             + std::mem::size_of::<Begin>()
             + std::mem::size_of::<Status>()
             + std::mem::size_of::<PublicProjection>()
@@ -207,6 +242,9 @@ impl Registry {
         Self::row_route(row)
     }
     fn row_route(row: Arc<Row>) -> Option<Route> {
+        // Sealed Existing route: no old operation/producer may see an admitted
+        // physical Session through this type, even for equal public identifiers.
+        row.selected.existing()?;
         let (session, public) = {
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             (state.session.clone()?, state.public.clone()?)
@@ -272,6 +310,7 @@ impl Registry {
                 .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
                 .cloned()
         }?;
+        row.selected.existing()?;
         {
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             state.effects_closed = true;
@@ -280,7 +319,7 @@ impl Registry {
         // Direct wake after guards; shutdown/close cannot depend on a future
         // maintenance cadence, nor wake a task while retaining its State lock.
         row.admission_changed.notify_waiters();
-        Some(row.selected.clone())
+        row.selected.existing().cloned()
     }
 
     /// Pure readiness before terminating authenticated Control routing. First
@@ -318,7 +357,7 @@ impl Registry {
             .iter()
             .flatten()
             .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
-            .map(|row| row.selected.clone())
+            .and_then(|row| row.selected.existing().cloned())
     }
 
     /// Exact public projection after ensure, outside Coordinator. If collection won this
@@ -340,6 +379,9 @@ impl Registry {
                     })
                 })
                 .ok_or(Refused::Binding)?;
+        if row.selected.profile() != ChannelProfile::Existing {
+            return Err(Refused::Binding);
+        }
         row.projection_busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Refused::Capacity)?;
@@ -372,6 +414,11 @@ impl Registry {
             .as_ref()
             .and_then(|index| index.rows[usize::from(slot)].as_ref())
             .ok_or(Refused::Binding)?;
+        // Do this before cloning Session/output or authenticating an old header.
+        // Only the distinct admitted route may eventually dispatch operation31.
+        if row.selected.profile() != ChannelProfile::Existing {
+            return Err(Refused::Binding);
+        }
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closed {
             return Err(Refused::Binding);
@@ -419,6 +466,11 @@ impl Registry {
         if selected.lease().is_admitted() {
             return Err(Refused::Binding);
         }
+        self.begin_owner(ChannelOwner::Existing(selected), device)
+    }
+
+    fn begin_owner(&self, selected: ChannelOwner, device: [u8; 32]) -> Result<Begin, Refused> {
+        MetadataProjection::require_layout(super::commands::bootstrap_reply_layout_bytes())?;
         let resources = selected.resources();
         let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
         if self.stopping.load(Ordering::Acquire) {
@@ -428,7 +480,7 @@ impl Registry {
         if let Some(row) = index.rows.iter().flatten().find(|row| {
             row.selected.id() == selected.id() && row.selected.executor() == selected.executor()
         }) {
-            if !Arc::ptr_eq(&row.selected, &selected) {
+            if !row.selected.is_same(&selected) {
                 return Err(Refused::Binding);
             }
             let status = row.status();
@@ -454,12 +506,24 @@ impl Registry {
                 ResourceKind::Retained,
             )
             .map_err(|_| Refused::Capacity)?;
-        let prepared = Prepared::new(
-            selected.clone(),
-            serial.to_be_bytes(),
-            (slot + 1) as u8,
-            device,
-        )?;
+        let prepared = match &selected {
+            ChannelOwner::Existing(value) => Prepared::new(
+                value.clone(),
+                serial.to_be_bytes(),
+                (slot + 1) as u8,
+                device,
+            )?,
+            ChannelOwner::Admitted(_) => Prepared::new_owner(
+                selected.clone(),
+                serial.to_be_bytes(),
+                (slot + 1) as u8,
+                device,
+            )?,
+        };
+        let admitted_stage = match selected.profile() {
+            ChannelProfile::Existing => None,
+            ChannelProfile::Admitted => Some(AdmittedStage::BootstrapOnly),
+        };
         // Proven-unstarted refusal above has no row/serial effect. Once this Pending becomes
         // visible, its ticket always finishes or latches a closed fence, including unwind.
         let row = Arc::new(Row {
@@ -477,6 +541,7 @@ impl Registry {
                 retirement: None,
                 admission: None,
                 admission_slot: admission_slot::Slot::default(),
+                admitted_stage,
             }),
             projection_busy: AtomicBool::new(false),
             admission_changed: tokio::sync::Notify::new(),
@@ -526,6 +591,9 @@ impl Registry {
                 .flatten()
                 .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
         }) {
+            if row.selected.profile() != ChannelProfile::Existing {
+                return Err(Refused::Binding);
+            }
             row.state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -558,7 +626,7 @@ impl Registry {
             )
             .map_err(|_| Refused::Capacity)?;
         let row = Arc::new(Row {
-            selected,
+            selected: ChannelOwner::Existing(selected),
             device: [0; 32],
             session_id: serial.to_be_bytes(),
             slot: (slot + 1) as u8,
@@ -572,6 +640,7 @@ impl Registry {
                 retirement: None,
                 admission: None,
                 admission_slot: admission_slot::Slot::default(),
+                admitted_stage: None,
             }),
             projection_busy: AtomicBool::new(false),
             admission_changed: tokio::sync::Notify::new(),
@@ -614,6 +683,7 @@ impl Registry {
                         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                         state.closed
                             && !state.pending
+                            && state.admitted_returned()
                             && state.admission_slot.collected()
                             && state.retirement.as_ref().is_some_and(|owners| {
                                 owners.session.strong_count() == 0
@@ -638,7 +708,14 @@ impl Registry {
                 .retirement
                 .as_ref()
                 .and_then(|owners| owners.identity.clone());
-            ledger.channel_collected(CollectedChannel { row, identity });
+            match row.selected.profile() {
+                ChannelProfile::Existing => {
+                    ledger.channel_collected(CollectedChannel { row, identity })
+                }
+                // This slice exposes only bootstrap custody for admitted rows.
+                // It never mints the Existing ledger's collection certificate.
+                ChannelProfile::Admitted => drop((identity, row)),
+            }
         }
         // Always sweep, including an empty/uninitialized registry. The original one-shot
         // witness may have arrived before the last cleanup/metadata handle actually dropped.
@@ -740,6 +817,29 @@ impl Registry {
 }
 /// Native-only immutable control routing. Retain the actual row, Session and paid public
 /// output across IO; copied session IDs alone cannot create this owner or authorize actions.
+/// Distinct admitted routing deliberately has no Existing selected-owner accessor.
+#[allow(dead_code)] // Operation31 is a separate, not-yet-implemented consumer.
+#[derive(Clone)]
+pub(in crate::voice_handoff) struct AdmittedRoute {
+    row: Arc<Row>,
+    session: Arc<Session>,
+    public: Arc<SetupOutput>,
+}
+#[allow(dead_code)]
+impl AdmittedRoute {
+    pub(in crate::voice_handoff) fn selected(
+        &self,
+    ) -> &crate::voice_authority::AdmittedPublishedKey {
+        self.row.selected.admitted().expect("sealed admitted route")
+    }
+    pub(in crate::voice_handoff) fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+    pub(in crate::voice_handoff) fn public(&self) -> &Arc<SetupOutput> {
+        &self.public
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Route {
     row: Arc<Row>,
@@ -771,7 +871,7 @@ impl Route {
     /// Only this immutable native row supplies selection. Request labels are lookup hints,
     /// never a substitute for the allocation which owns this Session and its payments.
     pub(super) fn selected(&self) -> &Arc<SelectedHandoffOwner> {
-        &self.row.selected
+        self.row.selected.existing().expect("sealed Existing route")
     }
     /// Pure first-effect fence. Repeat under the SAME original UI commit as close_row;
     /// otherwise a retained Route could start actor work after trusted channel collection.
@@ -870,6 +970,9 @@ impl Row {
             if !state.admission_slot.collected() {
                 // The direct close wake was already sent. Metadata closure cannot
                 // certify channel collection ahead of its original admission work.
+                return Err(Refused::Capacity);
+            }
+            if !state.admitted_returned() {
                 return Err(Refused::Capacity);
             }
             if state.retirement.is_none() {
@@ -1091,6 +1194,18 @@ async fn finish(
     executor: [u8; 32],
     closure: Closure,
 ) -> Result<Status, Refused> {
+    // A legacy cleanup adapter cannot reinterpret an admitted generation or
+    // report its still-retained physical setup as legacy no-work history.
+    if state.voice_channels.admitted_identity(owner, executor)
+        || state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admitted_activation(owner)
+            .is_some()
+    {
+        return Err(Refused::Binding);
+    }
     // An aborted permanent task transferred its actual position into the Row.
     // Cleanup is negative only and must run OUTSIDE UI/Coordinator/State guards.
     if let Some(route) = state.voice_channels.original_route(owner, executor) {

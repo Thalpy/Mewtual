@@ -42,6 +42,10 @@ export const TAURI_COMMAND_GROUPS = {
       // It accepts no drain flag, private bytes or replacement generation; setup still gates
       // the unlocked session and native selected owner before RNG or channel admission.
       "setup_voice_channel", "settle_voice_channel_setup", "collect_voice_channel",
+      // Separate admitted physical bootstrap; no pilot/Ready/RTC conversion.
+      // Native setup crosses current UI/profile fences; exact negative cleanup
+      // deliberately survives End/lock without creating a replacement row.
+      "setup_admitted_voice_channel", "settle_admitted_voice_channel_setup", "collect_admitted_voice_channel",
       // Read existing original-channel work metadata after End/lock so unseen Pending can
       // be cleaned up. It cannot admit work, fetch payloads or assert actual drainage.
       "read_voice_channel_work",
