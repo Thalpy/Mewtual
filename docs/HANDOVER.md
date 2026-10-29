@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Shared route registry custody prerequisite (29 October; unrun)
+## Shared route registry custody prerequisite (29 October; focused passes)
 
 Before adding Control7 transport, this leaf fixes inherited raw-Weak route tails with
 strong rows and the SAME original outside payer; no Weak escapes and Arc destruction
@@ -9,9 +9,12 @@ fallible voice attachment now prepays an explicit4KiB fixed registry/inline cost
 when OFF, within unchanged group/process caps. Crypto/Forward entry points prune sole
 rows before reservation and on quiet housekeeping. External preparations, driver
 cancellation/replies and early refusal retain the SAME payer after final authority
-destruction even after Root retirement. Eleven focused regressions (nine sync/two rt)
-and measured guards are drafted but
-unrun; no Cargo ran. Prior full suites cover earlier inputs. See
+destruction even after Root retirement. Focused execution passes nine sync and eleven
+rt authority cases (two new rt regressions); all original assertions remain. Windows
+registry1904/4096, route376/512 and actual execution/completion/scheduler2056/4096
+guards pass. The first compile found one missing test-only RngCore import, corrected
+before the passing rerun. Strict lint/full suites remain primary-owned and pending;
+prior full suites cover earlier inputs. See
 [the source trace, accounting and exact limits](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
 
 ## Admitted Root presence draft (29 October; corrections pending rerun)

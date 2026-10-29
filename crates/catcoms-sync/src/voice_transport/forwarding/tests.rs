@@ -1,5 +1,5 @@
 use super::*;
-use catcoms_rt::{Clock, ManualClock};
+use catcoms_rt::{Clock, ManualClock, RngCore};
 use std::future::Future;
 use voice_v2::resources::{ResourceKind, GROUP_BYTES};
 use voice_v2::runtime::Runtime;

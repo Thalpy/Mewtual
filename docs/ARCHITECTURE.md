@@ -1,13 +1,15 @@
 # Mewtual; Architecture
 
-## Route registry custody prerequisite (29 October; unrun)
+## Route registry custody prerequisite (29 October; focused passes)
 
 The shared64-route registry retains strong route rows and the SAME outside Lower or
 verification payer through actual Arc destruction. A separately prepaid4KiB owner
 funds fixed backing/inline metadata before first VoiceRuntime publication, including
 OFF attachments. Sole-owner rows prune before Crypto/Forward reservation. Existing
 wire/enums and all limits remain unchanged; Query/Support transport is not yet added.
-See [the inherited defect, accounting and unrun regressions](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+Nine sync and eleven rt authority cases pass; actual registry1904/4096 and route376/512
+guards pass. Full integration remains pending. See
+[the inherited defect, accounting and scoped evidence](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
 
 ## Admitted Root presence (29 October; draft, inactive)
 

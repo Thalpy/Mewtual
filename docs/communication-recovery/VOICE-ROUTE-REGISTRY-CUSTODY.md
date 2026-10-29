@@ -3,8 +3,9 @@
 This isolated prerequisite corrects an inherited route-metadata custody defect before
 new Control7 Query/Support transport reuses the registry. No Query/Support producer,
 wire allocation, Source enum, routing limit or rollout activation is added by this fix.
-V2 remains OFF. The implementation and eleven focused regressions are unrun; narrow
-formatting/static inspection and the early read-only design review are complete.
+V2 remains OFF. Nine sync cases and eleven rt authority cases (including two new rt
+regressions) pass. Narrow formatting and independent actual-diff re-review are clear;
+strict lint and complete integration suites remain pending with the primary.
 
 The previous `RouteOwners.active` stored raw Weak<RouteGate>. The original Lower or
 verification payment lived only in RouteGate's keepalive. Dropping the last strong
@@ -53,11 +54,14 @@ process2MiB, Crypto4, Forward4 and route64 ceilings remain unchanged.
 Production preallocation guards cover the full fixed backing, complete owner metadata,
 construction overlap and original per-route512-byte metadata graph. The focused growth
 test also reports the actual enclosing VoiceRuntime size and RouteOwners inline size.
-These declared application-owned inventories exclude allocator/RSS overhead. Actual
-measurements and runtime validation are pending; earlier complete suites do not cover
-this changed input.
+These declared application-owned inventories exclude allocator/RSS overhead. Windows
+measurements are registry1904/4096, per-route376/512, RouteOwners120 bytes versus its
+previous24-byte Vec, and enclosing VoiceRuntime2112 bytes. The actual execution,
+completion and scheduler wrapper graph is2056/4096, including the752-byte opaque
+execution body. These measurements preserve the full guards and original per-flight
+fees. Earlier complete suites do not cover this changed input.
 
-Draft regressions use a real prepared Source, pause its actual final route destructor
+Passing regressions use a real prepared Source, pause its actual final route destructor
 after internal custody destruction and check payment during concurrent pruning; retire
 Root before dropping an unexecuted Source, an awaited public driver cancellation, a
 real ResponderReply, a retained Bytes clone and a refused prepared response; drive real
@@ -74,4 +78,12 @@ real P2P policy and bound only their outer harness waits through sanctioned Cloc
 The next operational Query/Support slice still needs separately typed Control7 bytes,
 Source/ingress/forwarding and immutable current query owners. Agreement, neutral/native
 consumption, Ready, SDP/ICE/RTC and production audio/relay remain separate gates. The
-primary owns focused execution, strict lint and complete integration suites.
+primary owns strict lint and complete integration suites. Focused commands used the
+released shared native target with-j1 and testthreads1:
+
+- `cargo test -p catcoms-sync --all-features --lib voice_transport::forwarding::tests -j1 -- --test-threads=1 --nocapture`:9 passed,1407 filtered,2.73s.
+- `cargo test -p catcoms-rt --all-features --lib authority_tests -j1 -- --test-threads=1 --nocapture`:11 passed,27 filtered,0.00s.
+
+The first sync compilation exited101 for a missing test-only RngCore import; no test
+ran in that invocation. The one-line import correction was applied before the passing
+rerun. No full suite or strict lint result is claimed for this leaf.

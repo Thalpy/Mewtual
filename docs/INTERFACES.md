@@ -1,6 +1,6 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Voice route ownership (29 October; unrun prerequisite)
+## Voice route ownership (29 October; focused passes)
 
 First fallible Root voice attachment prepays4KiB for the shared64-row route registry
 before publishing VoiceRuntime; subsequent attachment reuses it. No wire or public
