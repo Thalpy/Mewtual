@@ -11,6 +11,42 @@ const TABLE_BYTES: usize = 4096;
 /// callers. Refresh accepts only the actual current original, never copied IDs.
 #[derive(Clone)]
 pub struct SupportQueryIdentity(pub(super) Owner);
+/// Immutable historical metadata of one original query. These copied values
+/// grant no current authority and are never accepted as a query/refresh input.
+/// No signature, key material, packet bytes or owning handle escapes here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SupportQueryMetadata {
+    pub query: Nonce,
+    pub signed_hash: Nonce,
+    pub issued_wall_ms: u64,
+    pub expires_wall_ms: u64,
+    pub local_deadline_ms: u64,
+    pub ordinal: u64,
+}
+impl SupportQueryIdentity {
+    /// Pure original-allocation identity, including after End or replacement.
+    pub fn is_same(&self, other: &Self) -> bool {
+        self.0.same(&other.0)
+    }
+    /// Historical diagnostic projection; it does not sample a Clock or renew
+    /// either original deadline. Positive observations still require Root.
+    pub fn metadata(&self) -> SupportQueryMetadata {
+        let owner = &self.0;
+        let metadata = owner.object().metadata();
+        let Role::Query(query) = &owner.get().role else {
+            unreachable!("only canonical query owners construct opaque query identities")
+        };
+        SupportQueryMetadata {
+            query: metadata.id(),
+            signed_hash: owner.object().hash(),
+            issued_wall_ms: metadata.issued(),
+            expires_wall_ms: metadata.expires(),
+            local_deadline_ms: owner.get().deadline,
+            ordinal: query.ordinal,
+        }
+    }
+}
+redacted_debug!(SupportQueryMetadata);
 #[cfg(test)]
 impl SupportQueryIdentity {
     pub(crate) fn owner_for_test(&self) -> &Owner {

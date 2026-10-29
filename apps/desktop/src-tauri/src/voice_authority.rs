@@ -976,4 +976,6 @@ impl Coordinator {
 }
 
 #[cfg(test)]
+mod support_test_observation;
+#[cfg(test)]
 pub(crate) mod tests;

@@ -27,5 +27,5 @@ pub(crate) fn inventories_for_test() -> (usize, usize, usize) {
 }
 pub use table::{
     DirectHelperSupportObservation, DirectHelperSupportProbe, EndpointSupportObservation,
-    EndpointSupportQuery, SupportQueryIdentity,
+    EndpointSupportQuery, SupportQueryIdentity, SupportQueryMetadata,
 };

@@ -667,6 +667,8 @@ async fn admitted_control_q2_supersedes_before_busy_publication_and_late_q1_cann
             f.a.ensure_admitted_direct_helper_support(&grant, &original, b)
                 .unwrap();
         let first = q1.identity().owner_for_test().clone();
+        let historical = q1.identity().metadata();
+        assert!(q1.identity().is_same(q1.clone().identity()));
         let m = first.object().metadata();
         let late = control::Object::support(
             m.scope(),
@@ -696,6 +698,8 @@ async fn admitted_control_q2_supersedes_before_busy_publication_and_late_q1_cann
             f.a.refresh_admitted_direct_helper_support(&grant, &original, b, q1.identity())
                 .unwrap();
         let second = q2.identity().owner_for_test();
+        assert!(!q1.identity().is_same(q2.identity()));
+        assert_eq!(q1.identity().metadata(), historical);
         assert!(
             !first.authorized(),
             "q1 closes synchronously even with all actual Forward slots occupied"
@@ -760,6 +764,7 @@ async fn admitted_control_q2_supersedes_before_busy_publication_and_late_q1_cann
                 .err(),
             Some(VoiceError::RetryMismatch)
         );
+        assert_eq!(q1.identity().metadata(), historical, "historical metadata never renews stale authority");
     })
     .await;
 }

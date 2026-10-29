@@ -287,6 +287,10 @@ pub(super) struct Trace {
     /// Test-only public Ready shape, not authenticated admission: attempts and helper
     /// count per permitted fixture edge. Never retain SDP, packet bytes or identity seeds.
     pub ready_submissions: BTreeMap<(usize, usize), (usize, usize)>,
+    /// Hash-only, UNVERIFIED diagnostic samples of complete signed Control7
+    /// objects at actual connected TCP submission. Never acceptance authority.
+    pub control_submissions: std::collections::VecDeque<(usize, usize, [u8; 32])>,
+    pub control_evicted: usize,
     /// Bounded by the six fixture identities; contains no routes, identity seeds or payloads.
     pub peer_dials: BTreeMap<(usize, usize), (usize, String)>,
     /// Driver-confirmed local dial attempts, excluding suppressed batches/errors. This is
@@ -588,6 +592,16 @@ impl MeshTransport for Transport {
         mut cancellation: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
         let kind = data.first().copied().unwrap_or(0);
+        if let Some(hash) = super::admitted_control::unverified_control_hash(&data) {
+            let mut trace = self.rules.trace.lock().unwrap();
+            if trace.control_submissions.len() == 64 {
+                trace.control_submissions.pop_front();
+                trace.control_evicted += 1;
+            }
+            trace
+                .control_submissions
+                .push_back((self.index, self.rules.index(peer), hash));
+        }
         let mut lower_capture = None;
         if kind == 28 {
             let mut frame = catcoms_wire::Decoder::new(&data);

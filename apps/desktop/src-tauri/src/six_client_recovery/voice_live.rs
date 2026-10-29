@@ -838,7 +838,7 @@ async fn complete_browser_media_pair(
     )
 }
 
-async fn enable(scenario: &Scenario, index: usize) {
+pub(super) async fn enable(scenario: &Scenario, index: usize) {
     let running = scenario.online(index);
     let generation = running.state.ui_session_generation.load(Ordering::Acquire);
     bounded(
