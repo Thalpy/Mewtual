@@ -131,6 +131,38 @@ fn sdp_failure_diagnostics_refuse_contended_and_equal_label_foreign_parents() {
 }
 
 #[test]
+fn confirmation_failure_diagnostic_preserves_original_deadline_after_settlement() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let deadline = action.protected_binding().unwrap().deadline;
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let before = selected.resources().counts();
+    let expected = format!("original Derive monotonic deadline=Some({deadline})");
+    assert!(ledger
+        .fixture_confirmation_diagnostic(&selected, Some(id))
+        .contains(&expected));
+    assert_eq!(selected.resources().counts(), before);
+    // A terminally settled original without a receipt cannot produce a fresh
+    // result. Diagnostics must retain its original time rather than relabel it
+    // as absent/unstarted or create another action to satisfy the pump oracle.
+    action.settle_engine();
+    ledger.reconcile(id).unwrap();
+    let after_settle = selected.resources().counts();
+    let diagnostic = ledger.fixture_confirmation_diagnostic(&selected, Some(id));
+    assert!(diagnostic.contains("[1, 0, 1, 0, 1, 0, 0, 0]"));
+    assert!(diagnostic.contains(&expected));
+    assert_eq!(selected.resources().counts(), after_settle);
+    assert_eq!(
+        ledger.status(id).unwrap().action.unwrap().0,
+        action.serial()
+    );
+}
+
+#[test]
 fn derivation_diagnostics_do_not_create_or_retire_original_pending_and_refuse_contention() {
     let (_coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());

@@ -97,6 +97,7 @@ impl Ledger {
                 .find(|row| row.id == id && row.key.matches(selected, row.key.purpose))
                 .ok_or("original parent absent")?;
             let mut totals = [0_u8; 8];
+            let mut derive_deadline = None;
             for row in index.rows.iter().flatten() {
                 // SDP rows share this SAME parent Arc too. Their independent
                 // result/ACK/Return must not inflate confirmation progress.
@@ -124,11 +125,23 @@ impl Ledger {
                 totals[5] += u8::from(state.status.acknowledged);
                 totals[6] += u8::from(state.status.drained);
                 totals[7] += u8::from(matches!(state.body, Body::Pending(_)));
+                if parent_row {
+                    if let Body::Live(live) = &state.body {
+                        // Immutable scalar only: this accessor takes no Engine/Root
+                        // lock and invokes no Clock. In particular, do not diagnose
+                        // an expired original by asking is_pending() under State.
+                        derive_deadline = live
+                            .action
+                            .protected_binding()
+                            .ok()
+                            .map(|binding| binding.deadline);
+                    }
+                }
             }
-            Ok(totals)
+            Ok((totals, derive_deadline))
         })();
         match observed {
-            Ok(totals) => format!("original confirmation rows/contended/actions/receipts/settled/acked/drained/pending={totals:?}"),
+            Ok((totals, derive_deadline)) => format!("original confirmation rows/contended/actions/receipts/settled/acked/drained/pending={totals:?}; original Derive monotonic deadline={derive_deadline:?}"),
             Err(reason) => reason.into(),
         }
     }

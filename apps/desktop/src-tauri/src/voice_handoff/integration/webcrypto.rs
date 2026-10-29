@@ -70,6 +70,7 @@ enum Method {
 #[derive(Debug)]
 struct StepTrace {
     step: String,
+    started_mono: u64,
     phase: &'static str,
     frames: usize,
     callbacks: usize,
@@ -79,8 +80,9 @@ struct StepTrace {
     node: Option<ProgressPhase>,
 }
 impl StepTrace {
-    fn new(step: &Value) -> Self {
+    fn new(step: &Value, started_mono: u64) -> Self {
         Self {
+            started_mono,
             // The source is our closed scenario, but cap/sanitize even that input.
             step: step["name"]
                 .as_str()
@@ -113,6 +115,11 @@ fn original_step_diagnostic(
     discovered: Option<PairSelector>,
 ) -> Option<String> {
     selected.map(|selected| {
+        // Sample the sanctioned fixture Clock before any ledger/native snapshot.
+        // Compare this and StepTrace's start with the immutable deadline: a
+        // deadline already past at step entry differs from expiry during a stall.
+        // Neither observation establishes the stall's cause or renews authority.
+        let observed_mono = crate::voice_runtime(state).clock().monotonic_ms();
         // Every path here is a primitive try-lock snapshot. In particular, do
         // not call ordinary terminal/SDP getters while diagnosing their stall.
         let expected = expected.or_else(|| {
@@ -136,7 +143,7 @@ fn original_step_diagnostic(
         let confirmation = state
             .voice_handoff
             .fixture_confirmation_diagnostic(selected, expected);
-        format!("{ledger}; {confirmation}; {native:?}; independent {session}")
+        format!("observed monotonic ms={observed_mono}; {ledger}; {confirmation}; {native:?}; independent {session}")
     })
 }
 #[derive(Deserialize, Clone, PartialEq, Eq)]
@@ -1557,7 +1564,7 @@ async fn drive_streams(
     } else {
         30
     };
-    let mut trace = StepTrace::new(&step);
+    let mut trace = StepTrace::new(&step, crate::voice_runtime(state).clock().monotonic_ms());
     let expected = callbacks.expected_parent;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(bound),
@@ -2164,7 +2171,8 @@ fn diagnostic_progress_rejects_payloads_unknown_phases_and_unknown_metadata() {
     ] {
         assert!(serde_json::from_value::<Frame>(frame).is_err());
     }
-    let trace = StepTrace::new(&json!({"name":"🔑".repeat(500)}));
+    let trace = StepTrace::new(&json!({"name":"🔑".repeat(500)}), 123);
+    assert_eq!(trace.started_mono, 123);
     assert_eq!(
         trace.step,
         "?".repeat(40),
