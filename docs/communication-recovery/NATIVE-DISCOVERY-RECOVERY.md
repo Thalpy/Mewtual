@@ -1,5 +1,27 @@
 # Native discovery fixture recovery
 
+## Integrated evidence update (29 October)
+
+All four listed focused regressions now pass on Windows. The capsule inventory
+measures2,176/4,096B. The real forced-attachment scenario passes62.91s, and the
+original alternate-peer discovery scenario passes61.24s, retaining their original
+deadlines/candidates and independent sibling assertions. These local passes do
+not establish the older hosted pressure cause or replace the full Linux gate.
+
+Hosted checkpoint0b5c6739 is still red: Linux native passed1,066/failed44. Its
+first failure moved to the new forced-attachment scenario's later automatic
+WebCrypto pump, which timed out while the parent had no key and one confirmation
+row had action1/receipt0/settled1/ACK0/drained0. The remaining recovery fixtures
+then hit the closed isolation gate. A separate independent delayed-metadata test
+still expected the former8KiB Row refund after the intentional10KiB correction;
+that exact expectation is corrected and its focused test passes. The pump stall
+remains unresolved. Both Root OS jobs also failed formatting at0b5; the module
+ordering/test wrapping are corrected and current Root formatting passes.
+
+The earlier unrun plan and original failure analysis below are retained as
+checkpoint history. Full native/Linux acceptance and strict checks remain open;
+no timeout has been raised and no passing isolated replay is called a CI fix.
+
 29 October 2026. Test-harness-only leaf from pushed `fbe53dab`; no production protocol,
 factory, deadline, attempt, resource ceiling or V2 activation change. Compilation, tests,
 compiled layout measurements and lint are **unrun**. Narrow formatting/static review are

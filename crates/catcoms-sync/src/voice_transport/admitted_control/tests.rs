@@ -764,7 +764,11 @@ async fn admitted_control_q2_supersedes_before_busy_publication_and_late_q1_cann
                 .err(),
             Some(VoiceError::RetryMismatch)
         );
-        assert_eq!(q1.identity().metadata(), historical, "historical metadata never renews stale authority");
+        assert_eq!(
+            q1.identity().metadata(),
+            historical,
+            "historical metadata never renews stale authority"
+        );
     })
     .await;
 }

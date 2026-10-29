@@ -225,7 +225,10 @@ async fn ready_and_closed_share_one_guard_and_delayed_closed_body_remains_paid_a
     assert_eq!(resources.counts(), retained);
     drop(closed);
     collect_inner(&f.state, &owner, EXECUTOR).await.unwrap();
-    assert_eq!(resources.counts().0, retained.0 - 8192);
+    // The complete retired Session allocation raised this original Row's
+    // prepaid contribution from8KiB to10KiB. Delayed serialization must retain
+    // that WHOLE contribution, then return it exactly once after the last reply.
+    assert_eq!(resources.counts().0, retained.0 - 10 * 1024);
     drop(selected);
     host.finish().await.unwrap();
     f.close().await;

@@ -7,7 +7,8 @@ The subsequent correction pairs every lifecycle/retirement alias with the SAME
 outside permit, frees the no-credit State allocation first and uses `Arc::into_inner`
 for all final funding drops. It preserves the larger old State<P> invoice and
 adds the new wrappers; no terms or caps are cut. Its eighth concurrent-final-drop
-regression and updated invoice remain unrun. Actual-diff re-review is clear.
+regression now passes, with all eight Actor cases green (0.08s) and the complete
+updated graph2,816/4,096B. Actual-diff re-review is clear.
 Older activation/Presence Work types are not changed by this scoped correction.
 Native Slot/31 and operational consumers remain required.
 

@@ -1,5 +1,25 @@
 # Admitted Control7 Actor bridge and TCP acceptance
 
+## Integrated focused results (29 October; V2 remains OFF)
+
+The six new Actor tests pass (0.07s), including the outside-funding correction;
+their complete graph measures3,080/4,096B. The eight neutral Actor cases pass
+(0.08s;2,816/4,096B). All twelve Root Control7 cases pass (7.96s), including
+historical metadata after q2 supersession. Actual-diff review is clear for this
+new bridge boundary; inherited roster/older-Work limitations below remain open.
+
+The real four-client TCP scenario passes6.34s: actual Swarm blocks A–C, unjoined
+B stays under genuine Forward pressure while the SAME signed query rotates
+through D, and original Root validates C's signed endpoint Support. The bounded
+test graph measures2,240/4,096B and actual observer future384/1,024B. This is no
+SDP/ICE/RTC, key-generation, media or physical audio acceptance.
+
+The first native compilation exposed a missing direct BLAKE3 dependency in the
+hash-only diagnostic. It is now a test-only dependency on the SAME already-locked
+transitive version, with no production dependency or new resolved crate/version.
+The original compiler failure log is retained. Full backend/native suites and
+strict gates remain pending; the earlier unrun plan below is checkpoint history.
+
 29 October 2026. Implementation and tests are **UNRUN**. Earlier twelve in-memory
 Query/Support passes do not validate this new Actor command or real TCP scenario.
 No Cargo command has run on this leaf; the primary owns the shared Rust target
