@@ -54,6 +54,7 @@ fn index_layout_bytes() -> usize {
         + std::mem::size_of::<[Option<RowRef>; ROWS]>()
         + std::mem::size_of::<IndexOwner>()
         + std::mem::size_of::<ProcessRetainedCredit>()
+        + std::mem::size_of::<Reaper<'static>>()
 }
 
 struct Index {
@@ -340,6 +341,17 @@ impl Drop for MetadataProjection {
 pub(crate) struct Registry {
     index: Mutex<Option<IndexOwner>>,
     stopping: AtomicBool,
+    reaper_busy: AtomicBool,
+}
+/// One original index payment covers one heavy collection frame. Callers never
+/// wait while another collector is destroying an owner (which may itself wake
+/// a reentrant collector). Unwind returns only this execution position, never
+/// a Row/Session or a proof that its actual obligations returned.
+struct Reaper<'a>(&'a AtomicBool);
+impl Drop for Reaper<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 pub(crate) enum Status {
     Pending,
@@ -817,6 +829,33 @@ impl Registry {
     /// Bounded collection requires an irreversibly dead original lease, no pending setup,
     /// and actual drainage of ALL detached owners. Keep the monotonic serial across reuse.
     pub(crate) fn collect_retired(&self, ledger: &super::ledger::Ledger) {
+        if self
+            .reaper_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let _reaper = Reaper(&self.reaper_busy);
+        let paid_index = {
+            self.index
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+        };
+        if !paid_index {
+            // The independently paid ledger still needs quiet collection, but
+            // no index exists to sponsor a heavy Registry collection frame.
+            ledger.collect_retired();
+            return;
+        }
+        self.collect_retired_owned(ledger);
+    }
+
+    /// Keep the fixed Row array out of refused/reentrant caller frames. The
+    /// caller owns the sole affine Reaper through every actual drop and unwind.
+    #[inline(never)]
+    fn collect_retired_owned(&self, ledger: &super::ledger::Ledger) {
         // Reap the two independent admitted custodians outside all guards FIRST.
         // A held output must not pin a returned Session's lane/control payments.
         // This is reachable even while the call lease itself remains live.

@@ -38,6 +38,14 @@ return, even while the overall call remains live. Final Row collection still
 requires the original dead lease and every existing admitted-stage/Slot drain
 predicate. An empty Existing Slot is not a substitute for future admitted debt.
 
+The Registry admits only one heavy collection frame at a time, using a
+nonblocking affine reaper guard. A concurrent or reentrant collector returns
+without allocating a second fixed 64-Row scratch array, modifying return state
+or releasing payments. The separate non-inlined helper is entered only after
+that gate and only when the original paid index exists. An empty Registry still
+allows the independently paid ledger's quiet sweep. The reaper position returns
+on unwind; it is not a Session/Row return certificate.
+
 Setup Ticket fields place original preparation before the last Row alias. The
 allocation-free reaper runs before admitted-key Crypto admission and before its
 UI/Coordinator locks; it does not invoke callbacks from SessionRef destruction.
