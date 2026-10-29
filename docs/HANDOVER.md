@@ -1,5 +1,56 @@
 # Mewtual; Handover
 
+## V2 reservation and memory integration (28 October; integrated gates pending)
+
+The parallel continuation integrates browser budget policy `cb7ecd0b`, exact native SDP
+reservation diagnostics `71453ca5` and native parent-row reservation `91f06da3`.
+`262624bd` preserves the stable registration across ordinary reserved-generation Cancel;
+`ca7ad276` separately corrects the negative-close fixture's transient-Capacity assumption.
+Earlier passing checkpoint results below remain historical evidence.
+
+The browser now defaults to 512 KiB per group with the same 2 MiB aggregate. The local
+policy seam accepts integer KiB values from 256 through 1024 before broker construction;
+there is no settings UI or persistence yet. Broker ABI50 binds that immutable policy to
+the original retained ledger and requires reload for a changed selection. Cleanup of the
+original remains available. The individual 256 KiB job cap, packet/body limits, execution
+limits and existing fees stay fixed. Configuration still pays its measured 64 KiB.
+Actual configured admission/preclaim plus the separate capture helper charges 248 KiB;
+the sixteen-peer 408 KiB inventory is structural, not operational RTC acceptance. See
+[the measured policy and focused evidence](communication-recovery/VOICE-BROWSER-MEMORY-POLICY.md).
+
+Native Slot now also retains an affine parent claim: one real ledger position and checked
+serial, the existing 2,304-byte Row contribution and original 2 KiB PreparedPhase. All
+ordinary/confirmation and SDP allocators exclude its stamp. Exact Ledger, selected owner,
+physical Session and generation bind it; actual preparation/payment destruction precedes
+stamp reuse and per-generation return. There is no dummy selector, Pending row or Action,
+and no consumption/signing API. The unchanged v11 reply is capacity-only; older v11 builds
+did not reserve this native row. Future operational admission needs an explicit upgraded
+contract and cannot infer native-row support from arbitrary old Reserved replies.
+
+The latest completed older Linux run at `e14f3996` had 993 passes and 40 failures. Its sole
+origin was `native_browser_local_discovery_refusal_selects_other_media_peer_and_preserves_indexed_sibling`:
+actual opcode12 reached the 64 KiB SDP storage reservation and repeatedly hit a byte cap;
+39 later failures were the closed fixture gate. A and C use different pools, and old
+indexed media retains an independent 8 KiB partition. The retained owner causing pressure
+is still unestablished. New fixed scalar evidence records the exact group/process cap and
+counts under the deciding pool mutex, then reports them after unlocking with original
+parent and physical request sequence. It changes no limit, deadline, attempt or authority.
+
+Each implementation had its own read-only adversarial review. Browser focused tests pass
+574/574; the diagnostic's five Root regressions pass. Complete integrated suites, native
+diagnostic/layout checks and final build/startup are pending. Primary owns those runs;
+agents run focused checks only, with one heavy Rust process at a time.
+
+The next interface is documented in the reviewed
+[bilateral admission proposal](communication-recovery/VOICE-BILATERAL-ADMISSION-PROPOSAL.md).
+It is approved for staged implementation only. Current Root call-profile authority,
+role-specific consumption, exact negative-result recovery and owned native SDP storage
+remain implementation gates; the proposal is not a wire allocation or activation approval.
+
+V2 remains OFF. Bilateral agreement, role-specific consumption, RoundRef/KDF and operational
+Ready/SDP/RTC/audio, member media relay and combined/physical acceptance remain unfinished.
+Only one physical desktop is available. External download resume is outside this work.
+
 ## Native capacity Control and browser pairing (28 October; inactive, local gates pass)
 
 The code checkpoint is `6245af85` in draft PR81, following pushed baseline `e14f3996`.

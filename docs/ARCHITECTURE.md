@@ -1,5 +1,25 @@
 # Mewtual; Architecture
 
+## V2 reservation and browser budget continuation (28 October; inactive)
+
+Native capacity now includes a real inert parent-row reservation retained by the original
+Slot alongside RootHighPreclaim. One checked serial occupies an existing ledger position;
+every ordinary/confirmation/SDP allocator excludes it. The original Row and PreparedPhase
+contributions remain paid through actual destruction, before stamp reuse or Returned.
+This creates neither a selector nor a Pending row, Action, signature or consume API.
+Version11 bytes remain unchanged. Older version11 native builds held only Root capacity;
+operational admission must independently establish the upgraded contract.
+
+Browser ABI50 adds an immutable local aggregate policy: 512 KiB/group by default,
+integer KiB selections from 256 to 1024, and the original 2 MiB total. Per-job maximum
+remains 256 KiB; packet/action/execution limits and all fees are unchanged. A retained
+broker refuses a different policy and preserves its original cleanup. Settings UI and
+persistence remain open. The distinct configured admission factory pins before ACK and
+pairs original capacity; its `ready` is bootstrap-only. Actual capture composition uses
+248 KiB; the sixteen-peer 408 KiB inventory is structural. Native Root retains its
+independent 512 KiB/group and 2 MiB total. See VOICE-BROWSER-MEMORY-POLICY and HANDOVER.
+The older ABI49/256 KiB checkpoint descriptions below are historical. V2 remains OFF.
+
 ## Native capacity control adapter draft (28 October; inactive)
 
 Operation30/version11 exposes the existing canonical Slot through fixed authenticated
@@ -24,9 +44,10 @@ admission channels. Its one-shot cadence and IO deadline preserve known/unknown 
 custody through actual callback/cancel return; inline callbacks cannot certify elapsed
 cadence. A clock fault closes positive admission, retains negative debt and permits no
 unbounded automatic retry. Pre-ACK faults close rather than falling through to ACK.
-The later already-full configured/audio composition still requires
-measuring this separate8KiB fee; no extra group capacity is promised.
-Native ledger preclaim, bilateral agreement and activation remain open. V2 stays OFF.
+The separately measured8KiB coordinator now fits the current local policy described
+above; that local increase grants no native execution or operational RTC permission.
+The current native parent claim is described above. Bilateral agreement, operational
+consumption and activation remain open. V2 stays OFF.
 
 ## Native canonical admission continuation draft (28 October; inactive)
 
@@ -49,8 +70,8 @@ still retain an empty scheduler cell briefly; Row/Control fees do not claim to f
 opaque tail indefinitely. A future API retaining any task observer across Row collection
 must independently keep its original funding through that observer's return.
 
-The earlier Slot-only checkpoint predates the capacity wire/browser adapter above. No native
-ledger preclaim, signed bilateral agreement or live V2 audio/relay is supplied. Local mode operation29
+The earlier Slot-only checkpoint predated the capacity wire/browser adapter and native row
+reservation above. It supplied no signed bilateral agreement or live V2 audio/relay. Local mode operation29
 and all resource ceilings are unchanged. Production V2 remains OFF.
 
 ## Inert V2 progression capacity (28 October; candidate, inactive)

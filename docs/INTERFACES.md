@@ -1,5 +1,32 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Local V2 budget and native parent claim (28 October; inactive)
+
+`voiceBrowserBudget(groupKiB)` accepts safe integer KiB values from 256 through 1024.
+The default is 512 KiB/group; the aggregate stays 2 MiB and an individual generic job
+stays at most 256 KiB. Copy caller fields once into the original immutable ledger policy
+before work allocation. `windowVoiceCryptoBroker` ABI50 refuses older brokers or a changed
+requested policy without replacing the original ledger. Original cleanup remains callable.
+No settings UI/persistence or live resizing is provided. Peer/server metadata is not a
+source for this local policy. `nativeConfiguredAdmissionAppCalls` selects admission mode
+before channel construction and preclaims after the original29/30 pre-ACK probe; its
+App `ready` still asserts bootstrap only.
+
+`Ledger::reserve_parent` is native-only and returns an affine inert claim bound to exact
+Ledger, selected allocation, physical Session and generation. It holds a checked serial,
+one of the same32 ledger positions, Row2,304 bytes and the original PreparedPhase2KiB.
+It supplies no selector, Action or consumption API. Every allocator excludes its stamp;
+actual owners/payments return before reuse. Current native Reserved requires this claim
+and original Root capacity. Version11 bytes are unchanged, so an older version11 Reserved
+reply cannot establish support for future operational native-row consumption.
+
+`ReservationRefusal` is fixed historical diagnostic data from the deciding Resources
+mutex: requested bytes, original group/process counts/limits and cap/table/invalid flags.
+It contains no group identifier or owner and is never serialized to peers/renderer.
+The observing SDP preparation preserves all existing admission and ownership checks.
+Native harness records it only after unlocking, keyed to original parent and physical
+request; absent/contended observations confer no result. It grants no admission/refund.
+
 ## Local native capacity Control (28 October; implementation draft, V2 inactive)
 
 Physical operation30/version11 is distinct from mode-only operation29. Its exact10-byte

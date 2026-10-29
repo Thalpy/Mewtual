@@ -1,5 +1,28 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native row reservation and local browser policy (28 October; inactive)
+
+The actual native parent claim adds no protocol permission. It binds one existing ledger
+position/serial and original fees to the exact Ledger/selection/physical Session/generation.
+Allocators cannot reuse its stamp until actual preparation and payment destruction.
+Slot cancellation/reclamation must join it alongside Root capacity; no dummy selector or
+Row makes unagreed work executable. Older version11 native responses did not reserve it;
+future signed admission requires explicit support and role/agreement enforcement.
+
+Browser ABI50 chooses a validated immutable local buffer budget before construction.
+Default512KiB/group and selectable256-1024KiB remain below the unchanged2MiB aggregate;
+individual jobs stay at256KiB and protocol/execution limits are independent. Changing
+requested policy cannot replace a retained broker or erase unresolved work. Cleanup of
+the original stays available. This policy measures application-owned buffers, not total
+WebView/SDK/OS RAM. Incoming peer fields never select this policy. Settings UI/persistence
+and live resizing are not implemented; future settings must use the local policy seam.
+
+Byte-refusal diagnostics copy only bounded scalars under the SAME deciding pool mutex.
+They retain no work/pool/group identifier and publish after unlocking. Native test
+observations retain original parent/physical request identity; later stages cannot turn
+old evidence into a current admission, return or refund. The Linux pressure source is
+still unestablished; diagnostic evidence alone does not resolve it. V2 remains OFF.
+
 ## Local capacity observation draft (28 October; inactive)
 
 Authenticated operation30/version11 is a strict Session-level Control grammar selected

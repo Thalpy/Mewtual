@@ -1,6 +1,28 @@
 # Native admission integration
 
-The current code checkpoint (`6245af85`, draft PR81) adds native capacity Control30/version11, strict shared
+The current parallel integration adds a real affine native parent-row claim and browser
+ABI50 local memory policy. The Slot retains both its original RootHighPreclaim and one
+actual ledger position/serial with the same Row2,304-byte and PreparedPhase2KiB payments.
+All allocators exclude the stamp until actual destruction. There is no consume API or
+protocol permission. Version11 bytes remain unchanged; older version11 native builds held
+only Root capacity. Operational consumers need an explicit upgraded support contract.
+
+Browser default512KiB/group, selectable256-1024KiB, retains the fixed2MiB aggregate and
+256KiB individual-job cap. Actual configured admission/capture uses248KiB; sixteen-peer
+408KiB is structural. No settings UI/persistence or production capture/RTC wiring is supplied.
+See VOICE-BROWSER-MEMORY-POLICY and the current HANDOVER for integrated validation status.
+
+The [reviewed bilateral proposal](VOICE-BILATERAL-ADMISSION-PROPOSAL.md) now records the
+next interface and its staged owner agreement. It requires issuer-owned current Root
+call-profile authority before delegating keys or publishing a participant, and actual
+ownership of the native 64 KiB SDP sidecar before promising whole-chain capacity.
+Older still-recognized child leases and unrelated ordinary-pool pressure are explicit
+adversarial cases. Neither that document nor current capacity-only replies implement
+these gates or permit an operational producer.
+
+## Earlier capacity-pairing checkpoint
+
+The earlier code checkpoint (`6245af85`, draft PR81) adds native capacity Control30/version11, strict shared
 browser codecs and retained capacity-only browser pairing.38 focused native tests and the
 assembled Control graph guard pass.17 codec/frame tests,37 actual-WebCrypto pairing tests
 and nine cadence units pass. Browser re-review has no remaining blocker/high/medium;
@@ -23,16 +45,17 @@ strict native Clippy and explicit check/build/startup pass. Production V2
 remains OFF. This document describes implemented native custody and the remaining connection,
 not completed native admission, signed readiness, media relay or physical acceptance.
 
-## Next native ledger and agreement boundary (design only)
+## Native ledger reservation and next agreement boundary
 
-The next reviewed slice is an inert affine native parent-row claim, retained by the
-SAME Slot alongside RootHighPreclaim. Reserve one of the existing32 positions without a
+The native parent-row claim is now implemented, retained by the
+SAME Slot alongside RootHighPreclaim. It reserves one of the existing32 positions without a
 dummy selector, Pending row, work projection or signature. Pay the existing2304-byte Row
 fee plus the SAME PreparedPhase2KiB contribution (4352 bytes). Every allocator, including
-SDP children, must exclude reserved serial stamps. Eventual private upgraded consumption
+SDP children, excludes reserved serial stamps. Eventual private upgraded consumption
 moves the SAME serial/payment/preparation into the real Row; no refund/recharge or
-deadline reset. Slot reclamation/emergency recovery/Returned/Closed must include actual
-claim return. Measure Index against its1024-byte guard and all original native envelopes.
+deadline reset. That consumption API remains unimplemented. Slot reclamation/emergency
+recovery/Returned/Closed join actual claim return. Index776/1024 and the original native
+envelopes pass focused guards; primary still owns integrated gates.
 One parent claim does not promise descendant capacity.
 
 Do not call the pilot producer to consume this claim: its legacy PreparedChain constructor
@@ -42,8 +65,9 @@ orientation/evidence and its own correct backing. Existing signed Ready authenti
 actual post-Finish transition. It is not a pre-agreement capability advertisement. Complete
 bilateral binding, RoundRef/KDF domain, role-specific consume, immutable RoundGate,
 Request/Grant/Commit, lost-Commit recovery and failed-round Forget remain required.
-The separately charged browser8KiB remains a real deficit in the previously full
-configured/audio composition; removing only the old2KiB lifecycle does not make it fit.
+The separately charged browser8KiB now fits the measured local512KiB default above;
+configuration keeps its proven64KiB fee. This does not increase native Root's independent
+512KiB/group or2MiB total, or establish operational audio composition.
 This design review authorizes neither an unspecified wire protocol nor activation.
 
 ## Implemented Actor boundary
@@ -150,11 +174,13 @@ SDK/IO/task/cell/unsubscribe return. Broker ABI49 uses the SAME retained window 
 Unknown/cancel-failed timer registrations remain owned until actual return; inline or
 invalid cadence cannot drive an outer poll loop. Clock faults close positive admission,
 including before ACK, then retain negative debt with bounded/manual availability recovery.
-The later already-full configured/audio composition still needs a measured solution.
+The current local memory policy resolves that browser budget obstacle; operational
+native/browser/RTC composition still needs the agreement and consume boundaries.
 
-Reserved is capacity only. It is NOT signed Ready, a native32-row ledger reservation,
-DeviceId orientation, bilateral Request/Grant/Commit or RoundRef/KDF permission. Those
-remain separate requirements before any production V2 activation.
+Current native Reserved includes the actual inert ledger position as well as Root
+capacity. An arbitrary older version11 Reserved reply cannot certify that support.
+Neither is a consumed row, signed Ready, DeviceId orientation, bilateral Request/Grant/Commit
+or RoundRef/KDF permission. Those remain requirements before production V2 activation.
 
 The current candidate uses a DISTINCT Session Control30/version11 for canonical capacity
 Register/Observe/Cancel, keeping mode-only operation29 unchanged. First capacity admission

@@ -1,5 +1,57 @@
 # Chat, files and voice implementation evidence
 
+## Native row reservation and browser memory policy (28 October; inactive draft)
+
+The current runtime checkpoint is `ca7ad276` on `communication-v2-native-admission`
+(draft PR81). It integrates browser policy `cb7ecd0b`, exact reservation diagnostics
+`71453ca5`, actual native parent-row claims `91f06da3`, the stable-registration Cancel
+correction `262624bd` and the separate negative-close fixture correction `ca7ad276`.
+The earlier full-suite results below describe their named earlier checkpoints.
+
+The browser defaults to 512 KiB per group. Its immutable local configuration seam accepts
+256–1024 KiB, retains the fixed 2 MiB aggregate and 256 KiB individual-job cap, and
+requires a reload for a changed selection. There is no settings UI or persistence.
+Actual configured admission/preclaim plus the separate capture helper uses 248 KiB.
+The 408 KiB sixteen-peer inventory is structural, not a working sixteen-peer RTC test.
+See [the measured browser policy](VOICE-BROWSER-MEMORY-POLICY.md).
+
+The canonical native Slot retains both its original Root capacity and one affine claim
+on an actual native ledger position and serial. All row allocators exclude that serial
+until the original preparation and payments have actually returned. No dummy row,
+selector, Action, signing authority or consumption API is created. Version11 bytes are
+unchanged; an old version11 Reserved reply cannot establish this new native-row support.
+The Reserved-generation Cancel correction preserves the same registration and incarnation
+without weakening genuine call, UI, selection, epoch or whole-mode revocation.
+
+Focused evidence includes 574 browser tests, five Root diagnostic regressions, nine native
+parent-claim units, actual Actor/Slot cancellation cases and unchanged concrete graph
+guards. The physical Control graph is 12,244 bytes against its existing 12,288-byte
+payment. The previously failing alternate-peer/native-SDP scenario passes locally on
+Windows in 82.81 seconds. That does not establish the cause of the earlier Linux failure.
+The new diagnostic captures decision-time byte counts under the original resource mutex
+and reports them outside it; it does not increase limits or grant retry authority.
+
+The initial negative-close fixture failed on a transient local Capacity refusal. Its
+separate correction retries only the same original negative operation after joining the
+refused attempt, with the existing bounded cadence. Four actual TCP cases pass afterward;
+the failed evidence is retained. Runtime admission, deadlines and publication rules did
+not change in that correction.
+
+Both implementation leaves had their own read-only adversarial review and re-review.
+The integrated runtime review has no remaining blocker/high/medium; three low documentation
+findings were corrected. Complete integrated suites and the final build/startup gates are
+running centrally, with only one heavy Rust process at a time. A fresh dependency audit
+passes all four categories. Final results will replace this pending statement.
+
+The [bilateral admission proposal](VOICE-BILATERAL-ADMISSION-PROPOSAL.md) has its own
+read-only design review and staged owner agreement. Its profile, wire, ownership,
+negative-recovery and sidecar gates are required future implementation, not test evidence.
+
+Production V2 remains OFF. Bilateral agreement, actual role-specific consumption,
+RoundRef/KDF, operational Ready/SDP/RTC, member media relay and combined/physical acceptance
+remain open. Only one physical desktop is available. External download resume is outside
+this continuation.
+
 ## Capacity Control and browser pairing continuation (28 October; inactive draft)
 
 The canonical native Slot now has authenticated Session Control30/version11, separate
