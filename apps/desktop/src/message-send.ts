@@ -3,7 +3,8 @@ export type SendMessageResult = {
   accepted: boolean;
   message_id?: string;
   replayed?: boolean;
-  disposition?: "committed" | "stopped-before-commit" | "stopped-after-commit";
+  /** Retired Stop fences future work but cannot establish historical acceptance after Leave. */
+  disposition?: "committed" | "stopped-before-commit" | "stopped-after-commit" | "stopped-retired";
   persistence:
     | { status: "durable" }
     | { status: "pending"; reason: "snapshot_failed" | "store_unavailable" | "write_failed" }
@@ -31,6 +32,7 @@ export type SendOutcome = "refused" | "failed" | "sent" | "uncertain";
 
 /** Classify this reply without letting a retry refusal erase a prior unknown outcome. */
 export function sendOutcome(result: SendMessageResult, priorMayHaveGone = false): SendOutcome {
+  if (result.disposition === "stopped-retired") return "uncertain";
   if (result.accepted && result.persistence.status === "durable") return "sent";
   // Refused because the conversation moved on: never authored, and held for review with its
   // automatic retry paused. This is absence evidence for this attempt only: a lost predecessor
@@ -54,6 +56,9 @@ export async function sendAndRefresh(
 }
 
 export function persistenceWarning(result: SendMessageResult, priorMayHaveGone = false): string | null {
+  if (result.disposition === "stopped-retired") return result.accepted === false && result.persistence.status === "durable"
+    ? "Future retries are stopped. The original operation may already have been applied."
+    : "Stop confirmation has not completed. The original operation may already have been applied; its retry identity is retained.";
   if (!result.accepted && result.persistence.status === "superseded") {
     if (priorMayHaveGone) return "Automatic retry is paused because the conversation changed. An earlier attempt may have sent this message; check the conversation before sending it again.";
     return "This pending message needs review because the conversation changed. Automatic retry is paused; move it to a draft to start a new send.";

@@ -40,7 +40,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
-  import { addPendingSend, durableStopOriginal, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
@@ -20723,10 +20723,14 @@
         result = (await invokeDebugged<SendMessageResult>("stop_durable_chat", {
           server: intent.server, original: durableStopOriginal(intent),
         })).value;
-      } else if (intent.kind === "edit" || intent.kind === "delete") {
-        result = (await invokeDebugged<SendMessageResult>(intent.kind === "edit" ? "edit_message" : "delete_message", {
+      } else if (intent.kind === "edit") {
+        result = (await invokeDebugged<SendMessageResult>("edit_message", {
           ...common, id: intent.messageId, target: intent.target,
-          ...(intent.kind === "edit" ? { text: intent.text } : {}),
+          text: intent.text,
+        })).value;
+      } else if (intent.kind === "delete") {
+        result = (await invokeDebugged<SendMessageResult>("delete_message", {
+          ...common, id: intent.messageId, target: intent.target,
         })).value;
       } else {
         result = (await invokeDebugged<SendMessageResult>("send_message", {
@@ -20745,6 +20749,24 @@
       }
       throw failure;
     }
+    if (!intent.resolution && result.disposition === "stopped-retired" && durableStopTerminal(result)
+      && pendingSubmissionCurrent(intent, session)) {
+      // A stale positive continuity copy can encounter a native fence saved by a
+      // different session. The synced negative terminal grants no new authoring.
+      // Seal negative custody before removal so lock/cleanup failure can only
+      // repeat Stop. Keep send/edit text for explicit recovery rather than lose it.
+      let resolving: PendingSend | undefined;
+      await savePendingDecision(intent.token, () => {
+        if (!samePendingIntent(pendingSends[intent.token], intent)) throw new Error("The retired request changed before its Stop decision was saved.");
+        resolving = { ...pendingSends[intent.token], acceptance: "ambiguous",
+          resolution: intent.kind === "delete" ? "cancel" : "recover" };
+        const next = { ...pendingSends, [intent.token]: resolving };
+        uiContinuityVersion = 2;
+        return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next }),
+          commit: () => { pendingSends = next; } };
+      });
+      if (resolving && pendingSubmissionCurrent(resolving, session)) intent = resolving;
+    }
     if (!intent.resolution && pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
       pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: "context_changed" };
       await saveUiStateImmediately();
@@ -20753,17 +20775,23 @@
       await saveUiStateImmediately();
     }
     if (intent.resolution && pendingSubmissionCurrent(intent, session)) {
-      if (result.persistence.status === "durable" && ["committed", "stopped-before-commit", "stopped-after-commit"].includes(result.disposition ?? "")) {
+      if (durableStopTerminal(result)) {
         // Native has saved an exact-token terminal. Only now may continuity release
         // its slot; a failed cleanup write safely replays the same Stop after reload.
         await savePendingDecision(intent.token, () => {
           if (!samePendingIntent(pendingSends[intent.token], intent)) throw new Error("The pending Stop decision changed.");
-          const next = resolvePendingSend(pendingSends, recoveredSendDrafts, intent.token, intent.resolution!);
+          // A retired-server fence establishes only future non-publication. Preserve
+          // historical ambiguity in any recovered copy, even for a legacy fresh marker.
+          const pending = result.disposition === "stopped-retired"
+            ? { ...pendingSends, [intent.token]: { ...pendingSends[intent.token], acceptance: "ambiguous" as const } }
+            : pendingSends;
+          const next = resolvePendingSend(pending, recoveredSendDrafts, intent.token, intent.resolution!);
           return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
             commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[intent.token]; } };
         });
+        if (result.disposition === "stopped-retired" && !locked && session === uiStateLoadGeneration) toast(retiredStopWarning(intent), "warn", 12000);
       }
-    } else if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable"
+    } else if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable" && result.disposition !== "stopped-retired"
       && ((intent.kind !== "edit" && intent.kind !== "delete") || result.disposition === "committed")) {
       delete pendingSends[intent.token];
       delete pendingSendErrors[intent.token];

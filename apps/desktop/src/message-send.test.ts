@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import ts from "typescript";
-import { addPendingSend, durableStopOriginal, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted } from "./pending-sends.ts";
+import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted } from "./pending-sends.ts";
 import { readFileSync } from "node:fs";
 import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult } from "./message-send.ts";
 
@@ -39,13 +39,22 @@ test("a replaced conversation cannot claim persistence or suggest ordinary retry
   assert.match(persistenceWarning(result)!, /could create a duplicate/);
 });
 
+test("a retired terminal never reports a historical send success or a pending positive save", () => {
+  const result: SendMessageResult = { accepted: false, persistence: { status: "durable" }, disposition: "stopped-retired" };
+  assert.equal(sendOutcome(result), "uncertain");
+  assert.match(persistenceWarning(result)!, /Future retries are stopped/);
+  assert.doesNotMatch(persistenceWarning(result)!, /will retry automatically|history save has not completed/);
+  assert.equal(sendOutcome({ ...result, accepted: true }), "uncertain");
+  assert.match(persistenceWarning({ ...result, persistence: { status: "pending", reason: "write_failed" } })!, /Stop confirmation has not completed/);
+});
+
 // Execute the actual composer and pending-send functions, with only their I/O replaced.
 function composer(submit: (args: Record<string, unknown>) => Promise<SendMessageResult>,
   refresh = async () => {}, context = async () => "a".repeat(64), onSeal: () => void = () => {}) {
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
   const body = ts.transpile(source.slice(source.indexOf("  async function submitPendingSend("),
     source.indexOf("  // Inline edit of one of your own messages.")), { target: ts.ScriptTarget.ES2022 });
-  return new Function("submit", "refresh", "context", "onSeal", "sendAndRefresh", "persistenceWarning", "sendOutcome", "addPendingSend", "durableStopOriginal", "matchingPendingSend", "samePendingIntent", "pendingSendRetryBlock", "resolvePendingSend", "sendRefusedUnaccepted", `
+  return new Function("submit", "refresh", "context", "onSeal", "sendAndRefresh", "persistenceWarning", "sendOutcome", "addPendingSend", "durableStopOriginal", "durableStopTerminal", "retiredStopWarning", "matchingPendingSend", "samePendingIntent", "pendingSendRetryBlock", "resolvePendingSend", "sendRefusedUnaccepted", `
     let draft = "one message", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
@@ -70,7 +79,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
       lock() { sealed = JSON.parse(continuityJson()); locked = true; uiStateLoadGeneration++; draft = ""; drafts = {}; pendingSends = {}; sending = false; pendingSendNonce++; },
       state() { return { draft, drafts, pendingSends, recoveredSendDrafts, sealed, warnings, error, sending }; }
     };
-  `)(submit, refresh, context, onSeal, sendAndRefresh, persistenceWarning, sendOutcome, addPendingSend, durableStopOriginal, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted);
+  `)(submit, refresh, context, onSeal, sendAndRefresh, persistenceWarning, sendOutcome, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted);
 }
 
 test("composer keeps the draft until its retry identity can be sealed", async () => {

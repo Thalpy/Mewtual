@@ -1,3 +1,5 @@
+import type { SendMessageResult } from "./message-send.ts";
+
 /** Unfinished caller intents live only in the vault-sealed continuity record. */
 type PendingIntentBase = {
   token: string;
@@ -106,6 +108,9 @@ export function resolvePendingSend(
 
 export function pendingAcceptanceWarning(intent: PendingSend): string {
   if (intent.resolution) return "Stop is awaiting a durable confirmation. This exact request will only retry Stop; an already saved change cannot be retracted.";
+  if (intent.kind === "edit" || intent.kind === "delete") return intent.acceptance === "not_accepted"
+    ? "This change request has not been submitted."
+    : `${intent.kind === "edit" ? "This edit" : "This deletion"} may already have been applied. Stopping retries cannot retract an applied change.`;
   return intent.acceptance === "not_accepted"
     ? "This request has not been submitted."
     : "This message may already have been accepted. Stopping retries cannot retract a message. Sending recovered text later may create a duplicate.";
@@ -154,6 +159,22 @@ export function durableStopOriginal(intent: PendingSend) {
 
 export function pendingActionLabel(intent: PendingSend): string {
   return intent.kind === "edit" ? "Edit message" : intent.kind === "delete" ? "Delete message" : "Send message";
+}
+
+/** Only an acknowledged durable native terminal permits releasing caller custody. */
+export function durableStopTerminal(result: SendMessageResult): boolean {
+  if (result.persistence.status !== "durable") return false;
+  if (result.disposition === "stopped-retired") return result.accepted === false;
+  return result.disposition === "committed" || result.disposition === "stopped-before-commit"
+    || result.disposition === "stopped-after-commit";
+}
+
+/** A retired store can fence future work without reconstructing its erased historical outcome. */
+export function retiredStopWarning(intent: PendingSend): string {
+  const history = intent.kind === "edit" ? "This edit may already have been applied."
+    : intent.kind === "delete" ? "This deletion may already have been applied."
+    : "This message may already have been sent.";
+  return `Future retries are stopped. ${history}`;
 }
 
 /**

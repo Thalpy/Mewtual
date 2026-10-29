@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { addPendingSend, durableStopOriginal, matchingPendingMutation, matchingPendingSend, MAX_PENDING_SENDS,
+import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, MAX_PENDING_SENDS,
   samePendingIntent, sanitizePendingSends, type PendingSend } from "./pending-sends.ts";
 import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
 import { deferred, pendingManagerApp, settle } from "./pending-manager-fixture.test.ts";
@@ -14,6 +14,7 @@ const deletion: PendingSend = { ...edit, kind: "delete", text: "" };
 const collection = (item: PendingSend) => ({ [item.token]: item });
 const durable = { accepted: true, persistence: { status: "durable" as const }, disposition: "committed" as const };
 const stopped = { accepted: false, persistence: { status: "durable" as const }, disposition: "stopped-before-commit" as const };
+const retired = { accepted: false, persistence: { status: "durable" as const }, disposition: "stopped-retired" as const };
 
 test("v1 sends retain their original shape while v2 action and Stop hydration reject downgrade/coercion", () => {
   assert.equal(JSON.stringify(sanitizePendingSends(collection(post))), JSON.stringify(collection(post)));
@@ -193,6 +194,135 @@ test("an unavailable original server cannot claim a durable Stop or silently fre
   assert.equal(app.state().stops.length, 2);
   assert.equal(app.state().submissions.length, 0);
   assert.equal(app.state().sealed.pendingSends[token].resolution, "cancel");
+  app.answerStop(async () => ({ ...retired, accepted: true }));
+  await assert.rejects(app.resolve(token, "cancel"), /awaiting a durable confirmation/);
+  assert.ok(app.state().pendingSends[token], "retired replies must explicitly deny positive acceptance");
+  app.answerStop(async () => retired); await app.resolve(token, "cancel");
+  assert.deepEqual(app.state().pendingSends, {});
+  assert.match(app.state().warnings.at(-1)!, /message may already have been sent/);
+  app.done();
+});
+
+test("retired Stop requires a durable negative terminal and describes only future fencing", () => {
+  assert.equal(durableStopTerminal(retired), true);
+  for (const result of [{ ...retired, accepted: true },
+    { ...retired, persistence: { status: "pending" as const, reason: "write_failed" as const } },
+    { ...retired, persistence: { status: "superseded" as const } },
+    { accepted: false, persistence: { status: "durable" as const } }]) assert.equal(durableStopTerminal(result), false);
+  assert.equal(retiredStopWarning(post), "Future retries are stopped. This message may already have been sent.");
+  assert.equal(retiredStopWarning(edit), "Future retries are stopped. This edit may already have been applied.");
+  assert.equal(retiredStopWarning(deletion), "Future retries are stopped. This deletion may already have been applied.");
+});
+
+test("retired Stop reply loss and pending fence retain exact negative custody across reload until durable replay", async () => {
+  const original = { ...edit, acceptance: "not_accepted" as const };
+  const app = pendingManagerApp({ version: 2, pendingSends: collection(original) }); await app.hydrate();
+  app.answerStop(async () => { throw new Error("retired fence reply lost"); });
+  await assert.rejects(app.resolve(token, "recover"), /reply lost/);
+  const request = app.state().stops[0].args;
+  app.answerStop(async () => ({ ...retired, persistence: { status: "pending", reason: "write_failed" } }));
+  await app.retry(true);
+  assert.equal(app.state().pendingSends[token].resolution, "recover");
+  assert.deepEqual(app.state().recoveredSendDrafts, {});
+  app.lock(); await app.unlock(); app.answerStop(async () => retired); await app.retry(true);
+  assert.deepEqual(app.state().stops.map(call => call.args), [request, request, request]);
+  assert.equal(app.state().submissions.length, 0); assert.equal(app.state().contextCalls, 0);
+  assert.deepEqual(app.state().pendingSends, {});
+  assert.equal(app.state().recoveredSendDrafts[token].acceptance, "ambiguous", "retirement cannot certify the old historical outcome");
+  assert.equal(app.state().recoveredSendDrafts[token].kind, "edit");
+  assert.equal(app.state().warnings.at(-1), retiredStopWarning(edit));
+  app.done();
+});
+
+test("all retired actions retain historical uncertainty while only sends/edits recover text", async () => {
+  for (const intent of [post, edit, deletion]) {
+    const app = pendingManagerApp({ version: 2, pendingSends: collection({ ...intent, acceptance: "not_accepted" }) }); await app.hydrate();
+    app.answerStop(async () => retired); await app.resolve(token, "recover");
+    assert.deepEqual(app.state().pendingSends, {});
+    if (intent.kind === "delete") assert.deepEqual(app.state().recoveredSendDrafts, {});
+    else assert.equal(app.state().sealed.recoveredSendDrafts[token].acceptance, "ambiguous");
+    assert.equal(app.state().warnings.at(-1), retiredStopWarning(intent));
+    app.done();
+  }
+});
+
+test("a stale positive durable-retired reply seals negative custody before recovery for every action", async () => {
+  for (const intent of [post, edit, deletion]) {
+    const app = pendingManagerApp({ version: intent.kind ? 2 : 1, pendingSends: collection(intent) }); await app.hydrate();
+    app.conversation(7, "9"); app.type("newer composer"); app.answer(async () => retired);
+    await app.submit(token);
+    assert.equal(app.state().submissions.length, 1);
+    assert.equal(app.state().submissions[0].sealed.pendingSends[token].resolution, undefined);
+    assert.equal(app.state().writes[1].version, 2);
+    assert.equal(app.state().writes[1].pendingSends[token].resolution, intent.kind === "delete" ? "cancel" : "recover");
+    assert.equal(app.state().writes[1].pendingSends[token].acceptance, "ambiguous");
+    assert.equal(app.state().writes[1].pendingSends[token].token, token);
+    assert.deepEqual(app.state().writes[2].pendingSends, {});
+    assert.deepEqual(app.state().pendingSends, {});
+    assert.equal(app.state().stops.length, 0, "the already synced exact native terminal covers removal after the negative seal");
+    assert.equal(app.state().draft, "newer composer");
+    if (intent.kind === "delete") assert.deepEqual(app.state().recoveredSendDrafts, {});
+    else assert.equal(app.state().recoveredSendDrafts[token].text, intent.text);
+    app.done();
+  }
+});
+
+test("positive reply loss and uncertain retired write retry the same token until a synced negative terminal", async () => {
+  const app = pendingManagerApp({ pendingSends: collection(post) }); await app.hydrate();
+  app.answer(async () => { throw new Error("positive fence reply lost"); });
+  await assert.rejects(app.submit(token), /reply lost/);
+  app.answer(async () => ({ ...retired, persistence: { status: "pending", reason: "write_failed" } }));
+  await app.retry(true);
+  assert.equal(app.state().pendingSends[token].resolution, undefined);
+  assert.match(app.state().error, /Stop confirmation has not completed/);
+  app.lock(); await app.unlock(); app.answer(async () => retired); await app.retry(true);
+  assert.deepEqual(app.state().submissions.map(call => call.args.retryToken), [token, token, token]);
+  assert.equal(app.state().contextCalls, 0);
+  assert.deepEqual(app.state().pendingSends, {});
+  assert.equal(app.state().recoveredSendDrafts[token].acceptance, "ambiguous");
+  assert.match(app.state().error, /original operation may already have been applied/);
+  app.done();
+});
+
+test("positive retired conversion cannot remove custody if its negative seal or later cleanup fails", async () => {
+  const app = pendingManagerApp({ version: 2, pendingSends: collection(edit) }); await app.hydrate();
+  app.answer(async () => { app.failSaves(true); return retired; });
+  await assert.rejects(app.submit(token), /decision was not completed/);
+  assert.equal(app.state().pendingSends[token].resolution, undefined);
+  assert.equal(app.state().sealed.pendingSends[token].token, token);
+  app.failSaves(false); app.answer(async () => retired);
+  const cleanup = deferred();
+  app.holdSave(Promise.resolve()); app.holdSave(Promise.resolve()); app.holdSave(cleanup.promise);
+  const retrying = app.retry(true); await settle();
+  assert.equal(app.state().pendingSends[token].resolution, "recover");
+  assert.equal(app.state().sealed.pendingSends[token].resolution, "recover");
+  app.failSaves(true); cleanup.resolve(); await retrying;
+  assert.ok(app.state().pendingSends[token]); assert.deepEqual(app.state().recoveredSendDrafts, {});
+  const positives = app.state().submissions.length;
+  app.failSaves(false); app.answerStop(async () => retired); await app.retry(true);
+  assert.equal(app.state().submissions.length, positives, "cleanup recovery can dispatch only Stop");
+  assert.equal(app.state().stops.length, 1);
+  assert.deepEqual(app.state().pendingSends, {});
+  app.done();
+});
+
+test("a retired tag with positive acceptance cannot remove a stale positive request", async () => {
+  const app = pendingManagerApp({ pendingSends: collection(post) }); await app.hydrate();
+  app.answer(async () => ({ ...retired, accepted: true })); await app.submit(token);
+  assert.ok(app.state().pendingSends[token]);
+  assert.equal(app.state().pendingSends[token].resolution, undefined);
+  assert.deepEqual(app.state().recoveredSendDrafts, {});
+  app.done();
+});
+
+test("a late retired Stop terminal cannot display its warning after lock", async () => {
+  const app = pendingManagerApp({ version: 2, pendingSends: collection(edit) }); await app.hydrate();
+  const reply = deferred<any>(); app.answerStop(() => reply.promise);
+  const resolving = app.resolve(token, "cancel"), rejected = assert.rejects(resolving, /session changed/);
+  await settle(); app.lock(); reply.resolve(retired); await rejected;
+  assert.deepEqual(app.state().warnings, []);
+  await app.unlock(); app.answerStop(async () => retired); await app.retry(true);
+  assert.equal(app.state().warnings.at(-1), retiredStopWarning(edit));
   app.done();
 });
 

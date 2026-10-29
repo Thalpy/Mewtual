@@ -57,10 +57,21 @@ every later retry, including after lock/reload, dispatches only Stop. A durable 
 serialized continuity save that removes the entry or installs its recovered text.
 The slot stays occupied until that final write succeeds. A cleanup failure safely
 replays Stop; it never remints a positive operation.
-The current native Stop still needs the original mounted server actor/store. A
-request whose server was permanently left cannot yet obtain that terminal; its
-saved Stop remains pending rather than claiming safe release. The orphaned-manager
-tests replace native I/O and do not establish an absent-server tombstone mechanism.
+For a permanently left server, only the distinct native `stopped-retired` terminal
+with `accepted: false` and durable persistence permits release. It confirms a
+vault-sealed fence against future retries/publication; historical acceptance remains
+unknown. The UI says the message may already have been sent, or the edit/deletion
+may already have been applied. Recovered text carries an ambiguous acceptance marker.
+Missing-server errors, lost replies, Pending and Superseded alone retain the same
+saved Stop and occupied slot. Frontend tests replace native I/O; actual vault-fence
+durability and pre-Actor restore fencing remain native integration responsibilities.
+A stale positive continuity copy can receive this same synced retired terminal
+after native rewrites its existing exact fence. Before releasing that copy, the
+UI first seals a negative resolution with its original identity: recover for send/edit
+text, cancel for a textless deletion. Cleanup then uses the already confirmed native
+terminal. Failed cleanup or lock leaves a sealed Stop; later retries cannot author
+positively. A failed negative seal retains the original request for exact native
+fence reconciliation. No error string alone triggers this conversion or removal.
 Queued ordinary saves construct their snapshots at execution time, after preceding
 decision commits, so an older captured snapshot cannot resurrect retired work. A resolution
 temporarily holds submission and completion mutations. Every submission also checks its
