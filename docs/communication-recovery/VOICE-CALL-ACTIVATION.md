@@ -7,8 +7,9 @@ producer is enabled. A successful selection is not permission to use an old cryp
 The actual Root issuer creates an immutable admitted lease. Legacy endpoint factories,
 queued source work and legacy ingress cannot write into a selected admitted call. A
 healthy existing participant cannot be upgraded in place. Epoch changes close admitted
-children before inherited callbacks run; notifications and actual destruction happen
-outside the original Group/Policy guards, including callback-panic paths.
+children before inherited callbacks run. New admitted-child notifications and retained
+alias destruction happen outside the original Group/Policy guards, including callback-panic
+paths. Inherited Existing/ActorGate/session notification paths are not rewritten here.
 
 Native retains the exact prepared pair and original paid work. Its original UI-session
 guard orders Root selection against lock, replacement and epoch invalidation. Root

@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Inactive trusted call activation (29 October; Rust-only)
+
+`ServerActor::prepare_admitted_voice_call` returns one original inert Root pair and its
+paid exact-Actor control. Selection/clear publish canonical outcomes through original Work
+and real retirement, not an invoke waiter's lifetime. The native adapter remains private
+and unregistered. Existing key/endpoint APIs cannot consume its admitted grant. No Tauri,
+IPC, operation31, signing, browser, SDP/RTC or wire permission is added by these APIs.
+
+Native result recovery reuses one canonical Cell. Explicit ACK and actual Root/argument/
+execution return are separate requirements for Forget. Recovery requires equality with
+the exact current checked serial on one shared return stamp; future/stale values and
+overflow refuse. `Closed` and Stop ACK mean terminal effects are fenced, not physical
+task/permit return. See [the activation contract](communication-recovery/VOICE-CALL-ACTIVATION.md)
+and [mailbox contract](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
 ## Normal Actor stop versus command return (29 October; focused checks pass)
 
 `ServerActor::stop_and_wait` acknowledges terminal first-effects closure. `AppEvent::Closed`

@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+## Issuer-bound native call activation (29 October; private, inactive)
+
+The actual Root issuer prepares an immutable admitted call profile before granting any
+key/endpoint permission. Root selection and the native final commit share the original
+UI generation and commit guard; Existing creators and ingress cannot replace that call.
+An actor-local paid owner supplies exact original queue routing through a real std Weak
+tombstone. Normal shutdown detaches it before Root retirement while retaining the closed
+receiver to join older pre-close permits. Abort/unwind closes the new-family send gate.
+
+Native retains one canonical paid Cell, exact Work/outcome and explicit result ACK. Its
+outer runner destroys the execution Box before publishing the original exact serial stamp;
+negative recovery shares that same allocation. Final index backing deallocates before its
+last original payer. The measured native graph fits 17,752/18,432 bytes; Root/control/RPC
+payments and original process/group limits stay independent. See
+[activation](communication-recovery/VOICE-CALL-ACTIVATION.md) and
+[normal mailbox retirement](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+No production command or admitted key/LocalJoin/Ready/RTC producer is connected. V2 is OFF.
+
 ## Normal Actor mailbox retirement (29 October; focused checks pass)
 
 Normal terminal paths close and synchronously discard queued commands before awaiting

@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive admitted call selection and actual return (29 October)
+
+An admitted profile belongs to the actual Root-issued child before any grant escapes;
+renderer metadata cannot upgrade a healthy Existing join. Original Root instance, resources,
+scope, grant, selected native owner and still-held UI generation/commit identity fence the
+final selection. Epoch changes invalidate admitted children before deferred notifications.
+Legacy and Existing endpoint writers cannot use the new profile during its keyless interval.
+
+Queue acceptance, callback completion, weak absence and logical closure do not certify
+argument return. Native canonical history keeps the same Work/outcome and payer. The outer
+runner frees its execution Box before the shared exact stamped return; per-retry stamp
+allocations cannot accumulate behind paused old destructors. Index backing frees before
+its last payer, including revocation unwind. Explicit ACK remains independent of cleanup.
+The measured native fee is 18 KiB within unchanged resource ceilings. This inventory covers
+application-owned graphs, not allocator/RSS or synchronous empty Tokio-cell collection.
+Normal old-family mailbox retirement joins pre-close permits; their abort/panic path is
+still outside this correction. These private interfaces grant no live V2/RTC authority.
+See [the scoped evidence](communication-recovery/VOICE-CALL-ACTIVATION.md).
+
 ## Normal terminal mailbox custody (29 October; focused checks pass)
 
 Closing/dropping a Tokio bounded Receiver does not invalidate an already-held Permit's

@@ -1,5 +1,55 @@
 # Mewtual; Handover
 
+## Native activation and mailbox integration (29 October; inactive, validation in progress)
+
+This local continuation integrates issuer-bound call activation `f4e75ea1`, private
+admitted wire codec `ee52990c`, normal mailbox retirement `13ac6cd1`, control detachment
+`78cbb721` and native destruction/return-stamp correction `1c0cd4bb`. It is not pushed yet.
+The native activation entry is private and unregistered; no operational key, Ready,
+SDP/RTC or media producer is enabled. V2 remains OFF.
+
+The actual Root issuer fixes the admitted profile before grant escape. Original UI
+generation/commit custody orders selection against lock and epoch changes. Existing
+endpoint/legacy writers cannot replace that admitted activation. One paid actor-local
+control supplies only exact original routing; native history holds real std Weak owners,
+not a strong Actor or raw Tokio WeakSender. The native runner destroys its execution Box
+before publishing an exact return stamp. All recovery uses the same stamped allocation.
+Final index backing remains paid through actual deallocation and revocation unwind.
+The complete native graph is 17,752/18,432 bytes; the measured 18 KiB fee replaces the
+insufficient provisional 16 KiB inside unchanged group/process limits. See
+[the scoped contract, tests and remaining gates](communication-recovery/VOICE-CALL-ACTIVATION.md).
+
+Normal actor termination retains its closed receiver through Closed delivery and joins
+actual pre-close permits using a negative-only final drain. The new-family control detaches
+before Root retirement/blocked Closed. The two old-admission regressions fail before the
+fix and pass afterward; the leaf's 35 actor tests and strict App Clippy pass. Abort/panic
+retirement of older queue families remains an inherited limitation. See
+[the exact shutdown boundary](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
+Leaf evidence: Root activation17 plus source-retirement1, actor/control14, codec26 and
+native activation9 pass. The two adapted legacy fixtures retain their original assertions.
+Strict Root sync/App and native Clippy pass; separate native checking passes. Final
+actual-diff re-review has no remaining findings. Combined checks pass: 14 Actor/control,
+10 admission, 17 Root activation and 26 codec tests; 3,655 frontend tests with zero
+failures/skips, frontend static/production build, all ten real Edge flows and Root formatting.
+The complete Root suite is running; complete native validation and final native build/startup
+remain pending. Older complete results below apply
+to their recorded checkpoints, not automatically to this changed Root source.
+
+Hosted `fbe53dab` Linux native acceptance fails: 1,020 passed/39 failed. Its origin is
+`native_browser_local_discovery_refusal_selects_other_peer_and_preserves_indexed_sibling`:
+Capacity occurs after peer selection and creation/retention of an actual Pending row;
+the fixture then incorrectly requires a pre-selection refusal certificate. Stage5 alone
+does not identify pair preparation, derivation or native attachment as the deciding gate.
+Exact-row continuation under the original ten-second observer and a deterministic
+post-publication attachment-refusal regression have been drafted and reviewed separately;
+their compilation and execution remain pending integration. The 38
+later cases hit the closed fixture gate. This is unresolved evidence, not a flaky pass.
+
+Operational admitted key/LocalJoin publication, bilateral agreement/role-specific
+consumption, Ready/SDP/ICE/RTC/audio, member relay and combined/physical acceptance remain
+unfinished. Only one physical desktop is available. External download resume is excluded.
+
 ## Normal Actor mailbox retirement (29 October; focused checks pass)
 
 This separate leaf closes an inherited reserve-to-send custody gap. Normal terminal
@@ -39,12 +89,12 @@ and the unchanged startup probe passes with actual desktop access and the setup-
 marker. The application was not unlocked. The earlier intermittent native media
 refusal remains unclassified; no timeout or security limit was increased.
 
-The operational call-profile/receiver-retirement work and admitted wire codec in separate
-worktrees remain unintegrated drafts. The former now contains the paid actor-local control
-and receiver-retirement fence plus eight deterministic control tests; their static review
-has no remaining findings, but compilation, measured layouts and all Rust execution gates
-are still unrun. The codec has 26 draft tests and an agreed staged grammar; its Rust
-execution gates are also unrun. Neither draft is ready for activation.
+At that earlier checkpoint, the operational call-profile/receiver-retirement work and
+admitted wire codec remained unintegrated drafts. The former contained paid actor-local
+control, the receiver-retirement fence and eight deterministic control tests with clear
+static review, but its compilation/layout and Rust execution gates were unrun. The codec's
+26 draft tests and agreed staged grammar were also awaiting Rust execution. The new top
+section records their subsequent focused results and local integration; neither enables V2.
 V2 remains OFF. Operational bilateral admission/Ready/SDP/RTC/audio, member relay and
 combined/physical acceptance are still incomplete. Only one physical desktop is available.
 
