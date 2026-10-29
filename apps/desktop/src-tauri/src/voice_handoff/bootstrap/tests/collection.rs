@@ -420,14 +420,11 @@ async fn lock_unlock_and_replacement_do_not_revive_or_collect_the_wrong_original
     let before = selected.resources().counts();
     collect_channel(&f.state, &owner, [9; 32]).await.unwrap();
     assert_eq!(selected.resources().counts(), before);
-    assert!(Arc::ptr_eq(
-        &current,
-        &ready(
-            ensure(&f.state, &replacement, [9; 32], &mut Rng::new())
-                .await
-                .unwrap()
-        )
-    ));
+    assert!(current.is_same(&ready(
+        ensure(&f.state, &replacement, [9; 32], &mut Rng::new())
+            .await
+            .unwrap()
+    )));
     assert!(replacement_selected.lease().is_live());
     drop(late);
     drop(output);

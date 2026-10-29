@@ -3,7 +3,7 @@
 //! layout already pinned by shared WebCrypto vectors; no native Session key is inspected.
 use super::*;
 use crate::voice_activation_tests::Fixture;
-use crate::voice_handoff::bootstrap::{ensure, SetupOutputRef, Status};
+use crate::voice_handoff::bootstrap::{ensure, SetupOutput, SetupOutputRef, Status};
 use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
     Aes256Gcm,
@@ -373,8 +373,10 @@ async fn admitted_begin_worker_keeps_physical_ownership_ahead_of_newer_history()
 /// Actual native bootstrap + independent client MAC/AEAD for sibling executor regressions.
 /// Fixture allocations are not application custody evidence; returned Incoming is the real
 /// original Session owner and has already passed header authentication and body opening.
+/// These synchronous helpers borrow only the body. Their callers retain the original
+/// paid SetupOutputRef; no output reference or ownership escapes into the returned frame.
 pub(in crate::voice_handoff) fn opened_frame(
-    public: &SetupOutputRef,
+    public: &SetupOutput,
     route: &super::super::bootstrap::Route,
     header: (u64, u8, u8, [u8; 16]),
     plaintext: &[u8],
@@ -395,7 +397,7 @@ pub(in crate::voice_handoff) fn opened_frame(
 /// Independent real MAC/AEAD wire without body admission. Large-SDP regressions can then
 /// exercise the actual authenticated capacity permit and coalesced-header/tail boundary.
 pub(in crate::voice_handoff) fn signed_frame(
-    public: &SetupOutputRef,
+    public: &SetupOutput,
     header: (u64, u8, u8, [u8; 16]),
     plaintext: &[u8],
 ) -> Vec<u8> {
@@ -462,7 +464,7 @@ async fn invalid_sdp_shape_and_unfunded_large_data_refuse_before_allocation_or_n
 /// Independently verify a sibling adapter's ACTUAL completed MAC/AEAD reply against its
 /// original request. Fixture Vecs are test scaffolding, not application copy-custody evidence.
 pub(in crate::voice_handoff) fn opened_reply(
-    public: &SetupOutputRef,
+    public: &SetupOutput,
     header: (u64, u8, u8, [u8; 16]),
     request_plaintext: &[u8],
     reply: &super::super::channel::CompletedReply,
@@ -470,7 +472,7 @@ pub(in crate::voice_handoff) fn opened_reply(
     opened_reply_kind(public, header, request_plaintext, reply, 0)
 }
 pub(in crate::voice_handoff) fn opened_reply_kind(
-    public: &SetupOutputRef,
+    public: &SetupOutput,
     header: (u64, u8, u8, [u8; 16]),
     request_plaintext: &[u8],
     reply: &super::super::channel::CompletedReply,

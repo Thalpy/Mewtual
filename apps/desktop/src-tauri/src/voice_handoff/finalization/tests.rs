@@ -10,7 +10,6 @@ use crate::voice_handoff::ledger::{
 use catcoms_sync::voice_v2::crypto_actions::CryptoInputLease;
 use catcoms_sync::voice_v2::presence::{LocalJoin, PairSelector};
 use catcoms_sync::voice_v2::resources::ResourceKind;
-use std::sync::Arc;
 
 struct Case {
     native: Fixture,

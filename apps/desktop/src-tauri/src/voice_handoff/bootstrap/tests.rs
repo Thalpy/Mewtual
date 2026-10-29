@@ -263,7 +263,7 @@ async fn lost_setup_reply_and_duplicate_ensure_recover_original_session_without_
             .await
             .unwrap(),
     );
-    assert!(Arc::ptr_eq(&first, &recovered));
+    assert!(first.is_same(&recovered));
     assert_eq!(first.public.session, recovered.public.session);
     assert_eq!(first.public.transcript(), recovered.public.transcript());
     assert_eq!(unused.draws, 0);
@@ -678,7 +678,7 @@ async fn exact_replies_share_one_paid_projection_until_last_output_after_registr
                 .await
                 .unwrap(),
         );
-        assert!(Arc::ptr_eq(&first, &reply));
+        assert!(first.is_same(&reply));
         assert_eq!(unused.draws, 0);
         replies.push(reply);
     }

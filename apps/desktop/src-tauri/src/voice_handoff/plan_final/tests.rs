@@ -19,7 +19,7 @@ struct Case {
     selector: PairSelector,
     row: ResolvedRow,
     route: Route,
-    _output: Arc<bootstrap::SetupOutput>,
+    _output: bootstrap::SetupOutputRef,
     action: Arc<CryptoAction>,
     _join: LocalJoin,
 }
