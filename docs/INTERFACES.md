@@ -1,5 +1,31 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Admitted native key commands (29 October; inactive call path)
+
+The main webview has seven distinct commands: `prepare_admitted_voice_owner`,
+`activate_admitted_voice_owner`, `acknowledge_admitted_voice_activation`,
+`admit_admitted_voice_join_key`, `publish_admitted_voice_join_key`,
+`acknowledge_admitted_voice_key_publication` and `settle_admitted_voice_join_key`.
+They select only the issuer-sealed admitted profile. Existing command names cannot
+adopt these owners, keys or grants. Admission freezes one executor/permit/join and
+publication validates and freezes the original uncompressed P-256 public point.
+
+Publication returns a closed JSON union tagged `kind`: `accepted`, `rejected`,
+`closed` or `not-started`. Every variant identifies the original owner, executor,
+permit and join; accepted additionally carries `keyRef`. Known Root refusal is
+distinct from work that closed without a known outcome. A missing record proves
+nothing. Historical accepted output does not grant present-time admission or RTC
+permission. Explicit result acknowledgement precedes SDK settlement in the browser,
+so a lost acknowledgement reply can recover the original retained cell.
+
+Broker ABI52's `selectAdmittedJoinKey` uses a distinct opaque key handle and the
+exact branded `voiceAdmittedJoinKeyNative` adapter, sharing the existing bounded
+provider queue and ledger. The brand prevents accidental mixing, not hostile code
+in the same JavaScript realm. No private key crosses IPC. These commands and the
+browser adapter do not implement the operational agreement/KDF/Ready/RTC path.
+See [native custody](communication-recovery/VOICE-ADMITTED-KEY.md) and
+[browser custody](communication-recovery/VOICE-ADMITTED-BROWSER-KEY.md).
+
 ## Admitted key presence (29 October; draft, inactive)
 
 Trusted Root `start_admitted_voice_presence(grant, original, join, point)` accepts

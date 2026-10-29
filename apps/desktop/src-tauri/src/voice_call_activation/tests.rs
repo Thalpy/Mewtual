@@ -59,6 +59,21 @@ async fn native_winner(f: &Fixture, handle: &Handle) -> Worker {
     drop(old);
     worker
 }
+/// Actual native UI/CAS -> original Actor selection -> final native admission.
+/// The caller owns only this test-harness outer Box; it must retain/poll or drop
+/// the original runner. No test flips the issuer's activation phase directly.
+pub(crate) async fn active_handle_fixture(
+    f: &Fixture,
+) -> (Handle, Pin<Box<dyn Future<Output = ()> + Send>>) {
+    let handle = prepared(f).await;
+    let worker = native_winner(f, &handle).await;
+    let mut runner = Box::pin(worker.run());
+    assert!(poll_once(runner.as_mut(), Waker::noop()).is_pending());
+    f.actor.member_count().await;
+    assert!(poll_once(runner.as_mut(), Waker::noop()).is_pending());
+    assert!(handle.active());
+    (handle, runner)
+}
 fn poll_once<F: Future>(future: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
     future.poll(&mut TaskContext::from_waker(waker))
 }
@@ -432,6 +447,7 @@ async fn runner_joins_actual_execution_drop_before_return_for_completion_and_can
             returned: Some(TaskReturned {
                 signal: returned.clone(),
                 serial: 1,
+                cell: Weak::new(), // no real native Cell in this execution-only fixture
                 _funding: funding,
             }),
         };

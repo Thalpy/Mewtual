@@ -75,13 +75,18 @@ async fn input_uses_only_original_prepaid_copy_capacity_under_ordinary_pool_pres
     use catcoms_sync::voice_v2::resources::ResourceKind;
     let case = Case::new().await;
     let pool = case.route.selected().resources();
+    let group = case.route.selected().binding().scope.group;
     let pressure = pool
         .charge(
-            case.route.selected().binding().scope.group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let before = pool.counts();
     let reply = pull(
         &case.context,

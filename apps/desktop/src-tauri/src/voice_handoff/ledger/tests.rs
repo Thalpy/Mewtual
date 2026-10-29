@@ -1147,13 +1147,18 @@ fn original_purpose_lookup_under_full_pressure_rejects_foreign_identity_and_ever
     registration.mark_handoff().unwrap();
     drop(registration);
     let pool = selected.resources();
+    let group = selected.binding().scope.group;
     let _pressure = pool
         .charge(
-            selected.binding().scope.group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let before = pool.counts();
     let mut peer = selector;
     peer.peer = DeviceKeypair::from_seed(&[5; 32]).device_id();

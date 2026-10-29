@@ -618,13 +618,19 @@ mod tests {
         let input = action.input().unwrap();
         action.admit_engine(action.engine_bytes()).unwrap();
         action.settle_engine();
+        let group = action.protected_binding().unwrap().scope.group;
         let pressure = pool
             .charge(
-                action.protected_binding().unwrap().scope.group,
-                catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+                group,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES
+                    - pool.group_counts(group).unwrap().0,
                 ResourceKind::Retained,
             )
             .unwrap();
+        assert_eq!(
+            pool.group_counts(group).unwrap().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES
+        );
         phase.close_confirmation().unwrap();
         assert!(phase.is_drained(), "local16KiB loan has actually returned");
         let pending = pool.counts();
@@ -680,13 +686,19 @@ mod tests {
     fn result_body_uses_prepaid_phase_capacity_and_its_actual_owner_delays_retirement() {
         let (coordinator, _join, action, phase) = phase_fixture();
         let pool = coordinator.runtime().resources();
+        let group = action.protected_binding().unwrap().scope.group;
         let pressure = pool
             .charge(
-                action.protected_binding().unwrap().scope.group,
-                catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+                group,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES
+                    - pool.group_counts(group).unwrap().0,
                 ResourceKind::Retained,
             )
             .unwrap();
+        assert_eq!(
+            pool.group_counts(group).unwrap().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES
+        );
         let full = pool.counts();
         let mut buffer = phase.buffer(528).unwrap();
         buffer.bytes_mut().fill(9);
@@ -933,14 +945,19 @@ mod tests {
     fn phase_copy_bytes_and_owner_limits_never_increase_the_original_reservation() {
         let (coordinator, _join, action, phase) = phase_fixture();
         let pool = coordinator.runtime().resources();
-        let original = pool.counts();
+        let group = action.protected_binding().unwrap().scope.group;
         let pressure = pool
             .charge(
-                action.protected_binding().unwrap().scope.group,
-                catcoms_sync::voice_v2::resources::GROUP_BYTES - original.0,
+                group,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES
+                    - pool.group_counts(group).unwrap().0,
                 ResourceKind::Retained,
             )
             .unwrap();
+        assert_eq!(
+            pool.group_counts(group).unwrap().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES
+        );
         let full = pool.counts();
         let buffer = phase.buffer(16 * 1024).unwrap();
         assert_eq!(pool.counts(), full);
@@ -1035,6 +1052,10 @@ mod tests {
             )
             .unwrap();
         let before = pool.counts();
+        assert_eq!(
+            pool.group_counts(scope.group).unwrap().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES
+        );
         assert_eq!(
             PreparedPhase::new(pool.clone(), scope, CallLease::default()).err(),
             Some(VoiceError::Capacity)

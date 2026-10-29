@@ -75,8 +75,10 @@ mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
 mod voice_authority;
-// Inactive trusted admitted-call profile boundary. No Tauri command, UI adapter,
-// key/LocalJoin/network producer selects it; compile its ownership regressions.
+// Fixed admitted-profile native activation/key commands. App V2 selection stays
+// off until operational bilateral agreement, Ready and RTC consumers are wired.
+mod voice_admitted_call;
+mod voice_admitted_key;
 mod voice_call_activation;
 // Authenticated action dispatch exists, but App V2 call selection is still off. Remove the
 // temporary unused-item allowance as the App driver takes ownership of these private APIs.
@@ -11233,6 +11235,7 @@ async fn end_voice_owner_inner(state: &AppState, owner: &str) {
         }
     }
     state.voice_channels.collect_retired(&state.voice_handoff);
+    voice_admitted_call::collect_retired(state);
 }
 
 async fn admit_voice_crypto_inner(
@@ -18951,6 +18954,9 @@ pub fn run() {
             end_call_mapping_owner,
             prepare_voice_controller,
             prepare_voice_owner,
+            voice_admitted_call::prepare_admitted_voice_owner,
+            voice_admitted_call::activate_admitted_voice_owner,
+            voice_admitted_call::acknowledge_admitted_voice_activation,
             activate_voice_owner,
             end_voice_owner,
             admit_voice_crypto,
@@ -18958,6 +18964,10 @@ pub fn run() {
             voice_join_key::admit_voice_join_key,
             voice_join_key::publish_voice_join_key,
             voice_join_key::settle_voice_join_key,
+            voice_admitted_key::admit_admitted_voice_join_key,
+            voice_admitted_key::publish_admitted_voice_join_key,
+            voice_admitted_key::settle_admitted_voice_join_key,
+            voice_admitted_key::acknowledge_admitted_voice_key_publication,
             voice_handoff::commands::setup_voice_channel,
             voice_handoff::commands::read_voice_channel_work,
             voice_handoff::commands::settle_voice_channel_setup,

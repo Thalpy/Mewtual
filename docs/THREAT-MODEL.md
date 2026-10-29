@@ -1,5 +1,30 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original admitted key publication (29 October; inactive call path)
+
+The native admitted commands require the original selected Root residence,
+issuer-sealed admitted call profile, current UI generation and exact native
+executor/permit/join. Public P-256 point validation precedes native tuple freezing.
+Final publication is ordered against lock through the original UI commit guard;
+the canonical paid task, not its invoke observer, holds that guard through actual
+Actor work. Lock/unlock cannot revive earlier-generation positive authority.
+
+Callback loss is uncertainty. Accepted and rejected results remain in the original
+paid cell until explicit acknowledgement, actual task return and SDK settlement.
+Typed `closed` is not a known Root rejection. `not-started` requires the retained
+closed generation and proof that its publication never began; absence is not proof.
+Known historical acceptance may survive End/lock but cannot authorize new work.
+Task, Actor argument, Root residence and SDK return remain independent obligations.
+
+The browser retains one original nonextractable key and retries the same native
+identity. Its distinct handle cannot enter Existing KDF/channel factories; adapter
+branding is not isolation from hostile JavaScript in the same realm. Inventory
+guards cover application-owned logical graphs, not opaque SDK, allocator or
+framework copies. V2 remains OFF; agreement, admitted KDF, Ready, SDP/RTC, relay and
+physical acceptance remain separate unfinished boundaries. See the
+[native](communication-recovery/VOICE-ADMITTED-KEY.md) and
+[browser](communication-recovery/VOICE-ADMITTED-BROWSER-KEY.md) contracts.
+
 ## Admitted presence boundary (29 October; inactive draft)
 
 The discovery-only admitted owner requires the SAME Root residence, current
@@ -9,9 +34,9 @@ authority. Existing packet factories remain rejecting. Ingress pins original wat
 recipients; replacement cannot adopt stale work. Dedicated admitted Ann/Proof Source
 publication and lower flights check NativeActive independently of `live`, including
 the first negative-store interval. Funding is external to Presence/proof Boxes and
-survives actual deallocation. The first focused run passed five behavior cases and
-measured the full8264-byte graph; corrected9KiB funding, preallocation checks and
-fixture execution remain pending rerun. Operational agreement/consume/Ready/RTC/relay
+survives actual deallocation. Ten corrected focused cases pass with the complete
+8264/9216-byte presence guard and preallocation checks retained. Complete integration
+validation remains pending. Operational agreement/consume/Ready/RTC/relay
 are separate gates. See
 [the scoped contract](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
 

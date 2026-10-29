@@ -17,6 +17,9 @@ use std::sync::Arc;
 
 mod join_key;
 pub(crate) use join_key::SelectedHandoffOwner;
+pub(crate) use join_key::{
+    AdmittedKeyCompletion, AdmittedKeyRetirement, AdmittedPublicationPlan, AdmittedPublicationWork,
+};
 pub(crate) use join_key::{JoinKeyAdmission, JoinKeyPublication, PublicationPlan};
 
 const CANDIDATES: usize = 8;
@@ -236,6 +239,10 @@ pub(crate) struct Coordinator {
     // A selected join has one generation, unlike the compatibility fresh-token operations.
     // Uncertain generation/publication survives owner retirement until actual work drains.
     join_generations: HashMap<String, join_key::Generation>,
+    // The SAME existing table's actual backing becomes separately process-paid
+    // before its first row of EITHER profile. LAST relative to the table: empty retained
+    // capacity and final table deallocation remain paid through Coordinator Drop.
+    join_index_funding: Option<Arc<join_key::JoinIndexFunding>>,
     // Registered only from opaque Root-issued owners, before pull/admission can race. These
     // survive End/lock/replacement while an engine is admitted but actual settlement is unknown.
     // Lock order is Coordinator -> action fence. Root never calls Coordinator under its fence.
@@ -296,6 +303,7 @@ impl Coordinator {
             activations: Vec::new(),
             operations: HashMap::new(),
             join_generations: HashMap::new(),
+            join_index_funding: None,
             #[cfg(test)]
             actions: HashMap::new(),
             resources: runtime.resources(),
@@ -527,7 +535,14 @@ impl Coordinator {
         &mut self,
         handle: &crate::voice_call_activation::Handle,
     ) -> Option<DetachedActivation> {
-        if !handle.collectible() {
+        if !handle.collectible()
+            || self
+                .join_generations
+                .get(handle.id())
+                .is_some_and(|generation| {
+                    generation.blocks_admitted_activation_forget(handle.original())
+                })
+        {
             return None;
         }
         let index = self
@@ -544,6 +559,35 @@ impl Coordinator {
             _allocation: allocation,
             _original: original,
         })
+    }
+
+    /// Collect at most one acknowledged original after actual call/Work/storage
+    /// and task return. End alone is never result acknowledgement. The existing
+    /// key-debt fence still prevents a parent from losing its only recovery
+    /// handle while SDK settlement or publication history remains outstanding.
+    ///
+    /// The bounded native caller may repeat this up to its existing 32-row cap,
+    /// dropping each returned owner AFTER Coordinator. Only activation Cell locks
+    /// are used here; those paths never acquire Coordinator while holding Cell.
+    /// Publication Cell -> Coordinator workers use a DIFFERENT Cell, and their
+    /// reverse Pending checks are pure atomics/immutable metadata only.
+    pub(crate) fn collect_one_acknowledged_admitted_activation(
+        &mut self,
+    ) -> Option<DetachedActivation> {
+        let original = self
+            .activations
+            .iter()
+            .find(|handle| {
+                handle.collectible()
+                    && self
+                        .join_generations
+                        .get(handle.id())
+                        .is_none_or(|generation| {
+                            !generation.blocks_admitted_activation_forget(handle.original())
+                        })
+            })?
+            .clone();
+        self.forget_admitted_activation(&original)
     }
     /// Recover only a currently installed activation, before looking for its consumed candidate.
     /// Candidate expiry does not expire an accepted call, and a lost reply must not allocate a

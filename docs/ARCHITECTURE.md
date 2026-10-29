@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Admitted native/browser key custody (29 October; inactive)
+
+The distinct admitted native commands connect the same selected Root residence to
+one native key generation and one browser-held nonextractable key. A separately
+paid canonical publication task owns the original UI commit guard, Actor request,
+typed terminal history and actual-return markers. Invoke loss cannot replace that
+task or become a negative result. Coordinator's shared key index has its own
+process backing fee; per-generation funding survives escaped watch/metadata owners.
+
+Broker ABI52 adds a distinct admitted key handle and native adapter while retaining
+the existing aggregate ledger, provider queue and cleanup obligations. Terminal ACK
+precedes SDK settlement so lost ACK replies remain recoverable. Existing factories
+cannot use this key. This integrates original-key custody only; operational bilateral
+agreement, admitted KDF, Ready and RTC/media composition are still unfinished.
+See [native](communication-recovery/VOICE-ADMITTED-KEY.md) and
+[browser](communication-recovery/VOICE-ADMITTED-BROWSER-KEY.md) contracts.
+
 ## Admitted Root presence (29 October; draft, inactive)
 
 The exact selected NativeActive Root residence can own a separate discovery-only
@@ -10,7 +27,8 @@ FreshPeer remain profile-neutral. Only the opaque new discovery Source entry adm
 admitted Announcement/Proof; final publication and flights require NativeActive.
 First focused compilation passed five behavior cases, while the full8264-byte
 inventory growth-guard test failed against its initial8KiB fee. The explicit9KiB correction preserves that
-graph and adds a preallocation fence; corrected fixture/tests remain pending. See
+graph and adds a preallocation fence; all ten corrected focused cases pass. Complete
+integration validation remains pending. See
 [the contract and unfinished operational gates](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
 V2 remains OFF.
 

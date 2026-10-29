@@ -241,10 +241,16 @@ async fn lost_setup_reply_and_duplicate_ensure_recover_original_session_without_
         .resources()
         .charge(
             group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - before.0 + INDEX_BYTES,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES
+                - selected.resources().group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    // Both bootstrap and key-index payments are process-only, not group bytes.
+    assert_eq!(
+        selected.resources().group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let mut unused = Rng::new();
     let recovered = ready(
         ensure(&f.state, &owner, [9; 32], &mut unused)
@@ -261,6 +267,7 @@ async fn lost_setup_reply_and_duplicate_ensure_recover_original_session_without_
         "original setup engine and independent control lane survive reply loss"
     );
     drop(held);
+    assert_eq!(selected.resources().counts(), before);
     f.close().await;
 }
 
@@ -558,10 +565,15 @@ async fn full_group_or_crypto_pressure_refuses_before_rng_without_stranding_a_ro
                 resources
                     .charge(
                         group,
-                        catcoms_sync::voice_v2::resources::GROUP_BYTES - resources.counts().0,
+                        catcoms_sync::voice_v2::resources::GROUP_BYTES
+                            - resources.group_counts(group).unwrap().0,
                         ResourceKind::Retained,
                     )
                     .unwrap(),
+            );
+            assert_eq!(
+                resources.group_counts(group).unwrap().0,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES
             );
         }
         let mut rng = Rng::new();
