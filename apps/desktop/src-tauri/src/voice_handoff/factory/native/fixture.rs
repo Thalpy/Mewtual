@@ -2,7 +2,7 @@
 //! capsule; production builds contain neither it nor a new producer API. Only the
 //! optional Arc handles enter the measured native8KiB task/completion graph.
 use super::*;
-use catcoms_sync::voice_v2::crypto_actions::HandoffLoan;
+use catcoms_sync::voice_v2::crypto_actions::{CryptoAction, HandoffLoan};
 use std::sync::Mutex;
 
 const HARNESS_BYTES: usize = 4096;
