@@ -432,10 +432,28 @@ async fn stop_request_at(
     existing_only: bool,
 ) -> Result<Option<SendMessageResult>, String> {
     original.validate()?;
+    let identity = original.retired_identity();
+    if existing_only {
+        // Ordinary positive traffic must not wait behind an unrelated pre-registration
+        // restore. This probe only observes absence; it grants no lease or admission. Its
+        // mounted-store guard ends BEFORE any global wait. Final authorize still repeats the
+        // exact scoped fence check while holding session/store/registry custody, so a fence
+        // installed after this probe cannot authorize a late positive transaction.
+        let present = {
+            let mounted = state.store.lock().await;
+            mounted
+                .as_ref()
+                .ok_or_else(|| "vault is not mounted".to_string())?
+                .has_chat_stop_fence(server, &identity)
+                .map_err(|e| e.to_string())?
+        };
+        if !present {
+            return Ok(None);
+        }
+    }
     // One constant serializer covers all orphan IDs. An arbitrary missing numeric ID cannot
     // create an unbounded persist_locks entry. Restores retain this same guard through register.
     let orphan = state.chat_orphan_commit.clone().lock_owned().await;
-    let identity = original.retired_identity();
     let existing_fence = {
         let mounted = state.store.lock().await;
         mounted
@@ -912,5 +930,152 @@ mod tests {
         assert_eq!(result.persistence, PersistOutcome::Durable);
         assert_eq!(result.disposition, "stopped-retired");
         assert!(actor.messages(5).await.is_empty());
+    }
+    #[tokio::test]
+    async fn live_durable_send_does_not_wait_for_unrelated_pre_registration_custody() {
+        use libp2p::futures::FutureExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (entry, task, drain) = leaving::tests::running(1011);
+        let actor = entry.actor.clone();
+        state.servers.lock().await.insert(12, entry);
+        actor.open_channel(5).await;
+        let context = actor.durable_send_context().await.unwrap();
+        let op = Operation::start(
+            None,
+            catcoms_diagnostics::Section::Channels,
+            "send_message",
+            12,
+            Some("5"),
+        );
+        // Hold the same real state-wide guard an unrelated restoring Actor retains before
+        // registration. A live group's ordinary no-fence send must complete its real store save
+        // while that guard remains held, without waiting for unrelated dialing/startup work.
+        let unrelated = state.chat_orphan_commit.clone().lock_owned().await;
+        let mut sending = Box::pin(send(
+            &state,
+            &op,
+            12,
+            "5",
+            "independent live write".into(),
+            None,
+            Some(hex::encode([201; 16])),
+            Some(hex::encode(context)),
+        ));
+        let mut completed = None;
+        // The current-thread fixture has only the actual native future and Actor to advance.
+        // A fixed poll/yield budget detects the old global wait without an ambient timeout.
+        for _ in 0..32 {
+            if let Some(result) = sending.as_mut().now_or_never() {
+                completed = Some(result);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let accepted = completed
+            .expect("unrelated pre-registration custody blocked a live durable send")
+            .unwrap();
+        assert!(accepted.accepted);
+        assert_eq!(accepted.persistence, PersistOutcome::Durable);
+        assert!(state.chat_orphan_commit.try_lock().is_err());
+        let snapshot = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_server(12)
+            .unwrap();
+        let saved = Server::restore(
+            &snapshot,
+            Hub::new().join(PeerId::from_u64(1012)),
+            ChaCha20Rng::seed_from_u64(1012),
+            Box::new(ManualClock::new(2_000)),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(saved.messages(5).len(), 1);
+        assert_eq!(saved.messages(5)[0].text, "independent live write");
+        drop(sending);
+        drop(unrelated);
+        actor.stop_and_wait().await.unwrap();
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn positive_fence_probe_keeps_final_race_check_and_malformed_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (entry, task, drain) = leaving::tests::running(1013);
+        let actor = entry.actor.clone();
+        state.servers.lock().await.insert(12, entry);
+        actor.open_channel(5).await;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let request = DurableSendRequest {
+            token: [202; 16],
+            expected_context: actor.durable_send_context().await.unwrap(),
+            channel: 5,
+            text: "must stay unstarted".into(),
+            reply_to: String::new(),
+        };
+        let original = DurableChatRequest::Send(request.clone());
+        let identity = original.retired_identity();
+        assert!(
+            stop_request_at(&state, 12, original.clone(), generation, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let ready = actor.prepare_durable_send(request.clone()).await.unwrap();
+        // Install the actual exact fence after the absence probe and before final custody. This
+        // trusted test seam drives the race directly; the positive path cannot mint a fence.
+        state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .save_chat_stop_fence(12, &identity, &mut OsCryptoRng)
+            .unwrap();
+        assert!(authorize(&state, 12, 1013, generation, Some(&identity))
+            .unwrap_err()
+            .starts_with("CHAT_SEND_STOPPED:"));
+        drop(ready);
+        let terminal = stop_request_at(&state, 12, original, generation, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.persistence, PersistOutcome::Durable);
+        assert_eq!(terminal.disposition, "stopped-retired");
+        assert!(actor.messages(5).await.is_empty());
+        let fence_path = dir.path().join("chat-stop-fences.bin");
+        std::fs::write(&fence_path, b"not authenticated fence state").unwrap();
+        let unrelated = state.chat_orphan_commit.clone().lock_owned().await;
+        let foreign = DurableChatRequest::Send(DurableSendRequest {
+            token: [203; 16],
+            ..request
+        });
+        assert!(
+            stop_request_at(&state, 12, foreign, generation, true)
+                .await
+                .is_err(),
+            "malformed probe must fail closed before waiting for the unrelated global guard"
+        );
+        assert_eq!(
+            std::fs::read(fence_path).unwrap(),
+            b"not authenticated fence state"
+        );
+        assert!(actor.messages(5).await.is_empty());
+        drop(unrelated);
+        actor.stop_and_wait().await.unwrap();
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 }
