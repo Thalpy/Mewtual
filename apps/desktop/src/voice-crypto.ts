@@ -6,6 +6,9 @@ import { decodeVoiceAdmissionMode, decodeVoiceNegotiationCapacity, encodeVoiceAd
 import { VoiceSharedExecution } from "./voice-shared-execution.ts";
 import { VoiceSdkPositions, type VoiceSdkPositionRequest } from "./voice-sdk-positions.ts";
 import { VoiceByteLedger } from "./voice-byte-ledger.ts";
+import { isVoiceAdmittedJoinKeyNative, type VoiceAdmittedSelectedKeyNative,
+  type VoiceAdmittedKeyPublication } from "./voice-admitted-join-native.ts";
+import { VOICE_ADMITTED_SELECTED_KEY_BYTES, voiceAdmittedKeyInventory } from "./voice-admitted-key-inventory.ts";
 import { DEFAULT_VOICE_BROWSER_BUDGET, copyVoiceBrowserBudget, type VoiceBrowserBudget } from "./voice-browser-budget.ts";
 /** Retained V2 endpoint crypto/native custody. App activation still requires production
  * adapter/RTC-track composition and acceptance. Native tickets and original scoped grants
@@ -187,6 +190,12 @@ export interface VoiceSelectedKeyNative {
 export type VoiceSelectedKeyOutcome = Readonly<{ kind: "accepted"; key: VoiceJoinKeyHandle }> |
   Readonly<{ kind: "uncertain" | "retired" | "failed" | "busy" | "unavailable" }>;
 export type VoiceSelectedKeyHandle = Readonly<{ attempt(): Promise<VoiceSelectedKeyOutcome> }>;
+/** Distinct original admitted key. No legacy publicKey/derive/bind/channel API
+ * accepts this opaque handle; only this broker's separate private map owns it. */
+export type VoiceAdmittedJoinKeyHandle = Readonly<{ publicPoint(): Uint8Array<ArrayBuffer> }>;
+export type VoiceAdmittedSelectedKeyOutcome = Readonly<{ kind: "accepted"; key: VoiceAdmittedJoinKeyHandle }> |
+  Readonly<{ kind: "uncertain" | "retired" | "failed" | "busy" | "unavailable" }>;
+export type VoiceAdmittedSelectedKeyHandle = Readonly<{ attempt(): Promise<VoiceAdmittedSelectedKeyOutcome> }>;
 export type VoiceCryptoChain = Readonly<{ close(): void; isCurrent(): boolean }>;
 export type VoiceDerivationSetup = Readonly<{ localPublicKey: Uint8Array; peerPublicKey: Uint8Array; transcript: Uint8Array }>;
 
@@ -207,10 +216,12 @@ type ActionHandle = Readonly<{
   attempt(): Promise<ActionOutcome>; inspect(): VoiceConfirmationStatus; retire(): void;
 }>;
 type JoinKeyRecord = {
+  readonly profile: "existing" | "admitted";
   owner: VoiceCryptoOwner; privateKey: CryptoKey | null; point: Uint8Array<ArrayBuffer>;
   join: string | null; key: string | null;
 };
 type SelectedKeyRecord = {
+  readonly profile: "existing";
   owner: VoiceCryptoOwner; key: JoinKeyRecord; native: VoiceSelectedKeyNative;
   executor: string; permit: string | null; join: string | null;
   attempt: Signal<VoiceSelectedKeyOutcome> | null; retry: Signal<void> | null;
@@ -220,6 +231,39 @@ type SelectedKeyRecord = {
   channelUsers: number; jobReturned: boolean; closed: Signal<void>;
   unsubscribe: () => void;
 };
+type AdmittedSelectionOps = { attempt(): Promise<VoiceAdmittedSelectedKeyOutcome>; retire(): void };
+type AdmittedPointOps = { point(): Uint8Array<ArrayBuffer> };
+type AdmittedSelectedKeyRecord = Omit<SelectedKeyRecord, "profile" | "native" | "attempt" | "outcome" | "handle"> & {
+  readonly profile: "admitted"; native: VoiceAdmittedSelectedKeyNative;
+  attempt: Signal<VoiceAdmittedSelectedKeyOutcome> | null;
+  outcome: VoiceAdmittedSelectedKeyOutcome | null; handle: VoiceAdmittedSelectedKeyHandle;
+  cell: VoiceHandleCell<AdmittedSelectionOps>; keyCell: VoiceHandleCell<AdmittedPointOps> | null;
+  publicHandle: VoiceAdmittedJoinKeyHandle | null; disposing: boolean;
+  terminal: VoiceAdmittedKeyPublication | null;
+};
+type AnySelectedKeyRecord = SelectedKeyRecord | AdmittedSelectedKeyRecord;
+const retiredAdmittedKey = Promise.resolve(Object.freeze({ kind: "retired" as const }));
+// External factories capture only their detachable capsule, never an SDK frame,
+// original key pair, broker or previous selection's lexical construction scope.
+function admittedSelectionHandle(cell: VoiceHandleCell<AdmittedSelectionOps>): VoiceAdmittedSelectedKeyHandle {
+  return Object.freeze({ attempt: () => cell.dispatch(ops => ops.attempt(), retiredAdmittedKey) });
+}
+function admittedSelectionRetirement(cell: VoiceHandleCell<AdmittedSelectionOps>): () => void {
+  // Owner.retire snapshots its listeners. A visited callback must retain only
+  // this detachable cell while later retirement callbacks run, never the key or
+  // broker after their payment is returned.
+  return () => cell.dispatch(ops => ops.retire(), undefined);
+}
+function admittedPointHandle(cell: VoiceHandleCell<AdmittedPointOps>): VoiceAdmittedJoinKeyHandle {
+  return Object.freeze({ publicPoint: () => {
+    const point = cell.dispatch(ops => ops.point(), null);
+    if (point === null) throw new Error("admitted voice key retired");
+    return point;
+  } });
+}
+function admittedPointOps(record: AdmittedSelectedKeyRecord): AdmittedPointOps {
+  return { point: () => { current(record.owner); return record.key.point.slice(); } };
+}
 // Application-owned generation state, key and fixed public-metadata projections. This is not
 // a bound on opaque SDK/GC heaps or the stock framework's request/response copies.
 const SELECTED_KEY_BYTES = 4096;
@@ -479,6 +523,49 @@ function exactKeys(value: unknown, names: string[]): value is Record<string, unk
   return !!value && typeof value === "object" && Reflect.ownKeys(value).length === names.length &&
     names.every(name => Object.hasOwn(value, name));
 }
+function admittedAdmissionReply(value: unknown, record: AdmittedSelectedKeyRecord): VoiceSelectedKeyAdmission | null {
+  try {
+    if (!exactKeys(value, ["owner", "executor", "permit", "join", "kind"])) return null;
+    const read = (name: string): unknown => {
+      const property = Object.getOwnPropertyDescriptor(value, name);
+      return property && "value" in property ? property.value : undefined;
+    };
+    const owner = read("owner"), executor = read("executor"), permit = read("permit"), join = read("join"), kind = read("kind");
+    if (owner !== record.owner.token || executor !== record.executor || typeof owner !== "string" || typeof executor !== "string") return null;
+    if (kind === "refused" && permit === "" && join === "") return Object.freeze({ owner, executor, permit, join, kind });
+    if ((kind === "admitted" || kind === "closed") && boundText(permit) && typeof join === "string" && /^[0-9a-f]{64}$/.test(join))
+      return Object.freeze({ owner, executor, permit, join, kind });
+  } catch { /* An accessor/proxy/malformed projection never proves no admission. */ }
+  return null;
+}
+/** Copy closed native terminal metadata once. Accessor properties are not native
+ * JSON and cannot use validation to mutate a later owner/permit observation. */
+function admittedPublicationReply(value: unknown, record: AdmittedSelectedKeyRecord): VoiceAdmittedKeyPublication | null {
+  try {
+    if (!value || typeof value !== "object") return null;
+    const read = (name: string): unknown => {
+      const property = Object.getOwnPropertyDescriptor(value, name);
+      return property && "value" in property ? property.value : undefined;
+    };
+    const kind = read("kind");
+    const names = kind === "accepted" ? ["kind", "owner", "executor", "permit", "join", "keyRef"] :
+      ["kind", "owner", "executor", "permit", "join", "code"];
+    if (!exactKeys(value, names)) return null;
+    const owner = read("owner"), executor = read("executor"), permit = read("permit"), join = read("join");
+    if (owner !== record.owner.token || executor !== record.executor || permit !== record.permit || join !== record.join ||
+        typeof owner !== "string" || typeof executor !== "string" || typeof permit !== "string" || typeof join !== "string") return null;
+    const identity = { owner, executor, permit, join };
+    if (kind === "accepted") {
+      const keyRef = read("keyRef");
+      return typeof keyRef === "string" && /^[0-9a-f]{64}$/.test(keyRef) ? Object.freeze({ kind, ...identity, keyRef }) : null;
+    }
+    const code = read("code");
+    if (kind === "rejected" && (code === "capacity" || code === "refused" || code === "stopped")) return Object.freeze({ kind, ...identity, code });
+    if (kind === "closed" && (code === "ended" || code === "unconfirmed")) return Object.freeze({ kind, ...identity, code });
+    if (kind === "not-started" && code === "ended") return Object.freeze({ kind, ...identity, code });
+  } catch { /* Malformed/non-native objects are unknown, never terminal authority. */ }
+  return null;
+}
 function boundText(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 128;
 }
@@ -527,9 +614,9 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  // A retained older broker has no exact-peer first-fetch fence. Preserve its
-  // cleanup, but require reload instead of reusing it or creating another pool.
-  readonly version = 51;
+  // A retained older broker lacks the immutable admitted-key compartment and
+  // cleanup protocol. Preserve its cleanup, but require reload, never a new pool.
+  readonly version = 52;
   readonly memoryBudget: VoiceBrowserBudget;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
@@ -545,8 +632,9 @@ export class VoiceCryptoBroker {
   // This map and its combined pending/terminal cap survive HMR with this exact broker.
   private readonly actions = new Map<string, ActionRecord>();
   private readonly joinKeys = new WeakMap<VoiceJoinKeyHandle, JoinKeyRecord>();
+  private readonly admittedKeys = new WeakMap<VoiceAdmittedJoinKeyHandle, JoinKeyRecord>();
   private readonly keys = new Set<JoinKeyRecord>();
-  private readonly selectedKeys = new Map<string, SelectedKeyRecord>();
+  private readonly selectedKeys = new Map<string, AnySelectedKeyRecord>();
   private appSession: { native: VoiceAppNative; selected: VoiceSelectedKeyNative; ipc: VoiceIpcNative; transport: typeof fetch;
     configurationSource: VoiceRtcDeviceSettingsSource | null; mode: IpcMode; handle: VoiceAppCalls } | null = null;
   // Actual App-created native owner allocation only. Equal token/group labels cannot
@@ -613,10 +701,11 @@ export class VoiceCryptoBroker {
    * job, including uncertain admission/publication/settlement. Compatibility fixture APIs below
    * deliberately still permit independent keys; upgraded callers must use this selection. */
   selectJoinKey(owner: VoiceCryptoOwner, native: VoiceSelectedKeyNative): VoiceSelectedKeyHandle {
+    if (isVoiceAdmittedJoinKeyNative(native)) throw new Error("admitted voice adapter requires admitted selection");
     current(owner);
     const prior = this.selectedKeys.get(owner.token);
     if (prior) {
-      if (prior.owner !== owner || prior.native !== native) throw new Error("voice key selection changed");
+      if (prior.profile !== "existing" || prior.owner !== owner || prior.native !== native) throw new Error("voice key selection changed");
       return prior.handle;
     }
     if (this.keys.size >= 128 || [...this.keys].filter(key => key.owner === owner).length >= 16) throw new Error("voice join key capacity reached");
@@ -626,13 +715,15 @@ export class VoiceCryptoBroker {
       this.selectedExecutor = [...globalThis.crypto.getRandomValues(new Uint8Array(32))].map(n => n.toString(16).padStart(2, "0")).join("");
     }
     this.charge(owner, SELECTED_KEY_BYTES);
-    const key: JoinKeyRecord = { owner, privateKey: null, point: new Uint8Array(), join: null, key: null };
+    const key: JoinKeyRecord = { profile: "existing", owner, privateKey: null, point: new Uint8Array(), join: null, key: null };
+    Object.defineProperty(key, "profile", { writable: false, configurable: false });
     const record: SelectedKeyRecord = {
-      owner, key, native, executor: this.selectedExecutor, permit: null, join: null,
+      profile: "existing", owner, key, native, executor: this.selectedExecutor, permit: null, join: null,
       attempt: null, retry: null, outcome: null, handle: null!, started: false, drained: true,
       retired: false, released: false, unsubscribe: () => {}, wake: {},
       channelUsers: 0, jobReturned: true, closed: signal<void>(),
     };
+    Object.defineProperty(record, "profile", { writable: false, configurable: false });
     record.handle = Object.freeze({ attempt: () => this.attemptSelectedKey(record) });
     this.selectedKeys.set(owner.token, record); this.keys.add(key);
     try {
@@ -646,26 +737,85 @@ export class VoiceCryptoBroker {
     return record.handle;
   }
 
-  private releaseSelectedKey(record: SelectedKeyRecord): void {
+  /** A distinct factory owns the admitted key from first native admission. It
+   * shares the original byte ledger, finite key cap, queue and SDK position with
+   * Existing work, but never publishes a legacy key/selected-channel handle. */
+  selectAdmittedJoinKey(owner: VoiceCryptoOwner, native: VoiceAdmittedSelectedKeyNative): VoiceAdmittedSelectedKeyHandle {
+    if (!isVoiceAdmittedJoinKeyNative(native)) throw new Error("original admitted voice adapter required");
+    current(owner);
+    const prior = this.selectedKeys.get(owner.token);
+    if (prior) {
+      if (prior.profile !== "admitted" || prior.owner !== owner || prior.native !== native)
+        throw new Error("voice key selection changed");
+      return prior.handle;
+    }
+    if (this.keys.size >= 128 || [...this.keys].filter(key => key.owner === owner).length >= 16)
+      throw new Error("voice join key capacity reached");
+    if (!this.selectedExecutor)
+      this.selectedExecutor = [...globalThis.crypto.getRandomValues(new Uint8Array(32))].map(n => n.toString(16).padStart(2, "0")).join("");
+    if (voiceAdmittedKeyInventory().total > VOICE_ADMITTED_SELECTED_KEY_BYTES)
+      throw new Error("admitted voice metadata capacity reached");
+    this.charge(owner, VOICE_ADMITTED_SELECTED_KEY_BYTES);
+    const key: JoinKeyRecord = { profile: "admitted", owner, privateKey: null, point: new Uint8Array(), join: null, key: null };
+    Object.defineProperty(key, "profile", { writable: false, configurable: false });
+    const record: AdmittedSelectedKeyRecord = {
+      profile: "admitted", owner, key, native, executor: this.selectedExecutor, permit: null, join: null,
+      attempt: null, retry: null, outcome: null, handle: null!, started: false, drained: true,
+      retired: false, released: false, unsubscribe: () => {}, wake: {},
+      channelUsers: 0, jobReturned: true, closed: signal<void>(),
+      cell: null!, keyCell: null, publicHandle: null, disposing: false, terminal: null,
+    };
+    Object.defineProperty(record, "profile", { writable: false, configurable: false });
+    // This target intentionally owns the retained record until detachment. No
+    // SDK has run in this construction scope; escaped handles capture only cell.
+    record.cell = new VoiceHandleCell({ attempt: () => this.attemptSelectedKey(record), retire: () => {
+      record.retired = true;
+      this.wakeSelectedKey(record);
+      record.attempt?.resolve(Object.freeze({ kind: "retired" })); record.attempt = null;
+      if (record.drained) this.releaseSelectedKey(record);
+    } });
+    record.handle = admittedSelectionHandle(record.cell);
+    this.selectedKeys.set(owner.token, record); this.keys.add(key);
+    try {
+      record.unsubscribe = owner.onRetired(admittedSelectionRetirement(record.cell));
+    } catch (error) { this.releaseSelectedKey(record); throw error; }
+    return record.handle;
+  }
+
+  private releaseSelectedKey(record: AnySelectedKeyRecord): void {
     // End cannot erase/refund the original selected key while an actual local-channel SDK
     // promise still borrows it. Keep its exact lookup/payment through actual queue-job
     // return too: a first teardown request after map removal must not miss an old worker.
     // The channel releases its separate borrow after real drainage.
     if (record.released || record.channelUsers || !record.jobReturned) return;
+    if (record.profile === "admitted") {
+      const selection = record.cell.detach(), point = record.keyCell?.detach();
+      if (!record.cell.detached || (record.keyCell && !record.keyCell.detached)) {
+        if (!record.disposing) {
+          record.disposing = true;
+          void Promise.all([selection, point]).then(() => { record.disposing = false; this.releaseSelectedKey(record); });
+        }
+        return;
+      }
+      if (record.publicHandle) this.admittedKeys.delete(record.publicHandle);
+    }
     record.released = true; record.unsubscribe();
     record.key.privateKey = null; record.key.point.fill(0);
     this.keys.delete(record.key); this.selectedKeys.delete(record.owner.token);
-    this.refund(record.owner, SELECTED_KEY_BYTES);
+    this.refund(record.owner, record.profile === "admitted" ? VOICE_ADMITTED_SELECTED_KEY_BYTES : SELECTED_KEY_BYTES);
     if (record.jobReturned) record.closed.resolve();
   }
 
-  private attemptSelectedKey(record: SelectedKeyRecord): Promise<VoiceSelectedKeyOutcome> {
+  private attemptSelectedKey(record: SelectedKeyRecord): Promise<VoiceSelectedKeyOutcome>;
+  private attemptSelectedKey(record: AdmittedSelectedKeyRecord): Promise<VoiceAdmittedSelectedKeyOutcome>;
+  private attemptSelectedKey(record: AnySelectedKeyRecord): Promise<VoiceSelectedKeyOutcome | VoiceAdmittedSelectedKeyOutcome> {
     // Old handles can wake their sole cleanup owner even after End. They never restart crypto.
     this.wakeSelectedKey(record);
     if (record.retired || !record.owner.isCurrent()) return Promise.resolve(Object.freeze({ kind: "retired" }));
     if (record.outcome) return Promise.resolve(record.outcome);
     if (record.attempt) return record.attempt.promise;
-    record.attempt = signal<VoiceSelectedKeyOutcome>();
+    if (record.profile === "existing") record.attempt = signal<VoiceSelectedKeyOutcome>();
+    else record.attempt = signal<VoiceAdmittedSelectedKeyOutcome>();
     const attempt = record.attempt.promise;
     if (record.started) return attempt;
     if (this.queue.length >= MAX_QUEUED) {
@@ -680,7 +830,10 @@ export class VoiceCryptoBroker {
     };
     this.queue.push({ owner: record.owner, bytes: 128,
       refuse: () => { record.retired = true; record.attempt?.resolve(Object.freeze({ kind: "retired" })); record.attempt = null; finish(); },
-      start: async () => { try { await this.driveSelectedKey(record); } finally { finish(); } },
+      start: async () => { try {
+        if (record.profile === "existing") await this.driveSelectedKey(record);
+        else await this.driveAdmittedSelectedKey(record);
+      } finally { finish(); } },
       returned: () => {
         record.jobReturned = true; this.refund(record.owner, 128);
         if (record.retired || !record.owner.isCurrent()) this.releaseSelectedKey(record);
@@ -690,7 +843,7 @@ export class VoiceCryptoBroker {
     this.pump(); return attempt;
   }
 
-  private wakeSelectedKey(record: SelectedKeyRecord): void {
+  private wakeSelectedKey(record: AnySelectedKeyRecord): void {
     record.wake = {}; record.retry?.resolve();
   }
 
@@ -721,6 +874,7 @@ export class VoiceCryptoBroker {
   }
   private appCalls(native: VoiceAppNative, selected: VoiceSelectedKeyNative, ipc: VoiceIpcNative,
     transport: typeof fetch, configurationSource: VoiceRtcDeviceSettingsSource | null, mode: IpcMode): VoiceAppCalls {
+    if (isVoiceAdmittedJoinKeyNative(selected)) throw new Error("admitted voice adapter requires a separate application profile");
     const previous = this.appSession;
     if (previous) {
       if (previous.native !== native || previous.selected !== selected || previous.ipc !== ipc || previous.transport !== transport ||
@@ -845,7 +999,7 @@ export class VoiceCryptoBroker {
     current(owner);
     const selected = this.selectedKeys.get(owner.token);
     const key = this.joinKeys.get(handle);
-    if (!selected || selected.owner !== owner || selected.key !== key || !key.privateKey ||
+    if (!selected || selected.profile !== "existing" || selected.owner !== owner || selected.key !== key || !key.privateKey ||
         selected.outcome?.kind !== "accepted" || selected.outcome.key !== handle ||
         !key.join || !key.key) throw new Error("selected voice key required");
     const previous = this.ipcChannels.get(owner.token);
@@ -1431,7 +1585,7 @@ export class VoiceCryptoBroker {
     }
   }
 
-  private async waitSelectedKeyRetry(record: SelectedKeyRecord, observed: object): Promise<void> {
+  private async waitSelectedKeyRetry(record: AnySelectedKeyRecord, observed: object): Promise<void> {
     // End/availability may arrive while the RPC is still pending. Consume that one wake even
     // if it predates retry installation. The next RPC samples the new identity, so a permanently
     // failed retired operation cannot turn this into an immediate infinite retry loop.
@@ -1439,6 +1593,20 @@ export class VoiceCryptoBroker {
     record.retry = signal<void>();
     record.attempt?.resolve(Object.freeze({ kind: "uncertain" })); record.attempt = null;
     await record.retry.promise; record.retry = null;
+  }
+
+  /** The SAME queue job owns the provider call for either immutable profile.
+   * Generated public-key objects never enter an escaped handle's lexical scope. */
+  private async generateSelectedKey(record: AnySelectedKeyRecord, live: () => boolean): Promise<boolean> {
+    const keys = await this.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+    if (!live()) return false;
+    record.key.privateKey = keys.privateKey;
+    const exported = await this.subtle.exportKey("raw", keys.publicKey);
+    if (record.profile === "admitted" && (!(exported instanceof ArrayBuffer) || exported.byteLength !== 65))
+      throw new Error("invalid admitted voice public point");
+    record.key.point = new Uint8Array(exported);
+    if (record.profile === "admitted" && record.key.point[0] !== 4) throw new Error("invalid admitted voice public point");
+    return live();
   }
 
   private async driveSelectedKey(record: SelectedKeyRecord): Promise<void> {
@@ -1473,11 +1641,7 @@ export class VoiceCryptoBroker {
       if (!live()) return;
       // Share only provider computation, never ordinary run()/fresh-token admission. The whole
       // native/engine/publication/settlement flight holds this broker's one queue position.
-      const keys = await this.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
-      if (!live()) return;
-      record.key.privateKey = keys.privateKey;
-      record.key.point = new Uint8Array(await this.subtle.exportKey("raw", keys.publicKey));
-      if (!live()) return;
+      if (!await this.generateSelectedKey(record, live)) return;
       while (live()) {
         const observed = record.wake;
         let reply: unknown;
@@ -1510,12 +1674,93 @@ export class VoiceCryptoBroker {
     }
   }
 
+  private async driveAdmittedSelectedKey(record: AdmittedSelectedKeyRecord): Promise<void> {
+    const live = () => !record.retired && record.owner.isCurrent();
+    let attempted = false, historical = false, mayHavePublished = false;
+    let outcome: VoiceAdmittedSelectedKeyOutcome = Object.freeze({ kind: "failed" });
+    const publication = async (): Promise<void> => {
+      // Once a publish MAY have entered, End must not erase its unknown history.
+      // Native can return exact terminal history or a narrow NeverStartedClosed
+      // proof even after revocation; a generic exception is neither.
+      while (!record.terminal) {
+        const observed = record.wake;
+        let reply: unknown;
+        try { reply = await record.native.publish(record.owner.token, record.executor, record.permit!, record.key.point.slice()); }
+        catch { /* Recover only this frozen native generation, never another key. */ }
+        record.terminal = admittedPublicationReply(reply, record);
+        if (!record.terminal) await this.waitSelectedKeyRetry(record, observed);
+      }
+      const terminal = record.terminal;
+      if (terminal.kind === "accepted") {
+        record.key.join = terminal.join; record.key.key = terminal.keyRef;
+        if (live()) {
+          record.keyCell = new VoiceHandleCell(admittedPointOps(record));
+          const handle = admittedPointHandle(record.keyCell);
+          record.publicHandle = handle;
+          this.admittedKeys.set(handle, record.key); // NEVER the legacy joinKeys WeakMap
+          outcome = Object.freeze({ kind: "accepted", key: handle });
+        }
+      } else outcome = Object.freeze({ kind: terminal.kind === "rejected" ? "failed" : "unavailable" });
+      if (!live()) outcome = Object.freeze({ kind: "retired" });
+      // This observer result is not native collection or SDK settlement. Retain
+      // the SAME result/key while ACK is unavailable; availability wakes cleanup.
+      record.outcome = outcome;
+      record.attempt?.resolve(outcome); record.attempt = null;
+    };
+    try {
+      while (live() && !record.permit) {
+        attempted = true;
+        const observed = record.wake;
+        let raw: unknown;
+        try { raw = await record.native.admit(record.owner.token, record.executor); } catch { /* Exact original recovery. */ }
+        const reply = admittedAdmissionReply(raw, record);
+        if (reply?.kind === "refused") {
+          historical = true; outcome = Object.freeze({ kind: "unavailable" }); return;
+        }
+        if (reply?.kind === "closed") {
+          historical = true; outcome = Object.freeze({ kind: "unavailable" }); return;
+        }
+        if (!live()) return;
+        if (reply?.kind === "admitted") {
+          record.permit = reply.permit; record.join = reply.join;
+        } else await this.waitSelectedKeyRetry(record, observed);
+      }
+      if (!live() || !await this.generateSelectedKey(record, live)) return;
+      mayHavePublished = true; // BEFORE any IPC/provider callback can retire/reenter
+      await publication();
+    } catch { /* A failed provider is terminal; never generate twice for this owner. */ }
+    finally {
+      if (attempted && !historical) {
+        if (mayHavePublished && !record.terminal) await publication();
+        if (record.terminal && record.terminal.kind !== "not-started") {
+          for (;;) {
+            const observed = record.wake;
+            try { await record.native.acknowledge(record.owner.token, record.executor); break; }
+            catch { await this.waitSelectedKeyRetry(record, observed); }
+          }
+        }
+        // ACK precedes this SDK settlement on KNOWN terminal history. The native
+        // engine credit keeps that same canonical result recoverable if ACK's
+        // reply is lost. A not-started certificate needs no publication ACK.
+        for (;;) {
+          const observed = record.wake;
+          try { await record.native.settle(record.owner.token, record.executor); break; }
+          catch { await this.waitSelectedKeyRetry(record, observed); }
+        }
+      }
+      if (!live()) outcome = Object.freeze({ kind: "retired" });
+      record.outcome = outcome;
+      record.attempt?.resolve(outcome); record.attempt = null;
+    }
+  }
+
   /** Generate on this retained broker. There is deliberately no private-key adoption API. */
   async createJoinKeyHandle(owner: VoiceCryptoOwner): Promise<VoiceJoinKeyHandle> {
     current(owner);
     if (this.keys.size >= 128 || [...this.keys].filter(key => key.owner === owner).length >= 16) throw new Error("voice join key capacity reached");
     this.charge(owner, 1024);
-    const key: JoinKeyRecord = { owner, privateKey: null, point: new Uint8Array(), join: null, key: null };
+    const key: JoinKeyRecord = { profile: "existing", owner, privateKey: null, point: new Uint8Array(), join: null, key: null };
+    Object.defineProperty(key, "profile", { writable: false, configurable: false });
     this.keys.add(key);
     let unsubscribe = () => {};
     const release = () => {
@@ -4927,7 +5172,7 @@ export function windowVoiceCryptoBroker(
   // null or swapped slots cannot publish a second pool beside its unresolved original.
   if (expected !== undefined && previous !== expected) throw new Error("voice crypto broker changed; reload required");
   if (previous) {
-    if (previous.version !== 51 || typeof previous.nativeConfiguredAdmissionAppCalls !== "function" || typeof previous.nativeAdmissionChannel !== "function" || typeof previous.nativeNegotiationCapacity !== "function" || typeof previous.preclaimNativeNegotiation !== "function" || typeof previous.nativeDerivationFromPreclaim !== "function" || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 52 || typeof previous.selectAdmittedJoinKey !== "function" || typeof previous.nativeConfiguredAdmissionAppCalls !== "function" || typeof previous.nativeAdmissionChannel !== "function" || typeof previous.nativeNegotiationCapacity !== "function" || typeof previous.preclaimNativeNegotiation !== "function" || typeof previous.nativeDerivationFromPreclaim !== "function" || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
