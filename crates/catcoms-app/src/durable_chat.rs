@@ -200,6 +200,18 @@ impl DurableMutationRequest {
         *h.finalize().as_bytes()
     }
 }
+// Canonical request components used together at lookup/admission. The message id and target
+// are derived from the request, never reconstructed from mutable rendered message text.
+type ChatRequestIdentityParts = (
+    [u8; 16],
+    [u8; 32],
+    [u8; 32],
+    u128,
+    String,
+    ChatAction,
+    Option<[u8; 32]>,
+);
+
 impl DurableChatRequest {
     pub fn validate(&self) -> Result<(), String> {
         match self {
@@ -213,17 +225,7 @@ impl DurableChatRequest {
             Self::Mutation(r) => r.channel,
         }
     }
-    fn identity(
-        &self,
-    ) -> (
-        [u8; 16],
-        [u8; 32],
-        [u8; 32],
-        u128,
-        String,
-        ChatAction,
-        Option<[u8; 32]>,
-    ) {
+    fn identity(&self) -> ChatRequestIdentityParts {
         match self {
             Self::Send(r) => {
                 let b = r.binding();
