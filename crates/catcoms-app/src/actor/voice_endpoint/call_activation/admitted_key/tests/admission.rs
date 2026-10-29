@@ -212,6 +212,52 @@ async fn actual_admitted_actor_stages_whole_registration_and_reuses_same_observe
 }
 
 #[tokio::test]
+async fn actual_admitted_actor_same_rpc_funding_survives_retired_result_and_concurrent_last_work() {
+    // No Presence is published here. Root's real Unauthorized result creates no
+    // pools/registration, isolating the exact invocation allocation/payment tail.
+    let call = bounded(Call::new()).await;
+    let original = call.pair.observer();
+    let cell = ResultCell::new(&original);
+    let pool = call._runtime.resources();
+    let before = pool.counts().0;
+    let work = queue(&call, &cell, None);
+    bounded(cell.ready()).await;
+    bounded(work.wait_retired()).await;
+    {
+        let mut state = cell.state.lock().unwrap();
+        assert!(matches!(state.result, Some(Err(VoiceError::Unauthorized))));
+        assert!(!state.unknown && state.refusal.is_none());
+        drop(state.work.take());
+        drop(state.result.take());
+    }
+    assert_eq!(pool.counts().0, before + ADMISSION_RPC_BYTES);
+    let first = work.clone();
+    let second = work.clone();
+    drop(work);
+    let (one, one_done) = oneshot::channel();
+    let (two, two_done) = oneshot::channel();
+    drop(std::thread::spawn(move || {
+        drop(first);
+        let _ = one.send(());
+    }));
+    drop(std::thread::spawn(move || {
+        drop(second);
+        let _ = two.send(());
+    }));
+    bounded(async {
+        one_done.await.unwrap();
+        two_done.await.unwrap();
+    })
+    .await;
+    assert_eq!(
+        pool.counts().0,
+        before,
+        "the SAME funding returns exactly once"
+    );
+    bounded(call.close()).await;
+}
+
+#[tokio::test]
 async fn actual_admitted_actor_capacity_refusal_still_stages_original_registration_for_retry() {
     let call = bounded(published()).await;
     let original = call.pair.observer();

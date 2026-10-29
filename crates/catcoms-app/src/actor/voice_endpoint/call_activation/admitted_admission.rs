@@ -28,17 +28,67 @@ pub trait VoiceAdmittedAdmissionPublisher: Send {
     );
 }
 
+/// Every alias retains the SAME plain permit outside the lifecycle allocation.
+/// No raw Arc/Weak escapes. Concurrent final owners all use `into_inner`, freeing
+/// the funding header before the actual permit/Credit can return to its pool.
+struct FundingOwner(Option<Arc<AdmissionRpcPermit>>);
+impl Clone for FundingOwner {
+    fn clone(&self) -> Self {
+        Self(Some(
+            self.0.as_ref().expect("original admission funding").clone(),
+        ))
+    }
+}
+impl Drop for FundingOwner {
+    fn drop(&mut self) {
+        if let Some(permit) = self.0.take().and_then(Arc::into_inner) {
+            drop(permit);
+        }
+    }
+}
 #[derive(Clone)]
-pub struct VoiceAdmittedAdmissionWork(Arc<InvocationState<AdmissionRpcPermit>>);
+pub struct VoiceAdmittedAdmissionWork {
+    state: Option<Arc<InvocationState<()>>>,
+    funding: FundingOwner,
+}
+impl Drop for VoiceAdmittedAdmissionWork {
+    fn drop(&mut self) {
+        drop(self.state.take());
+    }
+}
 impl VoiceAdmittedAdmissionWork {
     pub fn is_same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(self.state.as_ref().unwrap(), other.state.as_ref().unwrap())
     }
     pub fn is_retired(&self) -> bool {
-        self.0.is_retired()
+        self.state.as_ref().unwrap().is_retired()
     }
     pub async fn wait_retired(&self) {
-        self.0.wait_retired().await;
+        self.state.as_ref().unwrap().wait_retired().await;
+    }
+    fn payment(&self) -> &AdmissionRpcPermit {
+        self.funding
+            .0
+            .as_deref()
+            .expect("original admission payment")
+    }
+}
+struct Retirement {
+    marker: Option<InvocationRetirement<()>>,
+    // LAST: marker destruction/notification and its Arc tail precede payment.
+    funding: FundingOwner,
+}
+impl Drop for Retirement {
+    fn drop(&mut self) {
+        drop(self.marker.take());
+    }
+}
+impl Retirement {
+    fn work(&self) -> VoiceAdmittedAdmissionWork {
+        VoiceAdmittedAdmissionWork {
+            state: Some(self.marker.as_ref().unwrap().0.clone()),
+            funding: self.funding.clone(),
+        }
     }
 }
 impl std::fmt::Debug for VoiceAdmittedAdmissionWork {
@@ -54,15 +104,12 @@ struct Arguments {
     generation: u64,
     publisher: Option<Box<dyn VoiceAdmittedAdmissionPublisher>>,
     // LAST: original arguments/callback destruction precedes actual retirement.
-    retirement: Option<InvocationRetirement<AdmissionRpcPermit>>,
+    retirement: Option<Retirement>,
 }
 impl Drop for Arguments {
     fn drop(&mut self) {
         if let Some(publisher) = self.publisher.take() {
-            let work = self
-                .retirement
-                .as_ref()
-                .map(|retired| VoiceAdmittedAdmissionWork(retired.0.clone()));
+            let work = self.retirement.as_ref().map(Retirement::work);
             publisher.refused(VoiceEndpointError::Stopped, work, None);
         }
     }
@@ -87,7 +134,7 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
         &submission.0.arguments.activation,
         submission.0.arguments.original.as_ref(),
         submission.0.arguments.generation,
-        submission.0.payment.0.payment(),
+        submission.0.payment.payment(),
     );
     publisher.completed(result, submission.0.payment.clone());
 }
@@ -178,10 +225,15 @@ impl VoiceActivationControl {
                 return Err(error);
             }
         };
-        let work = VoiceAdmittedAdmissionWork(Arc::new(InvocationState::new(
-            preparing.payment.take().unwrap(),
-        )));
-        preparing.arguments.retirement = Some(InvocationRetirement(work.0.clone()));
+        let funding = FundingOwner(Some(Arc::new(preparing.payment.take().unwrap())));
+        let work = VoiceAdmittedAdmissionWork {
+            state: Some(Arc::new(InvocationState::new(()))),
+            funding: funding.clone(),
+        };
+        preparing.arguments.retirement = Some(Retirement {
+            marker: Some(InvocationRetirement(work.state.as_ref().unwrap().clone())),
+            funding,
+        });
         if let Err(error) = preparing
             .arguments
             .publisher
@@ -232,6 +284,10 @@ pub const fn voice_admitted_admission_rpc_bytes() -> usize {
         + std::mem::size_of::<Submission>()
         + std::mem::size_of::<Preparing>()
         + std::mem::size_of::<(usize, usize, InvocationState<AdmissionRpcPermit>)>()
+        // Keep the earlier larger State<P> allowance after moving P outside;
+        // add all new wrappers without trimming original inventory terms.
+        + 2 * std::mem::size_of::<FundingOwner>()
+        + std::mem::size_of::<Retirement>()
         + 3 * std::mem::size_of::<VoiceAdmittedAdmissionWork>()
         + std::mem::size_of::<VoiceAdmittedAdmissionResult>()
         + std::mem::size_of::<(usize, usize, AdmissionRpcPermit)>()

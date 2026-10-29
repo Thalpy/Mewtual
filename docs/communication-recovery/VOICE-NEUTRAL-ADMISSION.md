@@ -1,5 +1,16 @@
 # Admitted neutral Root preparation
 
+The sealed Actor bridge now stages the WHOLE exact admitted result and separates
+true unstarted refusal from entered callback uncertainty. Seven focused cases
+pass on the integrated pre-funding-correction source (2,720/4,096-byte graph).
+The subsequent correction pairs every lifecycle/retirement alias with the SAME
+outside permit, frees the no-credit State allocation first and uses `Arc::into_inner`
+for all final funding drops. It preserves the larger old State<P> invoice and
+adds the new wrappers; no terms or caps are cut. Its eighth concurrent-final-drop
+regression and updated invoice remain unrun. Actual-diff re-review is clear.
+Older activation/Presence Work types are not changed by this scoped correction.
+Native Slot/31 and operational consumers remain required.
+
 29 October 2026. Focused tests pass for the initial factory; final checks remain
 open. V2 remains off.
 It supplies inert Root capacity, not an operational agreement or Ready result.
