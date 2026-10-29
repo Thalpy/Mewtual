@@ -553,3 +553,36 @@ Later negative revocation, revision or physical mount replacement still refuses
 that continuation. Negative custody can retire an Initializing reservation.
 No native hook, fresh proof/capture producer or owner-evidence head writer is
 activated by these library contracts; their final integration remains required.
+
+The primary subsequently compiled the negative-custody slice in combined
+`28ec6705`: app/sync all-feature test metadata passed. Focused runtime passed Store
+admission 16/16, scope 9/9 and join 3/3. `2d3f03f9` removes one redundant test trait
+import without changing the reviewed authority boundary. Affected strict Clippy
+is still running; no full-suite or native activation claim follows from this batch.
+
+### Already-held storage continuation (uncompiled)
+
+Initialization already owns the admission writer. A subordinate logical owner-head
+saver must not call `with_chat_admission_storage` again: that would deadlock. The
+crate-private `ChatAdmissionStoragePermit` instead borrows that original writer,
+Store, logical identity, domain/nonce/revision, runtime owner identity and composed
+weak observer. Its closed mode is Initializing or Current, never a caller-supplied
+boolean. It has no Clone/serialization/Send or public constructor and cannot escape
+the higher-ranked synchronous callback. Existing public methods remain wrappers.
+
+The saver takes its head writer only after receiving the permit, checks the exact
+Store/group/full signer/source, and calls `validate_original` after that wait,
+immediately before synchronous storage admission. Negative revocation takes neither
+writer. A write already admitted by that final read can finish, but cannot run after
+a completed durable retirement because the original admission writer is still held.
+An Initializing permit covers only a private canonical snapshot. No fact export or
+publication becomes usable until the external Current barrier returns an opaque
+Current binding with the same runtime owner identity. Duplicate AlreadyCurrent
+completion continues to skip the old covering callback.
+
+New deterministic regressions exercise both closed phases and wrong-source
+refusal, actual sealed bytes surviving duplicate completion/reopen, revocation
+while waiting for a held subordinate writer, and a completed private save followed
+by revocation refusing Current promotion. They are uncompiled/unexecuted pending
+primary execution. Exact native Actor incarnation and canonical owner-head CAS
+remain host obligations; this borrowed permit alone does not implement them.

@@ -12,10 +12,15 @@ claim for the new scope code. See
 [`CHAT-STABLE-AUTHORING-SCOPE-NEXT.md`](communication-recovery/CHAT-STABLE-AUTHORING-SCOPE-NEXT.md)
 for fixture corrections, remaining host hooks and the honest snapshot rollback limits.
 
-The separate negative-custody draft is not yet compiled, and native managed/no-tail classification,
-inseparable admission capture, metadata repair/exposure, durable Leave and offline Retired restore
-remain unwired. Owner-evidence logical-head persistence is another separate unresolved activation
-gate; local scope/current roster metadata is not historical membership authority.
+The subsequent negative-custody slice passed the primary's isolated app/sync all-feature test
+metadata check and focused Store admission 16/16, scope 9/9 and join 3/3 runtime checks. A further
+borrowed already-held storage permit
+prevents owner-head initialization from recursively acquiring the admission writer. It preserves
+the original Store/nonce/owner and closed Initializing/Current phase through synchronous I/O;
+that continuation is uncompiled/unexecuted. Native managed/no-tail classification, inseparable
+admission capture, metadata repair/exposure, durable Leave and offline Retired restore remain
+unwired. Owner-evidence logical-head persistence is another separate unresolved activation gate;
+local scope/current roster metadata is not historical membership authority.
 
 ## Integrated text-chat validation (29 October; backend runtime gates pending)
 

@@ -2,6 +2,8 @@ use super::*;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[path = "storage_tests.rs"]
+mod held_storage;
 #[path = "revocation_tests.rs"]
 mod negative_custody;
 

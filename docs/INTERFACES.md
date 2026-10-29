@@ -24,8 +24,19 @@ run; Current binding must match that same runtime dummy identity. The dummy allo
 publisher/Store alive. Weak negative handles target their original owner, never a logical-key
 lookup, and invalidate all aliases without acquiring the admission/evidence writers. Captures
 and preparations retain this original liveness; a private own-issued retry slot preserves exact
-pre-rename debt without accepting a later revoked completion. This source is still unexecuted
-and has no native activation at this checkpoint.
+pre-rename debt without accepting a later revoked completion. The primary's isolated app/sync
+all-feature test metadata check passed for this negative-custody source. Focused runtime passed
+Store admission 16/16, scope 9/9 and join 3/3; it has no native activation at this checkpoint.
+
+Trusted Store children can use `ChatAdmissionStoragePermit` while the outer admission writer
+is already held. Its closed Initializing/Current mode, original Store/group/full signer, nonce,
+revision, dummy owner identity and composed weak observer cannot be constructed from saved
+labels. The non-Clone, nonserialized, non-Send permit is confined to a higher-ranked synchronous
+callback. An owner-head saver must acquire its subordinate writer and revalidate the permit
+immediately before I/O; recursively entering an admission API would deadlock. Initializing permits
+cover private storage only; publication still requires the separately returned Current binding
+after the inventory barrier, with the same runtime owner. Existing public storage callbacks remain
+wrappers. This permit continuation is uncompiled/unexecuted pending primary validation.
 
 The tail has closed Active/Retired/Initializing phases. Initializing carries the exact reserved
 domain/nonce while original recovery spans turns, has no aliases or runtime authority, and must

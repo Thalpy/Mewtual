@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 mod custody;
 mod revocation;
+mod storage;
+pub(crate) use storage::ChatAdmissionStoragePermit;
 
 const DOMAIN: &str = "catcoms/chat-admission-inventory/v1";
 const FILE: &str = "chat-admissions.bin";
@@ -56,6 +58,12 @@ enum Phase {
     Initializing,
     Current,
     Retired,
+}
+/// Closed storage phases: initialization is a private covering save, never a publication grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatAdmissionStorageMode {
+    Initializing,
+    Current,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Origin {
@@ -773,6 +781,24 @@ impl ServerStore {
         rng: &mut R,
         save: impl FnOnce(&Self, &mut R) -> Result<(), AppError>,
     ) -> Result<ChatAdmissionFinish, AppError> {
+        self.finish_chat_admission_with_storage(preparation, rng, |permit, rng| {
+            save(permit.store(), rng)
+        })
+    }
+
+    /// Cover private initialization under the already-held admission writer. The permit cannot
+    /// escape the callback or be sent to an asynchronous worker. A subordinate owner-head saver
+    /// takes its own writer AFTER this permit, then revalidates the original permit before I/O;
+    /// it must never re-enter an outer admission API. Initializing permits grant no publication.
+    pub(crate) fn finish_chat_admission_with_storage<R: CryptoRngCore>(
+        &self,
+        preparation: &ChatAdmissionPreparation,
+        rng: &mut R,
+        save: impl for<'writer> FnOnce(
+            ChatAdmissionStoragePermit<'writer>,
+            &mut R,
+        ) -> Result<(), AppError>,
+    ) -> Result<ChatAdmissionFinish, AppError> {
         let mut runtime = self.chat_mount.locked()?;
         if !runtime.managed
             || preparation.domain != self.chat_vault_domain()?
@@ -815,7 +841,9 @@ impl ServerStore {
         if preparation.mount.is_cancelled() || preparation.admission.is_cancelled() {
             return Err(refused());
         }
-        save(self, rng)?;
+        let permit = ChatAdmissionStoragePermit::initializing(self, &runtime, preparation);
+        permit.validate_original(self, preparation.key.group(), preparation.key.signer())?;
+        save(permit, rng)?;
         if preparation.admission.is_cancelled() {
             return Err(refused());
         }
@@ -914,6 +942,17 @@ impl ServerStore {
         binding: &ChatAdmissionBinding,
         write: impl FnOnce(&Self) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
+        self.with_chat_admission_storage_permit(binding, |permit| write(permit.store()))
+    }
+
+    /// Supply exact original-store custody without recursively reacquiring the admission writer.
+    /// The synchronous callback may take a subordinate logical head writer, and must revalidate
+    /// this permit after that wait. Its return value cannot borrow the callback-local permit.
+    pub(crate) fn with_chat_admission_storage_permit<T>(
+        &self,
+        binding: &ChatAdmissionBinding,
+        write: impl for<'writer> FnOnce(ChatAdmissionStoragePermit<'writer>) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         let runtime = self.chat_mount.locked()?;
         self.original_chat_store(binding)?;
         if !runtime.managed || runtime.dirty {
@@ -936,7 +975,9 @@ impl ServerStore {
         if !binding.is_live() {
             return Err(refused());
         }
-        write(self)
+        let permit = ChatAdmissionStoragePermit::current(self, &runtime, binding);
+        permit.validate_original(self, binding.key.group(), binding.key.signer())?;
+        write(permit)
     }
 
     /// Negative history repair bypasses role/UI, not physical original-store lifetime. It cannot
