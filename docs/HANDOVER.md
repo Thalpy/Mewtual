@@ -1,17 +1,20 @@
 # Mewtual; Handover
 
-## Admitted neutral Root factory (29 October; uncompiled draft)
+## Admitted neutral Root factory (29 October; initial focused tests pass)
 
 The separate typed Root factory reserves neutral6/6 and twelve Action positions
 from one paid pool set per admitted Presence. It validates the actual selected
 NativeActive residence/grant and preserves a newly created registration across
 later capacity refusal. Exact retries reuse its observer; this is not canonical
 native-generation or lost-first-reply recovery. Existing role consumers refuse
-Neutral before decomposition. Pool2KiB/registration3KiB are guarded candidate fees,
-not compiled measurements. Tests are drafted but unrun; actual-diff review and
-integration gates remain open. V2 stays OFF. Actor/native Slot, operation31,
+Neutral before decomposition. Eleven focused tests pass, with complete pool
+648/2,048 and registration1,600/3,072-byte guards. Thirteen capacity and thirteen
+presence regressions also pass (Presence8,296/9,216). Two additional final-callback
+revocation/unwind tests remain unrun; strict/integration checks and final re-review
+remain open. V2 stays OFF. Actor/native Slot, operation31,
 bilateral agreement/RoundGate/consume, admitted KDF/Ready/RTC and relay remain open.
 See [the factory contract and required next consumers](communication-recovery/VOICE-NEUTRAL-ADMISSION.md).
+
 
 ## Admitted native key handoff (29 October; implementation and validation in progress)
 

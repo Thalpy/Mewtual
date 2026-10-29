@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Inert admitted neutral preparation (29 October; inactive)
+
+`ChannelSync::prepare_admitted_voice_admission_step` accepts the actual original
+admitted grant/activation, optional exact admitted observer, generation and original
+RPC payment. It takes no peer/role. `AdmittedAdmissionPrepared::into_parts` returns
+the affine registration independently of a later neutral-capacity refusal; native
+must retain it for exact retry. `None` requests a new registration and does not
+recover a lost native reply. These types cannot become an Existing HIGH preclaim.
+No public consume, role binding, Availability, Ready or RTC permission is supplied.
+See [the exact contract and remaining consumers](communication-recovery/VOICE-NEUTRAL-ADMISSION.md).
+
 ## Admitted native key commands (29 October; inactive call path)
 
 The main webview has seven distinct commands: `prepare_admitted_voice_owner`,

@@ -1,6 +1,7 @@
 # Admitted neutral Root preparation
 
-29 October 2026. This factory is drafted and **uncompiled/unrun**. V2 remains off.
+29 October 2026. Focused tests pass for the initial factory; final checks remain
+open. V2 remains off.
 It supplies inert Root capacity, not an operational agreement or Ready result.
 
 `prepare_admitted_voice_admission_step` checks the actual selected NativeActive
@@ -35,16 +36,22 @@ NativeActive remains an independent predicate: an old live bit cannot reopen
 admission during the first phase-negative interval. Epoch/End closure invalidates
 currency immediately but does not return still-owned capacity or pool backing.
 All new prepayments have production inventory guards before allocation: pools
-2 KiB and registration3 KiB. These are candidate allowances until compiled
-measurements and focused tests pass; the formulas must not be reduced to fit.
+2 KiB and registration3 KiB. Compiled inventories measure 648/2,048 and
+1,600/3,072 bytes. The complete formulas remain intact.
 
-The draft regressions cover actual Root preparation, full ordinary-pool refusal
+Eleven focused tests pass (1.45s), covering actual Root preparation, full ordinary-pool refusal
 and exact registration/RNG recovery, foreign observers/payments, cancellation,
 phase-first closure, an actual MLS Add, neutral position accounting, both legacy
 role refusals, partial packet reservation rollback, final body destruction and
-concurrent final funding return. Formatting has been checked separately from
-execution. Complete integration checks and adversarial actual-diff review remain
-open.
+concurrent final funding return. Thirteen adjacent capacity tests pass, including
+both legacy role refusals and partial rollback; all thirteen admitted-presence
+tests pass, including the complete 8,296/9,216-byte Presence guard. The exact
+Root-clear payment test accounts separately for Watcher's immediate 1,536-byte
+refund and its lease aliases' later release of the original Presence funding.
+Two further final-callback revocation/unwind cases have been added but not run.
+Formatting and actual-diff review are separate evidence; the review's bounded
+test-wait and actual-composition findings were corrected. Complete integration,
+strict checks and the final re-review remain open.
 
 Still required: the Actor/native admitted Slot, sticky local operation31,
 canonical native generation ownership, Availability/Request/Grant/Commit,

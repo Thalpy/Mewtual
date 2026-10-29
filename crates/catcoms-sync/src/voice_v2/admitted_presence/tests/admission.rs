@@ -62,6 +62,74 @@ async fn admitted_neutral_requires_native_active_and_actual_published_presence_b
 }
 
 #[tokio::test]
+async fn admitted_neutral_final_callback_revocation_refuses_and_returns_registration_funding() {
+    let (mut node, runtime, _clock, grant, _owner, activation, _key, _remote) = fixture().await;
+    let context = node.voice_v2_context(1).unwrap();
+    let before = runtime.resources().counts();
+    let voice = node.voice_runtime.as_mut().unwrap();
+    let actor = voice.current.as_ref().unwrap();
+    let presence = voice.endpoints.admitted_presence_for_test().unwrap();
+    let refused =
+        presence.prepare_admission_session(actor, &context, &activation, &mut node.rng, || {
+            assert_eq!(
+                runtime.resources().counts(),
+                (before.0 + POOLS_BYTES + REGISTRATION_BYTES, before.1)
+            );
+            activation.invalidate();
+        });
+    assert_eq!(refused.err(), Some(VoiceError::Unauthorized));
+    assert!(!activation.is_active() && !grant.lease().is_live());
+    // Only the one lazily installed, original per-Presence pool remains. The
+    // unpublished affine registration and its complete body/header really left.
+    assert_eq!(
+        runtime.resources().counts(),
+        (before.0 + POOLS_BYTES, before.1)
+    );
+}
+
+#[tokio::test]
+async fn admitted_neutral_prepublication_unwind_returns_registration_without_ending_call_or_reminting_pools(
+) {
+    let (mut node, runtime, _clock, grant, _owner, activation, _key, _remote) = fixture().await;
+    let context = node.voice_v2_context(1).unwrap();
+    let before = runtime.resources().counts();
+    let thrown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let voice = node.voice_runtime.as_mut().unwrap();
+        let actor = voice.current.as_ref().unwrap();
+        let presence = voice.endpoints.admitted_presence_for_test().unwrap();
+        let _ =
+            presence.prepare_admission_session(actor, &context, &activation, &mut node.rng, || {
+                assert_eq!(
+                    runtime.resources().counts(),
+                    (before.0 + POOLS_BYTES + REGISTRATION_BYTES, before.1)
+                );
+                panic!(
+                    "deterministic unpublished registration failure after actual RNG/allocation"
+                );
+            });
+    }));
+    assert!(thrown.is_err());
+    assert!(
+        activation.is_active(),
+        "registration destruction is not whole-call End"
+    );
+    assert_eq!(
+        runtime.resources().counts(),
+        (before.0 + POOLS_BYTES, before.1)
+    );
+    let payment = AdmissionRpcPermit::reserve(&runtime.resources(), grant.scope()).unwrap();
+    let (session, capacity) = node
+        .prepare_admitted_voice_admission_step(&grant, &activation, None, 1, &payment)
+        .unwrap()
+        .into_parts();
+    let session = session.unwrap();
+    assert!(session.is_current() && capacity.unwrap().belongs_to(&session));
+    // Creating a registration after proven unpublished unwind uses the SAME
+    // cached pools. It does not establish lost-native-reply recovery.
+    assert_eq!(session.observer().unreserved_counts(), (32, 32, 32));
+}
+
+#[tokio::test]
 async fn admitted_neutral_root_prepares_original_registration_and_actual_six_six_pools() {
     let (mut node, runtime, _clock, grant, _owner, activation, _key, _remote) = fixture().await;
     let payment = AdmissionRpcPermit::reserve(&runtime.resources(), grant.scope()).unwrap();

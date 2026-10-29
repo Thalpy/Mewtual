@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Admitted neutral capacity (29 October; inactive)
+
+The separate preparation requires the actual selected NativeActive Root residence,
+original grant/lease/watch parent, current actor/epoch and original resource/pool/key
+identity. Native phase closure is checked independently of the live bit. One paid
+pool set belongs to Presence; escaped registrations/preclaims carry its SAME outside
+payment. The preclaim destroys capacity before its observer/pool payer. Epoch/End
+invalidates currency without refunding actual outstanding custody. Existing role
+consumers refuse Neutral before decomposition. This does not enforce canonical
+native generation, bilateral admission, RoundGate or operational RTC; those remain
+unimplemented consumers. [Scope and measured evidence](communication-recovery/VOICE-NEUTRAL-ADMISSION.md).
+
 ## Original admitted key publication (29 October; inactive call path)
 
 The native admitted commands require the original selected Root residence,
