@@ -453,3 +453,65 @@ binding in the sync tests is not evidence for native mount/lineage custody. Firs
 initialization must also survive unrelated epochs after actual fresh attachment;
 the original authenticator is checked at that handoff, not reinterpreted as a
 later current-epoch requirement. Actual removal/Leave ends unused fresh provenance.
+
+## Remaining host implementation seams (not activated)
+
+The next runtime slice must close these mechanical gates; the dormant APIs above
+do not prove them merely by existing:
+
+1. `ServerStore::open` holds `_session` before authenticating keys. Under that same
+   lifetime exclusion, an authenticated managed-v3 wrapper must require a valid,
+   nonmissing inventory before returning a usable managed Store. Legacy activation
+   keeps its inventory-first/wrapper-second order and real parent-sync barrier.
+   Every restore consumer, including CLI/library callers, must classify managed
+   no-tail bytes before any owner run or positive publication.
+2. A Store-issued negative-only handle must weakly target its **original** nonce
+   owner, never look up whichever owner now occupies a logical key. Actual removal
+   and Leave synchronously invalidate all sibling/unregistered observers before
+   waiting for the external retirement save. Its atomic path cannot take the
+   inventory writer from inside an Actor transition or keep the owner alive.
+   Captures/preparations must retain and recheck that original revocation observer
+   too: otherwise a delayed pre-removal fresh completion could advance N2 before
+   retirement and make N1's fence miss. Refuse new capture/bind/renewal while that
+   Current owner's retirement debt remains unsettled. Original negative custody
+   must still be able to durably retire. Crash before that fence remains the
+   already stated lost-removal limit.
+3. App Found/join/helper/reply/switchboard/grant wrappers must own the exact Store
+   capture before their actual fresh-KP await, couple the returned opaque proof
+   privately, and never expose a generic old-proof/new-capture attachment API.
+   The original authenticator is checked at `new_joined` handoff; subsequent scope
+   initialization checks current exact own-leaf membership and original Store CAS,
+   without rejecting unrelated epochs in the same attached admission.
+4. Save the provisional Initializing label after external reservation and before
+   registration or any negative/background writer. Recover originals in bounded
+   owner turns, save complete Active aliases, then durably promote Current. Keep
+   exact metadata uncertainty and original custody across Lock; repair from the
+   latest receive/negative graph, never a captured older replacement. A duplicate
+   `AlreadyCurrent` result cannot rerun its old callback or acknowledge a newer
+   persistence ticket. No context is exposed from a merely staged/cached label.
+5. Native `restore_server_actor` currently holds `chat_orphan_commit` across
+   restoration but subscribes, publishes a self-record and dials before spawn.
+   The new classification/metadata barrier must precede all those actions and
+   retain pre-registration custody through installation or actual teardown.
+   A Retired branch needs enforced retained-offline behavior for scheduled and
+   direct Actor network commands as well; omitting initial dials or rejecting
+   only the context RPC does not prove offline restoration.
+6. Positive writes from app durable-chat transactions and native persistence
+   workers must enter the actual original Store's admission serializer through
+   the final replacement. Negative repair uses original mount/nonce plus exact
+   native server incarnation; a new admission merges old evidence through its own
+   transaction. Revoke the actual mount before a replacement/unmount waits on a
+   held Store guard. A host negative-only weak mount handle can do this without
+   turning cached domain equality into a permit. UI Lock and passphrase rewrap
+   preserve the mount; existing session/incarnation/upload guards remain required.
+7. `leave_server`/`leaving::stop_server` need explicit scope retirement in addition
+   to their existing stop acknowledgment and snapshot cleanup. Persist the external
+   fence before reporting retirement; a later cleanup failure stays incomplete
+   without resuming old authority. Do not attach durable retirement to generic
+   `StopAndWait`, which also serves ordinary shutdown/restart.
+
+Required new race coverage includes sibling plus unregistered observers, delayed
+fresh completion during the pre-fence interval, an old weak handle applied after
+N2 renewal, and held original publication/storage repair across physical mount
+replacement. These are implementation obligations, not claims about the current
+desktop or additional moderation/root-governance decisions.
