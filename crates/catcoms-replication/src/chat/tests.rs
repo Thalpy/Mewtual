@@ -2,6 +2,7 @@ use super::*;
 mod acceptance;
 mod fixtures;
 mod moderation;
+mod signing;
 use fixtures::*;
 
 #[test]
