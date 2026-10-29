@@ -80,12 +80,19 @@ pub(super) async fn register(
     index: usize,
 ) -> Running {
     let RestoredActor {
+        chat_fence_commit,
         actor,
         mut events,
         task,
         group_id,
         device_id,
     } = restored;
+    // Match production registration: retain real pre-registration custody while awaiting
+    // the original UI generation, and publish the registry row before releasing absence custody.
+    let generation = state.ui_session_generation.load(Ordering::Acquire);
+    let session = require_ui_session_generation(&state, generation)
+        .await
+        .unwrap();
     state.servers.lock().await.insert(
         1,
         ServerEntry {
@@ -108,9 +115,10 @@ pub(super) async fn register(
             persist: PersistCounters::default(),
         },
     );
+    chat_fence_commit.installed();
+    drop(session);
     // Match native installation: neither the actor handle nor a fixture call supplies unlock
     // authority. Capture the mounted account and exact registry row through the production seam.
-    let generation = state.ui_session_generation.load(Ordering::Acquire);
     actor.set_keep_session(keep_session::for_actor(&state, 1, &actor, generation).await);
     assert_eq!(
         persist_server_net(&state, 1, net).await,

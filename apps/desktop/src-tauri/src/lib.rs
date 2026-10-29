@@ -24952,6 +24952,9 @@ mod tests {
                     persist: PersistCounters::default(),
                 },
             );
+            // This fixture has actually installed the row; finish the same pre-registration
+            // owner as production instead of dropping it and aborting the now-visible actor.
+            restored.chat_fence_commit.installed();
             (state, actor, restored.events, restored.task)
         }
 

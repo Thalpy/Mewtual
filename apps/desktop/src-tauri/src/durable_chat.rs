@@ -867,7 +867,7 @@ mod tests {
     }
     #[tokio::test]
     async fn pre_registration_chat_owner_retains_guard_until_actual_aborted_actor_completion() {
-        use futures::FutureExt;
+        use libp2p::futures::FutureExt;
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
