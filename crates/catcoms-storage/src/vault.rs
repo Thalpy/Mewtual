@@ -939,29 +939,42 @@ mod tests {
     fn managed_activation_real_platform_sync_failure_is_not_acknowledged() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("original");
-        let moved = root.path().join("moved");
+        let missing = root.path().join("missing-sync-parent");
         let mut rng = ChaCha20Rng::seed_from_u64(0x005c_0a33);
-        open_or_create_vault(&dir, b"scope secret", &mut rng).unwrap();
+        let original = open_or_create_vault(&dir, b"scope secret", &mut rng).unwrap();
+        let renamed = std::cell::Cell::new(false);
         let result = activate_chat_scope_vault_with_hooks(
             &dir,
             b"scope secret",
             &mut rng,
             |phase, _| {
                 if matches!(phase, AtomicWritePhase::Renamed) {
-                    // The actual managed wrapper rename has happened. Move the parent so the REAL
-                    // platform callback must now fail opening the original directory. A no-op
-                    // Windows implementation would incorrectly acknowledge this activation.
-                    std::fs::rename(&dir, &moved).unwrap();
+                    renamed.set(true);
                 }
             },
-            sync_managed_directory,
+            |parent| {
+                assert_eq!(parent, dir);
+                assert!(
+                    renamed.get(),
+                    "real wrapper replacement must precede this barrier"
+                );
+                assert!(std::fs::symlink_metadata(&missing)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound));
+                // Windows correctly prevents renaming a parent containing our live transaction
+                // lock. Instead route this fault seam to a verified missing directory and call
+                // the REAL platform callback. No fabricated error is returned; a Windows no-op
+                // callback would wrongly report success and make this regression fail.
+                sync_managed_directory(&missing)
+            },
         );
         assert!(matches!(
             result,
             Err(StorageError::CommittedButNotDurable(_))
         ));
-        assert!(chat_scope_vault_managed(&moved).unwrap());
-        activate_chat_scope_vault(&moved, b"scope secret", &mut rng).unwrap();
+        assert!(chat_scope_vault_managed(&dir).unwrap());
+        activate_chat_scope_vault(&dir, b"scope secret", &mut rng).unwrap();
+        let reopened = open_or_create_vault(&dir, b"scope secret", &mut rng).unwrap();
+        assert_eq!(original.db_key().unwrap(), reopened.db_key().unwrap());
     }
 
     #[cfg(windows)]

@@ -458,8 +458,18 @@ async fn actual_applied_removal_revokes_original_publication_even_when_transitio
     binding.stage_and_bind(&mut member);
     let snapshot = member.snapshot().unwrap();
     let authority = member.local_chat_scope.authority().unwrap();
+    // remove() only stages the signed contest entry. Close the injected-clock window and
+    // run its real completion seam before selecting the retained removal record.
+    owner.config.stage_decision_window_ms = 0;
+    let before = owner.epoch();
     owner.remove(&member.device_id()).await.unwrap();
+    let staged = owner.pending.as_ref().unwrap().best.clone();
+    assert_eq!(staged.commit_epoch, member.epoch());
+    assert!(owner.resolve_pending_if_expired());
+    assert_eq!(owner.epoch(), before + 1);
+    assert!(!owner.group.contains_device(&member.device_id()));
     let record = owner.commit_log.back().unwrap().clone();
+    assert_eq!(record.commit_id(), staged.commit_id());
     assert!(member.apply_commit_in_order(&record));
     assert!(authority.is_cancelled());
     assert!(member.chat_scope_label().unwrap().retired());

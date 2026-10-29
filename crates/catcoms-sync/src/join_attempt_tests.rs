@@ -146,6 +146,14 @@ fn fresh_routing_completion_cannot_move_to_another_group_device_or_same_key_rejo
         Box::new(ManualClock::new(1_000)),
     );
     let device = MlsDevice::generate().unwrap();
+    // A genuine same-key rejoin uses fresh provider state. Capture the real identity BEFORE
+    // A1 joins: duplicating afterward would also retain A1's group and OpenMLS refuses to
+    // replace an already stored GroupId. Keep A1's actual group/proof for the swap assertion.
+    let rejoining_device = device.duplicate().unwrap();
+    assert_eq!(
+        device.public_key_bytes(),
+        rejoining_device.public_key_bytes()
+    );
     let join = |node: &mut ChannelSync<_, _>, device: &MlsDevice, nonce: u8| {
         let invite = node.mint_invite([nonce; 16], 10_000, Vec::new()).unwrap();
         let package = device
@@ -169,17 +177,17 @@ fn fresh_routing_completion_cannot_move_to_another_group_device_or_same_key_rejo
         node.group.remove_member(&node.device, &device.device_id())
     })
     .unwrap();
-    let (second_group, second_routing) = join(&mut node, &device, 0x92);
+    let (second_group, second_routing) = join(&mut node, &rejoining_device, 0x92);
     assert_eq!(first_group.group_id(), second_group.group_id());
     assert_ne!(
         first_group.epoch_authenticator_id(),
         second_group.epoch_authenticator_id()
     );
-    assert!(!first_proof.matches_initial_state(&second_group, &device));
+    assert!(!first_proof.matches_initial_state(&second_group, &rejoining_device));
     let wrong_admission = ChannelSync::new_joined(
         Hub::new().join(PeerId::from_u64(807)),
         second_group,
-        device,
+        rejoining_device,
         ChaCha20Rng::seed_from_u64(807),
         Box::new(ManualClock::new(1_000)),
         first_routing,
