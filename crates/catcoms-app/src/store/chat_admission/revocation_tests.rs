@@ -1,7 +1,6 @@
 //! Storage fixtures below model trusted issuance, not a production Fresh proof constructor.
 //! They exercise actual sealed files and original-owner revocation independently of native UI.
 use super::*;
-use rand_core::RngCore;
 use std::future::Future;
 
 #[test]
