@@ -41,6 +41,13 @@ Each implementation had its own read-only adversarial review. Browser focused te
 diagnostic/layout checks and final build/startup are pending. Primary owns those runs;
 agents run focused checks only, with one heavy Rust process at a time.
 
+The first hosted run of this integration (`153c573f`) stops in frontend testing:
+3,647 pass and one older confirmation pressure test assumes a fixed 256 KiB default.
+The test-only correction selects the existing 256 KiB local policy explicitly, preserving
+every original byte-cap, admission and cleanup assertion; all other fixtures keep the new
+default. Its confirmation/policy subset passes 36/36 and read-only review has no findings.
+The central complete frontend run will use that correction. No runtime source changed.
+
 The next interface is documented in the reviewed
 [bilateral admission proposal](communication-recovery/VOICE-BILATERAL-ADMISSION-PROPOSAL.md).
 It is approved for staged implementation only. Current Root call-profile authority,

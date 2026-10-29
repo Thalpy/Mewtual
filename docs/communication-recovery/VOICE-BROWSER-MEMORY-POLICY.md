@@ -83,6 +83,13 @@ Strict targeted TypeScript for the shipped changed modules and the new policy te
 passes (`target/browser-budget-types-final.log` and `.exit`); diff checking passes.
 The primary will run the full suites, static/build, flows and startup after integration.
 
+The subsequent complete hosted frontend run at `153c573f` has 3,647 passes and one
+failure outside that focused subset: an older confirmation-pressure unit assumes the
+default is always 256 KiB. Its test-only correction explicitly selects the supported
+256 KiB policy, preserving the exact original cap, pre-admission refusal and late-engine
+return assertions. Other fixtures keep the new default. The confirmation/policy subset
+passes 36/36 afterward and read-only review has no findings; complete validation is pending.
+
 Initial focused checks exposed stale 200/256 KiB pressure fillers; the fixtures now
 fill the selected aggregate with individually bounded jobs or original retained payments.
 All exact refusal and full-queue assertions remain. A new exact-job-boundary unit also

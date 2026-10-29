@@ -43,6 +43,14 @@ findings were corrected. Complete integrated suites and the final build/startup 
 running centrally, with only one heavy Rust process at a time. A fresh dependency audit
 passes all four categories. Final results will replace this pending statement.
 
+Hosted head `153c573f` has a separate frontend failure: 3,647 pass and one existing
+confirmation pressure test still assumes a fixed 256 KiB default. Its test-only correction
+explicitly chooses the supported 256 KiB local policy and preserves all original pressure,
+admission and actual-return assertions. The confirmation/policy subset then passes 36/36;
+read-only review reports no findings. The complete central frontend suite remains pending.
+This correction changes no runtime source, and the failed hosted evidence remains at
+[job 123178420516](https://github.com/Thalpy/Mewtual/actions/runs/40791756301/job/123178420516).
+
 The [bilateral admission proposal](VOICE-BILATERAL-ADMISSION-PROPOSAL.md) has its own
 read-only design review and staged owner agreement. Its profile, wire, ownership,
 negative-recovery and sidecar gates are required future implementation, not test evidence.
