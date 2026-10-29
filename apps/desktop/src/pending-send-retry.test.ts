@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { PendingSendRetry, type RetryClock } from "./pending-send-retry.ts";
-import { MAX_PENDING_SEND_BYTES, pendingSendRetryBlock, sanitizePendingSends, sendRefusedUnaccepted, type PendingSend } from "./pending-sends.ts";
+import { MAX_PENDING_SEND_BYTES, samePendingIntent, pendingSendRetryBlock, sanitizePendingSends, sendRefusedUnaccepted, type PendingSend } from "./pending-sends.ts";
 import { persistenceWarning } from "./message-send.ts";
 
 class FakeClock implements RetryClock {
@@ -115,7 +115,7 @@ function appFixture(clock: FakeClock, failure: string | null = null) {
   class ScheduledRetry extends PendingSendRetry {
     constructor(run: (session: number) => Promise<void>) { super(run, clock); }
   }
-  const app = new Function("PendingSendRetry", "pendingSendRetryBlock", "persistenceWarning", "sanitizePendingSends", "intent", "initialFailure", `
+  const app = new Function("PendingSendRetry", "samePendingIntent", "pendingSendRetryBlock", "persistenceWarning", "sanitizePendingSends", "intent", "initialFailure", `
     let locked = false, uiStateReady = true, uiStateLoadGeneration = 1, sending = false;
     let pendingSends = { [intent.token]: structuredClone(intent) }, pendingSendErrors = {}, retryingPendingSends = false;
     let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
@@ -150,7 +150,7 @@ function appFixture(clock: FakeClock, failure: string | null = null) {
       unhydrated() { uiStateReady = false; },
       state() { return { pendingSends, submissions, writes, authored: authored.size, error, draft }; }
     };
-  `)(ScheduledRetry, pendingSendRetryBlock, persistenceWarning, sanitizePendingSends, intent, failure);
+  `)(ScheduledRetry, samePendingIntent, pendingSendRetryBlock, persistenceWarning, sanitizePendingSends, intent, failure);
   clock.afterMicrotask = () => app.sync();
   app.sync();
   return app;

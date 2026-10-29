@@ -40,7 +40,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
-  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, durableStopOriginal, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
@@ -3547,6 +3547,7 @@
   // completes asynchronously after unlock.
   let uiStateReady = $state(false);
   let pendingSends = $state<PendingSends>({});
+  let uiContinuityVersion: 1 | 2 = 1;
   let recoveredSendDrafts = $state<PendingSends>({});
   // Holds submissions/result mutations while a user's explicit resolution crosses the vault barrier.
   let pendingSendResolution = $state<string | null>(null);
@@ -3562,7 +3563,7 @@
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      Object.values(pendingSends).some(intent => !intent.retryBlock),
+      Object.values(pendingSends).some(intent => intent.resolution || !intent.retryBlock),
       sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
     );
   });
@@ -3601,7 +3602,7 @@
     }
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
+    return JSON.stringify({ version: uiContinuityVersion, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
       studioDraft: studioSnapshot?.() ?? restoredStudioDraft });
   }
   /**
@@ -3660,6 +3661,7 @@
       }
       if (generation !== uiStateLoadGeneration || locked) return;
       pendingSends = next.pendingSends;
+      uiContinuityVersion = next.version;
       recoveredSendDrafts = next.recoveredSendDrafts;
       drafts = next.drafts;
       readMarks = next.readMarks;
@@ -4196,7 +4198,7 @@
   }
   function setTextEffectValue(target: TextEffectTarget, value: string) {
     if (target === "chat") { draft = value; saveDraftFor(chanKey()); }
-    else if (target === "chat-edit") editDraft = value;
+    else if (target === "chat-edit") { editDraft = value; editRevision += 1; }
     else if (target === "announcement") statusDraft = value;
     else if (target === "wiki") { wikiBody = value; wikiDirty = true; }
     else if (target === "bio") pDescription = value;
@@ -4558,16 +4560,11 @@
       return;
     }
     try {
-      // One trace for the whole sweep rather than one per message: a moderator deleting eleven
-      // messages performed one action, and eleven unrelated traces would hide that the failure on
-      // the ninth belonged to the same operation as the eight that worked.
-      const sweep = traceSource.next();
+      // Admit each deletion through the same sealed queue as an ordinary local delete.
+      // Pause the sweep on uncertainty; the retained exact intent will retry on its own.
       for (const message of selected) {
-        await invokeDebugged(
-          "delete_message",
-          { server, channel: message.channel, msgId: message.id },
-          { trace: sweep },
-        );
+        const result = await queueMessageMutation(server, message.channel, message.id, "delete", "");
+        if (result.persistence.status !== "durable") throw new Error("A deletion is awaiting its history save. Review Pending messages before continuing the sweep.");
       }
       moderationSelected = new Set();
       moderationDeleteArmed = false;
@@ -7119,6 +7116,9 @@
   // the previous group's messages, roster, files and branding stay on screen for the whole
   // round-trip, which reads as the switch not having taken.
   function clearServerView() {
+    // Inline edit plaintext belongs to this view. Lock/switch/removal must drop it
+    // and invalidate old admission callbacks, including after a failed first seal.
+    cancelEdit();
     view = "chat";
     moderationSelected = new Set();
     moderationDeleteArmed = false;
@@ -20708,21 +20708,35 @@
       if (!pendingSubmissionCurrent(intent, session)) throw new Error("This pending request is being resolved or its session changed.");
       // Seal uncertainty before dispatch, even on retry. Native errors and token conflicts do
       // not prove absence: a previous invocation may already have committed this identity.
-      pendingSends[intent.token] = { ...pendingSends[intent.token], acceptance: "ambiguous" };
+      if (!intent.resolution) pendingSends[intent.token] = { ...pendingSends[intent.token], acceptance: "ambiguous" };
       // Also covers retry after an earlier continuity-write failure. No native authoring
       // request may outlive the only copy of its caller identity.
       if (!(await saveUiStateImmediately()) || !pendingSubmissionCurrent(intent, session)) {
         throw new Error("Save the pending message in this vault before retrying it.");
       }
       onDispatch();
-      result = (await invokeDebugged<SendMessageResult>("send_message", {
-        server: intent.server, channel: intent.channel, text: intent.text, replyTo: intent.replyTo,
-        retryToken: intent.token, expectedContext: intent.expectedContext,
-      })).value;
+      const common = { server: intent.server, channel: intent.channel,
+        retryToken: intent.token, expectedContext: intent.expectedContext };
+      // A saved negative decision always wins. Errors/restarts cannot turn Stop back
+      // into the positive operation, even when the original reply was never observed.
+      if (intent.resolution) {
+        result = (await invokeDebugged<SendMessageResult>("stop_durable_chat", {
+          server: intent.server, original: durableStopOriginal(intent),
+        })).value;
+      } else if (intent.kind === "edit" || intent.kind === "delete") {
+        result = (await invokeDebugged<SendMessageResult>(intent.kind === "edit" ? "edit_message" : "delete_message", {
+          ...common, id: intent.messageId, target: intent.target,
+          ...(intent.kind === "edit" ? { text: intent.text } : {}),
+        })).value;
+      } else {
+        result = (await invokeDebugged<SendMessageResult>("send_message", {
+          ...common, text: intent.text, replyTo: intent.replyTo,
+        })).value;
+      }
     } catch (failure) {
       if (pendingSubmissionCurrent(intent, session)) {
         pendingSendErrors[intent.token] = errorText(failure);
-        const block = pendingSendRetryBlock(errorText(failure));
+        const block = intent.resolution ? undefined : pendingSendRetryBlock(errorText(failure));
         const current = pendingSends[intent.token];
         if (current && current.retryBlock !== block) {
           pendingSends[intent.token] = { ...current, retryBlock: block };
@@ -20731,22 +20745,37 @@
       }
       throw failure;
     }
-    if (pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
+    if (!intent.resolution && pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
       pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: "context_changed" };
       await saveUiStateImmediately();
     } else if (pendingSubmissionCurrent(intent, session) && result.persistence.status !== "durable" && pendingSends[intent.token]?.retryBlock) {
       pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: undefined };
       await saveUiStateImmediately();
     }
-    if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable") {
+    if (intent.resolution && pendingSubmissionCurrent(intent, session)) {
+      if (result.persistence.status === "durable" && ["committed", "stopped-before-commit", "stopped-after-commit"].includes(result.disposition ?? "")) {
+        // Native has saved an exact-token terminal. Only now may continuity release
+        // its slot; a failed cleanup write safely replays the same Stop after reload.
+        await savePendingDecision(intent.token, () => {
+          if (!samePendingIntent(pendingSends[intent.token], intent)) throw new Error("The pending Stop decision changed.");
+          const next = resolvePendingSend(pendingSends, recoveredSendDrafts, intent.token, intent.resolution!);
+          return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
+            commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[intent.token]; } };
+        });
+      }
+    } else if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable"
+      && ((intent.kind !== "edit" && intent.kind !== "delete") || result.disposition === "committed")) {
       delete pendingSends[intent.token];
       delete pendingSendErrors[intent.token];
-      const key = chatScopeKey(intent.server, intent.channel);
-      const sameDraft = (draftRevisions[key] ?? 0) === draftRevision;
-      if (sameDraft && drafts[key]?.trim() === intent.text) delete drafts[key];
-      if (sameDraft && activeServerId === intent.server && cur?.active === intent.channel && draft.trim() === intent.text) {
-        draft = "";
-        replyingTo = "";
+      // Mutations never own the composer, even when their text happens to match it.
+      if (intent.kind !== "edit" && intent.kind !== "delete") {
+        const key = chatScopeKey(intent.server, intent.channel);
+        const sameDraft = (draftRevisions[key] ?? 0) === draftRevision;
+        if (sameDraft && drafts[key]?.trim() === intent.text) delete drafts[key];
+        if (sameDraft && activeServerId === intent.server && cur?.active === intent.channel && draft.trim() === intent.text) {
+          draft = "";
+          replyingTo = "";
+        }
       }
       // If cleanup cannot persist, replaying the still-sealed token is safe on next unlock.
       await saveUiStateImmediately();
@@ -20757,8 +20786,7 @@
   function pendingSubmissionCurrent(intent: PendingSend, session: number): boolean {
     const current = pendingSends[intent.token];
     return !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && pendingSendResolution === null
-      && !!current && current.server === intent.server && current.channel === intent.channel
-      && current.text === intent.text && current.replyTo === intent.replyTo && current.expectedContext === intent.expectedContext;
+      && !!current && samePendingIntent(current, intent);
   }
 
   /** A resolution owns this queue entry until both the sealed write and local commit finish. */
@@ -20789,13 +20817,27 @@
   }
 
   async function resolvePendingMessage(token: string, action: PendingResolution): Promise<void> {
+    const session = uiStateLoadGeneration;
+    // First seal the irreversible choice with the complete original request. No native
+    // Stop may outlive this recovery identity, and no later retry may author positively.
     await savePendingDecision(token, () => {
-      const next = resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
+      const original = pendingSends[token];
+      if (!original) throw new Error("This pending message has already been resolved.");
+      if (original.resolution && original.resolution !== action) throw new Error("This request already has a saved Stop decision.");
+      // Check recovery capacity before committing Stop: retain the requested full copy.
+      resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
+      uiContinuityVersion = 2;
+      const next = { ...pendingSends, [token]: { ...original, resolution: action } };
       return {
-        json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
-        commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; },
+        json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next }),
+        commit: () => { pendingSends = next; },
       };
     });
+    const intent = pendingSends[token];
+    if (!intent || !pendingSubmissionCurrent(intent, session)) throw new Error("This pending request is being resolved or its session changed. The saved Stop decision is retained.");
+    const result = await submitPendingSend(intent, session);
+    if (locked || session !== uiStateLoadGeneration) throw new Error("The UI session changed while Stop was awaiting confirmation. Reopen Pending messages after unlocking.");
+    if (pendingSends[token]) throw new Error(`Stop is still awaiting a durable confirmation (${result.persistence.status}). Its saved decision will retry.`);
   }
 
   async function removeRecoveredSendDraft(token: string): Promise<void> {
@@ -20811,7 +20853,7 @@
   async function useRecoveredSendDraft(token: string): Promise<void> {
     await savePendingDecision(token, () => {
       const item = recoveredSendDrafts[token], key = chanKey();
-      if (!item || !key || activeServerId === null || !cur?.active) throw new Error("Open a conversation before using this saved text.");
+      if (!item || item.kind === "delete" || !key || activeServerId === null || !cur?.active) throw new Error("Open a conversation before using this saved text.");
       if (draft.trim() && draft !== item.text) throw new Error("Keep or clear the current composer draft first.");
       if (item.text.length > MAX_DRAFT_CHARS) throw new Error("This text exceeds the composer draft limit. Copy the saved text instead; the full copy remains here.");
       const revision = draftRevisions[key] ?? 0;
@@ -20843,13 +20885,15 @@
       for (const intent of Object.values(pendingSends)) {
         if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
-        if (automatic && intent.retryBlock) continue;
+        if (automatic && intent.retryBlock && !intent.resolution) continue;
         // A refusal now cannot establish absence of an older invocation whose reply was lost.
         const priorMayHaveGone = intent.acceptance !== "not_accepted";
         try {
           const result = await submitPendingSend(intent, session);
           if (locked || session !== uiStateLoadGeneration) return;
-          const warning = persistenceWarning(result, priorMayHaveGone);
+          const warning = intent.resolution
+            ? (pendingSends[intent.token] ? "Stop is awaiting a durable confirmation. Its saved decision will retry; an already saved change cannot be retracted." : null)
+            : persistenceWarning(result, priorMayHaveGone);
           if (warning) error = warning;
         } catch (failure) {
           if (locked || session !== uiStateLoadGeneration) return;
@@ -20886,6 +20930,7 @@
     let priorMayHaveGone = false;
     try {
       intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
+      if (intent?.resolution) throw new Error("This exact request is awaiting Stop confirmation. Review Pending messages before sending it again.");
       if (intent) priorMayHaveGone = intent.acceptance !== "not_accepted";
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
@@ -20967,37 +21012,82 @@
     }
   }
 
+  /** All production edit/delete callers share send custody, capacity and retry scheduling. */
+  async function queueMessageMutation(server: number, channel: string, messageId: string,
+    kind: "edit" | "delete", text: string, onSealed: () => void = () => {}): Promise<SendMessageResult> {
+    if (locked || !uiStateReady || windowCloseInFlight || sending || retryingPendingSends || pendingSendResolution !== null || pendingManagerOpen) {
+      throw new Error("Wait until the vault is ready before changing this message.");
+    }
+    const session = uiStateLoadGeneration;
+    const operation = ++pendingSendNonce;
+    sending = true;
+    try {
+      // Reuse ambiguous original custody before looking up a now-deleted target or a
+      // changed epoch. A failed reply never licenses a new token for the same request.
+      let intent = matchingPendingMutation(pendingSends, server, channel, messageId, undefined, kind, text);
+      if (intent?.resolution) throw new Error("This exact change is awaiting Stop confirmation. Review Pending messages before changing it again.");
+      if (!intent) {
+        const metadata = await invoke<{ context: string; target: string }>("durable_mutation_context", { server, channel, id: messageId });
+        if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null) throw new Error("The UI session changed before the message intent was saved.");
+        if (!/^[a-f0-9]{64}$/.test(metadata.context) || !/^[a-f0-9]{64}$/.test(metadata.target)) throw new Error("Invalid native mutation context.");
+        intent = { token: crypto.randomUUID().replaceAll("-", ""), server, channel, expectedContext: metadata.context,
+          kind, messageId, target: metadata.target, text, replyTo: "", acceptance: "not_accepted" } as PendingSend;
+        pendingSends = addPendingSend(pendingSends, intent);
+      }
+      // Sticky v2 must cross the sealed barrier before any mutation dispatch. Old native
+      // strict-v1 readers will reject this envelope instead of posting recovered edit text.
+      uiContinuityVersion = 2;
+      clearTimeout(uiStateSaveTimer);
+      await queueUiStateSave(continuityJson);
+      if (!pendingSubmissionCurrent(intent, session)) throw new Error("The message intent was taken over before dispatch.");
+      onSealed();
+      const result = await submitPendingSend(intent, session);
+      if (!locked && session === uiStateLoadGeneration && activeServerId === server && cur?.active === channel) {
+        const warning = persistenceWarning(result, intent.acceptance !== "not_accepted");
+        if (warning) error = warning;
+        await refresh();
+      }
+      return result;
+    } finally {
+      if (pendingSendNonce === operation) sending = false;
+    }
+  }
+
   // Inline edit of one of your own messages.
   let editingId = $state("");
   let editDraft = $state("");
+  let editRevision = 0;
   function startEdit(m: Msg) {
+    editRevision += 1;
     editingId = m.id;
     editDraft = m.text;
   }
   function cancelEdit() {
+    editRevision += 1;
     editingId = "";
     editDraft = "";
   }
   async function saveEdit(m: Msg) {
     const text = editDraft.trim();
     const ch = cur?.active;
-    if (!text || activeServerId === null || !ch) {
-      cancelEdit();
-      return;
-    }
-    cancelEdit();
-    if (text === m.text) return; // no change
+    const server = activeServerId, messageId = m.id, revision = editRevision, session = uiStateLoadGeneration;
+    if (!text || server === null || !ch) return;
     try {
-      await invokeDebugged("edit_message", { server: activeServerId, channel: ch, msgId: m.id, text });
+      await queueMessageMutation(server, ch, messageId, "edit", text, () => {
+        // Admission owns this old editor only; later typing/opening survives any late reply.
+        if (session === uiStateLoadGeneration && activeServerId === server && cur?.active === ch
+          && editingId === messageId && editRevision === revision && editDraft.trim() === text) cancelEdit();
+      });
     } catch (e) {
       error = errorText(e);
     }
   }
   async function deleteMessage(m: Msg) {
     const ch = cur?.active;
-    if (activeServerId === null || !ch) return;
+    const server = activeServerId, messageId = m.id;
+    if (server === null || !ch) return;
     try {
-      await invokeDebugged("delete_message", { server: activeServerId, channel: ch, msgId: m.id });
+      await queueMessageMutation(server, ch, messageId, "delete", "");
     } catch (e) {
       error = errorText(e);
     }
@@ -27980,6 +28070,7 @@
                     <textarea
                       bind:this={editMessageEl}
                       bind:value={editDraft}
+                      oninput={() => { editRevision += 1; }}
                       rows="2"
                       onselect={() => onTextEffectSelection("chat-edit")}
                       onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); saveEdit(m); } else if (e.key === "Escape") { e.preventDefault(); cancelEdit(); } }}
@@ -28120,7 +28211,8 @@
                 <summary>{Object.keys(pendingSends).length} message(s) awaiting save confirmation</summary>
                 <p>Pending messages keep their original identity. Temporary save failures retry automatically while unlocked.</p>
                 {#each Object.values(pendingSends).filter((item) => item.server === activeServerId) as item (item.token)}
-                  <p>{item.text}</p>
+                  <p>{pendingActionLabel(item)}{item.resolution ? " · Stop awaiting confirmation" : ""}</p>
+                  {#if item.kind !== "delete"}<p>{item.text}</p>{/if}
                   {#if item.retryBlock}<p>Automatic retry paused. Review this message before retrying.</p>{/if}
                   {#if pendingSendErrors[item.token]}
                     <p>{pendingSendErrors[item.token]}</p>

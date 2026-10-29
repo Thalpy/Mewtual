@@ -97,6 +97,8 @@ export const TAURI_COMMAND_GROUPS = {
     boundary: "Read projections from a registered per-server actor; never bypass MLS/CRDT validation.",
     commands: [
       "get_channels", "durable_send_context", "get_members", "get_profiles", "get_livery", "get_badges", "get_devices",
+      // Context/immutable target metadata only; native mutation admission rechecks authority.
+      "durable_mutation_context",
       // Exact actor's authenticated mode; fenced against lock and replacement, no authority write.
       "group_communication_mode",
       "get_files", "get_storage_health", "get_cache_status", "get_online_members", "get_delivery", "dm_stats",
@@ -200,6 +202,8 @@ export const TAURI_COMMAND_GROUPS = {
       "begin_inline_download", "download_file",
       "send_call_signal", "dismiss_dm_request", "create_event",
       "save_wiki_page", "send_message", "edit_message", "delete_message", "toggle_reaction",
+      // Saves the exact original chat token's negative terminal; never accepts a new mutation.
+      "stop_durable_chat",
       // `jukebox_add_link` queues a video id rather than a content address. It has the same
       // authority as `jukebox_add` and reaches no network of its own: whether a listener ever
       // fetches what it names is that listener's decision, taken locally at play time.

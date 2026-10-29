@@ -3,6 +3,7 @@ export type SendMessageResult = {
   accepted: boolean;
   message_id?: string;
   replayed?: boolean;
+  disposition?: "committed" | "stopped-before-commit" | "stopped-after-commit";
   persistence:
     | { status: "durable" }
     | { status: "pending"; reason: "snapshot_failed" | "store_unavailable" | "write_failed" }

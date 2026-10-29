@@ -9,7 +9,7 @@ const intent = (n = 1, overrides: Partial<PendingSend> = {}): PendingSend => ({
 });
 const collection = (entries: PendingSend[]) => Object.fromEntries(entries.map(item => [item.token, item]));
 
-test("all permanent and uncertain orphaned requests can be recovered without a mounted conversation or publication", async () => {
+test("durable native Stop recovers blocked or uncertain requests without a mounted frontend conversation or positive publication", async () => {
   for (const retryBlock of ["invalid", "conflict", "context_changed", undefined] as const) {
     const item = intent(1, retryBlock ? { retryBlock } : {});
     const app = pendingManagerApp({ pendingSends: collection([item]) });
@@ -75,12 +75,17 @@ test("queued ordinary saves use current post-decision state and cannot resurrect
   const resolution = app.resolve(item.token, "recover");
   const ordinaryAfter = app.save();
   first.resolve(); await Promise.all([ordinaryBefore, resolution, ordinaryAfter]);
-  assert.equal(app.state().writes.length, 3);
+  assert.equal(app.state().writes.length, 5, "resolution seals Stop, seals dispatch, then removes after a durable terminal");
   assert.deepEqual(app.state().writes[0].pendingSends[item.token], item);
-  for (const saved of app.state().writes.slice(1)) {
+  for (const saved of app.state().writes.slice(1, -1)) {
+    assert.equal(saved.pendingSends[item.token].resolution, "recover");
+    assert.equal(saved.version, 2);
+  }
+  for (const saved of app.state().writes.slice(-1)) {
     assert.deepEqual(saved.pendingSends, {});
     assert.deepEqual(saved.recoveredSendDrafts[item.token], item);
   }
+  assert.equal(app.state().stops.length, 1);
   app.lock(); await app.unlock();
   assert.deepEqual(app.state().pendingSends, {});
   app.done();

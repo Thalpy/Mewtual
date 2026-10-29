@@ -78,6 +78,24 @@ test("compiled manager reports a failed decision without hiding the original pen
   ui.done(); app.done();
 });
 
+test("compiled manager can retry a saved recovery Stop with the original token and decision", async () => {
+  const token = "4".repeat(32);
+  const item = { token, server: 1, channel: "3", expectedContext: "b".repeat(64),
+    text: "saved recovery text", replyTo: "", resolution: "recover" };
+  const app = pendingManagerApp({ version: 2, pendingSends: { [token]: item } });
+  await app.hydrate(); app.manager(true);
+  const ui = surface(app);
+  const retry = [...ui.target.querySelectorAll("button")].find(button => button.textContent === "Retry Stop");
+  assert.ok(retry); assert.equal(retry.disabled, false, "the open manager pauses automatic retry, so saved recovery needs a usable control");
+  await ui.click(token, "Retry Stop"); await ui.click(token, "Confirm recovery");
+  assert.equal(app.state().stops.length, 1);
+  assert.equal(app.state().stops[0].args.original.token, token);
+  assert.equal(app.state().stops[0].sealed.pendingSends[token].resolution, "recover");
+  assert.equal(app.state().recoveredSendDrafts[token].text, item.text);
+  assert.equal(app.state().submissions.length, 0);
+  ui.done(); app.done();
+});
+
 test("pending manager is a personal settings page with no mounted-server condition", () => {
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
   const pages = source.slice(source.indexOf("const USER_SET_PAGES"), source.indexOf("const SRV_SET_PAGES"));

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, sendRefusedUnaccepted } from "./pending-sends.ts";
+import { addPendingSend, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, sendRefusedUnaccepted } from "./pending-sends.ts";
 import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.ts";
 import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
 
@@ -16,7 +16,7 @@ const transpile = (start: string, end: string) => {
 
 test("retry refuses IPC until the caller identity survives an actual successful continuity save", async () => {
   const body = transpile("  async function submitPendingSend(", "  // Inline edit of one of your own messages.");
-  const app = new Function("addPendingSend", "matchingPendingSend", "sendAndRefresh", "persistenceWarning", "sendOutcome", "pendingSendRetryBlock", "sendRefusedUnaccepted", `
+  const app = new Function("addPendingSend", "matchingPendingSend", "samePendingIntent", "sendAndRefresh", "persistenceWarning", "sendOutcome", "pendingSendRetryBlock", "sendRefusedUnaccepted", `
     let draft = "retain this identity", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
@@ -46,7 +46,7 @@ test("retry refuses IPC until the caller identity survives an actual successful 
       allowSave() { savesFail = false; },
       state() { return { draft, pendingSends, submissions, sealed }; }
     };
-  `)(addPendingSend, matchingPendingSend, sendAndRefresh, persistenceWarning, sendOutcome, pendingSendRetryBlock, sendRefusedUnaccepted);
+  `)(addPendingSend, matchingPendingSend, samePendingIntent, sendAndRefresh, persistenceWarning, sendOutcome, pendingSendRetryBlock, sendRefusedUnaccepted);
 
   await app.send();
   const [token] = Object.keys(app.state().pendingSends);
@@ -75,7 +75,7 @@ test("failed continuity hydration cannot replace the sealed pending identities w
   const app = new Function("initial", "sanitizeUiContinuity", "planLegacyReadMarkMigration", "console", `
     let locked = false, uiStateLoadGeneration = 7, uiStateReady = false, uiStateSaveTimer;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
-    let pendingSends = structuredClone(initial.pendingSends), drafts = structuredClone(initial.drafts);
+    let pendingSends = structuredClone(initial.pendingSends), drafts = structuredClone(initial.drafts), uiContinuityVersion = 1;
     let recoveredSendDrafts = {};
     // The Studio chunk is unmounted, so actual App continuity must preserve the sealed fallback.
     let studioSnapshot = null, studioRestore = null, restoredStudioDraft = null;

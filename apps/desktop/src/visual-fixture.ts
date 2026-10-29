@@ -249,6 +249,18 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       });
     case "save_ui_state":
       return null;
+    // Explicit metadata/result mocks keep the real queue available in visual validation.
+    // They model a durable local terminal, never a peer delivery acknowledgement.
+    case "durable_send_context":
+      return "a".repeat(64);
+    case "durable_mutation_context":
+      return { context: "a".repeat(64), target: "b".repeat(64) };
+    case "send_message":
+    case "edit_message":
+    case "delete_message":
+      return { accepted: true, persistence: { status: "durable" }, message_id: String(args.id ?? "fixture-message"), replayed: false, disposition: "committed" };
+    case "stop_durable_chat":
+      return { accepted: false, persistence: { status: "durable" }, message_id: "", replayed: false, disposition: "stopped-before-commit" };
     case "get_inbox":
       return clone([
         {
