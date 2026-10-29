@@ -43,6 +43,45 @@ pub struct AppliedOp {
     pub change: ChangeHash,
 }
 
+/// An exact original local chat operation retained by a storage preparation. Its private
+/// envelope is never a general inbound admission API: construction verifies the local device,
+/// document scope, signature and exact Automerge hash. Applying it repairs saved history only;
+/// it grants neither current membership nor publication authority.
+#[derive(Clone)]
+pub struct SavedLocalChatOp(SignedOp);
+
+impl SavedLocalChatOp {
+    /// Restore a bounded preparation after its containing encrypted snapshot was authenticated.
+    pub fn decode(
+        bytes: &[u8],
+        device: &MlsDevice,
+        channel: u128,
+        change: ChangeHash,
+    ) -> Result<Self, ReplError> {
+        let op = SignedOp::decode(bytes)?;
+        if op.doc_type != DocType::Channel
+            || op.doc_id != channel
+            || op.author_device != device.device_id()
+            || !op.verify()
+            || op.domain_op.is_some()
+        {
+            return Err(ReplError::BadSignature);
+        }
+        let parsed = Change::from_bytes(op.delta.clone())
+            .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        if parsed.hash() != change || parsed.actor_id().to_bytes() != device.device_id().as_bytes()
+        {
+            return Err(ReplError::ActorMismatch);
+        }
+        Ok(Self(op))
+    }
+
+    /// Exact original bytes; no signature or encryption is regenerated on retry.
+    pub fn encode(&self) -> Vec<u8> {
+        self.0.encode()
+    }
+}
+
 /// One encrypted, replicated CRDT document.
 pub struct EncryptedDoc {
     doc_type: DocType,
@@ -257,6 +296,70 @@ impl EncryptedDoc {
     /// Borrow the underlying automerge document (for reads/projection).
     pub fn doc(&self) -> &AutoCommit {
         &self.doc
+    }
+
+    /// Capture the exact original local preparation before the first storage attempt. Opening
+    /// the just-created packet proves its scope and signer without exposing raw SignedOp input.
+    pub fn capture_local_chat_op(
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        change: ChangeHash,
+    ) -> Result<SavedLocalChatOp, ReplError> {
+        if sealed.epoch != group.epoch() {
+            return Err(ReplError::EpochUnavailable(sealed.epoch));
+        }
+        let key = group.channel_secret(device, DocType::Channel, sealed.doc_id)?;
+        let op = sealed.open(&key)?;
+        SavedLocalChatOp::decode(&op.encode(), device, sealed.doc_id, change)
+    }
+
+    /// Additive historical repair from an opaque original local preparation. Current-epoch
+    /// sealing is deliberately absent, so membership churn cannot lose a possibly saved change.
+    pub fn repair_local_chat_op(&mut self, original: &SavedLocalChatOp) -> Result<(), ReplError> {
+        self.apply_signed_tracked_observed(original.0.clone(), |_, _| {})
+            .map(|_| ())
+    }
+
+    /// Verified signer of the change that created an object, where that signed history exists.
+    /// Actor bytes alone are not authorship. Contradictory envelopes refuse rather than choosing
+    /// one signer. Legacy missing evidence stays None; v1 does not prove historical MLS tenure.
+    pub fn verified_object_creator(
+        &self,
+        object: &automerge::ObjId,
+    ) -> Result<Option<DeviceId>, ReplError> {
+        let automerge::ObjId::Id(counter, actor, _) = object else {
+            return Err(ReplError::Malformed);
+        };
+        let mut found = None;
+        for op in &self.log {
+            let change = Change::from_bytes(op.delta.clone())
+                .map_err(|e| ReplError::Automerge(e.to_string()))?;
+            if change.actor_id() != actor
+                || *counter < change.start_op().get()
+                || *counter > change.max_op()
+            {
+                continue;
+            }
+            if op.doc_type != self.doc_type
+                || op.doc_id != self.doc_id
+                || !op.verify()
+                || (actor.to_bytes().len() == op.author_device.as_bytes().len()
+                    && actor.to_bytes() != op.author_device.as_bytes())
+            {
+                return Err(ReplError::BadSignature);
+            }
+            if found.is_some_and(|signer| signer != op.author_device) {
+                return Err(ReplError::BadSignature);
+            }
+            found = Some(op.author_device);
+        }
+        if found.is_none() && actor.to_bytes().len() == 32 {
+            // Modern device actors require their actual signed creator. A peer-provided actor
+            // string cannot turn missing/contradictory evidence into legacy authorship.
+            return Err(ReplError::BadSignature);
+        }
+        Ok(found)
     }
 
     /// This document's type (for re-keying a restored doc in the sync layer's map).

@@ -4976,6 +4976,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// holds the signer private key, group secrets, routing secrets and plaintext document
     /// content; the registry seals it under the vault key before it touches disk (9f).
     pub fn snapshot(&mut self) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+        // Rollback-only history must never overwrite a possibly installed chat terminal.
+        if !self.durable_chat.snapshot_allowed() {
+            return Err(SyncError::ChatPreparationPending);
+        }
         let mls = snapshot_server(&self.device, &self.group)?;
         // `routing` carries the live routing secrets in the clear; zeroize the intermediate
         // (the returned blob is already `Zeroizing`).
@@ -5174,7 +5178,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let durable_chat = if d.is_empty() {
             durable_chat::DurableChatState::default()
         } else {
-            durable_chat::DurableChatState::decode(d.get_bytes().map_err(|_| bad())?)?
+            durable_chat::DurableChatState::decode(d.get_bytes().map_err(|_| bad())?, &device)?
         };
         let pending_finalization = if d.is_empty() {
             HashMap::new()

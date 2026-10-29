@@ -1,6 +1,10 @@
 //! Native custody for a chat operation's durable acceptance barrier.
 use super::*;
-use catcoms_app::durable_chat::{DurableSendLease, DurableSendRequest};
+use catcoms_app::durable_chat::{
+    DurableChatRequest, DurableMutationAction, DurableMutationRequest, DurableSendLease,
+    DurableSendOutcome, DurableSendRequest, DurableStopRequest,
+};
+use catcoms_sync::durable_chat::ChatDisposition;
 
 fn fixed_hex<const N: usize>(text: &str) -> Result<[u8; N], String> {
     if text.len() != N * 2
@@ -122,18 +126,7 @@ pub(super) async fn send(
     } else {
         "CHANNEL.SEND.PREPARED_PENDING"
     });
-    Ok(SendMessageResult {
-        accepted: outcome.durable,
-        persistence: if outcome.durable {
-            PersistOutcome::Durable
-        } else {
-            PersistOutcome::Pending {
-                reason: PersistFailure::WriteFailed,
-            }
-        },
-        message_id: Some(outcome.message_id),
-        replayed: outcome.replayed,
-    })
+    Ok(response(outcome))
 }
 
 #[tauri::command]
@@ -155,6 +148,208 @@ pub(super) async fn durable_send_context(
         return Err("The conversation changed while preparing the message.".into());
     }
     Ok(hex::encode(context))
+}
+
+fn disposition(value: ChatDisposition) -> &'static str {
+    match value {
+        ChatDisposition::Committed => "committed",
+        ChatDisposition::StoppedBeforeCommit => "stopped-before-commit",
+        ChatDisposition::StoppedAfterCommit => "stopped-after-commit",
+    }
+}
+fn response(outcome: DurableSendOutcome) -> SendMessageResult {
+    SendMessageResult {
+        accepted: outcome.durable && outcome.disposition == ChatDisposition::Committed,
+        persistence: if outcome.durable {
+            PersistOutcome::Durable
+        } else {
+            PersistOutcome::Pending {
+                reason: PersistFailure::WriteFailed,
+            }
+        },
+        message_id: Some(outcome.message_id),
+        replayed: outcome.replayed,
+        disposition: disposition(outcome.disposition),
+    }
+}
+/// Mutations have no missing-token fallback: every production caller must first seal its
+/// immutable request. Capturing Actor/incarnation before Ready fences replacement races.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn mutation(
+    state: &AppState,
+    op: &Operation,
+    server: u64,
+    channel: &str,
+    id: String,
+    action: DurableMutationAction,
+    retry_token: String,
+    expected_context: String,
+    target: String,
+) -> Result<SendMessageResult, AppError> {
+    let generation = unlocked_ui_session_generation(state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    let channel = channel
+        .parse()
+        .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
+    let (actor, instance) = actor_instance_of(state, server)
+        .await
+        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
+    let actor = op.bind_actor(actor);
+    let request = DurableMutationRequest {
+        token: fixed_hex(&retry_token).map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?,
+        expected_context: fixed_hex(&expected_context)
+            .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?,
+        channel,
+        message_id: id,
+        target: fixed_hex(&target).map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?,
+        action,
+    };
+    let ready = actor
+        .prepare_durable_mutation(request)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
+    let lease = authorize(state, server, instance, generation)
+        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
+    let outcome = ready
+        .commit(lease)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
+    op.succeeded(if outcome.durable {
+        "CHANNEL.MUTATION.PERSISTED"
+    } else {
+        "CHANNEL.MUTATION.PREPARED_PENDING"
+    });
+    Ok(response(outcome))
+}
+#[derive(serde::Serialize)]
+pub(super) struct MutationContextResult {
+    context: String,
+    target: String,
+}
+#[tauri::command]
+pub(super) async fn durable_mutation_context(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    id: String,
+) -> Result<MutationContextResult, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let channel = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let (actor, instance) = actor_instance_of(&state, server)
+        .await
+        .map_err(|failure| failure.message())?;
+    let result = actor.durable_mutation_context(channel, id).await?;
+    let _session = require_ui_session_generation(&state, generation).await?;
+    let registry = state.servers.lock().await;
+    if registry
+        .get(&server)
+        .is_none_or(|entry| entry.instance != instance)
+    {
+        return Err("The conversation changed while preparing the mutation.".into());
+    }
+    Ok(MutationContextResult {
+        context: hex::encode(result.context),
+        target: hex::encode(result.target),
+    })
+}
+/// A closed, action-aware IPC request. Unknown tags/fields refuse rather than reinterpret a
+/// recovered edit or deletion as a new post. Every field contributes to the original binding.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub(super) enum OriginalChatRequest {
+    Send {
+        token: String,
+        expected_context: String,
+        channel: String,
+        text: String,
+        reply_to: String,
+    },
+    Edit {
+        token: String,
+        expected_context: String,
+        channel: String,
+        message_id: String,
+        target: String,
+        text: String,
+    },
+    Delete {
+        token: String,
+        expected_context: String,
+        channel: String,
+        message_id: String,
+        target: String,
+    },
+}
+impl OriginalChatRequest {
+    fn into_request(self) -> Result<DurableChatRequest, String> {
+        let channel_id =
+            |channel: String| channel.parse().map_err(|_| "bad channel id".to_string());
+        let request = match self {
+            Self::Send {
+                token,
+                expected_context,
+                channel,
+                text,
+                reply_to,
+            } => DurableChatRequest::Send(DurableSendRequest {
+                token: fixed_hex(&token)?,
+                expected_context: fixed_hex(&expected_context)?,
+                channel: channel_id(channel)?,
+                text,
+                reply_to,
+            }),
+            Self::Edit {
+                token,
+                expected_context,
+                channel,
+                message_id,
+                target,
+                text,
+            } => DurableChatRequest::Mutation(DurableMutationRequest {
+                token: fixed_hex(&token)?,
+                expected_context: fixed_hex(&expected_context)?,
+                channel: channel_id(channel)?,
+                message_id,
+                target: fixed_hex(&target)?,
+                action: DurableMutationAction::Edit { text },
+            }),
+            Self::Delete {
+                token,
+                expected_context,
+                channel,
+                message_id,
+                target,
+            } => DurableChatRequest::Mutation(DurableMutationRequest {
+                token: fixed_hex(&token)?,
+                expected_context: fixed_hex(&expected_context)?,
+                channel: channel_id(channel)?,
+                message_id,
+                target: fixed_hex(&target)?,
+                action: DurableMutationAction::Delete,
+            }),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+#[tauri::command]
+pub(super) async fn stop_durable_chat(
+    state: State<'_, AppState>,
+    server: u64,
+    original: OriginalChatRequest,
+) -> Result<SendMessageResult, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server)
+        .await
+        .map_err(|failure| failure.message())?;
+    let ready = actor
+        .prepare_durable_stop(DurableStopRequest {
+            original: original.into_request()?,
+        })
+        .await?;
+    let lease = authorize(&state, server, instance, generation)?;
+    Ok(response(ready.commit(lease).await?))
 }
 
 #[cfg(test)]

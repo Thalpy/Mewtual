@@ -589,6 +589,19 @@ pub enum AppCommand {
         request: crate::durable_chat::DurableSendRequest,
         ready: oneshot::Sender<crate::durable_chat::DurableSendReady>,
     },
+    DurableChat {
+        request: crate::durable_chat::DurableChatRequest,
+        stop: bool,
+        ready: oneshot::Sender<crate::durable_chat::DurableSendReady>,
+    },
+    DurableMutationContext {
+        channel: u128,
+        id: String,
+        reply: oneshot::Sender<Result<crate::durable_chat::MutationContext, String>>,
+    },
+    DurableChatRepair {
+        ready: oneshot::Sender<Option<crate::durable_chat::DurableRepairReady>>,
+    },
     DurableSendContext {
         reply: oneshot::Sender<Result<[u8; 32], String>>,
     },
@@ -1848,6 +1861,64 @@ impl ServerActor {
         let (ready, rx) = oneshot::channel();
         self.cmd_tx
             .send(AppCommand::DurableSend { request, ready })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// Metadata only: admission repeats current membership, role and immutable target checks.
+    pub async fn durable_mutation_context(
+        &self,
+        channel: u128,
+        id: String,
+    ) -> Result<crate::durable_chat::MutationContext, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DurableMutationContext { channel, id, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn prepare_durable_mutation(
+        &self,
+        request: crate::durable_chat::DurableMutationRequest,
+    ) -> Result<crate::durable_chat::DurableSendReady, String> {
+        self.prepare_durable_chat(
+            crate::durable_chat::DurableChatRequest::Mutation(request),
+            false,
+        )
+        .await
+    }
+    pub async fn prepare_durable_stop(
+        &self,
+        request: crate::durable_chat::DurableStopRequest,
+    ) -> Result<crate::durable_chat::DurableSendReady, String> {
+        self.prepare_durable_chat(request.original, true).await
+    }
+    async fn prepare_durable_chat(
+        &self,
+        request: crate::durable_chat::DurableChatRequest,
+        stop: bool,
+    ) -> Result<crate::durable_chat::DurableSendReady, String> {
+        request.validate()?;
+        let (ready, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DurableChat {
+                request,
+                stop,
+                ready,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
+    }
+    /// Host-owned negative repair uses the same Actor and persistence serializer while locked.
+    pub async fn prepare_durable_chat_repair(
+        &self,
+    ) -> Result<Option<crate::durable_chat::DurableRepairReady>, String> {
+        let (ready, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DurableChatRepair { ready })
             .await
             .map_err(|_| "server stopped".to_string())?;
         rx.await.map_err(|_| "server stopped".to_string())
@@ -4984,11 +5055,28 @@ where
                     }
                     Some(AppCommand::DurableSend { request, ready }) => {
                         let channel = request.channel;
-                        if crate::durable_chat::execute(&mut server, request, ready).await {
+                        if crate::durable_chat::execute(&mut server, crate::durable_chat::DurableChatRequest::Send(request), false, ready).await {
                             let _ = event_tx.send(AppEvent::SnapshotNeeded).await;
                             if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                                 let _ = event_tx.send(AppEvent::ChannelUpdated { channel, change }).await;
                             }
+                        }
+                    }
+                    Some(AppCommand::DurableMutationContext { channel,id,reply }) => {
+                        let _=reply.send(server.durable_mutation_context(channel,&id));
+                    }
+                    Some(AppCommand::DurableChat { request,stop,ready }) => {
+                        let channel=request.channel();
+                        if crate::durable_chat::execute(&mut server,request,stop,ready).await {
+                            let _=event_tx.send(AppEvent::SnapshotNeeded).await;
+                            if let Some(change)=channel_delta_if_moved(&server,channel,&mut counts,&mut versions) {
+                                let _=event_tx.send(AppEvent::ChannelUpdated{channel,change}).await;
+                            }
+                        }
+                    }
+                    Some(AppCommand::DurableChatRepair { ready }) => {
+                        if crate::durable_chat::execute_repair(&mut server,ready).await {
+                            let _=event_tx.send(AppEvent::SnapshotNeeded).await;
                         }
                     }
                     Some(AppCommand::SendMessage {

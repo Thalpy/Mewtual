@@ -3704,7 +3704,7 @@ async fn persist_captured(
     actor: ServerActor,
 ) -> PersistOutcome {
     let lock = persist_lock_for(state, server);
-    let _writing = lock.lock().await;
+    let writing = lock.lock_owned().await;
     // Two questions, now that this writer holds the id's lock. Is the entry still the one this
     // request belongs to; and did a write that started after this ticket already carry it?
     let covering = {
@@ -3722,6 +3722,59 @@ async fn persist_captured(
         }
         entry.persist.requested
     };
+    // Hidden post-rename chat candidates must be reconciled before an ordinary snapshot.
+    // Ready owns this same Actor; transfer this original serializer guard and acquire only
+    // try-locks afterward. This negative history save deliberately works while the UI is locked.
+    match actor.prepare_durable_chat_repair().await {
+        Ok(Some(ready)) => {
+            let store = match state.store.clone().try_lock_owned() {
+                Ok(store) if store.is_some() => store,
+                _ => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::StoreUnavailable,
+                    }
+                }
+            };
+            let registry = match state.servers.clone().try_lock_owned() {
+                Ok(registry) => registry,
+                Err(_) => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::SnapshotFailed,
+                    }
+                }
+            };
+            if registry
+                .get(&server)
+                .is_none_or(|entry| entry.instance != instance)
+            {
+                return PersistOutcome::Superseded;
+            }
+            let lease = catcoms_app::durable_chat::DurableSendLease::new(
+                store,
+                server,
+                (writing, registry),
+            );
+            if let Err(error) = ready.commit(lease).await {
+                tracing::error!(target:"catcoms_app",server,error=%error,"VAULT.CHAT_REPAIR.FAILED");
+                return PersistOutcome::Pending {
+                    reason: PersistFailure::WriteFailed,
+                };
+            }
+            if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+                if entry.instance == instance {
+                    entry.persist.completed_through(covering);
+                }
+            }
+            return PersistOutcome::Durable;
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return PersistOutcome::Pending {
+                reason: PersistFailure::SnapshotFailed,
+            }
+        }
+    }
+    let _writing = writing;
     let bytes = match actor.snapshot().await {
         Ok(b) => b,
         Err(e) => {
@@ -12126,10 +12179,12 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
-    if object.get("version").and_then(serde_json::Value::as_u64) != Some(1)
-        || !object
-            .get("drafts")
-            .is_some_and(serde_json::Value::is_object)
+    if !matches!(
+        object.get("version").and_then(serde_json::Value::as_u64),
+        Some(1 | 2)
+    ) || !object
+        .get("drafts")
+        .is_some_and(serde_json::Value::is_object)
         || !object
             .get("readMarks")
             .is_some_and(serde_json::Value::is_object)
@@ -12649,6 +12704,7 @@ struct SendMessageResult {
     persistence: PersistOutcome,
     message_id: Option<String>,
     replayed: bool,
+    disposition: &'static str,
 }
 
 /// Send a chat message to a channel (by id).
@@ -12697,16 +12753,20 @@ async fn send_message(
     .await
 }
 
-/// Edit one of your own messages (by message id) in a channel.
+/// Edit crosses the same encrypted snapshot barrier as a post; a retry keeps its exact token.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn edit_message(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
-    msg_id: String,
+    id: String,
     text: String,
+    retry_token: String,
+    expected_context: String,
+    target: String,
     trace: Option<String>,
-) -> Result<(), AppError> {
+) -> Result<SendMessageResult, AppError> {
     let op = Operation::start(
         trace,
         catcoms_diagnostics::Section::Channels,
@@ -12714,25 +12774,32 @@ async fn edit_message(
         server,
         Some(&channel),
     );
-    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
-    actor
-        .edit_message(id, msg_id, text)
-        .await
-        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
-    persist_server(&state, server).await;
-    op.succeeded("CHANNEL.EDIT.PERSISTED");
-    Ok(())
+    durable_chat::mutation(
+        &state,
+        &op,
+        server,
+        &channel,
+        id,
+        catcoms_app::durable_chat::DurableMutationAction::Edit { text },
+        retry_token,
+        expected_context,
+        target,
+    )
+    .await
 }
-
-/// Delete one of your own messages (by message id) from a channel.
+/// Moderation deletion also retains a sealed caller intent; no non-durable production fallback.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn delete_message(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
-    msg_id: String,
+    id: String,
+    retry_token: String,
+    expected_context: String,
+    target: String,
     trace: Option<String>,
-) -> Result<(), AppError> {
+) -> Result<SendMessageResult, AppError> {
     let op = Operation::start(
         trace,
         catcoms_diagnostics::Section::Channels,
@@ -12740,14 +12807,18 @@ async fn delete_message(
         server,
         Some(&channel),
     );
-    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
-    actor
-        .delete_message(id, msg_id)
-        .await
-        .map_err(|e| op.fail(codes::CHAT_DELETE_REJECTED, e))?;
-    persist_server(&state, server).await;
-    op.succeeded("CHANNEL.DELETE.PERSISTED");
-    Ok(())
+    durable_chat::mutation(
+        &state,
+        &op,
+        server,
+        &channel,
+        id,
+        catcoms_app::durable_chat::DurableMutationAction::Delete,
+        retry_token,
+        expected_context,
+        target,
+    )
+    .await
 }
 
 /// Toggle this member's emoji reaction on a message (by message id) in a channel.
@@ -18985,6 +19056,8 @@ pub fn run() {
             revoke_device,
             send_message,
             durable_chat::durable_send_context,
+            durable_chat::durable_mutation_context,
+            durable_chat::stop_durable_chat,
             edit_message,
             delete_message,
             toggle_reaction,
