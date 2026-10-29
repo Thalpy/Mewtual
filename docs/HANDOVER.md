@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Individual media closure (29 October; inactive, final gates pending)
+## Individual media closure (29 October; inactive, complete suites pass)
 
 `359a2eb0` integrates the reviewed exact-peer native-request fence. Queued or encrypting
 Admit/Current/Detach cannot first-fetch after that peer closes. Indexed siblings retain
@@ -14,13 +14,21 @@ fits its original 8 KiB fee. See [the ownership and evidence note](communication
 documents the measured inline admission outcome for Clippy, and adds bounded native media
 refusal enums. Strict Root/native Clippy, Root formatting, ambient checks and focused
 native history scenarios pass. The prior complete Root 4,007-test result applies to
-unchanged Root inputs. Complete native/frontend validation and final build/startup are
-being repeated for this integrated checkpoint. The earlier intermittent native media
+unchanged Root inputs. Complete native validation passes 1,058 library tests plus six
+ACL/parser tests, with zero failures/ignores (2,615.13s library). The harness runs one test
+at a time; concurrency inside each P2P scenario is unchanged. The complete frontend suite
+passes 3,655 tests, with zero failures/ignores; Svelte checking has zero errors/warnings,
+the production build and all ten real Edge flows pass. The native rebuild passes (5m08s),
+and the unchanged startup probe passes with actual desktop access and the setup-complete
+marker. The application was not unlocked. The earlier intermittent native media
 refusal remains unclassified; no timeout or security limit was increased.
 
 The operational call-profile/receiver-retirement work and admitted wire codec in separate
-worktrees remain unintegrated drafts. In particular, the former still needs the reviewed
-send-versus-receiver-retirement fence before its channel ownership cycle is resolved.
+worktrees remain unintegrated drafts. The former now contains the paid actor-local control
+and receiver-retirement fence plus eight deterministic control tests; their static review
+has no remaining findings, but compilation, measured layouts and all Rust execution gates
+are still unrun. The codec has 26 draft tests and an agreed staged grammar; its Rust
+execution gates are also unrun. Neither draft is ready for activation.
 V2 remains OFF. Operational bilateral admission/Ready/SDP/RTC/audio, member relay and
 combined/physical acceptance are still incomplete. Only one physical desktop is available.
 

@@ -14,11 +14,18 @@ without replacing their original ledger or blocking cleanup. The logical media g
 Native fixture/lint correction `a99e4c23` has independent read-only review and passing
 native history scenarios (75.00s/45.80s), concrete layouts and strict native Clippy.
 Strict Root Clippy, Root formatting and ambient checks also pass. Root inputs remain
-unchanged from the complete 4,007-test pass. Complete integrated native/frontend and
-final build/startup gates are running; the earlier unclassified native media refusal
+unchanged from the complete 4,007-test pass. Complete integrated native validation passes
+1,058 library plus six ACL/parser tests, zero failed/ignored (2,615.13s library), with one
+harness test at a time and unchanged internal scenario concurrency. The complete frontend
+passes 3,655 tests, zero failed/ignored; Svelte checking has zero errors/warnings, production
+build and all ten real Edge flows pass. Native rebuild passes (5m08s), and the unchanged
+actual application startup probe passes with desktop access. The application was not
+unlocked. The earlier unclassified native media refusal
 is still open. No deadline, security limit or protocol allowance changed.
 
 The separate operational-call and admitted-codec drafts are not integrated or accepted.
+Their static reviews have no remaining findings: eight new actor/control tests and 26
+codec tests are drafted, but all their Rust compilation/layout/execution gates are unrun.
 V2 stays OFF; operational Ready/SDP/RTC/audio, member relay and combined/physical acceptance
 remain incomplete. A second physical desktop is not available.
 
