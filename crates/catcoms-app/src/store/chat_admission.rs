@@ -8,7 +8,8 @@ use super::*;
 use catcoms_rt::{RequestAuthority, RequestCancellation};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::watch;
+mod custody;
+mod revocation;
 
 const DOMAIN: &str = "catcoms/chat-admission-inventory/v1";
 const FILE: &str = "chat-admissions.bin";
@@ -76,6 +77,10 @@ pub struct ChatAdmissionCapture {
     original: Option<Record>,
     mount_identity: Arc<()>,
     mount: RequestCancellation,
+    admission: Option<RequestCancellation>,
+    // A valid issuance revokes its previous owner before I/O. Preserve its OWN exact candidate
+    // even on pre-rename failure, rather than treating that self-revocation as a new admission.
+    issued: Mutex<Option<ChatAdmissionPreparation>>,
 }
 impl std::fmt::Debug for ChatAdmissionCapture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -92,6 +97,9 @@ pub struct ChatAdmissionPreparation {
     domain: [u8; 32],
     mount_identity: Arc<()>,
     mount: RequestCancellation,
+    admission: RequestCancellation,
+    owner_identity: Arc<()>,
+    revoker: ChatAdmissionRevoker,
 }
 impl std::fmt::Debug for ChatAdmissionPreparation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -130,6 +138,9 @@ impl ChatAdmissionPreparation {
     pub fn domain(&self) -> [u8; 32] {
         self.domain
     }
+    pub fn revoker(&self) -> ChatAdmissionRevoker {
+        self.revoker.clone()
+    }
 }
 
 /// Runtime custody returned only after the actual mounted store verifies a Current record.
@@ -143,6 +154,8 @@ pub struct ChatAdmissionBinding {
     mount_identity: Arc<()>,
     mount: RequestCancellation,
     publication: RequestCancellation,
+    owner_identity: Arc<()>,
+    revoker: ChatAdmissionRevoker,
 }
 impl std::fmt::Debug for ChatAdmissionBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -164,9 +177,50 @@ impl ChatAdmissionBinding {
     pub fn is_live(&self) -> bool {
         !self.publication.is_cancelled()
     }
+    /// Negative-only original-owner handle, safe to call before waiting for retirement storage.
+    pub fn revoker(&self) -> ChatAdmissionRevoker {
+        self.revoker.clone()
+    }
 }
 
-impl catcoms_sync::local_chat_scope::ManagedChatScopeBinding for ChatAdmissionBinding {
+/// Revokes only the original nonce owner. It cannot publish, issue a binding, access a later
+/// admission or keep the publisher alive. Durable retirement is still separately required.
+#[derive(Clone)]
+pub struct ChatAdmissionRevoker(revocation::Handle);
+impl ChatAdmissionRevoker {
+    pub fn revoke(&self) {
+        self.0.revoke();
+    }
+}
+impl std::fmt::Debug for ChatAdmissionRevoker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatAdmissionRevoker")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Host-held negative-only handle for revocation BEFORE waiting for a mounted Store guard.
+/// Reopening/replacing a Store never changes which physical lifetime this handle targets.
+#[derive(Clone)]
+pub struct ChatMountRevoker(revocation::Handle);
+impl ChatMountRevoker {
+    pub fn revoke(&self) {
+        self.0.revoke();
+    }
+}
+impl std::fmt::Debug for ChatMountRevoker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatMountRevoker").finish_non_exhaustive()
+    }
+}
+
+impl catcoms_sync::local_chat_scope::ManagedChatScopeRevocation for ChatAdmissionRevoker {
+    fn revoke(&self) {
+        ChatAdmissionRevoker::revoke(self);
+    }
+}
+
+impl catcoms_sync::local_chat_scope::ManagedChatScopeReservation for ChatAdmissionBinding {
     fn group(&self) -> &[u8] {
         self.key.group()
     }
@@ -179,15 +233,50 @@ impl catcoms_sync::local_chat_scope::ManagedChatScopeBinding for ChatAdmissionBi
     fn nonce(&self) -> [u8; 32] {
         self.nonce
     }
+    fn owner_identity(&self) -> Arc<()> {
+        self.owner_identity.clone()
+    }
+    fn reservation_observer(&self) -> RequestCancellation {
+        self.publication.clone()
+    }
+    fn revocation(&self) -> Arc<dyn catcoms_sync::local_chat_scope::ManagedChatScopeRevocation> {
+        Arc::new(self.revoker.clone())
+    }
+}
+impl catcoms_sync::local_chat_scope::ManagedChatScopeBinding for ChatAdmissionBinding {
     fn publication_authority(&self) -> RequestCancellation {
         self.publication.clone()
+    }
+}
+
+impl catcoms_sync::local_chat_scope::ManagedChatScopeReservation for ChatAdmissionPreparation {
+    fn group(&self) -> &[u8] {
+        self.key.group()
+    }
+    fn signer(&self) -> &[u8; 32] {
+        self.key.signer()
+    }
+    fn domain(&self) -> [u8; 32] {
+        self.domain
+    }
+    fn nonce(&self) -> [u8; 32] {
+        self.record.nonce
+    }
+    fn owner_identity(&self) -> Arc<()> {
+        self.owner_identity.clone()
+    }
+    fn reservation_observer(&self) -> RequestCancellation {
+        self.admission.clone()
+    }
+    fn revocation(&self) -> Arc<dyn catcoms_sync::local_chat_scope::ManagedChatScopeRevocation> {
+        Arc::new(self.revoker.clone())
     }
 }
 
 struct AdmissionOwner {
     nonce: [u8; 32],
     revision: u64,
-    signal: watch::Sender<bool>,
+    life: Arc<revocation::Owner>,
 }
 #[derive(Default)]
 struct Runtime {
@@ -196,33 +285,48 @@ struct Runtime {
     managed: bool,
     owners: BTreeMap<ChatAdmissionKey, AdmissionOwner>,
 }
+#[cfg(test)]
+type BeforeWriterHook = Box<dyn FnOnce(&Mutex<Runtime>) + Send>;
 /// Owned by one physical ServerStore. Observers never retain these revoking senders.
 pub(super) struct MountOwner {
     identity: Arc<()>,
-    signal: watch::Sender<bool>,
+    life: Arc<revocation::Owner>,
     runtime: Mutex<Runtime>,
+    #[cfg(test)]
+    before_writer: Mutex<Option<BeforeWriterHook>>,
 }
 impl MountOwner {
     pub(super) fn new() -> Self {
         Self {
             identity: Arc::new(()),
-            signal: watch::channel(false).0,
+            life: revocation::Owner::new(),
             runtime: Mutex::new(Runtime::default()),
+            #[cfg(test)]
+            before_writer: Mutex::new(None),
         }
     }
     fn observer(&self) -> RequestCancellation {
-        RequestCancellation::new(self.signal.subscribe(), None)
+        self.life.observer()
     }
     pub(super) fn revoke(&self) {
-        self.signal.send_replace(true);
+        self.life.revoke();
     }
     fn locked(&self) -> Result<std::sync::MutexGuard<'_, Runtime>, AppError> {
-        if *self.signal.borrow() {
+        if !self.life.live() {
             return Err(refused());
+        }
+        #[cfg(test)]
+        {
+            // One bounded scheduling seam. Release its own mutex before executing the hook;
+            // tests can prove real writer contention without ambient sleeps or polling races.
+            let hook = self.before_writer.lock().map_err(|_| refused())?.take();
+            if let Some(hook) = hook {
+                hook(&self.runtime);
+            }
         }
         let runtime = self.runtime.lock().map_err(|_| refused())?;
         // Revocation can happen while this synchronous writer waits for earlier admitted work.
-        if *self.signal.borrow() {
+        if !self.life.live() {
             return Err(refused());
         }
         Ok(runtime)
@@ -237,14 +341,12 @@ impl Drop for MountOwner {
 #[derive(Debug)]
 struct AdmissionAuthority {
     mount: RequestCancellation,
-    admission: watch::Receiver<bool>,
+    admission: RequestCancellation,
 }
 #[async_trait::async_trait]
 impl RequestAuthority for AdmissionAuthority {
     fn authorized(&self) -> bool {
-        !self.mount.is_cancelled()
-            && !*self.admission.borrow()
-            && self.admission.has_changed().is_ok()
+        !self.mount.is_cancelled() && !self.admission.is_cancelled()
     }
     async fn revoked(&self) {
         let mut mount = self.mount.clone();
@@ -252,7 +354,7 @@ impl RequestAuthority for AdmissionAuthority {
         while self.authorized() {
             tokio::select! {
                 _ = mount.cancelled() => return,
-                changed = admission.changed() => if changed.is_err() { return; },
+                _ = admission.cancelled() => return,
             }
         }
     }
@@ -366,6 +468,12 @@ impl ServerStore {
         self.chat_mount.revoke();
     }
 
+    /// Capture this while the Store is mounted; revoke before any replacement/unmount await.
+    /// The returned weak negative handle cannot keep the Store/session alive or affect a new mount.
+    pub fn chat_mount_revoker(&self) -> ChatMountRevoker {
+        ChatMountRevoker(self.chat_mount.life.handle())
+    }
+
     /// Nonsecret comparison domain, not a runtime binding or source of admission authority.
     pub fn chat_vault_domain(&self) -> Result<[u8; 32], AppError> {
         let key = Zeroizing::new(self.keys.db_key()?);
@@ -408,7 +516,7 @@ impl ServerStore {
         let table = runtime.table.as_ref().ok_or_else(refused)?;
         let bytes = Zeroizing::new(encode(table, &self.chat_vault_domain()?)?);
         let sealed = seal(&self.keys.db_key()?, &bytes, rng)?;
-        if *self.chat_mount.signal.borrow() {
+        if !self.chat_mount.life.live() {
             return Err(refused());
         }
         self.write_chat_admissions_record(&frame(&sealed))?;
@@ -450,7 +558,7 @@ impl ServerStore {
         &self,
         key: ChatAdmissionKey,
     ) -> Result<ChatAdmissionCapture, AppError> {
-        let runtime = self.chat_mount.locked()?;
+        let mut runtime = self.chat_mount.locked()?;
         if !runtime.managed || runtime.dirty {
             return Err(refused());
         }
@@ -460,11 +568,20 @@ impl ServerStore {
             .ok_or_else(refused)?
             .get(&key)
             .cloned();
+        let admission = match &original {
+            Some(record) if record.phase != Phase::Retired => Some(
+                self.reservation_locked(&mut runtime, &key, record)?
+                    .admission,
+            ),
+            _ => None,
+        };
         Ok(ChatAdmissionCapture {
             key,
             original,
             mount_identity: self.chat_mount.identity.clone(),
             mount: self.chat_mount.observer(),
+            admission,
+            issued: Mutex::new(None),
         })
     }
 
@@ -485,8 +602,44 @@ impl ServerStore {
         {
             return Err(refused());
         }
-        let table = runtime.table.as_mut().ok_or_else(refused)?;
-        let current = table.get(&capture.key).cloned();
+        // Lock order is Store writer -> brief issued-slot access. No slot guard is held while
+        // waiting for the writer or during I/O, and no slot reader ever waits for Store custody.
+        // Re-read under the writer so simultaneous retries cannot each sample a new nonce.
+        let issued = capture.issued.lock().map_err(|_| refused())?.clone();
+        let current = runtime
+            .table
+            .as_ref()
+            .ok_or_else(refused)?
+            .get(&capture.key)
+            .cloned();
+        if let Some(issued) = issued {
+            if issued.record.origin != origin
+                || issued.record.provenance != provenance
+                || issued.admission.is_cancelled()
+                || current.as_ref().is_none_or(|row| {
+                    row.nonce != issued.record.nonce
+                        || row.revision != issued.record.revision
+                        || row.origin != origin
+                        || row.provenance != provenance
+                        || row.phase == Phase::Retired
+                })
+            {
+                return Err(refused());
+            }
+            // This is the SAME privately issued candidate, not permission to advance again.
+            // Its own observer still refuses any later removal, revision or mount replacement.
+            if runtime.dirty {
+                self.flush_chat_admissions(&mut runtime, rng)?;
+            }
+            return Ok(issued);
+        }
+        if capture
+            .admission
+            .as_ref()
+            .is_some_and(RequestCancellation::is_cancelled)
+        {
+            return Err(refused());
+        }
         if current.as_ref().is_some_and(|r| {
             r.phase == Phase::Retired
                 && r.origin == Origin::Fresh
@@ -506,7 +659,10 @@ impl ServerStore {
             if current != capture.original || (origin == Origin::Legacy && current.is_some()) {
                 return Err(refused());
             }
-            if current.is_none() && table.len() >= MAX_CHAT_ADMISSION_IDENTITIES {
+            if current.is_none()
+                && runtime.table.as_ref().ok_or_else(refused)?.len()
+                    >= MAX_CHAT_ADMISSION_IDENTITIES
+            {
                 return Err(refused());
             }
             let revision = match current {
@@ -530,35 +686,53 @@ impl ServerStore {
                 provenance,
             }
         };
+        let unchanged = current
+            .as_ref()
+            .is_some_and(|old| old.nonce == record.nonce && old.revision == record.revision);
+        let (preparation, new_owner) = if unchanged {
+            (
+                self.reservation_locked(&mut runtime, &capture.key, &record)?,
+                None,
+            )
+        } else {
+            let (preparation, owner) = self.new_reservation(&capture.key, &record)?;
+            (preparation, Some(owner))
+        };
+        // Final fresh-issuance admission point. Revocation is atomic and does not wait for this
+        // writer, so recheck AFTER nonce/RNG/custody construction, immediately before the advance.
+        // Revocation after this read may leave already-admitted original-custody work to finish.
+        if capture
+            .admission
+            .as_ref()
+            .is_some_and(RequestCancellation::is_cancelled)
+            || preparation.admission.is_cancelled()
+        {
+            return Err(refused());
+        }
+        // Cache BEFORE revoking the previous nonce or touching disk. A failed rename can retry
+        // exactly this candidate, even though issuing it already invalidated the old observer.
+        *capture.issued.lock().map_err(|_| refused())? = Some(preparation.clone());
+        if let Some(owner) = new_owner {
+            if let Some(old) = runtime.owners.insert(capture.key.clone(), owner) {
+                old.life.revoke();
+            }
+            runtime
+                .table
+                .as_mut()
+                .ok_or_else(refused)?
+                .insert(capture.key.clone(), record.clone());
+        }
         if record.phase == Phase::Current {
-            // Same verified attempt, already complete: do not revoke its unchanged owner or
-            // rerun initialization. Finish reports this as AlreadyCurrent.
-            return Ok(ChatAdmissionPreparation {
-                key: capture.key.clone(),
-                record,
-                domain: self.chat_vault_domain()?,
-                mount_identity: self.chat_mount.identity.clone(),
-                mount: self.chat_mount.observer(),
-            });
+            // Same verified attempt: preserve its unchanged owner and never reinstall old data.
+            if runtime.dirty {
+                self.flush_chat_admissions(&mut runtime, rng)?;
+            }
+            return Ok(preparation);
         }
-        if let Some(old) = runtime.owners.remove(&capture.key) {
-            old.signal.send_replace(true);
-        }
-        runtime
-            .table
-            .as_mut()
-            .ok_or_else(refused)?
-            .insert(capture.key.clone(), record.clone());
         // Keep the EXACT candidate in memory even after a before-rename failure. Old observers
         // remain revoked; a retry flushes this same reservation instead of sampling a new nonce.
         self.flush_chat_admissions(&mut runtime, rng)?;
-        Ok(ChatAdmissionPreparation {
-            key: capture.key.clone(),
-            record,
-            domain: self.chat_vault_domain()?,
-            mount_identity: self.chat_mount.identity.clone(),
-            mount: self.chat_mount.observer(),
-        })
+        Ok(preparation)
     }
 
     /// One-time bootstrap of previously unmanaged bytes. Any recorded identity, including a
@@ -603,6 +777,7 @@ impl ServerStore {
         if !runtime.managed
             || preparation.domain != self.chat_vault_domain()?
             || preparation.mount.is_cancelled()
+            || preparation.admission.is_cancelled()
             || !Arc::ptr_eq(&preparation.mount_identity, &self.chat_mount.identity)
         {
             return Err(refused());
@@ -637,10 +812,13 @@ impl ServerStore {
                 .map(ChatAdmissionFinish::AlreadyCurrent);
         }
         // No await between final lineage check, covering original-store save and Current commit.
-        if preparation.mount.is_cancelled() {
+        if preparation.mount.is_cancelled() || preparation.admission.is_cancelled() {
             return Err(refused());
         }
         save(self, rng)?;
+        if preparation.admission.is_cancelled() {
+            return Err(refused());
+        }
         runtime
             .table
             .as_mut()
@@ -659,7 +837,7 @@ impl ServerStore {
         key: &ChatAdmissionKey,
         nonce: [u8; 32],
     ) -> Result<ChatAdmissionBinding, AppError> {
-        if !runtime.managed || runtime.dirty || *self.chat_mount.signal.borrow() {
+        if !runtime.managed || runtime.dirty || !self.chat_mount.life.live() {
             return Err(refused());
         }
         let row = runtime
@@ -667,44 +845,22 @@ impl ServerStore {
             .as_ref()
             .ok_or_else(refused)?
             .get(key)
+            .cloned()
             .ok_or_else(refused)?;
         if row.phase != Phase::Current || row.nonce != nonce {
             return Err(refused());
         }
-        let revision = row.revision;
-        if runtime
-            .owners
-            .get(key)
-            .is_some_and(|owner| owner.nonce != nonce || owner.revision != revision)
-        {
-            if let Some(old) = runtime.owners.remove(key) {
-                old.signal.send_replace(true);
-            }
-        }
-        let owner = runtime
-            .owners
-            .entry(key.clone())
-            .or_insert_with(|| AdmissionOwner {
-                nonce,
-                revision,
-                signal: watch::channel(false).0,
-            });
-        let mount = self.chat_mount.observer();
-        let admission = owner.signal.subscribe();
-        let publication = RequestCancellation::new(admission.clone(), None).with_authority(
-            Arc::new(AdmissionAuthority {
-                mount: mount.clone(),
-                admission,
-            }),
-        );
+        let custody = self.reservation_locked(runtime, key, &row)?;
         Ok(ChatAdmissionBinding {
             key: key.clone(),
             nonce,
-            revision,
-            domain: self.chat_vault_domain()?,
-            mount_identity: self.chat_mount.identity.clone(),
-            mount,
-            publication,
+            revision: row.revision,
+            domain: custody.domain,
+            mount_identity: custody.mount_identity,
+            mount: custody.mount,
+            publication: custody.admission,
+            owner_identity: custody.owner_identity,
+            revoker: custody.revoker,
         })
     }
 
@@ -734,15 +890,9 @@ impl ServerStore {
             Phase::Current => self
                 .bind_chat_admission_locked(&mut runtime, key, nonce)
                 .map(ChatAdmissionResolution::Current),
-            Phase::Initializing => Ok(ChatAdmissionResolution::Initializing(
-                ChatAdmissionPreparation {
-                    key: key.clone(),
-                    record: row,
-                    domain: self.chat_vault_domain()?,
-                    mount_identity: self.chat_mount.identity.clone(),
-                    mount: self.chat_mount.observer(),
-                },
-            )),
+            Phase::Initializing => self
+                .reservation_locked(&mut runtime, key, &row)
+                .map(ChatAdmissionResolution::Initializing),
             Phase::Retired => Ok(ChatAdmissionResolution::Retired),
         }
     }
@@ -766,7 +916,7 @@ impl ServerStore {
     ) -> Result<T, AppError> {
         let runtime = self.chat_mount.locked()?;
         self.original_chat_store(binding)?;
-        if !runtime.managed || runtime.dirty || !binding.is_live() {
+        if !runtime.managed || runtime.dirty {
             return Err(refused());
         }
         let row = runtime
@@ -779,6 +929,11 @@ impl ServerStore {
             || row.nonce != binding.nonce
             || row.revision != binding.revision
         {
+            return Err(refused());
+        }
+        // Final positive storage admission read. A later revoke cannot recall this original
+        // synchronous write; the writer still prevents it from running after a durable fence.
+        if !binding.is_live() {
             return Err(refused());
         }
         write(self)
@@ -804,6 +959,9 @@ impl ServerStore {
         if row.nonce != binding.nonce {
             return Err(refused());
         }
+        if binding.mount.is_cancelled() {
+            return Err(refused());
+        }
         write(self)
     }
 
@@ -817,27 +975,67 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let mut runtime = self.chat_mount.locked()?;
         self.original_chat_store(binding)?;
+        self.retire_chat_row(
+            &mut runtime,
+            &binding.key,
+            binding.nonce,
+            binding.revision,
+            rng,
+        )
+    }
+
+    /// A reserved Initializing scope can be removed before Current is issued. This original
+    /// negative custody remains usable after its publication/liveness observer is revoked.
+    pub fn retire_chat_preparation(
+        &self,
+        preparation: &ChatAdmissionPreparation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let mut runtime = self.chat_mount.locked()?;
+        if preparation.mount.is_cancelled()
+            || !Arc::ptr_eq(&preparation.mount_identity, &self.chat_mount.identity)
+            || preparation.domain != self.chat_vault_domain()?
+        {
+            return Err(refused());
+        }
+        self.retire_chat_row(
+            &mut runtime,
+            &preparation.key,
+            preparation.record.nonce,
+            preparation.record.revision,
+            rng,
+        )
+    }
+
+    fn retire_chat_row(
+        &self,
+        runtime: &mut Runtime,
+        key: &ChatAdmissionKey,
+        nonce: [u8; 32],
+        revision: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
         let row = runtime
             .table
             .as_mut()
             .ok_or_else(refused)?
-            .get_mut(&binding.key)
+            .get_mut(key)
             .ok_or_else(refused)?;
-        if row.nonce != binding.nonce {
+        if row.nonce != nonce {
             return Err(refused());
         }
         if row.phase != Phase::Retired {
-            if row.revision != binding.revision {
+            if row.revision != revision {
                 return Err(refused());
             }
             row.phase = Phase::Retired;
             // Retirement still works at revision exhaustion; future renewal's checked_add refuses.
             row.revision = row.revision.saturating_add(1);
         }
-        if let Some(owner) = runtime.owners.remove(&binding.key) {
-            owner.signal.send_replace(true);
+        if let Some(owner) = runtime.owners.remove(key) {
+            owner.life.revoke();
         }
-        self.flush_chat_admissions(&mut runtime, rng)
+        self.flush_chat_admissions(runtime, rng)
     }
 
     /// Metadata-only debt can be flushed by the original mounted persistence worker while UI is

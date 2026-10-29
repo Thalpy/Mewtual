@@ -515,3 +515,41 @@ fresh completion during the pre-fence interval, an old weak handle applied after
 N2 renewal, and held original publication/storage repair across physical mount
 replacement. These are implementation obligations, not claims about the current
 desktop or additional moderation/root-governance decisions.
+
+## Focused foundation validation (29 October; activation still closed)
+
+The primary executed the committed foundation through `1661965a` in isolated
+combined worktree `text-chat-next-focused-worktree` (combined `05e36622`, including
+the separate owner-evidence prerequisites). Its all-feature test metadata check
+for rt/net/storage/MLS/replication/sync/app passed with zero warnings. Focused
+runtime results passed: MLS `group::` 39/39, `join_attempt_tests` 3/3,
+`durable_chat::scope_tests` 9/9, app `store::chat_admission::tests` 9/9,
+managed vault 3/3, real Windows directory flush 1/1, and publication 10/10.
+
+This supersedes the earlier unrun status for those committed foundation filters.
+The first focused run exposed three fixture errors: an old stored GroupId in the
+same-key rejoin provider, inspecting a staged Remove before its real resolver,
+and renaming a directory while Windows held its vault transaction lock. `1661965a`
+corrected the fixtures, retained the original assertions and passed re-execution.
+
+The implementing/review agents ran no Cargo/npm suites. Full repository/native/
+frontend gates for the combined new scope implementation have not been claimed.
+The subsequent negative-custody draft and actual native host integration remain
+uncompiled/unwired at this checkpoint. No managed scope activation is enabled.
+
+The following isolated negative-custody source slice has received independent
+read-only review but is not yet compiled/executed. Store-owned atomic lifetimes
+now have negative-only weak mount/admission handles, with no writer lock or
+sender retained by observers. Initializing and Current share the same runtime
+owner. `ManagedChatScopeReservation` carries original observer, dummy identity
+and weak revocation; only its stronger Current binding permits publication.
+Actual scope removal/Leave revokes that shared original lifetime synchronously;
+ordinary Actor shutdown does not durably retire it or revoke sibling owners.
+
+Pre-await captures retain original admission liveness. A private exact issued
+candidate is cached before old-owner revocation/I/O, so its own pre-rename retry
+keeps its nonce without permitting a delayed unrelated completion to advance.
+Later negative revocation, revision or physical mount replacement still refuses
+that continuation. Negative custody can retire an Initializing reservation.
+No native hook, fresh proof/capture producer or owner-evidence head writer is
+activated by these library contracts; their final integration remains required.

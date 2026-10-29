@@ -2,6 +2,9 @@ use super::*;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[path = "revocation_tests.rs"]
+mod negative_custody;
+
 const SECRET: &[u8] = b"admission fixture secret";
 fn mounted() -> (tempfile::TempDir, ServerStore, ChaCha20Rng) {
     let dir = tempfile::tempdir().unwrap();

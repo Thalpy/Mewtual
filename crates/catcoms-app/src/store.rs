@@ -51,7 +51,8 @@ mod chat_admission;
 mod chat_fences;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
-    ChatAdmissionPreparation, ChatAdmissionResolution, MAX_CHAT_ADMISSION_IDENTITIES,
+    ChatAdmissionPreparation, ChatAdmissionResolution, ChatAdmissionRevoker, ChatMountRevoker,
+    MAX_CHAT_ADMISSION_IDENTITIES,
 };
 mod creative_references;
 mod epoch_draft_archive;

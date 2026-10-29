@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Dormant stable authoring scope: focused validation (29 October)
+
+The isolated scope foundation through `1661965a` preserves opaque existing context/RPC shapes,
+adds strict Active/Retired/Initializing persistence and exact accepted-v1 publication migration,
+and keeps native activation closed. The primary's isolated combined `05e36622` all-feature test
+metadata check for rt/net/storage/MLS/replication/sync/app passed without warnings. Focused runtime
+passes: MLS group 39, fresh join 3, scope 9, Store admission inventory 9, managed vault 3, actual
+Windows directory flush 1 and publication 10. These are focused results, not a complete-suite
+claim for the new scope code. See
+[`CHAT-STABLE-AUTHORING-SCOPE-NEXT.md`](communication-recovery/CHAT-STABLE-AUTHORING-SCOPE-NEXT.md)
+for fixture corrections, remaining host hooks and the honest snapshot rollback limits.
+
+The separate negative-custody draft is not yet compiled, and native managed/no-tail classification,
+inseparable admission capture, metadata repair/exposure, durable Leave and offline Retired restore
+remain unwired. Owner-evidence logical-head persistence is another separate unresolved activation
+gate; local scope/current roster metadata is not historical membership authority.
+
 ## Integrated text-chat validation (29 October; backend runtime gates pending)
 
 The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/

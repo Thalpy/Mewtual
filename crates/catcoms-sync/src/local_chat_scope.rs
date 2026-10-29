@@ -19,11 +19,22 @@ const MAX_TAIL_BYTES: usize = 512 + durable_chat::MAX_CHAT_PENDING * (MAX_ORIGIN
 /// wire interface: never implement it for decoded labels, raw scalars or a fresh watch channel.
 /// Sync does not authenticate arbitrary Rust implementations. A new production implementation
 /// changes this authorization boundary and requires review; fake implementations are test-only.
-pub trait ManagedChatScopeBinding {
+pub trait ManagedChatScopeReservation {
     fn group(&self) -> &[u8];
     fn signer(&self) -> &[u8; 32];
     fn domain(&self) -> [u8; 32];
     fn nonce(&self) -> [u8; 32];
+    /// Runtime identity only. Retaining this dummy allocation cannot keep its owner alive.
+    fn owner_identity(&self) -> Arc<()>;
+    fn reservation_observer(&self) -> RequestCancellation;
+    fn revocation(&self) -> Arc<dyn ManagedChatScopeRevocation>;
+}
+/// Negative-only original lifetime target. Never select a newer owner by logical key.
+pub trait ManagedChatScopeRevocation: Send + Sync {
+    fn revoke(&self);
+}
+/// Only a durably Current Store result implements the stronger publication contract.
+pub trait ManagedChatScopeBinding: ManagedChatScopeReservation {
     fn publication_authority(&self) -> RequestCancellation;
 }
 
@@ -70,6 +81,11 @@ struct Runtime {
     original: RequestCancellation,
     publication: RequestCancellation,
 }
+struct Reservation {
+    identity: Arc<()>,
+    observer: RequestCancellation,
+    revoker: Arc<dyn ManagedChatScopeRevocation>,
+}
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.owner.send_replace(true);
@@ -106,6 +122,7 @@ pub(super) struct LocalChatScope {
     // each with the replication layer's fixed operation/byte budget, outside final save leases.
     pub(super) recovery: BTreeMap<[u8; 16], SavedLocalChatRecovery>,
     runtime: Option<Runtime>,
+    reservation: Option<Reservation>,
     revision: u64,
 }
 impl LocalChatScope {
@@ -116,6 +133,10 @@ impl LocalChatScope {
         self.label
             .as_ref()
             .is_some_and(|label| !label.retired && !label.initializing)
+            && self
+                .reservation
+                .as_ref()
+                .is_some_and(|reservation| !reservation.observer.is_cancelled())
             && self.runtime.as_ref().is_some_and(|runtime| {
                 !runtime.original.is_cancelled() && !runtime.publication.is_cancelled()
             })
@@ -125,6 +146,9 @@ impl LocalChatScope {
             .then(|| self.runtime.as_ref().unwrap().publication.clone())
     }
     pub(super) fn retire(&mut self) {
+        if let Some(reservation) = &self.reservation {
+            reservation.revoker.revoke();
+        }
         if let Some(runtime) = &self.runtime {
             runtime.owner.send_replace(true);
         }
@@ -317,6 +341,7 @@ impl LocalChatScope {
             required: true,
             aliases,
             runtime: None,
+            reservation: None,
             revision: 0,
             recovery: BTreeMap::new(),
         };
@@ -367,6 +392,48 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
     pub fn chat_scope_revision(&self) -> u64 {
         self.local_chat_scope.revision
+    }
+
+    /// Attach original negative custody before an Initializing instance can run or reach a
+    /// background writer. This cannot publish or change scope labels. This Actor cannot refresh
+    /// its runtime owner identity after a physical mount replacement or later admission.
+    pub fn attach_managed_chat_reservation(
+        &mut self,
+        source: &impl ManagedChatScopeReservation,
+    ) -> Result<(), SyncError> {
+        let domain = source.domain();
+        let nonce = source.nonce();
+        let group = source.group().to_vec();
+        let signer = *source.signer();
+        let identity = source.owner_identity();
+        let observer = source.reservation_observer();
+        let revoker = source.revocation();
+        if self
+            .chat_scope_label()
+            .is_none_or(|label| label.domain != domain || label.nonce != nonce || label.retired)
+            || group != self.group.group_id()
+            || signer.as_slice() != self.device.public_key_bytes()
+            || !self.group.is_active()
+            || !self.group.has_local_signer(&self.device.public_key_bytes())
+            || observer.is_cancelled()
+        {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        if let Some(original) = &self.local_chat_scope.reservation {
+            return if Arc::ptr_eq(&original.identity, &identity)
+                && !original.observer.is_cancelled()
+            {
+                Ok(())
+            } else {
+                Err(SyncError::ChatScopeUnavailable)
+            };
+        }
+        self.local_chat_scope.reservation = Some(Reservation {
+            identity,
+            observer,
+            revoker,
+        });
+        Ok(())
     }
 
     /// Persistable non-authorizing identity while original recovery spans owner turns. The host
@@ -471,6 +538,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::ChatScopeUnavailable);
         }
+        self.attach_managed_chat_reservation(binding)?;
         if self.local_chat_scope.runtime.is_some() {
             return if self.local_chat_scope.live() {
                 Ok(())

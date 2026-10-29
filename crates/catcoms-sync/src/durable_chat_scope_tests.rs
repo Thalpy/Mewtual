@@ -14,7 +14,8 @@ struct Binding {
     signer: [u8; 32],
     domain: [u8; 32],
     nonce: [u8; 32],
-    owner: watch::Sender<bool>,
+    owner: Arc<watch::Sender<bool>>,
+    identity: Arc<()>,
 }
 impl Binding {
     fn fixture(node: &Node, nonce: u8) -> Self {
@@ -23,7 +24,8 @@ impl Binding {
             signer: node.my_public_key().try_into().unwrap(),
             domain: [0x92; 32],
             nonce: [nonce; 32],
-            owner: watch::channel(false).0,
+            owner: Arc::new(watch::channel(false).0),
+            identity: Arc::new(()),
         }
     }
     fn stage_and_bind(&self, node: &mut Node) {
@@ -32,7 +34,15 @@ impl Binding {
         node.bind_managed_chat_scope(self).unwrap();
     }
 }
-impl local_chat_scope::ManagedChatScopeBinding for Binding {
+struct FixtureRevoker(std::sync::Weak<watch::Sender<bool>>);
+impl local_chat_scope::ManagedChatScopeRevocation for FixtureRevoker {
+    fn revoke(&self) {
+        if let Some(owner) = self.0.upgrade() {
+            owner.send_replace(true);
+        }
+    }
+}
+impl local_chat_scope::ManagedChatScopeReservation for Binding {
     fn group(&self) -> &[u8] {
         &self.group
     }
@@ -45,6 +55,17 @@ impl local_chat_scope::ManagedChatScopeBinding for Binding {
     fn nonce(&self) -> [u8; 32] {
         self.nonce
     }
+    fn owner_identity(&self) -> Arc<()> {
+        self.identity.clone()
+    }
+    fn reservation_observer(&self) -> RequestCancellation {
+        RequestCancellation::new(self.owner.subscribe(), None)
+    }
+    fn revocation(&self) -> Arc<dyn local_chat_scope::ManagedChatScopeRevocation> {
+        Arc::new(FixtureRevoker(Arc::downgrade(&self.owner)))
+    }
+}
+impl local_chat_scope::ManagedChatScopeBinding for Binding {
     fn publication_authority(&self) -> RequestCancellation {
         RequestCancellation::new(self.owner.subscribe(), None)
     }
@@ -477,7 +498,10 @@ async fn actual_applied_removal_revokes_original_publication_even_when_transitio
     assert!(member.durable_send_context().is_err());
 
     let mut panicking = restore(&snapshot, &hub, 922);
-    panicking.bind_managed_chat_scope(&binding).unwrap();
+    // Independent host lifetime for the unwind scenario. The first scenario already revoked
+    // its real fixture owner; same-Store alias propagation is exercised by actual Store tests.
+    let panic_binding = Binding::fixture(&panicking, 8);
+    panicking.bind_managed_chat_scope(&panic_binding).unwrap();
     let authority = panicking.local_chat_scope.authority().unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         panicking.with_observed_mls_transition(|node| {

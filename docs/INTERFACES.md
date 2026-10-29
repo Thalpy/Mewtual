@@ -18,6 +18,15 @@ then validate independent lineage and complete saved-before-exposure initializat
 The current desktop does not yet activate this integration. See
 [`CHAT-STABLE-AUTHORING-SCOPE-NEXT.md`](communication-recovery/CHAT-STABLE-AUTHORING-SCOPE-NEXT.md).
 
+Its base `ManagedChatScopeReservation` is also implemented by opaque Initializing preparation
+and carries only original lifetime observation/revocation. Attach it before any Initializing owner
+run; Current binding must match that same runtime dummy identity. The dummy allocation keeps no
+publisher/Store alive. Weak negative handles target their original owner, never a logical-key
+lookup, and invalidate all aliases without acquiring the admission/evidence writers. Captures
+and preparations retain this original liveness; a private own-issued retry slot preserves exact
+pre-rename debt without accepting a later revoked completion. This source is still unexecuted
+and has no native activation at this checkpoint.
+
 The tail has closed Active/Retired/Initializing phases. Initializing carries the exact reserved
 domain/nonce while original recovery spans turns, has no aliases or runtime authority, and must
 be saved before exposing that instance to any negative/background writer. Resume it against the
