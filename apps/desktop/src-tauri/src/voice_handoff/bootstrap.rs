@@ -27,7 +27,11 @@ pub(super) use admission_slot::control_layout_bytes as admission_capacity_layout
 
 const ROWS: usize = 64;
 const INDEX_BYTES: usize = 4096;
-const ROW_BYTES: usize = 8192;
+// The complete graph includes Retirement's weak-only Session allocation tail.
+// Windows measured 9,080 bytes after that missing owner was restored. Prepay
+// 10 KiB before Row allocation; keep the full production/test invoices intact.
+// This changes only each retained Row's fee, not index slots or process caps.
+const ROW_BYTES: usize = 10 * 1024;
 
 struct Index {
     serial: u128,
@@ -159,7 +163,8 @@ impl MetadataProjection {
 
     /// Conservative complete original Row/preparation/output inventory plus ONE serial
     /// metadata reply. General allocator, framework copies after handoff and OS overhead
-    /// are outside this application-owner bound. Refuse rather than raise its8KiB payment.
+    /// are outside this application-owner bound. Refuse before allocation if the
+    /// complete graph exceeds the independently prepaid 10 KiB Row payment.
     pub(super) fn require_reply_memory(&self, reply_bytes: usize) -> Result<(), Refused> {
         Self::require_layout(reply_bytes)
     }

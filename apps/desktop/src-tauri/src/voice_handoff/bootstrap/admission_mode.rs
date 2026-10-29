@@ -15,7 +15,7 @@ impl AdmissionPin {
     }
 }
 
-/// The observation owns no additional heap graph. Row's fixed8KiB pays its new
+/// The observation owns no additional heap graph. Row's fixed10KiB pays its new
 /// inline pin; the physical Control guard must count this actual borrowed frame.
 pub(in crate::voice_handoff) fn observation_layout_bytes() -> usize {
     std::mem::size_of::<std::sync::MutexGuard<'_, State>>()

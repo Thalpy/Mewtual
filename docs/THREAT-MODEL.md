@@ -2471,7 +2471,11 @@ assertion. Its trusted retained broker awaits real setup/SDK/IO promises before 
 All successful setup variants borrow one original Row projection guard. Pending/Closed metadata
 remain paid even if End and collection race their delayed serialization. Ready checks the exact
 original credit. A hard-capped JSON writer prevents serializer capacity growth; combined graph,
-hex scratch and allocation fit the unchanged 8 KiB Row allowance. Arbitrary stock Tauri/WebView
+hex scratch and allocation are checked against the prepaid 10 KiB Row allowance.
+The complete retired Session weak-allocation tail raised the measured Windows
+graph to9,080B; its former8KiB fee refused setup. Every inventory term remains,
+and the existing64-row and group/process ceilings are unchanged. The updated fee
+still needs the complete integration rerun. Arbitrary stock Tauri/WebView
 public-metadata copies after handoff, SDK/GC heaps, allocator RSS and physical erasure are not
 bounded by this payment. This narrow exception cannot carry secrets or action data.
 

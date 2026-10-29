@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Current admitted integration (29 October; V2 OFF, validation in progress)
+
+The neutral Root factory and sealed Actor preparation are integrated with
+Control7 and the separate admitted physical bootstrap. The Actor bridge retains
+the whole registration/capacity result and distinguishes actual unstarted return
+from an entered callback loss; it is reviewed but awaits compiled tests. Native
+Slot/operation31, bilateral agreement/RoundGate, admitted KDF/Ready/RTC and relay
+remain open.
+
+Three native bootstrap crypto/layout cases pass. The integrated admitted filter
+passed34 and failed16 because the complete Row/reply inventory measured9,080B
+against its old8KiB payment. The fee is now10KiB before allocation, with every
+invoice term preserved and unchanged64-row/group/process caps; the correction
+and lifecycle cases await rerun. The original failure log is retained. Final
+Root/native/frontend suites and startup/flow gates remain required.
+
 ## Control7 Query/Support snapshot (29 October; focused draft, OFF)
 
 Twelve focused cases pass at34336b2f, including actual restricted A–B–C dispatch,

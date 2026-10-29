@@ -157,7 +157,7 @@ fn rpc_layout_bytes() -> usize {
         + 128
 }
 pub(super) fn retained_layout_bytes() -> usize {
-    // Existing Row8KiB pays current and one preparing plain marker allocation.
+    // Row's independent10KiB pays current and one preparing plain marker allocation.
     // Neither marker has a credit/callback/Row backedge. Funding's allocation is
     // independently counted in its original native8KiB graph below.
     2 * std::mem::size_of::<(usize, usize, InvocationId)>()

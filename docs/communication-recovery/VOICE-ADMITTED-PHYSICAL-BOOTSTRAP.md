@@ -102,12 +102,16 @@ browser's deferred-ACK factory is implemented here; both are required before
 operation 31 is enabled. Key-only callers keep their existing early parent ACK
 behavior.
 
-The original 8 KiB Row, 8 KiB setup work, 2 KiB bootstrap and 12 KiB Control payments
-and group/process ceilings remain unchanged. Row reply and retained Session
+The complete Windows Row/reply graph measured 9,080 bytes after restoring the
+weak-only retired Session allocation. Its former 8 KiB payment correctly refused
+setup. The Row now prepays **10 KiB** before allocation, without removing any
+invoice terms. At the existing 64-row limit this adds at most 128 KiB of charged
+metadata; group/process ceilings do not change. The separate 8 KiB setup work,
+2 KiB bootstrap and 12 KiB Control payments also do not change. Row reply and retained Session
 layout guards run before their allocations. Setup reply buffers have bounded
 actual String capacities and a 2,304-byte capped JSON writer; the full 2,048-byte
-hex scratch is counted. Concrete native future/graph tests are drafted but have
-not yet run, so these unchanged fees are **not a new measured acceptance claim**.
+hex scratch is counted. The concrete native future/graph guard passes. The
+corrected Row fee and lifecycle cases still require their integrated rerun.
 Framework copies after handoff, opaque SDK/provider heaps and allocator/RSS are
 outside the application-owned inventory.
 
@@ -119,8 +123,10 @@ leading-zero ECDH, cross-profile refusal, complete grammar boundaries and
 malformed input. Eleven command-security checks and targeted strict TypeScript
 also pass. Scoped Rust formatting and diff whitespace checks pass.
 
-Six native lifecycle/pressure/reuse regressions and three native crypto/layout
-cases are drafted and **uncompiled/unrun** while primary owns the Rust target.
+All three native crypto/layout cases pass. The first integrated admitted filter
+passed 34 cases and failed 16, including all six new lifecycle cases: the complete
+Row inventory exceeded its former fee before setup could proceed. The original
+failure log is retained; the increased prepaid Row fee has not yet been rerun.
 They are not physical audio, network, browser-to-native HTTP or RTC evidence.
 Full integrated suites, generated runtime ACL, native layout measurements and
 startup/build checks remain primary-owned gates before this leaf can be accepted.

@@ -229,7 +229,9 @@ negative recovery and shutdown drain original owners outside native guards befor
 
 Operation29/version10 remains mode-only. The operation30/version11 adapter is described above;
 native ledger reservation and signed Ready remain open. Existing
-Row8KiB/Control12KiB and all group/process limits remain unchanged. V2 stays OFF.
+Row metadata was8KiB at this draft; the29 October complete retired-Session
+inventory correction now prepays10KiB. Control12KiB and all group/process limits
+remain unchanged. V2 stays OFF.
 
 ## Local admission mode selection (28 October; V2 inactive)
 
