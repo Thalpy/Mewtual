@@ -16,7 +16,7 @@ exact-token Stop and host-owned uncertain-write repair are a separate implementa
 in progress. Full combined suites have not run. See
 [the exact core API, evidence and limits](communication-recovery/CHAT-TYPED-CORE.md).
 
-## Text-chat priority and current durability boundaries (29 October)
+## Text-chat baseline traced before the mutation continuation (29 October)
 
 The user prioritised text-chat protocol completion ahead of voice V2. The new text branch starts
 from current main `613a7782`; unfinished voice work remains in its separate checkpoints.
@@ -24,8 +24,8 @@ from current main `613a7782`; unfinished voice work remains in its separate chec
 Source tracing confirms desktop new-message sends already save the exact original operation,
 retry receipt and publication obligation before acceptance/export. Received history and ordinary
 edits/deletes have separate background/save-later boundaries; current delivery receipts record
-historical receipt confirmation, not receiver durability. Native edit/delete paths also ignore Pending/Superseded
-persistence outcomes while logging PERSISTED. Those paths are being addressed by extending the
+historical receipt confirmation, not receiver durability. On baseline `613a7782`, native edit/delete paths ignored Pending/Superseded
+persistence outcomes while logging PERSISTED. The new mutation draft addresses those paths by extending the
 existing durable transaction, rather than adding an unrelated second send mechanism.
 
 Raw CRDT receive-time message authorization, full signer/target binding and cloned-writer fork
@@ -37,6 +37,19 @@ removal, and current-roster filtering must not erase legitimate older history.
 This documentation-only correction ran no suites; it records inspected current code, not a new
 test result. [Canonical flow](MESSAGE-FLOW.md) and
 [history/security limits](communication-recovery/CHAT-HISTORY-CONVERGENCE.md).
+
+## Durable local chat mutation implementation checkpoint (29 October)
+
+The isolated durable edit/delete branch now contains backend/native transactions, sticky v2 records,
+real no-op frontiers, exact-token Stop, whole-terminal post-rename uncertainty and automatic locked-UI
+negative repair. Focused regressions include actual encrypted-store rename/parent-sync faults and
+fresh reopen counts, unknown Stop/no-op/stopped-signed terminals, foreign receive union through epoch
+movement, unwind restoration, token conflicts and immutable target rejection. Scoped rustfmt passes;
+these newly added regressions are **not yet executed** in this checkpoint. The primary owns focused
+Cargo execution, complete root/native/frontend suites and final gates after integration. A read-only
+adversarial review remains required. Orphan Stop after Leave is under separate design review. R6,
+historical authorization and a typed chat ledger are not claimed by this mutation slice.
+
 
 ## Corrected combined validation passed locally (28 October)
 

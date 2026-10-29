@@ -1114,4 +1114,88 @@ mod tests {
             .starts_with("CHAT_MUTATION_AUTHOR_CONFLICT"));
         assert_eq!(n.messages(5).len(), 1);
     }
+    #[tokio::test]
+    async fn durable_mutation_uncommitted_delete_rechecks_same_epoch_demotion_but_saved_replay_does_not(
+    ) {
+        let hub = Hub::new();
+        let owner_peer = PeerId::from_u64(901);
+        let mut owner = Server::found(
+            hub.join(owner_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(901),
+            Box::new(ManualClock::new(1_000)),
+            "owner",
+        )
+        .unwrap();
+        owner.subscribe_control().await.unwrap();
+        owner.open_channel(5).await.unwrap();
+        owner.open_roles().await.unwrap();
+        owner.send_message(5, "moderated row").await.unwrap();
+        let id = owner.messages(5)[0].id.clone();
+        let invite = owner.mint_invite([90; 16], u64::MAX, vec![]).unwrap();
+        let (member, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(902)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(902),
+                Box::new(ManualClock::new(1_000)),
+                "member",
+                owner_peer,
+                &invite
+            ),
+            owner.sync_once()
+        );
+        let mut member = member.unwrap();
+        member.open_channel(5).await.unwrap();
+        member.open_roles().await.unwrap();
+        let (caught, _) = tokio::join!(
+            member.request_channel_catchup(owner_peer, 5),
+            owner.sync_once()
+        );
+        caught.unwrap();
+        owner.set_admin(&member.device_id, true).await.unwrap();
+        let (roles, _) = tokio::join!(member.request_roles_catchup(owner_peer), owner.sync_once());
+        roles.unwrap();
+        assert_eq!(member.my_role(), Role::Admin);
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(903)).unwrap();
+        let request = mutation_request(&member, 1, &id, DurableMutationAction::Delete);
+        let basis = member.sync.durable_send_context().unwrap();
+        let blocked = dir.path().join("servers/9.bin");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(
+            !member
+                .commit_chat_request(&request, &store, 9)
+                .unwrap()
+                .durable
+        );
+        owner.set_admin(&member.device_id, false).await.unwrap();
+        let (roles, _) = tokio::join!(member.request_roles_catchup(owner_peer), owner.sync_once());
+        roles.unwrap();
+        assert_eq!(member.my_role(), Role::Member);
+        assert_eq!(member.sync.durable_send_context().unwrap(), basis);
+        std::fs::remove_dir(blocked).unwrap();
+        assert!(member
+            .commit_chat_request(&request, &store, 9)
+            .unwrap_err()
+            .starts_with("CHAT_MUTATION_NOT_AUTHORIZED"));
+        assert_eq!(member.messages(5).len(), 1);
+        owner.set_admin(&member.device_id, true).await.unwrap();
+        let (roles, _) = tokio::join!(member.request_roles_catchup(owner_peer), owner.sync_once());
+        roles.unwrap();
+        assert!(
+            member
+                .commit_chat_request(&request, &store, 9)
+                .unwrap()
+                .durable
+        );
+        owner.set_admin(&member.device_id, false).await.unwrap();
+        let (roles, _) = tokio::join!(member.request_roles_catchup(owner_peer), owner.sync_once());
+        roles.unwrap();
+        let saved = member.commit_chat_request(&request, &store, 9).unwrap();
+        assert!(saved.durable && saved.replayed);
+        assert!(member.messages(5).is_empty());
+        assert_eq!(ops(&member), 2);
+    }
 }

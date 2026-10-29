@@ -49,6 +49,15 @@ pub struct AppliedOp {
 /// it grants neither current membership nor publication authority.
 #[derive(Clone)]
 pub struct SavedLocalChatOp(SignedOp);
+const MAX_SAVED_LOCAL_CHAT_BYTES: usize = 256 * 1024;
+#[derive(Default)]
+struct CreatorEvidenceIndex {
+    indexed: usize,
+    // Append-only derived archive metadata. Queries parse each log entry at most once; the
+    // object actor narrows later range/signature checks without trusting it as authorship.
+    ranges: HashMap<ActorId, Vec<(u64, u64, usize)>>,
+}
+
 impl fmt::Debug for SavedLocalChatOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SavedLocalChatOp")
@@ -65,7 +74,17 @@ impl SavedLocalChatOp {
         channel: u128,
         change: ChangeHash,
     ) -> Result<Self, ReplError> {
+        if bytes.len() > MAX_SAVED_LOCAL_CHAT_BYTES {
+            return Err(ReplError::Malformed);
+        }
         let op = SignedOp::decode(bytes)?;
+        // These preparations are emitted from Change::raw_bytes(). Reject compressed/document
+        // chunks before Automerge can allocate decompressed state. General legacy ingress keeps
+        // its existing compatibility grammar; this is only the saved-local proof constructor.
+        if op.delta.len() < 10 || op.delta[..4] != [0x85, 0x6f, 0x4a, 0x83] || op.delta[8] != 1 {
+            return Err(ReplError::Malformed);
+        }
+
         if op.doc_type != DocType::Channel
             || op.doc_id != channel
             || op.author_device != device.device_id()
@@ -89,6 +108,41 @@ impl SavedLocalChatOp {
     }
 }
 
+#[cfg(test)]
+mod saved_local_chat_tests {
+    use super::*;
+    #[test]
+    fn saved_local_chat_proof_rejects_wrong_scope_device_hash_compression_and_size() {
+        let device = MlsDevice::generate().unwrap();
+        let mut graph = AutoCommit::new();
+        graph.set_actor(ActorId::from(device.device_id().as_bytes().to_vec()));
+        graph.put(ROOT, "text", "repeat".repeat(4_000)).unwrap();
+        graph.commit();
+        let mut change = graph.get_last_local_change().unwrap();
+        let hash = change.hash();
+        let raw =
+            SignedOp::sign(&device, DocType::Channel, 5, change.raw_bytes().to_vec()).unwrap();
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 5, hash).is_ok());
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 6, hash).is_err());
+        assert!(
+            SavedLocalChatOp::decode(&raw.encode(), &MlsDevice::generate().unwrap(), 5, hash)
+                .is_err()
+        );
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 5, ChangeHash([0; 32])).is_err());
+        let compressed = change.bytes().into_owned();
+        assert_eq!(compressed[8], 2);
+        let compressed = SignedOp::sign(&device, DocType::Channel, 5, compressed).unwrap();
+        assert!(SavedLocalChatOp::decode(&compressed.encode(), &device, 5, hash).is_err());
+        assert!(SavedLocalChatOp::decode(
+            &vec![0; MAX_SAVED_LOCAL_CHAT_BYTES + 1],
+            &device,
+            5,
+            hash
+        )
+        .is_err());
+    }
+}
+
 /// One encrypted, replicated CRDT document.
 pub struct EncryptedDoc {
     doc_type: DocType,
@@ -104,6 +158,7 @@ pub struct EncryptedDoc {
     change_authors: HashMap<ChangeHash, DeviceId>,
     /// How many entries of `log` are already reflected in `change_authors`.
     authors_indexed: usize,
+    creator_evidence: std::cell::RefCell<CreatorEvidenceIndex>,
     /// The last [`EncryptedDoc::snapshot`] and the exact document state it describes: the
     /// automerge heads plus the op-log length, which together are everything the serialization
     /// reads. Persistence re-serializes every open document of a server on every write, so an
@@ -151,6 +206,7 @@ impl EncryptedDoc {
             applied: HashSet::new(),
             change_authors: HashMap::new(),
             authors_indexed: 0,
+            creator_evidence: Default::default(),
             snapshot_cache: None,
             checkpoint: None,
             catchup_index: AncestryIndex::default(),
@@ -338,16 +394,24 @@ impl EncryptedDoc {
         let automerge::ObjId::Id(counter, actor, _) = object else {
             return Err(ReplError::Malformed);
         };
-        let mut found = None;
-        for op in &self.log {
-            let change = Change::from_bytes(op.delta.clone())
+        let mut evidence = self.creator_evidence.borrow_mut();
+        while evidence.indexed < self.log.len() {
+            let index = evidence.indexed;
+            let change = Change::from_bytes(self.log[index].delta.clone())
                 .map_err(|e| ReplError::Automerge(e.to_string()))?;
-            if change.actor_id() != actor
-                || *counter < change.start_op().get()
-                || *counter > change.max_op()
-            {
+            evidence
+                .ranges
+                .entry(change.actor_id().clone())
+                .or_default()
+                .push((change.start_op().get(), change.max_op(), index));
+            evidence.indexed += 1;
+        }
+        let mut found = None;
+        for &(start, end, index) in evidence.ranges.get(actor).into_iter().flatten() {
+            if *counter < start || *counter > end {
                 continue;
             }
+            let op = &self.log[index];
             if op.doc_type != self.doc_type
                 || op.doc_id != self.doc_id
                 || !op.verify()
@@ -718,6 +782,7 @@ impl EncryptedDoc {
             applied,
             change_authors: HashMap::new(),
             authors_indexed: 0,
+            creator_evidence: Default::default(),
             snapshot_cache: None,
             checkpoint,
             catchup_index,

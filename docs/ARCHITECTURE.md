@@ -10,6 +10,23 @@ externally verified, action-bound historical witnesses and never trusts stored s
 There is no live producer/dispatch, authority archive, migration or encryption adapter
 yet; legacy R6 remains open. [Scope and evidence](communication-recovery/CHAT-TYPED-CORE.md).
 
+## Durable local chat transaction boundary (29 October; validation in progress)
+
+The desktop's post/edit/delete requests share private native preparations and the Actor Ready/lease
+barrier. The synchronous transaction constructs a candidate by adding its exact saved local signed
+operation to the latest received graph, saves one encrypted server snapshot containing history,
+retry receipt and publication obligation, then installs it without an intervening await. No-op edits
+and exact-token Stop use explicit metadata effects rather than fake change hashes.
+
+Storage distinguishes failures before replacement from a renamed candidate whose parent sync failed.
+The latter hides and retains the whole possible terminal, including no-op and Stop. Ordinary server
+snapshots refuse while that history is hidden. The persistence worker asks the same Actor for a repair
+Ready before snapshot capture; with its original per-id serializer plus current mounted-store and
+exact-incarnation lease it can save the latest receive union while UI is locked. This negative
+repair grants no fresh role, membership, authoring or publication authority. Callback unwind restores
+the old live graph and conservatively retains the complete possible terminal.
+
+
 ## Owned microphone device setting (27 October; inactive)
 
 The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after

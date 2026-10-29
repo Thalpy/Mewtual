@@ -12,6 +12,23 @@ policy, migration and live dispatch remain absent. Legacy R6 is unchanged. Retai
 deleted contents does not cryptographically restrict their visibility to moderators.
 [Evidence and unresolved boundaries](communication-recovery/CHAT-TYPED-CORE.md).
 
+## Local mutation durability boundary (29 October; validation in progress)
+
+Desktop durable local edit/delete binds MLS group/channel, winning message id, containing list and
+exact map object using canonical `(actor bytes, operation counter)` identities. Mutable text and
+edited fields do not invalidate an original preparation. Duplicate/id-less/substituted targets
+refuse. Where original signed creator evidence exists, scope/signature/range/full signer must agree;
+modern missing or contradictory proof refuses, while genuinely unavailable legacy evidence remains
+the documented honest-client boundary. A legacy v1 creator signature does not establish historical
+MLS membership/group authority. This slice does **not** solve R6 or migrate raw chat history.
+
+A post-rename parent-sync failure is possible installed history, including a possible stopped token.
+It cannot be overwritten by an ordinary rollback snapshot, cleared by epoch change/lock, or turned
+into a new operation. Exact-token negative repair merges the original operation into the latest live
+receive graph and saves before installation. Stop never retracts already saved history and a no-op
+receipt records a sampled local decision, not a promise that concurrent edits preserve displayed text.
+
+
 ## Native settings versus Lock and Leave (28 October; candidate)
 
 Cache-limit and saved-file metadata commands carry the UI generation captured before

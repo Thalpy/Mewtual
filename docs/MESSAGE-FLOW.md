@@ -119,9 +119,16 @@ the original operation across restart. Publication may retry those original byte
 author a replacement message. A post-rename storage failure can be ambiguous, so it is never
 evidence that the original operation does not exist.
 
-This guarantee does not yet cover every mutation: native edits/deletes still use ordinary
-`post` and later persistence, and received operations use the background snapshot path in
-section 3. Their receipt or visibility alone is not proof of a completed local save.
+Received operations still use the background snapshot path in section 3. Their receipt or
+visibility alone is not proof of a completed local save.
+
+The desktop's durable caller-intent path also covers text edits and deletions. It prepares one exact
+signed operation outside the exportable graph, then crosses the encrypted server snapshot barrier
+before acceptance/publication. Identical-text edits save a no-op frontier receipt; exact-token Stop
+saves a negative terminal and never removes saved history. Post-rename uncertainty blocks ordinary
+snapshots until the original operation/terminal is repaired additively with latest received history.
+The ordinary persistence worker owns this repair while UI is locked. The low-level trace below still
+describes the non-durable compatibility APIs; it is not the desktop acceptance contract. R6 remains.
 
 ### Ordinary product/sync post path
 

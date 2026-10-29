@@ -8,8 +8,25 @@ action, then requires explicit bounded `advance`. A missing parent's coverage st
 with its action; unrelated actions' coverage is never combined into one capped witness.
 Decoding cannot construct authority. Snapshots are plaintext at this internal API;
 native sealed persistence, certificate producers and live dispatch do not exist yet.
-Legacy wire/persistence readers are unchanged.
+This typed-core API does not change legacy wire/persistence readers.
 [Full contract and limits](communication-recovery/CHAT-TYPED-CORE.md).
+
+## Durable local chat mutations (29 October; validation in progress)
+
+Desktop edit/delete now require a retained caller token, original `expectedContext` and immutable
+`target` returned by `durable_mutation_context`. Their responses use the send result envelope
+and a closed disposition: `committed`, `stopped-before-commit`, or `stopped-after-commit`.
+`accepted` requires a durable committed operation/no-op. A pending storage reply never authorizes
+renderer acceptance or a PERSISTED diagnostic. Exact saved receipts replay before target/role
+reads, while every ordinary uncommitted mutation repeats current membership, target and permission.
+
+`stop_durable_chat` binds the complete original send/edit/delete request. It saves its terminal
+before releasing the native reservation. Saved operations remain additive history. A same-text edit
+saves real frontier heads and creates no signed change or edited timestamp. Durable-chat storage
+stays v1 byte-for-byte for legacy send-only rows and becomes sticky v2 for mutation/no-op/explicit
+Stop. UI continuity v2 is likewise sticky, so older readers reject rather than replay edit text as
+a post. The low-level `Server::edit_message/delete_message` APIs remain non-durable compatibility APIs.
+
 
 ## Owned microphone device setting (27 October; inactive)
 
