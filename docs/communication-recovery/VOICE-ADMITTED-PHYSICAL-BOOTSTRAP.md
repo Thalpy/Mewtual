@@ -77,15 +77,30 @@ and a corresponding collector branch. An empty Existing Slot is not that proof.
 
 Missing rows currently refuse; they do not manufacture an unknown RoundRef or
 SDK-drain certificate. The agreed next consumer must defer parent activation ACK
-until a canonical physical Row exists or a narrow exact no-start observation is
-received. That preserves the original parent through End/key-generation cleanup.
-The future no-start observation needs that retained CLOSED original, exact native
-profile/generation/executor and a UI-commit → Coordinator → Registry fence. An
-unknown parent remains NoProof; this observation would concern physical setup
-only, never Root rounds/publication history or browser SDK return. Neither this
-observation nor the browser's deferred-ACK factory is implemented here, and both
-are required before operation 31 is enabled. Key-only callers keep their existing
-early parent ACK behavior.
+until a known physical setup or closure terminal observation, including a narrow
+exact no-start result. That preserves the original parent through
+End/key-generation cleanup; mere Pending admission is not a terminal observation.
+The future no-start observation needs more than that retained CLOSED original and
+Row absence: an earlier admitted Row may already have been collected. An
+irreversible parent latch or canonical receipt must distinguish **Unstarted**,
+**Admitted** and **ActuallyCollected**, bound to the original native profile,
+generation, executor and, after admission, exact Row serial. Admission must latch
+before RNG under UI commit → Coordinator → Index. Collection may record its
+receipt only after the original Row, Session, header, output and native setup/hold
+owners actually return. Lost collection replies must recover that same paid
+receipt; they cannot be reclassified as never started. Any permitted parent
+ACK/Forget must preserve the original latch/receipt and its SAME payer in Row or
+final-history custody until explicit receipt ACK. The reply needs its own bounded
+prepaid graph,
+without acquiring fresh ordinary capacity merely to recover a known result.
+
+An unknown parent or absent latch/receipt remains NoProof. These observations
+concern physical setup only, never Root rounds/publication history or browser SDK
+return. The browser must defer parent activation ACK until a known setup or
+closure terminal observation. Neither this latch/receipt contract nor the
+browser's deferred-ACK factory is implemented here; both are required before
+operation 31 is enabled. Key-only callers keep their existing early parent ACK
+behavior.
 
 The original 8 KiB Row, 8 KiB setup work, 2 KiB bootstrap and 12 KiB Control payments
 and group/process ceilings remain unchanged. Row reply and retained Session
