@@ -1,5 +1,6 @@
-//! Inactive trusted call activation. No Tauri registration or key/RTC producer uses
-//! this entry yet. The canonical task, not an invoke waiter, owns native admission.
+//! Trusted admitted-call activation, reached by fixed-profile native commands.
+//! The canonical task, not an invoke waiter, owns native admission. The separate
+//! key command can publish presence; agreement, Ready and RTC remain gated.
 #![allow(dead_code)] // staged internal entry; enabling it requires separate protocol gates
 use crate::{voice_authority, AppState, ServerEntry, UiSessionGate, VoiceActivation};
 use catcoms_app::{
@@ -21,10 +22,10 @@ use std::task::Poll;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 pub(crate) const MAX_ACTIVATIONS: usize = 32;
-// The complete native graph needs more than 17 KiB on the current Windows test
-// build. Reserve 18 KiB before construction; the old provisional 16 KiB cannot
-// pay this graph. This is one local fee within unchanged group/process ceilings.
-const NATIVE_BYTES: usize = 18 * 1024;
+// The original graph measured 17,752 bytes; deferred old-owner custody raised it
+// to 18,464, already beyond 18 KiB. Reserve 19 KiB before construction, keeping the
+// complete compiled graph guard and unchanged group/process ceilings.
+const NATIVE_BYTES: usize = 19 * 1024;
 const CADENCE_MS: u64 = 250;
 // The only production source is the sanctioned SystemClock through Runtime's
 // EffectiveClock. ManualClock is the deterministic test source. Their boxed sleep
@@ -336,7 +337,7 @@ impl Handle {
         // outcome; all heavy destruction happens outside the Cell mutex.
         invocation.and_then(|mut inv| inv.outcome.take())
     }
-    async fn reply(&self) -> Reply {
+    pub(crate) async fn reply(&self) -> Reply {
         loop {
             let notified = self.cell.changed.notified();
             tokio::pin!(notified);
@@ -372,7 +373,8 @@ impl Handle {
     }
 }
 /// Local trusted receiver receipt. Dropping a lost reply does NOT acknowledge it.
-/// No Tauri/HTTP/wire encoding is provided by this inactive leaf.
+/// This receipt itself is not serialized; native commands project only its fixed
+/// historical activation metadata. That projection never conveys RTC authority.
 pub(crate) struct Reply {
     original: Handle,
 }
@@ -567,11 +569,15 @@ impl LiveContext {
 struct TaskReturned {
     signal: Arc<AtomicU64>,
     serial: u64,
+    cell: Weak<Cell>,
     _funding: Arc<Funding>,
 }
 impl Drop for TaskReturned {
     fn drop(&mut self) {
         self.signal.store(self.serial, Ordering::Release);
+        if let Some(cell) = self.cell.upgrade() {
+            cell.changed.notify_waiters();
+        }
     }
 }
 struct Worker {
@@ -579,6 +585,9 @@ struct Worker {
     context: Context,
     handle: Handle,
     negative_only: bool,
+    // A previously closed native owner can still have heavy Grant/Room tails.
+    // Its final destruction must follow this task's original UI guard release.
+    deferred_retired: Option<voice_authority::Owner>,
     // Before run(), this is LAST so an abandoned Worker returns its arguments
     // first. run() moves it OUTSIDE the boxed execution future before polling.
     returned: Option<TaskReturned>,
@@ -591,6 +600,7 @@ impl Drop for Worker {
         let commit = self.commit.take();
         self.handle.latch_refusal(Failure::Interrupted);
         drop(commit);
+        drop(self.deferred_retired.take());
         self.handle.notify_closed();
     }
 }
@@ -607,9 +617,11 @@ impl Handle {
             context,
             handle: self.clone(),
             negative_only: false,
+            deferred_retired: None,
             returned: Some(TaskReturned {
                 signal,
                 serial,
+                cell: Arc::downgrade(&self.cell),
                 _funding: self.funding.clone(),
             }),
         }
@@ -636,9 +648,11 @@ impl Handle {
             context,
             handle: self.clone(),
             negative_only: true,
+            deferred_retired: None,
             returned: Some(TaskReturned {
                 signal,
                 serial,
+                cell: Arc::downgrade(&self.cell),
                 _funding: self.funding.clone(),
             }),
         })
@@ -650,6 +664,46 @@ impl Handle {
             .unwrap_or_else(|e| e.into_inner())
             .control
             .clone()
+    }
+    /// Exact original routing only, not endpoint or key permission. The separate
+    /// admitted-key command repeats NativeActive/grant/current-Actor admission.
+    pub(crate) fn publication_control(&self) -> Option<VoiceActivationControl> {
+        self.control()
+    }
+    /// Construct cancellation custody BEFORE retaining/selecting the native
+    /// candidate. The opaque task cannot be polled until the final CAS returns.
+    pub(crate) fn prepare_task(
+        &self,
+        state: &AppState,
+        commit: OwnedMutexGuard<()>,
+    ) -> PreparedTask {
+        PreparedTask(self.initial_worker(Context::new(state), commit))
+    }
+    /// Recover negative work only after the exact previous execution returned.
+    /// No new Grant, positive selection or original RPC payment is created.
+    pub(crate) fn drive_negative(&self, state: &AppState) {
+        if let Some(worker) = self.negative_worker(Context::new(state)) {
+            drop(tokio::spawn(worker.run()));
+        }
+    }
+    /// Actual outside-Box return, distinct from logical close/Root destruction.
+    pub(crate) async fn wait_execution_return(&self) {
+        loop {
+            let changed = self.cell.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self
+                .cell
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .task
+                .has_returned()
+            {
+                return;
+            }
+            changed.await;
+        }
     }
     fn restore_payment(&self, kind: Kind, payment: Option<ActivationRpcPermit>) {
         let Some(payment) = payment else { return };
@@ -694,6 +748,16 @@ impl Handle {
         drop(grant); // after actual argument retirement; never under Cell/UI/Coordinator
     }
 }
+pub(crate) struct PreparedTask(Worker);
+impl PreparedTask {
+    pub(crate) fn with_retired(mut self, owner: Option<voice_authority::Owner>) -> Self {
+        self.0.deferred_retired = owner;
+        self
+    }
+    pub(crate) fn run(self) -> impl Future<Output = ()> + Send {
+        self.0.run()
+    }
+}
 impl Worker {
     fn run(mut self) -> RunningWorker {
         // Arm the return owner BEFORE allocating or first polling. An inner Drop
@@ -708,6 +772,7 @@ impl Worker {
     }
     fn release_commit(&mut self) {
         drop(self.commit.take());
+        drop(self.deferred_retired.take());
     }
     fn fail(&mut self, failure: Failure) {
         self.handle.latch_refusal(failure);
@@ -1068,4 +1133,4 @@ async fn cadence_tick(clock: &dyn Clock) -> Result<(), Failure> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

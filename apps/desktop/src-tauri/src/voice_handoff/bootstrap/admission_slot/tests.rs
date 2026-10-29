@@ -285,17 +285,15 @@ async fn capacity_control_full_pressure_keeps_observation_and_exact_never_starte
 {
     let (f, context, route, _cleanup) = setup().await;
     let resources = route.selected().resources();
+    let group = route.selected().binding().scope.group;
     let filler = resources
         .charge(
-            route.selected().binding().scope.group,
-            GROUP_BYTES
-                - resources
-                    .group_counts(route.selected().binding().scope.group)
-                    .unwrap()
-                    .0,
+            group,
+            GROUP_BYTES - resources.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
     let full = resources.counts();
     let refused = capacity(&route, &context, CapacityKind::Register, 1).unwrap();
     assert_eq!(
@@ -563,13 +561,15 @@ async fn native_admission_slot_emergency_staged_cleanup_needs_no_capacity_or_rep
     abort.abort();
     until(|| view(&route).returned).await;
     let resources = route.selected().resources();
+    let group = route.selected().binding().scope.group;
     let filler = resources
         .charge(
-            route.selected().binding().scope.group,
-            GROUP_BYTES - resources.counts().0,
+            group,
+            GROUP_BYTES - resources.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
     drop(ui);
     std::thread::scope(|threads| {
         for _ in 0..4 {
@@ -781,13 +781,15 @@ async fn native_admission_slot_busy_ui_keeps_same_candidate_and_cleanup_needs_no
     .await;
     let original = view(&route).incarnation.unwrap();
     let resources = route.selected().resources();
+    let group = route.selected().binding().scope.group;
     let filler = resources
         .charge(
-            route.selected().binding().scope.group,
-            GROUP_BYTES - resources.counts().0,
+            group,
+            GROUP_BYTES - resources.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
     drop(ui);
     route.nudge_admission();
     until(|| view(&route).phase == Phase::Reserved).await;

@@ -1,5 +1,37 @@
 # Mewtual; Architecture
 
+## Admitted native/browser key custody (29 October; inactive)
+
+The distinct admitted native commands connect the same selected Root residence to
+one native key generation and one browser-held nonextractable key. A separately
+paid canonical publication task owns the original UI commit guard, Actor request,
+typed terminal history and actual-return markers. Invoke loss cannot replace that
+task or become a negative result. Coordinator's shared key index has its own
+process backing fee; per-generation funding survives escaped watch/metadata owners.
+
+Broker ABI52 adds a distinct admitted key handle and native adapter while retaining
+the existing aggregate ledger, provider queue and cleanup obligations. Terminal ACK
+precedes SDK settlement so lost ACK replies remain recoverable. Existing factories
+cannot use this key. This integrates original-key custody only; operational bilateral
+agreement, admitted KDF, Ready and RTC/media composition are still unfinished.
+See [native](communication-recovery/VOICE-ADMITTED-KEY.md) and
+[browser](communication-recovery/VOICE-ADMITTED-BROWSER-KEY.md) contracts.
+
+## Admitted Root presence (29 October; draft, inactive)
+
+The exact selected NativeActive Root residence can own a separate discovery-only
+AdmittedPresence and immutable first key. It contains no legacy packet ledger or
+confirmation/action queue. Its implicit watcher stays under that SAME residence;
+external plain payments survive Presence/proof Box deallocation. Shared tags1–3 and
+FreshPeer remain profile-neutral. Only the opaque new discovery Source entry admits
+admitted Announcement/Proof; final publication and flights require NativeActive.
+First focused compilation passed five behavior cases, while the full8264-byte
+inventory growth-guard test failed against its initial8KiB fee. The explicit9KiB correction preserves that
+graph and adds a preallocation fence; all ten corrected focused cases pass. Complete
+integration validation remains pending. See
+[the contract and unfinished operational gates](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+V2 remains OFF.
+
 ## Confirmation-row allocation correction (29 October)
 
 The integrated fixed action now measures 1,008 bytes and its admission receipt
@@ -12,7 +44,7 @@ complete original formulas and proves that the old allowance refuses without
 charges or position consumption. Other owners' 1,536-byte allowances are separate.
 Earlier dated row measurements below describe their original checkpoints.
 
-## Issuer-bound native call activation (29 October; private, inactive)
+## Issuer-bound native call activation (29 October; inactive)
 
 The actual Root issuer prepares an immutable admitted call profile before granting any
 key/endpoint permission. Root selection and the native final commit share the original
@@ -24,11 +56,13 @@ receiver to join older pre-close permits. Abort/unwind closes the new-family sen
 Native retains one canonical paid Cell, exact Work/outcome and explicit result ACK. Its
 outer runner destroys the execution Box before publishing the original exact serial stamp;
 negative recovery shares that same allocation. Final index backing deallocates before its
-last original payer. The measured native graph fits 17,752/18,432 bytes; Root/control/RPC
+last original payer. The earlier activation-only graph fit 17,752/18,432 bytes;
+the integrated deferred-owner graph now uses 18,472/19,456. Root/control/RPC
 payments and original process/group limits stay independent. See
 [activation](communication-recovery/VOICE-CALL-ACTIVATION.md) and
 [normal mailbox retirement](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
-No production command or admitted key/LocalJoin/Ready/RTC producer is connected. V2 is OFF.
+The distinct admitted key commands above connect original selection and presence;
+operational agreement/Ready/RTC producers remain unfinished. V2 is OFF.
 
 ## Normal Actor mailbox retirement (29 October; focused checks pass)
 

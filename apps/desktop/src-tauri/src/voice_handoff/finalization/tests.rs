@@ -122,13 +122,18 @@ async fn delayed_root_owner_and_lost_issuance_and_ack_replies_recover_on_origina
     assert!(!ledger.channel_may_close(selected));
     // Fill the ordinary group pool AFTER compaction, while the real late Root input remains.
     let pool = selected.resources();
+    let group = selected.binding().scope.group;
     let pressure = pool
         .charge(
-            selected.binding().scope.group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let full = pool.counts();
     let response = case.respond(2, None);
     assert!(response.result.as_ref().unwrap().proof.is_none());

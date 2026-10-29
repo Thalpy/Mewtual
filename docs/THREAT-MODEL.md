@@ -1,5 +1,45 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original admitted key publication (29 October; inactive call path)
+
+The native admitted commands require the original selected Root residence,
+issuer-sealed admitted call profile, current UI generation and exact native
+executor/permit/join. Public P-256 point validation precedes native tuple freezing.
+Final publication is ordered against lock through the original UI commit guard;
+the canonical paid task, not its invoke observer, holds that guard through actual
+Actor work. Lock/unlock cannot revive earlier-generation positive authority.
+
+Callback loss is uncertainty. Accepted and rejected results remain in the original
+paid cell until explicit acknowledgement, actual task return and SDK settlement.
+Typed `closed` is not a known Root rejection. `not-started` requires the retained
+closed generation and proof that its publication never began; absence is not proof.
+Known historical acceptance may survive End/lock but cannot authorize new work.
+Task, Actor argument, Root residence and SDK return remain independent obligations.
+
+The browser retains one original nonextractable key and retries the same native
+identity. Its distinct handle cannot enter Existing KDF/channel factories; adapter
+branding is not isolation from hostile JavaScript in the same realm. Inventory
+guards cover application-owned logical graphs, not opaque SDK, allocator or
+framework copies. V2 remains OFF; agreement, admitted KDF, Ready, SDP/RTC, relay and
+physical acceptance remain separate unfinished boundaries. See the
+[native](communication-recovery/VOICE-ADMITTED-KEY.md) and
+[browser](communication-recovery/VOICE-ADMITTED-BROWSER-KEY.md) contracts.
+
+## Admitted presence boundary (29 October; inactive draft)
+
+The discovery-only admitted owner requires the SAME Root residence, current
+NativeActive original and immutable first native join/key. Historical publication
+receipts and shared FreshPeer liveness confer no remote profile support or round/RTC
+authority. Existing packet factories remain rejecting. Ingress pins original watcher
+recipients; replacement cannot adopt stale work. Dedicated admitted Ann/Proof Source
+publication and lower flights check NativeActive independently of `live`, including
+the first negative-store interval. Funding is external to Presence/proof Boxes and
+survives actual deallocation. Ten corrected focused cases pass with the complete
+8264/9216-byte presence guard and preallocation checks retained. Complete integration
+validation remains pending. Operational agreement/consume/Ready/RTC/relay
+are separate gates. See
+[the scoped contract](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+
 ## Inactive admitted call selection and actual return (29 October)
 
 An admitted profile belongs to the actual Root-issued child before any grant escapes;
@@ -13,7 +53,8 @@ argument return. Native canonical history keeps the same Work/outcome and payer.
 runner frees its execution Box before the shared exact stamped return; per-retry stamp
 allocations cannot accumulate behind paused old destructors. Index backing frees before
 its last payer, including revocation unwind. Explicit ACK remains independent of cleanup.
-The measured native fee is 18 KiB within unchanged resource ceilings. This inventory covers
+The earlier activation-only fee was 18 KiB; integrated deferred-owner custody now
+requires 19 KiB within unchanged resource ceilings. This inventory covers
 application-owned graphs, not allocator/RSS or synchronous empty Tokio-cell collection.
 Normal old-family mailbox retirement joins pre-close permits; their abort/panic path is
 still outside this correction. These private interfaces grant no live V2/RTC authority.

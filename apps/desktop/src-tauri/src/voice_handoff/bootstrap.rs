@@ -412,6 +412,13 @@ impl Registry {
         selected: Arc<SelectedHandoffOwner>,
         device: [u8; 32],
     ) -> Result<Begin, Refused> {
+        // This is the Existing/pilot grammar. A genuinely published admitted key
+        // needs its separate profile selection and cannot enter an old Session,
+        // even through a second physical channel with equal owner/executor labels.
+        // Refuse before allocating an index, row, crypto work, or RNG state.
+        if selected.lease().is_admitted() {
+            return Err(Refused::Binding);
+        }
         let resources = selected.resources();
         let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
         if self.stopping.load(Ordering::Acquire) {

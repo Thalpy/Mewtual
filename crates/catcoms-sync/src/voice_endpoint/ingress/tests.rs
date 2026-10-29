@@ -2,6 +2,7 @@ use super::*;
 use crate::voice_endpoint::tests::{attach, Node};
 use catcoms_rt::ManualClock;
 use voice_v2::runtime::Runtime;
+mod admitted_presence;
 mod protected;
 mod protected_start;
 
@@ -10,6 +11,12 @@ async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
 }
 async fn fixture_with_clock(
     make_clock: impl FnOnce(Arc<ManualClock>) -> Arc<dyn Clock>,
+) -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
+    fixture_with_directory(make_clock, |_| Ok(BTreeSet::from([1]))).await
+}
+async fn fixture_with_directory(
+    make_clock: impl FnOnce(Arc<ManualClock>) -> Arc<dyn Clock>,
+    reader: voice_v2::directory::DirectoryReader,
 ) -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     let (_hub, mut nodes, _) = crate::tests::build_members(2).await;
     crate::tests::converge_and_publish_test_routes(&mut nodes);
@@ -28,7 +35,13 @@ async fn fixture_with_clock(
     sender.clock = clock.clone();
     receiver.clock = clock.clone();
     let runtime = Runtime::new(make_clock(clock.clone()));
-    attach(&mut receiver, &runtime);
+    let ticket = runtime.session_ticket();
+    runtime.activate_session(&ticket).unwrap();
+    receiver
+        .prepare_voice_actor(&runtime, &ticket, 991, reader, |_| Ok(BTreeSet::new()))
+        .unwrap()
+        .register()
+        .unwrap();
     let (ok, served) = tokio::join!(
         sender.finalize_member_connection(receiver.local_peer()),
         receiver.run_once()

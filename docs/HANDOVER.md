@@ -1,5 +1,67 @@
 # Mewtual; Handover
 
+## Admitted native key handoff (29 October; implementation and validation in progress)
+
+The current leaf adds fixed admitted-profile activation/key commands with actual
+Actor/Root selection/publication and immutable Existing exclusion. Root presence
+has ten focused passes; Actor publication has five (2,744/4,096-byte graph). Ten
+native publication cases now pass, including 34 complete key lifecycles, locked
+final admission, lost replies, typed terminal history and actual execution
+destruction after result ACK/SDK settlement. Fourteen Coordinator, eleven Existing
+key, nine activation and 23 affected pressure regressions also pass. The integrated
+browser/native adapter suite passes 3,687 frontend tests with zero failures/skips;
+static checking, the production build and all ten Edge flow checks pass.
+
+Review found and corrected recursive Coordinator locking, stale final generation
+admission, missing rejected-activation cleanup, premature terminal-history removal,
+and taskless key rows stranded after early ACK followed by End. Accepted, rejected,
+unknown-closed and exact never-started results now have distinct public tags derived
+from typed facts. Known results stay paid until explicit ACK, actual task return
+and SDK settlement; the browser flow will ACK before SDK settlement so a lost ACK
+reply can recover the same cell. Missing records provide no proof. A bounded
+maintenance pass revisits both taskless key rows and acknowledged ended calls.
+
+Measured provisional fees refused rather than underpaying: native publication
+9,612 bytes versus 8 KiB now has 12 KiB; activation grew beyond 18 KiB and now has
+19 KiB; Existing key metadata measured 1,312/1,024 and now has 1.5 KiB; admitted
+key metadata has 2 KiB. The complete table now has a separate 64 KiB process
+payment for both profiles, with paid watch drains through actual deallocation.
+Current publication, activation and admitted-generation inventories measure
+9,772/12,288, 18,472/19,456 and 1,632/2,048 bytes. The shared index measures
+35,536/65,536 bytes. Process-only index backing is excluded from group pressure
+fillers; those tests still fill the actual group and preserve their refusal checks.
+The integration branch's full Root run found an undersized confirmation row; its
+2 KiB correction and pre-allocation production guard pass 120 focused chain tests.
+The complete Root rerun, complete native suite, current native check/build/startup
+and final strict checks remain open. The new real Tauri JSON-dispatch fixture has
+not run: enabling Tauri's test helper exposes an upstream compile mismatch between
+locked Tauri 2.11.3 and tauri-utils 2.10.2. This is being resolved explicitly.
+
+V2 remains OFF. The retained admitted browser key adapter is integrated here;
+Query/Support is being tested separately. Operational bilateral admission/Ready,
+admitted KDF, SDP/ICE/RTC, multi-peer/relay
+and combined/physical acceptance remain unfinished. Only one desktop is available.
+See [the current native key contract](communication-recovery/VOICE-ADMITTED-KEY.md).
+
+## Admitted Root presence (29 October; ten focused tests pass)
+
+The isolated admitted-presence leaf adds a dedicated Root discovery owner under the
+same selected NativeActive residence, exact immutable native join/key publication,
+opaque historical receipt and separately sealed Ann/Proof Source intake. Existing
+LocalJoin/packet factories and shared discovery bytes remain unchanged; FreshPeer
+never implies profile support. Funding stays outside Presence/proof Boxes through
+deallocation. The first primary focused run compiled and passed five behavior cases;
+the complete Windows growth-guard test failed at8264/8192 and three internal fixtures stalled
+because their real P2P finalization policy was absent. Only the Presence fee rises to
+9KiB/9216 within unchanged group/process caps; full inventory is preserved and checked
+before allocation. The fixture now establishes policy and bounds its handshake with
+the sanctioned Clock watchdog. Ten corrected focused tests pass (0.34s), with the
+8,264/9,216-byte presence and 1,360/1,536-byte proof guards retained. Final strict
+lint and full integration suites remain pending; narrow static review passes. These suites
+remain primary-owned. See [the exact boundary and regression list](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+V2 remains OFF; operation31, neutral/native consume, RoundGate/agreement/Ready and
+SDP/ICE/RTC/relay/audio are still operational blockers.
+
 ## Full backend validation found an undersized confirmation row (29 October)
 
 The full Root run failed `hello_receipt_and_action_layouts_fit_the_original_single_row`:
@@ -12,13 +74,14 @@ tests pass; the complete rerun remains pending and the backend gate stays open. 
 Clippy, formatting, deterministic-dependency checking and dependency audit passed
 before this correction. Native fixture recovery is integrated below but unrun.
 
-## Native activation and mailbox integration (29 October; inactive, validation in progress)
+## Earlier native activation and mailbox checkpoint (29 October; inactive)
 
 This local continuation integrates issuer-bound call activation `f4e75ea1`, private
 admitted wire codec `ee52990c`, normal mailbox retirement `13ac6cd1`, control detachment
-`78cbb721` and native destruction/return-stamp correction `1c0cd4bb`. It is not pushed yet.
-The native activation entry is private and unregistered; no operational key, Ready,
-SDP/RTC or media producer is enabled. V2 remains OFF.
+`78cbb721` and native destruction/return-stamp correction `1c0cd4bb`. The evidence
+below records that earlier checkpoint. The admitted-key integration above supersedes
+its private/unregistered entry and original fee measurements; no operational agreement,
+Ready, SDP/RTC or media producer is enabled. V2 remains OFF.
 
 The actual Root issuer fixes the admitted profile before grant escape. Original UI
 generation/commit custody orders selection against lock and epoch changes. Existing
@@ -44,7 +107,8 @@ Strict Root sync/App and native Clippy pass; separate native checking passes. Fi
 actual-diff re-review has no remaining findings. Combined checks pass: 14 Actor/control,
 10 admission, 17 Root activation and 26 codec tests; 3,655 frontend tests with zero
 failures/skips, frontend static/production build, all ten real Edge flows and Root formatting.
-The complete Root suite is running; complete native validation and final native build/startup
+That complete Root run finished with the confirmation-row failure recorded above;
+the corrected full rerun, complete native validation and final native build/startup
 remain pending. Older complete results below apply
 to their recorded checkpoints, not automatically to this changed Root source.
 
@@ -58,8 +122,8 @@ post-publication attachment-refusal regression have been drafted and reviewed se
 their compilation and execution remain pending integration. The 38
 later cases hit the closed fixture gate. This is unresolved evidence, not a flaky pass.
 
-Operational admitted key/LocalJoin publication, bilateral agreement/role-specific
-consumption, Ready/SDP/ICE/RTC/audio, member relay and combined/physical acceptance remain
+The admitted original-key/presence integration above is now present. Bilateral
+agreement/role-specific consumption, Ready/SDP/ICE/RTC/audio, member relay and combined/physical acceptance remain
 unfinished. Only one physical desktop is available. External download resume is excluded.
 
 ## Normal Actor mailbox retirement (29 October; focused checks pass)

@@ -31,6 +31,13 @@ export const TAURI_COMMAND_GROUPS = {
       // Selected-key cleanup can close one paid selection before a delayed admission and
       // waits for actual publication drainage; it never returns engine/network authority.
       "settle_voice_join_key",
+      // Exact admitted terminal history and ACK/settlement survive lock. Only
+      // first activation/key admission/publication may create work, behind the
+      // original UI-generation and immutable admitted-profile checks in Rust.
+      "prepare_admitted_voice_owner", "activate_admitted_voice_owner",
+      "acknowledge_admitted_voice_activation", "admit_admitted_voice_join_key",
+      "publish_admitted_voice_join_key", "settle_admitted_voice_join_key",
+      "acknowledge_admitted_voice_key_publication",
       // Exact original-channel cleanup must survive lock, End and lost setup/final replies.
       // It accepts no drain flag, private bytes or replacement generation; setup still gates
       // the unlocked session and native selected owner before RNG or channel admission.

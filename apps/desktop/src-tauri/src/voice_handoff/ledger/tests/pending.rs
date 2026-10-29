@@ -74,10 +74,14 @@ fn actual_publication_and_preparation_survive_busy_loan_then_attach_under_full_p
     let pressure = pool
         .charge(
             group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let full = pool.counts();
     let retry = ticket(&ledger, selected.clone(), selector);
     assert!(retry.id() == id);
