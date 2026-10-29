@@ -5175,10 +5175,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             group_policy::decode_pin(d.get_bytes().map_err(|_| bad())?)?
         };
-        let durable_chat = if d.is_empty() {
-            durable_chat::DurableChatState::default()
+        // Keep the authenticated tail borrowed until closed framing is checked and the actual
+        // local MLS device exists; saved-local proof decoding must use that exact identity.
+        let durable_chat_bytes = if d.is_empty() {
+            None
         } else {
-            durable_chat::DurableChatState::decode(d.get_bytes().map_err(|_| bad())?, &device)?
+            Some(d.get_bytes().map_err(|_| bad())?)
         };
         let pending_finalization = if d.is_empty() {
             HashMap::new()
@@ -5213,6 +5215,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
         let (device, group) = restore_server(&mls)?;
+        let durable_chat = match durable_chat_bytes {
+            Some(bytes) => durable_chat::DurableChatState::decode(bytes, &device)?,
+            None => Default::default(),
+        };
         if let Some(policy) = &policy {
             group_policy::require_supported(policy)?;
             policy.verify_pin(&group)?;

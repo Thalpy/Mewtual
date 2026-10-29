@@ -668,7 +668,9 @@ impl DurableChatState {
                             e.put_bytes(&h.0).map_err(|_| SyncError::Malformed)?;
                         }
                     }
-                    ChatEffect::NeverAuthored => e.put_u8(2),
+                    ChatEffect::NeverAuthored => {
+                        e.put_u8(2);
+                    }
                 }
             } else {
                 let ChatEffect::Signed { change, .. } = r.effect else {
@@ -1138,9 +1140,55 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.chat_storage_transaction(None, false, save)
     }
+    /// Restored autonomous publication is subject to retired exact-token fences too. This
+    /// negative path only stops receipts already in this snapshot; it admits no new token.
+    pub fn fence_saved_durable_chat<F>(
+        &mut self,
+        identities: &[([u8; 16], [u8; 32], [u8; 32], u128)],
+        save: F,
+    ) -> Result<(), ChatSaveError>
+    where
+        F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
+    {
+        let mut stopped = BTreeMap::new();
+        for &(token, binding, context, channel) in identities {
+            let Some(saved) = self
+                .durable_chat_lookup(token, binding, context, channel)
+                .map_err(ChatSaveError::NotReplaced)?
+            else {
+                continue;
+            };
+            if saved.durable && saved.disposition != ChatDisposition::Committed {
+                continue;
+            }
+            let mut record = self.durable_chat.records[&token].clone();
+            record.stopped = true;
+            record.explicit_stop = true;
+            record.sealed.clear();
+            if !record.durable {
+                record.effect = ChatEffect::NeverAuthored;
+            }
+            stopped.insert(token, record);
+        }
+        if stopped.is_empty() {
+            return Ok(());
+        }
+        self.chat_storage_transaction_records(stopped, true, save)
+    }
     fn chat_storage_transaction<F>(
         &mut self,
         selected: Option<([u8; 16], ChatRecord)>,
+        v2: bool,
+        save: F,
+    ) -> Result<(), ChatSaveError>
+    where
+        F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
+    {
+        self.chat_storage_transaction_records(selected.into_iter().collect(), v2, save)
+    }
+    fn chat_storage_transaction_records<F>(
+        &mut self,
+        selected: BTreeMap<[u8; 16], ChatRecord>,
         explicit_v2: bool,
         save: F,
     ) -> Result<(), ChatSaveError>
@@ -1148,9 +1196,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
         let mut updates = self.durable_chat.replacement_uncertain.clone();
-        if let Some((t, r)) = selected {
-            updates.insert(t, r);
-        }
+        updates.extend(selected);
         let mut previous = self.durable_chat.clone();
         let mut originals = BTreeMap::new();
         // Build every repaired document from its latest live state. Never replace it with an
