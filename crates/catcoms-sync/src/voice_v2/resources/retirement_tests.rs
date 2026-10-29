@@ -240,7 +240,6 @@ fn group_owner_eight_bucket_structural_bound_covers_pinned_small_and_tombstone_r
     // General immediate shrink after such early growth: retained oldB<=32n/7,
     // minimal newB<16n/7, hence old+new<(48/7)n<8n. Keep controls/alignment
     // separate in production; this structural proof is not allocator tracing.
-    assert!(48 < 8 * 7);
 }
 #[tokio::test]
 async fn group_owner_counter_retirement_keeps_budget_fence_closed_until_actual_buckets_return() {

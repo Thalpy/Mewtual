@@ -171,10 +171,16 @@ async fn voice_transport_prepared_ack_keeps_verification_through_driver_and_last
     drop(response);
     f.clock.advance_ms(60_001);
     f.helper_runtime.collect_expired();
+    f.helper.collect_expired_voice();
     assert_eq!(pool.counts().1, before + 1, "expiry suppresses effects without refunding live bytes");
     drop(lower);
+    f.helper.collect_expired_voice();
     assert_eq!(pool.counts().1, before + 1, "the byte clone still owns verification custody");
     drop(bytes);
+    // The registry is the actual final route owner until its ordinary quiet
+    // collector detaches the row. Bytes returning alone cannot refund that Arc.
+    assert_eq!(pool.counts().1, before + 1);
+    f.helper.collect_expired_voice();
     assert_eq!(pool.counts().1, before);
 }
 
@@ -209,8 +215,11 @@ async fn voice_transport_driver_time_sample_precedes_all_negative_and_positive_r
             *f.reply_clock.on_mono.lock().unwrap() = Some((0, Box::new(move || { runtime.upgrade().unwrap().revoke_session(); })));
         }
         assert!(!response.is_current(), "positive={positive}");
+        f.helper.collect_expired_voice();
         assert_eq!(f.helper_runtime.resources().counts(), before, "retirement does not refund held response bytes");
         drop(response);
+        assert_eq!(f.helper_runtime.resources().counts().1, 1, "the actual registry row remains until collection");
+        f.helper.collect_expired_voice();
         assert_eq!(f.helper_runtime.resources().counts().1, 0);
     }
 }
@@ -221,8 +230,8 @@ async fn voice_transport_pending_driver_checks_all_route_and_room_owners_after_o
         let mut f = VoiceForwardFixture::new().await;
         let mut pending = f.helper.prepare_voice_forwards().unwrap().pop().unwrap();
         let resources = f.helper_runtime.resources();
+        let helper = Arc::new(std::sync::Mutex::new(f.helper));
         let authority = if boundary == "wrapper root" {
-            let helper = Arc::new(std::sync::Mutex::new(f.helper));
             let original = helper.clone();
             let clock = Arc::new(ReplySampleClock {
                 inner: f.clock.clone(),
@@ -239,7 +248,7 @@ async fn voice_transport_pending_driver_checks_all_route_and_room_owners_after_o
                 let hub = f._hub.clone(); let peer = f.recipient.local_peer();
                 Box::new(move || { drop(hub.join(peer)); })
             } else {
-                let room = f.helper.voice_room_authority(1).unwrap().lease;
+                let room = helper.lock().unwrap().voice_room_authority(1).unwrap().lease;
                 Box::new(move || room.revoke())
             };
             *f.reply_clock.on_mono.lock().unwrap() = Some((0, retire));
@@ -248,7 +257,10 @@ async fn voice_transport_pending_driver_checks_all_route_and_room_owners_after_o
         assert!(!authority.authorized(), "{boundary}");
         let held = resources.counts().0;
         assert!(held >= 512, "dead effects still retain actual route/flight custody");
+        helper.lock().unwrap().collect_expired_voice();
+        assert_eq!(resources.counts().0, held, "{boundary}: collection cannot refund an externally held route");
         drop(pending); drop(authority);
+        helper.lock().unwrap().collect_expired_voice();
         assert!(resources.counts().0 < held, "{boundary}: release only on actual last owner");
     }
 }
@@ -267,7 +279,11 @@ async fn voice_transport_reply_route_capacity_refuses_before_original_packet_adm
     drop(held);
     let reply = f.helper.receive_voice_transport(f._source.local_peer(), &frame).unwrap();
     assert_eq!(f.helper.voice_transport_actor().unwrap().helper().unwrap().counts(), (1,1,0));
+    f.helper.collect_expired_voice();
+    assert_eq!(f.helper_runtime.resources().counts().1, 1);
     drop(reply);
+    assert_eq!(f.helper_runtime.resources().counts().1, 1);
+    f.helper.collect_expired_voice();
     assert_eq!(f.helper_runtime.resources().counts().1, 0);
 }
 
@@ -316,6 +332,8 @@ async fn voice_transport_prepared_ack_refuses_original_route_and_request_deadlin
         let (responder, receiver) = catcoms_rt::Responder::channel();
         assert!(matches!(reply.respond(responder), Err(catcoms_rt::TransportError::Cancelled)), "scenario {scenario}");
         assert!(receiver.recv_owned().await.is_none());
+        assert_eq!(f.helper_runtime.resources().counts().1, 1, "refusal cannot refund the actual registry row");
+        f.helper.collect_expired_voice();
         assert_eq!(f.helper_runtime.resources().counts().1, 0);
         drop(replacement);
     }
@@ -339,7 +357,11 @@ async fn voice_transport_queued_ack_epoch_change_retires_even_when_all_existing_
     assert!(f.helper.group.contains_device(&f.recipient.device_id()));
     assert!(!response.is_current(), "the driver must reject an old-epoch ACK before the next actor await");
     assert_eq!(f.helper_runtime.resources().counts().1, 1, "retired response still owns its credit");
+    f.helper.collect_expired_voice();
+    assert_eq!(f.helper_runtime.resources().counts().1, 1, "collection cannot return held driver custody");
     drop(response);
+    assert_eq!(f.helper_runtime.resources().counts().1, 1);
+    f.helper.collect_expired_voice();
     assert_eq!(f.helper_runtime.resources().counts().1, 0);
 }
 impl VoiceForwardFixture {
@@ -811,6 +833,8 @@ async fn root_prepares_and_submits_prepaid_sdp_with_the_ordinary_pool_full() {
         }
     });
     assert_eq!(f._source.complete_voice_source(completed).unwrap(), (crate::VoiceTransportStatus::HelperQueued, voice_v2::source::SourceOutcome::Pending));
+    assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts(), (1, 1, 1), "the route registry remains an actual Lower owner");
+    f._source.collect_expired_voice();
     assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts(), (1, 1, 0));
     drop(ordinary);
 }
@@ -853,8 +877,14 @@ async fn root_prepaid_sdp_routes_keep_two_actual_lowers_charged_after_cancellati
     drop(ordinary);
     f._endpoints[0].revoke_session();
     drop(_join); // closes unused exchange headroom; actual lower phase loans remain owned
+    f._source.collect_expired_voice();
+    assert_eq!(source.counts(), (1, 2, 2), "quiet collection cannot refund the actual retained responders");
     let retained = resources.counts().0;
     drop(responders);
+    // The real responders are gone, but the registry still sponsors its Gate
+    // allocations until the same production quiet-collection turn retires them.
+    assert_eq!(source.counts(), (1, 2, 1));
+    f._source.collect_expired_voice();
     assert_eq!(source.counts(), (0, 0, 0), "permanently ended activity is collected after both actual responders drain");
     assert!(resources.counts().0 < retained, "route metadata and both lower phase/lane charges retire with the real responders");
 }
@@ -883,6 +913,7 @@ async fn voice_transport_source_end_and_driver_replacement_reject_queued_or_comp
             completed
         };
         assert_eq!(f._source.complete_voice_source(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized), "scenario {scenario}");
+        f._source.collect_expired_voice();
         assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts().1, if scenario < 2 { 0 } else { 1 },
             "only native activity End permits early collection; driver churn preserves attempts");
         if scenario < 2 { assert_eq!(f._source.queue_voice_source(original, activity), Err(VoiceError::Unauthorized)); }
@@ -914,7 +945,11 @@ async fn voice_transport_source_timeout_keeps_actual_lower_flight_independent_of
     drop(held);
     assert_eq!(ledger.counts(), (1, 2, 1), "only the retired lower attempt leaves");
     assert!(f._endpoints[0].resources().counts().0 < charged);
+    f._source.collect_expired_voice();
+    assert_eq!(ledger.counts(), (1, 2, 1), "collection cannot refund the retained preparation");
     drop(second);
+    assert_eq!(ledger.counts(), (1, 2, 1), "the registry is still an actual Lower owner");
+    f._source.collect_expired_voice();
     assert_eq!(ledger.counts(), (1, 2, 0), "dropping preparation never refunds its attempt");
 }
 
