@@ -313,6 +313,86 @@ async fn admitted_actual_reclamation_unwind_returns_owned_candidate_without_a_re
 }
 
 #[tokio::test]
+async fn aborted_native_task_keeps_actual_queued_work_until_the_actor_returns_its_whole_result() {
+    let (f, clock, handle, route, context) = bounded(setup()).await;
+    command(&route, &context, Kind::SetupAck, 0);
+    // A genuine durable-send Ready parks the ordinary Actor before this voice
+    // command. Its Drop cancels the unsent message on every unwind path too;
+    // this does not replace the voice handler or manufacture a returned Work.
+    let send_context = bounded(f.actor.durable_send_context()).await.unwrap();
+    let parked = bounded(f.actor.prepare_durable_send(
+        catcoms_app::durable_chat::DurableSendRequest {
+            token: [32; 16],
+            expected_context: send_context,
+            channel: catcoms_app::channel_id("general"),
+            text: "never authored".into(),
+            reply_to: String::new(),
+        },
+    ))
+    .await
+    .unwrap();
+    let task = super::super::super::admitted_slot::register_observing_task(&context, &route, 1)
+        .unwrap()
+        .unwrap();
+    let work = bounded(async {
+        loop {
+            if let Some(work) = route.admitted_work() {
+                break work;
+            }
+            catcoms_rt::SystemClock
+                .sleep(std::time::Duration::from_millis(1))
+                .await;
+        }
+    })
+    .await;
+    assert!(
+        !work.is_retired(),
+        "the actual command is queued behind Ready"
+    );
+    let ordinary_sender = f.actor.clone();
+    task.abort();
+    bounded(async {
+        while !route.admitted_task_returned_for_test() {
+            catcoms_rt::SystemClock
+                .sleep(std::time::Duration::from_millis(1))
+                .await;
+        }
+    })
+    .await;
+    route.nudge_admitted();
+    assert!(!work.is_retired());
+    assert!(
+        !route.admitted_drained_for_test(),
+        "owed original Work blocks physical collection"
+    );
+    // Root may still mint after the native observer disappears: the accepted
+    // original command was never canceled. Preserve/destroy its WHOLE eventual
+    // result; native task return must not be interpreted as NoMint.
+    drop(parked);
+    bounded(work.wait_retired()).await;
+    route.nudge_admitted();
+    assert!(route.admitted_drained_for_test());
+    assert_eq!(route.admitted_snapshot(1).unwrap().state, View::Closed);
+    assert!(route
+        .admitted_control(
+            &context,
+            Request {
+                kind: Kind::Register,
+                generation: 1
+            }
+        )
+        .is_err());
+    assert!(
+        handle.active(),
+        "negative recovery cannot end the underlying call"
+    );
+    bounded(ordinary_sender.member_count()).await;
+    drop(work);
+    drop(ordinary_sender);
+    cleanup(f, clock, handle, route).await;
+}
+
+#[tokio::test]
 async fn next_generation_cancel_before_native_entry_is_noncreating_and_late_register_cannot_revive()
 {
     let (f, clock, handle, route, context) = bounded(setup()).await;

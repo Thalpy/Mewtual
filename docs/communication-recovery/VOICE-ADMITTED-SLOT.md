@@ -114,7 +114,10 @@ ordinary bytes, actual reclamation unwind, and authenticated TCP cross-profile,
 version/length/nonce and same-incarnation successor behavior. Further regressions
 pin lost-before-entry next-generation cancellation, the transient Closing snapshot,
 and actual cancellation between acceptance/enqueue or native claim/final attachment.
-They are unrun.
+A genuine durable-send Ready also parks the actual Actor while the original
+native task aborts: the retained original Work must prevent physical collection
+until that Actor returns its whole late result, with an ordinary Sender still held.
+These native cases are unrun.
 
 The primary's early actual-diff review found the canceled-Waiting snapshot and
 lost-next-entry cleanup defects; the fixes received a static re-review with no
