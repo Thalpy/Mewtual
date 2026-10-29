@@ -881,9 +881,10 @@ async fn root_prepaid_sdp_routes_keep_two_actual_lowers_charged_after_cancellati
     assert_eq!(source.counts(), (1, 2, 2), "quiet collection cannot refund the actual retained responders");
     let retained = resources.counts().0;
     drop(responders);
-    // The real responders are gone, but the registry still sponsors its Gate
-    // allocations until the same production quiet-collection turn retires them.
-    assert_eq!(source.counts(), (1, 2, 1));
+    // Upper cancellation returned the Gate authorities, so the preceding quiet
+    // turn could retire those rows. Their real responder keepalives still held
+    // BOTH Lower loans until this actual return; neither loan needs another turn.
+    assert_eq!(source.counts(), (0, 0, 0));
     f._source.collect_expired_voice();
     assert_eq!(source.counts(), (0, 0, 0), "permanently ended activity is collected after both actual responders drain");
     assert!(resources.counts().0 < retained, "route metadata and both lower phase/lane charges retire with the real responders");
