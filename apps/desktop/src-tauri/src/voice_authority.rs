@@ -381,6 +381,15 @@ impl Coordinator {
             .find(|handle| handle.id() == id)
             .cloned()
     }
+
+    /// Borrow before claiming an original paid physical serialization slot; do
+    /// not clone another pending response owner before its bounded admission.
+    pub(crate) fn admitted_activation_ref(
+        &self,
+        id: &str,
+    ) -> Option<&crate::voice_call_activation::Handle> {
+        self.activations.iter().find(|handle| handle.id() == id)
+    }
     /// Stage the separately paid canonical owner BEFORE native selection. The map
     /// is bounded custody/history only; inserting it grants no Root permission.
     #[allow(dead_code)] // Staged canonical admission; production integration remains gated.

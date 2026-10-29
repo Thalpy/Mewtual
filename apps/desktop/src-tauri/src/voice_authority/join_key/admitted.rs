@@ -401,10 +401,70 @@ impl Coordinator {
         handle: &crate::voice_call_activation::Handle,
         executor: [u8; 32],
     ) -> Result<JoinKeyAdmission, String> {
+        self.admitted_key_owner_ref(handle)?;
+        if handle.require_key_only_purpose().is_err() {
+            return Ok(JoinKeyAdmission {
+                owner: handle.id().into(),
+                executor: hex::encode(executor),
+                permit: String::new(),
+                join: String::new(),
+                kind: "refused",
+            });
+        }
+        self.admit_admitted_join_key_for_purpose(handle, executor, false)
+    }
+
+    /// Fixed physical-purpose producer, called only by its separate native
+    /// command. Purpose and exact history are bound before SDK permission; the
+    /// same generation cannot subsequently enter the key-only factory.
+    pub(crate) fn admit_admitted_physical_join_key(
+        &mut self,
+        handle: &crate::voice_call_activation::Handle,
+        executor: [u8; 32],
+    ) -> Result<JoinKeyAdmission, String> {
+        self.admitted_key_owner_ref(handle)?;
+        if handle.require_physical_purpose().is_err() {
+            return Ok(JoinKeyAdmission {
+                owner: handle.id().into(),
+                executor: hex::encode(executor),
+                permit: String::new(),
+                join: String::new(),
+                kind: "refused",
+            });
+        }
+        self.admit_admitted_join_key_for_purpose(handle, executor, true)
+    }
+
+    // `physical` is a closed native choice from the two fixed entry points,
+    // never a renderer flag. All actual authority remains the issuer/Handle.
+    fn admit_admitted_join_key_for_purpose(
+        &mut self,
+        handle: &crate::voice_call_activation::Handle,
+        executor: [u8; 32],
+        physical: bool,
+    ) -> Result<JoinKeyAdmission, String> {
         let owner = self.admitted_key_owner(handle)?;
         if !self.join_generations.contains_key(&owner.id) {
+            let prepaid = if physical {
+                Some(
+                    crate::voice_call_activation::physical::PhysicalHistory::prepay(handle)
+                        .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
+            };
             let mut generation = self.generation_row(&owner, executor, true)?;
             generation.admitted_original = Some(handle.original().clone());
+            if let Some(prepaid) = prepaid {
+                let history = prepaid.bind(handle, executor, generation.join, &generation.permit);
+                handle
+                    .install_physical_history(&history)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                handle
+                    .select_key_only_purpose()
+                    .map_err(|e| e.to_string())?;
+            }
             self.join_generations.insert(owner.id.clone(), generation);
         }
         let generation = &self.join_generations[&owner.id];
@@ -425,6 +485,13 @@ impl Coordinator {
                 join: String::new(),
                 kind: "refused",
             });
+        }
+        if physical
+            && handle.physical_history(executor).is_none_or(|history| {
+                !history.matches(handle, executor, generation.join, &generation.permit)
+            })
+        {
+            return Err("physical voice intent changed".into());
         }
         Ok(JoinKeyAdmission {
             owner: owner.id,

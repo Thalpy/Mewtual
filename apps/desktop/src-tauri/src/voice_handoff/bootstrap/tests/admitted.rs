@@ -39,7 +39,7 @@ async fn activate(f: &Fixture, controller: &str) -> Handle {
     crate::voice_admitted_call::acknowledge_inner(&f.state, &candidate)
         .await
         .unwrap();
-    let admission = crate::voice_admitted_key::admit_inner(&f.state, &candidate, [9; 32])
+    let admission = crate::voice_admitted_key::admit_physical_inner(&f.state, &candidate, [9; 32])
         .await
         .unwrap();
     bounded(crate::voice_admitted_key::publish_inner(
@@ -357,6 +357,14 @@ async fn admitted_sixty_five_real_calls_reuse_the_same_bounded_registry_without_
             .unwrap();
         drop(output);
         end(&f, &clock, &handle).await;
+        let history = handle.physical_history([9; 32]).unwrap();
+        let terminal = history
+            .terminal()
+            .expect("actual Row collection, not End alone");
+        history
+            .acknowledge_receipt(history.receipt_id(terminal))
+            .unwrap();
+        crate::voice_admitted_call::collect_retired(&f.state);
         let held = f.state.voice_channels.index.lock().unwrap();
         let index = held.as_ref().unwrap();
         assert_eq!(index.rows.len(), 64);
@@ -440,5 +448,367 @@ async fn admitted_actual_weak_session_tail_keeps_the_original_row_payer_until_ou
     let before_selection_drop = resources.counts().0;
     drop(selected);
     assert_eq!(resources.counts().0, before_selection_drop - selected_fee);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn admitted_physical_history_survives_key_pruning_and_full_pressure_without_reclassifying_admission(
+) {
+    use crate::voice_call_activation::physical::PhysicalTerminal;
+    use catcoms_sync::voice_v2::resources::{ResourceKind, GROUP_BYTES};
+    let clock = Arc::new(ManualClock::new(1000));
+    let f = Fixture::with_voice_clock(clock.clone()).await;
+    let handle = activate(&f, &controller(&f).await).await;
+    let history = handle.physical_history([9; 32]).unwrap();
+    assert!(
+        history.terminal().is_none(),
+        "a live unstarted intent is not negative proof"
+    );
+    assert!(handle.physical_history([8; 32]).is_none());
+    assert!(!handle.no_physical_intent(), "binding is irreversible");
+    let refusal = crate::voice_admitted_key::admit_inner(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    assert_eq!(
+        refusal.kind, "refused",
+        "the key-only factory cannot adopt a physical generation"
+    );
+    assert_eq!(refusal.owner, handle.id());
+    assert_eq!(refusal.executor, hex::encode([9; 32]));
+    assert!(refusal.permit.is_empty() && refusal.join.is_empty());
+    end(&f, &clock, &handle).await;
+    assert!(
+        f.state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .admitted_activation(handle.id())
+            .is_some(),
+        "early parent ACK cannot forget an unseen physical terminal"
+    );
+    let terminal = history
+        .terminal()
+        .expect("closed original, genuinely unstarted latch");
+    assert_eq!(terminal, PhysicalTerminal::NotStarted);
+    let receipt = history.receipt_id(terminal);
+    let resources = crate::voice_runtime(&f.state).resources();
+    let group = handle.binding().scope.group;
+    let pressure = resources
+        .charge(
+            group,
+            GROUP_BYTES - resources.group_counts(group).unwrap().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let before = resources.counts();
+    for _ in 0..8 {
+        let recovered = handle.physical_history([9; 32]).unwrap();
+        assert!(recovered.is_same(&history));
+        assert_eq!(recovered.terminal(), Some(terminal));
+        assert_eq!(recovered.receipt_id(terminal), receipt);
+        assert_eq!(
+            resources.counts(),
+            before,
+            "known history needs no new payment"
+        );
+    }
+    let mut wrong = receipt;
+    wrong[0] ^= 1;
+    assert!(history.acknowledge_receipt(wrong).is_err());
+    assert!(!history.acknowledged());
+    let mut rng = Rng::new();
+    assert!(ensure_admitted(&f.state, handle.id(), [9; 32], &mut rng)
+        .await
+        .is_err());
+    assert_eq!(
+        rng.draws, 0,
+        "a late original cannot bind after no-start proof"
+    );
+    assert_eq!(history.terminal(), Some(terminal));
+    drop(pressure);
+    history.acknowledge_receipt(receipt).unwrap();
+    crate::voice_admitted_call::collect_retired(&f.state);
+    assert!(f
+        .state
+        .voice_authority
+        .lock()
+        .unwrap()
+        .admitted_activation(handle.id())
+        .is_none());
+    assert_eq!(
+        history.terminal(),
+        Some(terminal),
+        "held original reply keeps SAME history paid"
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn admitted_physical_collection_receipt_waits_actual_last_output_and_recovers_lost_reply() {
+    use crate::voice_call_activation::physical::PhysicalTerminal;
+    let clock = Arc::new(ManualClock::new(1000));
+    let f = Fixture::with_voice_clock(clock.clone()).await;
+    let handle = activate(&f, &controller(&f).await).await;
+    let history = handle.physical_history([9; 32]).unwrap();
+    let output = ready(
+        ensure_admitted(&f.state, handle.id(), [9; 32], &mut Rng::new())
+            .await
+            .unwrap(),
+    );
+    let serial = output.public().session;
+    end(&f, &clock, &handle).await;
+    settle_admitted_setup(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    collect_admitted_channel(&f.state, handle.id(), [9; 32])
+        .await
+        .unwrap();
+    assert!(
+        history.terminal().is_none(),
+        "a close reply is not actual Row/output return"
+    );
+    drop(output);
+    f.state
+        .voice_channels
+        .collect_retired(&f.state.voice_handoff);
+    let terminal = PhysicalTerminal::Collected(serial);
+    assert_eq!(history.terminal(), Some(terminal));
+    assert_ne!(history.terminal(), Some(PhysicalTerminal::NotStarted));
+    let receipt = history.receipt_id(terminal);
+    // Discard the first observer exactly as a lost collect/reply projection.
+    drop(handle.physical_history([9; 32]).unwrap());
+    let original = f
+        .state
+        .voice_authority
+        .lock()
+        .unwrap()
+        .admitted_activation(handle.id())
+        .unwrap();
+    let recovered = original.physical_history([9; 32]).unwrap();
+    assert!(recovered.is_same(&history));
+    assert_eq!(recovered.receipt_id(recovered.terminal().unwrap()), receipt);
+    assert!(
+        !original.no_physical_intent(),
+        "collected is never reset to no-intent"
+    );
+    assert!(
+        !original.collectible(),
+        "collection does not acknowledge its lost reply"
+    );
+    recovered.acknowledge_receipt(receipt).unwrap();
+    crate::voice_admitted_call::collect_retired(&f.state);
+    assert!(f
+        .state
+        .voice_authority
+        .lock()
+        .unwrap()
+        .admitted_activation(handle.id())
+        .is_none());
+    f.close().await;
+}
+
+#[test]
+fn admitted_physical_history_full_graph_is_guarded_before_payment() {
+    let bytes = crate::voice_call_activation::physical::physical_history_layout_bytes();
+    assert!(
+        bytes <= crate::voice_call_activation::physical::PHYSICAL_HISTORY_BYTES,
+        "complete physical history requires {bytes}"
+    );
+}
+
+#[tokio::test]
+async fn admitted_unentered_physical_rpc_after_end_cannot_bind_or_adopt_a_replacement() {
+    let clock = Arc::new(ManualClock::new(1000));
+    let f = Fixture::with_voice_clock(clock.clone()).await;
+    let controller = controller(&f).await;
+    let candidate = crate::voice_admitted_call::prepare_inner(
+        &f.state,
+        controller.clone(),
+        7,
+        catcoms_app::channel_id("general").to_string(),
+    )
+    .await
+    .unwrap();
+    bounded(crate::voice_admitted_call::activate_inner(
+        &f.state,
+        candidate.clone(),
+    ))
+    .await
+    .unwrap();
+    // No physical admit has entered. The actual retained parent (not map
+    // absence) owns an irreversible initial discriminator before any SDK grant.
+    let old = f
+        .state
+        .voice_authority
+        .lock()
+        .unwrap()
+        .admitted_activation(&candidate)
+        .unwrap();
+    assert!(
+        !old.no_physical_intent(),
+        "an open parent is no negative proof"
+    );
+    end(&f, &clock, &old).await;
+    assert!(old.no_physical_intent());
+    let no_intent =
+        crate::voice_handoff::commands::fixture_physical_observation(&f.state, old.id(), [9; 32])
+            .await
+            .unwrap();
+    assert!(
+        crate::voice_handoff::commands::fixture_physical_observation(&f.state, old.id(), [9; 32])
+            .await
+            .is_err()
+    );
+    let body = no_intent.fixture_body_with_limit(256).unwrap();
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["kind"], "no-physical-intent");
+    assert_eq!(body["owner"], old.id());
+    assert_eq!(
+        body.as_object().unwrap().len(),
+        2,
+        "no executor/join/SDK certificate is invented"
+    );
+    let resources = crate::voice_runtime(&f.state).resources();
+    let before = resources.counts();
+    assert!(
+        crate::voice_admitted_key::admit_physical_inner(&f.state, old.id(), [9; 32])
+            .await
+            .is_err()
+    );
+    assert!(old.physical_history([9; 32]).is_none());
+    assert_eq!(
+        resources.counts(),
+        before,
+        "the delayed unentered RPC allocated nothing"
+    );
+    let replacement = activate(&f, &controller).await;
+    assert_ne!(old.id(), replacement.id());
+    assert!(old.no_physical_intent());
+    assert!(!replacement.no_physical_intent());
+    assert!(
+        crate::voice_admitted_key::admit_physical_inner(&f.state, old.id(), [9; 32])
+            .await
+            .is_err()
+    );
+    assert!(replacement.physical_history([9; 32]).is_some());
+    // Only explicit parent receipt ACK can release this no-intent activation.
+    crate::voice_admitted_call::acknowledge_inner(&f.state, old.id())
+        .await
+        .unwrap();
+    end(&f, &clock, &replacement).await;
+    let history = replacement.physical_history([9; 32]).unwrap();
+    let terminal = history.terminal().unwrap();
+    history
+        .acknowledge_receipt(history.receipt_id(terminal))
+        .unwrap();
+    crate::voice_admitted_call::collect_retired(&f.state);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn admitted_key_only_to_physical_refusal_preserves_original_generation_and_call() {
+    let clock = Arc::new(ManualClock::new(1000));
+    let f = Fixture::with_voice_clock(clock.clone()).await;
+    let controller = controller(&f).await;
+    let candidate = crate::voice_admitted_call::prepare_inner(
+        &f.state,
+        controller,
+        7,
+        catcoms_app::channel_id("general").to_string(),
+    )
+    .await
+    .unwrap();
+    bounded(crate::voice_admitted_call::activate_inner(
+        &f.state,
+        candidate.clone(),
+    ))
+    .await
+    .unwrap();
+    let handle = f
+        .state
+        .voice_authority
+        .lock()
+        .unwrap()
+        .admitted_activation(&candidate)
+        .unwrap();
+    let original = crate::voice_admitted_key::admit_inner(&f.state, &candidate, [9; 32])
+        .await
+        .unwrap();
+    let resources = crate::voice_runtime(&f.state).resources();
+    let before = resources.counts();
+    let refused = crate::voice_admitted_key::admit_physical_inner(&f.state, &candidate, [9; 32])
+        .await
+        .unwrap();
+    assert_eq!(refused.kind, "refused");
+    assert_eq!(refused.owner, candidate);
+    assert_eq!(refused.executor, hex::encode([9; 32]));
+    assert!(refused.permit.is_empty() && refused.join.is_empty());
+    assert!(
+        handle.active(),
+        "a wrong-purpose observer must not End the original call"
+    );
+    assert!(handle.physical_history([9; 32]).is_none());
+    assert!(
+        !handle.no_physical_intent(),
+        "KeyOnly is not the initial NoIntentYet discriminator"
+    );
+    let recovered = crate::voice_admitted_key::admit_inner(&f.state, &candidate, [9; 32])
+        .await
+        .unwrap();
+    assert_eq!(recovered.permit, original.permit);
+    assert_eq!(recovered.join, original.join);
+    assert_eq!(recovered.kind, "admitted");
+    assert_eq!(resources.counts(), before);
+    crate::voice_admitted_key::settle_inner(&f.state, &candidate, [9; 32])
+        .await
+        .unwrap();
+    end(&f, &clock, &handle).await;
+    crate::voice_admitted_call::acknowledge_inner(&f.state, &candidate)
+        .await
+        .unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn admitted_physical_metadata_projection_is_one_original_until_actual_reply_drop_error_or_unwind(
+) {
+    use crate::voice_handoff::commands::fixture_physical_observation as observe;
+    let clock = Arc::new(ManualClock::new(1000));
+    let f = Fixture::with_voice_clock(clock.clone()).await;
+    let handle = activate(&f, &controller(&f).await).await;
+    let resources = crate::voice_runtime(&f.state).resources();
+    let first = observe(&f.state, handle.id(), [9; 32]).await.unwrap();
+    let before = resources.counts();
+    assert!(observe(&f.state, handle.id(), [9; 32]).await.is_err());
+    assert_eq!(
+        resources.counts(),
+        before,
+        "Busy neither clones nor funds another serializer"
+    );
+    drop(first);
+    let failed = observe(&f.state, handle.id(), [9; 32]).await.unwrap();
+    assert!(failed.fixture_body_with_limit(0).is_err());
+    let retry = observe(&f.state, handle.id(), [9; 32]).await.unwrap();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _original = retry;
+            panic!("actual reply dropped during serializer unwind");
+        }))
+        .is_err()
+    );
+    assert!(
+        observe(&f.state, handle.id(), [8; 32]).await.is_err(),
+        "wrong tuple drops only its own temporary slot"
+    );
+    let exact = observe(&f.state, handle.id(), [9; 32]).await.unwrap();
+    assert_eq!(resources.counts(), before);
+    drop(exact);
+    end(&f, &clock, &handle).await;
+    let history = handle.physical_history([9; 32]).unwrap();
+    let terminal = history.terminal().unwrap();
+    history
+        .acknowledge_receipt(history.receipt_id(terminal))
+        .unwrap();
+    crate::voice_admitted_call::collect_retired(&f.state);
     f.close().await;
 }

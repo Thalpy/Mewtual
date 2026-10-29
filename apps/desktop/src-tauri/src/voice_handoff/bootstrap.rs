@@ -41,6 +41,9 @@ struct Index {
 }
 struct Row {
     selected: ChannelOwner,
+    // SAME original physical history, never a Handle/Row backedge. The parent
+    // blocks Forget until its exact terminal receipt is explicitly observed.
+    physical_history: Option<crate::voice_call_activation::physical::PhysicalHistory>,
     device: [u8; 32],
     session_id: [u8; 16],
     slot: u8,
@@ -471,11 +474,24 @@ impl Registry {
         if selected.lease().is_admitted() {
             return Err(Refused::Binding);
         }
-        self.begin_owner(ChannelOwner::Existing(selected), device)
+        self.begin_owner(ChannelOwner::Existing(selected), device, None)
     }
 
-    fn begin_owner(&self, selected: ChannelOwner, device: [u8; 32]) -> Result<Begin, Refused> {
+    fn begin_owner(
+        &self,
+        selected: ChannelOwner,
+        device: [u8; 32],
+        physical_history: Option<crate::voice_call_activation::physical::PhysicalHistory>,
+    ) -> Result<Begin, Refused> {
         MetadataProjection::require_layout(super::commands::bootstrap_reply_layout_bytes())?;
+        match (&selected, &physical_history) {
+            (ChannelOwner::Existing(_), None) => {}
+            (ChannelOwner::Admitted(key), Some(history))
+                if history.owner() == key.id()
+                    && history.executor() == key.executor()
+                    && history.join() == key.join() => {}
+            _ => return Err(Refused::Binding),
+        }
         let resources = selected.resources();
         let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
         if self.stopping.load(Ordering::Acquire) {
@@ -533,6 +549,7 @@ impl Registry {
         // visible, its ticket always finishes or latches a closed fence, including unwind.
         let row = Arc::new(Row {
             selected,
+            physical_history,
             device,
             session_id: serial.to_be_bytes(),
             slot: (slot + 1) as u8,
@@ -552,6 +569,13 @@ impl Registry {
             admission_changed: tokio::sync::Notify::new(),
             _credit: Arc::new(credit),
         });
+        // This SAME immutable history transitions before the Row can escape and
+        // before any RNG. A failed final closed-phase check leaves no admission.
+        if let Some(history) = &row.physical_history {
+            history
+                .admit_row(row.session_id)
+                .map_err(|_| Refused::Binding)?;
+        }
         index.serial = serial;
         index.rows[slot] = Some(row.clone());
         Ok(Begin::Work(Ticket {
@@ -632,6 +656,7 @@ impl Registry {
             .map_err(|_| Refused::Capacity)?;
         let row = Arc::new(Row {
             selected: ChannelOwner::Existing(selected),
+            physical_history: None,
             device: [0; 32],
             session_id: serial.to_be_bytes(),
             slot: (slot + 1) as u8,
@@ -719,7 +744,20 @@ impl Registry {
                 }
                 // This slice exposes only bootstrap custody for admitted rows.
                 // It never mints the Existing ledger's collection certificate.
-                ChannelProfile::Admitted => drop((identity, row)),
+                ChannelProfile::Admitted => {
+                    // Keep the SAME original Row payment outside actual final
+                    // Arc destruction: weak-only Session/output allocations
+                    // deallocate before we publish the collection receipt.
+                    let credit = row._credit.clone();
+                    let history = row.physical_history.clone();
+                    let serial = row.session_id;
+                    drop(identity);
+                    drop(row);
+                    if let Some(history) = history {
+                        history.row_actually_returned(serial);
+                    }
+                    drop(credit);
+                }
             }
         }
         // Always sweep, including an empty/uninitialized registry. The original one-shot

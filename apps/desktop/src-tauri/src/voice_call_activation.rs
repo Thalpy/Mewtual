@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::task::Poll;
 use tokio::sync::{Mutex, OwnedMutexGuard};
+pub(crate) mod physical;
+use physical::{PhysicalHistory, PhysicalPurpose};
 
 pub(crate) const MAX_ACTIVATIONS: usize = 32;
 // The original graph measured 17,752 bytes; deferred old-owner custody raised it
@@ -50,6 +52,7 @@ struct Cell {
     clock: Arc<dyn Clock>,
     state: StdMutex<State>,
     changed: tokio::sync::Notify,
+    physical_projection_busy: AtomicBool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Failure {
@@ -115,6 +118,7 @@ impl TaskTicket {
     }
 }
 struct State {
+    physical: PhysicalPurpose,
     owner: Option<ActivationOwner>,
     grant: Option<Arc<CallGrant>>,
     control: Option<VoiceActivationControl>,
@@ -170,6 +174,7 @@ impl Handle {
                 original,
                 clock,
                 state: StdMutex::new(State {
+                    physical: PhysicalPurpose::NoIntentYet,
                     owner: Some(owner),
                     grant: Some(grant),
                     control: Some(control),
@@ -188,6 +193,7 @@ impl Handle {
                     task_started: false,
                 }),
                 changed: tokio::sync::Notify::new(),
+                physical_projection_busy: AtomicBool::new(false),
             }),
             funding,
         })
@@ -360,6 +366,11 @@ impl Handle {
     pub(crate) fn collectible(&self) -> bool {
         let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
         self.original().is_closed()
+            && !self.cell.physical_projection_busy.load(Ordering::Acquire)
+            && match &state.physical {
+                PhysicalPurpose::Physical(history) => history.acknowledged(),
+                PhysicalPurpose::NoIntentYet | PhysicalPurpose::KeyOnly => true,
+            }
             && state.acknowledged
             && state.cleanup_done
             && state.invocation.is_none()
@@ -370,6 +381,105 @@ impl Handle {
                 .as_ref()
                 .is_some_and(|proof| proof.matches(self.original()))
             && state.task.has_returned()
+    }
+
+    /// One prepaid physical metadata serialization, including NoIntent. Claim
+    /// before cloning a new reply/history owner; duplicate lookup is Busy and
+    /// cannot multiply capped serializers under the same original invoice.
+    pub(crate) fn physical_projection(&self) -> Result<PhysicalProjection, VoiceError> {
+        self.cell
+            .physical_projection_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| VoiceError::Capacity)?;
+        Ok(PhysicalProjection {
+            original: self.clone(),
+        })
+    }
+
+    /// Purpose is immutable before any SDK admission. Equal public fields do
+    /// not allow a key-only caller to adopt a physical generation or vice versa.
+    pub(crate) fn require_key_only_purpose(&self) -> Result<(), VoiceError> {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.physical {
+            PhysicalPurpose::NoIntentYet | PhysicalPurpose::KeyOnly => Ok(()),
+            PhysicalPurpose::Physical(_) => Err(VoiceError::Unauthorized),
+        }
+    }
+    pub(crate) fn select_key_only_purpose(&self) -> Result<(), VoiceError> {
+        let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.original().is_closed() {
+            return Err(VoiceError::Unauthorized);
+        }
+        match state.physical {
+            PhysicalPurpose::NoIntentYet => {
+                state.physical = PhysicalPurpose::KeyOnly;
+                Ok(())
+            }
+            PhysicalPurpose::KeyOnly => Ok(()),
+            PhysicalPurpose::Physical(_) => Err(VoiceError::Unauthorized),
+        }
+    }
+    pub(crate) fn require_physical_purpose(&self) -> Result<(), VoiceError> {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.physical {
+            PhysicalPurpose::NoIntentYet | PhysicalPurpose::Physical(_) => Ok(()),
+            PhysicalPurpose::KeyOnly => Err(VoiceError::Unauthorized),
+        }
+    }
+    pub(crate) fn install_physical_history(
+        &self,
+        history: &PhysicalHistory,
+    ) -> Result<(), VoiceError> {
+        let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.original().is_closed() || !history.original().is_same(self.original()) {
+            return Err(VoiceError::Unauthorized);
+        }
+        match &state.physical {
+            PhysicalPurpose::NoIntentYet => {
+                state.physical = PhysicalPurpose::Physical(history.clone());
+                Ok(())
+            }
+            PhysicalPurpose::Physical(original) if original.is_same(history) => Ok(()),
+            _ => Err(VoiceError::Unauthorized),
+        }
+    }
+    /// Negative/history lookup only. It never checks a replacement live owner,
+    /// creates a history body, or upgrades the old grant.
+    pub(crate) fn physical_history(&self, executor: [u8; 32]) -> Option<PhysicalHistory> {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &state.physical {
+            PhysicalPurpose::Physical(history) if history.executor() == executor => {
+                Some(history.clone())
+            }
+            _ => None,
+        }
+    }
+    /// This is NOT a generation/executor/SDK certificate. It is available only
+    /// for the retained exact permanently closed original whose purpose never
+    /// entered the physical family. A forgotten/unknown parent gives NoProof.
+    pub(crate) fn no_physical_intent(&self) -> bool {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.original().is_closed() && matches!(state.physical, PhysicalPurpose::NoIntentYet)
+    }
+}
+
+/// An affine serialization slot. It remains with the actual reply through
+/// success, abandonment, serializer error and unwind. No caller-reset flag or
+/// generation floor can release another original Cell's projection.
+pub(crate) struct PhysicalProjection {
+    original: Handle,
+}
+impl PhysicalProjection {
+    pub(crate) fn original(&self) -> &Handle {
+        &self.original
+    }
+}
+impl Drop for PhysicalProjection {
+    fn drop(&mut self) {
+        self.original
+            .cell
+            .physical_projection_busy
+            .store(false, Ordering::Release);
     }
 }
 /// Local trusted receiver receipt. Dropping a lost reply does NOT acknowledge it.
@@ -1101,6 +1211,9 @@ fn native_layout_bytes() -> usize {
         + 2 * size_of::<Outcome>() + size_of::<Invocation>()
         + 2 * size_of::<Reply>() + size_of::<VoiceActivation>() + 3 * 64
         + size_of::<voice_authority::DetachedActivation>()
+        // A closed original which never bound a physical intent has no separate
+        // history payer. Its bounded no-intent projection belongs to THIS fee.
+        + crate::voice_handoff::commands::no_physical_intent_reply_layout_bytes()
         + weak_context + CLOCK_OWNER_BYTES + CLOCK_SLEEP_BYTES
         // Pinned Tokio1.53.3 task header/trailer, Box/Pin/callout and Notify waiter
         // bookkeeping. The large execution body is measured above, not hidden here.
