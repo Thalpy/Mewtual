@@ -4312,9 +4312,11 @@ async function framedMedia(t: TestContext, low = true,
     if (mode === 3 || mode === 6) { assert.ok(closed); assert.equal(sdk.calls.closed, 1); released = true; }
     if (mode === hold) await held.promise;
     if (mode === lost) { lost = -1; throw new Error("exact native media reply lost"); }
-    if (!admitted) return { kind: 0, body: new Uint8Array([9, 1]) };
+    // Original Close creates an exact negative claim even if Admit never reached
+    // native. Its Release must remain observable without inventing admission.
+    if (!admitted && !closed) return { kind: 0, body: new Uint8Array([9, 1]) };
     const current = (mode === 4 || mode === 7) && !closed && f.f.owner.isCurrent();
-    const bytes = Buffer.alloc(39); bytes.set([9, 0, 1 | (closed ? 2 : 0) | (released ? 4 : 0) | (current ? 8 : 0)]);
+    const bytes = Buffer.alloc(39); bytes.set([9, 0, (admitted ? 1 : 0) | (closed ? 2 : 0) | (released ? 4 : 0) | (current ? 8 : 0)]);
     Buffer.from(proof, "hex").copy(bytes, 3); bytes.writeUInt32BE(current ? remaining : 0xffffffff, 35);
     return { kind: 0, body: bytes };
   }, () => !admitted || released || indexed);
@@ -4351,7 +4353,7 @@ test("framed lost media admission recovers original claim without a second peer 
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });
-for (const version of [28,29,30,31,32,33,34,35,36]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
+for (const version of [28,29,30,31,32,33,34,35,36,50]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
   const f = await framedMedia(t), previous = Object.create(f.f.broker);
   Object.defineProperty(previous, "version", { value: version }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
@@ -5299,6 +5301,68 @@ async function failingMediaFixture(t: TestContext) {
   t.after(() => { globalThis.RTCPeerConnection = originalRtc; });
   return { first, f, next };
 }
+
+for (const mode of [0, 4, 7]) for (const barrier of ["lane", "encrypt"] as const)
+test(`individual media Close fences first fetch of mode${mode} at ${barrier}`, async t => {
+  const fixture = await failingMediaFixture(t), { first, f, next } = fixture;
+  if (mode !== 0) await next.media();
+  if (mode === 7) next.remaining(0);
+  const before = next.modes.filter(value => value === mode).length;
+  let lane: ReturnType<typeof f.holdCodec> | null = null;
+  let engine: ReturnType<typeof f.holdWhen> | null = null;
+  if (barrier === "encrypt") {
+    engine = f.holdWhen((name, args) => name === "encrypt" &&
+      (args[2] as Uint8Array)?.[0] === 9 && (args[2] as Uint8Array)?.[1] === mode);
+  } else if (mode === 7) {
+    // Detach follows a fresh Current in the same media flight. Queue the actual
+    // shared-lane barrier behind that Current, before its completion can queue Detach.
+    f.onResponse(async (header, requestMode) => {
+      if (!lane && header.logical === next.child.parent.row && header.operation === 28 && requestMode === 4)
+        lane = f.holdCodec();
+    });
+  } else {
+    lane = f.holdCodec(); await until(() => lane!.entered());
+  }
+  const pending = mode === 7 ? next.retireNegotiation() : next.media();
+  await until(() => barrier === "encrypt" ? engine!.entered() : lane?.entered() === true);
+  // Lane entry proves the preceding Current's real crypto/transport finally returned.
+  // Drain its microtask continuation so Detach is actually queued behind the barrier.
+  await flush();
+  const paid = f.broker.counts().bytes;
+  const session = (f.broker as unknown as { ipcChannels: Map<string, { tx: bigint }> })
+    .ipcChannels.get(f.owner.token)!;
+  const txAtClose = session.tx, nativeRequestsAtClose = f.counts().tx.length;
+  const plan = next.child.ready.chain;
+  plan.close();
+  assert.equal(f.owner.isCurrent(), true, "individual Close preserves the shared owner");
+  assert.equal(first.sdk.calls.closed, 0);
+  assert.equal(next.sdk.calls.closed, 1);
+  assert.equal(f.broker.counts().bytes, paid, "entered or queued work remains paid");
+  assert.equal(next.custody.effectCounts().sdkReleases, 0);
+  engine?.release(); lane?.release();
+  await pending;
+  const submitted = next.modes.filter(value => value === mode).length;
+  assert.equal(session.tx, txAtClose, "Close neither admits a queued nonce nor refunds an encrypted nonce");
+  let done = false;
+  const cleanup = f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, plan)
+    .then(() => { done = true; });
+  await finishFailedMedia(fixture, cleanup, () => done);
+  assert.deepEqual(next.modes.slice(-2), [2, 3], "original negative recovery remains available");
+  assert.equal(next.child.parent.finalCounts().finalAcknowledged, true);
+  assert.equal(first.sdk.calls.closed, 0);
+  const observed = first.modes.filter(value => value === 4).length;
+  await f.broker.completeNativeMediaHandoff(f.owner, next.child.channel, first.child.ready.chain);
+  assert.ok(first.modes.filter(value => value === 4).length > observed);
+  assert.ok(f.counts().tx.every((value, index, values) => index === 0 || value > values[index - 1]),
+    "a refused positive flight cannot refund or reuse its Session nonce");
+  assert.ok(f.counts().tx.slice(nativeRequestsAtClose).every(value => value > txAtClose),
+    "negative cleanup starts after the original counter, including a nonce never sent");
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), true);
+  f.owner.retire(); await next.child.channel.close();
+  assert.equal(f.broker.counts().bytes, 0);
+  assert.equal(submitted, before,
+    "this original peer must not first-submit positive work after its Close");
+});
 
 for (const loss of [-1, 0, 2, 3]) test(`failed attached media releases only its own peer; lost mode=${loss}`, async t => {
   const { first, f, next } = await failingMediaFixture(t);

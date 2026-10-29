@@ -527,7 +527,9 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 50;
+  // A retained older broker has no exact-peer first-fetch fence. Preserve its
+  // cleanup, but require reload instead of reusing it or creating another pool.
+  readonly version = 51;
   readonly memoryBudget: VoiceBrowserBudget;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
@@ -2541,6 +2543,10 @@ type RetainedNativePeer = {
   media: VoiceNativeMedia | null; compacted: boolean; compactionReturned: boolean;
   advanced: boolean; closing: boolean; refundReady: boolean; cleanup: Promise<void> | null;
 };
+/** One positive request snapshots its actual paid peer and driver before queueing.
+ * It deliberately has no current-negotiation identity: indexed media outlives that
+ * negotiation. Original negative cleanup does not carry this positive-effect fence. */
+type MediaRequestFence = Readonly<{ peer: RetainedNativePeer; driver: VoiceNativeMedia | null }>;
 function compactionReturned(work: Promise<boolean>, peer: RetainedNativePeer): Promise<boolean> {
   return work.then(result => { if (result) peer.compactionReturned = true; return result; });
 }
@@ -3757,9 +3763,16 @@ class RetainedIpcChannel {
     return { clock: this.clock, live: () => this.live(),
       begin: () => this.beginActivity(), end: () => this.endActivity(),
       stopped: () => this.mediaStopped(peer), refund: () => { peer.refundReady = true; },
-      request: (encoded, cleanup) => this.execution.run(() => this.framed(
-        encoded.operation, encoded.kind, encoded.logical, encoded.body, cleanup,
-        (kind, length) => kind === 0 && (length === 18 || length === 20 || length === 55), decodeVoiceMedia)) };
+      request: (encoded, cleanup) => {
+        // The original media8KiB pays this fixed snapshot through queued/entered
+        // framing and actual finally. Closing one peer must fence its first fetch
+        // without aborting another peer's request on the same physical Session.
+        const fence = cleanup ? undefined : { peer, driver: peer.media };
+        return this.execution.run(() => this.framed(
+          encoded.operation, encoded.kind, encoded.logical, encoded.body, cleanup,
+          (kind, length) => kind === 0 && (length === 18 || length === 20 || length === 55),
+          decodeVoiceMedia, undefined, undefined, undefined, fence));
+      } };
   }
   private mediaStopped(peer: RetainedNativePeer): void {
     peer.closing = true;
@@ -4503,7 +4516,7 @@ class RetainedIpcChannel {
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
     decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T, input?: undefined,
-    inputIntake?: ChainIntake, admissionClaim?: BrowserPreclaim): Promise<T>;
+    inputIntake?: ChainIntake, admissionClaim?: BrowserPreclaim, mediaFence?: MediaRequestFence): Promise<T>;
   private framed<T>(operation: VoiceIpcHeader["operation"], kind: VoiceIpcHeader["kind"],
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
@@ -4514,11 +4527,20 @@ class RetainedIpcChannel {
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
     decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T,
     input?: Readonly<{ loan: VoiceSdpInputLoan; expected: VoiceSdpInputExpectation; current(): void }>,
-    inputIntake?: ChainIntake, admissionClaim?: BrowserPreclaim): Promise<T | null> {
+    inputIntake?: ChainIntake, admissionClaim?: BrowserPreclaim, mediaFence?: MediaRequestFence): Promise<T | null> {
     const keys = this.keys, bootstrap = this.bootstrap;
     const check = () => {
       if (!keys || !bootstrap || this.keys !== keys || this.bootstrap !== bootstrap || this.drained) throw new Error("original voice channel unavailable");
       if (!afterEnd) this.check();
+      // Run AFTER the owner predicate, which can synchronously Close this peer.
+      // Repeat at every existing physical/SDK boundary, including just before
+      // first fetch. A canceled encryption still spends its original nonce; a
+      // queued request refused here has not spent one. Neither path refunds IO
+      // uncertainty or prevents original Close/Release/history recovery.
+      if (mediaFence && (!mediaFence.driver || mediaFence.peer.closing ||
+          mediaFence.peer.media !== mediaFence.driver || mediaFence.driver.closed ||
+          this.peers.get(mediaFence.peer.plan) !== mediaFence.peer))
+        throw new Error("original native media closed");
       // Register is a fresh native effect, even though it grants only capacity.
       // A local retirement during encrypt/sign/Clock must fence the FIRST fetch.
       // Observe/Cancel retain their exact private negative route after retirement.
@@ -4905,7 +4927,7 @@ export function windowVoiceCryptoBroker(
   // null or swapped slots cannot publish a second pool beside its unresolved original.
   if (expected !== undefined && previous !== expected) throw new Error("voice crypto broker changed; reload required");
   if (previous) {
-    if (previous.version !== 50 || typeof previous.nativeConfiguredAdmissionAppCalls !== "function" || typeof previous.nativeAdmissionChannel !== "function" || typeof previous.nativeNegotiationCapacity !== "function" || typeof previous.preclaimNativeNegotiation !== "function" || typeof previous.nativeDerivationFromPreclaim !== "function" || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 51 || typeof previous.nativeConfiguredAdmissionAppCalls !== "function" || typeof previous.nativeAdmissionChannel !== "function" || typeof previous.nativeNegotiationCapacity !== "function" || typeof previous.preclaimNativeNegotiation !== "function" || typeof previous.nativeDerivationFromPreclaim !== "function" || typeof previous.nativeConfiguredAppCalls !== "function" || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
