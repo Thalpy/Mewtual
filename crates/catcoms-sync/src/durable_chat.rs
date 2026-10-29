@@ -1037,6 +1037,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if message_id.is_empty()
             || message_id.len() > 128
             || (action == ChatAction::Send) != target.is_none()
+            || (noop && action != ChatAction::Edit)
         {
             return Err("invalid chat target".into());
         }

@@ -11,9 +11,24 @@ const DOMAIN: &str = "catcoms/chat-stop-fences/v1";
 fn malformed() -> AppError {
     AppError::Invalid("invalid or unsupported retired chat fences".into())
 }
+fn validate_identity(identity: &DurableChatIdentity) -> Result<(), AppError> {
+    if identity.message_id.is_empty()
+        || identity.message_id.len() > 128
+        || (identity.action == ChatAction::Send) != identity.target.is_none()
+    {
+        return Err(malformed());
+    }
+    Ok(())
+}
 fn encode(rows: &BTreeMap<(u64, [u8; 16]), DurableChatIdentity>) -> Result<Vec<u8>, AppError> {
     if rows.len() > MAX_CHAT_RECEIPTS {
         return Err(malformed());
+    }
+    for ((_, token), row) in rows {
+        validate_identity(row)?;
+        if token != &row.token {
+            return Err(malformed());
+        }
     }
     // Check the exact wire budget before allocating the complete encoding. Every field uses a
     // u32 length prefix; target is present exactly for the two mutation variants.
@@ -176,6 +191,7 @@ impl ServerStore {
         identity: &DurableChatIdentity,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        validate_identity(identity)?;
         let mut rows = self.chat_fences()?;
         if let Some(saved) = rows.get(&(server, identity.token)) {
             if saved != identity {
@@ -305,5 +321,32 @@ mod tests {
         assert!(store.has_chat_stop_fence(12, &first).is_err());
         assert_eq!(store.load_chat_stop_fences(12).unwrap(), vec![second]);
         assert_eq!(store.load_chat_stop_fences(999).unwrap(), vec![first]);
+    }
+    #[test]
+    fn invalid_public_retired_identity_cannot_replace_readable_fence_history() {
+        use crate::durable_chat::{DurableMutationAction, DurableMutationRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(198);
+        let store = ServerStore::open(dir.path(), b"test", &mut rng).unwrap();
+        let valid = identity(1, "retained");
+        store.save_chat_stop_fence(9, &valid, &mut rng).unwrap();
+        let previous = fs::read(dir.path().join("chat-stop-fences.bin")).unwrap();
+        for id in [String::new(), "x".repeat(129)] {
+            let invalid = DurableChatRequest::Mutation(DurableMutationRequest {
+                token: [2; 16],
+                expected_context: [1; 32],
+                channel: 5,
+                message_id: id,
+                target: [1; 32],
+                action: DurableMutationAction::Delete,
+            })
+            .retired_identity();
+            assert!(store.save_chat_stop_fence(9, &invalid, &mut rng).is_err());
+            assert_eq!(
+                fs::read(dir.path().join("chat-stop-fences.bin")).unwrap(),
+                previous
+            );
+            assert!(store.has_chat_stop_fence(9, &valid).unwrap());
+        }
     }
 }
