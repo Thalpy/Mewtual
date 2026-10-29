@@ -16,7 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
 # build.rs reads security/command-policy.json to feed the ACL manifest, so the reviewed policy and
 # the enforced command list cannot drift. Already in the dependency graph via tauri-build.
 serde_json = "1"
@@ -40,7 +40,10 @@ p256 = { version = "=0.14.0", default-features = false, features = ["ecdh"] }
 rand_core_0_10 = { package = "rand_core", version = "=0.10.1", default-features = false }
 async-trait = "0.1"
 bytes = "1"
-tauri = { version = "2", features = [] }
+# Keep runtime/codegen aligned with the locked tauri-utils 2.10 configuration.
+# Older Tauri test helpers omit AppConfig::app_directories_override and cannot
+# compile when the dev-only `test` feature below is enabled.
+tauri = { version = "2.12.5", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util"] }
@@ -96,6 +99,9 @@ tauri-plugin-process = "2"
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 
 [dev-dependencies]
+# Exercise the actual IPC argument/handler/serialization path with MockRuntime;
+# this empty Tauri feature only exposes its test helpers, not a shipped command.
+tauri = { version = "2.12.5", features = ["test"] }
 catcoms-crypto = { path = "../../../crates/catcoms-crypto" }
 tokio = { version = "1", features = ["io-util", "process"] }
 automerge = "0.10"
