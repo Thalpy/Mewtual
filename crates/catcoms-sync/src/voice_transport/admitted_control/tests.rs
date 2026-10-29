@@ -17,6 +17,7 @@ struct Chain {
     inner: catcoms_rt::MemNetwork,
     neighbours: HashSet<PeerId>,
     requests: Arc<Mutex<Vec<(PeerId, PeerId, u8)>>>,
+    control_hops: Arc<Mutex<Vec<(PeerId, PeerId, voice_v2::Nonce)>>>,
 }
 impl Chain {
     fn edge(&self, peer: PeerId, data: &[u8]) {
@@ -27,6 +28,16 @@ impl Chain {
         let mut log = self.requests.lock().unwrap();
         assert!(log.len() < 4096, "bounded harness request inventory");
         log.push((self.local_peer(), peer, data.first().copied().unwrap_or(0)));
+        // Passive harness observer only. It proves the SAME signed original
+        // crossed an actual allowed driver request; it supplies no production
+        // authorization, adapter success, endpoint proof or route selection.
+        if let Ok(outer) = Outer::parse(data) {
+            if let Ok(envelope) = control::wire::Envelope::decode(outer.inner) {
+                let mut hops = self.control_hops.lock().unwrap();
+                assert!(hops.len() < 4096);
+                hops.push((self.local_peer(), peer, envelope.object().metadata().id()));
+            }
+        }
     }
 }
 #[async_trait::async_trait]
@@ -118,9 +129,11 @@ struct Fixture {
     a: Node,
     b: Node,
     c: Node,
+    d: Option<Node>,
     clock: Arc<ManualClock>,
     runtimes: Vec<Arc<Runtime>>,
     requests: Arc<Mutex<Vec<(PeerId, PeerId, u8)>>>,
+    control_hops: Arc<Mutex<Vec<(PeerId, PeerId, voice_v2::Nonce)>>>,
     _hub: Arc<catcoms_rt::Hub>,
 }
 fn key(byte: u8) -> voice_v2::JoinKey {
@@ -172,7 +185,10 @@ async fn bind(a: &mut Node, b: &mut Node) {
 }
 impl Fixture {
     async fn new() -> Self {
-        let (_, mut original, _) = crate::tests::build_members(3).await;
+        Self::build(3).await
+    }
+    async fn build(count: usize) -> Self {
+        let (_, mut original, _) = crate::tests::build_members(count).await;
         crate::tests::converge_and_publish_test_routes(&mut original);
         original[0]
             .initialize_group_policy(GroupMode::PeerToPeer)
@@ -183,6 +199,9 @@ impl Fixture {
         for node in original.iter_mut().skip(1) {
             node.on_group_policy(&policy);
         }
+        if count == 4 && original[3].device_id() > original[1].device_id() {
+            original.swap(1, 3);
+        }
         let peers: Vec<_> = original.iter().map(|node| node.local_peer()).collect();
         let snapshots: Vec<_> = original
             .iter_mut()
@@ -191,13 +210,16 @@ impl Fixture {
         drop(original);
         let hub = catcoms_rt::Hub::new();
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let control_hops = Arc::new(Mutex::new(Vec::new()));
         let clock = Arc::new(ManualClock::new(1000));
         let mut nodes: Vec<Node> = snapshots
             .iter()
             .enumerate()
             .map(|(index, snapshot)| {
-                let neighbours = if index == 1 {
+                let neighbours = if index == 1 || index == 3 {
                     vec![peers[0], peers[2]]
+                } else if count == 4 {
+                    vec![peers[1], peers[3]]
                 } else {
                     vec![peers[1]]
                 };
@@ -207,6 +229,7 @@ impl Fixture {
                         inner: hub.join(peers[index]),
                         neighbours: neighbours.into_iter().collect(),
                         requests: requests.clone(),
+                        control_hops: control_hops.clone(),
                     },
                     rand_chacha::ChaCha20Rng::seed_from_u64(index as u64 + 901),
                     Box::new(clock.as_ref().clone()),
@@ -214,7 +237,7 @@ impl Fixture {
                 .unwrap()
             })
             .collect();
-        let runtimes: Vec<_> = (0..3).map(|_| Runtime::new(clock.clone())).collect();
+        let runtimes: Vec<_> = (0..count).map(|_| Runtime::new(clock.clone())).collect();
         for (node, runtime) in nodes.iter_mut().zip(&runtimes) {
             let ticket = runtime.session_ticket();
             runtime.activate_session(&ticket).unwrap();
@@ -240,15 +263,22 @@ impl Fixture {
         );
         bind(&mut a, &mut b).await;
         bind(&mut b, &mut c).await;
+        let mut d = iter.next();
+        if let Some(d) = &mut d {
+            bind(&mut a, d).await;
+            bind(d, &mut c).await;
+        }
         assert!(a.transport.connection_lease(c.local_peer()).is_none());
         assert!(c.transport.connection_lease(a.local_peer()).is_none());
         Self {
             a,
             b,
             c,
+            d,
             clock,
             runtimes,
             requests,
+            control_hops,
             _hub: hub,
         }
     }
@@ -257,6 +287,13 @@ impl Fixture {
             for node in [&mut self.a, &mut self.b, &mut self.c] {
                 for _ in 0..16 {
                     if node.run_once().now_or_never().is_none() {
+                        break;
+                    }
+                }
+            }
+            if let Some(d) = &mut self.d {
+                for _ in 0..16 {
+                    if d.run_once().now_or_never().is_none() {
                         break;
                     }
                 }
@@ -415,6 +452,204 @@ fn admitted_control_0_measures_real_enclosing_graphs_without_assuming_inherited_
     eprintln!("Control7 graphs record/table/ledger {new:?}; enclosing Group/ExistingHelper/ExistingSource/BTreeEntry {group:?}; Counts/HashBucket/Service {counter:?}; wrapper {}",wrapper_graph::<Chain>());
     assert!(new.0 <= 8192 && new.1 <= 4096 && new.2 <= 8192);
     assert!(wrapper_graph::<Chain>() <= 4096);
+}
+
+#[tokio::test]
+async fn admitted_control_same_original_rotates_to_lower_sorting_unjoined_bridge_when_first_bridge_is_busy(
+) {
+    bounded(async {
+        let mut f = Fixture::build(4).await;
+        let (ag, _ao, ap) = activate(&mut f.a, 71);
+        let (cg, _co, cp) = activate(&mut f.c, 72);
+        let b = f.b.device_id();
+        let d = f.d.as_ref().unwrap().device_id();
+        assert!(
+            d < b,
+            "fixture forces the wraparound ordering that used to repeat B"
+        );
+        let ab =
+            f.a.ensure_admitted_direct_helper_support(&ag, &ap, b)
+                .unwrap();
+        let ad =
+            f.a.ensure_admitted_direct_helper_support(&ag, &ap, d)
+                .unwrap();
+        let cb =
+            f.c.ensure_admitted_direct_helper_support(&cg, &cp, b)
+                .unwrap();
+        let cd =
+            f.c.ensure_admitted_direct_helper_support(&cg, &cp, d)
+                .unwrap();
+        for _ in 0..24 {
+            f.tick(4).await;
+            let known =
+                f.a.admitted_direct_helper_support_observation(&ag, &ap, &ab)
+                    .unwrap()
+                    == (HelperObservation::Observed { features: 1 })
+                    && f.a
+                        .admitted_direct_helper_support_observation(&ag, &ap, &ad)
+                        .unwrap()
+                        == (HelperObservation::Observed { features: 1 })
+                    && f.c
+                        .admitted_direct_helper_support_observation(&cg, &cp, &cb)
+                        .unwrap()
+                        == (HelperObservation::Observed { features: 1 })
+                    && f.c
+                        .admitted_direct_helper_support_observation(&cg, &cp, &cd)
+                        .unwrap()
+                        == (HelperObservation::Observed { features: 1 });
+            if known
+                && has_peers(&mut f.a, &f.runtimes[0].resources(), &ag, &ap)
+                && has_peers(&mut f.c, &f.runtimes[2].resources(), &cg, &cp)
+            {
+                break;
+            }
+            f.clock.advance_ms(250);
+        }
+        assert_eq!(
+            f.a.admitted_direct_helper_support_observation(&ag, &ap, &ad)
+                .unwrap(),
+            HelperObservation::Observed { features: 1 }
+        );
+        assert_eq!(
+            f.c.admitted_direct_helper_support_observation(&cg, &cp, &cd)
+                .unwrap(),
+            HelperObservation::Observed { features: 1 }
+        );
+        let scope = ag.scope();
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            while held.len() < 4 {
+                match f.runtimes[1].resources().charge(
+                    scope.group,
+                    512,
+                    voice_v2::resources::ResourceKind::Forward,
+                ) {
+                    Ok(credit) => held.push(credit),
+                    Err(VoiceError::Capacity) => break,
+                    Err(error) => panic!("{error:?}"),
+                }
+            }
+            if held.len() == 4 {
+                break;
+            }
+            f.tick(2).await;
+        }
+        assert_eq!(
+            held.len(),
+            4,
+            "actual B Forward lanes are occupied before Query publication"
+        );
+        let target = f.c.device_id();
+        let query =
+            f.a.ensure_admitted_endpoint_support(&ag, &ap, target)
+                .unwrap();
+        let owner = query.identity().owner_for_test();
+        let original = (
+            owner.object().metadata().id(),
+            owner.object().hash(),
+            owner.object().metadata().expires(),
+        );
+        for _ in 0..20 {
+            f.tick(4).await;
+            if f.a
+                .admitted_endpoint_support_observation(&ag, &ap, &query)
+                .unwrap()
+                == (EndpointObservation::Observed { features: 1 })
+            {
+                break;
+            }
+            f.clock.advance_ms(250);
+        }
+        assert_eq!(
+            f.a.admitted_endpoint_support_observation(&ag, &ap, &query)
+                .unwrap(),
+            EndpointObservation::Observed { features: 1 }
+        );
+        assert_eq!(
+            (
+                owner.object().metadata().id(),
+                owner.object().hash(),
+                owner.object().metadata().expires()
+            ),
+            original
+        );
+        assert!(owner.route_cursor().0 <= 3);
+        let (a, b, c, d) = (
+            f.a.local_peer(),
+            f.b.local_peer(),
+            f.c.local_peer(),
+            f.d.as_ref().unwrap().local_peer(),
+        );
+        let hops = f.control_hops.lock().unwrap();
+        assert!(
+            hops.contains(&(a, b, original.0)),
+            "first exact original used B"
+        );
+        assert!(
+            hops.contains(&(a, d, original.0)) && hops.contains(&(d, c, original.0)),
+            "SAME original reached C through D after B stayed busy"
+        );
+        assert!(!hops
+            .iter()
+            .any(|(from, to, _)| (*from == a && *to == c) || (*from == c && *to == a)));
+        assert!(f
+            .b
+            .voice_runtime
+            .as_ref()
+            .unwrap()
+            .endpoints
+            .is_unjoined_for_test());
+        assert!(f
+            .d
+            .as_ref()
+            .unwrap()
+            .voice_runtime
+            .as_ref()
+            .unwrap()
+            .endpoints
+            .is_unjoined_for_test());
+        drop(held);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn admitted_control_actual_epoch_and_rejoin_revoke_old_query_and_actual_lower_without_adoption(
+) {
+    bounded(async {
+        let mut f = Fixture::new().await;
+        let (grant,_owner,original) = activate(&mut f.a,73);
+        let b = f.b.device_id();
+        let old = f.a.ensure_admitted_direct_helper_support(&grant,&original,b).unwrap();
+        let old_query = old.identity().owner_for_test();
+        let m = old_query.object().metadata();
+        let replay = control::Object::support(m.scope(),m.epoch(),m.issuer(),m.id(),1,&f.b.device,[181;32],1000,m.expires()).unwrap();
+        let pending = f.a.prepare_admitted_controls(false).unwrap().pop().unwrap();
+        assert!(pending.authority.authorized());
+        let joiner = MlsDevice::generate().unwrap();
+        let package = joiner.key_package().unwrap();
+        f.a.with_observed_mls_transition(|node| node.group.add_member(&node.device,package)).unwrap();
+        assert!(f.a.group.epoch() > m.epoch());
+        assert!(!old_query.authorized() && !pending.authority.authorized(),"actual native epoch transition closes both original query and retained Lower immediately");
+        assert_eq!(f.a.ensure_admitted_direct_helper_support(&grant,&original,b).err(),Some(VoiceError::Unauthorized));
+        f.a.clear_admitted_voice_call(&original).unwrap();
+        let (next_grant,_next_owner,next) = activate(&mut f.a,74);
+        let fresh = f.a.ensure_admitted_direct_helper_support(&next_grant,&next,b).unwrap();
+        let current = fresh.identity().owner_for_test();
+        assert_ne!(current.object().metadata().id(),m.id());
+        assert_eq!(current.object().metadata().epoch(),f.a.group.epoch());
+        // An authenticated outer wrapper at the CURRENT epoch cannot repair the
+        // immutable OLD inner control/query identity after a real rejoin.
+        let inner = control::wire::EnvelopeRef::Direct(&replay).encode();
+        let key = f.b.device.public_key_bytes(); let nonce = [182;16]; let epoch = f.a.group.epoch();
+        let transcript = catchup_auth_transcript(&f.b.group.group_id(),KIND,&inner,&key,1000,&nonce,epoch,Some(&f.b.local_peer()));
+        let signature = f.b.device.sign(&transcript).unwrap();
+        let frame = encode_authed_request_frame(KIND,&inner,&key,1000,&nonce,epoch,&signature);
+        drop(f.a.receive_voice_transport(f.b.local_peer(),&frame).unwrap());
+        assert_eq!(current.features_at(1000,1000),None);
+        assert_eq!(f.a.admitted_direct_helper_support_observation(&next_grant,&next,&old).err(),Some(VoiceError::RetryMismatch));
+        drop(pending); f.a.prune_voice_routes();
+    }).await;
 }
 
 #[tokio::test]

@@ -1,12 +1,14 @@
 # Mewtual; Architecture
 
-## Control7 Query/Support (29 October; UNRUN draft, OFF)
+## Control7 Query/Support (29 October; focused draft, OFF)
 
 A separate typed Source/ingress/helper path implements protocol Query/Support
 without growing Existing wire/Source enums. Exact original query and selected
 helper proof survive actual paid Lower custody; current query32 differs from
-affine lifetime64/group256/process. All new execution/layout/lint gates remain
-pending. See [the exact ownership, limits and operational boundaries](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+affine lifetime64/group256/process. Ten focused cases and new-family graph guards
+pass atf60d6bab; replacement/epoch additions are unrun. The inherited Group1024
+invoice/escaping-ledger/Resources-backing custody gap remains open, as do lint and
+integration. See [the exact ownership, limits and operational boundaries](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
 
 ## Route registry custody prerequisite (29 October; focused passes)
 
@@ -14,7 +16,7 @@ The shared64-route registry retains strong route rows and the SAME outside Lower
 verification payer through actual Arc destruction. A separately prepaid4KiB owner
 funds fixed backing/inline metadata before first VoiceRuntime publication, including
 OFF attachments. Sole-owner rows prune before Crypto/Forward reservation. Existing
-wire/enums and all limits remain unchanged; Query/Support is a separate UNRUN draft.
+wire/enums and all limits remain unchanged; Query/Support is a separate focused draft.
 Nine sync and eleven rt authority cases pass; actual registry1904/4096 and route376/512
 guards pass. Full integration remains pending. See
 [the inherited defect, accounting and scoped evidence](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).

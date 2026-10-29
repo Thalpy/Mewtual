@@ -1,9 +1,28 @@
 # Control7 Query/Support operational slice
 
-29 October 2026. Implementation draft; **all new code/tests are UNRUN** at this
-snapshot. Early actual-path adversarial review found no remaining confirmed
-blocker/high after the three-submission correction. Formatting parsed the owned
-files; actual layouts, focused execution, strict lint and integration are pending.
+29 October 2026. Implementation draft, OFF. Ten focused tests PASS at snapshot
+`f60d6bab` (4.78s, Windows, `cargo test -p catcoms-sync --all-features --lib
+admitted_control -j1 -- --test-threads=1 --nocapture`). The current replacement-
+bridge/epoch regressions and helper-wrap correction are **UNRUN**. Early actual-
+path review corrected three submissions and the final original-helper proof.
+The remaining full Group accounting defect below prevents a coherent payment
+claim; strict lint, final review and complete integration are still pending.
+
+First compilation found adapter visibility/type/test-trait issues; the next found
+one missing Result annotation. After those corrections,4 tests passed and6 failed
+at fixture setup because the restricted transport omitted `request_connected`.
+Delegating only permitted edges to the actual Mem driver produced the10-test
+green run. No rejection/positive assertion or deadline was weakened.
+
+Measured new graphs are record6992/8192, table1344/4096, ledger3888/8192,
+wrapper1088/4096, actual execution future224, prepared88, shared completion264 and
+scheduler inline104. Actual enclosing Group304, ExistingHelper216, ExistingSource184,
+Runtime BTree tuple40, Resources Counts128/bucket tuple160/service24 expose an
+inherited fixed-fee gap: the complete constructor/Arc/BTree/hash-growth invoice is
+about2730 plus small handles against1024. Removing the new fields still exceeds
+1024. Raising the fee alone would not settle escaping ledger Arcs or retained
+empty Resources HashMap backing. Their separate custody correction is required;
+neither current Query tests nor the earlier route-registry tests prove it solved.
 
 The production kind28 dispatcher selects a separate Control7 signed/envelope
 grammar after authenticating its current connected requester. Existing Body,
@@ -45,7 +64,8 @@ count mechanism. Separate paid fixed backing bounds Source32/helper64/cache32.
 Exact duplicates retain one original signed response, payer and remaining budget.
 Shared Forward4, routes64, metadata512 and completion backlog8 remain aggregate
 across both families. Paid Control completion indirection preserves the old inline
-variant footprint. Actual retained/enclosing graphs still need execution evidence.
+variant footprint. New-family graph guards pass focused execution; the enclosing
+inherited Group/Resources invoice and lifetime gap above remains open.
 
 Authenticated Control service, including duplicates, additionally consumes shared
 process burst64/refill8 and group burst16/refill2 per250ms; periods preserve

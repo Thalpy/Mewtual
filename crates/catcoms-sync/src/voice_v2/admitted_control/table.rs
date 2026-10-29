@@ -273,7 +273,7 @@ impl Queries {
         // source's cursor prevents the first two busy helpers pinning it forever.
         let rows = self.0.get().rows.lock().unwrap_or_else(|e| e.into_inner());
         let mut candidates: [Option<Owner>; 2] = [None, None];
-        for pass in 0..2 {
+        for pass in 0..3 {
             for row in rows.iter() {
                 let peer = row.object().metadata().target();
                 let Role::Query(query) = &row.get().role else {
@@ -285,8 +285,16 @@ impl Queries {
                         .iter()
                         .flatten()
                         .any(|owner| owner.object().metadata().target() == peer)
-                    || (pass == 0 && after.is_some_and(|last| peer <= last))
-                    || (pass == 1 && after.is_none_or(|last| peer > last))
+                    // Other helpers after the cursor, then wrapped earlier
+                    // helpers, then the last-used one only as a fallback. An
+                    // insertion-ordered wrap must not choose that same busy
+                    // helper ahead of a lower-sorting compatible replacement.
+                    || match (after,pass) {
+                        (None,0) => false, (None,_) => true,
+                        (Some(last),0) => peer <= last,
+                        (Some(last),1) => peer >= last,
+                        (Some(last),_) => peer != last,
+                    }
                     || row
                         .features_at(wall, mono)
                         .is_none_or(|features| features & 1 == 0)

@@ -1,12 +1,14 @@
 # Mewtual; Handover
 
-## Control7 Query/Support snapshot (29 October; UNRUN, OFF)
+## Control7 Query/Support snapshot (29 October; focused draft, OFF)
 
-The new separately typed production Source/kind28 ingress/helper draft and its
-restricted A–B–C dispatch/adversarial regressions are unrun. Early actual-path
-review corrected Source attempts to3 and found no remaining confirmed high/blocker;
-final review, actual layouts, focused tests, strict lint and complete integration
-remain pending. [Exact ownership, fees, API and remaining V2 work](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+Ten focused cases pass atf60d6bab, including actual restricted A–B–C dispatch,
+unjoined B, q2/lateq1, duplicates/flood, expiry/old grammar, actual historical-owner
+return and3-submission exhaustion. New-family graph guards pass. Replacement-D/
+epoch additions are unrun. The measured inherited Group1024 invoice and escaping
+ledger/Resources-backing custody gap is open; raising only its fee is insufficient.
+Strict lint/final review/full integration remain pending.
+[Exact ownership, fees, API and remaining V2 work](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
 
 ## Shared route registry custody prerequisite (29 October; focused passes)
 
