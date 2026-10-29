@@ -29,7 +29,8 @@ dispatch remain absent; legacy R6 remains open. The reviewed inactive-core exten
 separates reusable member authority from approval for one exact moderation action. Governance,
 owner succession and offline revocation policy are not established by the current fixture witnesses.
 Voice V2 remains disabled and incomplete. External download resume is outside this continuation.
-## Exact typed moderation approval extension (29 October; focused/full gates pending)
+
+## Exact typed moderation approval extension (29 October; full gates pending)
 
 The integrated replication-only continuation adds opaque exact positive Delete approvals and retryable
 missing-approval state. Reusable DELETE_ANY cannot authorize cross-author deletion; existing own
@@ -39,7 +40,9 @@ original action/snapshot bytes and restore API stay unchanged. The fixture verif
 and pinned-issuer signatures, and fresh restore needs explicit approval resupply. No producer,
 authority archive, native/network integration or activation is added; production R6 remains open.
 Scoped formatting/diff checks pass. Design and actual-diff adversarial reviews have no remaining
-findings. The eight added regressions await primary execution; focused/full validation remains pending.
+findings. All 26 typed-core tests pass at `37580408` (47.60s), including the eight new approval
+regressions and the 20/50-writer partition/restart corpus. The subsequent comment-only change does
+not alter runtime behavior. Complete backend gates are running serially; their results remain pending.
 
 
 ## Inactive typed-chat core reviewed (29 October; combined gates pending)

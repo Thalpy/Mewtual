@@ -125,7 +125,7 @@ there is no automatic promotion into the new authenticated semantic namespace.
 
 ## Verification at this draft checkpoint
 
-All17 focused tests pass (50.38s), including the parameterized20/50-writer,
+The initial 17 focused tests passed (50.38s), including the parameterized20/50-writer,
 five-bubble corpus. They use genuine deterministic Ed25519 fixtures, not real
 MLS/native/network authority. Scoped Rust formatting and diff checks pass.
 
@@ -140,7 +140,7 @@ with WorkLimit before the traversal was bounded at the target Create, then passe
 Strict changed-crate Clippy passes. A broader affected-crate run was intentionally
 stopped while unchanged Studio/registry stress cases ran, so the new durable
 mutation draft could be compiled. Its partial output is not a
-complete pass. Complete Root/native/frontend validation remains pending for the combined text-chat
+complete pass. Complete Root/native validation remains pending for the combined text-chat
 change; focused results do not replace it. A later genuine alternate-nonce signature
 vector passes its focused test (one test, 0.05s): real verification accepts both
 signatures over identical semantics, opposite orders retain one deterministic
@@ -149,14 +149,16 @@ replace valid evidence. Its read-only re-review is clear. Additional malformed-c
 and wide-fanout cases remain explicit coverage follow-ups.
 No executed result from earlier Main inputs covers this new core.
 
-## Exact moderation approval extension (29 October; validation pending)
+## Exact moderation approval extension (29 October; full validation pending)
 
-The isolated continuation adds exact positive approvals without changing realm/action/CID signing
+The integrated continuation adds exact positive approvals without changing realm/action/CID signing
 domains, action/page/snapshot bytes, DocTypes or any live native/network producer. The updated
 cross-author Delete contract deliberately changes earlier permanent refusal into pending approval
 where ordinary SELF_DELETE authority exists. Own edits/deletes, causal coverage and signed history
 remain under their existing rules. New regressions cover both authority/approval orders, delayed
 Create and dependent wake, scope/signer/basis/grant/nonce/parent binding, genuine bad signatures/pins,
 normalized positive duplicates, proof-only and bare-rights controls, bounded entry storage, byte-exact
-snapshot/restart and real alternate Delete signatures sharing one approval. Those regressions have
-not run in this preparation checkout; primary owns focused and complete suites after review.
+snapshot/restart and real alternate Delete signatures sharing one approval. All 26 typed-core tests,
+including the eight new approval regressions, pass at `37580408` (47.60s). Design and actual-diff
+reviews are clear; the subsequent comment-only change preserves runtime behavior. The primary is
+running complete backend gates on the combined source; these focused results do not replace them.
