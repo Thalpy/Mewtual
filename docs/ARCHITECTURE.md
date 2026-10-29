@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Confirmation-row allocation correction (29 October)
+
+The integrated fixed action now measures 1,008 bytes and its admission receipt
+576 bytes. Their 1,584-byte overlap exceeds the former 1,536-byte chain row.
+The chain therefore prepays 2 KiB per row (6 KiB more across twelve rows), with
+the same group/process ceilings, positions, attempts and deadlines. A production
+guard checks both admission and start receipt composition before any metadata
+payment, packet allocation or slot reservation. The regression preserves the
+complete original formulas and proves that the old allowance refuses without
+charges or position consumption. Other owners' 1,536-byte allowances are separate.
+Earlier dated row measurements below describe their original checkpoints.
+
 ## Issuer-bound native call activation (29 October; private, inactive)
 
 The actual Root issuer prepares an immutable admitted call profile before granting any
@@ -909,7 +921,8 @@ The maximum AAD is579B, with37B of new round/profile metadata. The complete decl
 peak is188,521/196,608B, including two Lower owners, retained action inputs and maximum engine.
 Ready's maximum signed object is692B and declared peak32,644/32,768B. No group, row, action,
 reserve or stage-count limit increased. Confirmation history stores only its three-case role,
-so unrelated SDP enum payloads do not consume the original1536B confirmation row.
+so unrelated SDP enum payloads did not consume that checkpoint's 1536B confirmation
+row. The 29 October compiled guard and 2 KiB fee above supersede that allowance.
 
 This establishes wire/admission isolation only. Fresh rounds after old Finish expiry, typed
 native/browser SDP/RTC, operational scheduling, compaction, relay and acceptance remain open.
@@ -1685,7 +1698,8 @@ token preparation; exact retries return original admission history without creat
 decrypt. The fixed receipt owns original room/call/pair/chain/member/effect custody, without an
 action, input, engine or Workflow. Original Root reply-route authority independently fences epoch
 and connection changes. Consumed tokens and successful confirmation do not erase admission ACKs.
-The receipt and its actual effect allocation share the original 1,536-byte action row; the fixed
+At that checkpoint the receipt and its actual effect allocation shared a 1,536-byte action row;
+the 29 October compiled growth correction above now requires 2 KiB per chain row. The fixed
 metadata remains 2 KiB. These structural guards exclude allocator slack and framework copies.
 
 Protected mode is selected only for a pristine native pair and stays selected after a capacity

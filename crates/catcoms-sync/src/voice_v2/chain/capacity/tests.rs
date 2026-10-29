@@ -28,6 +28,35 @@ fn assert_positions_returned(slots: &Arc<slots::Slots>, packets: &PacketSlots) {
 }
 
 #[test]
+fn undersized_confirmation_row_refuses_before_payment_allocation_or_position_debit() {
+    let pool = Arc::new(Resources::default());
+    let slots = Arc::new(slots::Slots::default());
+    let packets = PacketSlots::new();
+    let group = binding(1).scope.group;
+    for allowance in [0, 1536, usize::MAX] {
+        let observed = std::cell::Cell::new(false);
+        let refused = ChainCapacity::reserve_with_row_bytes(
+            pool.clone(),
+            group,
+            true,
+            slots.clone(),
+            &packets,
+            allowance,
+            || observed.set(true),
+        );
+        assert_eq!(refused.err(), Some(VoiceError::Capacity));
+        assert!(!observed.get(), "metadata payment hook must not run");
+        assert_eq!(pool.counts(), (0, 0));
+        assert_positions_returned(&slots, &packets);
+    }
+    let funded = reserve(&pool, &slots, &packets);
+    assert!(funded.inner.is_some());
+    drop(funded);
+    assert_positions_returned(&slots, &packets);
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
 fn payment_precedes_packet_allocation_and_each_refusal_returns_exact_original_owners() {
     let pool = Arc::new(Resources::default());
     let slots = Arc::new(slots::Slots::default());

@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Full backend validation found an undersized confirmation row (29 October)
+
+The full Root run failed `hello_receipt_and_action_layouts_fit_the_original_single_row`:
+the compiled 1,008-byte action plus 576-byte receipt exceeds the 1,536-byte row.
+That sync unit binary passed 1,395 other tests. This is a real accounting failure,
+not a waived assertion. The correction keeps the full formulas, raises only the
+chain row to 2 KiB and adds a production preallocation guard plus a regression
+for the old allowance's zero-charge/zero-position refusal. All 120 focused chain
+tests pass; the complete rerun remains pending and the backend gate stays open. Strict Root
+Clippy, formatting, deterministic-dependency checking and dependency audit passed
+before this correction. Native fixture recovery is integrated below but unrun.
+
 ## Native activation and mailbox integration (29 October; inactive, validation in progress)
 
 This local continuation integrates issuer-bound call activation `f4e75ea1`, private

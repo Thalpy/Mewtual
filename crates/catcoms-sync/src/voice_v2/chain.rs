@@ -17,7 +17,10 @@ use super::{CallLease, DeviceId, Nonce, Scope, VoiceError};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-pub(super) const ROW_BYTES: usize = 1536;
+// The compiled action (1,008 bytes) plus admission receipt (576 bytes) exceeds
+// the old 1.5 KiB row. Reserve the complete 2 KiB row, including every receipt/
+// action term; group/process limits and row/attempt counts remain unchanged.
+pub(super) const ROW_BYTES: usize = 2048;
 // LOW Ready uses no action position. Its plain history fee also covers a conservative
 // complete shared-map node allowance, including internal edges. Two unused byte rows
 // remain after ten confirmation rows; the two SDP slots get record bytes from Exchange.
