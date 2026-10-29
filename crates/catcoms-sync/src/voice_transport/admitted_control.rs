@@ -221,7 +221,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Err(_) => (Status::Refused, [0; 32]),
             Ok(envelope) => {
                 let hash = envelope.object().hash();
-                let admitted = (|| {
+                let admitted = (|| -> Result<Status, VoiceError> {
                     let m = envelope.object().metadata();
                     let context = self.voice_v2_context(m.scope().room)?;
                     let room = self.voice_room_authority(context.scope.room)?;

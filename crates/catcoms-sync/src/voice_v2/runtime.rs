@@ -24,6 +24,15 @@ const CHILDREN: usize = 64;
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
 mod admitted_control;
+#[cfg(test)]
+pub(crate) fn admitted_control_group_inventory_for_test() -> (usize, usize, usize, usize) {
+    (
+        std::mem::size_of::<Group>(),
+        std::mem::size_of::<super::helper::HelperLedger>(),
+        std::mem::size_of::<super::source::SourceLedger>(),
+        std::mem::size_of::<([u8; 32], Arc<Group>)>(),
+    )
+}
 mod local;
 mod ready_source;
 pub(in crate::voice_v2) use local::EpochObservation;

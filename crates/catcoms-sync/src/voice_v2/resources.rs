@@ -72,6 +72,14 @@ struct ControlService {
     tokens: u64,
     initialized: bool,
 }
+#[cfg(test)]
+pub(crate) fn admitted_control_counter_inventory_for_test() -> (usize, usize, usize) {
+    (
+        std::mem::size_of::<Counts>(),
+        std::mem::size_of::<([u8; 32], Counts)>(),
+        std::mem::size_of::<ControlService>(),
+    )
+}
 impl ControlService {
     fn spend(&mut self, now: u64, burst: u64, refill: u64) -> bool {
         if !self.initialized {

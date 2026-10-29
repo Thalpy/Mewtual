@@ -398,6 +398,16 @@ async fn admitted_control_actual_queries_and_support_cross_only_restricted_unjoi
     .await;
 }
 
+#[test]
+fn admitted_control_0_measures_real_enclosing_graphs_without_assuming_inherited_fee_headroom() {
+    let new = control::inventories_for_test();
+    let group = voice_v2::runtime::admitted_control_group_inventory_for_test();
+    let counter = voice_v2::resources::admitted_control_counter_inventory_for_test();
+    eprintln!("Control7 graphs record/table/ledger {new:?}; enclosing Group/ExistingHelper/ExistingSource/BTreeEntry {group:?}; Counts/HashBucket/Service {counter:?}; wrapper {}",wrapper_graph::<Chain>());
+    assert!(new.0 <= 8192 && new.1 <= 4096 && new.2 <= 8192);
+    assert!(wrapper_graph::<Chain>() <= 4096);
+}
+
 #[tokio::test]
 async fn admitted_control_q2_supersedes_before_busy_publication_and_late_q1_cannot_install_support()
 {
