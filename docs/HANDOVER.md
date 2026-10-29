@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Integrated text-chat validation (29 October; native rerun pending)
+## Integrated text-chat validation (29 October; local gates passed)
 
 The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/
 Stop path. All findings from their actual-diff reviews have been corrected and re-reviewed. This
@@ -29,9 +29,12 @@ Capacity refusal. The latter closes the six-client fixture gate and causes 27 fu
 The reviewed corrections are `a5d42d06`, `1de41193`, `e5f4abe3` and `84590bab`. All **32 focused
 native tests** pass afterward: 11 error-contract tests, six durable-chat tests, the continuity
 assertion, a deterministic held-row oracle regression, all 12 reconnect regressions and the original
-multi-peer HTTP/TCP browser scenario. Full native rerun, refreshed native lint, build and startup
-remain pending. Earlier notes describe their own checkpoints; the failed full run is not a green
-gate. The primary owns complete runs and keeps Rust compilation serialized.
+multi-peer HTTP/TCP browser scenario. The complete native rerun at `4758801a` passes **1,020 tests**
+with zero failures/ignored across four result groups. Native strict all-target Clippy passes
+(3m17s), explicit native check passes (2m09s), build passes (10m47s), and the actual application
+startup gate observes its completion marker. Earlier notes describe their own checkpoints; the
+failed first run was repaired and rerun rather than treated as a pass. Hosted checks remain
+separate evidence; local results do not assert that every hosted job has finished.
 
 Production historical-authority issuance/archive, typed transport/encryption, migration and live
 dispatch remain absent; legacy R6 remains open. The reviewed inactive-core extension below
@@ -39,6 +42,13 @@ separates reusable member authority from approval for one exact moderation actio
 owner succession and enforcement of removal decisions remain unimplemented; fixture witnesses do
 not establish those production guarantees.
 Voice V2 remains disabled and incomplete. External download resume is outside this continuation.
+
+The user reaffirmed that ordinary chat conflicts resolve automatically and non-destructively,
+without user repair. The admin panel must expose the full retained ledger: originals, every edit,
+deletion, concurrent branch and decision. The previously selected exception remains unproven late
+actions from removed members, held for review while verified history is preserved. A separate
+inactive frontend checkpoint implements held-case reads only; it is not the full ledger view and
+is not wired into App. Production archive/reads, migration and the complete admin view remain open.
 
 The user has now selected the late-post policy: retain verified history and hold unproven late
 posts from removed members for approval. They also requested held posts and approval/rejection
