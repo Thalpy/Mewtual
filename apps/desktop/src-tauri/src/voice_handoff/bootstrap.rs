@@ -73,8 +73,9 @@ struct State {
 /// actual debt/return state here; an empty Existing Slot is not that evidence.
 enum AdmittedStage {
     BootstrapOnly,
-    /// A first Cancel is negative-only: no Box/task/RPC or Root mint exists.
-    CancelledBeforeStart,
+    /// Checked monotone pre-entry cancellation through this generation creates
+    /// no Box/task/RPC or Root mint; late Register cannot revive that intent.
+    CancelledBeforeStart(u64),
     Admission(admitted_slot::PaidSlot),
 }
 impl State {
@@ -860,14 +861,12 @@ impl Registry {
 /// Native-only immutable control routing. Retain the actual row, Session and paid public
 /// output across IO; copied session IDs alone cannot create this owner or authorize actions.
 /// Distinct admitted routing deliberately has no Existing selected-owner accessor.
-#[allow(dead_code)] // Operation31 is a separate, not-yet-implemented consumer.
 #[derive(Clone)]
 pub(in crate::voice_handoff) struct AdmittedRoute {
     row: Arc<Row>,
     session: Arc<Session>,
     public: Arc<SetupOutput>,
 }
-#[allow(dead_code)]
 impl AdmittedRoute {
     pub(in crate::voice_handoff) fn selected(
         &self,

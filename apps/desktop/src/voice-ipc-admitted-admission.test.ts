@@ -50,6 +50,14 @@ test("canonical successor/superseded observations never wrap or forge Returned",
   assert.equal(decodeVoiceAdmittedAdmission(reply(8, 1n, 2n, 1n, 0), { kind: "observe", generation: "1" }).state, "superseded");
   for (const bytes of [reply(3, 2n, 1n, 1n, 0), reply(5, 1n, 1n, 0n), reply(8, 1n, 1n, 1n)]) assert.throws(() => decodeVoiceAdmittedAdmission(bytes, { kind: "observe", generation: bytes[9] === 2 ? "2" : "1" }));
 });
+test("cancellation is Closing before actual return and lost-next-entry cancellation is noncreating", () => {
+  assert.equal(decodeVoiceAdmittedAdmission(reply(4, 1n, 1n, 1n, 0), { kind: "cancel", generation: "1" }).state, "closing");
+  assert.throws(() => decodeVoiceAdmittedAdmission(reply(2, 1n, 1n, 1n, 0), { kind: "cancel", generation: "1" }));
+  const returned = decodeVoiceAdmittedAdmission(reply(5, 2n, 2n, 2n, 0), { kind: "cancel", generation: "2" });
+  assert.equal(returned.state, "returned");
+  assert.equal(returned.canonical, "2");
+  assert.equal(returned.floor, "2");
+});
 test("intrinsic fixed typed-array view ignores hostile own properties and species", () => {
   const bytes = reply(3, 1n, 1n, 0n, 0); let reads = 0;
   for (const key of ["length", "byteLength", "byteOffset", "buffer"]) Object.defineProperty(bytes, key, { get() { reads++; throw new Error("shadow"); } });

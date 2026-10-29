@@ -87,6 +87,10 @@ struct Slot {
     recovering: bool,
     #[cfg(test)]
     unwind_reclamation: bool,
+    #[cfg(test)]
+    cancel_after_accept: bool,
+    #[cfg(test)]
+    cancel_before_attach: bool,
 }
 impl Slot {
     fn close(&mut self) {
@@ -118,6 +122,8 @@ impl Slot {
             && self.capacity.is_none()
             && self.parent.is_none()
             && self.invocation.is_none()
+            && !self.recovering
+            && self.emergency.is_none()
         {
             return Ok(());
         }
@@ -132,7 +138,7 @@ impl AdmittedStage {
     }
     pub(super) fn collected(&self) -> bool {
         match self {
-            Self::BootstrapOnly | Self::CancelledBeforeStart => true,
+            Self::BootstrapOnly | Self::CancelledBeforeStart(_) => true,
             Self::Admission(slot) => slot.body.as_ref().expect("original Slot").drained(),
         }
     }
@@ -147,6 +153,12 @@ fn slot_mut(state: &mut State) -> Option<&mut Slot> {
     match state.admitted_stage.as_mut()? {
         AdmittedStage::Admission(paid) => paid.body.as_deref_mut(),
         _ => None,
+    }
+}
+fn pre_task_floor(state: &State) -> u64 {
+    match state.admitted_stage.as_ref() {
+        Some(AdmittedStage::CancelledBeforeStart(through)) => *through,
+        _ => 0,
     }
 }
 
@@ -188,24 +200,23 @@ impl AdmittedRoute {
     pub(super) fn admitted_snapshot(&self, requested: u64) -> Result<Snapshot, Refused> {
         let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = slot(&state) else {
-            let cancelled = matches!(
-                state.admitted_stage,
-                Some(AdmittedStage::CancelledBeforeStart)
-            );
-            if requested > if cancelled { 2 } else { 1 } {
+            let cancelled = pre_task_floor(&state);
+            if requested > cancelled && cancelled.checked_add(1) != Some(requested) {
                 return Err(Refused::Bounds);
             }
             return Ok(Snapshot {
                 state: if state.closed || !self.selected().lease().is_live() {
                     View::Closed
-                } else if cancelled && requested <= 1 {
+                } else if requested != 0 && requested < cancelled {
+                    View::Superseded
+                } else if cancelled != 0 && (requested == 0 || requested == cancelled) {
                     View::Returned
                 } else {
                     View::Unstarted
                 },
                 requested,
-                canonical: u64::from(cancelled),
-                cancelled: u64::from(cancelled),
+                canonical: cancelled,
+                cancelled,
                 incarnation: None,
             });
         };
@@ -227,11 +238,14 @@ impl AdmittedRoute {
                 Phase::Closed => View::Closed,
             }
         };
-        let view = if !s.uncertain
-            && ((s.closed || state.closed || state.effects_closed)
-                && !matches!(s.phase, Phase::Closed)
-                || view == View::Reserved && s.capacity.as_ref().is_none_or(|c| !c.is_current()))
-        {
+        let canceled = (requested == 0 || requested == s.generation)
+            && s.cancelled >= s.generation
+            && !matches!(s.phase, Phase::Returned | Phase::Closed | Phase::Uncertain);
+        let closing =
+            (s.closed || state.closed || state.effects_closed) && s.phase != Phase::Closed;
+        let stale_reserved =
+            view == View::Reserved && s.capacity.as_ref().is_none_or(|c| !c.is_current());
+        let view = if !s.uncertain && (closing || canceled || stale_reserved) {
             View::Closing
         } else {
             view
@@ -247,7 +261,7 @@ impl AdmittedRoute {
                 .map(AdmittedAdmissionSession::incarnation),
         })
     }
-    pub(super) fn admitted_control(
+    pub(in crate::voice_handoff) fn admitted_control(
         &self,
         context: &Context,
         request: Request,
@@ -260,32 +274,45 @@ impl AdmittedRoute {
             }
             Kind::Observe => self.recover_admitted(),
             Kind::Register => register(context, self, request.generation)?,
-            Kind::Cancel => {
-                let mut state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(s) = slot_mut(&mut state) {
-                    s.validate(request.generation)?; // before ANY negative floor
-                    if request.generation > s.generation {
-                        return Err(Refused::Bounds);
-                    }
-                    s.cancelled = s.cancelled.max(request.generation);
-                    if let Some(original) = &s.registration {
-                        original
-                            .observer()
-                            .cancel_through(request.generation)
-                            .map_err(|_| Refused::Bounds)?;
-                    }
-                } else if request.generation != 1 {
-                    return Err(Refused::Bounds);
-                } else {
-                    state.admitted_stage = Some(AdmittedStage::CancelledBeforeStart);
-                }
-                drop(state);
-                self.row.admission_changed.notify_waiters();
-            }
+            Kind::Cancel => self.cancel_generation(request.generation)?,
         }
         self.admitted_snapshot(request.generation)
     }
-    pub(super) fn nudge_admitted(&self) {
+    fn cancel_generation(&self, g: u64) -> Result<(), Refused> {
+        if g == 0 {
+            return Err(Refused::Bounds);
+        }
+        let mut state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = slot_mut(&mut state) {
+            s.validate(g)?; // validates skips/MAX and actual prior return BEFORE the floor
+            if g > s.generation {
+                // The exact next request may have been lost BEFORE native entry.
+                // This is negative advancement only: no task/RPC/mint is created.
+                s.generation = g;
+                s.phase = Phase::Returned;
+                s.retry = false;
+            }
+            s.cancelled = s.cancelled.max(g);
+            if let Some(original) = &s.registration {
+                original
+                    .observer()
+                    .cancel_through(g)
+                    .map_err(|_| Refused::Bounds)?;
+            }
+        } else {
+            let through = pre_task_floor(&state);
+            if g > through && through.checked_add(1) != Some(g) {
+                return Err(Refused::Bounds);
+            }
+            if g > through {
+                state.admitted_stage = Some(AdmittedStage::CancelledBeforeStart(g));
+            }
+        }
+        drop(state);
+        self.row.admission_changed.notify_waiters();
+        Ok(())
+    }
+    pub(in crate::voice_handoff) fn nudge_admitted(&self) {
         self.recover_admitted();
         {
             let mut state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -443,6 +470,13 @@ fn register_with(
             drop(commit);
             true
         } else {
+            let through = pre_task_floor(&state);
+            if g <= through {
+                return Ok(());
+            } // late Register cannot revive canceled intent
+            if through.checked_add(1) != Some(g) {
+                return Err(Refused::Bounds);
+            }
             false
         }
     };
@@ -450,14 +484,9 @@ fn register_with(
         route.row.admission_changed.notify_waiters();
         return Ok(());
     }
-    let initial_cancelled = {
-        let state = route.row.state.lock().unwrap_or_else(|e| e.into_inner());
-        matches!(
-            state.admitted_stage,
-            Some(AdmittedStage::CancelledBeforeStart)
-        )
-    };
-    if g != if initial_cancelled { 2 } else { 1 } {
+    let initial_cancelled =
+        pre_task_floor(&route.row.state.lock().unwrap_or_else(|e| e.into_inner()));
+    if initial_cancelled.checked_add(1) != Some(g) {
         return Err(Refused::Bounds);
     }
     if task_layout_bytes() > TASK_BYTES || rpc_layout_bytes() > ADMISSION_RPC_BYTES {
@@ -490,7 +519,7 @@ fn register_with(
     let paid = PaidSlot {
         body: Some(Box::new(Slot {
             generation: g,
-            cancelled: u64::from(initial_cancelled),
+            cancelled: initial_cancelled,
             phase: Phase::Waiting,
             closed: false,
             uncertain: false,
@@ -505,6 +534,10 @@ fn register_with(
             recovering: false,
             #[cfg(test)]
             unwind_reclamation: false,
+            #[cfg(test)]
+            cancel_after_accept: false,
+            #[cfg(test)]
+            cancel_before_attach: false,
         })),
         _funding: funding,
     };
@@ -523,10 +556,7 @@ fn register_with(
             || state.effects_closed
             || state.browser_setup.is_some()
             || slot(&state).is_some()
-            || matches!(
-                state.admitted_stage,
-                Some(AdmittedStage::CancelledBeforeStart)
-            ) != initial_cancelled
+            || pre_task_floor(&state) != initial_cancelled
         {
             return Err(Refused::Binding);
         }
@@ -607,11 +637,21 @@ impl VoiceAdmittedAdmissionPublisher for Publisher {
             return Err(VoiceEndpointError::Protocol(VoiceError::RetryMismatch));
         }
         i.work = Some(work);
-        if closed || s.closed || s.cancelled >= s.generation {
-            Err(VoiceEndpointError::Stopped)
-        } else {
-            Ok(())
+        let refused = closed || s.closed || s.cancelled >= s.generation;
+        #[cfg(test)]
+        let cancel = (std::mem::take(&mut s.cancel_after_accept), s.generation);
+        drop(state);
+        if refused {
+            return Err(VoiceEndpointError::Stopped);
         }
+        // Deterministically reproduce a concurrent authenticated Cancel AFTER
+        // acceptance checks but BEFORE real enqueue. This uses the actual
+        // negative API, so Root observes its genuine original observer floor.
+        #[cfg(test)]
+        if cancel.0 {
+            self.route.cancel_generation(cancel.1).unwrap();
+        }
+        Ok(())
     }
     fn completed(
         mut self: Box<Self>,
@@ -942,7 +982,7 @@ fn finish(context: &Context, route: &AdmittedRoute) -> Result<(), Refused> {
                     let old = {
                         let mut state = route.row.state.lock().unwrap_or_else(|e| e.into_inner());
                         let s = slot_mut(&mut state).ok_or(Refused::Binding)?;
-                        if error != VoiceError::Capacity {
+                        if error != VoiceError::Capacity && s.cancelled < s.generation {
                             s.close();
                         }
                         s.phase = Phase::Waiting;
@@ -957,6 +997,13 @@ fn finish(context: &Context, route: &AdmittedRoute) -> Result<(), Refused> {
             // Keep candidate ownership in the finisher BEFORE any fallible/native
             // callback boundary. Busy restores this SAME value, never requeues Root.
             fin.outcome = Some(Outcome::Candidate(capacity, parent.take()));
+            {
+                let state = route.row.state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = slot(&state).ok_or(Refused::Binding)?;
+                if s.closed || s.cancelled >= s.generation {
+                    return Ok(());
+                }
+            }
             let live = context.upgrade().ok_or(Refused::Binding)?;
             if let Some(Outcome::Candidate(capacity, parent)) = fin.outcome.as_mut() {
                 if parent.is_none() {
@@ -969,6 +1016,17 @@ fn finish(context: &Context, route: &AdmittedRoute) -> Result<(), Refused> {
                             )
                             .map_err(|_| Refused::Capacity)?,
                     );
+                }
+            }
+            #[cfg(test)]
+            {
+                let cancel = {
+                    let mut state = route.row.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = slot_mut(&mut state).expect("original Slot");
+                    (std::mem::take(&mut s.cancel_before_attach), s.generation)
+                };
+                if cancel.0 {
+                    route.cancel_generation(cancel.1).unwrap();
                 }
             }
             let _commit = live
@@ -1084,7 +1142,9 @@ async fn run(context: Context, custody: Custody) {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
                         if let Some(s) = slot_mut(&mut state) {
-                            s.close();
+                            if s.cancelled < s.generation {
+                                s.close();
+                            }
                         }
                     }
                     break;
@@ -1127,7 +1187,9 @@ async fn run(context: Context, custody: Custody) {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = slot_mut(&mut state) {
-                        s.close();
+                        if s.cancelled < s.generation {
+                            s.close();
+                        }
                     }
                 }
             }
@@ -1180,7 +1242,7 @@ fn task_layout_bytes() -> usize {
 }
 /// Synchronous31 frames coexist with the paid HTTP future. Actual Slot/task and
 /// Actor argument graphs have their own independently checked contributions.
-pub(super) fn control_layout_bytes() -> usize {
+pub(in crate::voice_handoff) fn control_layout_bytes() -> usize {
     std::mem::size_of::<LiveContext>()
         + std::mem::size_of::<Handle>()
         + std::mem::size_of::<Snapshot>()
@@ -1221,5 +1283,14 @@ impl AdmittedRoute {
         slot_mut(&mut state)
             .expect("actual original Slot")
             .unwind_reclamation = true;
+    }
+    pub(super) fn cancel_admitted_race_for_test(&self, after_accept: bool) {
+        let mut state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = slot_mut(&mut state).expect("actual original Slot");
+        if after_accept {
+            s.cancel_after_accept = true;
+        } else {
+            s.cancel_before_attach = true;
+        }
     }
 }

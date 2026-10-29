@@ -1,5 +1,6 @@
 //! Inert physical bootstrap for an ORIGINAL admitted published browser key.
-//! No operation31/ACK/worker or agreement/capacity permission exists in this leaf.
+//! The separate admitted Slot consumes operation31; this bootstrap publishes no
+//! agreement, RoundGate, role, Ready or RTC permission.
 use super::*;
 use crate::voice_authority::AdmittedPublishedKey;
 use crate::voice_call_activation::Handle;
@@ -22,7 +23,6 @@ impl Registry {
                 })
             })
     }
-    #[allow(dead_code)] // Future operation31 must use this typed route, never route().
     pub(in crate::voice_handoff) fn admitted_route(
         &self,
         slot: u8,

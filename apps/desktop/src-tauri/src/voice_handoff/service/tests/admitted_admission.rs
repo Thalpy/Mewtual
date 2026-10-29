@@ -62,7 +62,7 @@ async fn setup_admitted() -> (
         .admitted_publication_task_for_cleanup(&owner, [9; 32])
         .unwrap();
     guarded(async {
-        while !pending.task_returned() {
+        while !pending.fixture_task_returned() {
             tokio::task::yield_now().await;
         }
     })

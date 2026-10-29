@@ -311,3 +311,133 @@ async fn admitted_actual_reclamation_unwind_returns_owned_candidate_without_a_re
     );
     cleanup(f, clock, handle, route).await;
 }
+
+#[tokio::test]
+async fn next_generation_cancel_before_native_entry_is_noncreating_and_late_register_cannot_revive()
+{
+    let (f, clock, handle, route, context) = bounded(setup()).await;
+    command(&route, &context, Kind::SetupAck, 0);
+    let before = route.selected().resources().counts();
+    for g in 1..=3 {
+        let canceled = command(&route, &context, Kind::Cancel, g);
+        assert_eq!(
+            (canceled.state, canceled.canonical, canceled.cancelled),
+            (View::Returned, g, g)
+        );
+        assert!(canceled.incarnation.is_none());
+        assert_eq!(
+            command(&route, &context, Kind::Register, g).state,
+            View::Returned
+        );
+        assert_eq!(
+            route.selected().resources().counts(),
+            before,
+            "negative advance allocates no task/Box/RPC"
+        );
+    }
+    assert!(route
+        .admitted_control(
+            &context,
+            Request {
+                kind: Kind::Cancel,
+                generation: 5
+            }
+        )
+        .is_err());
+    assert!(route
+        .admitted_control(
+            &context,
+            Request {
+                kind: Kind::Cancel,
+                generation: u64::MAX
+            }
+        )
+        .is_err());
+    assert_eq!(command(&route, &context, Kind::Observe, 3).cancelled, 3);
+    assert!(
+        handle.active(),
+        "negative per-generation cleanup preserves siblings/whole call"
+    );
+    command(&route, &context, Kind::Register, 4);
+    let first = observed(&route, 4, View::Reserved).await;
+    let incarnation = first.incarnation;
+    command(&route, &context, Kind::Cancel, 4);
+    observed(&route, 4, View::Returned).await;
+    // A browser's g5 Register was lost BEFORE entry: exact-next Cancel is a
+    // genuine negative fact, not a reason to mint g5 just to clean it up.
+    let canceled = command(&route, &context, Kind::Cancel, 5);
+    assert_eq!(
+        (canceled.state, canceled.canonical, canceled.cancelled),
+        (View::Returned, 5, 5)
+    );
+    assert_eq!(
+        command(&route, &context, Kind::Register, 5).state,
+        View::Returned
+    );
+    command(&route, &context, Kind::Register, 6);
+    assert_eq!(
+        observed(&route, 6, View::Reserved).await.incarnation,
+        incarnation
+    );
+    cleanup(f, clock, handle, route).await;
+}
+
+#[tokio::test]
+async fn canceled_waiting_snapshot_is_closing_until_actual_return_and_matches_v12_decoder_contract()
+{
+    let (f, clock, handle, route, context) = bounded(setup()).await;
+    command(&route, &context, Kind::SetupAck, 0);
+    // The actual physical Session already owns one Crypto lane. Fill its three
+    // remaining real lanes so Root returns Some(registration), Capacity.
+    let resources = route.selected().resources();
+    let group = route.selected().binding().scope.group;
+    let pressure: Vec<_> = (0..3)
+        .map(|_| resources.charge(group, 1, ResourceKind::Crypto).unwrap())
+        .collect();
+    command(&route, &context, Kind::Register, 1);
+    let waiting = bounded(async {
+        loop {
+            route.nudge_admitted();
+            let snapshot = route.admitted_snapshot(1).unwrap();
+            if snapshot.state == View::Waiting && snapshot.incarnation.is_some() {
+                break snapshot;
+            }
+            catcoms_rt::SystemClock
+                .sleep(std::time::Duration::from_millis(1))
+                .await;
+        }
+    })
+    .await;
+    // No await: this is the transient after the negative floor but before worker
+    // reclamation. Waiting+floor==g would contradict the closed browser grammar.
+    let canceled = command(&route, &context, Kind::Cancel, 1);
+    assert_eq!((canceled.state, canceled.cancelled), (View::Closing, 1));
+    assert_eq!(canceled.incarnation, waiting.incarnation);
+    assert_eq!(canceled.encode()[1], 4);
+    observed(&route, 1, View::Returned).await;
+    drop(pressure);
+    cleanup(f, clock, handle, route).await;
+}
+
+#[tokio::test]
+async fn actual_cancel_during_accepted_or_final_attachment_preserves_registration_for_successor() {
+    for after_accept in [true, false] {
+        let (f, clock, handle, route, context) = bounded(setup()).await;
+        command(&route, &context, Kind::SetupAck, 0);
+        command(&route, &context, Kind::Register, 1);
+        let original = observed(&route, 1, View::Reserved).await.incarnation;
+        command(&route, &context, Kind::Cancel, 1);
+        observed(&route, 1, View::Returned).await;
+        route.cancel_admitted_race_for_test(after_accept);
+        command(&route, &context, Kind::Register, 2);
+        let canceled = observed(&route, 2, View::Returned).await;
+        assert_eq!(canceled.incarnation, original);
+        assert!(handle.active());
+        command(&route, &context, Kind::Register, 3);
+        assert_eq!(
+            observed(&route, 3, View::Reserved).await.incarnation,
+            original
+        );
+        cleanup(f, clock, handle, route).await;
+    }
+}
