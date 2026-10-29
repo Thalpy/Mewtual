@@ -26,6 +26,9 @@ pub use catalog::{
     MemberCatalogView, MAX_MEMBER_CATALOG_CREDENTIAL_BYTES, MAX_MEMBER_CATALOG_PROBES,
 };
 
+mod owner_observation;
+pub use owner_observation::{LocalMembershipChange, LocalMembershipChangeKind};
+
 /// The result of adding a member: the joiner's Welcome, the Commit to fan out to
 /// existing members, and the epoch the commit was built at.
 #[derive(Debug, Clone)]

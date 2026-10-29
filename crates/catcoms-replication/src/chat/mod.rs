@@ -9,6 +9,7 @@
 mod action;
 mod authority;
 mod ledger;
+pub mod owner_facts;
 mod projection;
 mod storage;
 
