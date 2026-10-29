@@ -405,3 +405,13 @@ The external lineage inventory and native metadata/lifetime integration remain
 in progress; desktop context derivation has not been switched. New focused tests
 are unrun pending primary execution. Scoped formatting/static review is not a
 substitute for those tests or the required complete suites.
+
+The next dormant storage API supplies the bounded independent lineage file,
+reserved retirement footprint, exact mount observers, ordered initialization and
+explicit `Saved` versus `AlreadyCurrent` completion. Duplicate Current completion
+cannot rerun an old covering callback or revoke the unchanged owner. Negative
+repair refuses a superseded admission nonce even on the same physical mount.
+The raw fresh-attempt fixture issuer is compiled only in unit tests; production
+still needs the opaque live completion coupled to its original capture. No native
+caller or `ServerStore::open` activates these APIs yet. Its storage/fault/reopen
+regressions are also unrun; independent static review does not claim execution.

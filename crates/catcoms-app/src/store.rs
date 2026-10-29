@@ -47,7 +47,12 @@ pub(crate) fn studio_refused(
     }
 }
 
+mod chat_admission;
 mod chat_fences;
+pub use chat_admission::{
+    ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
+    ChatAdmissionPreparation, ChatAdmissionResolution, MAX_CHAT_ADMISSION_IDENTITIES,
+};
 mod creative_references;
 mod epoch_draft_archive;
 mod epoch_intents;
@@ -1307,6 +1312,42 @@ mod persistence {
             }
             atomic_write(&self.dir.join("chat-stop-fences.bin"), bytes)
         }
+        /// Independent current-admission fence; per-server deletion never removes this file.
+        pub(super) fn write_chat_admissions_record(&self, bytes: &[u8]) -> Result<(), AppError> {
+            #[cfg(test)]
+            if self
+                .chat_fence_pre_rename_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return atomic_write_with_hook(
+                    &self.dir.join("chat-admissions.bin"),
+                    bytes,
+                    |phase, staged| {
+                        if phase == AtomicWritePhase::TempSynced {
+                            fs::remove_file(staged)
+                                .expect("remove actual admission staging file before rename");
+                        }
+                    },
+                );
+            }
+            #[cfg(test)]
+            if self
+                .chat_parent_sync_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return atomic_write_with_hook_and_sync(
+                    &self.dir.join("chat-admissions.bin"),
+                    bytes,
+                    |_, _| {},
+                    |_| {
+                        Err(std::io::Error::other(
+                            "injected admission parent-sync failure after actual rename",
+                        ))
+                    },
+                );
+            }
+            atomic_write(&self.dir.join("chat-admissions.bin"), bytes)
+        }
         pub(super) fn write_ui_state_record(&self, bytes: &[u8]) -> Result<(), AppError> {
             atomic_write(&self.ui_state_path(), bytes)
         }
@@ -1523,6 +1564,8 @@ impl SavedLimitLoad {
 pub struct ServerStore {
     dir: PathBuf,
     keys: KeyHierarchy,
+    // Actual physical-mount custody and serialized admission lineage, never restored from bytes.
+    chat_mount: chat_admission::MountOwner,
     // Process-local freshness only, never wire authority. Replaced before any intent-file I/O;
     // budgets made from older scans (or another mounted vault) cannot authorize a new write.
     intent_generation: std::sync::Arc<()>,
@@ -1596,6 +1639,7 @@ impl ServerStore {
             creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,
+            chat_mount: chat_admission::MountOwner::new(),
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
             inventory_generation: std::sync::Arc::new(()),
@@ -2163,6 +2207,8 @@ impl ServerStore {
 
 impl Drop for ServerStore {
     fn drop(&mut self) {
+        // Close original publication/repair custody before any other destructor can wait.
+        self.chat_mount.revoke();
         // A blob handle may outlive its vault mount. It must not delete under stale pins after
         // a new mount has written metadata. This does not grant old handles new read authority.
         if let Ok(mut state) = self.creative_protection.lock() {
