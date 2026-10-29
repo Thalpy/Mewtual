@@ -328,7 +328,7 @@ enum PhysicalRoute {
     Admitted(AdmittedRoute),
 }
 impl PhysicalRoute {
-    fn session(&self) -> &Arc<super::channel::Session> {
+    fn session(&self) -> &super::channel::SessionRef {
         match self {
             Self::Existing(route) => route.session(),
             Self::Admitted(route) => route.session(),

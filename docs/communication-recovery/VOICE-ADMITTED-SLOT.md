@@ -122,7 +122,12 @@ These native cases are unrun.
 The primary's early actual-diff review found the canceled-Waiting snapshot and
 lost-next-entry cleanup defects; the fixes received a static re-review with no
 remaining blocker/high/medium finding in that cancellation delta.
-The independently owned paid RowRef/SessionRef prerequisite is not yet adopted.
+The independently owned paid RowRef/SessionRef prerequisite (`ed80b310`) is now
+adopted: Slot task return, typed route lookup, HTTP routing and fixture output
+retain body-only paired owners. No raw metadata/Session Arc can escape this path.
+The exhaustive Slot drain checks remain required before strong admitted owner
+retirement; actual-return markers do not replace them. This custody integration
+still requires material re-review and native compilation/measurement.
 Native measurements/tests/lint and complete
 backend/frontend/integration gates remain pending with the primary. Operational
 RoundGate binding/role trim/consumption, bilateral control, admitted KDF/tags8/9,

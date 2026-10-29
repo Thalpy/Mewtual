@@ -9,7 +9,7 @@ async fn guarded<T>(future: impl Future<Output = T>) -> T {
 async fn setup_admitted() -> (
     Fixture,
     crate::voice_call_activation::Handle,
-    Arc<SetupOutput>,
+    crate::voice_handoff::bootstrap::SetupOutputRef,
     Arc<Runtime>,
     Client,
 ) {

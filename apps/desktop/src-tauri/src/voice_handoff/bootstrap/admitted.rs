@@ -41,7 +41,7 @@ impl Registry {
             .ok_or(Refused::Binding)?;
         Self::admitted_row_route(row.clone()).ok_or(Refused::Binding)
     }
-    pub(super) fn admitted_row_route(row: Arc<Row>) -> Option<AdmittedRoute> {
+    pub(super) fn admitted_row_route(row: RowRef) -> Option<AdmittedRoute> {
         row.selected.admitted()?;
         let (session, public) = {
             let state = row.state.lock().unwrap_or_else(|e| e.into_inner());
