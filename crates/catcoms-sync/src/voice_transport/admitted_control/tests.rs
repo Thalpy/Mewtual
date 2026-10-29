@@ -187,7 +187,11 @@ impl Fixture {
     async fn new() -> Self {
         Self::build(3).await
     }
-    async fn build(count: usize) -> Self {
+    async fn build(count: u64) -> Self {
+        assert!(
+            matches!(count, 3 | 4),
+            "bounded three/four-node harness graph"
+        );
         let (_, mut original, _) = crate::tests::build_members(count).await;
         crate::tests::converge_and_publish_test_routes(&mut original);
         original[0]
