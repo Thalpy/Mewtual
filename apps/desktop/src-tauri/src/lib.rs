@@ -518,6 +518,9 @@ struct AppState {
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
     ui_session_commit: Arc<Mutex<()>>,
+    /// Bounded global custody for orphan chat Stops and a restored Actor's pre-registration
+    /// window. It does not allocate a map entry for arbitrary missing numeric server IDs.
+    chat_orphan_commit: Arc<Mutex<()>>,
     /// Short fence for synchronous actor-event emission only. Event consumers must not wait for
     /// `ui_session_commit`: its holder can be waiting for this same bounded event sink to drain.
     /// Never retain this guard across actor/store/registry awaits; lock crosses it separately.
@@ -13375,6 +13378,7 @@ struct ReloadedServer {
 /// lets the lifecycle test exercise the exact restore, blob attachment, route restoration and
 /// actor startup used in production with a deterministic in-memory transport.
 struct RestoredActor {
+    chat_fence_commit: tokio::sync::OwnedMutexGuard<()>,
     actor: ServerActor,
     events: mpsc::Receiver<catcoms_app::TracedEvent>,
     task: tokio::task::JoinHandle<()>,
@@ -13404,6 +13408,31 @@ where
 {
     let mut server = Server::restore(snapshot, transport, rng, clock, &record.display_name)
         .map_err(|error| error.to_string())?;
+    let chat_fence_commit = state.chat_orphan_commit.clone().lock_owned().await;
+    {
+        let mounted = state.store.lock().await;
+        let store = mounted
+            .as_ref()
+            .ok_or_else(|| "vault is not mounted during chat fence restore".to_string())?;
+        let registry = state.servers.lock().await;
+        // An actual fence may require a covering server save. Never let this private older
+        // restore overwrite the snapshot of a currently mounted live incarnation.
+        server.apply_retired_chat_fences(store, |bytes, rng| {
+            if registry.contains_key(&record.id) {
+                return Err(catcoms_sync::durable_chat::ChatSaveError::NotReplaced(
+                    "live conversation superseded fenced restore".into(),
+                ));
+            }
+            store
+                .save_server(record.id, bytes, rng)
+                .map_err(|error| match error {
+                    catcoms_app::AppError::CommittedButNotDurable(e) => {
+                        catcoms_sync::durable_chat::ChatSaveError::ReplacedNotDurable(e)
+                    }
+                    e => catcoms_sync::durable_chat::ChatSaveError::NotReplaced(e.to_string()),
+                })
+        })?;
+    }
     server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     // A newer network record can outlive a failed/older core snapshot. Its enum is provenance,
     // never a substitute for the authenticated group policy pin inside that snapshot.
@@ -13473,6 +13502,7 @@ where
     let (actor, events, task) = spawn(server);
     actor.open_channel(channel_id("general")).await;
     Ok(RestoredActor {
+        chat_fence_commit,
         actor,
         events,
         task,
@@ -13602,6 +13632,7 @@ async fn reload_one(
     let rz_vec: Vec<String> = rz_target.iter().map(|t| t.addr.to_string()).collect();
 
     let RestoredActor {
+        chat_fence_commit,
         actor,
         events,
         task,
@@ -13719,6 +13750,9 @@ async fn reload_one(
     );
     drop(servers);
     drop(commit);
+    // Registration is now visible to orphan Stop. Only here can the global absence fence
+    // be released; earlier release would let a new fence race autonomous restored publication.
+    drop(chat_fence_commit);
     supervise("server_actor", record.id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, record.id, instance).await;

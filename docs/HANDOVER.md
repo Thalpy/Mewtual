@@ -47,7 +47,11 @@ fresh reopen counts, unknown Stop/no-op/stopped-signed terminals, foreign receiv
 movement, unwind restoration, token conflicts and immutable target rejection. Scoped rustfmt passes;
 these newly added regressions are **not yet executed** in this checkpoint. The primary owns focused
 Cargo execution, complete root/native/frontend suites and final gates after integration. A read-only
-adversarial review remains required. Orphan Stop after Leave is under separate design review. R6,
+adversarial review remains required. The orphan Stop design review required and now has a historical-unknown `stopped-retired` terminal,
+canonical vault-level exact fences, positive final-lease checks and pre-spawn restored-publication
+fencing. Added regressions exercise real fence pre-rename and post-rename sync faults, global bounds,
+confirmed Actor retirement, retained old snapshot restore without chat publication and same-id reuse.
+These tests still await primary execution and actual-diff review. R6,
 historical authorization and a typed chat ledger are not claimed by this mutation slice.
 
 

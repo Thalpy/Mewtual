@@ -15,7 +15,7 @@ This typed-core API does not change legacy wire/persistence readers.
 
 Desktop edit/delete now require a retained caller token, original `expectedContext` and immutable
 `target` returned by `durable_mutation_context`. Their responses use the send result envelope
-and a closed disposition: `committed`, `stopped-before-commit`, or `stopped-after-commit`.
+and a closed disposition: `committed`, `stopped-before-commit`, `stopped-after-commit`, or `stopped-retired`.
 `accepted` requires a durable committed operation/no-op. A pending storage reply never authorizes
 renderer acceptance or a PERSISTED diagnostic. Exact saved receipts replay before target/role
 reads, while every ordinary uncommitted mutation repeats current membership, target and permission.
@@ -25,7 +25,13 @@ before releasing the native reservation. Saved operations remain additive histor
 saves real frontier heads and creates no signed change or edited timestamp. Durable-chat storage
 stays v1 byte-for-byte for legacy send-only rows and becomes sticky v2 for mutation/no-op/explicit
 Stop. UI continuity v2 is likewise sticky, so older readers reject rather than replay edit text as
-a post. The low-level `Server::edit_message/delete_message` APIs remain non-durable compatibility APIs.
+a post. A `stopped-retired` result means a vault-sealed exact retry fence was durably saved after the
+original Actor was absent; whether the original request committed is unknown. Its history may
+already have been sent/applied. Retired fences survive Leave and are globally bounded/non-evicting.
+Positive native final custody checks them, and restored matching saved publication/reservations are
+stopped and saved before Actor spawn. Malformed fence state refuses admission/restore. A visible
+post-rename fence is rewritten before any durable Stop acknowledgement. The low-level
+`Server::edit_message/delete_message` APIs remain non-durable compatibility APIs.
 
 
 ## Owned microphone device setting (27 October; inactive)

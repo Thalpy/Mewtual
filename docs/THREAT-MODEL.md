@@ -14,6 +14,16 @@ deleted contents does not cryptographically restrict their visibility to moderat
 
 ## Local mutation durability boundary (29 October; validation in progress)
 
+A vault-level retired retry fence is an explicit historical-unknown terminal, never evidence that a
+removed request did or did not commit. It uses the same complete native request binding and global
+65,536-row/16 MiB plaintext limits, with no eviction. Store decode/authentication failures refuse all
+positive admission and fenced restore. Unknown numeric IDs use one global serializer rather than
+allocating per-id lock entries. A restored Actor retains that same serializer from fence read/apply
+through registry installation or confirmed teardown; it cannot publish before a new orphan Stop
+could race an unregistered incarnation. Applying a fence changes only exact matching saved/private
+receipts and preserves their signed history. Context mismatch alone is not retirement evidence.
+
+
 Desktop durable local edit/delete binds MLS group/channel, winning message id, containing list and
 exact map object using canonical `(actor bytes, operation counter)` identities. Mutable text and
 edited fields do not invalidate an original preparation. Duplicate/id-less/substituted targets

@@ -252,6 +252,44 @@ impl DurableChatRequest {
         }
     }
 }
+
+/// Opaque, plaintext-free exact identity for a vault-level retired retry fence. Only the
+/// canonical request binding and authenticated store decoder construct this metadata.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DurableChatIdentity {
+    pub(crate) token: [u8; 16],
+    pub(crate) binding: [u8; 32],
+    pub(crate) context: [u8; 32],
+    pub(crate) channel: u128,
+    pub(crate) message_id: String,
+    pub(crate) action: ChatAction,
+    pub(crate) target: Option<[u8; 32]>,
+}
+impl std::fmt::Debug for DurableChatIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableChatIdentity")
+            .finish_non_exhaustive()
+    }
+}
+impl DurableChatIdentity {
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+}
+impl DurableChatRequest {
+    pub fn retired_identity(&self) -> DurableChatIdentity {
+        let (token, binding, context, channel, message_id, action, target) = self.identity();
+        DurableChatIdentity {
+            token,
+            binding,
+            context,
+            channel,
+            message_id,
+            action,
+            target,
+        }
+    }
+}
 fn save_error(error: crate::AppError) -> ChatSaveError {
     match error {
         crate::AppError::CommittedButNotDurable(e) => ChatSaveError::ReplacedNotDurable(e),
@@ -271,6 +309,26 @@ fn outcome(
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Before restored history can run, apply every exact retired token to any saved/private
+    /// receipt it actually names. Unknown tokens do not inject tombstones into unrelated groups.
+    /// A conflicting token or malformed fence store fails closed before Actor publication.
+    pub fn apply_retired_chat_fences<F>(
+        &mut self,
+        store: &ServerStore,
+        save: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
+    {
+        let fences = store.load_chat_stop_fences().map_err(|e| e.to_string())?;
+        let identities: Vec<_> = fences
+            .iter()
+            .map(|f| (f.token, f.binding, f.context, f.channel))
+            .collect();
+        self.sync
+            .fence_saved_durable_chat(&identities, save)
+            .map_err(|e| e.to_string())
+    }
     /// Metadata only, not a capability. Resolves the exact same unique visible map as the writer.
     pub fn durable_mutation_context(
         &self,
@@ -1197,5 +1255,54 @@ mod tests {
         assert!(saved.durable && saved.replayed);
         assert!(member.messages(5).is_empty());
         assert_eq!(ops(&member), 2);
+    }
+    #[tokio::test]
+    async fn retired_chat_fence_restore_stops_original_publication_but_preserves_signed_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(194)).unwrap();
+        let mut n = mutation_node().await;
+        let request = send_request(&n, 1, "history may already have reached peers");
+        n.commit_chat_request(&request, &store, 9).unwrap();
+        let before = store.load_server(9).unwrap().to_vec();
+        store
+            .save_chat_stop_fence(
+                &request.retired_identity(),
+                &mut ChaCha20Rng::seed_from_u64(195),
+            )
+            .unwrap();
+        assert_eq!(store.load_server(9).unwrap().as_slice(), before);
+        let mut disk = restored(&store, 9);
+        disk.apply_retired_chat_fences(&store, |bytes, rng| {
+            store.save_server(9, bytes, rng).map_err(save_error)
+        })
+        .unwrap();
+        assert_eq!(ops(&disk), 1);
+        assert_eq!(disk.messages(5).len(), 1);
+        let (token, binding, context, channel, ..) = request.identity();
+        assert_eq!(
+            disk.sync
+                .durable_chat_lookup(token, binding, context, channel)
+                .unwrap()
+                .unwrap()
+                .disposition,
+            ChatDisposition::StoppedAfterCommit
+        );
+        let mut fresh = restored(&store, 9);
+        assert_eq!(
+            fresh
+                .commit_chat_request(&request, &store, 9)
+                .unwrap()
+                .disposition,
+            ChatDisposition::StoppedAfterCommit
+        );
+        assert_eq!(ops(&fresh), 1);
+        let mut unrelated = mutation_node().await;
+        unrelated
+            .apply_retired_chat_fences(&store, |_, _| {
+                panic!("unrelated restore must not overwrite any snapshot")
+            })
+            .unwrap();
+        assert_eq!(ops(&unrelated), 0);
     }
 }
