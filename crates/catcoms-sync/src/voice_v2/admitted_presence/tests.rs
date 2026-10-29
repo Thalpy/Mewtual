@@ -3,6 +3,8 @@ use super::*;
 use catcoms_rt::ManualClock;
 use std::sync::atomic::Ordering;
 
+mod admission;
+
 type Node = crate::ChannelSync<catcoms_rt::mem::MemNetwork, rand_chacha::ChaCha20Rng>;
 type Fixture = (
     Node,

@@ -150,6 +150,10 @@ pub(crate) struct AdmittedPresence {
     // Fixed capacity is paid by PresenceStorage before allocation. Each record's
     // SAME plain payment remains outside its own Box through actual deallocation.
     proofs: Vec<CachedProof>,
+    // Lazy, separately paid pool identities for admitted capacity. Registrations
+    // and escaped inert preclaims retain the SAME pool owner after Presence Drop.
+    // These are empty table counters, not a legacy PacketLedger or effect API.
+    admission_pools: Option<super::admitted_admission::PoolsOwner>,
 }
 impl AdmittedPresence {
     #[allow(clippy::too_many_arguments)] // Exact residence, tuple and independent watcher/RNG inputs stay explicit.
@@ -185,6 +189,7 @@ impl AdmittedPresence {
             next_renewal: 0,
             announcement: None,
             proofs: Vec::with_capacity(MAX_PENDING),
+            admission_pools: None,
         })
     }
     pub(crate) fn id(&self) -> u64 {
@@ -195,6 +200,88 @@ impl AdmittedPresence {
     }
     pub(crate) fn key(&self) -> &JoinKey {
         &self.key
+    }
+    pub(crate) fn admission_pools(
+        &mut self,
+    ) -> Result<super::admitted_admission::PoolsOwner, VoiceError> {
+        if !self.is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        if self.admission_pools.is_none() {
+            self.admission_pools = Some(super::admitted_admission::PoolsOwner::reserve(
+                &self.resources,
+                self.scope.group,
+            )?);
+        }
+        Ok(self
+            .admission_pools
+            .as_ref()
+            .expect("original admitted pools")
+            .clone())
+    }
+    /// Trusted Root adapter only. Root first validates its exact selected
+    /// residence/grant; the private preparation repeats call/watch/pool identity
+    /// and NativeActive after any injected RNG callback.
+    pub(crate) fn prepare_admission_session(
+        &mut self,
+        actor: &super::runtime::ActorOwner,
+        context: &Context,
+        original: &ActivationObserver,
+        rng: &mut impl CryptoRngCore,
+        before_final: impl FnOnce(),
+    ) -> Result<super::admitted_admission::AdmittedAdmissionSession, VoiceError> {
+        if self.scope != context.scope
+            || self.local != context.local
+            || !self.lease.is_same(original.original_lease())
+            || !original.is_active()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let pools = self.admission_pools()?;
+        super::admitted_admission::AdmittedAdmissionSession::prepare(
+            super::admitted_admission::Preparation {
+                actor,
+                context,
+                resources: &self.resources,
+                pools: &pools,
+                original,
+                key: &self.key,
+                call: &self.lease,
+                watch: &self.watch,
+            },
+            rng,
+            before_final,
+        )
+    }
+    pub(crate) fn reserve_round_preclaim(
+        &self,
+        actor: &super::runtime::ActorOwner,
+        context: &Context,
+        activation: &ActivationObserver,
+        original: &super::admitted_admission::AdmittedAdmissionObserver,
+        generation: u64,
+    ) -> Result<super::admitted_admission::RootRoundPreclaim, VoiceError> {
+        if self.scope != context.scope || self.local != context.local {
+            return Err(VoiceError::Unauthorized);
+        }
+        // A foreign observer must not create pools on a fresh Presence.
+        let pools = self
+            .admission_pools
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        original.reserve_neutral(
+            super::admitted_admission::Preparation {
+                actor,
+                context,
+                resources: &self.resources,
+                pools,
+                original: activation,
+                key: &self.key,
+                call: &self.lease,
+                watch: &self.watch,
+            },
+            generation,
+        )
     }
     pub(crate) fn watch(&self) -> &WatchLease {
         &self.watch
