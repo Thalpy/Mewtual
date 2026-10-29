@@ -426,6 +426,12 @@ pub struct SourceLedger {
     resources: Arc<Resources>,
     state: Mutex<State>,
 }
+impl Drop for SourceLedger {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        super::runtime::before_return_for_test(self as *const Self as usize);
+    }
+}
 struct FlightAuthority {
     hop: Arc<EffectAuthority>,
     packet: Arc<Packet>,
@@ -569,20 +575,16 @@ impl SourceLedger {
             call.revoke();
         }
     }
-    pub(super) fn new(
-        group: [u8; 32],
-        clock: Arc<dyn Clock>,
-        resources: Arc<Resources>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    pub(super) fn new(group: [u8; 32], clock: Arc<dyn Clock>, resources: Arc<Resources>) -> Self {
+        Self {
             group,
             clock,
             resources,
             state: Mutex::new(State::default()),
-        })
+        }
     }
     fn current(&self, actor: &ActorOwner) -> Result<(), VoiceError> {
-        if !std::ptr::eq(Arc::as_ptr(&actor.source()?), self) {
+        if !std::ptr::eq(&*actor.source()?, self) {
             return Err(VoiceError::Unauthorized);
         }
         Ok(())

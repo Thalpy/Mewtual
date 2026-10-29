@@ -61,11 +61,135 @@ struct Counts {
     // Affine claim's exact opaque stamp, retained through actual final destruction.
     // Lookup Weak owners above are housekeeping indices, never capacity certificates.
     progress: usize,
+    control: ControlService,
+}
+/// Control7 service uses discrete250ms periods. It is shared by EVERY room,
+/// Root and original in this exact Resources pool, independently of requester/
+/// issuer tokens and packet retries. Backward samples never refill it.
+#[derive(Default, Clone, Copy)]
+struct ControlService {
+    last: u64,
+    tokens: u64,
+    initialized: bool,
+}
+#[cfg(test)]
+pub(crate) fn admitted_control_counter_inventory_for_test() -> (usize, usize, usize) {
+    (
+        std::mem::size_of::<Counts>(),
+        std::mem::size_of::<([u8; 32], Counts)>(),
+        std::mem::size_of::<ControlService>(),
+    )
+}
+impl ControlService {
+    fn spend(&mut self, now: u64, burst: u64, refill: u64) -> bool {
+        if !self.initialized {
+            self.last = now;
+            self.tokens = burst;
+            self.initialized = true;
+        }
+        let periods = now.saturating_sub(self.last) / 250;
+        self.tokens = self
+            .tokens
+            .saturating_add(periods.saturating_mul(refill))
+            .min(burst);
+        self.last = self.last.saturating_add(periods * 250);
+        if self.tokens == 0 {
+            false
+        } else {
+            self.tokens -= 1;
+            true
+        }
+    }
+}
+#[cfg(test)]
+mod control_service_tests {
+    use super::*;
+    #[test]
+    fn admitted_control_service_periods_preserve_subperiod_remainder_and_backward_extreme_samples()
+    {
+        let mut bucket = ControlService::default();
+        for _ in 0..16 {
+            assert!(bucket.spend(1000, 16, 2));
+        }
+        for now in [1001, 1100, 1249, 999, 0] {
+            assert!(!bucket.spend(now, 16, 2));
+        }
+        assert!(bucket.spend(1251, 16, 2));
+        assert!(bucket.spend(1499, 16, 2));
+        assert!(!bucket.spend(1499, 16, 2));
+        assert!(bucket.spend(1500, 16, 2));
+        assert!(bucket.spend(1500, 16, 2));
+        assert!(!bucket.spend(1500, 16, 2));
+        for _ in 0..16 {
+            assert!(bucket.spend(u64::MAX, 16, 2));
+        }
+        assert!(!bucket.spend(u64::MAX, 16, 2));
+    }
+    #[test]
+    fn admitted_control_service_aggregates_rooms_roots_and_groups_without_reset_or_partial_debit() {
+        let pool = Arc::new(Resources::default());
+        let held: Vec<_> = (1..=5)
+            .map(|n| pool.charge([n; 32], 512, ResourceKind::Retained).unwrap())
+            .collect();
+        for group in 1..=4 {
+            for _ in 0..16 {
+                pool.admit_voice_control([group; 32], 1000).unwrap();
+            }
+        }
+        assert_eq!(
+            pool.admit_voice_control([5; 32], 1000),
+            Err(VoiceError::RateLimited)
+        );
+        assert_eq!(
+            pool.admit_voice_control([1; 32], 1249),
+            Err(VoiceError::RateLimited)
+        );
+        pool.admit_voice_control([1; 32], 1250).unwrap();
+        pool.admit_voice_control([1; 32], 1250).unwrap();
+        assert_eq!(
+            pool.admit_voice_control([1; 32], 1250),
+            Err(VoiceError::RateLimited)
+        );
+        // Group refusal did not debit the process's remaining six tokens.
+        for _ in 0..6 {
+            pool.admit_voice_control([5; 32], 1250).unwrap();
+        }
+        assert_eq!(
+            pool.admit_voice_control([5; 32], 1250),
+            Err(VoiceError::RateLimited)
+        );
+        drop(held);
+    }
 }
 #[derive(Default)]
 struct State {
     total: Counts,
     groups: HashMap<[u8; 32], Counts>,
+}
+impl State {
+    /// Pure locked retirement of an ACTUALLY empty counter row. Every caller
+    /// holds the same pool fence, so no charge/observer can see returned budget
+    /// while its old buckets or shrink/growth overlap remain allocated.
+    fn remove_empty_group(&mut self, group: &[u8; 32]) {
+        if !self.groups.get(group).is_some_and(|counts| {
+            counts.bytes == 0
+                && counts.progress == 0
+                && counts.slots.iter().all(|count| *count == 0)
+        }) {
+            return;
+        }
+        drop(self.groups.remove(group));
+        #[cfg(test)]
+        retirement_tests::before_shrink(self as *const Self as usize);
+        if self.groups.is_empty() {
+            // with_hasher copies the EXISTING seeds: no ambient RNG, including
+            // final Credit/Progress release. Free all backing before unlock.
+            let empty = HashMap::with_hasher(self.groups.hasher().clone());
+            drop(std::mem::replace(&mut self.groups, empty));
+        } else {
+            self.groups.shrink_to(self.groups.len());
+        }
+    }
 }
 
 /// Native creates one pool for every actor/controller in its process. Creating a pool per call
@@ -323,6 +447,44 @@ impl ByteBudget {
 }
 
 impl Resources {
+    #[cfg(test)]
+    pub(crate) fn group_counter_capacity_for_test(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (state.groups.len(), state.groups.capacity())
+    }
+    /// Complete full-bucket/control/alignment allowance, including simultaneous
+    /// old/new growth or shrink tables. Pinned hashbrown0.16.1 may grow early
+    /// when tombstones exhaust growth_left: at n>7B/16 it allocates up to2B,
+    /// so old+new3B/n<48/7<8 buckets per live row. The immediate sparse shrink
+    /// has the same bound. Keep BOTH tables' controls/alignment. A logical
+    /// capacity() change is not evidence of a physical bucket resize.
+    /// Empty backing stays under the retiring payer AND pool fence until freed.
+    pub(crate) fn group_index_invoice_bytes() -> usize {
+        let tuple = std::mem::size_of::<([u8; 32], Counts)>();
+        let align = std::mem::align_of::<([u8; 32], Counts)>().max(16);
+        8 * (tuple + 1) + 2 * (align - 1) + 32
+    }
+    /// No allocation or new group entry. A real Root/record reservation must
+    /// already own this group. Both buckets commit together or neither does.
+    pub(crate) fn admit_voice_control(&self, group: [u8; 32], now: u64) -> Result<(), VoiceError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut process = state.total.control;
+        let mut local = state
+            .groups
+            .get(&group)
+            .ok_or(VoiceError::Unauthorized)?
+            .control;
+        if !process.spend(now, 64, 8) || !local.spend(now, 16, 2) {
+            return Err(VoiceError::RateLimited);
+        }
+        state.total.control = process;
+        state
+            .groups
+            .get_mut(&group)
+            .ok_or(VoiceError::Unauthorized)?
+            .control = local;
+        Ok(())
+    }
     #[cfg(test)]
     pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
         self.state.lock().unwrap()
@@ -662,6 +824,9 @@ impl Resources {
     }
 }
 
+#[cfg(test)]
+mod retirement_tests;
+
 impl Reservation {
     #[cfg(test)]
     pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
@@ -900,10 +1065,7 @@ impl Credit {
         state.total.bytes -= bytes;
         let counts = state.groups.get_mut(&self.group).expect("retained reserve");
         counts.bytes -= bytes;
-        if counts.bytes == 0 && counts.progress == 0 && counts.slots.iter().all(|count| *count == 0)
-        {
-            state.groups.remove(&self.group);
-        }
+        state.remove_empty_group(&self.group);
     }
 }
 
@@ -927,13 +1089,8 @@ impl Drop for Credit {
             if let Some((slot, _, _)) = self.kind.slot() {
                 counts.slots[slot] -= 1;
             }
-            if counts.bytes == 0
-                && counts.progress == 0
-                && counts.slots.iter().all(|count| *count == 0)
-            {
-                state.groups.remove(&self.group);
-            }
         }
+        state.remove_empty_group(&self.group);
         // Never acquire the reservation mutex while holding the pool mutex: charge holds them
         // in the other order. Also release both before dropping the last reserve Arc, whose
         // original credit destructor must be able to acquire the pool mutex again.

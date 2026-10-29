@@ -1,5 +1,29 @@
 # Mewtual; Architecture
 
+## Control7 Query/Support (29 October; focused draft, OFF)
+
+A separate typed Source/ingress/helper path implements protocol Query/Support
+without growing Existing wire/Source enums. Exact original query and selected
+helper proof survive actual paid Lower custody; current query32 differs from
+affine lifetime64/group256/process. Twelve focused cases and new-family graph guards
+pass at34336b2f, including actual B→D replacement and epoch/rejoin refusal. The
+inherited Group/escaping-ledger/Resources backing correction also passes focused
+checks: its complete3750-byte graph prepays4KiB, even while OFF, within unchanged
+caps. Strict lint and full integration remain pending. See
+[the operational boundaries](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md)
+and [the exact Group custody evidence](communication-recovery/VOICE-GROUP-LEDGER-CUSTODY.md).
+
+## Route registry custody prerequisite (29 October; focused passes)
+
+The shared64-route registry retains strong route rows and the SAME outside Lower or
+verification payer through actual Arc destruction. A separately prepaid4KiB owner
+funds fixed backing/inline metadata before first VoiceRuntime publication, including
+OFF attachments. Sole-owner rows prune before Crypto/Forward reservation. Existing
+wire/enums and all limits remain unchanged; Query/Support is a separate focused draft.
+Nine sync and eleven rt authority cases pass; actual registry1904/4096 and route376/512
+guards pass. Full integration remains pending. See
+[the inherited defect, accounting and scoped evidence](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
 ## Admitted native/browser key custody (29 October; inactive)
 
 The distinct admitted native commands connect the same selected Root residence to

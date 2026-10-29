@@ -18,7 +18,7 @@ struct Fixture {
     runtime: Arc<Runtime>,
     clock: Arc<ManualClock>,
     actor: ActorOwner,
-    source: Arc<SourceLedger>,
+    source: super::super::runtime::SourceOwner,
     context: Context,
     join: RefCell<LocalJoin>,
     lease: CallLease,
@@ -1535,7 +1535,7 @@ fn source_actor_replacement_keeps_actual_lower_until_ended_activity_drains() {
         indirect: true,
     })
     .unwrap();
-    assert!(Arc::ptr_eq(&next.source().unwrap(), &f.source));
+    assert!(next.source().unwrap().is_same(&f.source));
     assert_eq!(f.source.counts(), (1, 1, 1));
     assert!(
         !f.lease.is_live(),

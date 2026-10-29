@@ -263,8 +263,10 @@ pub trait RequestAuthority: Send + Sync + fmt::Debug {
 #[derive(Clone)]
 pub struct RequestCancellation {
     signal: watch::Receiver<bool>,
-    keepalive: Option<SharedRequestKeepalive>,
     authority: Option<Arc<dyn RequestAuthority>>,
+    // Original capacity outlives final authority destruction, including a queued
+    // driver owner retained after its service/Root and upper future have retired.
+    keepalive: Option<SharedRequestKeepalive>,
 }
 
 impl fmt::Debug for RequestCancellation {
@@ -403,8 +405,10 @@ pub trait ResponseBudget: Send + Sync + fmt::Debug {
 #[derive(Debug)]
 pub struct ResponderReply {
     data: Bytes,
-    custody: Option<SharedRequestKeepalive>,
     effect: Option<Arc<dyn RequestAuthority>>,
+    // Drop effect/route allocations before their original outside payer. Byte
+    // owners retain separate clones while a serialized lower copy is still held.
+    custody: Option<SharedRequestKeepalive>,
 }
 impl ResponderReply {
     /// Present-time application effect gate, independent of the driver's original ingress gate.
@@ -557,17 +561,24 @@ impl Responder {
         effect: Option<Arc<dyn RequestAuthority>>,
         service: Option<SharedRequestKeepalive>,
     ) -> Result<(), TransportError> {
+        // Use the SAME ordered owner on success and every early refusal: bytes
+        // first, authority next, original service payment last. Separate function
+        // parameters otherwise drop service before effect on an early return.
+        let mut admitted = ResponderReply {
+            data,
+            effect,
+            custody: service,
+        };
         // Custody must protect the INPUT even when authority/receiver/budget refuses below.
-        // Parameter drop order must never return its service allowance while the final bytes
+        // This ordered owner must never return its service allowance while the final bytes
         // still exist. The later composite additionally covers actual driver serialization.
-        let data = if let Some(custody) = &service {
-            Bytes::from_owner(OwnedReplyBytes {
+        if let Some(custody) = &admitted.custody {
+            let data = std::mem::take(&mut admitted.data);
+            admitted.data = Bytes::from_owner(OwnedReplyBytes {
                 data,
                 _custody: custody.clone(),
-            })
-        } else {
-            data
-        };
+            });
+        }
         if self
             .lifetime
             .ingress
@@ -576,7 +587,11 @@ impl Responder {
         {
             return Err(TransportError::Cancelled);
         }
-        if effect.as_ref().is_some_and(|effect| !effect.authorized()) {
+        if admitted
+            .effect
+            .as_ref()
+            .is_some_and(|effect| !effect.authorized())
+        {
             return Err(TransportError::Cancelled);
         }
         // Preserve the ingress refusal above, but a known-dead reply receiver needs no new
@@ -587,9 +602,9 @@ impl Responder {
         let custody = self
             .response_budget
             .as_ref()
-            .map(|budget| budget.clone().retain(data.len()))
+            .map(|budget| budget.clone().retain(admitted.data.len()))
             .transpose()?;
-        let custody = match (custody, service) {
+        admitted.custody = match (custody, admitted.custody.take()) {
             (Some(driver), Some(service)) => Some(Arc::new(ReplyCustody {
                 _driver: driver,
                 _service: service,
@@ -597,20 +612,15 @@ impl Responder {
             (Some(driver), None) => Some(driver),
             (None, service) => service,
         };
-        let data = if let Some(custody) = &custody {
-            Bytes::from_owner(OwnedReplyBytes {
+        if let Some(custody) = &admitted.custody {
+            let data = std::mem::take(&mut admitted.data);
+            admitted.data = Bytes::from_owner(OwnedReplyBytes {
                 data,
                 _custody: custody.clone(),
-            })
-        } else {
-            data
-        };
+            });
+        }
         self.reply
-            .send(ResponderReply {
-                data,
-                custody,
-                effect,
-            })
+            .send(admitted)
             .map_err(|_| TransportError::Closed)
     }
 
@@ -1255,6 +1265,102 @@ mod authority_tests {
     use super::*;
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct DropOrderPayer(Arc<AtomicBool>);
+    impl Drop for DropOrderPayer {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    #[derive(Debug)]
+    struct DropOrderAuthority {
+        payer_live: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+        allowed: bool,
+    }
+    impl Drop for DropOrderAuthority {
+        fn drop(&mut self) {
+            assert!(
+                self.payer_live.load(Ordering::Acquire),
+                "original outside payer must outlive final authority destruction"
+            );
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+    #[async_trait]
+    impl RequestAuthority for DropOrderAuthority {
+        fn authorized(&self) -> bool {
+            self.allowed
+        }
+        async fn revoked(&self) {
+            if self.allowed {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+    type DropOrderOwners = (
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+        Arc<dyn RequestAuthority>,
+        SharedRequestKeepalive,
+    );
+    fn drop_order_owners(allowed: bool) -> DropOrderOwners {
+        let live = Arc::new(AtomicBool::new(true));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let authority = Arc::new(DropOrderAuthority {
+            payer_live: live.clone(),
+            dropped: dropped.clone(),
+            allowed,
+        });
+        let payer = Arc::new(DropOrderPayer(live.clone()));
+        (live, dropped, authority, payer)
+    }
+    #[test]
+    fn request_cancellation_destroys_final_authority_before_original_keepalive() {
+        let (live, dropped, authority, payer) = drop_order_owners(true);
+        let (_signal, receive) = watch::channel(false);
+        let cancellation = RequestCancellation::new(receive, Some(payer)).with_authority(authority);
+        drop(cancellation);
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(!live.load(Ordering::Acquire));
+    }
+    #[tokio::test]
+    async fn responder_reply_success_and_refusal_destroy_authority_before_service_payer() {
+        #[derive(Debug)]
+        struct RefusingBudget;
+        impl ResponseBudget for RefusingBudget {
+            fn retain(self: Arc<Self>, _: usize) -> Result<SharedRequestKeepalive, TransportError> {
+                Err(TransportError::Closed)
+            }
+        }
+        for mode in [0, 1, 2] {
+            let allowed = mode != 1;
+            let (live, dropped, authority, payer) = drop_order_owners(allowed);
+            let (mut responder, receive) = Responder::channel();
+            if mode == 2 {
+                responder.response_budget = Some(Arc::new(RefusingBudget));
+            }
+            let result = responder.try_respond_with_custody(
+                Bytes::from_static(b"paid response"),
+                authority,
+                payer,
+            );
+            if mode == 0 {
+                result.unwrap();
+                let reply = receive.recv_owned().await.unwrap();
+                assert!(live.load(Ordering::Acquire));
+                assert!(!dropped.load(Ordering::Acquire));
+                drop(reply);
+            } else if mode == 1 {
+                assert!(matches!(result, Err(TransportError::Cancelled)));
+            } else {
+                assert!(matches!(result, Err(TransportError::Closed)));
+            }
+            assert!(dropped.load(Ordering::Acquire));
+            assert!(!live.load(Ordering::Acquire));
+        }
+    }
 
     #[derive(Debug)]
     struct Gate {

@@ -1,5 +1,38 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Control7 observation boundary (29 October; focused draft, OFF)
+
+FreshPeer/helper ACKs cannot infer support. A Source Lower retains the exact live
+query and selected signed helper observation; q2/End/epoch/reconnect closes stale
+effects without refunding actual custody. Every original retains fresh affine8KiB
+payment, with const coupling to aggregate lifetime64/group256/process. Shared
+service/requester/issuer/Forward/route limits constrain duplicates and floods.
+Native approved driver lifetime callbacks remain trusted and pure; arbitrary
+reentrant custom transport authorities are outside this seam's guarantee. Twelve
+focused cases/new-family graphs pass, including actual B→D/epoch refusal. The
+inherited Group/Resources backing and escaping-ledger gap now has a focused
+correction: strict same-payer wrappers outlive actual sponsored allocations,
+Runtime installs ordered map retirement before revocation callbacks, and all
+three empty-counter removals free/shrink backing under the pool fence. The full
+3750/4096 invoice includes pinned H8 tombstone growth/shrink overlap. Strict lint
+and full integration remain pending; this is a declared application graph, not
+an allocator trace or proof of every generic Resources caller's sponsorship.
+[Enforcement trace and unfinished security/operational gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+
+## Route metadata tail custody (29 October; focused passes)
+
+Raw Weak registry entries could retain RouteGate allocation after its internal payer
+returned; zero strong count can race an unfinished destructor. Strong registry rows
+with no escaping Weak now detach only at sole ownership, destroy Arc before outside
+original payer and keep fixed backing independently paid. Early pruning avoids
+stranding Crypto lanes on idle unjoined Roots; quiet collection covers cross-Root
+process pressure. Outside prepared/driver owners destroy authority before original
+payer after registry/Root retirement, including ordinary refused replies. Exact route/member/connection
+gates and all bounds remain enforced. The new4KiB first-attachment graph and actual
+destruction/rollover regressions pass focused execution. Complete suites and strict
+lint remain pending; no V2 activation claim.
+See [the scoped custody trace](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
 ## Original admitted key publication (29 October; inactive call path)
 
 The native admitted commands require the original selected Root residence,

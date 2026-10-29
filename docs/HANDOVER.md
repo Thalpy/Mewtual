@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Control7 Query/Support snapshot (29 October; focused draft, OFF)
+
+Twelve focused cases pass at34336b2f, including actual restricted A–B–C dispatch,
+unjoined B, q2/lateq1, duplicates/flood, expiry/old grammar, actual historical-owner
+return and3-submission exhaustion. New-family graph guards and actual replacement-D/
+MLS epoch/rejoin refusal cases pass. The inherited Group/escaping-ledger/counter
+backing correction passes rt authority11, Resources60, helper26, source32,
+runtime42 and route9 focused tests; the revised actual Root transport cases pass
+69/69 at4b9d2241. Its full3750-byte invoice prepays4KiB without changing caps.
+Final read-only review found no blocker/high/medium. Strict lint and complete
+integration remain primary-owned pending gates; earlier full suites cover earlier
+inputs. Counts are separate overlapping filters, not an aggregate unique total.
+[Exact ownership, fees, API and remaining V2 work](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+
+## Shared route registry custody prerequisite (29 October; focused passes)
+
+Before adding Control7 transport, this leaf fixes inherited raw-Weak route tails with
+strong rows and the SAME original outside payer; no Weak escapes and Arc destruction
+precedes payer release. Aggregate64 and per-flight512 metadata stay unchanged. First
+fallible voice attachment now prepays an explicit4KiB fixed registry/inline cost even
+when OFF, within unchanged group/process caps. Crypto/Forward entry points prune sole
+rows before reservation and on quiet housekeeping. External preparations, driver
+cancellation/replies and early refusal retain the SAME payer after final authority
+destruction even after Root retirement. Focused execution passes nine sync and eleven
+rt authority cases (two new rt regressions); all original assertions remain. Windows
+registry1904/4096, route376/512 and actual execution/completion/scheduler2056/4096
+guards pass. The first compile found one missing test-only RngCore import, corrected
+before the passing rerun. Strict lint/full suites remain primary-owned and pending;
+prior full suites cover earlier inputs. See
+[the source trace, accounting and exact limits](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
+## Admitted Root presence draft (29 October; corrections pending rerun)
+
 ## Desktop dependency and actual IPC validation (29 October; integration gates open)
 
 Tauri is aligned to 2.12.5, build/codegen/macros2.7.4, runtime2.12.2 and

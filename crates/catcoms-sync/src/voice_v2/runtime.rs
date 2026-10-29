@@ -23,6 +23,21 @@ const CHILDREN: usize = 64;
 // authentication transcripts are dropped before decode; the small ACK fits the fixed allowance.
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
+mod admitted_control;
+mod group_owner;
+#[cfg(test)]
+pub(in crate::voice_v2) use group_owner::before_return_for_test;
+use group_owner::{FundingOwner, GroupOwner, GroupRetirement};
+pub use group_owner::{HelperOwner, SourceOwner};
+#[cfg(test)]
+pub(crate) fn admitted_control_group_inventory_for_test() -> (usize, usize, usize, usize) {
+    (
+        std::mem::size_of::<Group>(),
+        std::mem::size_of::<super::helper::HelperLedger>(),
+        std::mem::size_of::<super::source::SourceLedger>(),
+        std::mem::size_of::<([u8; 32], GroupOwner)>(),
+    )
+}
 mod local;
 mod ready_source;
 pub(in crate::voice_v2) use local::EpochObservation;
@@ -132,10 +147,16 @@ struct GroupState {
 struct Group {
     hash: [u8; 32],
     state: Mutex<GroupState>,
-    _credit: Credit,
-    helper: Arc<super::helper::HelperLedger>,
-    source: Arc<super::source::SourceLedger>,
+    helper: HelperOwner,
+    source: SourceOwner,
     verification: Arc<Mutex<super::limits::Bucket>>,
+    control: Mutex<Option<super::admitted_control::ControlLedger>>,
+}
+impl Drop for Group {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        before_return_for_test(self as *const Self as usize);
+    }
 }
 struct Policy {
     pin: Option<[u8; 32]>,
@@ -256,7 +277,7 @@ impl ActorGate {
 }
 struct State {
     session: Arc<Session>,
-    groups: BTreeMap<[u8; 32], Arc<Group>>,
+    groups: BTreeMap<[u8; 32], GroupOwner>,
     actors: Vec<Weak<ActorGate>>,
 }
 /// Native must share this exact instance with every product actor and the browser-credit owner.
@@ -273,12 +294,23 @@ impl Drop for Runtime {
         // Detached work may own gates/resources without owning this process registry. Dropping
         // the registry closes those gates; constructing another registry cannot leave old effects
         // live alongside a fresh budget. Actual lower holders still keep their old credits.
-        let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
-        state.session.observation.store(false, Ordering::Release);
-        state.session.live.revoke();
-        for actor in state.actors.iter().filter_map(Weak::upgrade) {
-            actor.revoke();
-        }
+        let groups = {
+            let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
+            // Install before the first arbitrary watch waker. Unwind must not
+            // fall back to BTreeMap value-before-node destruction.
+            let groups = GroupRetirement::take(&mut state.groups);
+            state.session.observation.store(false, Ordering::Release);
+            state.session.live.revoke();
+            for actor in state.actors.iter().filter_map(Weak::upgrade) {
+                actor.revoke();
+            }
+            // Ordinary BTreeMap::drop may destroy values before node backing. Pop
+            // structurally first, retaining the last original payer until even the
+            // final empty root node/map has returned. Group/ledger bodies and all
+            // funding aliases are destroyed outside the process registry guard.
+            groups
+        };
+        drop(groups);
     }
 }
 
@@ -323,6 +355,14 @@ impl Runtime {
         for group in groups {
             group.source.collect_expired();
             group.helper.collect_expired();
+            let control = group
+                .control
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(control) = control {
+                control.collect_expired();
+            }
             group
                 .state
                 .lock()
@@ -399,34 +439,44 @@ impl Runtime {
             if state.groups.len() >= GROUPS {
                 return Err(VoiceError::Capacity);
             }
-            let credit = self.resources.charge(hash, 1024, ResourceKind::Retained)?;
+            let funding = FundingOwner::reserve(&self.resources, hash)?;
             state.groups.insert(
                 hash,
-                Arc::new(Group {
-                    hash,
-                    _credit: credit,
-                    verification: self.verification.clone(),
-                    helper: super::helper::HelperLedger::new(
+                GroupOwner::new(
+                    Group {
                         hash,
-                        self.clock.clone(),
-                        self.resources.clone(),
-                    ),
-                    source: super::source::SourceLedger::new(
-                        hash,
-                        self.clock.clone(),
-                        self.resources.clone(),
-                    ),
-                    state: Mutex::new(GroupState {
-                        revision: 0,
-                        epoch: None,
-                        members: BTreeMap::new(),
-                        active: Weak::new(),
-                        limits: OriginLimits::new(hash, self.resources.clone()),
-                    }),
-                }),
+                        verification: self.verification.clone(),
+                        control: Mutex::new(None),
+                        helper: HelperOwner::new(
+                            super::helper::HelperLedger::new(
+                                hash,
+                                self.clock.clone(),
+                                self.resources.clone(),
+                            ),
+                            funding.clone(),
+                        ),
+                        source: SourceOwner::new(
+                            super::source::SourceLedger::new(
+                                hash,
+                                self.clock.clone(),
+                                self.resources.clone(),
+                            ),
+                            funding.clone(),
+                        ),
+                        state: Mutex::new(GroupState {
+                            revision: 0,
+                            epoch: None,
+                            members: BTreeMap::new(),
+                            active: Weak::new(),
+                            limits: OriginLimits::new(hash, self.resources.clone()),
+                        }),
+                    },
+                    funding,
+                ),
             );
         }
         let group = state.groups[&hash].clone();
+        debug_assert!(group.is_same(&state.groups[&hash]));
         let revision = group
             .state
             .lock()
@@ -478,7 +528,7 @@ impl Runtime {
 
 /// Unique actor-owned handle. Dropping the real actor irrevocably retires its detached effects.
 pub struct ActorOwner {
-    group: Arc<Group>,
+    group: GroupOwner,
     gate: Arc<ActorGate>,
     revision: u64,
     clock: Arc<EffectiveClock>,
@@ -489,7 +539,7 @@ pub struct ActorOwner {
 #[derive(Clone)]
 pub struct ActorRegistration {
     gate: Arc<ActorGate>,
-    group: Arc<Group>,
+    group: GroupOwner,
     expected_revision: u64,
     clock: Arc<EffectiveClock>,
     _preparation: Arc<PreparationGuard>,
@@ -618,21 +668,22 @@ redacted_debug!(View);
 impl ActorOwner {
     #[cfg(test)]
     pub(crate) fn lock_probe_for_test(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
-        let group = Arc::downgrade(&self.group);
+        let group = self.group.probe();
         let actor = Arc::downgrade(&self.gate);
         Arc::new(move || {
-            let Some(group) = group.upgrade() else {
-                return false;
-            };
             let Some(actor) = actor.upgrade() else {
                 return false;
             };
             // A callback may be running during unwind from an inherited waker.
             // Poisoned means the lock was acquired, not that a guard still holds it.
-            let group_free = !matches!(
-                group.state.try_lock(),
-                Err(std::sync::TryLockError::WouldBlock)
-            );
+            let group_free = group
+                .inspect(|group| {
+                    !matches!(
+                        group.state.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    )
+                })
+                .unwrap_or(false);
             let policy_free = !matches!(
                 actor.policy.try_lock(),
                 Err(std::sync::TryLockError::WouldBlock)
@@ -845,11 +896,11 @@ impl ActorOwner {
             Err(VoiceError::Unauthorized)
         }
     }
-    pub fn helper(&self) -> Result<Arc<super::helper::HelperLedger>, VoiceError> {
+    pub fn helper(&self) -> Result<HelperOwner, VoiceError> {
         self.current()?;
         Ok(self.group.helper.clone())
     }
-    pub fn source(&self) -> Result<Arc<super::source::SourceLedger>, VoiceError> {
+    pub fn source(&self) -> Result<SourceOwner, VoiceError> {
         self.current()?;
         Ok(self.group.source.clone())
     }

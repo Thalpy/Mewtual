@@ -4,12 +4,18 @@ use catcoms_rt::{RequestAuthority, SharedRequestKeepalive};
 use futures::FutureExt;
 use voice_v2::helper::HelperReceipt;
 use voice_v2::runtime::VerificationReplyAuthority;
+#[async_trait::async_trait]
+trait NativeReceipt: Send + Sync {
+    fn authorized_at(&self, wall: u64, mono: u64) -> bool;
+    async fn revoked(&self);
+}
 
 pub(super) enum Receipt {
     Helper(HelperReceipt),
     Endpoint(crate::voice_endpoint::EndpointReceipt),
 }
-impl Receipt {
+#[async_trait::async_trait]
+impl NativeReceipt for Receipt {
     fn authorized_at(&self, wall: u64, mono: u64) -> bool {
         match self {
             Self::Helper(receipt) => receipt.authorized_at(wall, mono),
@@ -23,10 +29,19 @@ impl Receipt {
         }
     }
 }
+#[async_trait::async_trait]
+impl NativeReceipt for voice_v2::admitted_control::Receipt {
+    fn authorized_at(&self, wall: u64, mono: u64) -> bool {
+        self.authorized_at(wall, mono)
+    }
+    async fn revoked(&self) {
+        self.revoked().await
+    }
+}
 struct ReplyAuthority {
     verification: Arc<VerificationReplyAuthority>,
     route: Arc<dyn RequestAuthority>,
-    receipt: Option<Receipt>,
+    receipt: Option<Box<dyn NativeReceipt>>,
 }
 impl fmt::Debug for ReplyAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -62,9 +77,11 @@ impl RequestAuthority for ReplyAuthority {
 }
 #[derive(Debug)]
 struct ReplyCustody {
-    _verification: SharedRequestKeepalive,
     // Includes the actual admitted packet and its charge, not just copied status/counts.
     _authority: Arc<ReplyAuthority>,
+    // Original payer LAST: Root/registry may already have retired when a queued
+    // reply or its final Bytes/driver clone releases the final route authority.
+    _verification: SharedRequestKeepalive,
 }
 struct ReplyBytes {
     bytes: Vec<u8>,
@@ -96,6 +113,36 @@ impl VoiceTransportReply {
         verification: Arc<VerificationReplyAuthority>,
         route: Arc<dyn RequestAuthority>,
         receipt: Option<Receipt>,
+        work: SharedRequestKeepalive,
+    ) -> Option<Self> {
+        Self::new_receipt(
+            bytes,
+            verification,
+            route,
+            receipt.map(|receipt| Box::new(receipt) as Box<dyn NativeReceipt>),
+            work,
+        )
+    }
+    pub(super) fn new_admitted(
+        bytes: Vec<u8>,
+        verification: Arc<VerificationReplyAuthority>,
+        route: Arc<dyn RequestAuthority>,
+        receipt: Option<voice_v2::admitted_control::Receipt>,
+        work: SharedRequestKeepalive,
+    ) -> Option<Self> {
+        Self::new_receipt(
+            bytes,
+            verification,
+            route,
+            receipt.map(|receipt| Box::new(receipt) as Box<dyn NativeReceipt>),
+            work,
+        )
+    }
+    fn new_receipt(
+        bytes: Vec<u8>,
+        verification: Arc<VerificationReplyAuthority>,
+        route: Arc<dyn RequestAuthority>,
+        receipt: Option<Box<dyn NativeReceipt>>,
         work: SharedRequestKeepalive,
     ) -> Option<Self> {
         let authority = Arc::new(ReplyAuthority {

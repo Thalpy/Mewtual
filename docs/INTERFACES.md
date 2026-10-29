@@ -1,5 +1,29 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Admitted protocol support (29 October; focused draft, OFF)
+
+Root has distinct endpoint and direct-helper ensure/refresh/observe APIs. Only the
+actual selected NativeActive original/Presence may create a query; endpoint evidence
+comes from its original Watcher. Opaque refresh identity closes q1 before q2 source
+publication. Observed feature bits are historical observations, never Availability,
+consent or reservation. Twelve focused cases pass. Opaque HelperOwner/SourceOwner
+aliases now retain the SAME outside Group payer; they dereference the ledger body,
+never its Arc. Actual body/header destruction precedes payment return. The complete
+Group graph prepays4KiB, including empty-ledger and counter-backing custody, even
+while OFF. Focused ownership checks pass; strict lint/full integration remain pending.
+[Exact API ownership and pending gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+
+## Voice route ownership (29 October; focused passes)
+
+First fallible Root voice attachment prepays4KiB for the shared64-row route registry
+before publishing VoiceRuntime; subsequent attachment reuses it. No wire or public
+Source API changes. Route rows retain the original Lower/verification sponsor until
+actual route destruction, then release it outside guards. The plain registry fee
+survives Vec deallocation. Prepared/driver owners keep the SAME payer after authority
+even after Root retirement; public rt signatures and wire bytes are unchanged. Quiet
+housekeeping releases idle process-wide Crypto custody. Crypto/Forward/route caps stay unchanged; see
+[the exact scope and pending validation](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
 ## Admitted native key commands (29 October; inactive call path)
 
 The main webview has seven distinct commands: `prepare_admitted_voice_owner`,

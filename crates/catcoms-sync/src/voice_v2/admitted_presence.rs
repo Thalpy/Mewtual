@@ -150,6 +150,8 @@ pub(crate) struct AdmittedPresence {
     // Fixed capacity is paid by PresenceStorage before allocation. Each record's
     // SAME plain payment remains outside its own Box through actual deallocation.
     proofs: Vec<CachedProof>,
+    // Separate new-family query owners: no legacy ledger/confirmation factory.
+    queries: Option<super::admitted_control::Queries>,
 }
 impl AdmittedPresence {
     #[allow(clippy::too_many_arguments)] // Exact residence, tuple and independent watcher/RNG inputs stay explicit.
@@ -185,6 +187,7 @@ impl AdmittedPresence {
             next_renewal: 0,
             announcement: None,
             proofs: Vec::with_capacity(MAX_PENDING),
+            queries: None,
         })
     }
     pub(crate) fn id(&self) -> u64 {
@@ -195,6 +198,23 @@ impl AdmittedPresence {
     }
     pub(crate) fn key(&self) -> &JoinKey {
         &self.key
+    }
+    pub(crate) fn query_peer(&self, peer: DeviceId) -> Option<FreshPeer> {
+        self.watcher.peer_for_pair(peer)
+    }
+    pub(crate) fn queries(&self) -> Option<&super::admitted_control::Queries> {
+        self.queries.as_ref()
+    }
+    pub(crate) fn prepare_queries(
+        &mut self,
+    ) -> Result<&super::admitted_control::Queries, VoiceError> {
+        if self.queries.is_none() {
+            self.queries = Some(super::admitted_control::Queries::new(
+                &self.resources,
+                self.scope.group,
+            )?);
+        }
+        self.queries.as_ref().ok_or(VoiceError::Unauthorized)
     }
     pub(crate) fn watch(&self) -> &WatchLease {
         &self.watch
