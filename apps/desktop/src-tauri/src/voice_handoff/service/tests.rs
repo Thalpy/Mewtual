@@ -1837,7 +1837,7 @@ struct Parked {
     at: usize,
     writes: usize,
     dropped: Arc<AtomicBool>,
-    session: Arc<super::super::channel::Session>,
+    session: super::super::channel::SessionRef,
     expected_busy_on_drop: bool,
 }
 impl AsyncRead for Parked {
