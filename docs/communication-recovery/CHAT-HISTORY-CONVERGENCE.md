@@ -1,8 +1,29 @@
 # Chat history across partitions and MLS epochs
 
+## Approved late-post policy (29 October; production integration pending)
+
+The user selected this policy: keep verified history, and hold unproven late posts from removed
+members for approval. Ordinary offline chat between current members should still merge automatically.
+An old membership proof, sender timestamp or local receipt time cannot prove that an exact post was
+created before removal. Verification must use shared cryptographic/causal evidence, so different
+arrival orders cannot give replicas different permanent authority decisions.
+
+Held posts and their approval or rejection belong in the existing server moderation/admin timeline.
+Each entry must identify the original action, full signer, channel and removal context, preserve its
+evidence, and deduplicate repeated delivery. Approval/rejection records must name the exact action
+and decision-maker; retries must not duplicate decisions or release another held post. Holding or
+rejecting a post does not erase its original signed audit history.
+
+The moderation timeline is a view of verified decisions, not an authority source. The existing raw
+moderation CRDT has the disclosed R7 completeness/authorization limitations; adding a row there must
+not grant permission to release a post. Production proof issuance/archive, admission/projection
+handling and this timeline integration remain unfinished. The inactive typed core and its fixture
+witnesses do not activate this policy or close R6/R7.
+
 29 October clarification: current desktop new-message sends use a separate save-before-export
 transaction with a persisted retry identity. The accepted-in-memory boundary below still applies
-to received history and ordinary legacy mutations, including current edits/deletes. Delivery
+to received history and low-level legacy mutation APIs. The integrated desktop edit/delete path
+now uses the same durable transaction; its complete backend gates are still running. Delivery
 receipts are not receiver disk-flush evidence. See the corrected desktop/ordinary-send distinction
 in [MESSAGE-FLOW](../MESSAGE-FLOW.md). No new implementation or validation is claimed by this note.
 

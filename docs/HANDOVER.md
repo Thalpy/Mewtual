@@ -27,8 +27,16 @@ review status. The primary owns the backend runs and keeps Rust compilation seri
 Production historical-authority issuance/archive, typed transport/encryption, migration and live
 dispatch remain absent; legacy R6 remains open. The reviewed inactive-core extension below
 separates reusable member authority from approval for one exact moderation action. Governance,
-owner succession and offline revocation policy are not established by the current fixture witnesses.
+owner succession and enforcement of removal decisions remain unimplemented; fixture witnesses do
+not establish those production guarantees.
 Voice V2 remains disabled and incomplete. External download resume is outside this continuation.
+
+The user has now selected the late-post policy: retain verified history and hold unproven late
+posts from removed members for approval. They also requested held posts and approval/rejection
+decisions in the existing admin log. This is a production-integration requirement, not implemented
+behavior of the inactive core. It must use shared exact-action evidence rather than sender clocks
+or local first arrival, and the mutable moderation CRDT cannot authorize release. See
+[the policy and audit requirements](communication-recovery/CHAT-HISTORY-CONVERGENCE.md).
 
 ## Exact typed moderation approval extension (29 October; full gates pending)
 
