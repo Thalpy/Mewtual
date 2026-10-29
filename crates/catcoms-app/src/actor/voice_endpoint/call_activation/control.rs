@@ -169,8 +169,13 @@ impl ActorInbox {
     pub(in crate::actor) fn control(&mut self) -> &mut ActorControl {
         &mut self.control
     }
-    pub(in crate::actor) fn close_activation(&self) {
-        self.control.close();
+    pub(in crate::actor) fn close_activation(&mut self) {
+        // Normal shutdown retains THIS closed receiver to join older pre-close
+        // permits. Detach the new-family owner and raw seed before Root retirement
+        // or blocked Closed delivery; that separate receiver lifetime must not
+        // keep native history's routing control alive. Actual argument owners keep
+        // their own SAME payment until they return.
+        self.control.detach();
     }
     pub(in crate::actor) async fn recv(&mut self) -> Option<Envelope> {
         self.receiver.recv().await
