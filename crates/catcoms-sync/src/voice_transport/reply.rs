@@ -62,9 +62,11 @@ impl RequestAuthority for ReplyAuthority {
 }
 #[derive(Debug)]
 struct ReplyCustody {
-    _verification: SharedRequestKeepalive,
     // Includes the actual admitted packet and its charge, not just copied status/counts.
     _authority: Arc<ReplyAuthority>,
+    // Original payer LAST: Root/registry may already have retired when a queued
+    // reply or its final Bytes/driver clone releases the final route authority.
+    _verification: SharedRequestKeepalive,
 }
 struct ReplyBytes {
     bytes: Vec<u8>,

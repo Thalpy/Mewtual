@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Shared route registry custody prerequisite (29 October; unrun)
+
+Before adding Control7 transport, this leaf fixes inherited raw-Weak route tails with
+strong rows and the SAME original outside payer; no Weak escapes and Arc destruction
+precedes payer release. Aggregate64 and per-flight512 metadata stay unchanged. First
+fallible voice attachment now prepays an explicit4KiB fixed registry/inline cost even
+when OFF, within unchanged group/process caps. Crypto/Forward entry points prune sole
+rows before reservation and on quiet housekeeping. External preparations, driver
+cancellation/replies and early refusal retain the SAME payer after final authority
+destruction even after Root retirement. Eleven focused regressions (nine sync/two rt)
+and measured guards are drafted but
+unrun; no Cargo ran. Prior full suites cover earlier inputs. See
+[the source trace, accounting and exact limits](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
 ## Admitted Root presence draft (29 October; corrections pending rerun)
 
 The isolated admitted-presence leaf adds a dedicated Root discovery owner under the

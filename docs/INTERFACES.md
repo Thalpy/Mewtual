@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Voice route ownership (29 October; unrun prerequisite)
+
+First fallible Root voice attachment prepays4KiB for the shared64-row route registry
+before publishing VoiceRuntime; subsequent attachment reuses it. No wire or public
+Source API changes. Route rows retain the original Lower/verification sponsor until
+actual route destruction, then release it outside guards. The plain registry fee
+survives Vec deallocation. Prepared/driver owners keep the SAME payer after authority
+even after Root retirement; public rt signatures and wire bytes are unchanged. Quiet
+housekeeping releases idle process-wide Crypto custody. Crypto/Forward/route caps stay unchanged; see
+[the exact scope and pending validation](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
 ## Admitted key presence (29 October; draft, inactive)
 
 Trusted Root `start_admitted_voice_presence(grant, original, join, point)` accepts

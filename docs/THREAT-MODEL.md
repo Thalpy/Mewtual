@@ -1,5 +1,18 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Route metadata tail custody (29 October; unrun prerequisite)
+
+Raw Weak registry entries could retain RouteGate allocation after its internal payer
+returned; zero strong count can race an unfinished destructor. Strong registry rows
+with no escaping Weak now detach only at sole ownership, destroy Arc before outside
+original payer and keep fixed backing independently paid. Early pruning avoids
+stranding Crypto lanes on idle unjoined Roots; quiet collection covers cross-Root
+process pressure. Outside prepared/driver owners destroy authority before original
+payer after registry/Root retirement, including ordinary refused replies. Exact route/member/connection
+gates and all bounds remain enforced. The new4KiB first-attachment cost and actual
+destruction/rollover regressions remain pending execution; no V2 activation claim.
+See [the scoped custody trace](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
 ## Admitted presence boundary (29 October; inactive draft)
 
 The discovery-only admitted owner requires the SAME Root residence, current

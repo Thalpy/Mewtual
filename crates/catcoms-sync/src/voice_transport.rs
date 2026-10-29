@@ -139,6 +139,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         response: &[u8],
         retained: Option<forwarding::RetainedEnvelope<'_>>,
     ) -> Result<VoiceTransportStatus, VoiceError> {
+        self.prune_voice_routes();
         if response.len() > 512 {
             return Err(VoiceError::Bounds);
         }
@@ -373,6 +374,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         frame: &[u8],
         original_request: Option<Arc<dyn catcoms_rt::RequestAuthority>>,
     ) -> Option<VoiceTransportReply> {
+        self.prune_voice_routes();
         if original_request
             .as_ref()
             .is_some_and(|original| !original.authorized())

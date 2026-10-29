@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Route registry custody prerequisite (29 October; unrun)
+
+The shared64-route registry retains strong route rows and the SAME outside Lower or
+verification payer through actual Arc destruction. A separately prepaid4KiB owner
+funds fixed backing/inline metadata before first VoiceRuntime publication, including
+OFF attachments. Sole-owner rows prune before Crypto/Forward reservation. Existing
+wire/enums and all limits remain unchanged; Query/Support transport is not yet added.
+See [the inherited defect, accounting and unrun regressions](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
 ## Admitted Root presence (29 October; draft, inactive)
 
 The exact selected NativeActive Root residence can own a separate discovery-only
