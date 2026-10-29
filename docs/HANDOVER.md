@@ -1,5 +1,31 @@
 # Mewtual; Handover
 
+## Desktop dependency and actual IPC validation (29 October; integration gates open)
+
+Tauri is aligned to 2.12.5, build/codegen/macros2.7.4, runtime2.12.2 and
+runtime-wry2.12.3; tauri-utils remains2.10.2. JavaScript API/CLI are2.12.4.
+Plugins and unrelated Node packages are unchanged. Explicit
+`build.windows.staticVCRuntime:false` preserves the previous absent-environment
+linking choice. This is a real desktop dependency update, not a test-only feature.
+The old family also falls in the published
+[cross-WebView channel-fetch advisory](https://github.com/tauri-apps/tauri/security/advisories/GHSA-w28w-mhc8-qvjv);
+the aligned release has the per-WebView ownership correction.
+
+The first new-family build compiled but Windows refused its library test executable
+before test execution: it imported Common Controls v6 without an embedded manifest.
+The fix links the SAME Tauri-generated resource into only the MSVC library/integration
+test harnesses; the normal application manifest remains unchanged. Final actual-diff
+review is clear. A fresh, unmodified Cargo build now passes both real JSON-dispatch
+tests (0.38s) and the native dialog-entrypoint regression. The generated executable's
+RT_MANIFEST1 contains Common Controls6, with no diagnostic sidecar present. Manually
+embedded diagnostic copies were investigative evidence only.
+
+The matching Node packages are installed in an isolated dependency directory; the
+repository's shared node_modules are untouched. The current full frontend suite
+passes3,687/0 with concurrency2. New-family frontend check/build/flows, actual ACL,
+native check/build/startup, dependency audit and complete Root/native suites remain
+open. Earlier passes below retain their recorded source/dependency boundaries.
+
 ## Admitted native key handoff (29 October; implementation and validation in progress)
 
 The current leaf adds fixed admitted-profile activation/key commands with actual
@@ -9,8 +35,9 @@ native publication cases now pass, including 34 complete key lifecycles, locked
 final admission, lost replies, typed terminal history and actual execution
 destruction after result ACK/SDK settlement. Fourteen Coordinator, eleven Existing
 key, nine activation and 23 affected pressure regressions also pass. The integrated
-browser/native adapter suite passes 3,687 frontend tests with zero failures/skips;
-static checking, the production build and all ten Edge flow checks pass.
+browser/native adapter suite passed 3,687 frontend tests with zero failures/skips;
+static checking, the production build and all ten Edge flow checks passed before
+the desktop dependency alignment above.
 
 Review found and corrected recursive Coordinator locking, stale final generation
 admission, missing rejected-activation cleanup, premature terminal-history removal,
@@ -33,9 +60,8 @@ fillers; those tests still fill the actual group and preserve their refusal chec
 The integration branch's full Root run found an undersized confirmation row; its
 2 KiB correction and pre-allocation production guard pass 120 focused chain tests.
 The complete Root rerun, complete native suite, current native check/build/startup
-and final strict checks remain open. The new real Tauri JSON-dispatch fixture has
-not run: enabling Tauri's test helper exposes an upstream compile mismatch between
-locked Tauri 2.11.3 and tauri-utils 2.10.2. This is being resolved explicitly.
+and final strict checks remain open. The real Tauri JSON-dispatch and test-manifest
+checks now pass on the aligned desktop dependencies, as recorded above.
 
 V2 remains OFF. The retained admitted browser key adapter is integrated here;
 Query/Support is being tested separately. Operational bilateral admission/Ready,

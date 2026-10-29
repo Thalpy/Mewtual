@@ -67,10 +67,14 @@ graph measures 9,772/12,288 bytes, activation 18,472/19,456, admitted metadata
 1,632/2,048 and the shared index 35,536/65,536. All 23 affected pressure cases pass
 after their fillers use actual group usage rather than the process-only index
 payment; the original refusal assertions remain intact. The retained browser key
-adapter is integrated: the complete frontend suite passes 3,687 tests, static and
-production-build checks pass, and all ten Edge flows pass. The earlier failed logs
-are retained. The real Tauri JSON-dispatch fixture is reviewed but not executed:
-Tauri 2.11.3's test helper fails to compile against locked tauri-utils 2.10.2.
+adapter is integrated: the complete frontend suite passes 3,687 tests. Static,
+production-build and ten Edge-flow checks passed before the desktop dependency
+alignment; their current reruns remain open. The earlier failed logs are retained.
+Tauri2.12.5 and JavaScript API/CLI2.12.4 resolve the old test-helper mismatch and
+align desktop packaging. Both actual JSON-dispatch tests pass from an unmodified
+Cargo build, as does the Common Controls entrypoint test. The MSVC test harness
+links the same generated Tauri manifest; normal application resource linking is
+unchanged. A diagnostic edited executable is not counted as final validation.
 Complete current Root/native suites and native check/build/startup remain open.
 Neither an earlier full-suite pass nor a codec-only pass establishes that this
 evolving worktree is green. Operational agreement, admitted KDF, Ready and RTC
