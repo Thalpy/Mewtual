@@ -42,7 +42,9 @@ async fn setup_admitted() -> (
     crate::voice_admitted_call::acknowledge_inner(&f.state, &owner)
         .await
         .unwrap();
-    let admission = crate::voice_admitted_key::admit_inner(&f.state, &owner, [9; 32])
+    // Physical intent precedes the sole key computation; a KeyOnly generation
+    // is intentionally ineligible for this actual HTTP/Slot fixture.
+    let admission = crate::voice_admitted_key::admit_physical_inner(&f.state, &owner, [9; 32])
         .await
         .unwrap();
     guarded(crate::voice_admitted_key::publish_inner(
