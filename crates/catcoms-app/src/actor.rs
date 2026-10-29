@@ -4717,9 +4717,23 @@ fn admit_terminal_stop(stopped: oneshot::Sender<()>, retire: impl FnOnce()) -> b
 
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
 /// [`AppEvent`]s, and the task's [`JoinHandle`].
-#[rustfmt::skip] // Preserve the existing command-table layout previously inside select! macro.
 pub fn spawn<T, R>(
+    server: Server<T, R>,
+) -> (ServerActor, mpsc::Receiver<TracedEvent>, JoinHandle<()>)
+where
+    T: MeshTransport + Send + 'static,
+    R: CryptoRngCore + Send + 'static,
+{
+    spawn_with_lifetime(server, Box::new(()))
+}
+
+/// Spawn with opaque host lifecycle custody retained INSIDE the actual Actor future. Host
+/// cancellation/JoinHandle detachment cannot release this guard while the Actor can publish.
+/// The custody grants no application authority and is dropped only when the task actually ends.
+#[rustfmt::skip]
+pub fn spawn_with_lifetime<T, R>(
     mut server: Server<T, R>,
+    lifetime:Box<dyn Send>,
 ) -> (ServerActor, mpsc::Receiver<TracedEvent>, JoinHandle<()>)
 where
     T: MeshTransport + Send + 'static,
@@ -4741,6 +4755,7 @@ where
     #[cfg(test)]
     let studio_pools = STUDIO_POOLS_FOR_NEXT_SPAWN.with(|pools| pools.borrow_mut().take());
     let handle = tokio::spawn(async move {
+        let _lifetime=lifetime;
         let mut studio_receiver = crate::studio::StudioReceiver::default();
         #[cfg(test)]
         studio_receiver.observe_hints_for_test(studio_hint_signal);
@@ -5075,8 +5090,13 @@ where
                         }
                     }
                     Some(AppCommand::DurableChatRepair { ready }) => {
-                        if crate::durable_chat::execute_repair(&mut server,ready).await {
+                        if let Some(channels)=crate::durable_chat::execute_repair(&mut server,ready).await {
                             let _=event_tx.send(AppEvent::SnapshotNeeded).await;
+                            for channel in channels {
+                                if let Some(change)=channel_delta_if_moved(&server,channel,&mut counts,&mut versions) {
+                                    let _=event_tx.send(AppEvent::ChannelUpdated{channel,change}).await;
+                                }
+                            }
                         }
                     }
                     Some(AppCommand::SendMessage {

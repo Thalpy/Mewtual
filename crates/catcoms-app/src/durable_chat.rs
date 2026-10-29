@@ -315,12 +315,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub fn apply_retired_chat_fences<F>(
         &mut self,
         store: &ServerStore,
+        server_id: u64,
         save: F,
     ) -> Result<(), String>
     where
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
-        let fences = store.load_chat_stop_fences().map_err(|e| e.to_string())?;
+        let fences = store
+            .load_chat_stop_fences(server_id)
+            .map_err(|e| e.to_string())?;
         let identities: Vec<_> = fences
             .iter()
             .map(|f| (f.token, f.binding, f.context, f.channel))
@@ -579,10 +582,10 @@ impl DurableRepairReady {
 pub(crate) async fn execute_repair<T: MeshTransport, R: CryptoRngCore>(
     server: &mut Server<T, R>,
     ready: oneshot::Sender<Option<DurableRepairReady>>,
-) -> bool {
+) -> Option<Vec<u128>> {
     if !server.sync.durable_chat_needs_repair() {
         let _ = ready.send(None);
-        return false;
+        return None;
     }
     let (lease, rx) = oneshot::channel();
     let (tx, result) = oneshot::channel();
@@ -590,11 +593,12 @@ pub(crate) async fn execute_repair<T: MeshTransport, R: CryptoRngCore>(
         .send(Some(DurableRepairReady { lease, result }))
         .is_err()
     {
-        return false;
+        return None;
     }
     let Ok(lease) = rx.await else {
-        return false;
+        return None;
     };
+    let channels = server.sync.durable_chat_repair_channels();
     let result = match lease.store.as_ref() {
         Some(store) => server
             .sync
@@ -609,7 +613,7 @@ pub(crate) async fn execute_repair<T: MeshTransport, R: CryptoRngCore>(
     let touched = result.is_ok();
     drop(lease);
     let _ = tx.send(result);
-    touched
+    touched.then_some(channels)
 }
 #[cfg(test)]
 mod tests {
@@ -1267,13 +1271,14 @@ mod tests {
         let before = store.load_server(9).unwrap().to_vec();
         store
             .save_chat_stop_fence(
+                9,
                 &request.retired_identity(),
                 &mut ChaCha20Rng::seed_from_u64(195),
             )
             .unwrap();
         assert_eq!(store.load_server(9).unwrap().as_slice(), before);
         let mut disk = restored(&store, 9);
-        disk.apply_retired_chat_fences(&store, |bytes, rng| {
+        disk.apply_retired_chat_fences(&store, 9, |bytes, rng| {
             store.save_server(9, bytes, rng).map_err(save_error)
         })
         .unwrap();
@@ -1299,10 +1304,92 @@ mod tests {
         assert_eq!(ops(&fresh), 1);
         let mut unrelated = mutation_node().await;
         unrelated
-            .apply_retired_chat_fences(&store, |_, _| {
+            .apply_retired_chat_fences(&store, 9, |_, _| {
                 panic!("unrelated restore must not overwrite any snapshot")
             })
             .unwrap();
         assert_eq!(ops(&unrelated), 0);
+    }
+    #[tokio::test]
+    async fn durable_chat_host_repair_emits_projection_once_only_after_real_covering_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Some(
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(197)).unwrap(),
+        )));
+        let (actor, mut events, task) = spawn(mutation_node().await);
+        actor.open_channel(5).await;
+        let request = DurableSendRequest {
+            token: [1; 16],
+            expected_context: actor.durable_send_context().await.unwrap(),
+            channel: 5,
+            text: "host repaired".into(),
+            reply_to: String::new(),
+        };
+        store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .fail_next_chat_parent_sync();
+        let pending = actor
+            .prepare_durable_send(request)
+            .await
+            .unwrap()
+            .commit(DurableSendLease::new(
+                store.clone().lock_owned().await,
+                9,
+                (),
+            ))
+            .await
+            .unwrap();
+        assert!(!pending.durable);
+        store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .fail_next_chat_parent_sync();
+        let failed = actor
+            .prepare_durable_chat_repair()
+            .await
+            .unwrap()
+            .unwrap()
+            .commit(DurableSendLease::new(
+                store.clone().lock_owned().await,
+                9,
+                (),
+            ))
+            .await;
+        assert!(failed.is_err());
+        assert!(actor.messages(5).await.is_empty());
+        actor
+            .prepare_durable_chat_repair()
+            .await
+            .unwrap()
+            .unwrap()
+            .commit(DurableSendLease::new(
+                store.clone().lock_owned().await,
+                9,
+                (),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(actor.messages(5).await.len(), 1);
+        actor.stop_and_wait().await.unwrap();
+        task.await.unwrap();
+        let mut changes = 0;
+        while let Some(event) = events.recv().await {
+            if matches!(
+                event.event,
+                crate::AppEvent::ChannelUpdated { channel: 5, .. }
+            ) {
+                changes += 1;
+            }
+        }
+        assert_eq!(
+            changes, 1,
+            "only successful host repair projects the installed channel change"
+        );
+        assert_eq!(ops(&restored(store.lock().await.as_ref().unwrap(), 9)), 1);
     }
 }

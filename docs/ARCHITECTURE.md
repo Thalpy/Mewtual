@@ -12,7 +12,7 @@ yet; legacy R6 remains open. [Scope and evidence](communication-recovery/CHAT-TY
 
 ## Durable local chat transaction boundary (29 October; validation in progress)
 
-An absent-Actor Stop instead saves a globally bounded vault-sealed exact retry fence and returns
+An absent-Actor Stop instead saves a globally bounded vault-sealed numeric-server/exact-token retry fence and returns
 `stopped-retired`, with historical acceptance unknown. The same constant orphan serializer guards
 pre-spawn restore processing through final native registration. Before any autonomous publication,
 a restored matching receipt is negatively stopped in a real covering server save; unrelated graphs

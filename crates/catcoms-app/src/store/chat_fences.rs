@@ -11,7 +11,7 @@ const DOMAIN: &str = "catcoms/chat-stop-fences/v1";
 fn malformed() -> AppError {
     AppError::Invalid("invalid or unsupported retired chat fences".into())
 }
-fn encode(rows: &BTreeMap<[u8; 16], DurableChatIdentity>) -> Result<Vec<u8>, AppError> {
+fn encode(rows: &BTreeMap<(u64, [u8; 16]), DurableChatIdentity>) -> Result<Vec<u8>, AppError> {
     if rows.len() > MAX_CHAT_RECEIPTS {
         return Err(malformed());
     }
@@ -21,7 +21,8 @@ fn encode(rows: &BTreeMap<[u8; 16], DurableChatIdentity>) -> Result<Vec<u8>, App
         .values()
         .try_fold(4 + DOMAIN.len() + 5, |sum, row| {
             sum.checked_add(
-                20 + 36
+                8 + 20
+                    + 36
                     + 36
                     + 16
                     + 4
@@ -40,7 +41,8 @@ fn encode(rows: &BTreeMap<[u8; 16], DurableChatIdentity>) -> Result<Vec<u8>, App
     e.put_str(DOMAIN).map_err(|_| malformed())?;
     e.put_u8(1);
     e.put_u32(rows.len() as u32);
-    for row in rows.values() {
+    for ((server, _), row) in rows {
+        e.put_u64(*server);
         e.put_bytes(&row.token).map_err(|_| malformed())?;
         e.put_bytes(&row.binding).map_err(|_| malformed())?;
         e.put_bytes(&row.context).map_err(|_| malformed())?;
@@ -63,7 +65,7 @@ fn encode(rows: &BTreeMap<[u8; 16], DurableChatIdentity>) -> Result<Vec<u8>, App
     }
     Ok(bytes)
 }
-fn decode(bytes: &[u8]) -> Result<BTreeMap<[u8; 16], DurableChatIdentity>, AppError> {
+fn decode(bytes: &[u8]) -> Result<BTreeMap<(u64, [u8; 16]), DurableChatIdentity>, AppError> {
     if bytes.len() > MAX_FENCE_BYTES {
         return Err(malformed());
     }
@@ -78,6 +80,7 @@ fn decode(bytes: &[u8]) -> Result<BTreeMap<[u8; 16], DurableChatIdentity>, AppEr
     }
     let mut rows = BTreeMap::new();
     for _ in 0..count {
+        let server = d.get_u64().map_err(|_| malformed())?;
         let token = d
             .get_bytes()
             .map_err(|_| malformed())?
@@ -123,7 +126,7 @@ fn decode(bytes: &[u8]) -> Result<BTreeMap<[u8; 16], DurableChatIdentity>, AppEr
             action,
             target,
         };
-        if rows.insert(token, row).is_some() {
+        if rows.insert((server, token), row).is_some() {
             return Err(malformed());
         }
     }
@@ -131,7 +134,7 @@ fn decode(bytes: &[u8]) -> Result<BTreeMap<[u8; 16], DurableChatIdentity>, AppEr
     Ok(rows)
 }
 impl ServerStore {
-    fn chat_fences(&self) -> Result<BTreeMap<[u8; 16], DurableChatIdentity>, AppError> {
+    fn chat_fences(&self) -> Result<BTreeMap<(u64, [u8; 16]), DurableChatIdentity>, AppError> {
         let path = self.dir.join("chat-stop-fences.bin");
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -143,9 +146,13 @@ impl ServerStore {
         decode(&unseal(&self.keys.db_key()?, &unframe(&raw)?)?)
     }
     /// Parse/authentication failures refuse all fresh native positive admissions.
-    pub fn has_chat_stop_fence(&self, identity: &DurableChatIdentity) -> Result<bool, AppError> {
+    pub fn has_chat_stop_fence(
+        &self,
+        server: u64,
+        identity: &DurableChatIdentity,
+    ) -> Result<bool, AppError> {
         let rows = self.chat_fences()?;
-        match rows.get(&identity.token) {
+        match rows.get(&(server, identity.token)) {
             Some(saved) if saved != identity => Err(AppError::Invalid(
                 "CHAT_SEND_TOKEN_CONFLICT: retired token binds another request".into(),
             )),
@@ -153,19 +160,24 @@ impl ServerStore {
             None => Ok(false),
         }
     }
-    pub fn load_chat_stop_fences(&self) -> Result<Vec<DurableChatIdentity>, AppError> {
-        Ok(self.chat_fences()?.into_values().collect())
+    pub fn load_chat_stop_fences(&self, server: u64) -> Result<Vec<DurableChatIdentity>, AppError> {
+        Ok(self
+            .chat_fences()?
+            .into_iter()
+            .filter_map(|((id, _), identity)| (id == server).then_some(identity))
+            .collect())
     }
     /// Merge and rewrite even an identical visible fence. A prior rename with failed parent sync
     /// is not durable evidence; only this successful save can acknowledge the negative terminal.
     /// The host must hold its mounted-store mutex and absence/registration custody throughout.
     pub fn save_chat_stop_fence(
         &self,
+        server: u64,
         identity: &DurableChatIdentity,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         let mut rows = self.chat_fences()?;
-        if let Some(saved) = rows.get(&identity.token) {
+        if let Some(saved) = rows.get(&(server, identity.token)) {
             if saved != identity {
                 return Err(AppError::Invalid(
                     "CHAT_SEND_TOKEN_CONFLICT: retired token binds another request".into(),
@@ -176,7 +188,7 @@ impl ServerStore {
                 "retired chat fence capacity exhausted".into(),
             ));
         }
-        rows.insert(identity.token, identity.clone());
+        rows.insert((server, identity.token), identity.clone());
         let bytes = encode(&rows)?;
         let sealed = seal(&self.keys.db_key()?, &bytes, rng)?;
         self.write_chat_fences_record(&frame(&sealed))
@@ -205,35 +217,35 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(191);
         let store = ServerStore::open(dir.path(), b"test", &mut rng).unwrap();
         let first = identity(1, "original");
-        store.save_chat_stop_fence(&first, &mut rng).unwrap();
+        store.save_chat_stop_fence(9, &first, &mut rng).unwrap();
         let path = dir.path().join("chat-stop-fences.bin");
         let previous = fs::read(&path).unwrap();
         let second = identity(2, "another");
         store
             .chat_fence_pre_rename_failure
             .store(true, Ordering::SeqCst);
-        assert!(store.save_chat_stop_fence(&second, &mut rng).is_err());
+        assert!(store.save_chat_stop_fence(9, &second, &mut rng).is_err());
         assert_eq!(fs::read(&path).unwrap(), previous);
-        assert!(!store.has_chat_stop_fence(&second).unwrap());
+        assert!(!store.has_chat_stop_fence(9, &second).unwrap());
         store.fail_next_chat_parent_sync();
         assert!(matches!(
-            store.save_chat_stop_fence(&second, &mut rng),
+            store.save_chat_stop_fence(9, &second, &mut rng),
             Err(AppError::CommittedButNotDurable(_))
         ));
-        assert!(store.has_chat_stop_fence(&first).unwrap());
-        assert!(store.has_chat_stop_fence(&second).unwrap());
+        assert!(store.has_chat_stop_fence(9, &first).unwrap());
+        assert!(store.has_chat_stop_fence(9, &second).unwrap());
         assert!(store
-            .has_chat_stop_fence(&identity(2, "foreign binding"))
+            .has_chat_stop_fence(9, &identity(2, "foreign binding"))
             .is_err());
         // A fresh authenticated read sees the actual renamed fence, not a helper success flag.
         drop(store);
         let store = ServerStore::open(dir.path(), b"test", &mut rng).unwrap();
-        assert!(store.has_chat_stop_fence(&second).unwrap());
-        store.save_chat_stop_fence(&second, &mut rng).unwrap();
-        assert_eq!(store.load_chat_stop_fences().unwrap().len(), 2);
+        assert!(store.has_chat_stop_fence(9, &second).unwrap());
+        store.save_chat_stop_fence(9, &second, &mut rng).unwrap();
+        assert_eq!(store.load_chat_stop_fences(9).unwrap().len(), 2);
         store.remove_server(44).unwrap();
         assert!(
-            store.has_chat_stop_fence(&second).unwrap(),
+            store.has_chat_stop_fence(9, &second).unwrap(),
             "Leave must never remove global negative history"
         );
     }
@@ -252,8 +264,8 @@ mod tests {
                 &seal(&store.keys.db_key().unwrap(), &bad.finish(), &mut rng).unwrap(),
             ))
             .unwrap();
-        assert!(store.has_chat_stop_fence(&request).is_err());
-        assert!(store.save_chat_stop_fence(&request, &mut rng).is_err());
+        assert!(store.has_chat_stop_fence(9, &request).is_err());
+        assert!(store.save_chat_stop_fence(9, &request, &mut rng).is_err());
         let mut count = Encoder::new();
         count.put_str(DOMAIN).unwrap();
         count.put_u8(1);
@@ -263,7 +275,7 @@ mod tests {
         for i in 0..=MAX_CHAT_RECEIPTS {
             let mut row = request.clone();
             row.token = (i as u128).to_be_bytes();
-            rows.insert(row.token, row);
+            rows.insert((9, row.token), row);
         }
         assert!(encode(&rows).is_err());
         rows.pop_last();
@@ -276,5 +288,22 @@ mod tests {
             encode(&rows).is_err(),
             "combined byte cap is checked before encoding allocation"
         );
+    }
+    #[test]
+    fn retired_chat_fences_bind_numeric_server_and_allow_independent_equal_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(196);
+        let store = ServerStore::open(dir.path(), b"test", &mut rng).unwrap();
+        let first = identity(1, "first scope");
+        let second = identity(1, "other scope");
+        store.save_chat_stop_fence(999, &first, &mut rng).unwrap();
+        assert!(!store.has_chat_stop_fence(12, &first).unwrap());
+        assert!(!store.has_chat_stop_fence(12, &second).unwrap());
+        store.save_chat_stop_fence(12, &second, &mut rng).unwrap();
+        assert!(store.has_chat_stop_fence(999, &first).unwrap());
+        assert!(store.has_chat_stop_fence(12, &second).unwrap());
+        assert!(store.has_chat_stop_fence(12, &first).is_err());
+        assert_eq!(store.load_chat_stop_fences(12).unwrap(), vec![second]);
+        assert_eq!(store.load_chat_stop_fences(999).unwrap(), vec![first]);
     }
 }

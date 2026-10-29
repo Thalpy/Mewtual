@@ -523,6 +523,57 @@ mod tests {
             ChatDisposition::StoppedAfterCommit
         );
     }
+    #[tokio::test]
+    async fn durable_chat_noop_refuses_real_frontier_over_retained_head_cap() {
+        let mut n = node();
+        n.open_channel(DocType::Channel, 5).await.unwrap();
+        for index in 0..=MAX_NOOP_HEADS {
+            let mut graph = AutoCommit::new();
+            let mut actor = vec![0; 16];
+            actor[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            graph.set_actor(automerge::ActorId::from(actor));
+            graph.put(ROOT, format!("head-{index}"), true).unwrap();
+            graph.commit();
+            let op = catcoms_replication::SignedOp::sign(
+                &n.device,
+                DocType::Channel,
+                5,
+                graph.get_last_local_change().unwrap().raw_bytes().to_vec(),
+            )
+            .unwrap();
+            let sealed = SealedOp::seal(&op, &n.group, &n.device, &mut n.rng).unwrap();
+            n.docs
+                .get_mut(&(DocType::Channel, 5))
+                .unwrap()
+                .ingest_tracked(&sealed, &n.group, &n.device)
+                .unwrap();
+        }
+        assert_eq!(
+            n.doc(DocType::Channel, 5)
+                .unwrap()
+                .doc()
+                .clone()
+                .get_heads()
+                .len(),
+            MAX_NOOP_HEADS + 1
+        );
+        let context = n.durable_send_context().unwrap();
+        let error = n
+            .prepare_durable_chat_action(
+                [1; 16],
+                [1; 32],
+                context,
+                5,
+                "sample".into(),
+                ChatAction::Edit,
+                Some([1; 32]),
+                true,
+                |_| panic!("no-op never edits"),
+            )
+            .unwrap_err();
+        assert!(error.contains("no-op frontier exceeds"));
+        assert!(n.durable_chat.records.is_empty());
+    }
 }
 
 #[derive(Clone)]
@@ -898,6 +949,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub fn durable_chat_token_needs_repair(&self, token: [u8; 16]) -> bool {
         self.durable_chat.replacement_uncertain.contains_key(&token)
     }
+    /// Only repaired signed effects can change projections; metadata-only terminals are omitted.
+    pub fn durable_chat_repair_channels(&self) -> Vec<u128> {
+        self.durable_chat
+            .replacement_uncertain
+            .values()
+            .filter_map(|r| {
+                (r.durable && matches!(r.effect, ChatEffect::Signed { .. })).then_some(r.channel)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
     pub fn durable_chat_needs_repair(&self) -> bool {
         !self.durable_chat.replacement_uncertain.is_empty()
     }
@@ -985,7 +1048,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let mut candidate = EncryptedDoc::restore_for_actor(&original, &self.device.device_id())
             .map_err(|e| e.to_string())?;
         let (effect, sealed) = if noop {
-            // Bound before retaining any frontier. A sampled no-op never turns into a later edit.
+            // Bound retained receipt metadata. Automerge materializes its existing frontier
+            // before this check (like the candidate snapshot itself, transient work scales with
+            // the existing graph). No oversized frontier enters a prepared receipt.
+            // A sampled no-op never turns into a later edit.
             let heads = candidate.doc().clone().get_heads();
             if heads.len() > MAX_NOOP_HEADS {
                 return Err("CHAT_SEND_CAPACITY: no-op frontier exceeds limit".into());

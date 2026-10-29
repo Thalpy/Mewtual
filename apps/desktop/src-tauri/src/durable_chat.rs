@@ -60,7 +60,7 @@ fn authorize(
             .as_ref()
             .ok_or_else(|| "vault is not mounted".to_string())?;
         if store
-            .has_chat_stop_fence(identity)
+            .has_chat_stop_fence(server, identity)
             .map_err(|e| e.to_string())?
         {
             return Err("CHAT_SEND_STOPPED: this retired token is permanently fenced; repeat Stop to resolve its saved terminal".into());
@@ -90,24 +90,23 @@ pub(super) async fn send(
     let channel = channel
         .parse()
         .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
-    let (actor, instance) = actor_instance_of(state, server)
-        .await
-        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
-    let actor = op.bind_actor(actor);
+    let mut captured = None;
     let (token, expected_context) = match (retry_token, expected_context) {
         (Some(token), Some(context)) => (
             fixed_hex(&token).map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?,
             fixed_hex(&context).map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?,
         ),
-        // Older local callers still cross the same save barrier. Updated callers retain the
-        // token before invocation so they can also recover an ambiguous IPC completion.
         (None, None) => {
-            let mut token = [0u8; 16];
+            let (actor, instance) = actor_instance_of(state, server)
+                .await
+                .map_err(|failure| op.fail(failure.code(), failure.message()))?;
+            let mut token = [0; 16];
             OsCryptoRng.fill_bytes(&mut token);
             let context = actor
                 .durable_send_context()
                 .await
                 .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
+            captured = Some((actor, instance));
             (token, context)
         }
         _ => {
@@ -124,21 +123,56 @@ pub(super) async fn send(
         text,
         reply_to: reply_to.unwrap_or_default(),
     };
-    let identity = DurableChatRequest::Send(request.clone()).retired_identity();
+    request
+        .validate()
+        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
+    let original = DurableChatRequest::Send(request.clone());
+    if let Some(terminal) = stop_request_at(state, server, original.clone(), generation, true)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?
+    {
+        op.succeeded(if terminal.persistence == PersistOutcome::Durable {
+            "CHANNEL.SEND.RETIRED_FENCE_PERSISTED"
+        } else {
+            "CHANNEL.SEND.RETIRED_FENCE_PENDING"
+        });
+        return Ok(terminal);
+    }
+    let (actor, instance) = match captured {
+        Some(captured) => captured,
+        None => actor_instance_of(state, server)
+            .await
+            .map_err(|failure| op.fail(failure.code(), failure.message()))?,
+    };
+    let actor = op.bind_actor(actor);
+    let identity = original.retired_identity();
     let ready = actor
         .prepare_durable_send(request)
         .await
         .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
-    let lease = authorize(state, server, instance, generation, Some(&identity))
-        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
+    let lease = match authorize(state, server, instance, generation, Some(&identity)) {
+        Ok(lease) => lease,
+        Err(error) if error.starts_with("CHAT_SEND_STOPPED:") => {
+            // Release the original Ready and all failed final-lease custody before negative
+            // recovery. The same request may only rewrite an already existing exact fence.
+            drop(ready);
+            return stop_request_at(state, server, original, generation, true)
+                .await
+                .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?
+                .ok_or_else(|| op.fail(codes::CHAT_SEND_REJECTED, "retired fence disappeared"));
+        }
+        Err(error) => return Err(op.fail(codes::CHAT_SEND_REJECTED, error)),
+    };
     let outcome = ready
         .commit(lease)
         .await
         .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
-    op.succeeded(if outcome.durable {
-        "CHANNEL.SEND.PERSISTED"
-    } else {
+    op.succeeded(if !outcome.durable {
         "CHANNEL.SEND.PREPARED_PENDING"
+    } else if outcome.disposition != ChatDisposition::Committed {
+        "CHANNEL.SEND.STOPPED"
+    } else {
+        "CHANNEL.SEND.PERSISTED"
     });
     Ok(response(outcome))
 }
@@ -199,17 +233,11 @@ pub(super) async fn mutation(
     retry_token: String,
     expected_context: String,
     target: String,
+    generation: u64,
 ) -> Result<SendMessageResult, AppError> {
-    let generation = unlocked_ui_session_generation(state)
-        .await
-        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     let channel = channel
         .parse()
         .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
-    let (actor, instance) = actor_instance_of(state, server)
-        .await
-        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
-    let actor = op.bind_actor(actor);
     let request = DurableMutationRequest {
         token: fixed_hex(&retry_token).map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?,
         expected_context: fixed_hex(&expected_context)
@@ -219,24 +247,50 @@ pub(super) async fn mutation(
         target: fixed_hex(&target).map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?,
         action,
     };
-    let identity = DurableChatRequest::Mutation(request.clone()).retired_identity();
+    request
+        .validate()
+        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
+    let original = DurableChatRequest::Mutation(request.clone());
+    if let Some(terminal) = stop_request_at(state, server, original.clone(), generation, true)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?
+    {
+        return Ok(terminal);
+    }
+    let (actor, instance) = actor_instance_of(state, server)
+        .await
+        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
+    let actor = op.bind_actor(actor);
+    let identity = original.retired_identity();
     let ready = actor
         .prepare_durable_mutation(request)
         .await
         .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
-    let lease = authorize(state, server, instance, generation, Some(&identity))
-        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
+    let lease = match authorize(state, server, instance, generation, Some(&identity)) {
+        Ok(lease) => lease,
+        Err(error) if error.starts_with("CHAT_SEND_STOPPED:") => {
+            drop(ready);
+            return stop_request_at(state, server, original, generation, true)
+                .await
+                .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?
+                .ok_or_else(|| op.fail(codes::CHAT_EDIT_REJECTED, "retired fence disappeared"));
+        }
+        Err(error) => return Err(op.fail(codes::CHAT_EDIT_REJECTED, error)),
+    };
     let outcome = ready
         .commit(lease)
         .await
         .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
-    op.succeeded(if outcome.durable {
-        "CHANNEL.MUTATION.PERSISTED"
-    } else {
+    op.succeeded(if !outcome.durable {
         "CHANNEL.MUTATION.PREPARED_PENDING"
+    } else if outcome.disposition != ChatDisposition::Committed {
+        "CHANNEL.MUTATION.STOPPED"
+    } else {
+        "CHANNEL.MUTATION.PERSISTED"
     });
     Ok(response(outcome))
 }
+
 #[derive(serde::Serialize)]
 pub(super) struct MutationContextResult {
     context: String,
@@ -354,15 +408,30 @@ pub(super) async fn stop_durable_chat(
     server: u64,
     original: OriginalChatRequest,
 ) -> Result<SendMessageResult, String> {
-    stop_request(&state, server, original.into_request()?).await
+    let generation = unlocked_ui_session_generation(&state).await?;
+    stop_request_at(&state, server, original.into_request()?, generation, false)
+        .await?
+        .ok_or_else(|| "missing exact Stop result".to_string())
 }
+#[cfg(test)]
 async fn stop_request(
     state: &AppState,
     server: u64,
     original: DurableChatRequest,
 ) -> Result<SendMessageResult, String> {
-    original.validate()?;
     let generation = unlocked_ui_session_generation(state).await?;
+    stop_request_at(state, server, original, generation, false)
+        .await?
+        .ok_or_else(|| "missing exact Stop result".to_string())
+}
+async fn stop_request_at(
+    state: &AppState,
+    server: u64,
+    original: DurableChatRequest,
+    generation: u64,
+    existing_only: bool,
+) -> Result<Option<SendMessageResult>, String> {
+    original.validate()?;
     // One constant serializer covers all orphan IDs. An arbitrary missing numeric ID cannot
     // create an unbounded persist_locks entry. Restores retain this same guard through register.
     let orphan = state.chat_orphan_commit.clone().lock_owned().await;
@@ -372,9 +441,12 @@ async fn stop_request(
         mounted
             .as_ref()
             .ok_or_else(|| "vault is not mounted".to_string())?
-            .has_chat_stop_fence(&identity)
+            .has_chat_stop_fence(server, &identity)
             .map_err(|e| e.to_string())?
     };
+    if existing_only && !existing_fence {
+        return Ok(None);
+    }
     let current = state
         .servers
         .lock()
@@ -387,7 +459,7 @@ async fn stop_request(
             .prepare_durable_stop(DurableStopRequest { original })
             .await?;
         let lease = authorize(state, server, instance, generation, None)?;
-        return Ok(response(ready.commit(lease).await?));
+        return Ok(Some(response(ready.commit(lease).await?)));
     }
     let _session = require_ui_session_generation(state, generation).await?;
     let guard = state.store.lock().await;
@@ -404,12 +476,12 @@ async fn stop_request(
     // Decode/foreign bindings fail closed. Identical visible fences are rewritten, since a
     // previous post-rename parent-sync failure cannot acknowledge this durable terminal.
     store
-        .has_chat_stop_fence(&identity)
+        .has_chat_stop_fence(server, &identity)
         .map_err(|e| e.to_string())?;
     let durable = store
-        .save_chat_stop_fence(&identity, &mut OsCryptoRng)
+        .save_chat_stop_fence(server, &identity, &mut OsCryptoRng)
         .is_ok();
-    Ok(SendMessageResult {
+    Ok(Some(SendMessageResult {
         accepted: false,
         persistence: if durable {
             PersistOutcome::Durable
@@ -421,7 +493,7 @@ async fn stop_request(
         message_id: Some(identity.message_id().to_string()),
         replayed: existing_fence,
         disposition: "stopped-retired",
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -660,6 +732,31 @@ mod tests {
             .unwrap()
             .accepted
         );
+        let foreign_scope = stop_request(&state, 999, request.clone()).await.unwrap();
+        assert_eq!(foreign_scope.disposition, "stopped-retired");
+        assert!(!state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .has_chat_stop_fence(12, &request.retired_identity())
+            .unwrap());
+        assert!(
+            send(
+                &state,
+                &op,
+                12,
+                "5",
+                "retained original".into(),
+                None,
+                Some(hex::encode([193; 16])),
+                Some(hex::encode(context))
+            )
+            .await
+            .unwrap()
+            .accepted
+        );
         // The actual stop handshake closes authoring/publication before registry retirement.
         let stopped = leaving::stop_server(&state, 12, &ManualClock::new(1_000))
             .await
@@ -755,8 +852,10 @@ mod tests {
             Some(hex::encode(context)),
         )
         .await
-        .unwrap_err();
-        assert!(late.to_string().contains("retired token"));
+        .unwrap();
+        assert!(!late.accepted);
+        assert_eq!(late.disposition, "stopped-retired");
+        assert_eq!(late.persistence, PersistOutcome::Durable);
         assert!(replacement_actor.messages(5).await.is_empty());
         let terminal = stop_request(&reopened, 12, request).await.unwrap();
         assert_eq!(terminal.disposition, "stopped-retired");
@@ -765,5 +864,53 @@ mod tests {
         replacement_actor.stop_and_wait().await.unwrap();
         task.await.unwrap();
         drain.await.unwrap();
+    }
+    #[tokio::test]
+    async fn pre_registration_chat_owner_retains_guard_until_actual_aborted_actor_completion() {
+        use futures::FutureExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let guard = state.chat_orphan_commit.clone().lock_owned().await;
+        let custody = Arc::new(std::sync::Mutex::new(Some(guard)));
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(1006)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1006),
+            Box::new(ManualClock::new(1_000)),
+            "test",
+        )
+        .unwrap();
+        let (actor, mut events, task) =
+            catcoms_app::spawn_with_lifetime(server, Box::new(custody.clone()));
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let owner = PreRegistrationChatOwner {
+            custody,
+            abort: Some(task.abort_handle()),
+        };
+        actor.open_channel(5).await;
+        let request = DurableSendRequest {
+            token: [194; 16],
+            expected_context: actor.durable_send_context().await.unwrap(),
+            channel: 5,
+            text: "must not escape canceled restore".into(),
+            reply_to: String::new(),
+        };
+        // A real Ready parks the actual Actor before its original storage lease. Dropping the
+        // pre-registration owner aborts that task, but its lifetime still owns the absence guard.
+        let ready = actor.prepare_durable_send(request.clone()).await.unwrap();
+        let mut stopped = Box::pin(stop_request(&state, 12, DurableChatRequest::Send(request)));
+        assert!(stopped.as_mut().now_or_never().is_none());
+        drop(owner);
+        assert!(state.chat_orphan_commit.try_lock().is_err());
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(ready);
+        drain.await.unwrap();
+        let result = stopped.await.unwrap();
+        assert_eq!(result.persistence, PersistOutcome::Durable);
+        assert_eq!(result.disposition, "stopped-retired");
+        assert!(actor.messages(5).await.is_empty());
     }
 }

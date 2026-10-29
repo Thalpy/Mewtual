@@ -25,7 +25,7 @@ before releasing the native reservation. Saved operations remain additive histor
 saves real frontier heads and creates no signed change or edited timestamp. Durable-chat storage
 stays v1 byte-for-byte for legacy send-only rows and becomes sticky v2 for mutation/no-op/explicit
 Stop. UI continuity v2 is likewise sticky, so older readers reject rather than replay edit text as
-a post. A `stopped-retired` result means a vault-sealed exact retry fence was durably saved after the
+a post. A `stopped-retired` result means a vault-sealed numeric-server/exact-token retry fence was durably saved after the
 original Actor was absent; whether the original request committed is unknown. Its history may
 already have been sent/applied. Retired fences survive Leave and are globally bounded/non-evicting.
 Positive native final custody checks them, and restored matching saved publication/reservations are

@@ -12777,6 +12777,9 @@ async fn edit_message(
         server,
         Some(&channel),
     );
+    let generation = unlocked_ui_session_generation(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     durable_chat::mutation(
         &state,
         &op,
@@ -12787,6 +12790,7 @@ async fn edit_message(
         retry_token,
         expected_context,
         target,
+        generation,
     )
     .await
 }
@@ -12810,6 +12814,9 @@ async fn delete_message(
         server,
         Some(&channel),
     );
+    let generation = unlocked_ui_session_generation(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     durable_chat::mutation(
         &state,
         &op,
@@ -12820,6 +12827,7 @@ async fn delete_message(
         retry_token,
         expected_context,
         target,
+        generation,
     )
     .await
 }
@@ -13377,8 +13385,31 @@ struct ReloadedServer {
 /// Transport-independent half of vault reload. Keeping this seam below Tauri's concrete runtime
 /// lets the lifecycle test exercise the exact restore, blob attachment, route restoration and
 /// actor startup used in production with a deterministic in-memory transport.
+/// Cancellation owns an actual Actor abort and leaves custody in that same task until actual
+/// completion. Plain JoinHandle Drop detaches; releasing the absence guard there would let a
+/// retired Stop race an unregistered publisher. Only final registry installation disarms it.
+struct PreRegistrationChatOwner {
+    custody: Arc<std::sync::Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>>,
+    abort: Option<tokio::task::AbortHandle>,
+}
+impl PreRegistrationChatOwner {
+    fn installed(mut self) {
+        self.abort = None;
+        self.custody
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+}
+impl Drop for PreRegistrationChatOwner {
+    fn drop(&mut self) {
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
+    }
+}
 struct RestoredActor {
-    chat_fence_commit: tokio::sync::OwnedMutexGuard<()>,
+    chat_fence_commit: PreRegistrationChatOwner,
     actor: ServerActor,
     events: mpsc::Receiver<catcoms_app::TracedEvent>,
     task: tokio::task::JoinHandle<()>,
@@ -13417,7 +13448,7 @@ where
         let registry = state.servers.lock().await;
         // An actual fence may require a covering server save. Never let this private older
         // restore overwrite the snapshot of a currently mounted live incarnation.
-        server.apply_retired_chat_fences(store, |bytes, rng| {
+        server.apply_retired_chat_fences(store, record.id, |bytes, rng| {
             if registry.contains_key(&record.id) {
                 return Err(catcoms_sync::durable_chat::ChatSaveError::NotReplaced(
                     "live conversation superseded fenced restore".into(),
@@ -13499,7 +13530,12 @@ where
 
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, task) = spawn(server);
+    let custody = Arc::new(std::sync::Mutex::new(Some(chat_fence_commit)));
+    let (actor, events, task) = catcoms_app::spawn_with_lifetime(server, Box::new(custody.clone()));
+    let chat_fence_commit = PreRegistrationChatOwner {
+        custody,
+        abort: Some(task.abort_handle()),
+    };
     actor.open_channel(channel_id("general")).await;
     Ok(RestoredActor {
         chat_fence_commit,
@@ -13752,7 +13788,7 @@ async fn reload_one(
     drop(commit);
     // Registration is now visible to orphan Stop. Only here can the global absence fence
     // be released; earlier release would let a new fence race autonomous restored publication.
-    drop(chat_fence_commit);
+    chat_fence_commit.installed();
     supervise("server_actor", record.id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, record.id, instance).await;
