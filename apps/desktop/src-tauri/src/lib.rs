@@ -26688,7 +26688,10 @@ mod tests {
             r#"{"version":1,"drafts":{"1:2":"hello"},"readMarks":{"1:2":9}}"#
         )
         .is_ok());
-        assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_err());
+        // Mutation/Stop continuity deliberately uses sticky v2, including after the queue
+        // empties. Both supported envelopes remain readable; an unknown successor refuses.
+        assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());

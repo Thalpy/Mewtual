@@ -2,6 +2,49 @@ use super::*;
 use crate::voice_handoff::ledger::tests::{actual_action, selection};
 
 #[test]
+fn confirmation_terminal_oracle_retries_actual_row_contention_without_claiming_completion() {
+    use crate::voice_handoff::integration::webcrypto::automatic_terminal;
+    use std::sync::mpsc;
+
+    let (_coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let Begin::Factory(registration) = ledger
+        .begin(selected.clone(), Purpose::Derive(selector))
+        .unwrap()
+    else {
+        panic!("new original Pending")
+    };
+    let id = registration.id();
+    let row = ledger.index.lock().unwrap().rows[id.slot]
+        .as_ref()
+        .unwrap()
+        .clone();
+    let before = selected.resources().counts();
+    let held = row.state.lock().unwrap();
+    let (observed, observation) = mpsc::channel();
+    let worker_ledger = ledger.clone();
+    let worker_selected = selected.clone();
+    let worker = std::thread::spawn(move || {
+        observed
+            .send(automatic_terminal(&worker_ledger, &worker_selected, None))
+            .unwrap();
+    });
+    // The actual parent mutex, rather than a fabricated Capacity result, drives the
+    // refusal. The watchdog releases it before joining even if a regression waits.
+    let result = observation.recv_timeout(std::time::Duration::from_secs(5));
+    drop(held);
+    worker.join().unwrap();
+    assert!(!result.expect("passive oracle must refuse actual row contention"));
+    assert!(!automatic_terminal(&ledger, &selected, None));
+    assert_eq!(selected.resources().counts(), before);
+    assert_eq!(
+        registration.id(),
+        id,
+        "observation cannot replace original work"
+    );
+}
+
+#[test]
 fn work_snapshot_is_original_noncreating_and_revisits_pending_attachment_in_same_slot() {
     let (mut coordinator, selected, selector) = selection();
     let (_foreign_coordinator, foreign, _) = selection();

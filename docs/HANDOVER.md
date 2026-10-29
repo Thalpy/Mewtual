@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Integrated text-chat validation (29 October; backend runtime gates pending)
+## Integrated text-chat validation (29 October; native rerun pending)
 
 The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/
 Stop path. All findings from their actual-diff reviews have been corrected and re-reviewed. This
@@ -19,10 +19,19 @@ at `9e976e92`. The typed-core run passed 17 tests before integration, with a sep
 signature-variant regression at `b58fb13d`. These are recorded focused results at their respective
 revisions, not complete backend-suite results or a claim that every test was rerun at `e491a2a8`.
 
-All five native durability/runtime regressions pass at `1f9367c7`, as does native strict all-target
-Clippy. Complete Root/native test suites and native build/startup remain pending. Earlier checkpoint notes
-below describe what had run at those points; this section supersedes their pending frontend and
-review status. The primary owns the backend runs and keeps Rust compilation serialized.
+The complete Root workspace run at `e30c0bed` passes **3,983 tests**, with zero failures and 25
+existing ignored tests across 59 result groups, including doc tests. The native full run at that
+checkpoint finishes **978 passed, 34 failed**. Its independent causes are the Delete error-code
+mapping, an obsolete v2-continuity assertion, a reconnect fixture dropping real pre-registration
+Actor custody after registration, and a multi-peer confirmation oracle panicking on a retryable
+Capacity refusal. The latter closes the six-client fixture gate and causes 27 further failures.
+
+The reviewed corrections are `a5d42d06`, `1de41193`, `e5f4abe3` and `84590bab`. All **32 focused
+native tests** pass afterward: 11 error-contract tests, six durable-chat tests, the continuity
+assertion, a deterministic held-row oracle regression, all 12 reconnect regressions and the original
+multi-peer HTTP/TCP browser scenario. Full native rerun, refreshed native lint, build and startup
+remain pending. Earlier notes describe their own checkpoints; the failed full run is not a green
+gate. The primary owns complete runs and keeps Rust compilation serialized.
 
 Production historical-authority issuance/archive, typed transport/encryption, migration and live
 dispatch remain absent; legacy R6 remains open. The reviewed inactive-core extension below
