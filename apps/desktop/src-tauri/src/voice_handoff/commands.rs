@@ -10,6 +10,60 @@ use serde::Serialize;
 use std::io::Write;
 use std::sync::Arc;
 use tauri::State;
+mod physical_history;
+pub(crate) fn no_physical_intent_reply_layout_bytes() -> usize {
+    physical_history::no_intent_reply_layout_bytes()
+}
+pub(crate) fn physical_receipt_reply_layout_bytes() -> usize {
+    physical_history::bound_reply_layout_bytes()
+}
+#[cfg(test)]
+pub(crate) async fn fixture_physical_observation(
+    state: &AppState,
+    owner: &str,
+    executor: [u8; 32],
+) -> Result<physical_history::PhysicalReply, String> {
+    physical_history::observe_inner(state, owner, executor).await
+}
+
+/// Exact paid physical history only. Missing/forgotten parents remain NoProof;
+/// this fixed negative command neither creates intent nor starts work.
+#[tauri::command]
+pub(crate) async fn observe_admitted_voice_channel(
+    state: State<'_, AppState>,
+    owner: String,
+    executor: String,
+) -> Result<physical_history::PhysicalReply, String> {
+    let id = identity(&owner, &executor)?;
+    physical_history::observe_inner(&state, &owner, id).await
+}
+
+/// Explicit final-forget/waiver for an ALREADY observed exact physical receipt.
+/// It proves neither browser observation nor receipt delivery. Native may collect
+/// only after its independent original Root/key/task gates have actually returned.
+#[tauri::command]
+pub(crate) async fn acknowledge_admitted_voice_channel(
+    state: State<'_, AppState>,
+    owner: String,
+    executor: String,
+    receipt: String,
+) -> Result<(), String> {
+    let id = identity(&owner, &executor)?;
+    if receipt.len() != 64
+        || !receipt
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(REFUSED.into());
+    }
+    let receipt = hex::decode(receipt)
+        .map_err(|_| REFUSED)?
+        .try_into()
+        .map_err(|_| REFUSED)?;
+    physical_history::acknowledge_inner(&state, &owner, id, receipt).await?;
+    crate::voice_admitted_call::collect_retired(&state);
+    Ok(())
+}
 
 const REFUSED: &str = "voice channel unavailable";
 pub(super) const PUBLIC_REPLY_BYTES: usize = 2304;

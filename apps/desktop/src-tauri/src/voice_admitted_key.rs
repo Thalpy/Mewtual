@@ -117,8 +117,25 @@ pub(super) async fn admit_inner(
     owner: &str,
     executor: [u8; 32],
 ) -> Result<crate::voice_authority::JoinKeyAdmission, String> {
-    // A closed old physical owner may become collectible after its last real
-    // header returns. Reap BEFORE fresh Crypto admission or UI/Coordinator locks.
+    admit_for_purpose(state, owner, executor, false).await
+}
+
+/// Separate fixed physical family; no caller-supplied profile flag crosses IPC.
+pub(super) async fn admit_physical_inner(
+    state: &crate::AppState,
+    owner: &str,
+    executor: [u8; 32],
+) -> Result<crate::voice_authority::JoinKeyAdmission, String> {
+    admit_for_purpose(state, owner, executor, true).await
+}
+
+async fn admit_for_purpose(
+    state: &crate::AppState,
+    owner: &str,
+    executor: [u8; 32],
+    physical: bool,
+) -> Result<crate::voice_authority::JoinKeyAdmission, String> {
+    // Reap actual closed physical owners before fresh Crypto or UI/Coordinator guards.
     state.voice_channels.collect_retired(&state.voice_handoff);
     crate::voice_admitted_call::collect_retired(state);
     let original = activation(state, owner)?;
@@ -133,7 +150,11 @@ pub(super) async fn admit_inner(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     crate::check_voice_activation_generation(state, original.binding().generation)?;
-    authority.admit_admitted_join_key(&original, executor)
+    if physical {
+        authority.admit_admitted_physical_join_key(&original, executor)
+    } else {
+        authority.admit_admitted_join_key(&original, executor)
+    }
 }
 
 pub(super) async fn publish_inner(
@@ -352,6 +373,16 @@ pub(crate) async fn admit_admitted_voice_join_key(
 ) -> Result<crate::voice_authority::JoinKeyAdmission, String> {
     crate::require_unlocked_session(&state).await?;
     admit_inner(&state, &owner, crate::voice_join_key::executor(&executor)?).await
+}
+
+#[tauri::command]
+pub(crate) async fn admit_admitted_physical_voice_join_key(
+    state: tauri::State<'_, crate::AppState>,
+    owner: String,
+    executor: String,
+) -> Result<crate::voice_authority::JoinKeyAdmission, String> {
+    crate::require_unlocked_session(&state).await?;
+    admit_physical_inner(&state, &owner, crate::voice_join_key::executor(&executor)?).await
 }
 
 #[tauri::command]

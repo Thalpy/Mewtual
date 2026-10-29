@@ -136,9 +136,12 @@ pub(crate) async fn ensure_admitted(
             .admitted_published_key(&handle, executor)
             .map_err(|_| Refused::Binding)?;
         require_admitted_selected(state, &authority, &handle, &selected)?;
-        let begin = state
-            .voice_channels
-            .begin_owner(ChannelOwner::Admitted(selected.clone()), device)?;
+        let history = handle.physical_history(executor).ok_or(Refused::Binding)?;
+        let begin = state.voice_channels.begin_owner(
+            ChannelOwner::Admitted(selected.clone()),
+            device,
+            Some(history),
+        )?;
         (selected, begin)
     };
     let Begin::Work(mut ticket) = begin else {
