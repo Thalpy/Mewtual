@@ -117,7 +117,25 @@ fn decode<'a>(
 /// local Capacity means this synchronous call did not admit a producer. Retry the SAME
 /// candidate, with fresh sanctioned clock samples, within the existing fixture bound;
 /// never retry another refusal or discard an already successful Factory/Existing row.
-async fn current<T>(
+pub(super) async fn current<T>(
+    state: &AppState,
+    context: &context::Context,
+    route: &bootstrap::Route,
+    intent: &InitialSdpIntent,
+    apply: impl FnMut(
+        &crate::voice_handoff::transition::Admission<'_>,
+        u64,
+        u64,
+    ) -> Result<T, VoiceError>,
+) -> Result<T, factory::Refused> {
+    current_after_refusal(state, context, route, intent, apply, || {}).await
+}
+
+/// Deterministic fixture seam: a refusal hook may release the actual competing
+/// guard only after the entire failed admission returned and released its own
+/// native/Index/State guards. It cannot turn another refusal or an Ok(None) into
+/// success. The default helper above has no hook or additional retry allowance.
+pub(super) async fn current_after_refusal<T>(
     state: &AppState,
     context: &context::Context,
     route: &bootstrap::Route,
@@ -127,6 +145,7 @@ async fn current<T>(
         u64,
         u64,
     ) -> Result<T, VoiceError>,
+    mut after_refusal: impl FnMut(),
 ) -> Result<T, factory::Refused> {
     let clock = crate::voice_runtime(state).clock();
     let wall = clock.now_ms();
@@ -148,7 +167,8 @@ async fn current<T>(
         {
             return result;
         }
-        // No native guard survives this wait. Original Ready/intent deadlines and all
+        after_refusal();
+        // The failed admission holds no guard across this wait. Original Ready/intent deadlines and all
         // protocol/security refusals remain enforced by the actual admission path.
         clock
             .sleep(std::time::Duration::from_millis(

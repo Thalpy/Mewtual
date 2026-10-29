@@ -39,9 +39,23 @@ not change in that correction.
 
 Both implementation leaves had their own read-only adversarial review and re-review.
 The integrated runtime review has no remaining blocker/high/medium; three low documentation
-findings were corrected. Complete integrated suites and the final build/startup gates are
-running centrally, with only one heavy Rust process at a time. A fresh dependency audit
-passes all four categories. Final results will replace this pending statement.
+findings were corrected. The complete Root suite passes 4,007 tests, with zero failures
+and 25 existing ignores. A fresh dependency audit passes all four categories. Complete
+native/frontend and final build/startup validation remain pending, with one heavy Rust
+process at a time.
+
+The first complete native library run records 1,045 passes and 13 failures (2,314.62s).
+One originating fixture unwraps local nonblocking admission `Capacity` in
+`native_v2_pc_intent_original_sdp_completion_retires_body_but_keeps_task_and_ui_until_collection`;
+twelve subsequent cases stop at the closed fixture gate. The test-only correction reuses
+the existing bounded original-admission helper, retaining the SAME candidate, row, outcome,
+Session, 32-observation/10ms cadence and original intent deadline. A forced actual UI-lock
+refusal proves zero row entry and zero new task/body charge, then releases its competing
+guard before retry. All original ownership, admission and retirement assertions remain.
+Read-only review has no findings; the corrected native build and two real TCP scenarios
+pass (11.18s/11.60s). The failed evidence remains in `target/v2-final-native-full.log` with
+exit 101. Focused corrected logs are `target/v2-sdp-admission-retry-{worker,completion}.log`,
+each with exit zero. A new complete native run and the remaining gates are still required.
 
 Hosted head `153c573f` has a separate frontend failure: 3,647 pass and one existing
 confirmation pressure test still assumes a fixed 256 KiB default. Its test-only correction

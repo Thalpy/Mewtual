@@ -37,9 +37,23 @@ counts under the deciding pool mutex, then reports them after unlocking with ori
 parent and physical request sequence. It changes no limit, deadline, attempt or authority.
 
 Each implementation had its own read-only adversarial review. Browser focused tests pass
-574/574; the diagnostic's five Root regressions pass. Complete integrated suites, native
-diagnostic/layout checks and final build/startup are pending. Primary owns those runs;
+574/574; the diagnostic's five Root regressions pass. The complete Root suite now passes
+4,007 tests with zero failures and 25 existing ignores. Integrated native diagnostic/layout
+checks and the former Linux alternate-peer scenario also pass locally on Windows. Complete
+native/frontend suites and final build/startup remain pending. Primary owns those runs;
 agents run focused checks only, with one heavy Rust process at a time.
+
+The first complete native library run has 1,045 passes and 13 failures. Its origin is
+`native_v2_pc_intent_original_sdp_completion_retires_body_but_keeps_task_and_ui_until_collection`:
+the fixture unwraps a legitimate local `Capacity` from nonblocking admission; twelve later
+cases fail the intentionally closed recovery-fixture gate. The test-only correction reuses
+the existing 32-observation/10ms helper with the SAME row/candidate/Session and original
+intent deadline. It forces an actual UI-lock refusal, proves the row callback did not enter
+and no task/body charge was acquired, releases that guard before waiting, and checks the
+returned ticket/outcome identity. No production source, protocol allowance or assertion is
+weakened. Read-only review has no findings; the test build and both actual TCP regressions
+pass (11.18s and 11.60s). The failed log remains `target/v2-final-native-full.log`; corrected
+complete validation will use separate logs and is still pending.
 
 The first hosted run of this integration (`153c573f`) stops in frontend testing:
 3,647 pass and one older confirmation pressure test assumes a fixed 256 KiB default.
