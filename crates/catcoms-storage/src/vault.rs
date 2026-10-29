@@ -28,6 +28,11 @@ const VAULT_VERSION_RAW_SECRET: u8 = 1;
 /// value before Argon2. Short secrets continue to use v1 so existing vault bytes remain stable.
 const VAULT_VERSION_PREHASHED_SECRET: u8 = 2;
 const LONG_SECRET_DOMAIN: &str = "mewtual-vault-long-secret/v2";
+/// Managed chat admission requires native readers that understand its independent fences.
+/// A distinct KDF domain binds this version cryptographically: merely changing 3 to 1/2 must
+/// not let an old reader decrypt a managed vault while ignoring its retirement inventory.
+const VAULT_VERSION_CHAT_SCOPE: u8 = 3;
+const CHAT_SCOPE_SECRET_DOMAIN: &str = "mewtual-vault-chat-scope/v3";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const SEALED_DEK_LEN: usize = 32 + 16; // 32-byte DEK plus Poly1305 authentication tag.
@@ -104,6 +109,54 @@ pub fn vault_exists(dir: impl AsRef<Path>) -> bool {
     dir.as_ref().join(VAULT_FILE).exists()
 }
 
+/// Whether the authenticated-open path must require managed chat admission inventory.
+/// This parses only the closed wrapper version; callers must still unseal the vault normally.
+pub fn chat_scope_vault_managed(dir: impl AsRef<Path>) -> Result<bool, StorageError> {
+    Ok(
+        vault_version(&read_vault_wrapper(&dir.as_ref().join(VAULT_FILE))?)?
+            == VAULT_VERSION_CHAT_SCOPE,
+    )
+}
+
+/// Commit mandatory managed-chat format after the host has durably initialized its sealed
+/// admission inventory. The host must retain the exclusive vault session throughout activation.
+/// An earlier staged inventory is inert until this succeeds; errors, including post-rename
+/// uncertainty, must not return a usable managed store or expose an authoring context.
+///
+/// The root DEK and every derived data key are preserved. Existing managed wrappers are rewritten
+/// too: retry must cross a real directory-sync barrier rather than acknowledge possibly renamed
+/// bytes from a prior failed activation. This is not a reader-downgrade or data migration API.
+pub fn activate_chat_scope_vault(
+    dir: impl AsRef<Path>,
+    passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Result<(), StorageError> {
+    activate_chat_scope_vault_with_hooks(
+        dir.as_ref(),
+        passphrase,
+        rng,
+        |_, _| {},
+        sync_managed_directory,
+    )
+}
+
+fn activate_chat_scope_vault_with_hooks(
+    dir: &Path,
+    passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+    phase: impl FnMut(AtomicWritePhase, &Path),
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), StorageError> {
+    validate_existing_vault_secret_shape(passphrase)?;
+    let _lock = lock_vault(dir)?;
+    let path = dir.join(VAULT_FILE);
+    let old = read_vault_wrapper(&path)?;
+    let dek = decode_and_unseal(&old, passphrase)?;
+    let replacement = seal_and_encode_version(&dek, passphrase, rng, VAULT_VERSION_CHAT_SCOPE)?;
+    let _ = decode_and_unseal(&replacement, passphrase)?;
+    write_atomic_with_hook_and_sync(&path, &replacement, phase, sync_parent)
+}
+
 /// An exclusive installation mount held for the lifetime of the product's loaded server store.
 /// Dropping this value, including during process termination, releases the operating-system lock.
 #[derive(Debug)]
@@ -176,7 +229,12 @@ fn change_vault_passphrase_with_hooks(
     let path = dir.join(VAULT_FILE);
     let old = read_vault_wrapper(&path)?;
     let dek = decode_and_unseal(&old, current_passphrase)?;
-    let replacement = seal_and_encode(&dek, new_passphrase, rng)?;
+    // A secret change must never silently re-enable old binaries that ignore admission fences.
+    let replacement = if vault_version(&old)? == VAULT_VERSION_CHAT_SCOPE {
+        seal_and_encode_version(&dek, new_passphrase, rng, VAULT_VERSION_CHAT_SCOPE)?
+    } else {
+        seal_and_encode(&dek, new_passphrase, rng)?
+    };
     // Authenticate the generated wrapper before it can replace the user's only live vault file.
     let _ = decode_and_unseal(&replacement, new_passphrase)?;
     candidate_ready();
@@ -262,7 +320,9 @@ fn read_vault_wrapper(path: &Path) -> Result<[u8; VAULT_ENCODED_LEN], StorageErr
 
 fn vault_version(bytes: &[u8]) -> Result<u8, StorageError> {
     match bytes.first().copied() {
-        Some(VAULT_VERSION_RAW_SECRET | VAULT_VERSION_PREHASHED_SECRET) => Ok(bytes[0]),
+        Some(
+            VAULT_VERSION_RAW_SECRET | VAULT_VERSION_PREHASHED_SECRET | VAULT_VERSION_CHAT_SCOPE,
+        ) => Ok(bytes[0]),
         _ => Err(StorageError::Malformed),
     }
 }
@@ -276,6 +336,13 @@ fn derive_passphrase_store(
         VAULT_VERSION_RAW_SECRET => Ok(PassphraseKeyStore::derive(passphrase, salt)?),
         VAULT_VERSION_PREHASHED_SECRET => {
             let mut hasher = blake3::Hasher::new_derive_key(LONG_SECRET_DOMAIN);
+            hasher.update(&(passphrase.len() as u64).to_be_bytes());
+            hasher.update(passphrase);
+            let normalized = Zeroizing::new(*hasher.finalize().as_bytes());
+            Ok(PassphraseKeyStore::derive(normalized.as_slice(), salt)?)
+        }
+        VAULT_VERSION_CHAT_SCOPE => {
+            let mut hasher = blake3::Hasher::new_derive_key(CHAT_SCOPE_SECRET_DOMAIN);
             hasher.update(&(passphrase.len() as u64).to_be_bytes());
             hasher.update(passphrase);
             let normalized = Zeroizing::new(*hasher.finalize().as_bytes());
@@ -373,9 +440,41 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
     File::open(path).and_then(|directory| directory.sync_all())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Match the application's real Windows server-record barrier. Backup semantics permits a
+    // directory handle, write access permits FlushFileBuffers, and full sharing avoids turning
+    // this short barrier into a rename exclusion. These are the Win32 CreateFile flag values,
+    // also used by this crate's existing kept/external Windows directory-handle code.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+    OpenOptions::new()
+        .write(true)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .and_then(|directory| directory.sync_all())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sync_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(any(unix, windows))]
+fn sync_managed_directory(path: &Path) -> std::io::Result<()> {
+    sync_directory(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_managed_directory(_path: &Path) -> std::io::Result<()> {
+    // Legacy formats retain their earlier atomic-only policy on unsupported targets, but a
+    // mandatory anti-downgrade format cannot claim activation without its durability barrier.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "managed chat vault activation requires a real directory-sync implementation",
+    ))
 }
 
 /// Write `bytes` through a unique create-new sibling, then durably publish it. Unique staging
@@ -737,6 +836,145 @@ mod tests {
         assert!(open_or_create_vault(dir.path(), b"guess", &mut rng).is_err());
         let kh3 = open_or_create_vault(dir.path(), b"correct horse battery", &mut rng).unwrap();
         assert_eq!(db1, kh3.db_key().unwrap());
+    }
+
+    #[test]
+    fn managed_chat_wrapper_preserves_data_keys_and_cryptographically_rejects_header_downgrade() {
+        for passphrase in [
+            b"scope secret".to_vec(),
+            vec![b'l'; MAX_VAULT_SECRET_BYTES + 1],
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut rng = ChaCha20Rng::seed_from_u64(0x005c_0a31);
+            // A real legacy-long wrapper needs the historical raw creation seam; ordinary new
+            // vault creation correctly refuses such inputs. Its successful compatibility open
+            // migrates to v2 before managed activation, exercising both predecessor formats.
+            let dek = Dek::generate(&mut rng);
+            let legacy =
+                seal_and_encode_version(&dek, &passphrase, &mut rng, VAULT_VERSION_RAW_SECRET)
+                    .unwrap();
+            write_atomic(&dir.path().join(VAULT_FILE), &legacy).unwrap();
+            let original = open_or_create_vault(dir.path(), &passphrase, &mut rng).unwrap();
+            assert!(!chat_scope_vault_managed(dir.path()).unwrap());
+            activate_chat_scope_vault(dir.path(), &passphrase, &mut rng).unwrap();
+            assert!(chat_scope_vault_managed(dir.path()).unwrap());
+            let managed = read_vault_wrapper(&dir.path().join(VAULT_FILE)).unwrap();
+            let reopened = open_or_create_vault(dir.path(), &passphrase, &mut rng).unwrap();
+            assert_eq!(original.db_key().unwrap(), reopened.db_key().unwrap());
+            assert_eq!(original.blob_key().unwrap(), reopened.blob_key().unwrap());
+            assert_eq!(
+                original.mls_seal_key().unwrap(),
+                reopened.mls_seal_key().unwrap()
+            );
+            for old_version in [VAULT_VERSION_RAW_SECRET, VAULT_VERSION_PREHASHED_SECRET] {
+                let mut tampered = managed;
+                tampered[0] = old_version;
+                assert!(
+                    decode_and_unseal(&tampered, &passphrase).is_err(),
+                    "a parse tag alone must not allow an old reader to bypass retirement fences"
+                );
+            }
+            change_vault_passphrase(
+                dir.path(),
+                &passphrase,
+                b"replacement scope secret",
+                &mut rng,
+            )
+            .unwrap();
+            assert!(chat_scope_vault_managed(dir.path()).unwrap());
+            let after =
+                open_or_create_vault(dir.path(), b"replacement scope secret", &mut rng).unwrap();
+            assert_eq!(original.db_key().unwrap(), after.db_key().unwrap());
+        }
+    }
+
+    #[test]
+    fn managed_activation_uses_real_replacement_boundary_and_retry_flushes_same_dek() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x005c_0a32);
+        let original = open_or_create_vault(dir.path(), b"scope secret", &mut rng).unwrap();
+        let old = read_vault_wrapper(&dir.path().join(VAULT_FILE)).unwrap();
+        let before_rename = activate_chat_scope_vault_with_hooks(
+            dir.path(),
+            b"scope secret",
+            &mut rng,
+            |phase, staged| {
+                if matches!(phase, AtomicWritePhase::TempSynced) {
+                    std::fs::remove_file(staged).unwrap();
+                }
+            },
+            sync_directory,
+        );
+        assert!(matches!(before_rename, Err(StorageError::Io(_))));
+        assert_eq!(
+            read_vault_wrapper(&dir.path().join(VAULT_FILE)).unwrap(),
+            old
+        );
+        let after_rename = activate_chat_scope_vault_with_hooks(
+            dir.path(),
+            b"scope secret",
+            &mut rng,
+            |_, _| {},
+            |_| {
+                Err(std::io::Error::other(
+                    "injected managed activation directory-sync failure",
+                ))
+            },
+        );
+        assert!(matches!(
+            after_rename,
+            Err(StorageError::CommittedButNotDurable(_))
+        ));
+        assert!(
+            chat_scope_vault_managed(dir.path()).unwrap(),
+            "actual rename installed managed bytes"
+        );
+        activate_chat_scope_vault(dir.path(), b"scope secret", &mut rng).unwrap();
+        let reopened = open_or_create_vault(dir.path(), b"scope secret", &mut rng).unwrap();
+        assert_eq!(original.db_key().unwrap(), reopened.db_key().unwrap());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn managed_activation_real_platform_sync_failure_is_not_acknowledged() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("original");
+        let moved = root.path().join("moved");
+        let mut rng = ChaCha20Rng::seed_from_u64(0x005c_0a33);
+        open_or_create_vault(&dir, b"scope secret", &mut rng).unwrap();
+        let result = activate_chat_scope_vault_with_hooks(
+            &dir,
+            b"scope secret",
+            &mut rng,
+            |phase, _| {
+                if matches!(phase, AtomicWritePhase::Renamed) {
+                    // The actual managed wrapper rename has happened. Move the parent so the REAL
+                    // platform callback must now fail opening the original directory. A no-op
+                    // Windows implementation would incorrectly acknowledge this activation.
+                    std::fs::rename(&dir, &moved).unwrap();
+                }
+            },
+            sync_managed_directory,
+        );
+        assert!(matches!(
+            result,
+            Err(StorageError::CommittedButNotDurable(_))
+        ));
+        assert!(chat_scope_vault_managed(&moved).unwrap());
+        activate_chat_scope_vault(&moved, b"scope secret", &mut rng).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vault_directory_sync_uses_a_real_windows_handle() {
+        let root = tempfile::tempdir().unwrap();
+        sync_managed_directory(root.path()).expect("existing Windows directory flushes");
+        assert_eq!(
+            sync_managed_directory(&root.path().join("absent"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]

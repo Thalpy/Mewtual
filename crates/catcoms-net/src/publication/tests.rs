@@ -14,6 +14,58 @@ fn take(receiver: &mut mpsc::Receiver<Command>) -> Publication {
 }
 
 #[tokio::test]
+async fn original_publication_authority_is_checked_at_driver_handoff() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let slots = Arc::new(Semaphore::new(1));
+    let (owner, observer) = tokio::sync::watch::channel(false);
+    let authority = RequestCancellation::new(observer, None);
+    let mut future = Box::pin(publish_once_with_authority(
+        &tx,
+        &slots,
+        topic(),
+        Bytes::from_static(b"original"),
+        Some(authority),
+    ));
+    assert!(poll!(&mut future).is_pending());
+    let queued = take(&mut rx);
+    owner.send_replace(true);
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "escaped queue custody is still charged"
+    );
+    queued.run_with(|_, _| panic!("retired mount must not enter gossip"));
+    assert_eq!(future.await, Err(PublishOnceError::Revoked));
+    assert_eq!(slots.available_permits(), 1);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn retirement_after_publication_admission_does_not_retract_submission() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let slots = Arc::new(Semaphore::new(1));
+    let (owner, observer) = tokio::sync::watch::channel(false);
+    let mut future = Box::pin(publish_once_with_authority(
+        &tx,
+        &slots,
+        topic(),
+        Bytes::from_static(b"admitted"),
+        Some(RequestCancellation::new(observer, None)),
+    ));
+    assert!(poll!(&mut future).is_pending());
+    take(&mut rx).run_with(|_, bytes| {
+        // This is after the final original-authority check. A later retirement cannot turn
+        // an admitted send into a clean refusal or authorize refunding live transport work.
+        owner.send_replace(true);
+        assert_eq!(bytes.as_ref(), b"admitted");
+        assert_eq!(slots.available_permits(), 0);
+        Ok(PublishSubmission::Submitted)
+    });
+    assert_eq!(future.await, Ok(PublishSubmission::Submitted));
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[tokio::test]
 async fn publish_once_waits_for_driver_result_and_never_requeues_failure() {
     let (tx, mut rx) = mpsc::channel(4);
     let slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT));

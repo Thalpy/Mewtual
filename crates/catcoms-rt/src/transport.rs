@@ -147,6 +147,9 @@ pub enum PublishSubmission {
 /// normal gossip-cache/handler state. No variant authorizes retiring a durable intent.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum PublishOnceError {
+    /// The original lifecycle owner retired before the driver's admission point.
+    #[error("publication authority retired before submission")]
+    Revoked,
     #[error("one-shot publication is unsupported")]
     Unsupported,
     #[error("publication exceeds the payload or topic limit")]
@@ -949,6 +952,21 @@ pub trait MeshTransport: Send + Sync {
         &self,
         _topic: Topic,
         _data: Bytes,
+    ) -> Result<PublishSubmission, PublishOnceError> {
+        Err(PublishOnceError::Unsupported)
+    }
+
+    /// One-shot publication with original revocable custody, checked by the driver immediately
+    /// before its synchronous gossip attempt. Checking only before an await/command enqueue is
+    /// insufficient: the mount or admission can retire while that command is queued. A completed
+    /// admission cannot be recalled, and revocation never refunds still-owned lower work.
+    ///
+    /// Unsupported transports fail closed; there is deliberately no legacy-publication fallback.
+    async fn publish_once_authorized(
+        &self,
+        _topic: Topic,
+        _data: Bytes,
+        _authority: RequestCancellation,
     ) -> Result<PublishSubmission, PublishOnceError> {
         Err(PublishOnceError::Unsupported)
     }
