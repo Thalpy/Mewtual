@@ -1,5 +1,9 @@
 # Control7 Query/Support operational slice
 
+An additional [typed Actor bridge and blocked-TCP acceptance leaf](VOICE-CONTROL-TCP-ACCEPTANCE.md)
+is implemented but **UNRUN**. Its new commands, graph guard and real driver scenario
+are not covered by the focused passes recorded below. V2 remains OFF.
+
 29 October 2026. Focused implementation, OFF. Twelve focused tests PASS at snapshot
 `34336b2f` (7.96s, Windows, `cargo test -p catcoms-sync --all-features --lib
 admitted_control -j1 -- --test-threads=1 --nocapture`), including actual restricted

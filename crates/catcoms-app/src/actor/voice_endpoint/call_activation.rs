@@ -8,9 +8,14 @@ use catcoms_sync::voice_v2::call_activation::{
 };
 mod admitted_admission;
 mod admitted_key;
+mod admitted_support;
 pub use admitted_admission::{
     voice_admitted_admission_rpc_bytes, VoiceAdmittedAdmissionPublisher,
     VoiceAdmittedAdmissionResult, VoiceAdmittedAdmissionWork,
+};
+pub use admitted_support::{
+    voice_admitted_support_rpc_bytes, VoiceAdmittedSupportPublisher, VoiceAdmittedSupportResult,
+    VoiceAdmittedSupportWork,
 };
 mod control;
 pub use admitted_key::{
@@ -101,6 +106,7 @@ pub(super) enum Command {
     Selection(Selection),
     AdmittedPresence(admitted_key::Submission),
     AdmittedAdmission(admitted_admission::Submission),
+    AdmittedSupport(admitted_support::Submission),
     Prepare {
         room: u128,
         trace: Trace,
@@ -118,6 +124,7 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
     match command {
         Command::AdmittedPresence(submission) => admitted_key::apply(submission, server),
         Command::AdmittedAdmission(submission) => admitted_admission::apply(submission, server),
+        Command::AdmittedSupport(submission) => admitted_support::apply(submission, server),
         Command::Prepare {
             room,
             trace,
