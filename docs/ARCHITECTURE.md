@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Separate typed chat action core (29 October; inactive)
+
+`catcoms-replication::chat` retains a content-addressed semantic DAG separately from
+legacy Automerge history. Full signer keys and exact Create IDs bind actions; causal
+edit alternatives, pending dependencies and authorized tombstones survive additive
+merge. The realm is deterministic from group/channel/profile. Snapshot restore needs
+externally verified, action-bound historical witnesses and never trusts stored status.
+There is no live producer/dispatch, authority archive, migration or encryption adapter
+yet; legacy R6 remains open. [Scope and evidence](communication-recovery/CHAT-TYPED-CORE.md).
+
 ## Owned microphone device setting (27 October; inactive)
 
 The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after

@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Inactive typed-chat core reviewed (29 October; combined gates pending)
+
+The new replication-only typed action DAG passes17 focused tests, including20/50
+writers in five independent activity bubbles, forks/reordering, exact signed union,
+two restarts, cross-author refusal and backward clocks. It is not connected to live
+traffic. Independent review found a restore coverage-union failure and malformed
+snapshot allocation hazard; both are fixed, regressions pass, and re-review has no
+remaining blocker/high. Primary also reproduced/fixed unrelated reply-history scans
+exhausting a small edit projection's work allowance.
+
+Production authority issuance/archive, governance policy, migration, encryption and
+Root/native/UI dispatch remain absent. Legacy R6 is still open. Durable edit/delete,
+exact-token Stop and host-owned uncertain-write repair are a separate implementation
+in progress. Full combined suites have not run. See
+[the exact core API, evidence and limits](communication-recovery/CHAT-TYPED-CORE.md).
+
 ## Text-chat priority and current durability boundaries (29 October)
 
 The user prioritised text-chat protocol completion ahead of voice V2. The new text branch starts

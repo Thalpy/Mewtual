@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Typed chat witness boundary (29 October; inactive)
+
+The separate `replication::chat` core verifies signatures before duplicate admission
+and scopes typed actions to a deterministic realm, full signer and exact Create target.
+Its opaque historical witness cannot be decoded from wire or a snapshot. Restore binds
+each witness to one action; missing proof remains pending. Malformed snapshot counts
+are checked before allocation. These are library boundaries, not a completed native
+membership or moderation proof: historical certificate durability, revocation/succession
+policy, migration and live dispatch remain absent. Legacy R6 is unchanged. Retaining
+deleted contents does not cryptographically restrict their visibility to moderators.
+[Evidence and unresolved boundaries](communication-recovery/CHAT-TYPED-CORE.md).
+
 ## Native settings versus Lock and Leave (28 October; candidate)
 
 Cache-limit and saved-file metadata commands carry the UI generation captured before

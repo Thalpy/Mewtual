@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Inactive typed-chat restore contract (29 October)
+
+`chat::ChatLedger::restore(bytes, limits, &[(ActionId, VerifiedAuthorityBasis)])`
+imports original signed evidence, applies externally verified authority to each exact
+action, then requires explicit bounded `advance`. A missing parent's coverage stays
+with its action; unrelated actions' coverage is never combined into one capped witness.
+Decoding cannot construct authority. Snapshots are plaintext at this internal API;
+native sealed persistence, certificate producers and live dispatch do not exist yet.
+Legacy wire/persistence readers are unchanged.
+[Full contract and limits](communication-recovery/CHAT-TYPED-CORE.md).
+
 ## Owned microphone device setting (27 October; inactive)
 
 The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after
