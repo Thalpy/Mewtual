@@ -331,11 +331,12 @@ async fn actual_admitted_actor_closed_pre_enqueue_returns_payment_without_fabric
             .err(),
         Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized))
     );
-    let mut state = cell.state.lock().unwrap();
-    assert!(state.work.is_none() && state.result.is_none() && !state.unknown);
-    let returned = state.refusal.take().unwrap().1.unwrap();
+    let returned = {
+        let mut state = cell.state.lock().unwrap();
+        assert!(state.work.is_none() && state.result.is_none() && !state.unknown);
+        state.refusal.take().unwrap().1.unwrap()
+    };
     assert!(returned.matches_activation(&original));
-    drop(state);
     assert_eq!(call._runtime.resources().counts(), before);
     drop(returned);
     assert_eq!(

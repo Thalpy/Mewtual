@@ -375,13 +375,14 @@ async fn accepted_publication_cannot_send_after_actual_actor_retirement_with_sen
         Err(VoiceEndpointError::Stopped)
     ));
     bounded(work.wait_retired()).await;
-    let slot = sink.slot.lock().unwrap();
-    assert!(matches!(
-        slot.refusal.as_ref(),
-        Some((VoiceEndpointError::Stopped, None))
-    ));
-    assert!(slot.result.is_none() && !slot.uncertain);
-    drop(slot);
+    {
+        let slot = sink.slot.lock().unwrap();
+        assert!(matches!(
+            slot.refusal.as_ref(),
+            Some((VoiceEndpointError::Stopped, None))
+        ));
+        assert!(slot.result.is_none() && !slot.uncertain);
+    }
     drop(call.actor);
     drop(call.pair);
     bounded(call.drain).await.unwrap();

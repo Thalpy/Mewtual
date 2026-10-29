@@ -260,16 +260,17 @@ async fn admitted_support_whole_root_refusal_and_actual_box_retirement_are_disti
     let work = call.queue(&sink);
     bounded(sink.ready()).await;
     bounded(work.wait_retired()).await;
-    let slot = sink.slot.lock().unwrap();
-    assert!(slot.work.as_ref().unwrap().is_same(&work));
-    assert!(matches!(
-        slot.result.as_ref(),
-        Some(VoiceAdmittedSupportResult::EndpointQuery(Err(
-            VoiceError::Unauthorized
-        )))
-    ));
-    assert!(slot.refusal.is_none() && !slot.uncertain);
-    drop(slot);
+    {
+        let slot = sink.slot.lock().unwrap();
+        assert!(slot.work.as_ref().unwrap().is_same(&work));
+        assert!(matches!(
+            slot.result.as_ref(),
+            Some(VoiceAdmittedSupportResult::EndpointQuery(Err(
+                VoiceError::Unauthorized
+            )))
+        ));
+        assert!(slot.refusal.is_none() && !slot.uncertain);
+    }
     call.close().await;
 }
 struct Resume(Option<std::sync::mpsc::Sender<()>>);
@@ -348,9 +349,10 @@ async fn admitted_support_entered_callback_panic_is_unknown_until_actual_retirem
     bounded(sink.ready()).await;
     assert!(bounded(call.task).await.unwrap_err().is_panic());
     bounded(work.wait_retired()).await;
-    let slot = sink.slot.lock().unwrap();
-    assert!(slot.uncertain && slot.result.is_none() && slot.refusal.is_none());
-    drop(slot);
+    {
+        let slot = sink.slot.lock().unwrap();
+        assert!(slot.uncertain && slot.result.is_none() && slot.refusal.is_none());
+    }
     assert!(original.is_closed());
     drop(call.actor);
     drop(call.pair);
@@ -399,13 +401,14 @@ async fn admitted_support_paused_accept_cannot_send_after_actual_actor_abort() {
         Err(VoiceEndpointError::Stopped)
     ));
     bounded(work.wait_retired()).await;
-    let slot = sink.slot.lock().unwrap();
-    assert!(matches!(
-        slot.refusal.as_ref(),
-        Some((VoiceEndpointError::Stopped, None))
-    ));
-    assert!(slot.result.is_none() && !slot.uncertain);
-    drop(slot);
+    {
+        let slot = sink.slot.lock().unwrap();
+        assert!(matches!(
+            slot.refusal.as_ref(),
+            Some((VoiceEndpointError::Stopped, None))
+        ));
+        assert!(slot.result.is_none() && !slot.uncertain);
+    }
     drop(call.actor);
     drop(call.pair);
     drop(call.runtime);
