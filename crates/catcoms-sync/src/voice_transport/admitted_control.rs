@@ -82,6 +82,8 @@ fn wrapper_graph<T: MeshTransport>() -> usize {
         + 128
 }
 impl<T: MeshTransport> PendingAdmittedControl<T> {
+    // Scheduler hop oracle only. Production sends from the original immutable Job.
+    #[cfg(test)]
     pub(crate) fn peer(&self) -> PeerId {
         self.job.peer()
     }

@@ -61,7 +61,7 @@ async fn activate(f: &Fixture, controller: &str) -> Handle {
     // A terminal JSON/native result is not execution Box destruction. Pin the
     // actual original return marker before making exact physical fee assertions.
     bounded(async {
-        while !pending.task_returned() {
+        while !pending.fixture_task_returned() {
             tokio::task::yield_now().await;
         }
     })

@@ -575,6 +575,12 @@ impl PendingPublication {
     fn task_returned(&self) -> bool {
         self.cell.returned.load(Ordering::Acquire) == self.cell.active_task.load(Ordering::Acquire)
     }
+    /// Observe the original outside-Box return stamp in cross-module fixtures.
+    /// No caller can supply a flag, advance the stamp or certify another owner.
+    #[cfg(test)]
+    pub(crate) fn fixture_task_returned(&self) -> bool {
+        self.task_returned()
+    }
     /// Pure negative collection predicate, safe under Coordinator: no reverse
     /// Cell lock edge. Completion, explicit acknowledgement and exact outside-
     /// Box return are independent facts; none substitutes for SDK settlement.
