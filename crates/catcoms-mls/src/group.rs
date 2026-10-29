@@ -133,11 +133,42 @@ impl ServerGroup {
     /// Join an existing group from a serialized Welcome (as produced by
     /// [`ServerGroup::add_member`]).
     pub fn join(device: &MlsDevice, welcome_bytes: &[u8]) -> Result<Self, MlsError> {
+        Self::join_inner(device, welcome_bytes, None)
+    }
+
+    /// Join only if MLS actually selects this live attempt's exact KeyPackage reference.
+    /// A provider can retain older init keys, so merely opening a signed Welcome does not bind
+    /// it to the current request. This establishes attempt binding, not historical membership
+    /// time or permission to renew a retired local admission.
+    pub fn join_for_key_package(
+        device: &MlsDevice,
+        welcome_bytes: &[u8],
+        expected: &[u8; 32],
+    ) -> Result<Self, MlsError> {
+        Self::join_inner(device, welcome_bytes, Some(expected))
+    }
+
+    fn join_inner(
+        device: &MlsDevice,
+        welcome_bytes: &[u8],
+        expected: Option<&[u8; 32]>,
+    ) -> Result<Self, MlsError> {
         let msg_in = MlsMessageIn::tls_deserialize(&mut &welcome_bytes[..]).map_err(proto)?;
         let welcome = match msg_in.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
             _ => return Err(MlsError::WrongMessageType),
         };
+        if expected.is_some_and(|expected| {
+            !welcome
+                .secrets()
+                .iter()
+                .any(|entry| entry.new_member().as_slice() == expected)
+        }) {
+            // Refuse an old-only Welcome BEFORE OpenMLS consumes any stored init key.
+            return Err(MlsError::Protocol(
+                "Welcome does not address this join attempt".into(),
+            ));
+        }
         // Leaf lifetimes in the received tree are NOT checked (docs/design-mls-leaf-lifetime.md).
         //
         // A leaf added from a KeyPackage keeps that KeyPackage's lifetime (openmls default: 84
@@ -159,9 +190,25 @@ impl ServerGroup {
         //
         // `build_from_welcome` consumes the KeyPackage's private material, as `new_from_welcome`
         // did, so a refused join cannot be retried with the same Welcome.
-        let group = StagedWelcome::build_from_welcome(device.provider(), &join_config(), welcome)
+        let builder = StagedWelcome::build_from_welcome(device.provider(), &join_config(), welcome)
             .map_err(proto)?
-            .skip_lifetime_validation()
+            .skip_lifetime_validation();
+        if let Some(expected) = expected {
+            // A multi-entry Welcome may mention the new reference but select an older local
+            // bundle first. Inspect the ACTUAL selection, not merely presence in its envelope.
+            let selected = builder
+                .processed_welcome()
+                .own_key_package()
+                .ok_or_else(|| {
+                    MlsError::Protocol("Welcome has no local KeyPackage selection".into())
+                })?;
+            if &device.key_package_reference(selected)? != expected {
+                return Err(MlsError::Protocol(
+                    "Welcome selected another join attempt".into(),
+                ));
+            }
+        }
+        let group = builder
             .build()
             .map_err(proto)?
             .into_group(device.provider())
@@ -774,6 +821,89 @@ mod commit_gate_tests;
 #[cfg(test)]
 mod m1_tests {
     use super::*;
+
+    #[test]
+    fn a_welcome_mentioning_fresh_and_old_init_keys_must_select_the_fresh_one() {
+        let alice = MlsDevice::generate().unwrap();
+        let charlie = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let bob_local = ServerGroup::create(&bob).unwrap();
+        let mut old_group = ServerGroup::create(&alice).unwrap();
+        let mut fresh_group = ServerGroup::create(&charlie).unwrap();
+        let old_package = bob.key_package().unwrap();
+        let old_welcome = old_group.add_member(&alice, old_package).unwrap().welcome;
+        let fresh_package = bob.key_package().unwrap();
+        let fresh_reference = bob.key_package_reference(&fresh_package).unwrap();
+        let fresh_welcome = fresh_group
+            .add_member(&charlie, fresh_package)
+            .unwrap()
+            .welcome;
+        let parse = |bytes: &[u8]| {
+            MlsMessageIn::tls_deserialize(&mut &bytes[..])
+                .unwrap()
+                .into_welcome()
+                .unwrap()
+        };
+        let mut value = serde_json::to_value(parse(&old_welcome)).unwrap();
+        value["secrets"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(&parse(&fresh_welcome).secrets()[0]).unwrap());
+        let mixed: Welcome = serde_json::from_value(value).unwrap();
+        let mixed_bytes = MlsMessageOut::from_welcome(mixed, ProtocolVersion::Mls10)
+            .tls_serialize_detached()
+            .unwrap();
+        let captured = crate::snapshot_server(&bob, &bob_local).unwrap();
+        let (restored, _) = crate::restore_server(&captured).unwrap();
+        assert!(
+            ServerGroup::join(&restored, &mixed_bytes).is_ok(),
+            "control proves the first locally available old entry really selects the old group"
+        );
+        assert!(
+            ServerGroup::join_for_key_package(&bob, &mixed_bytes, &fresh_reference).is_err(),
+            "mentioning fresh material is insufficient when OpenMLS actually selected old material"
+        );
+        assert_eq!(
+            ServerGroup::join_for_key_package(&bob, &fresh_welcome, &fresh_reference)
+                .unwrap()
+                .group_id(),
+            fresh_group.group_id()
+        );
+    }
+
+    #[test]
+    fn welcome_for_an_old_init_key_cannot_complete_a_new_attempt_from_a_restored_provider() {
+        let alice = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let bob_local = ServerGroup::create(&bob).unwrap();
+        let mut group = ServerGroup::create(&alice).unwrap();
+        let old = bob
+            .key_package_for_invite(&group.group_id(), [1; 16])
+            .unwrap();
+        let old_reference = bob.key_package_reference(&old).unwrap();
+        let admitted = group.add_member(&alice, old).unwrap();
+        let fresh = bob
+            .key_package_for_invite(&group.group_id(), [2; 16])
+            .unwrap();
+        let fresh_reference = bob.key_package_reference(&fresh).unwrap();
+        assert_ne!(old_reference, fresh_reference);
+        let captured = crate::snapshot_server(&bob, &bob_local).unwrap();
+        let (restored, _) = crate::restore_server(&captured).unwrap();
+        assert!(
+            ServerGroup::join(&restored, &admitted.welcome).is_ok(),
+            "the captured provider really can still open the old Welcome"
+        );
+        assert!(
+            ServerGroup::join_for_key_package(&bob, &admitted.welcome, &fresh_reference).is_err()
+        );
+        let checked =
+            ServerGroup::join_for_key_package(&bob, &admitted.welcome, &old_reference).unwrap();
+        assert_eq!(
+            checked.group_id(),
+            group.group_id(),
+            "mismatch refusal did not consume the old init key"
+        );
+    }
 
     #[test]
     fn local_device_query_does_not_adopt_another_current_member() {

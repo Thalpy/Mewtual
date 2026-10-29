@@ -15487,6 +15487,7 @@ pub async fn request_join_tracking<T: MeshTransport>(
 
     let key_package = device.key_package_for_invite(&invite.group_id, invite.invite_nonce)?;
     let kp_bytes = serialize_key_package(&key_package)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
 
     let mut payload = vec![KIND_JOIN];
     payload.extend_from_slice(&encode_join_req(invite, &kp_bytes));
@@ -15499,7 +15500,14 @@ pub async fn request_join_tracking<T: MeshTransport>(
         // Synchronous admission (single-committer): the Welcome is inline.
         Some((&JOIN_READY, rest)) => {
             let (welcome, signature, sealed_routing) = decode_join_resp(rest)?;
-            finish_join(device, invite, &welcome, &signature, &sealed_routing)
+            finish_join(
+                device,
+                invite,
+                &welcome,
+                &signature,
+                &sealed_routing,
+                &expected_key_package,
+            )
         }
         // Staged admission (concurrent committers): the inviter will *push* the
         // signed Welcome once its staged commit wins and merges. Await it.
@@ -15508,7 +15516,15 @@ pub async fn request_join_tracking<T: MeshTransport>(
             // The wall-clock bound on this wait lives at the call site (catcoms-app, which owns
             // the tokio runtime) so this crate stays runtime-agnostic; see the `request_join`
             // timeout wrapper there, so a never-finalizing owner can't wedge the joiner.
-            await_welcome_push(transport, connection_handoff, inviter, device, invite).await
+            await_welcome_push(
+                transport,
+                connection_handoff,
+                inviter,
+                device,
+                invite,
+                &expected_key_package,
+            )
+            .await
         }
         // Empty or unknown => rejected.
         _ => Err(SyncError::JoinRejected),
@@ -15554,6 +15570,7 @@ pub async fn request_join_via_helper_tracking<T: MeshTransport>(
 
     let key_package = device.key_package_for_invite(&invite.group_id, invite.invite_nonce)?;
     let kp_bytes = serialize_key_package(&key_package)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
     let join_body = encode_join_req(invite, &kp_bytes);
     let mut payload = vec![KIND_JOIN_FORWARD];
     payload.extend_from_slice(&encode_join_forward(inviter, &join_body, None));
@@ -15568,14 +15585,29 @@ pub async fn request_join_via_helper_tracking<T: MeshTransport>(
     match resp.split_first() {
         Some((&JOIN_READY, rest)) => {
             let (welcome, signature, sealed_routing) = decode_join_resp(rest)?;
-            finish_join(device, invite, &welcome, &signature, &sealed_routing)
+            finish_join(
+                device,
+                invite,
+                &welcome,
+                &signature,
+                &sealed_routing,
+                &expected_key_package,
+            )
         }
         Some((&JOIN_PENDING, _)) => {
             tracing::debug!(
                 ?helper,
                 "helper forwarded a staged admission; awaiting Welcome"
             );
-            await_welcome_push(transport, connection_handoff, helper, device, invite).await
+            await_welcome_push(
+                transport,
+                connection_handoff,
+                helper,
+                device,
+                invite,
+                &expected_key_package,
+            )
+            .await
         }
         _ => Err(SyncError::JoinRejected),
     }
@@ -15597,6 +15629,7 @@ async fn start_reply_join<T: MeshTransport>(
     join_body: &[u8],
     clock: &dyn Clock,
     within: std::time::Duration,
+    expected_key_package: &[u8; 32],
 ) -> ReplyJoinStart {
     let payload = if contact == inviter {
         let mut payload = vec![KIND_JOIN];
@@ -15625,7 +15658,14 @@ async fn start_reply_join<T: MeshTransport>(
             let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) else {
                 return ReplyJoinStart::Rejected;
             };
-            match finish_join(device, invite, &welcome, &signature, &sealed_routing) {
+            match finish_join(
+                device,
+                invite,
+                &welcome,
+                &signature,
+                &sealed_routing,
+                expected_key_package,
+            ) {
                 Ok((group, routing)) => ReplyJoinStart::Ready(Box::new(group), Box::new(routing)),
                 Err(_) => ReplyJoinStart::Rejected,
             }
@@ -15693,6 +15733,7 @@ pub async fn request_join_from_reply_tracking<T: MeshTransport>(
         .key_package_for_invite(&invite.group_id, invite.invite_nonce)
         .map_err(|_| SyncError::JoinRejected)?;
     let kp_bytes = serialize_key_package(&key_package).map_err(|_| SyncError::JoinRejected)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
     let join_body = encode_join_req(invite, &kp_bytes);
     let mut contacts = VecDeque::from([first_contact]);
     let mut proven = HashSet::from([first_contact]);
@@ -15729,6 +15770,7 @@ pub async fn request_join_from_reply_tracking<T: MeshTransport>(
                 &join_body,
                 clock,
                 std::time::Duration::from_millis(attempt_ms),
+                &expected_key_package,
             )
             .await
             {
@@ -15801,9 +15843,14 @@ pub async fn request_join_from_reply_tracking<T: MeshTransport>(
                 }
                 if let Some((&JOIN_READY, body)) = data[1..].split_first() {
                     if let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) {
-                        if let Ok((group, routing)) =
-                            finish_join(device, invite, &welcome, &signature, &sealed_routing)
-                        {
+                        if let Ok((group, routing)) = finish_join(
+                            device,
+                            invite,
+                            &welcome,
+                            &signature,
+                            &sealed_routing,
+                            &expected_key_package,
+                        ) {
                             return Ok((group, routing, from));
                         }
                     }
@@ -15932,6 +15979,7 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
         .key_package_for_invite(&invite.group_id, invite.invite_nonce)
         .map_err(|_| SyncError::JoinRejected)?;
     let kp_bytes = serialize_key_package(&key_package).map_err(|_| SyncError::JoinRejected)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
     let join_body = encode_join_req(invite, &kp_bytes);
     // Tauri dials the bounded route set concurrently, so several helpers can already be
     // connected before this routine begins. Queue every endorsed live contact now instead of
@@ -15980,6 +16028,7 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
                                         &welcome,
                                         &signature,
                                         &sealed_routing,
+                                        &expected_key_package,
                                     )
                                 },
                             ) {
@@ -16052,9 +16101,14 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
                 }
                 if let Some((&JOIN_READY, body)) = data[1..].split_first() {
                     if let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) {
-                        if let Ok((group, routing)) =
-                            finish_join(device, invite, &welcome, &signature, &sealed_routing)
-                        {
+                        if let Ok((group, routing)) = finish_join(
+                            device,
+                            invite,
+                            &welcome,
+                            &signature,
+                            &sealed_routing,
+                            &expected_key_package,
+                        ) {
                             return Ok((group, routing, from));
                         }
                     }
@@ -16081,6 +16135,7 @@ fn finish_join(
     welcome: &[u8],
     signature: &[u8; 64],
     sealed_routing: &[u8],
+    expected_key_package: &[u8; 32],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     let transcript = join_transcript(
         &invite.group_id,
@@ -16092,7 +16147,7 @@ fn finish_join(
         tracing::warn!("Welcome was not signed by the invite's inviter (or transfer tampered)");
         return Err(SyncError::JoinRejected);
     }
-    let group = ServerGroup::join(device, welcome)?;
+    let group = ServerGroup::join_for_key_package(device, welcome, expected_key_package)?;
     // Defense in depth: we must have landed in the group the invite named.
     if group.group_id() != invite.group_id {
         tracing::warn!("joined group id does not match the invite");
@@ -16178,6 +16233,7 @@ pub async fn request_device_join_tracking<T: MeshTransport>(
     let bind = device_bind_nonce(certificate);
     let key_package = device.key_package_for_invite(&certificate.group_id, bind)?;
     let kp_bytes = serialize_key_package(&key_package)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
     let pubkey = device.public_key_bytes();
     let transcript = device_add_transcript(
         &certificate.group_id,
@@ -16212,6 +16268,7 @@ pub async fn request_device_join_tracking<T: MeshTransport>(
                 &welcome,
                 &sig,
                 &sealed_routing,
+                &expected_key_package,
             )
         }
         // The contact relayed to the owner; the Welcome is pushed when the owner serializes it.
@@ -16224,6 +16281,7 @@ pub async fn request_device_join_tracking<T: MeshTransport>(
                 device,
                 certificate,
                 owner_public_key,
+                &expected_key_package,
             )
             .await
         }
@@ -16240,10 +16298,10 @@ pub async fn request_device_join_tracking<T: MeshTransport>(
 ///    grant before this device ever spoke to the network. This is the no-substitution property
 ///    the invite path gets from the inviter signature: a relay cannot mint its own group and pass
 ///    it off as this one, because it cannot produce that signature.
-/// 2. **It was built for *this* device.** `ServerGroup::join` can only open a Welcome whose group
-///    secrets were HPKE-sealed to the init key of the KeyPackage this device published; a key
-///    that exists solely in this device's provider. So a Welcome minted for device X is inert on
-///    device Y even if an attacker delivers it there; the device keypair *is* the binding.
+/// 2. **It selects this exact live attempt.** A restored provider may contain several init keys
+///    for the same signing device. `join_for_key_package` checks the actual OpenMLS selection
+///    against the freshly minted request's retained reference, not merely whether any old key
+///    could decrypt a captured Welcome.
 /// 3. **It is the group the certificate names.** `group_id` is inside the origin's signature, and
 ///    the origin must be a member of the group we landed in.
 fn finish_device_join(
@@ -16253,6 +16311,7 @@ fn finish_device_join(
     welcome: &[u8],
     signature: &[u8; 64],
     sealed_routing: &[u8],
+    expected_key_package: &[u8; 32],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     let transcript = device_join_transcript(
         &certificate.group_id,
@@ -16264,7 +16323,7 @@ fn finish_device_join(
         tracing::warn!("Welcome was not signed by the granted owner (or transfer tampered)");
         return Err(SyncError::JoinRejected);
     }
-    let group = ServerGroup::join(device, welcome)?;
+    let group = ServerGroup::join_for_key_package(device, welcome, expected_key_package)?;
     if group.group_id() != certificate.group_id {
         tracing::warn!("joined group id does not match the device certificate");
         return Err(SyncError::JoinRejected);
@@ -16288,6 +16347,7 @@ async fn await_device_welcome<T: MeshTransport>(
     device: &MlsDevice,
     certificate: &DeviceCertificate,
     owner_public_key: &[u8; 32],
+    expected_key_package: &[u8; 32],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     loop {
         match transport.next_event().await {
@@ -16308,6 +16368,7 @@ async fn await_device_welcome<T: MeshTransport>(
                             &welcome,
                             &signature,
                             &sealed_routing,
+                            expected_key_package,
                         );
                     }
                     _ => return Err(SyncError::JoinRejected),
@@ -16336,6 +16397,7 @@ async fn await_welcome_push<T: MeshTransport>(
     expected: PeerId,
     device: &MlsDevice,
     invite: &InviteToken,
+    expected_key_package: &[u8; 32],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     loop {
         match transport.next_event().await {
@@ -16349,7 +16411,14 @@ async fn await_welcome_push<T: MeshTransport>(
                 match data[1..].split_first() {
                     Some((&JOIN_READY, body)) => {
                         let (welcome, signature, sealed_routing) = decode_join_resp(body)?;
-                        return finish_join(device, invite, &welcome, &signature, &sealed_routing);
+                        return finish_join(
+                            device,
+                            invite,
+                            &welcome,
+                            &signature,
+                            &sealed_routing,
+                            expected_key_package,
+                        );
                     }
                     // Empty body => the committer lost; rejected.
                     _ => return Err(SyncError::JoinRejected),
@@ -16375,6 +16444,9 @@ impl<T: MeshTransport, R: CryptoRngCore> fmt::Debug for ChannelSync<T, R> {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod join_attempt_tests;
 
 #[cfg(test)]
 mod tests {

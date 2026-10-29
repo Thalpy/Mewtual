@@ -392,3 +392,16 @@ of all authorizing records or unavailable membership evidence.
 
 Documentation-only validation: inspect the final diff and run `git diff --check`.
 No Rust/frontend suites are required for this proposal, and none is claimed.
+
+## Isolated implementation foundation (29 October; unactivated)
+
+The implementation branch starts from text `5841c0a3`. Its first additive
+foundation supplies driver-checked original publication cancellation and managed
+vault v3 with a distinct KDF domain, sticky rewrap and real Unix/Windows directory
+flush. No production Store activates that wrapper yet. Exact-KeyPackage Welcome
+completion binding is a separate prerequisite: the selected init bundle, not just
+the signing-device key or presence of a fresh entry, must match the live attempt.
+The external lineage inventory and native metadata/lifetime integration remain
+in progress; desktop context derivation has not been switched. New focused tests
+are unrun pending primary execution. Scoped formatting/static review is not a
+substitute for those tests or the required complete suites.

@@ -211,6 +211,18 @@ impl MlsDevice {
         self.signer.public().to_vec()
     }
 
+    /// The MLS reference selected by a Welcome for this exact newly minted KeyPackage.
+    /// Callers retain it across every direct/pushed/helper completion of the same join attempt;
+    /// the signing-device key alone cannot distinguish an older init key in a restored provider.
+    pub fn key_package_reference(&self, package: &KeyPackage) -> Result<[u8; 32], MlsError> {
+        package
+            .hash_ref(self.provider.crypto())
+            .map_err(proto)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| MlsError::Internal("unexpected KeyPackage reference length"))
+    }
+
     /// Sign arbitrary bytes with this device's MLS leaf key (e.g. inner-signing a
     /// replicated CRDT op so authorship survives transport re-encryption).
     pub fn sign(&self, payload: &[u8]) -> Result<[u8; 64], MlsError> {

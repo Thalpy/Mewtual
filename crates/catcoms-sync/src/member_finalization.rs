@@ -573,6 +573,7 @@ mod tests {
         let package = device
             .key_package_for_invite(&invite.group_id, invite.invite_nonce)
             .unwrap();
+        let expected_key_package = device.key_package_reference(&package).unwrap();
         let response = alice
             .serve_join(
                 bob_peer,
@@ -580,8 +581,15 @@ mod tests {
             )
             .unwrap();
         let (welcome, signature, transfer) = decode_join_resp(&response[1..]).unwrap();
-        let (group, routing) =
-            finish_join(&device, &invite, &welcome, &signature, &transfer).unwrap();
+        let (group, routing) = finish_join(
+            &device,
+            &invite,
+            &welcome,
+            &signature,
+            &transfer,
+            &expected_key_package,
+        )
+        .unwrap();
         let mut bob = Node::new_joined(
             hub.join(bob_peer),
             group,
