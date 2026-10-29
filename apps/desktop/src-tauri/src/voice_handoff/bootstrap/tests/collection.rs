@@ -512,7 +512,14 @@ async fn late_last_owner_drop_is_collected_before_controller_admission_under_ful
         .rows
         .iter()
         .all(Option::is_none));
-    assert_eq!(resources.counts().0, 2 * 1024 * 1024 - ROW_BYTES);
+    // Pressure was filled AFTER the actual Header/Session returned. Its paid
+    // weak allocation tail still belonged to this retained Row then; collecting
+    // that Row must return BOTH original fees. Refunding the bootstrap tail at
+    // Header drop would let pressure consume it and fail this exact assertion.
+    assert_eq!(
+        resources.counts().0,
+        2 * 1024 * 1024 - ROW_BYTES - BOOTSTRAP_BYTES
+    );
     crate::activate_voice_owner_inner(&f.state, controller)
         .await
         .unwrap();
