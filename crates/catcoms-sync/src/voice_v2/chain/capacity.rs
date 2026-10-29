@@ -69,10 +69,46 @@ impl ChainCapacity {
         packet_slots: &super::super::packets::PacketSlots,
         after_payment: impl FnOnce(),
     ) -> Result<Self, VoiceError> {
+        Self::reserve_with_row_bytes(
+            resources,
+            group,
+            low,
+            slots,
+            packet_slots,
+            ROW_BYTES,
+            after_payment,
+        )
+    }
+
+    /// The production caller fixes row_bytes to ROW_BYTES. Keeping the same
+    /// early fence testable with the old allowance proves a growth refusal has
+    /// not already charged metadata, allocated packet wrappers or spent slots.
+    fn reserve_with_row_bytes(
+        resources: Arc<Resources>,
+        group: [u8; 32],
+        low: bool,
+        slots: Arc<slots::Slots>,
+        packet_slots: &super::super::packets::PacketSlots,
+        row_bytes: usize,
+        after_payment: impl FnOnce(),
+    ) -> Result<Self, VoiceError> {
+        let action = super::super::crypto_actions::fixed_record_layout_bytes();
+        let admission = super::admission::ADMISSION_RECORD_BYTES;
+        let start = super::start::START_RECORD_BYTES;
+        if row_bytes
+            .checked_sub(admission)
+            .is_none_or(|remaining| action > remaining)
+            || row_bytes
+                .checked_sub(start)
+                .is_none_or(|remaining| action > remaining)
+        {
+            return Err(VoiceError::Capacity);
+        }
+        let history_total = ROWS.checked_mul(row_bytes).ok_or(VoiceError::Capacity)?;
         let root_metadata = resources.charge(group, METADATA_BYTES, ResourceKind::Retained)?;
         after_payment();
         let packets = packet_slots.reserve_confirmation(low)?;
-        let history_bytes = resources.reserve(group, ROWS * ROW_BYTES)?;
+        let history_bytes = resources.reserve(group, history_total)?;
         let history_slots = slots.reserve(ROWS)?;
         let core = resources.reserve(group, super::super::negotiation::EXCHANGE_BYTES)?;
         let ready = Arc::new(super::super::ready::capacity::ReadyCapacity::new(
