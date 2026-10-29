@@ -34,6 +34,16 @@ impl std::fmt::Debug for VerifiedFreshChatAdmission {
     }
 }
 impl VerifiedFreshChatAdmission {
+    /// Narrow genesis-producer predicate. Generic local authoring provenance can survive
+    /// unrelated epochs, but installing CHECKPOINT-1 cannot reconstruct past Adds from a
+    /// current roster. Require this actual creation's ORIGINAL authenticated state instead.
+    pub(super) fn is_original_founder_state(
+        &self,
+        group: &ServerGroup,
+        device: &MlsDevice,
+    ) -> bool {
+        matches!(self.kind, FreshKind::Found { .. }) && self.matches_initial_state(group, device)
+    }
     pub(super) fn matches_initial_state(&self, group: &ServerGroup, device: &MlsDevice) -> bool {
         self.group == group.group_id()
             && self.signer.as_slice() == device.public_key_bytes()
@@ -139,3 +149,6 @@ impl VerifiedFreshChatAdmission {
         })
     }
 }
+
+#[cfg(test)]
+mod owner_profile_origin_tests;

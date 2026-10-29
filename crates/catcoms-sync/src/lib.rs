@@ -77,6 +77,7 @@ pub mod durable_chat;
 pub mod epoch_service;
 mod group_policy;
 pub mod local_chat_scope;
+pub mod owner_evidence;
 mod owner_tenure;
 mod voice_endpoint;
 mod voice_runtime;

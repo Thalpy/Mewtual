@@ -6,11 +6,15 @@ these wire/persistence changes. No production activation, owner succession, lega
 review UI is implied by this first checkpoint. Its signed resource profile is explicitly
 `owner-evidence-CHECKPOINT-1`, not an activation-ready long-lived 20/50-member chat profile.
 
-Source checkpoint: the strict record codecs/IDs and actual local MLS Add/Remove observations are
-written and have a clear read-only actual-diff review. Seven codec and five MLS regression tests
-are authored but **uncompiled/unrun**; the primary exclusively schedules Rust execution. Scoped
-formatting/diff checks pass. The retained archive, trusted-pin adapter, covering transaction and real
-second-member/fresh-restore vertical below are still absent; the primitives do not establish them.
+Source checkpoint: strict record codecs/IDs and actual local MLS Add/Remove observations have a
+clear read-only actual-diff review. On the primary's isolated combined `d1fd039b`, the affected
+seven-crate all-feature test metadata check passes without warnings; MLS `group::*` passes 39/39
+in 2.44s, including the five new observation regressions; owner-fact tests pass 7/7 in 27.01s.
+The new private actual-founder preparation/origin slice has a clear static review and three authored
+tests that are still **uncompiled/unrun**. The primary exclusively schedules Rust execution.
+Scoped formatting/diff checks pass. Retained archive, mounted trusted-pin adapter, covering
+transaction and real second-member/fresh-restore vertical below remain absent; primitive results do
+not establish them or production readiness.
 
 The checkpoint must exercise actual founder creation, a fresh-KeyPackage join, a signed typed action,
 an owner-certified acceptance and an actual removal cut. A second real member and a fresh restore
@@ -45,6 +49,10 @@ The exact ID prefixes are `mewtual/chat/owner-grant-id/v1\0` and
 `mewtual/chat/owner-basis-id/v1\0`. Transition commit digests hash the exact serialized MLS Commit
 bytes with BLAKE3; credential digests use prefix `mewtual/chat/mls-credential/v1\0` plus its exact
 serialized credential bytes. These fields do not expose private provider or init-key material.
+The founder creation reference is
+`BLAKE3("mewtual/chat/founder-creation/v1\0" || group-length:u32 || group || full-founder-key)`.
+That public shared label proves no creation by itself. The private preparation caller requires the
+actual Found source in its original authenticated state, then signs with the actual MlsDevice.
 
 | Kind | Exact payload after the common header |
 | --- | --- |
