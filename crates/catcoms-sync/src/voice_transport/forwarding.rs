@@ -506,6 +506,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         activity: SourceActivity,
     ) -> Result<bool, VoiceError> {
         self.reconcile_voice_actor();
+        // Classify the actual local effect, not a caller's activity label. Only a
+        // real WatchChallenge can remain a watcher source; SourceActivity::check
+        // also authenticates that sealed producer/body pairing. Helper forwarding
+        // uses its independent ledger and does not pass through this local queue.
+        if self.has_admitted_voice_activation()
+            && !matches!(object.body(), voice_v2::Body::WatchChallenge { .. })
+        {
+            return Err(VoiceError::Unauthorized);
+        }
         let room = self.voice_room_authority(object.scope().room)?;
         self.voice_transport_actor()?.source()?.admit(
             self.voice_transport_actor()?,
@@ -518,6 +527,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// immutable source attempt before framing, and sign a permit only for its selected helper.
     pub fn prepare_voice_sources(&mut self) -> Result<Vec<PendingVoiceSource<T>>, VoiceError> {
         self.reconcile_voice_actor();
+        if self.has_admitted_voice_activation() {
+            // Include already queued off-Root Existing values. Retirement is
+            // permanent, so clearing the admitted call cannot resurrect them.
+            // It occurs before take_ready can debit a new submission attempt.
+            self.voice_transport_actor()?
+                .source()?
+                .retire_existing_endpoint_sources();
+        }
         let free_routes = self.available_voice_routes()?;
         let source = self.voice_transport_actor()?.source()?;
         let jobs = source.take_ready_bounded(

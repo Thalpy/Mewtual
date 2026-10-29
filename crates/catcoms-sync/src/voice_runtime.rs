@@ -194,6 +194,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if now < voice.next_collection {
             return;
         }
+        // Existing quiet-network housekeeping needs no fresh RPC or allocation.
+        // It also reclaims canceled preparations in OTHER rooms under full pressure.
+        // Original externally held aliases continue to retain their original payment.
+        if let Some(actor) = &voice.current {
+            actor.collect_closed_children();
+        }
+        for candidate in &voice.candidates {
+            candidate.collect_closed_children();
+        }
+        voice.directory.collect_all_closed_children();
         voice.endpoints.collect_expired(voice.clock.as_ref());
         voice.next_collection = now.saturating_add(1000);
     }
@@ -253,6 +263,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         grant: &voice_v2::CallGrant,
     ) -> Result<(), VoiceError> {
+        self.require_existing_voice_call(grant)?;
         self.reconcile_voice_actor();
         self.observe_voice_directory();
         if self.voice_v2_context(grant.scope().room)?.scope != grant.scope() {
@@ -277,6 +288,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &self,
         grant: &voice_v2::CallGrant,
     ) -> Result<(), VoiceError> {
+        self.require_existing_voice_call(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         if context.scope != grant.scope() {
             return Err(VoiceError::Scope);

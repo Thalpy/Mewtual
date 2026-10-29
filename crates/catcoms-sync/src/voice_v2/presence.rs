@@ -630,6 +630,11 @@ impl LocalJoin {
         lease: CallLease,
         resources: Arc<Resources>,
     ) -> Result<Self, VoiceError> {
+        // No admitted endpoint/packet constructor is exposed by this staged activation
+        // leaf. Its separate agreement/consume proof must precede key/packet producers.
+        if lease.is_admitted() {
+            return Err(VoiceError::Unauthorized);
+        }
         key.validate()?;
         let ledger = PacketLedger::new(
             context,

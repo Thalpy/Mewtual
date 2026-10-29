@@ -26,6 +26,57 @@ struct Fixture {
 }
 
 #[test]
+fn admitted_profile_retirement_is_permanent_and_keeps_real_parked_lower_owned() {
+    let f = Fixture::new(true);
+    let packet = f.targeted(186, 48);
+    let activity = f.packet_activity(&packet).unwrap();
+    f.admit(packet.clone()).unwrap();
+    let job = f.jobs(&[2, 4]).pop().unwrap();
+    let lower = job.keepalive();
+    let before = f.runtime.resources().counts();
+    // Same seam used by actual Root selection, before take_ready/new attempt debit.
+    f.source.retire_existing_endpoint_sources();
+    assert!(!f.lease.is_live());
+    assert!(!job.authority().authorized());
+    assert!(f.jobs(&[2, 4]).is_empty());
+    assert_eq!(
+        f.source.complete(job.finish(None)).unwrap(),
+        SourceOutcome::Retired
+    );
+    assert_eq!(
+        f.runtime.resources().counts(),
+        before,
+        "profile retirement does not refund an actual lower owner"
+    );
+    // Clearing an admitted profile later cannot restore this original joined lease.
+    assert_eq!(
+        f.source.admit(&f.actor, packet, activity, f.room.clone()),
+        Err(VoiceError::Unauthorized)
+    );
+    assert!(f.jobs(&[2, 4]).is_empty());
+    drop(lower);
+    f.runtime.collect_expired();
+    assert!(f.runtime.resources().counts().0 < before.0);
+}
+
+#[test]
+fn watcher_activity_cannot_disguise_an_existing_endpoint_writer() {
+    let f = Fixture::new(true);
+    let packet = f.targeted(187, 48);
+    // These closed constructors are private to real Watcher/LocalJoin. Even a
+    // deliberately mismatched internal value fails body/producer verification.
+    let watch = WatchLease::new(f.actor.child_lease().unwrap());
+    let mislabeled = SourceActivity::watching(f.context.scope, f.context.local, [17; 32], watch);
+    let before = f.runtime.resources().counts();
+    assert_eq!(
+        f.source.admit(&f.actor, packet, mislabeled, f.room.clone()),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(f.source.counts(), (0, 0, 0));
+    assert_eq!(f.runtime.resources().counts(), before);
+}
+
+#[test]
 fn borrowed_native_packet_refuses_before_copy_and_exact_retry_keeps_original_source_budget() {
     let f = Fixture::new(true);
     let object = f.targeted(183, 32);

@@ -115,6 +115,12 @@ pub(crate) enum CandidateKind {
         controller: String,
         binding: Binding,
     },
+    // Selected only by the inactive trusted native entry. Ordinary IPC cannot
+    // choose a profile or reinterpret this candidate through activate().
+    AdmittedCall {
+        controller: String,
+        binding: Binding,
+    },
 }
 struct Candidate {
     revision: u64,
@@ -135,6 +141,13 @@ pub(crate) struct Owner {
     pub join: Nonce,
     pub lease: CallLease,
     _grant: Arc<CallGrant>,
+}
+/// Actual emptied custody-index backing, followed by its still-paid original.
+/// Drop this AFTER Coordinator. A per-row refund must not leave the final Vec
+/// allocation alive in an empty process registry with no remaining payer.
+pub(crate) struct DetachedActivation {
+    _allocation: Vec<crate::voice_call_activation::Handle>,
+    _original: crate::voice_call_activation::Handle,
 }
 impl Owner {
     /// Cleanup only: the original affine allocation remains usable after synchronous End
@@ -196,6 +209,10 @@ pub(crate) struct Coordinator {
     controller: Option<Controller>,
     owner: Option<Owner>,
     candidates: HashMap<String, Candidate>,
+    // Bounded original pending/terminal custody, not another call-winner cell.
+    // The SAME activation gate and actual owner remain the positive authority.
+    // End/lock do not acknowledge lost replies or erase unfinished cleanup.
+    activations: Vec<crate::voice_call_activation::Handle>,
     // These charges deliberately outlive every controller/owner and UI authorization epoch.
     // Dropping a WebView or IPC waiter is not evidence that WebCrypto settled.
     operations: HashMap<String, Credit>,
@@ -228,6 +245,7 @@ impl Coordinator {
             controller: None,
             owner: None,
             candidates: HashMap::new(),
+            activations: Vec::new(),
             operations: HashMap::new(),
             join_generations: HashMap::new(),
             #[cfg(test)]
@@ -266,6 +284,10 @@ impl Coordinator {
         if let CandidateKind::Call {
             controller,
             binding,
+        }
+        | CandidateKind::AdmittedCall {
+            controller,
+            binding,
         } = &kind
         {
             self.controller_parent(controller, binding.generation)?;
@@ -289,6 +311,187 @@ impl Coordinator {
             .get(id)
             .filter(|candidate| candidate.expires > now)
             .map(|candidate| candidate.kind.clone())
+    }
+    /// Trusted negative/result recovery. History is bound to this original native
+    /// candidate, independent of current UI authorization or replacement calls.
+    pub(crate) fn admitted_activation(
+        &self,
+        id: &str,
+    ) -> Option<crate::voice_call_activation::Handle> {
+        self.activations
+            .iter()
+            .find(|handle| handle.id() == id)
+            .cloned()
+    }
+    /// Stage the separately paid canonical owner BEFORE native selection. The map
+    /// is bounded custody/history only; inserting it grants no Root permission.
+    pub(crate) fn retain_admitted_activation(
+        &mut self,
+        handle: &crate::voice_call_activation::Handle,
+    ) -> Result<(), String> {
+        if let Some(original) = self
+            .activations
+            .iter()
+            .find(|original| original.id() == handle.id())
+        {
+            return if original.same(handle) {
+                Ok(())
+            } else {
+                Err("voice activation changed".into())
+            };
+        }
+        if self.activations.len() >= crate::voice_call_activation::MAX_ACTIVATIONS {
+            return Err("too many unfinished voice activations".into());
+        }
+        if self.activations.capacity() == 0 {
+            // Every admitted Cell pays the ENTIRE fixed maximum backing, not an
+            // optimistic load factor or one slice of a previously larger map.
+            self.activations
+                .reserve_exact(crate::voice_call_activation::MAX_ACTIVATIONS);
+        }
+        self.activations.push(handle.clone());
+        Ok(())
+    }
+    /// Native CAS for the inactive admitted entry, while holding its ORIGINAL UI
+    /// guard. Prepared grants stay inert before this turn; Root selection follows
+    /// on the canonical task. Return the old owner for destruction AFTER guards.
+    pub(crate) fn activate_admitted(
+        &mut self,
+        handle: &crate::voice_call_activation::Handle,
+        join: Nonce,
+        now: u64,
+    ) -> Result<Option<Owner>, String> {
+        if !self
+            .activations
+            .iter()
+            .any(|original| original.same(handle))
+        {
+            return Err("voice activation is not retained".into());
+        }
+        let candidate = self
+            .candidates
+            .get(handle.id())
+            .ok_or("voice candidate expired")?;
+        if candidate.expires <= now || candidate.revision != self.revision {
+            return Err("voice join was superseded".into());
+        }
+        let CandidateKind::AdmittedCall {
+            controller,
+            binding,
+        } = &candidate.kind
+        else {
+            return Err("this voice candidate has a different protocol".into());
+        };
+        if controller != handle.controller() || binding != handle.binding() {
+            return Err("voice activation binding changed".into());
+        }
+        self.controller_parent(controller, binding.generation)?;
+        let grant = handle.grant().ok_or("voice actor permission changed")?;
+        if !handle.original().matches_grant(&grant)
+            || !grant.lease().is_admitted()
+            || grant.scope() != binding.scope
+            || handle.original().is_closed()
+        {
+            return Err("voice actor permission changed".into());
+        }
+        // Fresh activation, never an in-place upgrade or replacement of a healthy
+        // endpoint. A losing candidate cannot revoke any current healthy call.
+        if self
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.lease.is_live())
+        {
+            return Err("end the current call before starting this call".into());
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or("voice revision exhausted")?;
+        let owner = Owner {
+            id: handle.id().into(),
+            binding: binding.clone(),
+            join,
+            lease: grant.lease(),
+            _grant: grant,
+        };
+        self.candidates.remove(handle.id());
+        self.revision = revision;
+        Ok(self.owner.replace(owner))
+    }
+    /// Final synchronous native fence after actual original Actor argument
+    /// retirement. The caller has already checked its STILL-HELD original UI guard
+    /// identity/generation; this checks exact controller/owner/grant/original gate.
+    pub(crate) fn finish_admitted_activation(
+        &mut self,
+        handle: &crate::voice_call_activation::Handle,
+        selected: catcoms_sync::voice_v2::call_activation::RootSelectedCall,
+    ) -> Result<(), catcoms_sync::voice_v2::VoiceError> {
+        use catcoms_sync::voice_v2::VoiceError;
+        let owner = self
+            .owner
+            .as_ref()
+            .filter(|owner| {
+                owner.id == handle.id()
+                    && owner.binding == *handle.binding()
+                    && owner.lease.is_admitted()
+                    && owner.lease.is_live()
+            })
+            .ok_or(VoiceError::Unauthorized)?;
+        if !self
+            .activations
+            .iter()
+            .any(|original| original.same(handle))
+            || self
+                .controller_parent(handle.controller(), handle.binding().generation)
+                .is_err()
+            || !handle.original().matches_grant(&owner._grant)
+            || !selected.original().is_same(handle.original())
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        handle.admit(selected, &owner._grant, owner.join)
+    }
+    /// Detach ONLY this original admitted owner for actual heavy destruction after
+    /// Coordinator/UI release. A late failed task may never End its replacement.
+    pub(crate) fn retire_admitted_activation(
+        &mut self,
+        handle: &crate::voice_call_activation::Handle,
+    ) -> Option<Owner> {
+        let same = self
+            .activations
+            .iter()
+            .any(|original| original.same(handle))
+            && self.owner.as_ref().is_some_and(|owner| {
+                owner.id == handle.id()
+                    && owner.binding == *handle.binding()
+                    && handle.original().matches_grant(&owner._grant)
+            });
+        same.then(|| self.owner.take()).flatten()
+    }
+    /// Explicit trusted local Forget, never End/TTL/absence. The returned paid
+    /// handle must be dropped after Coordinator; live reply copies retain their
+    /// SAME payer independently. Unknown or foreign originals create no history.
+    pub(crate) fn forget_admitted_activation(
+        &mut self,
+        handle: &crate::voice_call_activation::Handle,
+    ) -> Option<DetachedActivation> {
+        if !handle.collectible() {
+            return None;
+        }
+        let index = self
+            .activations
+            .iter()
+            .position(|original| original.same(handle))?;
+        let original = self.activations.swap_remove(index);
+        let allocation = if self.activations.is_empty() {
+            std::mem::take(&mut self.activations)
+        } else {
+            Vec::new()
+        };
+        Some(DetachedActivation {
+            _allocation: allocation,
+            _original: original,
+        })
     }
     /// Recover only a currently installed activation, before looking for its consumed candidate.
     /// Candidate expiry does not expire an accepted call, and a lost reply must not allocate a
@@ -358,6 +561,22 @@ impl Coordinator {
         now: u64,
         grant: &mut Option<CallGrant>,
     ) -> Result<(), String> {
+        // A second physical/pilot channel cannot turn an admitted issuer child
+        // into Existing permission, even before RootSelected/NativeActive.
+        if self
+            .candidates
+            .get(id)
+            .is_some_and(|candidate| matches!(candidate.kind, CandidateKind::AdmittedCall { .. }))
+        {
+            return Err("this voice candidate needs native admitted activation".into());
+        }
+        if self
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.lease.is_admitted() && owner.lease.is_live())
+        {
+            return Err("end the current call before replacing its protocol".into());
+        }
         let candidate = self
             .candidates
             .remove(id)
@@ -371,10 +590,11 @@ impl Coordinator {
         } = &candidate.kind
         {
             self.controller_parent(controller, binding.generation)?;
-            if grant
-                .as_ref()
-                .is_none_or(|grant| grant.scope() != binding.scope || !grant.lease().is_live())
-            {
+            if grant.as_ref().is_none_or(|grant| {
+                grant.scope() != binding.scope
+                    || !grant.lease().is_live()
+                    || grant.lease().is_admitted()
+            }) {
                 return Err("voice actor permission changed".into());
             }
         } else if grant.is_some() {
@@ -407,6 +627,9 @@ impl Coordinator {
                     lease: grant.lease(),
                     _grant: grant,
                 })
+            }
+            CandidateKind::AdmittedCall { .. } => {
+                unreachable!("admitted candidate refused before consumption")
             }
         }
         Ok(())
@@ -568,7 +791,9 @@ impl Coordinator {
     pub fn owner(&self, id: &str) -> Option<Owner> {
         self.owner
             .as_ref()
-            .filter(|owner| owner.id == id && owner.lease.is_live())
+            // This is the Existing positive-key/crypto/pilot entry. The staged
+            // admitted activation deliberately has no key or endpoint API yet.
+            .filter(|owner| owner.id == id && owner.lease.is_live() && !owner.lease.is_admitted())
             .cloned()
     }
     pub fn end(&mut self, id: &str) {
@@ -595,7 +820,17 @@ impl Coordinator {
             .as_ref()
             .is_some_and(|controller| controller.id == id)
             || self.owner.as_ref().is_some_and(|owner| owner.id == id);
-        let original = matches.then(|| self.owner.clone()).flatten();
+        // Admitted negative cleanup belongs to its original paid canonical task,
+        // not the legacy Stop/key producer. Its Cell already retains the actual
+        // Grant until original arguments return, then drops it outside guards.
+        let original = matches
+            .then(|| {
+                self.owner
+                    .as_ref()
+                    .filter(|owner| !owner.lease.is_admitted())
+                    .cloned()
+            })
+            .flatten();
         self.end(id);
         original
     }
@@ -607,7 +842,7 @@ impl Coordinator {
         self.retire_owner();
     }
     pub fn retire_server(&mut self, server: u64, instance: u64) {
-        self.candidates.retain(|_, c| !matches!(&c.kind, CandidateKind::Call { binding, .. } if binding.server == server && binding.instance == instance));
+        self.candidates.retain(|_, c| !matches!(&c.kind, CandidateKind::Call { binding, .. } | CandidateKind::AdmittedCall { binding, .. } if binding.server == server && binding.instance == instance));
         if let Some(id) = self
             .owner
             .as_ref()

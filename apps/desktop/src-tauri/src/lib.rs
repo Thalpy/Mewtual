@@ -75,6 +75,9 @@ mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
 mod voice_authority;
+// Inactive trusted admitted-call profile boundary. No Tauri command, UI adapter,
+// key/LocalJoin/network producer selects it; compile its ownership regressions.
+mod voice_call_activation;
 // Authenticated action dispatch exists, but App V2 call selection is still off. Remove the
 // temporary unused-item allowance as the App driver takes ownership of these private APIs.
 #[allow(dead_code)]
@@ -11125,6 +11128,9 @@ async fn activate_voice_owner_inner(
                 return Err("voice policy changed; rejoin the call".into());
             }
             (binding.generation, Some(grant))
+        }
+        voice_authority::CandidateKind::AdmittedCall { .. } => {
+            return Err("this voice candidate needs native admitted activation".into());
         }
     };
     let _commit = require_ui_session_generation(state, generation).await?;

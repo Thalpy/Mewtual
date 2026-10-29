@@ -40,17 +40,21 @@ mod file_transfers;
 mod member_maintenance;
 mod member_reconnect;
 mod voice_endpoint;
+use voice_endpoint::ActorInbox;
 pub use voice_endpoint::{
-    voice_admission_rpc_bytes, voice_context_queue_bytes, voice_initial_media_rpc_bytes,
-    voice_sdp_delivery_rpc_bytes, voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes,
-    voice_sdp_rpc_bytes, InitialSdpCompletion, InitialSdpPending, VoiceAdmissionPublisher,
-    VoiceAdmissionWork, VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceContextPending,
-    VoiceEndpointCommand, VoiceEndpointError, VoiceInitialMediaPublisher, VoiceInitialMediaWork,
-    VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpDeliveryPublisher,
-    VoiceSdpDeliveryWork, VoiceSdpEnginePublisher, VoiceSdpEngineWork, VoiceSdpInputPublisher,
-    VoiceSdpInputWork, VoiceSdpPending, VoiceSdpPublication, VoiceSdpRecordedInput,
-    VoiceSdpRecordedQueue, VoiceSdpResult, VoiceSdpResultInput, VoiceSdpResultPublisher,
-    VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
+    control_layout_bytes, voice_admission_rpc_bytes, voice_call_activation_rpc_bytes,
+    voice_context_queue_bytes, voice_initial_media_rpc_bytes, voice_sdp_delivery_rpc_bytes,
+    voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes, voice_sdp_rpc_bytes,
+    InitialSdpCompletion, InitialSdpPending, PreparedVoiceCall, VoiceActivationControl,
+    VoiceAdmissionPublisher, VoiceAdmissionWork, VoiceCallActivationPublisher,
+    VoiceCallActivationResult, VoiceCallActivationWork, VoiceConfirmationBody,
+    VoiceConfirmationCompletion, VoiceContextPending, VoiceEndpointCommand, VoiceEndpointError,
+    VoiceInitialMediaPublisher, VoiceInitialMediaWork, VoiceSdpBody, VoiceSdpBodyRefusal,
+    VoiceSdpCompletion, VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork, VoiceSdpEnginePublisher,
+    VoiceSdpEngineWork, VoiceSdpInputPublisher, VoiceSdpInputWork, VoiceSdpPending,
+    VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue, VoiceSdpResult,
+    VoiceSdpResultInput, VoiceSdpResultPublisher, VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES,
+    VOICE_ACTIVATION_CONTROL_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
     VOICE_INITIAL_MEDIA_RPC_BYTES, VOICE_SDP_DELIVERY_RPC_BYTES, VOICE_SDP_ENGINE_RPC_BYTES,
     VOICE_SDP_INPUT_RPC_BYTES, VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
 };
@@ -4654,7 +4658,8 @@ where
     T: MeshTransport + Send + 'static,
     R: CryptoRngCore + Send + 'static,
 {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(64);
+    let (cmd_tx, receiver) = mpsc::channel::<Envelope>(64);
+    let mut cmd_rx = ActorInbox::new(receiver, &cmd_tx);
     let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
     #[cfg(test)]
     let test_events = raw_events.downgrade();
@@ -5615,7 +5620,7 @@ where
                     Some(AppCommand::VoiceCallGrant { room, reply }) => {
                         let _ = reply.send(server.voice_call_grant(room));
                     }
-                    Some(AppCommand::VoiceEndpoint(command)) => command.apply(&mut server),
+                    Some(AppCommand::VoiceEndpoint(command)) => command.apply(&mut server, cmd_rx.control()),
                     Some(AppCommand::MediaKey { call_id, reply }) => {
                         let res = server
                             .media_key(call_id)
@@ -6294,6 +6299,7 @@ where
                         // a NEW generation; saved Keep allowance and intent remain unchanged.
                         file_transfers.retire();
                         if crate::shutdown::save_and_freeze(&mut server, ready).await {
+                            cmd_rx.close_activation();
                             server.sync.retire_voice_actor();
                             drop(cmd_rx);
                             let _ = event_tx.send(AppEvent::Closed).await;
@@ -6303,6 +6309,7 @@ where
                     }
                     Some(AppCommand::StopAndWait { stopped }) => {
                         if admit_terminal_stop(stopped, || {
+                            cmd_rx.close_activation();
                             file_transfers.retire();
                             server.sync.retire_voice_actor();
                             // Wake waiting producers and reject/drop already queued replies
@@ -6319,6 +6326,7 @@ where
                         }
                     }
                     Some(AppCommand::Shutdown) | None => {
+                        cmd_rx.close_activation();
                         file_transfers.retire();
                         server.sync.retire_voice_actor();
                         drop(cmd_rx);
@@ -6620,6 +6628,7 @@ where
                         }
                     }
                     _ => {
+                        cmd_rx.close_activation();
                         file_transfers.retire();
                         server.sync.retire_voice_actor();
                         drop(cmd_rx);

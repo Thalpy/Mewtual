@@ -13,7 +13,7 @@ mod peer_snapshot;
 mod results;
 mod snapshot;
 
-fn found(seed: u64) -> Server<MemNetwork, ChaCha20Rng> {
+pub(super) fn found(seed: u64) -> Server<MemNetwork, ChaCha20Rng> {
     Server::found(
         Hub::new().join(PeerId::from_u64(seed)),
         MlsDevice::generate().unwrap(),
@@ -23,7 +23,7 @@ fn found(seed: u64) -> Server<MemNetwork, ChaCha20Rng> {
     )
     .unwrap()
 }
-fn point() -> [u8; 65] {
+pub(super) fn point() -> [u8; 65] {
     hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap()
 }
 pub(super) async fn start() -> (
@@ -390,6 +390,10 @@ fn native_voice_watch_reply_lost_during_admitted_creation_closes_its_actual_gran
         .unwrap();
     let mut changes = server.sync.voice_endpoint_changes().unwrap();
     let parent = CallLease::default();
+    // Direct legacy dispatch still receives the same inert inbox control as the
+    // Actor loop. This Watch path never creates an admitted control owner.
+    let (command_sender, command_receiver) = mpsc::channel(64);
+    let mut inbox = ActorInbox::new(command_receiver, &command_sender);
     for _ in 0..12 {
         let (reply, result) = oneshot::channel();
         *lose.lock().unwrap() = Some(result);
@@ -398,7 +402,7 @@ fn native_voice_watch_reply_lost_during_admitted_creation_closes_its_actual_gran
             parent: parent.clone(),
             reply,
         }
-        .apply(&mut server);
+        .apply(&mut server, inbox.control());
         assert!(lose.lock().unwrap().is_none());
         assert!(
             changes.has_changed().unwrap(),

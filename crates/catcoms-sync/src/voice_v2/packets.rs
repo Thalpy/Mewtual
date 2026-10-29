@@ -918,6 +918,11 @@ impl PacketLedger {
         lease: CallLease,
         resources: Arc<Resources>,
     ) -> Result<Self, VoiceError> {
+        // This constructor implements the existing profile only. An admitted-issued
+        // lease must not consume its one allocator claim through an older lower API.
+        if lease.is_admitted() {
+            return Err(VoiceError::Unauthorized);
+        }
         lease.claim_packet_ledger()?;
         Ok(Self {
             scope: context.scope,

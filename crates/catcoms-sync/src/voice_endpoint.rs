@@ -10,6 +10,7 @@ use voice_v2::{CallGrant, CallLease, JoinKey, Scope, VoiceError, WatchLease};
 
 const WATCHES: usize = 8;
 mod admission;
+mod call_activation;
 mod confirmation;
 mod derivation;
 mod ingress;
@@ -64,6 +65,7 @@ struct Participant {
     join: LocalJoin,
 }
 pub(super) struct EndpointOwners {
+    activation: Option<voice_v2::call_activation::RootResidence>,
     serial: u64,
     observers: BTreeMap<u64, Observer>,
     participant: Option<Participant>,
@@ -73,6 +75,7 @@ pub(super) struct EndpointOwners {
 impl Default for EndpointOwners {
     fn default() -> Self {
         Self {
+            activation: None,
             serial: 0,
             observers: BTreeMap::new(),
             participant: None,
@@ -183,15 +186,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// stale/mixed-version traffic out of the native legacy queue before any renderer sees it.
     /// Presence-only observers and unjoined member helpers do not select an endpoint protocol.
     pub(crate) fn has_live_v2_participant(&self) -> bool {
-        self.voice_runtime.as_ref().is_some_and(|voice| {
-            voice
-                .endpoints
-                .participant
-                .as_ref()
-                .is_some_and(|participant| {
-                    participant.grant.strong_count() > 0 && participant.lease.is_live()
-                })
-        })
+        self.has_admitted_voice_activation()
+            || self.voice_runtime.as_ref().is_some_and(|voice| {
+                voice
+                    .endpoints
+                    .participant
+                    .as_ref()
+                    .is_some_and(|participant| {
+                        participant.grant.strong_count() > 0 && participant.lease.is_live()
+                    })
+            })
     }
 
     /// Trusted native factory. Parent is the actual controller for an explicit observer, or the

@@ -506,6 +506,38 @@ impl SourceJob {
     }
 }
 impl SourceLedger {
+    /// Permanently retire this Root's old endpoint writers at admitted-profile
+    /// selection. Watching/WatchChallenge and remote helper forwarding stay separate.
+    /// Snapshot only ONE original lease per pass, then revoke outside SourceState:
+    /// watch wakeups/destructors must not run under Source/Group/Policy locks. The
+    /// fixed packet cap bounds the pass; no unfunded batch or replacement registry.
+    /// Existing FlightAuthority observes the SAME lease and cancels its original
+    /// lower work. Actual flights/transport keep their charges until real return.
+    pub(crate) fn retire_existing_endpoint_sources(&self) {
+        for _ in 0..PACKETS {
+            let next = {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.packets.values().find_map(|packet| {
+                    if !matches!(
+                        packet.object.body(),
+                        Body::Announcement { .. }
+                            | Body::JoinProof { .. }
+                            | Body::Encrypted { .. }
+                            | Body::PairReady { .. }
+                            | Body::PairReadyRound { .. }
+                    ) {
+                        return None;
+                    }
+                    match &packet.activity.lease {
+                        ActivityLease::Joined(call) if call.is_live() => Some(call.clone()),
+                        _ => None,
+                    }
+                })
+            };
+            let Some(call) = next else { break };
+            call.revoke();
+        }
+    }
     pub(super) fn new(
         group: [u8; 32],
         clock: Arc<dyn Clock>,
