@@ -2,6 +2,9 @@
 use super::*;
 // Pressure must track the actual native policy, including future reviewed policy revisions.
 // A historical256KiB filler no longer exercises capacity refusal at the current512KiB limit.
+use crate::voice_authority::join_key::{
+    existing_generation_layout_bytes, GENERATION_BYTES, JOIN_INDEX_BYTES,
+};
 use catcoms_sync::voice_v2::resources::GROUP_BYTES;
 
 fn point() -> [u8; 65] {
@@ -33,8 +36,13 @@ fn native_handoff_selection_requires_actual_published_generation_and_reuses_its_
     let group = selected.binding().scope.group;
     let pressure = c
         .resources
-        .charge(group, GROUP_BYTES - before.0, ResourceKind::Retained)
+        .charge(
+            group,
+            GROUP_BYTES - c.resources.group_counts(group).unwrap().0,
+            ResourceKind::Retained,
+        )
         .unwrap();
+    assert_eq!(c.resources.group_counts(group).unwrap().0, GROUP_BYTES);
     assert!(Arc::ptr_eq(
         &selected,
         &c.selected_handoff_owner(&owner, [9; 32]).unwrap()
@@ -81,14 +89,18 @@ fn native_handoff_selection_capacity_refusal_does_not_consume_its_published_gene
     };
     c.finish_join_key_publication(&mut work, true).unwrap();
     let before = c.resources.counts();
+    let group = c.owner(&owner).unwrap().binding.scope.group;
+    // The shared key index is PROCESS-paid; total process bytes leave false
+    // group headroom and no longer exercise the intended selection refusal.
     let pressure = c
         .resources
         .charge(
-            c.owner(&owner).unwrap().binding.scope.group,
-            GROUP_BYTES - before.0,
+            group,
+            GROUP_BYTES - c.resources.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(c.resources.group_counts(group).unwrap().0, GROUP_BYTES);
     assert!(c.selected_handoff_owner(&owner, [9; 32]).is_err());
     drop(pressure);
     assert_eq!(c.resources.counts(), before);
@@ -105,8 +117,13 @@ fn selected_join_key_lost_admission_recovers_one_paid_operation_under_pressure()
     let group = c.owner(&owner).unwrap().binding.scope.group;
     let pressure = c
         .resources
-        .charge(group, GROUP_BYTES - baseline.1 .0, ResourceKind::Retained)
+        .charge(
+            group,
+            GROUP_BYTES - c.resources.group_counts(group).unwrap().0,
+            ResourceKind::Retained,
+        )
         .unwrap();
+    assert_eq!(c.resources.group_counts(group).unwrap().0, GROUP_BYTES);
     for _ in 0..4 {
         let retry = c.admit_join_key(&owner, [9; 32]).unwrap();
         assert_eq!(
@@ -140,10 +157,14 @@ fn selected_join_key_settlement_before_admission_irreversibly_closes_one_selecti
     assert_eq!((c.serial, c.resources.counts()), baseline);
     assert_eq!(c.join_generations.len(), 1);
     c.end(&owner);
-    assert_eq!(c.resources.counts(), (0, 0));
+    // Empty map backing still belongs to this Coordinator until actual Drop.
+    assert_eq!(c.resources.counts(), (JOIN_INDEX_BYTES, 0));
     c.settle_join_key("unknown", [1; 32]).unwrap();
     assert!(c.join_generations.is_empty());
     assert!(c.admit_join_key(&owner, [9; 32]).is_err());
+    let resources = c.resources.clone();
+    drop(c);
+    assert_eq!(resources.counts(), (0, 0));
 }
 
 #[test]
@@ -169,7 +190,10 @@ fn selected_join_key_end_preserves_uncertain_credit_and_cannot_refund_replacemen
     c.revoke_all();
     assert_eq!(c.resources.counts(), original);
     c.settle_join_key(&next, [9; 32]).unwrap();
-    assert_eq!(c.resources.counts(), (0, 0));
+    assert_eq!(c.resources.counts(), (JOIN_INDEX_BYTES, 0));
+    let resources = c.resources.clone();
+    drop(c);
+    assert_eq!(resources.counts(), (0, 0));
 }
 
 #[test]
@@ -220,14 +244,16 @@ fn selected_join_key_preparation_capacity_does_not_burn_generation_or_serial() {
         .resources
         .charge(
             group,
-            GROUP_BYTES - c.resources.counts().0,
+            GROUP_BYTES - c.resources.group_counts(group).map_or(0, |counts| counts.0),
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(c.resources.group_counts(group).unwrap().0, GROUP_BYTES);
     let serial = c.serial;
     assert!(c.admit_join_key(&owner, [9; 32]).is_err());
     assert_eq!(c.serial, serial);
     assert!(c.join_generations.is_empty());
+    assert!(c.join_index_funding.is_none());
     drop(pressure);
     c.admit_join_key(&owner, [9; 32]).unwrap();
     assert_eq!(c.serial, serial + 1);
@@ -265,8 +291,13 @@ fn supplied_selection_check_never_materializes_a_local_cache_for_foreign_equal_l
     let group = local.owner(&local_id).unwrap().binding.scope.group;
     let pressure = local
         .resources
-        .charge(group, GROUP_BYTES - before.0, ResourceKind::Retained)
+        .charge(
+            group,
+            GROUP_BYTES - local.resources.group_counts(group).unwrap().0,
+            ResourceKind::Retained,
+        )
         .unwrap();
+    assert_eq!(local.resources.group_counts(group).unwrap().0, GROUP_BYTES);
     let full = local.resources.counts();
     assert!(!local.is_current_handoff_owner(&other));
     assert_eq!(
@@ -281,4 +312,55 @@ fn supplied_selection_check_never_materializes_a_local_cache_for_foreign_equal_l
     let cached = local.resources.counts();
     assert!(local.is_current_handoff_owner(&selected));
     assert_eq!(local.resources.counts(), cached);
+}
+
+#[test]
+fn existing_key_row_has_a_complete_heap_guard_separate_from_shared_table() {
+    let measured = existing_generation_layout_bytes();
+    eprintln!("Existing generation heap/reply {measured}/{GENERATION_BYTES}");
+    assert!(measured <= GENERATION_BYTES);
+}
+
+#[test]
+fn existing_key_crypto_pressure_refuses_before_shared_index_allocation() {
+    let mut c = action_coordinator();
+    let controller = controller(&mut c);
+    let owner = call(&mut c, &controller, 1, 1);
+    let group = c.owner(&owner).unwrap().binding.scope.group;
+    // These original execution credits fill the real four-Crypto-slot group ceiling,
+    // while byte headroom remains. No new table/row/permit is admitted on refusal.
+    let held: Vec<_> = (0..4)
+        .map(|_| c.resources.charge(group, 1, ResourceKind::Crypto).unwrap())
+        .collect();
+    let before = (c.serial, c.resources.counts());
+    assert!(c.admit_join_key(&owner, [9; 32]).is_err());
+    assert!(c.join_generations.is_empty() && c.join_index_funding.is_none());
+    assert_eq!((c.serial, c.resources.counts()), before);
+    drop(held);
+}
+
+#[test]
+fn existing_paid_watch_survives_row_and_coordinator_return() {
+    let mut c = action_coordinator();
+    let controller = controller(&mut c);
+    let owner = call(&mut c, &controller, 1, 1);
+    let admission = c.admit_join_key(&owner, [9; 32]).unwrap();
+    let PublicationPlan::Start(mut work) = c
+        .prepare_join_key_publication(&owner, [9; 32], &admission.permit, point())
+        .unwrap()
+    else {
+        panic!("original Existing publication");
+    };
+    let drain = c.settle_join_key(&owner, [9; 32]).unwrap().unwrap();
+    let resources = c.resources.clone();
+    c.end(&owner);
+    assert!(c.finish_join_key_publication(&mut work, false).is_err());
+    drop(work); // actual argument custody, never an observed 'drained' flag
+    assert!(c.join_generations.is_empty());
+    assert!(*drain.borrow());
+    assert_eq!(resources.counts(), (JOIN_INDEX_BYTES + GENERATION_BYTES, 0));
+    drop(c); // actual shared map deallocation returns only the fixed index fee
+    assert_eq!(resources.counts(), (GENERATION_BYTES, 0));
+    drop(drain); // actual final watch owner returns its SAME metadata fee
+    assert_eq!(resources.counts(), (0, 0));
 }

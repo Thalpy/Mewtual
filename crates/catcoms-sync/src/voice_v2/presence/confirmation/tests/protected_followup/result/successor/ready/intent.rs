@@ -69,6 +69,75 @@ fn intent(
 }
 
 #[test]
+fn original_sdp_storage_records_group_and_process_refusal_then_reuses_the_same_key_custody() {
+    use crate::voice_v2::resources::{ResourceKind, GROUP_BYTES, PROCESS_BYTES};
+    let (mut p, keys) = confirmed_with_keys();
+    prepare(&mut p, |_, _| Ok(())).unwrap();
+    let resources = p._runtimes[1].resources();
+    let group = p.f.high.context.scope.group;
+    let request = crate::voice_v2::chain::sdp_handoff::BYTES;
+    let baseline = resources.counts();
+    let group_bytes = resources.group_counts(group).unwrap().0;
+    let pressure = resources
+        .charge(
+            group,
+            GROUP_BYTES - group_bytes - request + 1,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let mut observation = None;
+    assert_eq!(
+        keys.prepare_sdp_handoff_recording_refusal(&mut observation)
+            .err(),
+        Some(VoiceError::Capacity)
+    );
+    let group_refusal = observation.unwrap();
+    assert_eq!(group_refusal.requested_bytes, request);
+    assert!(group_refusal.group_bytes_exceeded);
+    assert!(!group_refusal.process_bytes_exceeded);
+    assert!(keys.is_current());
+    drop(pressure);
+    assert_eq!(resources.counts(), baseline);
+
+    let pressure = resources
+        .charge_process_retained(PROCESS_BYTES - baseline.0 - request + 1)
+        .unwrap();
+    assert_eq!(
+        keys.prepare_sdp_handoff_recording_refusal(&mut observation)
+            .err(),
+        Some(VoiceError::Capacity)
+    );
+    let process_refusal = observation.unwrap();
+    assert!(process_refusal.process_bytes_exceeded);
+    assert!(!process_refusal.group_bytes_exceeded);
+    assert_eq!(process_refusal.group_bytes, Some(group_bytes));
+    drop(pressure);
+
+    // Both refusals precede Phase/action publication. Only unrelated pressure
+    // returned; the original protected key/domain and its clocks are unchanged.
+    let phase = keys
+        .prepare_sdp_handoff_recording_refusal(&mut observation)
+        .unwrap();
+    assert!(observation.is_none());
+    assert!(keys.contains_sdp_handoff(&phase));
+    assert_eq!(resources.counts().0, baseline.0 + request);
+    phase.close();
+    drop(phase);
+    assert_eq!(resources.counts(), baseline);
+    keys.close_successor_effects();
+    observation = Some(process_refusal);
+    assert_eq!(
+        keys.prepare_sdp_handoff_recording_refusal(&mut observation)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert!(
+        observation.is_none(),
+        "stale refusal cannot describe a later authorization failure"
+    );
+}
+
+#[test]
 fn initial_sdp_intent_requires_original_ready_key_and_armed_phase_without_allocating_on_refusal() {
     let (mut p, keys) = confirmed_with_keys();
     let (other, foreign) = confirmed_with_keys();

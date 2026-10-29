@@ -2,14 +2,13 @@
 //! production dispatch is enabled here. Authentication/full-purpose/RowId resolution must
 //! precede this trusted adapter; this gate orders new intent against normal channel closure.
 use super::bootstrap::Route;
-use super::channel::{
-    self, BodyKind, CompletedReply, Incoming, Operation, Session, SessionIdentity,
-};
+use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation, SessionIdentity};
 use super::context::Context;
 use super::factory::Refused;
 use super::ledger::{FinalReceipt, Ledger, Purpose, ResolvedRow, RowId};
 use super::requests::{Kind, Request};
 use crate::voice_authority::SelectedHandoffOwner;
+use crate::voice_handoff::channel::SessionRef;
 use catcoms_sync::voice_v2::VoiceError;
 use std::sync::Arc;
 
@@ -21,7 +20,7 @@ pub(super) struct Admission {
     selected: Arc<SelectedHandoffOwner>,
     // Before intent is installed there may be NO Row paying for this identity yet.
     // Retain the original paid Session through admission, including forced-shutdown races.
-    session: Arc<Session>,
+    session: SessionRef,
     _commit: tokio::sync::OwnedMutexGuard<()>,
 }
 impl Admission {

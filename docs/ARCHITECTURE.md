@@ -1,5 +1,208 @@
 # Mewtual; Architecture
 
+## Admitted native Slot draft (29 October; uncompiled, OFF)
+
+An isolated typed operation31/version12 path stages genuine admitted neutral Root
+capacity and the distinct reserved native parent. It uses one paid boxed Slot,
+original Actor control/task/native hold and exact UI/Coordinator/Row fences.
+Existing routes/codecs remain closed to it. Native layout/tests/review are pending;
+`Reserved` supplies no RoundGate, Ready or RTC permission. See
+[the exact draft and unfinished consumers](communication-recovery/VOICE-ADMITTED-SLOT.md).
+
+## Control7 Query/Support (29 October; focused draft, OFF)
+
+A separate typed Source/ingress/helper path implements protocol Query/Support
+without growing Existing wire/Source enums. Exact original query and selected
+helper proof survive actual paid Lower custody; current query32 differs from
+affine lifetime64/group256/process. Twelve focused cases and new-family graph guards
+pass at34336b2f, including actual B→D replacement and epoch/rejoin refusal. The
+inherited Group/escaping-ledger/Resources backing correction also passes focused
+checks: its complete3750-byte graph prepays4KiB, even while OFF, within unchanged
+caps. Strict lint and full integration remain pending. See
+[the operational boundaries](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md)
+and [the exact Group custody evidence](communication-recovery/VOICE-GROUP-LEDGER-CUSTODY.md).
+
+## Route registry custody prerequisite (29 October; focused passes)
+
+The shared64-route registry retains strong route rows and the SAME outside Lower or
+verification payer through actual Arc destruction. A separately prepaid4KiB owner
+funds fixed backing/inline metadata before first VoiceRuntime publication, including
+OFF attachments. Sole-owner rows prune before Crypto/Forward reservation. Existing
+wire/enums and all limits remain unchanged; Query/Support is a separate focused draft.
+Nine sync and eleven rt authority cases pass; actual registry1904/4096 and route376/512
+guards pass. Full integration remains pending. See
+[the inherited defect, accounting and scoped evidence](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
+## Admitted native/browser key custody (29 October; inactive)
+
+The distinct admitted native commands connect the same selected Root residence to
+one native key generation and one browser-held nonextractable key. A separately
+paid canonical publication task owns the original UI commit guard, Actor request,
+typed terminal history and actual-return markers. Invoke loss cannot replace that
+task or become a negative result. Coordinator's shared key index has its own
+process backing fee; per-generation funding survives escaped watch/metadata owners.
+
+Broker ABI52 adds a distinct admitted key handle and native adapter while retaining
+the existing aggregate ledger, provider queue and cleanup obligations. Terminal ACK
+precedes SDK settlement so lost ACK replies remain recoverable. Existing factories
+cannot use this key. This integrates original-key custody only; operational bilateral
+agreement, admitted KDF, Ready and RTC/media composition are still unfinished.
+See [native](communication-recovery/VOICE-ADMITTED-KEY.md) and
+[browser](communication-recovery/VOICE-ADMITTED-BROWSER-KEY.md) contracts.
+
+## Admitted Root presence (29 October; draft, inactive)
+
+The exact selected NativeActive Root residence can own a separate discovery-only
+AdmittedPresence and immutable first key. It contains no legacy packet ledger or
+confirmation/action queue. Its implicit watcher stays under that SAME residence;
+external plain payments survive Presence/proof Box deallocation. Shared tags1–3 and
+FreshPeer remain profile-neutral. Only the opaque new discovery Source entry admits
+admitted Announcement/Proof; final publication and flights require NativeActive.
+First focused compilation passed five behavior cases, while the full8264-byte
+inventory growth-guard test failed against its initial8KiB fee. The explicit9KiB correction preserves that
+graph and adds a preallocation fence; all ten corrected focused cases pass. Complete
+integration validation remains pending. See
+[the contract and unfinished operational gates](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+V2 remains OFF.
+
+## Confirmation-row allocation correction (29 October)
+
+The integrated fixed action now measures 1,008 bytes and its admission receipt
+576 bytes. Their 1,584-byte overlap exceeds the former 1,536-byte chain row.
+The chain therefore prepays 2 KiB per row (6 KiB more across twelve rows), with
+the same group/process ceilings, positions, attempts and deadlines. A production
+guard checks both admission and start receipt composition before any metadata
+payment, packet allocation or slot reservation. The regression preserves the
+complete original formulas and proves that the old allowance refuses without
+charges or position consumption. Other owners' 1,536-byte allowances are separate.
+Earlier dated row measurements below describe their original checkpoints.
+
+## Issuer-bound native call activation (29 October; inactive)
+
+The actual Root issuer prepares an immutable admitted call profile before granting any
+key/endpoint permission. Root selection and the native final commit share the original
+UI generation and commit guard; Existing creators and ingress cannot replace that call.
+An actor-local paid owner supplies exact original queue routing through a real std Weak
+tombstone. Normal shutdown detaches it before Root retirement while retaining the closed
+receiver to join older pre-close permits. Abort/unwind closes the new-family send gate.
+
+Native retains one canonical paid Cell, exact Work/outcome and explicit result ACK. Its
+outer runner destroys the execution Box before publishing the original exact serial stamp;
+negative recovery shares that same allocation. Final index backing deallocates before its
+last original payer. The earlier activation-only graph fit 17,752/18,432 bytes;
+the integrated deferred-owner graph now uses 18,472/19,456. Root/control/RPC
+payments and original process/group limits stay independent. See
+[activation](communication-recovery/VOICE-CALL-ACTIVATION.md) and
+[normal mailbox retirement](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+The distinct admitted key commands above connect original selection and presence;
+operational agreement/Ready/RTC producers remain unfinished. V2 is OFF.
+
+## Normal Actor mailbox retirement (29 October; focused checks pass)
+
+Normal terminal paths close and synchronously discard queued commands before awaiting
+`Closed`, retaining the SAME Receiver. After event delivery, a negative-only receive drain
+joins outstanding pre-close mailbox permits before the Actor task returns. Ordinary Sender
+handles need not disappear; no drained command is dispatched. Original file/Root retirement
+still precedes event backpressure, and Stop ACK remains first-effects closure. Abort, unwind
+and panic-derived early returns are separate inherited limitations. See
+[the scoped custody note](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
+## Individual media request fence (29 October; inactive)
+
+Retained broker ABI51 binds each positive media request to its actual peer, driver and
+registry allocation before queueing. Framing repeats that exact negative-state check
+after owner callbacks, after SDK/transport awaits and before first fetch. Indexed media
+does not depend on the current negotiation generation. Individual Close leaves siblings
+and the shared controller usable; original negative recovery remains available.
+One fixed snapshot and its queued/frame/check references are included in the independently
+paid 8 KiB media inventory. See [the measured graph and tests](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
+Older brokers require reload without replacing their ledger or erasing cleanup debt.
+This does not enable V2 or complete operational admission, audio or relay.
+
+## Admitted-family codec leaf (29 October; private and inactive)
+
+`voice_v2::admitted_wire` separately decodes signed control7, encrypted8 and Ready9
+into immutable borrowed views. Fixed agreement503, derived RoundRef and transcript789
+use the proposed new domains. It supplies no signing, Source, dispatch, native profile,
+committed RoundGate or operational consumer; existing Body/SDP/profile paths remain
+separate and reject the new grammar. Exact draft allocations and unfinished authority,
+inventory and verification gates are in [the codec note](communication-recovery/VOICE-ADMITTED-WIRE-CODEC.md).
+V2 remains OFF.
+
+## V2 reservation and browser budget continuation (28 October; inactive)
+
+Native capacity now includes a real inert parent-row reservation retained by the original
+Slot alongside RootHighPreclaim. One checked serial occupies an existing ledger position;
+every ordinary/confirmation/SDP allocator excludes it. The original Row and PreparedPhase
+contributions remain paid through actual destruction, before stamp reuse or Returned.
+This creates neither a selector nor a Pending row, Action, signature or consume API.
+Version11 bytes remain unchanged. Older version11 native builds held only Root capacity;
+operational admission must independently establish the upgraded contract.
+
+Browser ABI50 adds an immutable local aggregate policy: 512 KiB/group by default,
+integer KiB selections from 256 to 1024, and the original 2 MiB total. Per-job maximum
+remains 256 KiB; packet/action/execution limits and all fees are unchanged. A retained
+broker refuses a different policy and preserves its original cleanup. Settings UI and
+persistence remain open. The distinct configured admission factory pins before ACK and
+pairs original capacity; its `ready` is bootstrap-only. Actual capture composition uses
+248 KiB; the sixteen-peer 408 KiB inventory is structural. Native Root retains its
+independent 512 KiB/group and 2 MiB total. See VOICE-BROWSER-MEMORY-POLICY and HANDOVER.
+The older ABI49/256 KiB checkpoint descriptions below are historical. V2 remains OFF.
+
+## Native capacity control adapter draft (28 October; inactive)
+
+Operation30/version11 exposes the existing canonical Slot through fixed authenticated
+Session Control. Register stages bounded demand outside Row guards; the SAME persistent
+native task owns Root preparation. Observe allocates nothing, and Cancel only latches the
+exact negative floor/wakes original work. Native errors project canonical custody rather
+than reporting guessed absence. Mode29 and its pre-ACK ordinal1 pin remain unchanged.
+
+The fixed59-byte snapshot separates requested/canonical generations and an optional public
+Root incarnation. The native12KiB Control guard includes the new synchronous adapter and
+prepayment/commit frames. Rust/browser codecs share vectors; their presence is audited by
+the container build. The browser draft selects an immutable admission constructor before
+ACK and pairs the existing128KiB/twelve-row preclaim to one native ordinal. A separate
+prepaid8KiB Session coordinator retains its original identity through lost replies and
+private cancellation after the public cell detaches. Refund requires an exact native
+negative certificate AND actual RPC/driver/cell/unsubscription return. End cannot wait
+for preclaim drainage while holding the codec needed by that negative continuation.
+Register revalidates the exact claim/owner after each SDK await and before first fetch;
+only Observe/Cancel may use the original route after retirement. Broker ABI49 rejects
+older producers on the same window symbol. Pilot work/conversion/lifecycle cannot use
+admission channels. Its one-shot cadence and IO deadline preserve known/unknown timer
+custody through actual callback/cancel return; inline callbacks cannot certify elapsed
+cadence. A clock fault closes positive admission, retains negative debt and permits no
+unbounded automatic retry. Pre-ACK faults close rather than falling through to ACK.
+The separately measured8KiB coordinator now fits the current local policy described
+above; that local increase grants no native execution or operational RTC permission.
+The current native parent claim is described above. Bilateral agreement, operational
+consumption and activation remain open. V2 stays OFF.
+
+## Native canonical admission continuation draft (28 October; inactive)
+
+The original bootstrap Row owns Slot, while one independently paid persistent native task
+per physical Session invokes Root through the existing4KiB Actor staging seam. Slot retains
+the original registration across successive canceled generations and quarantines one exact
+Work/outcome. It retains local Busy candidates without reminting. Row/Control/native task
+layout guards account for the concrete retained and overlapping temporary graphs.
+
+Per-generation cancellation returns only that generation's owners; final channel collection
+also requires the permanent task/native position to return. On unexpected task destruction,
+Slot can retain that SAME position (Session has no Row backedge). End/host/shutdown performs
+exclusive negative-only synchronous cleanup using the original funding. Shutdown awaits
+original Actor retirement before physical idle rather than depending on stopped maintenance.
+Actual owner destruction and position release precede collection markers.
+
+This is the logical application-owned graph, not allocator/RSS collection. Production drops
+both task observers immediately. Once the completed output/captures are destroyed, Tokio may
+still retain an empty scheduler cell briefly; Row/Control fees do not claim to fund that
+opaque tail indefinitely. A future API retaining any task observer across Row collection
+must independently keep its original funding through that observer's return.
+
+The earlier Slot-only checkpoint predated the capacity wire/browser adapter and native row
+reservation above. It supplied no signed bilateral agreement or live V2 audio/relay. Local mode operation29
+and all resource ceilings are unchanged. Production V2 remains OFF.
+
 ## Inert V2 progression capacity (28 October; candidate, inactive)
 
 One exact group claim now spans the original Workflow, independently prepared/transferred
@@ -785,7 +988,8 @@ The maximum AAD is579B, with37B of new round/profile metadata. The complete decl
 peak is188,521/196,608B, including two Lower owners, retained action inputs and maximum engine.
 Ready's maximum signed object is692B and declared peak32,644/32,768B. No group, row, action,
 reserve or stage-count limit increased. Confirmation history stores only its three-case role,
-so unrelated SDP enum payloads do not consume the original1536B confirmation row.
+so unrelated SDP enum payloads did not consume that checkpoint's 1536B confirmation
+row. The 29 October compiled guard and 2 KiB fee above supersede that allowance.
 
 This establishes wire/admission isolation only. Fresh rounds after old Finish expiry, typed
 native/browser SDP/RTC, operational scheduling, compaction, relay and acceptance remain open.
@@ -1561,7 +1765,8 @@ token preparation; exact retries return original admission history without creat
 decrypt. The fixed receipt owns original room/call/pair/chain/member/effect custody, without an
 action, input, engine or Workflow. Original Root reply-route authority independently fences epoch
 and connection changes. Consumed tokens and successful confirmation do not erase admission ACKs.
-The receipt and its actual effect allocation share the original 1,536-byte action row; the fixed
+At that checkpoint the receipt and its actual effect allocation shared a 1,536-byte action row;
+the 29 October compiled growth correction above now requires 2 KiB per chain row. The fixed
 metadata remains 2 KiB. These structural guards exclude allocator slack and framework copies.
 
 Protected mode is selected only for a pristine native pair and stays selected after a capacity

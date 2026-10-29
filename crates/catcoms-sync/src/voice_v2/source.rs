@@ -155,7 +155,13 @@ enum ActivityLease {
 impl ActivityLease {
     fn is_live(&self) -> bool {
         match self {
-            Self::Joined(lease) => lease.is_live(),
+            Self::Joined(lease) => {
+                if lease.is_admitted() {
+                    lease.admitted_active()
+                } else {
+                    lease.is_live()
+                }
+            }
             Self::Watching(lease) => lease.is_live(),
         }
     }
@@ -183,7 +189,26 @@ pub struct SourceActivity {
     incarnation: Incarnation,
     packet: Option<PacketActivity>,
 }
+/// A discovery-only producer seal. There is no public constructor, deref or
+/// extraction to let an admitted key reach an Existing packet/Ready queue.
+pub(crate) struct AdmittedDiscoveryActivity(SourceActivity);
+impl AdmittedDiscoveryActivity {
+    pub(super) fn new(activity: SourceActivity) -> Self {
+        Self(activity)
+    }
+    pub(crate) fn is_original(
+        &self,
+        original: &super::call_activation::ActivationObserver,
+    ) -> bool {
+        matches!(&self.0.lease, ActivityLease::Joined(call)
+            if call.is_admitted() && call.is_same(original.original_lease()))
+            && self.0.packet.is_none()
+    }
+}
 impl SourceActivity {
+    fn is_admitted(&self) -> bool {
+        matches!(&self.lease, ActivityLease::Joined(call) if call.is_admitted())
+    }
     pub(super) fn ready(&self) -> Option<&super::ready::source_authority::ReadySourceAuthority> {
         match &self.packet {
             Some(PacketActivity::Ready(ready)) => Some(ready),
@@ -307,7 +332,8 @@ impl SourceActivity {
                 self.packet.is_none() && key.join == *join && key.key_ref == *key_ref
             }
             (Incarnation::Joined(key), Body::Encrypted { header, .. }) => {
-                key.join == header.source_join
+                !self.is_admitted()
+                    && key.join == header.source_join
                     && key.key_ref == header.source_key_ref
                     && self
                         .packet
@@ -318,6 +344,9 @@ impl SourceActivity {
                         })
             }
             (Incarnation::Joined(_), Body::PairReady { .. } | Body::PairReadyRound { .. }) => {
+                if self.is_admitted() {
+                    return Err(VoiceError::Unauthorized);
+                }
                 let Some(ready) = self.ready() else {
                     return Err(VoiceError::Unauthorized);
                 };
@@ -396,6 +425,12 @@ pub struct SourceLedger {
     clock: Arc<dyn Clock>,
     resources: Arc<Resources>,
     state: Mutex<State>,
+}
+impl Drop for SourceLedger {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        super::runtime::before_return_for_test(self as *const Self as usize);
+    }
 }
 struct FlightAuthority {
     hop: Arc<EffectAuthority>,
@@ -506,20 +541,50 @@ impl SourceJob {
     }
 }
 impl SourceLedger {
-    pub(super) fn new(
-        group: [u8; 32],
-        clock: Arc<dyn Clock>,
-        resources: Arc<Resources>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    /// Permanently retire this Root's old endpoint writers at admitted-profile
+    /// selection. Watching/WatchChallenge and remote helper forwarding stay separate.
+    /// Snapshot only ONE original lease per pass, then revoke outside SourceState:
+    /// watch wakeups/destructors must not run under Source/Group/Policy locks. The
+    /// fixed packet cap bounds the pass; no unfunded batch or replacement registry.
+    /// Existing FlightAuthority observes the SAME lease and cancels its original
+    /// lower work. Actual flights/transport keep their charges until real return.
+    pub(crate) fn retire_existing_endpoint_sources(&self) {
+        for _ in 0..PACKETS {
+            let next = {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.packets.values().find_map(|packet| {
+                    if !matches!(
+                        packet.object.body(),
+                        Body::Announcement { .. }
+                            | Body::JoinProof { .. }
+                            | Body::Encrypted { .. }
+                            | Body::PairReady { .. }
+                            | Body::PairReadyRound { .. }
+                    ) {
+                        return None;
+                    }
+                    match &packet.activity.lease {
+                        ActivityLease::Joined(call) if !call.is_admitted() && call.is_live() => {
+                            Some(call.clone())
+                        }
+                        _ => None,
+                    }
+                })
+            };
+            let Some(call) = next else { break };
+            call.revoke();
+        }
+    }
+    pub(super) fn new(group: [u8; 32], clock: Arc<dyn Clock>, resources: Arc<Resources>) -> Self {
+        Self {
             group,
             clock,
             resources,
             state: Mutex::new(State::default()),
-        })
+        }
     }
     fn current(&self, actor: &ActorOwner) -> Result<(), VoiceError> {
-        if !std::ptr::eq(Arc::as_ptr(&actor.source()?), self) {
+        if !std::ptr::eq(&*actor.source()?, self) {
             return Err(VoiceError::Unauthorized);
         }
         Ok(())
@@ -564,7 +629,52 @@ impl SourceLedger {
         activity: SourceActivity,
         room: RoomAuthority,
     ) -> Result<bool, VoiceError> {
+        if activity.is_admitted() {
+            return Err(VoiceError::Unauthorized);
+        }
         self.admit_packet(actor, Cow::Owned(object), activity, room)
+    }
+    /// The same bounded Source storage and lower machinery, reachable only with
+    /// the dedicated original Presence seal and shared discovery body. No new wire,
+    /// packet capability or enum arm is introduced by this private entry point.
+    pub(crate) fn admit_admitted_discovery(
+        &self,
+        actor: &ActorOwner,
+        object: SignedObject,
+        activity: AdmittedDiscoveryActivity,
+        room: RoomAuthority,
+    ) -> Result<bool, VoiceError> {
+        self.admit_admitted_discovery_before_final(actor, object, activity, room, || {})
+    }
+    #[cfg(test)]
+    pub(crate) fn admit_admitted_discovery_before_final_for_test(
+        &self,
+        actor: &ActorOwner,
+        object: SignedObject,
+        activity: AdmittedDiscoveryActivity,
+        room: RoomAuthority,
+        before_final: impl FnOnce(),
+    ) -> Result<bool, VoiceError> {
+        self.admit_admitted_discovery_before_final(actor, object, activity, room, before_final)
+    }
+    fn admit_admitted_discovery_before_final(
+        &self,
+        actor: &ActorOwner,
+        object: SignedObject,
+        activity: AdmittedDiscoveryActivity,
+        room: RoomAuthority,
+        before_final: impl FnOnce(),
+    ) -> Result<bool, VoiceError> {
+        if !activity.0.is_admitted()
+            || activity.0.packet.is_some()
+            || !matches!(
+                object.body(),
+                Body::Announcement { .. } | Body::JoinProof { .. }
+            )
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.admit_packet_before_final(actor, Cow::Owned(object), activity.0, room, before_final)
     }
     /// Native cache-to-Source transfer. The caller borrows its actual published packet;
     /// Source pays canonical scratch and its retained copy BEFORE cloning any payload.
@@ -577,6 +687,9 @@ impl SourceLedger {
         activity: SourceActivity,
         room: RoomAuthority,
     ) -> Result<bool, VoiceError> {
+        if activity.is_admitted() {
+            return Err(VoiceError::Unauthorized);
+        }
         self.admit_packet(actor, Cow::Borrowed(object), activity, room)
     }
     fn admit_packet(

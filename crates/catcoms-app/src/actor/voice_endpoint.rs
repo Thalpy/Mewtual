@@ -32,7 +32,20 @@ impl std::error::Error for VoiceEndpointError {}
 
 type Reply<T> = oneshot::Sender<Result<T, VoiceError>>;
 
+mod admission;
+mod call_activation;
+pub use call_activation::{
+    control_layout_bytes, voice_admitted_admission_rpc_bytes, voice_admitted_presence_rpc_bytes,
+    voice_admitted_support_rpc_bytes, voice_call_activation_rpc_bytes, PreparedVoiceCall,
+    VoiceActivationControl, VoiceAdmittedAdmissionPublisher, VoiceAdmittedAdmissionResult,
+    VoiceAdmittedAdmissionWork, VoiceAdmittedPresencePublisher, VoiceAdmittedPresenceResult,
+    VoiceAdmittedPresenceWork, VoiceAdmittedSupportPublisher, VoiceAdmittedSupportResult,
+    VoiceAdmittedSupportWork, VoiceCallActivationPublisher, VoiceCallActivationResult,
+    VoiceCallActivationWork, VOICE_ACTIVATION_CONTROL_BYTES,
+};
+pub(in crate::actor) use call_activation::{ActorControl, ActorInbox};
 mod body;
+pub use admission::{voice_admission_rpc_bytes, VoiceAdmissionPublisher, VoiceAdmissionWork};
 mod context;
 pub use context::{voice_context_queue_bytes, VoiceContextPending};
 mod sdp_body;
@@ -133,12 +146,18 @@ impl std::fmt::Debug for VoiceEndpointCommand {
     }
 }
 impl VoiceEndpointCommand {
-    pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(self, server: &mut Server<T, R>) {
-        self.0.apply(server);
+    pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
+        self,
+        server: &mut Server<T, R>,
+        control: &mut ActorControl,
+    ) {
+        self.0.apply(server, control);
     }
 }
 
 enum Command {
+    CallActivation(call_activation::Command),
+    Admission(admission::Command),
     Sdp(sdp_ops::Command),
     SdpInput(sdp_input::Command),
     SdpEngine(sdp_engine::Command),
@@ -258,11 +277,17 @@ enum Command {
 }
 
 impl Command {
-    pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(self, server: &mut Server<T, R>) {
+    pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
+        self,
+        server: &mut Server<T, R>,
+        control: &mut ActorControl,
+    ) {
         // Losing a reply is not permission to repeat a first effect. Root factories recover
         // the actual action; terminal metadata survives for exact result recovery. A lost Watch
         // reply instead drops its affine grant and closes precisely that abandoned observer.
         match self {
+            Self::CallActivation(command) => call_activation::apply(command, server, control),
+            Self::Admission(command) => admission::apply(command, server),
             Self::Sdp(command) => sdp_ops::apply(command, server),
             Self::SdpInput(command) => sdp_input::apply(command, server),
             Self::SdpEngine(command) => sdp_engine::apply(command, server),

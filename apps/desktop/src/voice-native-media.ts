@@ -32,7 +32,11 @@ export function voiceNativeMediaInventory(): Readonly<{
     + 320 // passive status, SAME persistent proof, flight token
     + 512; // shared timer cell plus old executing AND new scheduled generations
   const start = 5 * 64 + 3 * 128 + 128 + 64; // Promises, closures, run, adoption reaction.
-  const rpc = 1792; // Request370 + frames256 + Promises128 + queued closure128 +
+  // One48-byte exact-peer snapshot plus queued/frame/check references and alignment.
+  // It has no extra closure or old negotiation/SDK backedge. Negative cleanup joins
+  // the positive flight before sending, so two such snapshots cannot overlap.
+  const requestFence = 128;
+  const rpc = 1792 + requestFence; // Request370 + frames256 + Promises128 + queued closure128 +
     // reactions128 + encode scratch256 + two temporary receipts480; rounded up.
   const historyOrDrain = Math.max(3 * 64 + 128 + 128 + 64, 64 + 320);
   // History must actually return BEFORE MediaRtcOwner.drain begins. Its retained
@@ -41,7 +45,7 @@ export function voiceNativeMediaInventory(): Readonly<{
   const cleanup = 4 * 64 + 2 * 128 + 128 + 64;
   const negative = 3 * 128; // Close/cancel and executing timer/provider return frames.
   return Object.freeze({
-    setup: 1520 + 2560 + (384 + 512 + VOICE_MEDIA_ENCODING_BYTES + 192) + start + 512 + negative,
+    setup: 1520 + 2560 + (384 + 512 + VOICE_MEDIA_ENCODING_BYTES + 192) + start + 512 + negative + requestFence,
     adopted: common + start + rpc + historyOrDrain + negative,
     closingWait: common + start + rpc + historyOrDrain + cleanup + negative,
     closingJoined: common + rpc + historyOrDrain + cleanup + negative,

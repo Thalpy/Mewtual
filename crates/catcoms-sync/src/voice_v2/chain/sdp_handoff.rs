@@ -333,12 +333,30 @@ impl Phase {
     /// Prepare inert capacity before the final native UI/selection/session admission.
     /// A failed preparation creates no effect lease, body buffer or replacement allowance.
     pub(super) fn prepare(original: Arc<PlanBinding>) -> Result<Arc<Self>, VoiceError> {
+        Self::prepare_observing(original, None)
+    }
+    pub(super) fn prepare_recording_refusal(
+        original: Arc<PlanBinding>,
+        observation: &mut Option<crate::voice_v2::resources::ReservationRefusal>,
+    ) -> Result<Arc<Self>, VoiceError> {
+        *observation = None;
+        Self::prepare_observing(original, Some(observation))
+    }
+    fn prepare_observing(
+        original: Arc<PlanBinding>,
+        observation: Option<&mut Option<crate::voice_v2::resources::ReservationRefusal>>,
+    ) -> Result<Arc<Self>, VoiceError> {
         if !original_current(&original) {
             return Err(VoiceError::Unauthorized);
         }
         let resources = original.resources().clone();
         let scope = original.scope;
-        let reserve = resources.reserve(scope.group, BYTES)?;
+        let reserve = match observation {
+            Some(observation) => {
+                resources.reserve_recording_refusal(scope.group, BYTES, observation)?
+            }
+            None => resources.reserve(scope.group, BYTES)?,
+        };
         let metadata = ByteBudget::Reserved(reserve.clone()).charge(
             &resources,
             scope.group,

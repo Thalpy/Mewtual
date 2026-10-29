@@ -2,7 +2,8 @@
 //! Workflow. A queued Actor command must keep publication ordered against UI lock even if
 //! its submitting task disappears. This wrapper grants no crypto/RTC authority: native final
 //! admission and Root current-owner checks still apply independently.
-use super::channel::{PhysicalHold, Session};
+use super::channel::PhysicalHold;
+use crate::voice_handoff::channel::SessionRef;
 use catcoms_sync::voice_v2::chain::sdp_handoff::TaskCopy;
 use catcoms_sync::voice_v2::sdp::InitialSdpIntent;
 use catcoms_sync::voice_v2::VoiceError;
@@ -35,7 +36,7 @@ impl Publication {
     /// lending custody to an Actor body. Both inputs are affine original native owners.
     pub(super) fn preparing(
         physical: PhysicalHold,
-        session: &Arc<Session>,
+        session: &SessionRef,
         intent: &Arc<InitialSdpIntent>,
         payment: TaskCopy,
     ) -> Result<Self, VoiceError> {
@@ -56,7 +57,7 @@ impl Publication {
     }
     pub(super) fn validate(
         &self,
-        session: &Arc<Session>,
+        session: &SessionRef,
         intent: &Arc<InitialSdpIntent>,
     ) -> Result<(), VoiceError> {
         if !self._physical.belongs_to(session) || !self._payment.uses_intent(intent) {

@@ -69,9 +69,9 @@ pub(super) struct Session {
     identity: Arc<SessionIdentity>,
     counters: Mutex<Counters>,
     idle: tokio::sync::Notify,
-    _control: Credit,
-    _bootstrap: Credit,
-    _browser_control: Credit,
+    // A live-body weak upgrade obtains the SAME outside control payment. This
+    // clone is destroyed before the final SessionRef outside payer can return.
+    funding: Option<super::owned::PlainOwner<owner::SessionFunding>>,
     // Prepaid from existing ordinary Crypto limits, independently of setup/data work.
     // Terminal browser control cannot depend on a fresh slot when other work fills the pool.
     control_lane: Arc<WorkLane>,
@@ -83,8 +83,12 @@ pub(super) struct Session {
     // Monotonic request sequences prevent a previous attempt from satisfying a new barrier.
     #[cfg(test)]
     result_preflight_sequence: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    return_boundary: Mutex<Option<owner::ReturnBoundary>>,
 }
 pub(super) struct SessionIdentity(pub(super) [u8; 32]);
+mod owner;
+pub(in crate::voice_handoff) use owner::{session_owner_layout_bytes, SessionRef, SessionWeak};
 impl Session {
     #[cfg(test)]
     pub(super) fn fixture_arm_input_pressure(&self) {
@@ -126,7 +130,7 @@ impl Session {
         group: [u8; 32],
         slot: u8,
         rng: &mut dyn CryptoRngCore,
-    ) -> Result<Arc<Self>, Refused> {
+    ) -> Result<SessionRef, Refused> {
         if !(1..=64).contains(&slot) {
             return Err(Refused::Header);
         }
@@ -147,37 +151,43 @@ impl Session {
         let mut seed = Zeroizing::new([0; 32]);
         rng.fill_bytes(seed.as_mut());
         let keys = Keys::new(&seed);
-        Ok(Arc::new(Self {
-            identity: Arc::new(SessionIdentity({
-                use sha2::{Digest, Sha256};
-                let mut hash = Sha256::new();
-                hash.update(b"native fixture session identity");
-                hash.update(seed.as_ref());
-                hash.finalize().into()
-            })),
-            resources,
-            group,
-            slot,
-            keys,
-            counters: Mutex::new(Counters {
-                closed: false,
-                busy: false,
-                native_busy: false,
-                request_floor: 0,
-                response_sequence: 0,
-            }),
-            idle: tokio::sync::Notify::new(),
-            _control: control,
-            _bootstrap: bootstrap,
-            _browser_control: browser_control,
-            control_lane,
-            input_pressure: AtomicBool::new(false),
-            result_preflight_sequence: std::sync::atomic::AtomicU64::new(0),
-        }))
+        Ok(SessionRef::new(
+            Self {
+                identity: Arc::new(SessionIdentity({
+                    use sha2::{Digest, Sha256};
+                    let mut hash = Sha256::new();
+                    hash.update(b"native fixture session identity");
+                    hash.update(seed.as_ref());
+                    hash.finalize().into()
+                })),
+                resources,
+                group,
+                slot,
+                keys,
+                counters: Mutex::new(Counters {
+                    closed: false,
+                    busy: false,
+                    native_busy: false,
+                    request_floor: 0,
+                    response_sequence: 0,
+                }),
+                idle: tokio::sync::Notify::new(),
+                funding: None,
+                control_lane,
+                input_pressure: AtomicBool::new(false),
+                result_preflight_sequence: std::sync::atomic::AtomicU64::new(0),
+                return_boundary: Mutex::new(None),
+            },
+            control,
+            bootstrap,
+            browser_control,
+        ))
     }
+}
+impl SessionRef {
     /// Own the paid scratch BEFORE reading unauthenticated HTTP. A single position continues
     /// across header/body/reply and completed output collection; releasing a caller is irrelevant.
-    pub(super) fn header(self: &Arc<Self>) -> Result<HeaderWorker, Refused> {
+    pub(super) fn header(&self) -> Result<HeaderWorker, Refused> {
         let mut counters = self
             .counters
             .lock()
@@ -203,7 +213,7 @@ impl Session {
     /// complete native task/preparation/output BEFORE constructing or awaiting that work;
     /// the browser's Control envelope may already be occupied. This private affine guard
     /// neither authenticates a frame nor creates a physical request/response nonce.
-    pub(super) fn native_hold(self: &Arc<Self>) -> Result<NativeHold, Refused> {
+    pub(super) fn native_hold(&self) -> Result<NativeHold, Refused> {
         let mut counters = self.counters.lock().unwrap_or_else(|e| e.into_inner());
         if counters.closed {
             return Err(Refused::Binding);
@@ -216,7 +226,8 @@ impl Session {
             session: self.clone(),
         })
     }
-
+}
+impl Session {
     /// Irreversible process-shutdown fence, independent of call lease revocation. Hold the
     /// counter mutex so an old Route's physical/native acquisition either precedes this
     /// fence (and must be collected), or refuses without debiting a sequence.
@@ -270,7 +281,14 @@ impl Session {
 /// its actual Row must remain discoverable by shutdown/GC while this guard owns its Session.
 /// Payment, work, grants and commit must drop BEFORE this last field publishes native idle.
 pub(super) struct NativeHold {
-    session: Arc<Session>,
+    session: SessionRef,
+}
+impl NativeHold {
+    /// The actual owned position, not a global idle snapshot after acquiring it.
+    /// This guard cannot be cloned or manufactured from a copied Session label.
+    pub(super) fn belongs_to(&self, session: &SessionRef) -> bool {
+        self.session.is_same(session)
+    }
 }
 impl Drop for NativeHold {
     fn drop(&mut self) {
@@ -287,6 +305,15 @@ impl Drop for NativeHold {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(boundary) = self
+            .return_boundary
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            boundary.wait();
+        }
         // Header/reply owners hold this actual Arc, so they have drained before final Drop.
         // Browser/provider retirement must separately precede registry collection; End alone
         // cannot remove the row. This closes its one original lane, never a replacement.
@@ -306,7 +333,7 @@ pub(super) struct HeaderWorker {
 /// work is detached. Its separately paid Session remains busy until BOTH original owners
 /// drain. This is not an engine/result authority and does not reset physical counters.
 struct PhysicalPosition {
-    session: Arc<Session>,
+    session: SessionRef,
     held: AtomicBool,
 }
 impl Drop for PhysicalPosition {
@@ -329,8 +356,8 @@ pub(super) struct PhysicalHold {
     position: Arc<PhysicalPosition>,
 }
 impl PhysicalHold {
-    pub(super) fn belongs_to(&self, session: &Arc<Session>) -> bool {
-        Arc::ptr_eq(&self.position.session, session)
+    pub(super) fn belongs_to(&self, session: &SessionRef) -> bool {
+        self.position.session.is_same(session)
     }
 }
 impl Drop for PhysicalHold {
@@ -639,8 +666,8 @@ impl Incoming {
     }
     /// Native allocation binding, not a copied slot/session label. A successfully opened
     /// request from another Session cannot authorize work through this Route.
-    pub(super) fn belongs_to(&self, session: &Arc<Session>) -> bool {
-        Arc::ptr_eq(&self.worker.position.session, session)
+    pub(super) fn belongs_to(&self, session: &SessionRef) -> bool {
+        self.worker.position.session.is_same(session)
     }
     /// Read only the already AEAD-opened native body. Calling this never decrypts twice or
     /// creates a separately owned plaintext copy; parsed borrows must end before extraction.

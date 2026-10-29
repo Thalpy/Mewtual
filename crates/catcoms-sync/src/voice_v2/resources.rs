@@ -61,11 +61,135 @@ struct Counts {
     // Affine claim's exact opaque stamp, retained through actual final destruction.
     // Lookup Weak owners above are housekeeping indices, never capacity certificates.
     progress: usize,
+    control: ControlService,
+}
+/// Control7 service uses discrete250ms periods. It is shared by EVERY room,
+/// Root and original in this exact Resources pool, independently of requester/
+/// issuer tokens and packet retries. Backward samples never refill it.
+#[derive(Default, Clone, Copy)]
+struct ControlService {
+    last: u64,
+    tokens: u64,
+    initialized: bool,
+}
+#[cfg(test)]
+pub(crate) fn admitted_control_counter_inventory_for_test() -> (usize, usize, usize) {
+    (
+        std::mem::size_of::<Counts>(),
+        std::mem::size_of::<([u8; 32], Counts)>(),
+        std::mem::size_of::<ControlService>(),
+    )
+}
+impl ControlService {
+    fn spend(&mut self, now: u64, burst: u64, refill: u64) -> bool {
+        if !self.initialized {
+            self.last = now;
+            self.tokens = burst;
+            self.initialized = true;
+        }
+        let periods = now.saturating_sub(self.last) / 250;
+        self.tokens = self
+            .tokens
+            .saturating_add(periods.saturating_mul(refill))
+            .min(burst);
+        self.last = self.last.saturating_add(periods * 250);
+        if self.tokens == 0 {
+            false
+        } else {
+            self.tokens -= 1;
+            true
+        }
+    }
+}
+#[cfg(test)]
+mod control_service_tests {
+    use super::*;
+    #[test]
+    fn admitted_control_service_periods_preserve_subperiod_remainder_and_backward_extreme_samples()
+    {
+        let mut bucket = ControlService::default();
+        for _ in 0..16 {
+            assert!(bucket.spend(1000, 16, 2));
+        }
+        for now in [1001, 1100, 1249, 999, 0] {
+            assert!(!bucket.spend(now, 16, 2));
+        }
+        assert!(bucket.spend(1251, 16, 2));
+        assert!(bucket.spend(1499, 16, 2));
+        assert!(!bucket.spend(1499, 16, 2));
+        assert!(bucket.spend(1500, 16, 2));
+        assert!(bucket.spend(1500, 16, 2));
+        assert!(!bucket.spend(1500, 16, 2));
+        for _ in 0..16 {
+            assert!(bucket.spend(u64::MAX, 16, 2));
+        }
+        assert!(!bucket.spend(u64::MAX, 16, 2));
+    }
+    #[test]
+    fn admitted_control_service_aggregates_rooms_roots_and_groups_without_reset_or_partial_debit() {
+        let pool = Arc::new(Resources::default());
+        let held: Vec<_> = (1..=5)
+            .map(|n| pool.charge([n; 32], 512, ResourceKind::Retained).unwrap())
+            .collect();
+        for group in 1..=4 {
+            for _ in 0..16 {
+                pool.admit_voice_control([group; 32], 1000).unwrap();
+            }
+        }
+        assert_eq!(
+            pool.admit_voice_control([5; 32], 1000),
+            Err(VoiceError::RateLimited)
+        );
+        assert_eq!(
+            pool.admit_voice_control([1; 32], 1249),
+            Err(VoiceError::RateLimited)
+        );
+        pool.admit_voice_control([1; 32], 1250).unwrap();
+        pool.admit_voice_control([1; 32], 1250).unwrap();
+        assert_eq!(
+            pool.admit_voice_control([1; 32], 1250),
+            Err(VoiceError::RateLimited)
+        );
+        // Group refusal did not debit the process's remaining six tokens.
+        for _ in 0..6 {
+            pool.admit_voice_control([5; 32], 1250).unwrap();
+        }
+        assert_eq!(
+            pool.admit_voice_control([5; 32], 1250),
+            Err(VoiceError::RateLimited)
+        );
+        drop(held);
+    }
 }
 #[derive(Default)]
 struct State {
     total: Counts,
     groups: HashMap<[u8; 32], Counts>,
+}
+impl State {
+    /// Pure locked retirement of an ACTUALLY empty counter row. Every caller
+    /// holds the same pool fence, so no charge/observer can see returned budget
+    /// while its old buckets or shrink/growth overlap remain allocated.
+    fn remove_empty_group(&mut self, group: &[u8; 32]) {
+        if !self.groups.get(group).is_some_and(|counts| {
+            counts.bytes == 0
+                && counts.progress == 0
+                && counts.slots.iter().all(|count| *count == 0)
+        }) {
+            return;
+        }
+        drop(self.groups.remove(group));
+        #[cfg(test)]
+        retirement_tests::before_shrink(self as *const Self as usize);
+        if self.groups.is_empty() {
+            // with_hasher copies the EXISTING seeds: no ambient RNG, including
+            // final Credit/Progress release. Free all backing before unlock.
+            let empty = HashMap::with_hasher(self.groups.hasher().clone());
+            drop(std::mem::replace(&mut self.groups, empty));
+        } else {
+            self.groups.shrink_to(self.groups.len());
+        }
+    }
 }
 
 /// Native creates one pool for every actor/controller in its process. Creating a pool per call
@@ -75,6 +199,46 @@ pub struct Resources {
     state: Mutex<State>,
 }
 redacted_debug!(Resources, Credit, ProcessRetainedCredit);
+
+/// Fixed diagnostic evidence captured while a byte reservation is refused under
+/// the pool's existing mutex. This contains no pool, group identifier, work owner
+/// or permission. It is a historical observation: later return may have changed
+/// every counter, so it must never be used as an admission or drainage check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReservationRefusal {
+    pub requested_bytes: usize,
+    pub group_bytes: Option<usize>,
+    pub process_bytes: usize,
+    pub group_limit_bytes: usize,
+    pub process_limit_bytes: usize,
+    pub group_bytes_exceeded: bool,
+    pub process_bytes_exceeded: bool,
+    pub group_records_exhausted: bool,
+    pub invalid_bytes: bool,
+}
+impl ReservationRefusal {
+    fn capture(state: &State, group: [u8; 32], bytes: usize) -> Self {
+        let group_bytes = state.groups.get(&group).map(|counts| counts.bytes);
+        Self {
+            requested_bytes: bytes,
+            group_bytes,
+            process_bytes: state.total.bytes,
+            group_limit_bytes: GROUP_BYTES,
+            process_limit_bytes: PROCESS_BYTES,
+            group_bytes_exceeded: group_bytes
+                .unwrap_or(0)
+                .checked_add(bytes)
+                .is_none_or(|total| total > GROUP_BYTES),
+            process_bytes_exceeded: state
+                .total
+                .bytes
+                .checked_add(bytes)
+                .is_none_or(|total| total > PROCESS_BYTES),
+            group_records_exhausted: group_bytes.is_none() && state.groups.len() >= GROUP_RECORDS,
+            invalid_bytes: bytes == 0,
+        }
+    }
+}
 
 /// Fixed native process infrastructure charged against the same process byte ceiling as groups.
 ///
@@ -284,6 +448,44 @@ impl ByteBudget {
 
 impl Resources {
     #[cfg(test)]
+    pub(crate) fn group_counter_capacity_for_test(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (state.groups.len(), state.groups.capacity())
+    }
+    /// Complete full-bucket/control/alignment allowance, including simultaneous
+    /// old/new growth or shrink tables. Pinned hashbrown0.16.1 may grow early
+    /// when tombstones exhaust growth_left: at n>7B/16 it allocates up to2B,
+    /// so old+new3B/n<48/7<8 buckets per live row. The immediate sparse shrink
+    /// has the same bound. Keep BOTH tables' controls/alignment. A logical
+    /// capacity() change is not evidence of a physical bucket resize.
+    /// Empty backing stays under the retiring payer AND pool fence until freed.
+    pub(crate) fn group_index_invoice_bytes() -> usize {
+        let tuple = std::mem::size_of::<([u8; 32], Counts)>();
+        let align = std::mem::align_of::<([u8; 32], Counts)>().max(16);
+        8 * (tuple + 1) + 2 * (align - 1) + 32
+    }
+    /// No allocation or new group entry. A real Root/record reservation must
+    /// already own this group. Both buckets commit together or neither does.
+    pub(crate) fn admit_voice_control(&self, group: [u8; 32], now: u64) -> Result<(), VoiceError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut process = state.total.control;
+        let mut local = state
+            .groups
+            .get(&group)
+            .ok_or(VoiceError::Unauthorized)?
+            .control;
+        if !process.spend(now, 64, 8) || !local.spend(now, 16, 2) {
+            return Err(VoiceError::RateLimited);
+        }
+        state.total.control = process;
+        state
+            .groups
+            .get_mut(&group)
+            .ok_or(VoiceError::Unauthorized)?
+            .control = local;
+        Ok(())
+    }
+    #[cfg(test)]
     pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
         self.state.lock().unwrap()
     }
@@ -469,6 +671,19 @@ impl Resources {
         kind: ResourceKind,
         prepaid_slot: bool,
     ) -> Result<Credit, VoiceError> {
+        self.charge_inner_observing(group, bytes, kind, prepaid_slot, None)
+    }
+    fn charge_inner_observing(
+        self: &Arc<Self>,
+        group: [u8; 32],
+        bytes: usize,
+        kind: ResourceKind,
+        prepaid_slot: bool,
+        observation: Option<&mut Option<ReservationRefusal>>,
+    ) -> Result<Credit, VoiceError> {
+        // Only the fixed byte-reservation API supplies an observation. Slot admission
+        // has different causes and must not masquerade as a byte-cap refusal.
+        debug_assert!(observation.is_none() || (kind == ResourceKind::Retained && !prepaid_slot));
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let counts = state.groups.get(&group);
         if (kind != ResourceKind::Crypto && bytes == 0 && !prepaid_slot)
@@ -481,6 +696,11 @@ impl Resources {
                     || counts.is_some_and(|counts| counts.slots[slot] >= group_max)
             })
         {
+            if let Some(observation) = observation {
+                // Copy scalar evidence before releasing the SAME deciding fence.
+                // No callback, formatting, publication or retained owner enters it.
+                *observation = Some(ReservationRefusal::capture(&state, group, bytes));
+            }
             return Err(VoiceError::Capacity);
         }
         state.total.bytes += bytes;
@@ -513,6 +733,34 @@ impl Resources {
         bytes: usize,
     ) -> Result<Arc<Reservation>, VoiceError> {
         let credit = self.charge(group, bytes, ResourceKind::Retained)?;
+        Ok(Arc::new(Reservation {
+            pool: self.clone(),
+            group,
+            state: Mutex::new(ReservationState {
+                credit,
+                available: bytes,
+                closed: false,
+            }),
+        }))
+    }
+    /// Reserve with the same limits and ownership as `reserve`, retaining only
+    /// scalar refusal evidence for a trusted diagnostic caller. Clear the caller's
+    /// previous observation before attempting this exact reservation. Successful
+    /// admission leaves it empty; reporting it cannot mint or return capacity.
+    pub fn reserve_recording_refusal(
+        self: &Arc<Self>,
+        group: [u8; 32],
+        bytes: usize,
+        observation: &mut Option<ReservationRefusal>,
+    ) -> Result<Arc<Reservation>, VoiceError> {
+        *observation = None;
+        let credit = self.charge_inner_observing(
+            group,
+            bytes,
+            ResourceKind::Retained,
+            false,
+            Some(observation),
+        )?;
         Ok(Arc::new(Reservation {
             pool: self.clone(),
             group,
@@ -575,6 +823,9 @@ impl Resources {
             .map(|counts| (counts.bytes, counts.slots[0]))
     }
 }
+
+#[cfg(test)]
+mod retirement_tests;
 
 impl Reservation {
     #[cfg(test)]
@@ -814,10 +1065,7 @@ impl Credit {
         state.total.bytes -= bytes;
         let counts = state.groups.get_mut(&self.group).expect("retained reserve");
         counts.bytes -= bytes;
-        if counts.bytes == 0 && counts.progress == 0 && counts.slots.iter().all(|count| *count == 0)
-        {
-            state.groups.remove(&self.group);
-        }
+        state.remove_empty_group(&self.group);
     }
 }
 
@@ -841,13 +1089,8 @@ impl Drop for Credit {
             if let Some((slot, _, _)) = self.kind.slot() {
                 counts.slots[slot] -= 1;
             }
-            if counts.bytes == 0
-                && counts.progress == 0
-                && counts.slots.iter().all(|count| *count == 0)
-            {
-                state.groups.remove(&self.group);
-            }
         }
+        state.remove_empty_group(&self.group);
         // Never acquire the reservation mutex while holding the pool mutex: charge holds them
         // in the other order. Also release both before dropping the last reserve Arc, whose
         // original credit destructor must be able to acquire the pool mutex again.
@@ -864,6 +1107,141 @@ impl Drop for Credit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_reservation_refusal_records_the_deciding_group_cap_without_owning_capacity() {
+        let pool = Arc::new(Resources::default());
+        let group = [1; 32];
+        let request = 64 * 1024;
+        let pressure = pool
+            .charge(group, GROUP_BYTES - request + 1, ResourceKind::Retained)
+            .unwrap();
+        let infrastructure = pool.charge_process_retained(4096).unwrap();
+        let before = pool.counts();
+        let mut observation = None;
+        assert_eq!(
+            pool.reserve_recording_refusal(group, request, &mut observation)
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+        let refused = observation.unwrap();
+        assert_eq!(refused.requested_bytes, request);
+        assert_eq!(refused.group_bytes, Some(GROUP_BYTES - request + 1));
+        assert_eq!(refused.process_bytes, before.0);
+        assert!(refused.group_bytes_exceeded);
+        assert!(!refused.process_bytes_exceeded);
+        assert!(!refused.group_records_exhausted);
+        assert!(!refused.invalid_bytes);
+        assert_eq!(
+            pool.counts(),
+            before,
+            "diagnostic capture changes no accounting"
+        );
+        drop(pressure);
+        let retry = pool
+            .reserve_recording_refusal(group, request, &mut observation)
+            .unwrap();
+        assert!(
+            observation.is_none(),
+            "success clears a prior caller observation"
+        );
+        assert_eq!(
+            refused.group_bytes,
+            Some(GROUP_BYTES - request + 1),
+            "retained evidence stays historical"
+        );
+        drop((retry, infrastructure));
+        let weak = Arc::downgrade(&pool);
+        drop(pool);
+        assert!(
+            weak.upgrade().is_none(),
+            "scalar evidence retains no pool or work"
+        );
+    }
+
+    #[test]
+    fn byte_reservation_refusal_distinguishes_process_pressure_from_group_pressure() {
+        let pool = Arc::new(Resources::default());
+        let group = [2; 32];
+        let request = 64 * 1024;
+        let group_owner = pool.charge(group, 1024, ResourceKind::Retained).unwrap();
+        let pressure = pool
+            .charge_process_retained(PROCESS_BYTES - request)
+            .unwrap();
+        let before = pool.counts();
+        let mut observation = None;
+        assert_eq!(
+            pool.reserve_recording_refusal(group, request, &mut observation)
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+        let refused = observation.unwrap();
+        assert_eq!(refused.group_bytes, Some(1024));
+        assert_eq!(refused.process_bytes, before.0);
+        assert!(refused.process_bytes_exceeded);
+        assert!(!refused.group_bytes_exceeded);
+        assert!(!refused.group_records_exhausted);
+        assert!(!refused.invalid_bytes);
+        assert_eq!(pool.counts(), before);
+        drop(pressure);
+        let same_request = pool
+            .reserve_recording_refusal(group, request, &mut observation)
+            .unwrap();
+        assert!(observation.is_none());
+        drop((same_request, group_owner));
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn byte_reservation_refusal_handles_invalid_sizes_without_overflow_or_stale_evidence() {
+        let pool = Arc::new(Resources::default());
+        let mut observation = None;
+        for bytes in [0, usize::MAX] {
+            assert_eq!(
+                pool.reserve_recording_refusal([1; 32], bytes, &mut observation)
+                    .err(),
+                Some(VoiceError::Capacity)
+            );
+            let refused = observation.unwrap();
+            assert_eq!(refused.requested_bytes, bytes);
+            assert_eq!(refused.group_bytes, None);
+            assert_eq!(refused.process_bytes, 0);
+            assert_eq!(refused.invalid_bytes, bytes == 0);
+            assert_eq!(refused.group_bytes_exceeded, bytes == usize::MAX);
+            assert_eq!(refused.process_bytes_exceeded, bytes == usize::MAX);
+            assert!(!refused.group_records_exhausted);
+        }
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn byte_reservation_refusal_distinguishes_the_bounded_group_record_table() {
+        let pool = Arc::new(Resources::default());
+        let owners = (0..GROUP_RECORDS)
+            .map(|index| {
+                let mut group = [0; 32];
+                group[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                pool.charge(group, 1, ResourceKind::Retained).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let before = pool.counts();
+        let mut observation = None;
+        assert_eq!(
+            pool.reserve_recording_refusal([255; 32], 64 * 1024, &mut observation)
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+        let refused = observation.unwrap();
+        assert_eq!(refused.group_bytes, None);
+        assert_eq!(refused.process_bytes, GROUP_RECORDS);
+        assert!(refused.group_records_exhausted);
+        assert!(!refused.group_bytes_exceeded);
+        assert!(!refused.process_bytes_exceeded);
+        assert!(!refused.invalid_bytes);
+        assert_eq!(pool.counts(), before);
+        drop(owners);
+        assert_eq!(pool.counts(), (0, 0));
+    }
 
     #[test]
     fn group_composition_snapshot_excludes_process_and_other_group_payments() {

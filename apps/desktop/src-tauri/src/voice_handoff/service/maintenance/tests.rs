@@ -1,9 +1,11 @@
 use super::*;
 use crate::voice_activation_tests::Fixture;
 use crate::voice_handoff::factory::tests::{channel_route, park, selection};
+use crate::voice_handoff::factory::Refused as NativeRefused;
 use crate::voice_handoff::ledger::{Begin, Purpose};
 use catcoms_sync::voice_v2::presence::PairSelector;
 use std::sync::Arc;
+mod recovery;
 
 #[tokio::test]
 async fn discovery_cursor_rotates_after_repeated_workers_refuse_before_peer_snapshot() {
@@ -115,6 +117,7 @@ pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
     context: &Context,
     route: &Route,
     clock: &dyn Clock,
+    force_attachment: bool,
 ) {
     assert!(
         route.native_ready(),
@@ -125,8 +128,12 @@ pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
         .checked_add(10_000)
         .expect("fixture observer deadline");
     let mut cursor = Cursor::new();
+    cursor.fixture_observe = true;
+    cursor.fixture_attachment_pressure = force_attachment;
     let index = usize::from(route.fixture_slot() - 1);
     let progression = async {
+        let mut recovery: Option<recovery::Recovery> = None;
+        let mut pressured = false;
         // A genuine successful Discover followed by a later local refusal must not
         // acquire the pre-selection marker used below. This barrier creates no row
         // or protocol effect, so the SAME normal Cursor can still start afterwards.
@@ -137,11 +144,18 @@ pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
             let peer = cursor.peers[index];
             let discovery = matches!(stage, 0 | 2);
             let live = context.upgrade().expect("original mounted context");
-            let servers = if discovery && (peer.is_multiple_of(2) || peer == 1) {
-                Some(live.servers.lock().await)
-            } else {
-                None
-            };
+            if let Some(original) = &mut recovery {
+                assert!(
+                    !original.observe(route, clock).await,
+                    "only a completed exact turn may publish success"
+                );
+            }
+            let servers =
+                if recovery.is_none() && discovery && (peer.is_multiple_of(2) || peer == 1) {
+                    Some(live.servers.lock().await)
+                } else {
+                    None
+                };
             let (admitted, selected, waiter) = cursor.ordinary_work(context, route, index);
             if !admitted {
                 // Admission refusal does not advance either cursor. The SAME finite
@@ -149,14 +163,69 @@ pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
                 assert_eq!((cursor.stage[index], cursor.peers[index]), (stage, peer));
                 continue;
             }
-            assert!(
-                selected.is_none(),
-                "a new original Pending appeared unexpectedly"
-            );
+            if let Some(original) = &recovery {
+                if let Some(selected) = selected {
+                    assert_eq!(selected, original.selector);
+                }
+            } else {
+                assert!(
+                    selected.is_none(),
+                    "a new original Pending appeared unexpectedly"
+                );
+            }
             let completed = waiter
                 .unwrap()
                 .await
                 .expect("original native worker panicked");
+            let witness = completed.fixture_witness();
+            let observed = witness
+                .as_ref()
+                .map(|witness| witness.observation())
+                .unwrap_or_default();
+            if let Some(original) = &mut recovery {
+                original.worker(observed);
+                let attached = original.observe(route, clock).await;
+                if observed.pressured {
+                    assert_eq!(
+                        completed.result(),
+                        Err(NativeRefused::Protocol(
+                            catcoms_sync::voice_v2::VoiceError::Capacity
+                        ))
+                    );
+                    assert_eq!(observed.stage, 3, "actual attach/try_bind boundary");
+                    assert!(observed.action.is_some() && !attached);
+                    pressured = true;
+                    cursor.fixture_attachment_pressure = false;
+                    witness.as_ref().unwrap().release_pressure();
+                }
+                match completed.result() {
+                    Ok(id) => {
+                        assert_eq!(
+                            id,
+                            original.id(),
+                            "no replacement parent/child may satisfy recovery"
+                        );
+                        if attached {
+                            assert!(
+                                !force_attachment || pressured,
+                                "real attachment Capacity was exercised"
+                            );
+                            drop(completed);
+                            return;
+                        }
+                    }
+                    Err(NativeRefused::Protocol(catcoms_sync::voice_v2::VoiceError::Capacity)) => {
+                        assert!(!attached, "Capacity is not current attached success")
+                    }
+                    Err(error) => panic!(
+                        "same original discovery recovery failed: {error:?}; stage {}",
+                        observed.stage
+                    ),
+                }
+                drop(completed);
+                drop(servers);
+                continue; // SAME Cursor; no parity pressure or pre-selection oracle after Begin
+            }
             if !discovery {
                 drop(completed); // ordinary confirmation; no selector is supplied
                 continue;
@@ -164,8 +233,42 @@ pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
             assert_eq!(cursor.peers[index], (peer + 1) % 64);
             assert_eq!(cursor.stage[index], (stage + 1) % 4);
             if !peer.is_multiple_of(2) && peer != 1 && completed.result().is_ok() {
+                assert!(
+                    !force_attachment,
+                    "forced attachment must refuse before this positive"
+                );
+                let original =
+                    recovery::Recovery::capture(context, route, observed, clock, false).await;
+                assert_eq!(
+                    completed.result(),
+                    Ok(original.id()),
+                    "positive is exact attached registration"
+                );
                 drop(completed);
                 return;
+            }
+            if completed.result()
+                == Err(NativeRefused::Protocol(
+                    catcoms_sync::voice_v2::VoiceError::Capacity,
+                ))
+                && !completed.refused_before_selection(peer)
+            {
+                assert!(
+                    servers.is_none(),
+                    "forced pre-snapshot guard cannot enter Root"
+                );
+                let original =
+                    recovery::Recovery::capture(context, route, observed, clock, true).await;
+                if observed.pressured {
+                    assert_eq!(observed.stage, 3);
+                    assert!(observed.action.is_some());
+                    pressured = true;
+                    cursor.fixture_attachment_pressure = false;
+                    witness.as_ref().unwrap().release_pressure();
+                }
+                recovery = Some(original);
+                drop(completed); // actual original NativeHold/payment before ordinary continuation
+                continue;
             }
             assert!(
                 completed.refused_before_selection(peer),
@@ -188,6 +291,15 @@ pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
             }
         }
     };
+    // The explicitly harness-owned recovery/capsule graph is separate from the
+    // native8KiB payer. Its optional Arc handles still count in native layout().
+    let harness_bytes =
+        std::mem::size_of_val(&progression) + 2 * native::fixture::Witness::layout_bytes();
+    eprintln!("exact discovery recovery harness graph {harness_bytes}/16384");
+    assert!(
+        harness_bytes <= 16 * 1024,
+        "complete bounded recovery harness frame/capsule overlap"
+    );
     tokio::select! {
         biased;
         _ = super::super::expire_at(clock, deadline) => panic!(
@@ -414,7 +526,8 @@ async fn pending_rotation_retries_every_original_across_interleaved_discovery_tu
         let f = Fixture::new().await;
         let context = Context::new(&f.state);
         let (_, selected, original) = selection(&f).await;
-        let route = channel_route(&f, &selected).await;
+        let route =
+            crate::voice_handoff::factory::tests::unacknowledged_channel_route(&f, &selected).await;
         let mut rows = Vec::new();
         for number in 0..count {
             let selector = PairSelector {

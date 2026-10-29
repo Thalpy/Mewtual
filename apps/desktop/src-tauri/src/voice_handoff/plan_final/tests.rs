@@ -19,7 +19,7 @@ struct Case {
     selector: PairSelector,
     row: ResolvedRow,
     route: Route,
-    _output: Arc<bootstrap::SetupOutput>,
+    _output: bootstrap::SetupOutputRef,
     action: Arc<CryptoAction>,
     _join: LocalJoin,
 }
@@ -427,7 +427,7 @@ async fn admitted_original_session_and_row_identity_remain_paid_across_forced_sh
         case.returned(); // The original variable Phase is actually gone before admission.
         let context = Context::new(&case.state);
         let admission = admit(&context, &case.route).await.unwrap();
-        let session = Arc::downgrade(case.route.session());
+        let session = case.route.session().downgrade();
         let identity = Arc::downgrade(admission.session());
         let Case {
             state,

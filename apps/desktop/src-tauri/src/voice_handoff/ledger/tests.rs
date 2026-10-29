@@ -82,6 +82,13 @@ fn sdp_failure_diagnostics_refuse_contended_and_equal_label_foreign_parents() {
     let id = registration.id();
     let before = selected.resources().counts();
     let index = ledger.index.lock().unwrap();
+    assert!(ledger
+        .fixture_discovered_parent(&selected, selector)
+        .is_none());
+    assert_eq!(
+        ledger.fixture_confirmation_diagnostic(&selected, Some(id)),
+        "ledger index contended"
+    );
     assert_eq!(
         ledger.fixture_sdp_diagnostic(&selected, Some(id)).1,
         "ledger index contended"
@@ -89,11 +96,28 @@ fn sdp_failure_diagnostics_refuse_contended_and_equal_label_foreign_parents() {
     let row = index.rows[id.slot].as_ref().unwrap().clone();
     drop(index);
     let state = row.state.lock().unwrap();
+    assert!(ledger
+        .fixture_confirmation_diagnostic(&selected, Some(id))
+        .contains("[1, 1, 0, 0, 0, 0, 0, 0]"));
     assert_eq!(
         ledger.fixture_sdp_diagnostic(&selected, Some(id)).1,
         "parent row contended"
     );
     drop(state);
+    assert_eq!(
+        ledger.fixture_discovered_parent(&selected, selector),
+        Some(id)
+    );
+    assert!(ledger
+        .fixture_discovered_parent(&foreign, selector)
+        .is_none());
+    assert_eq!(
+        ledger.fixture_confirmation_diagnostic(&foreign, Some(id)),
+        "original parent absent"
+    );
+    assert!(ledger
+        .fixture_confirmation_diagnostic(&selected, Some(id))
+        .contains("[1, 0, 0, 0, 0, 0, 0, 1]"));
     assert_eq!(
         ledger.fixture_sdp_diagnostic(&foreign, Some(id)).1,
         "original parent absent"
@@ -104,6 +128,38 @@ fn sdp_failure_diagnostics_refuse_contended_and_equal_label_foreign_parents() {
     );
     assert_eq!(selected.resources().counts(), before);
     assert_eq!(registration.id(), id);
+}
+
+#[test]
+fn confirmation_failure_diagnostic_preserves_original_deadline_after_settlement() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let deadline = action.protected_binding().unwrap().deadline;
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let before = selected.resources().counts();
+    let expected = format!("original Derive monotonic deadline=Some({deadline})");
+    assert!(ledger
+        .fixture_confirmation_diagnostic(&selected, Some(id))
+        .contains(&expected));
+    assert_eq!(selected.resources().counts(), before);
+    // A terminally settled original without a receipt cannot produce a fresh
+    // result. Diagnostics must retain its original time rather than relabel it
+    // as absent/unstarted or create another action to satisfy the pump oracle.
+    action.settle_engine();
+    ledger.reconcile(id).unwrap();
+    let after_settle = selected.resources().counts();
+    let diagnostic = ledger.fixture_confirmation_diagnostic(&selected, Some(id));
+    assert!(diagnostic.contains("[1, 0, 1, 0, 1, 0, 0, 0]"));
+    assert!(diagnostic.contains(&expected));
+    assert_eq!(selected.resources().counts(), after_settle);
+    assert_eq!(
+        ledger.status(id).unwrap().action.unwrap().0,
+        action.serial()
+    );
 }
 
 #[test]
@@ -1123,13 +1179,18 @@ fn original_purpose_lookup_under_full_pressure_rejects_foreign_identity_and_ever
     registration.mark_handoff().unwrap();
     drop(registration);
     let pool = selected.resources();
+    let group = selected.binding().scope.group;
     let _pressure = pool
         .charge(
-            selected.binding().scope.group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let before = pool.counts();
     let mut peer = selector;
     peer.peer = DeviceKeypair::from_seed(&[5; 32]).device_id();

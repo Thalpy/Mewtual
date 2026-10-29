@@ -112,7 +112,7 @@ pub(super) async fn ensure_derivation_row(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         require_current_selection(context.gate(), &authority, &selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     // Weak grant upgrade and all affine destruction occur outside Coordinator/ledger fences.
     let grant = selected.grant()?;
@@ -173,7 +173,7 @@ pub(super) async fn preflight_binding(
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             require_current_selection(live.gate(), &authority, selected)?;
-            route.require_open().map_err(|_| Refused::Closed)?;
+            route.require_pilot_open().map_err(|_| Refused::Closed)?;
         }
         let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
         let binding = selected.binding();
@@ -199,7 +199,7 @@ pub(super) async fn preflight_binding(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         require_current_selection(live.gate(), &authority, selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     Ok(live.commit.clone())
 }
@@ -260,7 +260,10 @@ async fn run(
     _commit: tokio::sync::OwnedMutexGuard<()>,
     custody: FactoryCustody,
 ) -> Completion {
+    #[cfg(not(test))]
     let result = publish_derivation(registration, actor, grant, selector).await;
+    #[cfg(test)]
+    let result = publish_derivation(registration, actor, grant, selector, None).await;
     Completion {
         result,
         _custody: custody,
@@ -275,8 +278,13 @@ async fn publish_derivation(
     actor: ServerActor,
     grant: Arc<CallGrant>,
     selector: PairSelector,
+    #[cfg(test)] witness: Option<&native::fixture::Witness>,
 ) -> Result<RowId, Refused> {
     if registration.has_publication()? {
+        #[cfg(test)]
+        if let Some(witness) = witness {
+            witness.stage(4);
+        }
         // An earlier actual Root reply already reached this counted Pending. A busy
         // previous handoff loan is a LOCAL attachment refusal, never permission to
         // repeat the Actor factory after that reply, a lost caller or later expiry.
@@ -285,10 +293,24 @@ async fn publish_derivation(
             .map_err(Refused::from);
     }
     registration.mark_handoff()?;
+    #[cfg(test)]
+    if let Some(witness) = witness {
+        witness.stage(1);
+    }
     let pair = actor.prepare_voice_pair(grant.clone(), selector).await?;
+    #[cfg(test)]
+    if let Some(witness) = witness {
+        witness.stage(2);
+    }
     let action = actor
         .prepare_voice_derivation(grant, pair.handshake)
         .await?;
+    // Test pressure owns the genuine original handoff loan outside every native
+    // guard. The ordinary attach/try_bind below must produce the actual refusal.
+    #[cfg(test)]
+    if let Some(witness) = witness {
+        witness.attachment(&action, DERIVATION_HANDOFF_BYTES);
+    }
     registration
         .attach(action, pair, DERIVATION_HANDOFF_BYTES)
         .map_err(Refused::from)

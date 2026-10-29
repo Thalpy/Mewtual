@@ -65,7 +65,13 @@ pub(in crate::voice_handoff) use sdp_rows::{
 pub(in crate::voice_handoff) use sdp_rows::{
     Registration as SdpRegistration, SubmissionOwners as SdpSubmissionOwners,
 };
+mod parent_claim;
 mod pc;
+#[cfg(test)]
+pub(in crate::voice_handoff) use parent_claim::{
+    fixture_existing_allocators_are_excluded, fixture_existing_claim,
+};
+pub(in crate::voice_handoff) use parent_claim::{AdmittedParentClaim, ParentClaim};
 pub(super) use pc::{Receipt as PcReceipt, State as PcState};
 mod plan;
 mod projection;
@@ -324,8 +330,21 @@ enum RowPayment {
 struct Index {
     serial: u64,
     rows: [Option<Arc<Row>>; ROWS],
+    // An inert admission claim occupies the SAME physical namespace without
+    // fabricating a Row/Purpose. Only its final destruction clears this serial.
+    reserved: [Option<std::num::NonZeroU64>; ROWS],
     // Fixed process metadata; every occupied entry has its own detached fee anchor.
     media: [Option<Arc<media_index::Entry>>; ROWS],
+}
+impl Index {
+    /// Shared by parent, confirmation-child and SDP allocators. An absent Row
+    /// does not imply a free position while an original affine claim survives.
+    fn vacant(&self) -> Option<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .position(|(slot, row)| row.is_none() && self.reserved[slot].is_none())
+    }
 }
 pub(crate) struct Ledger {
     index: Mutex<Index>,
@@ -340,6 +359,7 @@ impl Default for Ledger {
             index: Mutex::new(Index {
                 serial: 0,
                 rows: std::array::from_fn(|_| None),
+                reserved: [None; ROWS],
                 media: std::array::from_fn(|_| None),
             }),
         }
@@ -374,6 +394,10 @@ pub(crate) struct ResolvedRow {
     row: Arc<Row>,
 }
 impl ResolvedRow {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_address(&self) -> usize {
+        Arc::as_ptr(&self.row) as usize
+    }
     /// Pure fixture snapshots may wait for the Index; they neither sample a Clock nor
     /// admit work. Production final admission must keep using `transition_index` and
     /// refuse contention, so a sampled deadline cannot become stale while waiting.
@@ -965,11 +989,7 @@ impl Ledger {
             }
             return Ok(Begin::Existing(row.id));
         }
-        let slot = index
-            .rows
-            .iter()
-            .position(Option::is_none)
-            .ok_or(VoiceError::Capacity)?;
+        let slot = index.vacant().ok_or(VoiceError::Capacity)?;
         let serial = index.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
         let resources = selected.resources();
         let scope = selected.binding().scope;
@@ -1354,6 +1374,10 @@ pub(super) fn pending_close_layout_bytes() -> usize {
     std::mem::size_of::<ClosePending>() + std::mem::size_of::<PendingRetirement>()
 }
 impl Registration {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_address(&self) -> usize {
+        Arc::as_ptr(&self.row) as usize
+    }
     pub(crate) fn id(&self) -> RowId {
         self.row.id
     }

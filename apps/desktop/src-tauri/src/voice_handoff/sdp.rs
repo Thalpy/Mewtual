@@ -126,7 +126,23 @@ async fn prepare(
     route
         .session()
         .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 5);
+    #[cfg(not(test))]
     preparation.prepare()?;
+    #[cfg(test)]
+    {
+        let mut observation = None;
+        let result = preparation.prepare_recording_refusal(&mut observation);
+        if let Some(observation) = observation {
+            // The deciding pool already released its mutex. This fixed harness
+            // observation cannot wait for a stalled owner or retain their work.
+            route.session().fixture_sdp_reservation_refusal(
+                incoming.logical(),
+                incoming.fixture_sequence(),
+                observation,
+            );
+        }
+        result?;
+    }
     #[cfg(test)]
     route
         .session()

@@ -81,8 +81,7 @@ async fn retained_root_actor_lock_unlock_uses_fresh_owner_and_same_process_group
     runtime.activate_session(&ticket).unwrap();
     let new = node.voice_call_lease(1).unwrap();
     assert!(new.is_live() && !old.is_live());
-    assert!(Arc::ptr_eq(
-        &helper,
+    assert!(helper.is_same(
         &node
             .voice_runtime
             .as_ref()

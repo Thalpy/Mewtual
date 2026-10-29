@@ -2,19 +2,145 @@
 //! accounting, not private keys. A lost reply cannot create another operation or let another
 //! WebView adopt a generation whose original engine may still be running.
 use super::*;
+use catcoms_sync::voice_v2::call_activation::ActivationObserver;
 use serde::Serialize;
 
 const MAX_GENERATIONS: usize = 32;
-const GENERATION_BYTES: usize = 1024;
+// The complete Existing heap/reply graph measured 1,312 bytes. Its old
+// provisional 1 KiB fee was insufficient even with separately paid table
+// backing. Keep the full guard and charge 1.5 KiB within unchanged ceilings.
+pub(super) const GENERATION_BYTES: usize = 1536;
+// The admitted row has additional immutable issuer/task aliases plus a prepaid
+// completed-history reply; it has its own distinct measured fee.
+const ADMITTED_GENERATION_BYTES: usize = 2 * 1024;
 const GENERATE_BYTES: usize = 128;
 const SELECTED_BYTES: usize = 1024;
 
+mod admitted;
+use admitted::admitted_generation_layout_bytes;
+#[allow(unused_imports)] // Fixed native return types; admitted bootstrap itself awaits op31.
+pub(crate) use admitted::{
+    AdmittedKeyCompletion, AdmittedKeyDrain, AdmittedKeyRetirement, AdmittedKeySettlement,
+    AdmittedPublicationPlan, AdmittedPublicationWork, AdmittedPublishedKey,
+};
+pub(super) const JOIN_INDEX_BYTES: usize = 64 * 1024;
+
+/// Plain process backing payment for BOTH profiles, with no Coordinator/Runtime/
+/// task backedge. The first actual generation prepays the SAME typed table; the
+/// Coordinator field follows it and never refunds on empty retained capacity.
+pub(super) struct JoinIndexFunding {
+    _credit: catcoms_sync::voice_v2::resources::ProcessRetainedCredit,
+}
+
+/// Issuer provenance is immutable for the whole browser-key generation. A
+/// renderer token, recovered public point, or later selected channel cannot
+/// reinterpret an Existing generation as an admitted one (or the reverse).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenerationProfile {
+    Existing,
+    Admitted,
+}
+impl GenerationProfile {
+    fn of(owner: &Owner) -> Self {
+        if owner.lease.is_admitted() {
+            Self::Admitted
+        } else {
+            Self::Existing
+        }
+    }
+}
+
+/// Both profiles share their SAME plain fee with exact drain owners, so a late
+/// SDK settlement receiver cannot outlive metadata payment after row extraction.
+/// The immutable variant still prevents one profile from adopting the other.
+enum GenerationMetadata {
+    Existing(Arc<GenerationFunding>),
+    Admitted(Arc<GenerationFunding>),
+}
+struct GenerationFunding {
+    _credit: Credit,
+}
+
+/// Existing-profile settlement keeps the ORIGINAL watch allocation paid even
+/// when End/pruning removes its row before the native waiter is polled again.
+/// No raw receiver escapes without the same plain metadata payment.
+#[must_use = "retain the original paid watch owner until settlement returns"]
+pub(crate) struct JoinKeyDrain {
+    receiver: tokio::sync::watch::Receiver<bool>,
+    _funding: Arc<GenerationFunding>,
+}
+impl JoinKeyDrain {
+    /// Only the closed native/Tauri Tokio path awaits this private drain. Peers
+    /// and JS cannot supply a Rust executor/waker. Existing send_replace/pruning
+    /// notifications still run under Coordinator as before; this wrapper does
+    /// not claim generic arbitrary-Rust-waker reentry/panic resilience.
+    pub(crate) async fn wait(mut self) -> Result<(), String> {
+        while !*self.receiver.borrow_and_update() {
+            self.receiver
+                .changed()
+                .await
+                .map_err(|_| "voice key settlement owner stopped".to_string())?;
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn borrow(&self) -> tokio::sync::watch::Ref<'_, bool> {
+        self.receiver.borrow()
+    }
+}
+
+/// Pinned Tokio1.53.3 watch::Shared<bool>/BigNotify heap, including the Arc
+/// header and conservative optional fallback counter. Shared table backing pays
+/// inline Generation slots separately; each row pays its own actual watch heap.
+fn generation_watch_layout_bytes() -> usize {
+    #[allow(dead_code)]
+    struct WatchShared {
+        value: std::sync::RwLock<bool>,
+        state: std::sync::atomic::AtomicUsize,
+        receivers: std::sync::atomic::AtomicUsize,
+        senders: std::sync::atomic::AtomicUsize,
+        next: std::sync::atomic::AtomicUsize,
+        notify_rx: [tokio::sync::Notify; 8],
+        notify_tx: tokio::sync::Notify,
+    }
+    #[repr(C)]
+    struct ArcAllocation<T> {
+        strong: usize,
+        weak: usize,
+        value: T,
+    }
+    std::mem::size_of::<ArcAllocation<WatchShared>>()
+}
+
+/// Complete Existing retained row heap and one bounded public-reply peak. The
+/// SAME process-level index payment now covers ALL inline table slots and both
+/// allocations during rehash, so excluding that backing here is explicit.
+/// The original Grant's raw Weak can retain its allocation after affine custody
+/// returns; include that body/header rather than charging only a pointer.
+pub(super) fn existing_generation_layout_bytes() -> usize {
+    #[repr(C)]
+    struct ArcAllocation<T> {
+        strong: usize,
+        weak: usize,
+        value: T,
+    }
+    generation_watch_layout_bytes()
+        + std::mem::size_of::<ArcAllocation<GenerationFunding>>()
+        + std::mem::size_of::<ArcAllocation<CallGrant>>()
+        + 2 * 64 // actual table-key and permit String heaps
+        + std::mem::size_of::<JoinKeyDrain>()
+        + 2 * std::mem::size_of::<Arc<GenerationFunding>>()
+        + std::mem::size_of::<JoinKeyPublication>()
+        + 5 * 64 // owner/executor/permit/join/key_ref bounded reply String heaps
+}
+
 pub(super) struct Generation {
+    profile: GenerationProfile,
+    admitted_original: Option<ActivationObserver>,
     executor: [u8; 32],
     permit: String,
     join: Nonce,
     grant: std::sync::Weak<CallGrant>,
-    _metadata: Credit,
     engine: Option<Credit>,
     settlement_requested: bool,
     point: Option<[u8; 65]>,
@@ -22,6 +148,10 @@ pub(super) struct Generation {
     published: bool,
     drained: tokio::sync::watch::Sender<bool>,
     selected: Option<Arc<SelectedHandoffOwner>>,
+    admitted_selected: Option<AdmittedPublishedKey>,
+    admitted_task: Option<crate::voice_admitted_key::PendingPublication>,
+    // LAST: actual watch and cached selection owners precede their own metadata.
+    _metadata: GenerationMetadata,
 }
 
 /// Native-only identity for the byte-bearing pilot. Constructed once from the actual published
@@ -71,7 +201,7 @@ impl SelectedHandoffOwner {
     pub(crate) fn grant(&self) -> Result<Arc<CallGrant>, catcoms_sync::voice_v2::VoiceError> {
         self.grant
             .upgrade()
-            .filter(|grant| grant.lease().is_live())
+            .filter(|grant| grant.lease().is_live() && !grant.lease().is_admitted())
             .ok_or(catcoms_sync::voice_v2::VoiceError::Unauthorized)
     }
     pub(crate) fn grant_identity(&self) -> std::sync::Weak<CallGrant> {
@@ -130,7 +260,13 @@ impl Coordinator {
     pub(super) fn prune_join_generations(&mut self) {
         let current = self.owner.as_ref().map(|owner| owner.id.as_str());
         self.join_generations.retain(|id, generation| {
-            current == Some(id.as_str()) || generation.engine.is_some() || generation.publishing
+            // Admitted rows leave through an owned retirement ticket instead.
+            // Last watch Sender/selected-owner destruction may invoke a waker;
+            // never add those new callbacks under Coordinator's mutex.
+            generation.profile == GenerationProfile::Admitted
+                || current == Some(id.as_str())
+                || generation.engine.is_some()
+                || generation.publishing
         });
     }
 
@@ -140,6 +276,17 @@ impl Coordinator {
         executor: [u8; 32],
         generate: bool,
     ) -> Result<Generation, String> {
+        let profile = GenerationProfile::of(owner);
+        if profile == GenerationProfile::Admitted
+            && admitted_generation_layout_bytes() > ADMITTED_GENERATION_BYTES
+        {
+            return Err("voice key generation capacity reached".into());
+        }
+        if profile == GenerationProfile::Existing
+            && existing_generation_layout_bytes() > GENERATION_BYTES
+        {
+            return Err("voice key generation capacity reached".into());
+        }
         self.prune_join_generations();
         if self.join_generations.len() >= MAX_GENERATIONS {
             return Err("voice key generation capacity reached".into());
@@ -149,7 +296,14 @@ impl Coordinator {
         // cleanup has no actor/policy callbacks and creates no new retry or engine authority.
         let metadata = self
             .resources
-            .charge(group, GENERATION_BYTES, ResourceKind::Retained)
+            .charge(
+                group,
+                match profile {
+                    GenerationProfile::Existing => GENERATION_BYTES,
+                    GenerationProfile::Admitted => ADMITTED_GENERATION_BYTES,
+                },
+                ResourceKind::Retained,
+            )
             .map_err(|e| e.to_string())?;
         let engine = if generate {
             Some(
@@ -160,12 +314,24 @@ impl Coordinator {
         } else {
             None
         };
+        // The table contains both profiles and its inline entry size includes
+        // their common closed representation. Reserve the fixed shared backing
+        // before ANY row/watch/ID allocation, including Existing-only use. Plain
+        // row/engine reservations above can refund on local infrastructure
+        // refusal; no generation/permit was allocated or consumed yet.
+        self.ensure_join_index()?;
+        let funding = Arc::new(GenerationFunding { _credit: metadata });
+        let metadata = match profile {
+            GenerationProfile::Existing => GenerationMetadata::Existing(funding),
+            GenerationProfile::Admitted => GenerationMetadata::Admitted(funding),
+        };
         Ok(Generation {
+            profile,
+            admitted_original: None,
             executor,
             permit: self.id()?,
             join: owner.join,
             grant: Arc::downgrade(&owner._grant),
-            _metadata: metadata,
             engine,
             settlement_requested: !generate,
             point: None,
@@ -173,6 +339,9 @@ impl Coordinator {
             published: false,
             drained: tokio::sync::watch::channel(!generate).0,
             selected: None,
+            admitted_selected: None,
+            admitted_task: None,
+            _metadata: metadata,
         })
     }
 
@@ -191,13 +360,16 @@ impl Coordinator {
         let owner = self
             .owner
             .as_ref()
-            .filter(|owner| owner.id == owner_id && owner.lease.is_live())
+            .filter(|owner| {
+                owner.id == owner_id && owner.lease.is_live() && !owner.lease.is_admitted()
+            })
             .ok_or("voice owner changed")?;
         let generation = self
             .join_generations
             .get_mut(owner_id)
             .ok_or("voice key is unavailable")?;
-        if generation.executor != executor
+        if generation.profile != GenerationProfile::Existing
+            || generation.executor != executor
             || !generation.grant.ptr_eq(&Arc::downgrade(&owner._grant))
             || !generation.published
             || generation.publishing
@@ -257,7 +429,9 @@ impl Coordinator {
         let Some(owner) = self.owner.as_ref() else {
             return false;
         };
-        if owner.id != selected.id
+        if owner.lease.is_admitted()
+            || selected.lease.is_admitted()
+            || owner.id != selected.id
             || !owner.lease.is_live()
             || !selected.lease.is_live()
             || !owner.lease.is_same(&selected.lease)
@@ -270,7 +444,8 @@ impl Coordinator {
         self.join_generations
             .get(&owner.id)
             .is_some_and(|generation| {
-                generation.executor == selected.executor
+                generation.profile == GenerationProfile::Existing
+                    && generation.executor == selected.executor
                     && generation.grant.ptr_eq(&Arc::downgrade(&owner._grant))
                     && generation.published
                     && !generation.publishing
@@ -292,7 +467,9 @@ impl Coordinator {
             self.join_generations.insert(owner_id.into(), generation);
         }
         let generation = &self.join_generations[owner_id];
-        if !generation.grant.ptr_eq(&Arc::downgrade(&owner._grant)) {
+        if generation.profile != GenerationProfile::Existing
+            || !generation.grant.ptr_eq(&Arc::downgrade(&owner._grant))
+        {
             return Err("voice key belongs to another browser generation".into());
         }
         if generation.executor != executor {
@@ -326,7 +503,7 @@ impl Coordinator {
         &mut self,
         owner_id: &str,
         executor: [u8; 32],
-    ) -> Result<Option<tokio::sync::watch::Receiver<bool>>, String> {
+    ) -> Result<Option<JoinKeyDrain>, String> {
         if !self.join_generations.contains_key(owner_id) {
             let Some(owner) = self.owner(owner_id) else {
                 return Ok(None);
@@ -338,14 +515,20 @@ impl Coordinator {
             .join_generations
             .get_mut(owner_id)
             .expect("generation inserted");
-        if generation.executor != executor {
+        if generation.profile != GenerationProfile::Existing || generation.executor != executor {
             return Err("voice key belongs to another browser generation".into());
         }
         generation.settlement_requested = true;
         // An already queued actor effect is real outstanding work too. Its native-owned worker
         // retires publishing before this exact execution charge can return.
         if generation.publishing {
-            return Ok(Some(generation.drained.subscribe()));
+            let GenerationMetadata::Existing(funding) = &generation._metadata else {
+                unreachable!("Existing profile checked above");
+            };
+            return Ok(Some(JoinKeyDrain {
+                receiver: generation.drained.subscribe(),
+                _funding: funding.clone(),
+            }));
         }
         generation.engine.take();
         generation.drained.send_replace(true);
@@ -365,7 +548,8 @@ impl Coordinator {
             .join_generations
             .get_mut(owner_id)
             .ok_or("voice key is unavailable")?;
-        if generation.executor != executor
+        if generation.profile != GenerationProfile::Existing
+            || generation.executor != executor
             || generation.permit != permit
             || !generation.grant.ptr_eq(&Arc::downgrade(&owner._grant))
             || point[0] != 4
@@ -397,6 +581,11 @@ impl Coordinator {
         work: &mut JoinKeyWork,
         accepted: bool,
     ) -> Result<JoinKeyPublication, String> {
+        // The old byte-bearing pilot must never complete an admitted generation,
+        // even if a future internal caller somehow supplies equal public labels.
+        if work.owner.lease.is_admitted() {
+            return Err("voice key belongs to another protocol".into());
+        }
         // Consume this opaque work's one completion, but leave affine grant destruction with
         // its native worker after Coordinator unlock. Replaying an old completion cannot clear
         // a later retry's publishing flag or return that later worker's execution charge.
@@ -410,7 +599,10 @@ impl Coordinator {
             .join_generations
             .get_mut(&work.owner.id)
             .ok_or("voice key is unavailable")?;
-        if generation.executor != work.executor || generation.point != Some(work.point) {
+        if generation.profile != GenerationProfile::Existing
+            || generation.executor != work.executor
+            || generation.point != Some(work.point)
+        {
             return Err("voice key publication changed".into());
         }
         generation.publishing = false;

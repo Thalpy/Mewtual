@@ -23,6 +23,7 @@ fn selected_worker(context: &Context, route: &Route, selector: Selection) -> Wor
         selector,
         discovery_refusal: None,
         fixture_late_contention: false,
+        fixture_witness: None,
         custody: NativeCustody {
             _credit: credit,
             route: route.clone(),

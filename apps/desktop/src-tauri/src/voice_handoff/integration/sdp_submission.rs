@@ -137,10 +137,8 @@ pub(super) async fn exercise(
         .sdp_action_candidate(route.session().identity(), &request)
         .unwrap();
     let funding = candidate.funding().clone();
-    let wall = clock.now_ms();
-    let mono = clock.monotonic_ms();
     let ledger::SdpBegin::Factory(ticket) =
-        crate::voice_handoff::sdp::current(&context, route, |admission| {
+        super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| {
             state.voice_handoff.begin_sdp_action(
                 parent,
                 route.selected(),
@@ -150,6 +148,7 @@ pub(super) async fn exercise(
                 mono,
             )
         })
+        .await
         .unwrap()
     else {
         panic!("one original row");
@@ -254,11 +253,9 @@ pub(super) async fn exercise(
                 drop(held);
                 assert!(!route.session().fixture_counts().0);
                 assert_eq!(funding.in_flight(), 0);
-                let wall = clock.now_ms();
-                let mono = clock.monotonic_ms();
-                crate::voice_handoff::sdp::current(&context, route, |admission| {
+                super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| {
                     row.resume_sdp_action(parent, admission, &candidate, wall, mono)
-                })
+                }).await
                 .unwrap()
                 .unwrap()
             } else {
@@ -266,21 +263,17 @@ pub(super) async fn exercise(
             };
             let writer = ticket.publication_writer().unwrap();
             drop(ticket);
-            let wall = clock.now_ms();
-            let mono = clock.monotonic_ms();
             assert!(
-                crate::voice_handoff::sdp::current(&context, route, |admission| row
-                    .resume_sdp_action(parent, admission, &candidate, wall, mono))
+                super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| row
+                    .resume_sdp_action(parent, admission, &candidate, wall, mono)).await
                 .unwrap()
                 .is_none(),
                 "a retained affine Writer excludes another actual worker"
             );
             drop(writer);
-            let wall = clock.now_ms();
-            let mono = clock.monotonic_ms();
-            let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+            let ticket = super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| {
                 row.resume_sdp_action(parent, admission, &candidate, wall, mono)
-            })
+            }).await
             .unwrap()
             .unwrap();
             assert_eq!(ticket.id(), id);
@@ -338,11 +331,9 @@ pub(super) async fn exercise(
 
             // The ACTUAL UI lock wins final admission. Nothing entered Root; reclaim the SAME
             // canonical row/outcome afterwards rather than allocating a replacement purpose.
-            let wall = clock.now_ms();
-            let mono = clock.monotonic_ms();
-            let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+            let ticket = super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| {
                 row.resume_sdp_action(parent, admission, &candidate, wall, mono)
-            })
+            }).await
             .unwrap()
             .unwrap();
             let mut incoming = opened(state, public, route, parent, &encoded, seal);
@@ -364,10 +355,9 @@ pub(super) async fn exercise(
             if seal {
                 // A refused input must return inline: the underpaid original Copy is
                 // collected even while its returned queue object is retained/unpolled.
-                let wall = clock.now_ms(); let mono = clock.monotonic_ms();
-                let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+                let ticket = super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| {
                     row.resume_sdp_action(parent, admission, &candidate, wall, mono)
-                }).unwrap().unwrap();
+                }).await.unwrap().unwrap();
                 let incoming = opened(state, public, route, parent, &encoded, true);
                 let mut task = phase.task_copy(super::super::sdp_publication::TASK_BYTES).unwrap();
                 task.bind_native_history(funding.clone()).unwrap();
@@ -386,10 +376,9 @@ pub(super) async fn exercise(
                 assert!(matches!(refused.await, Err(catcoms_app::VoiceEndpointError::Protocol(VoiceError::Capacity))));
 
                 for completed in [false, true] {
-                    let wall = clock.now_ms(); let mono = clock.monotonic_ms();
-                    let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+                    let ticket = super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| {
                         row.resume_sdp_action(parent, admission, &candidate, wall, mono)
-                    }).unwrap().unwrap();
+                    }).await.unwrap().unwrap();
                     let mut incoming = opened(state, public, route, parent, &encoded, true);
                     let mut task = phase.task_copy(super::super::sdp_publication::TASK_BYTES).unwrap();
                     task.bind_native_history(funding.clone()).unwrap();
@@ -448,11 +437,9 @@ pub(super) async fn exercise(
                 // after positive mailbox admission but before the parked Actor prepares
                 // Root. The scoped callback must refuse and permit exact local retry.
                 let parked = super::pc::park(&actor).await;
-                let wall = clock.now_ms();
-                let mono = clock.monotonic_ms();
-                let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+                let ticket = super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| {
                     row.resume_sdp_action(parent, admission, &candidate, wall, mono)
-                }).unwrap().unwrap();
+                }).await.unwrap().unwrap();
                 let mut incoming = opened(state, public, route, parent, &encoded, true);
                 let physical = incoming.hold_position().unwrap();
                 let input = payload(&mut incoming, intent, &funding, true);
@@ -473,11 +460,9 @@ pub(super) async fn exercise(
                 assert_eq!(funding.in_flight(), 0);
             }
             if !seal {
-                let wall = clock.now_ms();
-                let mono = clock.monotonic_ms();
-                let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+                let ticket = super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| {
                     row.resume_sdp_action(parent, admission, &candidate, wall, mono)
-                })
+                }).await
                 .unwrap()
                 .unwrap();
                 let incoming = opened(state, public, route, parent, &encoded, false);
@@ -504,13 +489,35 @@ pub(super) async fn exercise(
                 // The next claim below must resume THIS normal Root Capacity refusal.
             }
             let parked = super::pc::park(&actor).await;
-            let wall = clock.now_ms();
-            let mono = clock.monotonic_ms();
-            let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
-                row.resume_sdp_action(parent, admission, &candidate, wall, mono)
-            })
+            // Parking the Actor does not make native admission uncontended. Force
+            // the real UI try-lock to refuse once, then release ONLY that competing
+            // guard after the failed attempt has returned. The retry must reclaim
+            // this SAME row/candidate, within the SAME original Ready interval.
+            let mut held_current = Some(state.ui_session_commit.clone().lock_owned().await);
+            let entered = std::sync::atomic::AtomicUsize::new(0);
+            let mut refusals = 0;
+            let ticket = super::sdp_rows::current_after_refusal(
+                state, &context, route, intent,
+                |admission, wall, mono| {
+                    entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    row.resume_sdp_action(parent, admission, &candidate, wall, mono)
+                },
+                || {
+                    refusals += 1;
+                    if let Some(held) = held_current.take() {
+                        assert_eq!(entered.load(std::sync::atomic::Ordering::SeqCst), 0,
+                            "contended UI admission must refuse before touching the row");
+                        assert_eq!(funding.in_flight(), 0,
+                            "a local admission refusal buys no second task or body");
+                        drop(held);
+                    }
+                },
+            ).await
             .unwrap()
             .unwrap();
+            assert!(refusals > 0, "actual UI contention was not exercised");
+            assert_eq!(ticket.id(), id, "local retry must keep the original row");
+            assert!(Arc::ptr_eq(&slot, &ticket.resolved().sdp_test_outcome()));
             let mut incoming = opened(state, public, route, parent, &encoded, seal);
             let physical = incoming.hold_position().unwrap();
             let input = payload(&mut incoming, intent, &funding, seal);
@@ -638,11 +645,9 @@ pub(super) async fn exercise(
                 published,
                 "only real Root unstarted retirement settles an engine"
             );
-            let wall = clock.now_ms();
-            let mono = clock.monotonic_ms();
             assert!(matches!(
-                crate::voice_handoff::sdp::current(&context, route, |admission| row
-                    .resume_sdp_action(parent, admission, &candidate, wall, mono)),
+                super::sdp_rows::current(state, &context, route, intent, |admission, wall, mono| row
+                    .resume_sdp_action(parent, admission, &candidate, wall, mono)).await,
                 Err(factory::Refused::Protocol(VoiceError::Unauthorized))
             ));
             assert_eq!(

@@ -1,3 +1,19 @@
+export type NativeProgressPhase = "step" | "rpc" | "rpc-return" | "http" | "http-return" | "transition" | "rtc" | "media" | "observer-close" | "pump" | "idle";
+
+/** Latest diagnostic state only; no event queue or per-attempt allocation. The
+ * fixture samples on its fixed100ms cadence independently of protocol attempts.
+ * Updating this during a fast Capacity loop cannot exhaust its callback budget. */
+export class NativeControlProgress {
+  #latest: NativeProgressPhase | null = null;
+  #sent: NativeProgressPhase | null = null;
+  update(phase: NativeProgressPhase): void { this.#latest = phase; }
+  reset(): void { this.#latest = null; this.#sent = null; }
+  sample(): NativeProgressPhase | null {
+    if (this.#latest === this.#sent) return null;
+    this.#sent = this.#latest; return this.#sent;
+  }
+}
+
 /** Test-only length-framed metadata reader. OS pipe chunks are NOT protocol frames:
  * one chunk may finish a reply and contain the next step. Decode sequentially through
  * ONE fixed frame buffer; the caller retains its one-step/one-callback ownership checks.

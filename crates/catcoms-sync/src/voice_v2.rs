@@ -47,6 +47,12 @@ pub const CLOCK_SKEW_MS: u64 = 5_000;
 /// remain valid through a second post-expiry window. Retention owners must account for BOTH.
 pub const MAX_REMOTE_PACKET_REMAINING_MS: u64 = MAX_PACKET_LIFETIME_MS + 2 * CLOCK_SKEW_MS;
 pub const MAX_REMOTE_DELEGATION_REMAINING_MS: u64 = MAX_DELEGATION_LIFETIME_MS + 2 * CLOCK_SKEW_MS;
+pub mod admission;
+pub mod admitted_admission;
+pub mod admitted_control;
+pub mod admitted_presence;
+mod admitted_wire;
+pub mod call_activation;
 pub mod chain;
 pub mod crypto_actions;
 pub mod crypto_authority;
@@ -79,38 +85,102 @@ impl Drop for RevocationOwner {
 /// Native-owned revocation shared with an actor. Revocation is synchronous and irreversible;
 /// lock/remount can close an old actor's authority before waiting for its command loop.
 #[derive(Clone)]
-pub struct CallLease(std::sync::Arc<LeaseState>);
+#[repr(transparent)]
+pub struct CallLease(Option<std::sync::Arc<LeaseState>>);
+/// Selected only by the actual issuer before a child escapes. This is local authority,
+/// never a wire value or a renderer-selected feature flag.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallProfile {
+    Existing,
+    Admitted,
+}
 struct LeaseState {
+    profile: CallProfile,
+    // One original gate shared by issuer revocation and native admitted activation.
+    // Existing children ignore it; no caller can choose or renew an admitted phase.
+    activation: std::sync::atomic::AtomicU8,
     live: std::sync::atomic::AtomicBool,
     ledger_claimed: std::sync::atomic::AtomicBool,
     changed: tokio::sync::watch::Sender<bool>,
+    // Admitted children and the private admitted-presence watcher child carry
+    // their original plain payer. Issuer/source aliases may outlive their Root.
+    // CallLease::drop keeps it OUTSIDE final Arc destruction.
+    funding: Option<std::sync::Arc<call_activation::Funding>>,
 }
 impl Default for CallLease {
     fn default() -> Self {
-        Self(std::sync::Arc::new(LeaseState {
-            live: std::sync::atomic::AtomicBool::new(true),
-            ledger_claimed: std::sync::atomic::AtomicBool::new(false),
-            changed: tokio::sync::watch::channel(false).0,
-        }))
+        Self::new(CallProfile::Existing, None)
     }
 }
 impl CallLease {
+    fn new(
+        profile: CallProfile,
+        funding: Option<std::sync::Arc<call_activation::Funding>>,
+    ) -> Self {
+        Self(Some(std::sync::Arc::new(LeaseState {
+            profile,
+            activation: std::sync::atomic::AtomicU8::new(call_activation::CANDIDATE),
+            live: std::sync::atomic::AtomicBool::new(true),
+            ledger_claimed: std::sync::atomic::AtomicBool::new(false),
+            changed: tokio::sync::watch::channel(false).0,
+            funding,
+        })))
+    }
+    pub(crate) fn admitted(funding: std::sync::Arc<call_activation::Funding>) -> Self {
+        Self::new(CallProfile::Admitted, Some(funding))
+    }
+    // Borrow only: no production raw Arc/Weak LeaseState may escape this wrapper.
+    fn state(&self) -> &std::sync::Arc<LeaseState> {
+        self.0.as_ref().expect("live lease wrapper")
+    }
+    /// Immutable original issuer profile. Custody wrapping cannot change this identity.
+    pub fn is_admitted(&self) -> bool {
+        self.state().profile == CallProfile::Admitted
+    }
     pub fn is_live(&self) -> bool {
-        self.0.live.load(std::sync::atomic::Ordering::Acquire)
+        self.state().live.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// The phase is checked independently: invalidate closes it before clearing
+    /// `live`, so a concurrent first Source send cannot use that intermediate state.
+    pub(crate) fn admitted_active(&self) -> bool {
+        self.is_admitted()
+            && self
+                .activation_phase()
+                .load(std::sync::atomic::Ordering::Acquire)
+                == call_activation::NATIVE_ACTIVE
+            && self.is_live()
     }
     pub fn revoke(&self) {
-        self.0
+        self.invalidate();
+        self.notify_revoked();
+    }
+    pub(in crate::voice_v2) fn invalidate(&self) {
+        self.state().activation.store(
+            call_activation::CLOSED,
+            std::sync::atomic::Ordering::Release,
+        );
+        self.state()
             .live
             .store(false, std::sync::atomic::Ordering::Release);
-        self.0.changed.send_replace(true);
+    }
+    pub(in crate::voice_v2) fn notify_revoked(&self) {
+        if let Some(state) = &self.0 {
+            state.changed.send_replace(true);
+        }
+    }
+    pub(in crate::voice_v2) fn empty() -> Self {
+        Self(None)
+    }
+    pub(in crate::voice_v2) fn activation_phase(&self) -> &std::sync::atomic::AtomicU8 {
+        &self.state().activation
     }
     pub fn is_same(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0)
+        std::sync::Arc::ptr_eq(self.state(), other.state())
     }
     /// Register before checking the irreversible flag. Revocation between a driver's synchronous
     /// admission check and this wait therefore cannot strand a detached request.
     pub(crate) async fn wait_revoked(&self) {
-        let mut changed = self.0.changed.subscribe();
+        let mut changed = self.state().changed.subscribe();
         while self.is_live() {
             if changed.changed().await.is_err() {
                 break;
@@ -124,7 +194,7 @@ impl CallLease {
         if !self.is_live() {
             return Err(VoiceError::Unauthorized);
         }
-        self.0
+        self.state()
             .ledger_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| VoiceError::Unauthorized)?;
@@ -132,6 +202,25 @@ impl CallLease {
             return Err(VoiceError::Unauthorized);
         }
         Ok(())
+    }
+}
+impl Drop for CallLease {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.take() {
+            Self::destroy_state(state, || {});
+        }
+    }
+}
+impl CallLease {
+    fn destroy_state(state: std::sync::Arc<LeaseState>, after_deallocation: impl FnOnce()) {
+        // All strong aliases, including Actor/Directory entries, use this wrapper.
+        // Keep the SAME original plain funding local until Arc::drop has destroyed
+        // Sender/fields AND freed LeaseState/header. Funding LAST inside the body
+        // alone would refund before that final deallocation. No Weak lease escapes.
+        let funding = state.funding.clone();
+        drop(state);
+        after_deallocation(); // production is an empty closure; deterministic test barrier
+        drop(funding);
     }
 }
 redacted_debug!(CallLease);
@@ -200,11 +289,14 @@ impl WatchLease {
         if self.parent.is_some()
             || self
                 .lease
-                .0
+                .state()
                 .ledger_claimed
                 .load(std::sync::atomic::Ordering::Acquire)
             || !self.is_live()
             || !parent.is_live()
+            // An admitted call is not a legacy controller/watch parent. Keep its
+            // original profile sealed even in trusted off-Root custody wrappers.
+            || parent.is_admitted()
         {
             return Err(VoiceError::Unauthorized);
         }
@@ -212,10 +304,40 @@ impl WatchLease {
         Ok(self)
     }
     pub fn is_live(&self) -> bool {
-        self.lease.is_live() && self.parent.as_ref().is_none_or(CallLease::is_live)
+        self.lease.is_live()
+            && self.parent.as_ref().is_none_or(|parent| {
+                if parent.is_admitted() {
+                    parent.admitted_active()
+                } else {
+                    parent.is_live()
+                }
+            })
+    }
+    /// Only the unique actual RootResidence may bind this separate discovery parent.
+    /// The public Existing factory above remains permanently profile-rejecting.
+    fn with_admitted_parent(
+        mut self,
+        original: &call_activation::ActivationObserver,
+    ) -> Result<Self, VoiceError> {
+        if self.parent.is_some()
+            || self
+                .lease
+                .state()
+                .ledger_claimed
+                .load(std::sync::atomic::Ordering::Acquire)
+            || !self.is_live()
+            || !original.is_active()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.parent = Some(original.original_lease().clone());
+        Ok(self)
     }
     pub fn revoke(&self) {
         self.lease.revoke();
+    }
+    pub(in crate::voice_v2) fn invalidate(&self) {
+        self.lease.invalidate();
     }
     pub fn is_same(&self, other: &Self) -> bool {
         self.lease.is_same(&other.lease)

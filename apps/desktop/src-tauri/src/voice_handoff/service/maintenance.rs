@@ -15,6 +15,10 @@ struct Cursor {
     peers: [u8; 64],
     stage: [u8; 64],
     continuations: [u8; 64],
+    #[cfg(test)]
+    fixture_observe: bool,
+    #[cfg(test)]
+    fixture_attachment_pressure: bool,
 }
 impl Cursor {
     fn new() -> Self {
@@ -27,6 +31,10 @@ impl Cursor {
             peers: [0; 64],
             stage: [0; 64],
             continuations: [0; 64],
+            #[cfg(test)]
+            fixture_observe: false,
+            #[cfg(test)]
+            fixture_attachment_pressure: false,
         }
     }
     /// Newly adopted key claims bypass the slow four-stage discovery rotation. Scan at
@@ -38,9 +46,14 @@ impl Cursor {
         for _ in 0..64 {
             let slot = self.ready_channel;
             self.ready_channel = (slot + 1) % 64;
+            if let Ok(route) = registry.admitted_route(slot + 1) {
+                route.nudge_admitted();
+                continue;
+            }
             let Ok(route) = registry.route(slot + 1) else {
                 continue;
             };
+            route.nudge_admission();
             if !route.native_ready() {
                 continue;
             }
@@ -96,9 +109,14 @@ impl Cursor {
         for _ in 0..64 {
             let slot = self.channel;
             self.channel = (self.channel + 1) % 64;
+            if let Ok(route) = registry.admitted_route(slot + 1) {
+                route.nudge_admitted();
+                continue;
+            }
             let Ok(route) = registry.route(slot + 1) else {
                 continue;
             };
+            route.nudge_admission();
             if !route.native_ready() {
                 continue;
             }
@@ -186,7 +204,20 @@ impl Cursor {
             };
             drop(live);
             if let Some(selector) = pending {
+                #[cfg(not(test))]
                 let waiter = native::produce_derivation(context, route, selector).ok();
+                #[cfg(test)]
+                let waiter = if self.fixture_observe {
+                    native::fixture::derive(
+                        context,
+                        route,
+                        selector,
+                        self.fixture_attachment_pressure,
+                    )
+                    .ok()
+                } else {
+                    native::produce_derivation(context, route, selector).ok()
+                };
                 let admitted = waiter.is_some();
                 // Busy Ready work must not consume every other original selection.
                 // Commit rotation only when its actual native worker acquired the slot.
@@ -196,7 +227,20 @@ impl Cursor {
                 (admitted, admitted.then_some(selector), waiter)
             } else {
                 let cursor = self.peers[index];
+                #[cfg(not(test))]
                 let waiter = native::discover_derivation(context, route, cursor).ok();
+                #[cfg(test)]
+                let waiter = if self.fixture_observe {
+                    native::fixture::discover(
+                        context,
+                        route,
+                        cursor,
+                        self.fixture_attachment_pressure,
+                    )
+                    .ok()
+                } else {
+                    native::discover_derivation(context, route, cursor).ok()
+                };
                 let admitted = waiter.is_some();
                 if admitted {
                     self.peers[index] = (cursor + 1) % 64;

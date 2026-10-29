@@ -2,6 +2,7 @@ use super::*;
 use catcoms_rt::rng::RngError;
 use catcoms_rt::{CryptoRng, RngCore};
 use catcoms_sync::voice_v2::Scope;
+mod admitted;
 
 /// rand_core 0.6 fixture RNG, the seam type production receives. Tests hand it to p256 through
 /// the production [`BorrowedRng`] bridge, never directly.

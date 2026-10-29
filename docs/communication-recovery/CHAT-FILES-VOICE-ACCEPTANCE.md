@@ -1,5 +1,242 @@
 # Chat, files and voice implementation evidence
 
+## Exact individual-media request fence (29 October; inactive)
+
+Integrated runtime `359a2eb0` adds an exact peer/driver/registry fence before positive
+native media fetches and after the existing framing callbacks/awaits. All six actual
+retained-channel queued/encrypt barriers fail before the fix and pass afterward.
+The IPC/media/status subset passes 453 tests; the final nonce/HMR subset passes 7/7,
+and strict shipped-source TypeScript passes. Broker ABI51 refuses older retained brokers
+without replacing their original ledger or blocking cleanup. The logical media graph is
+7,728/6,272/6,976/6,080 bytes by stage, each below its original 8 KiB fee. See
+[the scoped ownership, review and evidence](VOICE-MEDIA-PEER-FENCE.md).
+
+Native fixture/lint correction `a99e4c23` has independent read-only review and passing
+native history scenarios (75.00s/45.80s), concrete layouts and strict native Clippy.
+Strict Root Clippy, Root formatting and ambient checks also pass. Root inputs remain
+unchanged from the complete 4,007-test pass. Complete integrated native validation passes
+1,058 library plus six ACL/parser tests, zero failed/ignored (2,615.13s library), with one
+harness test at a time and unchanged internal scenario concurrency. The complete frontend
+passes 3,655 tests, zero failed/ignored; Svelte checking has zero errors/warnings, production
+build and all ten real Edge flows pass. Native rebuild passes (5m08s), and the unchanged
+actual application startup probe passes with desktop access. The application was not
+unlocked. The earlier unclassified native media refusal
+is still open. No deadline, security limit or protocol allowance changed.
+
+The separate operational-call and admitted-codec drafts are not integrated or accepted.
+Their static reviews have no remaining findings: eight new actor/control tests and 26
+codec tests are drafted, but all their Rust compilation/layout/execution gates are unrun.
+V2 stays OFF; operational Ready/SDP/RTC/audio, member relay and combined/physical acceptance
+remain incomplete. A second physical desktop is not available.
+
+## Native row reservation and browser memory policy (28 October; inactive draft)
+
+The reservation/memory runtime checkpoint is `ca7ad276` on `communication-v2-native-admission`
+(draft PR81). It integrates browser policy `cb7ecd0b`, exact reservation diagnostics
+`71453ca5`, actual native parent-row claims `91f06da3`, the stable-registration Cancel
+correction `262624bd` and the separate negative-close fixture correction `ca7ad276`.
+The earlier full-suite results below describe their named earlier checkpoints.
+
+The browser defaults to 512 KiB per group. Its immutable local configuration seam accepts
+256–1024 KiB, retains the fixed 2 MiB aggregate and 256 KiB individual-job cap, and
+requires a reload for a changed selection. There is no settings UI or persistence.
+Actual configured admission/preclaim plus the separate capture helper uses 248 KiB.
+The 408 KiB sixteen-peer inventory is structural, not a working sixteen-peer RTC test.
+See [the measured browser policy](VOICE-BROWSER-MEMORY-POLICY.md).
+
+The canonical native Slot retains both its original Root capacity and one affine claim
+on an actual native ledger position and serial. All row allocators exclude that serial
+until the original preparation and payments have actually returned. No dummy row,
+selector, Action, signing authority or consumption API is created. Version11 bytes are
+unchanged; an old version11 Reserved reply cannot establish this new native-row support.
+The Reserved-generation Cancel correction preserves the same registration and incarnation
+without weakening genuine call, UI, selection, epoch or whole-mode revocation.
+
+Focused evidence includes 574 browser tests, five Root diagnostic regressions, nine native
+parent-claim units, actual Actor/Slot cancellation cases and unchanged concrete graph
+guards. The physical Control graph is 12,244 bytes against its existing 12,288-byte
+payment. The previously failing alternate-peer/native-SDP scenario passes locally on
+Windows in 82.81 seconds. That does not establish the cause of the earlier Linux failure.
+The new diagnostic captures decision-time byte counts under the original resource mutex
+and reports them outside it; it does not increase limits or grant retry authority.
+
+The initial negative-close fixture failed on a transient local Capacity refusal. Its
+separate correction retries only the same original negative operation after joining the
+refused attempt, with the existing bounded cadence. Four actual TCP cases pass afterward;
+the failed evidence is retained. Runtime admission, deadlines and publication rules did
+not change in that correction.
+
+Both implementation leaves had their own read-only adversarial review and re-review.
+The integrated runtime review has no remaining blocker/high/medium; three low documentation
+findings were corrected. The complete Root suite passes 4,007 tests, with zero failures
+and 25 existing ignores. A fresh dependency audit passes all four categories. Complete
+native and final build/startup validation remain pending, with one heavy Rust process at
+a time. The complete frontend suite passes 3,648 tests, and Svelte checking has zero
+errors/warnings.
+
+The first complete native library run records 1,045 passes and 13 failures (2,314.62s).
+One originating fixture unwraps local nonblocking admission `Capacity` in
+`native_v2_pc_intent_original_sdp_completion_retires_body_but_keeps_task_and_ui_until_collection`;
+twelve subsequent cases stop at the closed fixture gate. The test-only correction reuses
+the existing bounded original-admission helper, retaining the SAME candidate, row, outcome,
+Session, 32-observation/10ms cadence and original intent deadline. A forced actual UI-lock
+refusal proves zero row entry and zero new task/body charge, then releases its competing
+guard before retry. All original ownership, admission and retirement assertions remain.
+Read-only review has no findings; the corrected native build and two real TCP scenarios
+pass (11.18s/11.60s). The failed evidence remains in `target/v2-final-native-full.log` with
+exit 101. Focused corrected logs are `target/v2-sdp-admission-retry-{worker,completion}.log`,
+each with exit zero. A new complete native run and the remaining gates are still required.
+
+The second complete Windows native library run has 1,030 passes and 28 failures
+(2,028.91s; `target/v2-final2-native-full.log`, exit 101). Its sole origin is the
+two-peer/shared-Session history-collection scenario: repeated authenticated four-byte
+native media refusals precede the second peer's five-second freshness closure during
+retirement. The old bounded trace omitted refusal enums, so its source is unclassified;
+27 later failures are closed-fixture-gate cascades. Fixed enum diagnostics were added,
+without changing deadlines or authority. The origin remains open.
+
+Three isolated repeats pass. A fourth fails at a different fixture assumption: an
+immediate repeat of completed history still can encounter the shared Index's Capacity
+refusal. The test-only correction forces actual post-success Index contention and retries
+only Capacity on the SAME retained target, at most 32 observations/5ms cadence within
+the original three-second deadline. All proof, flag, tombstone and actual-return checks
+remain. Its read-only review has no findings; the corrected build, concrete layout guard
+(1,512/4,096-byte RPC, 4,656/8,192-byte task), two-peer scenario (75.00s) and independent
+collector scenario (45.80s) pass. These do not establish the original media-refusal cause.
+
+Hosted `0225cf8a` passes 1,059 Linux native library tests and six ACL/parser tests in
+[job 123233186254](https://github.com/Thalpy/Mewtual/actions/runs/40808552650/job/123233186254).
+The job subsequently fails strict Clippy on the enlarged inline admission `Outcome` enum.
+A scoped annotation preserves the already measured, runtime-checked 8 KiB graph rather
+than adding a Box allocation/destruction path. Local strict native Clippy now passes. Neither that
+annotation nor the hosted native pass resolves the Windows media-refusal origin.
+
+A separate review finding concerns individual-peer Close while positive media work is
+queued or encrypting: the shared Session can remain live until that work first fetches.
+The isolated exact-peer fence/regression leaf is integrated in the later section above.
+No audio resurrection was demonstrated; this older checkpoint did not correct that
+boundary or activate V2.
+
+Hosted head `153c573f` has a separate frontend failure: 3,647 pass and one existing
+confirmation pressure test still assumes a fixed 256 KiB default. Its test-only correction
+explicitly chooses the supported 256 KiB local policy and preserves all original pressure,
+admission and actual-return assertions. The confirmation/policy subset then passes 36/36;
+read-only review reports no findings. The complete central frontend suite passes 3,648 tests.
+This correction changes no runtime source, and the failed hosted evidence remains at
+[job 123178420516](https://github.com/Thalpy/Mewtual/actions/runs/40791756301/job/123178420516).
+
+The [bilateral admission proposal](VOICE-BILATERAL-ADMISSION-PROPOSAL.md) has its own
+read-only design review and staged owner agreement. Its profile, wire, ownership,
+negative-recovery and sidecar gates are required future implementation, not test evidence.
+
+Production V2 remains OFF. Bilateral agreement, actual role-specific consumption,
+RoundRef/KDF, operational Ready/SDP/RTC, member media relay and combined/physical acceptance
+remain open. Only one physical desktop is available. External download resume is outside
+this continuation.
+
+## Capacity Control and browser pairing continuation (28 October; inactive draft)
+
+The canonical native Slot now has authenticated Session Control30/version11, separate
+from pre-ACK mode29/version10. Fixed header/class/Session/length admission precedes nonce
+consumption and RowId parsing. Its snapshot distinguishes requested/canonical generation,
+negative floor and optional public incarnation. Historical callers cannot observe a
+successor's Reserved capacity. Observe creates nothing; cancellation and collection
+certificates depend on original Work/output/capacity return. Per-generation return is
+not a task/Actor payer refund. Review corrected the Pending-to-accepted cancellation race
+without treating generic Stopped as proven unstarted.
+
+The browser's immutable capacity-only constructor pins mode before ACK on the SAME retained
+channel. Its separately prepaid8KiB coordinator pairs the existing128KiB/twelve-row envelope
+before publication/subscription. Detached public handles cannot convert through pilot
+actions. Private negative work retains the original ordinal, incarnation and all fees
+through lost replies, native Closing/Uncertain, actual SDK/IO/task/cell/subscription return.
+Fresh Register repeats exact owner/claim checks through crypto and first fetch. End's
+negative path can use the codec independently of the driver waiting for browser drainage.
+
+Known/unknown admission timer registrations remain joined through actual cancellation or
+callback return. Terminal IO cleanup publishes only its SAME cancel-retry guard; live
+deadlines cannot be disarmed by availability. Fault notification promptly fences positives
+and aborts the captured controller, separately from return. Inline/invalid cadence cannot
+spin the outer native loop. Pre-ACK faults close without ACK.
+
+Focused evidence:38 native capacity tests, the concrete Control graph guard,17 shared
+codec/frame tests,37 actual-WebCrypto pairing regressions and nine timer units pass.
+Read-only adversarial review/re-review has no remaining blocker/high/medium in these
+boundaries. The complete Root suite passes4,002 tests with25 existing ignores. The complete
+native suite passes1,043 library plus six ACL/parser tests, with zero failures/ignores;
+the library run takes2,489.58s. The complete frontend suite passes3,635 tests, Svelte reports
+zero errors/warnings, the production build passes and all ten real Edge flows pass.
+Root/native formatting, strict Root/native Clippy, explicit native checking, the ambient
+dependency gate and a fresh dependency audit pass. Native build passes (3m44s), followed
+by actual application startup with desktop permissions and the unchanged probe; the app
+was not unlocked. Code is retained in commits `4f3bc42c`, `83f3958a` and `6245af85`.
+Complete suite logs are `target/capacity-root-verified.log`,
+`target/capacity-native-verified.log` and `target/capacity-frontend-probe-final.log`;
+each has a separate `.exit` marker. Final native check/lint/build and startup logs are
+under `target/capacity-final-*`, with separate exit markers.
+The first complete native run remains recorded as1,037 passes/six failures: the empty-SDP
+fixture assumed first-poll Pending despite a valid local Capacity refusal, followed by five
+fixture-admission cascades. The test-only correction forces that refusal and full-mailbox
+admission while preserving the original Task/body/grant/tag and absolute deadline. All
+three focused SDP cases pass (33.96s), as do those cases in the final complete native run.
+No runtime deadline, retry allowance or publication authority changed.
+The TypeScript endpoint in pairing units models native responses; Rust actual-Actor/TCP
+tests and shared vectors verify the native side separately. These are not a new combined
+native/browser Ready/SDP/RTC or physical-audio acceptance claim.
+
+Compatibility is checked before ACK: mode29 pin is followed by a noncreating30/Observe1
+probe, and only exact Unstarted/request1/canonical0/floor0/no-incarnation permits ACK or
+browser reservation. An old mode29-only native cannot strand a paired reservation.
+Lost/held/malformed probes keep the original keys/counters without a preclaim. ABI49
+rejects retained pre-probe48 producers on the same window symbol while preserving cleanup.
+
+Native ledger reservation, bilateral agreement/RoundRef/KDF, operational Ready/SDP/RTC,
+configured multi-peer/audio budget composition, member relay and combined/physical
+acceptance remain open. Production V2 stays OFF. Only one physical desktop is available;
+external download resume is outside this continuation.
+
+## Native canonical admission continuation (28 October; inactive draft)
+
+The integration branch now retains the exact Actor invocation/outcome and stable Root
+registration inside the original bootstrap Row. One paid8KiB task/physical native position
+serves the Session. Lost observations coalesce; ordinary generation cancellation preserves
+the same incarnation; Busy attachment retains the same affine candidate. Actual old Work,
+capacity and reclamation must return before the next generation. Per-generation Returned
+does not claim the permanent task/position or residual4KiB Actor payer has been refunded.
+
+All thirteen focused Slot regressions pass, including actual parked Actor cancellation,
+reply loss, host-only next-generation retry, both final close variants, actual Store/resumable
+removal at both UI fences, full-capacity cleanup, concurrent recovery, abort before first
+poll, emergency reclamation unwind and shutdown after maintenance stops. The concrete
+RPC/task inventories fit their unchanged4KiB/8KiB fees. Read-only design/adversarial review
+and re-review have no remaining blocker/high/medium. Strict native all-target/all-feature
+Clippy passes. The COMPLETE current native suite passes1,032 library tests plus six ACL
+tests, with zero failures/ignores (2,333.77s). Explicit native checking (1m11s), native build
+(3m43s) and real application startup also pass. The first sandboxed startup timed out
+without output; the SAME20s probe passes with desktop permissions, without code/timeout changes.
+
+The complete Root suite passes4,002 tests with25 existing ignores on unchanged Root/Cargo
+inputs. Current frontend3,580 tests, Svelte checks (zero diagnostics), production build,
+formatting and ambient dependency gate pass. All ten real Edge flows pass after an initial
+browser/CDP launch failure; the successful rerun used local-browser permissions.
+
+Separate test-only timeout reporting now retains a bounded latest pipe/Node/callback trace
+and original-owner nonblocking native snapshots. Thirteen diagnostic checks, the actual
+acknowledged parked-child30s wrapper/End/reap/service-collection regression and the original
+media-adoption scenario all pass locally on Windows. Confirmation diagnostics explicitly
+exclude the real SDP children; latest-only100ms sampling cannot exhaust callback allowance
+inside fast Capacity loops. No protocol deadline, retry allowance or authority is renewed.
+
+PR76's current Linux975-pass/37-failure result remains unresolved: one native/WebCrypto
+media control-step timeout precedes36 fail-closed fixture admissions. Its root cause has
+not been established; a local Windows pass and better diagnostics do not resolve it.
+
+At that earlier checkpoint, Operation30/version11 and paired browser cancellation were
+still unfinished; their current capacity-only implementation is recorded above. Native
+ledger preclaim, bilateral agreement/RoundRef/KDF, operational audio/RTC composition,
+member relay and combined/physical acceptance remain unfinished. Only one physical desktop
+is available. V2 stays OFF.
+
 ## Microphone device IDs own their storage (27 October; helper inactive)
 
 The inactive capture helper now copies admitted device IDs into independent numeric UTF16

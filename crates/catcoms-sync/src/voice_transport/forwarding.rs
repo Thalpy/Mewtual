@@ -3,24 +3,93 @@
 use super::*;
 use catcoms_rt::{RequestAuthority, SharedRequestKeepalive};
 use futures::FutureExt;
-use std::sync::Weak;
-use voice_v2::helper::{ForwardJob, HelperLedger};
-use voice_v2::source::{SourceActivity, SourceHop, SourceJob, SourceLedger, SourceOutcome};
+use voice_v2::helper::ForwardJob;
+use voice_v2::runtime::{HelperOwner, SourceOwner};
+use voice_v2::source::{SourceActivity, SourceHop, SourceJob, SourceOutcome};
 use voice_v2::CallLease;
 
 const ROUTES: usize = 64;
 const DEADLINE_MS: u64 = 3_000;
+const REGISTRY_BYTES: usize = 4096;
 
-#[derive(Default)]
 pub(crate) struct RouteOwners {
-    active: Vec<Weak<RouteGate>>,
+    active: Vec<RouteRow>,
+    // Plain, outside the Vec allocation. First Root attachment reserves this
+    // before VoiceRuntime construction, including this owner's inline growth.
+    _funding: voice_v2::resources::Credit,
+}
+struct RouteRow {
+    gate: Option<Arc<RouteGate>>,
+    // Only the ledger Flight or actual ingress Credit: the outer transport
+    // FlightAuthority owns RouteGate and would create a backedge here.
+    _custody: SharedRequestKeepalive,
+}
+impl RouteRow {
+    fn gate(&self) -> &Arc<RouteGate> {
+        self.gate.as_ref().expect("original route row")
+    }
+}
+impl Drop for RouteRow {
+    fn drop(&mut self) {
+        // Registry owns the final Arc while detaching this row. No Weak escapes,
+        // so another thread cannot acquire a new strong owner after sole-owner
+        // classification. Keep the SAME payer through body AND Arc deallocation.
+        drop(self.gate.take());
+    }
 }
 impl RouteOwners {
+    pub(crate) fn new(
+        resources: &Arc<voice_v2::resources::Resources>,
+        group: [u8; 32],
+    ) -> Result<Self, VoiceError> {
+        if Self::graph_bytes() > REGISTRY_BYTES
+            || Self::route_metadata_bytes() > voice_v2::ROUTE_METADATA_BYTES
+        {
+            return Err(VoiceError::Bounds);
+        }
+        let funding = resources.charge(
+            group,
+            REGISTRY_BYTES,
+            voice_v2::resources::ResourceKind::Retained,
+        )?;
+        Ok(Self {
+            active: Vec::with_capacity(ROUTES),
+            _funding: funding,
+        })
+    }
+    fn graph_bytes() -> usize {
+        // Full owner (including its new VoiceRuntime inline fields), constructor
+        // overlap and exact fixed backing. Gate allocations retain their original
+        // per-flight512-byte metadata payment, independently of this backing fee.
+        2 * std::mem::size_of::<Self>() + ROUTES * std::mem::size_of::<RouteRow>() + 128
+    }
+    fn route_metadata_bytes() -> usize {
+        std::mem::size_of::<RouteGate>()
+            + 2 * std::mem::size_of::<usize>()
+            + std::mem::size_of::<FlightAuthority>()
+            + 2 * std::mem::size_of::<usize>()
+            + std::mem::size_of::<RouteRow>()
+            + 64
+    }
+    fn take_unused(&mut self) -> Option<RouteRow> {
+        let index = self
+            .active
+            .iter()
+            .position(|row| Arc::strong_count(row.gate()) == 1)?;
+        Some(self.active.swap_remove(index))
+    }
+    pub(crate) fn prune(&mut self) {
+        // Call only outside native/Group/Policy/Source guards. Detach first;
+        // actual Arc/payer destructors run after the mutable Vec operation ends.
+        while let Some(row) = self.take_unused() {
+            drop(row);
+        }
+    }
     pub(crate) fn disconnected(&self, peer: PeerId) {
         for gate in self
             .active
             .iter()
-            .filter_map(Weak::upgrade)
+            .map(RouteRow::gate)
             // Ordered events may lag a same-peer reconnect. The driver already revoked the
             // departed incarnation; an old event must not cancel a newly captured live owner.
             .filter(|gate| gate.peer == peer && !gate.connection.is_live())
@@ -31,9 +100,13 @@ impl RouteOwners {
 }
 impl Drop for RouteOwners {
     fn drop(&mut self) {
-        for gate in self.active.iter().filter_map(Weak::upgrade) {
+        for gate in self.active.iter().map(RouteRow::gate) {
             gate.live.revoke();
         }
+        drop(std::mem::take(&mut self.active));
+        // Actual Vec backing and row-owned Gate allocations are gone before the
+        // plain registry funding drops. External request/reply owners can still
+        // hold Gates; each retains the SAME payer after its authority instead.
     }
 }
 struct RouteGate {
@@ -47,7 +120,26 @@ struct RouteGate {
     // The source/helper reserves these metadata bytes before spending its attempt. Retaining
     // the SAME flight also retains its phase/lane through any driver authority or completion;
     // cancellation alone cannot refund custody. Flight has no back-edge to this RouteGate.
-    _custody: SharedRequestKeepalive,
+    _custody: Option<SharedRequestKeepalive>,
+    #[cfg(test)]
+    before_deallocation: std::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
+}
+impl Drop for RouteGate {
+    fn drop(&mut self) {
+        drop(self._custody.take());
+        #[cfg(test)]
+        if let Some((entered, resume)) = self.before_deallocation.lock().unwrap().take() {
+            let _ = entered.send(());
+            let _ = resume.recv();
+        }
+        // Registry row's outside payer remains until Arc::drop has also freed
+        // this allocation. The test pause models the old final-strong-Drop gap.
+    }
 }
 impl fmt::Debug for RouteGate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -115,7 +207,7 @@ impl RequestAuthority for FlightAuthority {
 enum Work {
     Helper {
         job: ForwardJob,
-        ledger: Arc<HelperLedger>,
+        ledger: HelperOwner,
     },
     Source {
         // Packet ciphertext remains in the original SourceJob. Only this immutable fixed
@@ -124,7 +216,7 @@ enum Work {
         // refusal before RouteGate has captured another keepalive owner.
         permit: Option<Box<voice_v2::RoutePermit>>,
         job: SourceJob,
-        ledger: Arc<SourceLedger>,
+        ledger: SourceOwner,
     },
 }
 
@@ -215,8 +307,8 @@ impl Work {
     }
     fn current(&self, actor: &voice_v2::runtime::ActorOwner) -> Result<(), VoiceError> {
         let current = match self {
-            Self::Helper { ledger, .. } => Arc::ptr_eq(ledger, &actor.helper()?),
-            Self::Source { ledger, .. } => Arc::ptr_eq(ledger, &actor.source()?),
+            Self::Helper { ledger, .. } => ledger.is_same(&actor.helper()?),
+            Self::Source { ledger, .. } => ledger.is_same(&actor.source()?),
         };
         if current {
             Ok(())
@@ -243,6 +335,9 @@ pub struct PendingVoiceForward<T: MeshTransport> {
     job: Work,
     authority: Arc<FlightAuthority>,
     instance: Arc<()>,
+    // Last even on an abandoned, unexecuted preparation after Root retirement:
+    // `job` alone drops before `authority` and cannot sponsor its final Arc tail.
+    _custody: SharedRequestKeepalive,
 }
 /// Bounded untrusted ACK plus the exact affine request/edge it can complete.
 pub struct CompletedVoiceForward {
@@ -394,6 +489,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         route: BoundRoute,
         custody: SharedRequestKeepalive,
     ) -> Result<Arc<dyn RequestAuthority>, VoiceError> {
+        self.capture_voice_route(route, custody)
+            .map(|gate| gate as Arc<dyn RequestAuthority>)
+    }
+    fn capture_voice_route(
+        &mut self,
+        route: BoundRoute,
+        custody: SharedRequestKeepalive,
+    ) -> Result<Arc<RouteGate>, VoiceError> {
         let context = self.voice_v2_context(0)?;
         let descriptor = peer_descriptor_hash(
             self.peer_records
@@ -409,7 +512,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .voice_runtime
             .as_mut()
             .ok_or(VoiceError::Unauthorized)?;
-        voice.routes.active.retain(|gate| gate.strong_count() > 0);
+        voice.routes.prune();
         if voice.routes.active.len() >= ROUTES {
             return Err(VoiceError::Capacity);
         }
@@ -421,16 +524,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             policy: context.scope.policy,
             live: CallLease::default(),
             connection,
+            _custody: Some(custody.clone()),
+            #[cfg(test)]
+            before_deallocation: std::sync::Mutex::new(None),
+        });
+        voice.routes.active.push(RouteRow {
+            gate: Some(gate.clone()),
             _custody: custody,
         });
-        voice.routes.active.push(Arc::downgrade(&gate));
         Ok(gate)
     }
 
+    /// Release unused route metadata BEFORE asking for another Crypto/Forward
+    /// lane. An idle unjoined Root may own only old verification-credit rows.
+    pub(crate) fn prune_voice_routes(&mut self) {
+        if let Some(voice) = &mut self.voice_runtime {
+            voice.routes.prune();
+        }
+    }
+
     /// Observe every real root/member/policy/descriptor/proof transition before another await.
-    /// Weak rows stay counted while actual RouteGate owners exist. The separate lower Flight
+    /// Strong registry rows stay counted while actual RouteGate owners exist. The separate lower Flight
     /// credit stays charged until real retirement even after route metadata has been released.
     pub(crate) fn reconcile_voice_routes(&mut self) {
+        self.prune_voice_routes();
         // File reads have their own Root/member lifetime even when voice is never attached.
         // This common observed-transition hook must precede every optional voice early return.
         self.reconcile_file_effects();
@@ -444,7 +561,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     .routes
                     .active
                     .iter()
-                    .filter_map(Weak::upgrade)
+                    .map(|row| row.gate().clone())
                     .collect()
             })
             .unwrap_or_default();
@@ -469,9 +586,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 gate.live.revoke();
             }
         }
-        if let Some(voice) = &mut self.voice_runtime {
-            voice.routes.active.retain(|gate| gate.strong_count() > 0);
-        }
+        self.prune_voice_routes();
     }
     /// Prepare at most four current helper edges. `voice_schedule` calls this only while the
     /// local switch is `Forwarding`; it executes and settles each edge on this same Root.
@@ -506,6 +621,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         activity: SourceActivity,
     ) -> Result<bool, VoiceError> {
         self.reconcile_voice_actor();
+        // Classify the actual local effect, not a caller's activity label. Only a
+        // real WatchChallenge can remain a watcher source; SourceActivity::check
+        // also authenticates that sealed producer/body pairing. Helper forwarding
+        // uses its independent ledger and does not pass through this local queue.
+        if self.has_admitted_voice_activation()
+            && !matches!(object.body(), voice_v2::Body::WatchChallenge { .. })
+        {
+            return Err(VoiceError::Unauthorized);
+        }
         let room = self.voice_room_authority(object.scope().room)?;
         self.voice_transport_actor()?.source()?.admit(
             self.voice_transport_actor()?,
@@ -518,6 +642,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// immutable source attempt before framing, and sign a permit only for its selected helper.
     pub fn prepare_voice_sources(&mut self) -> Result<Vec<PendingVoiceSource<T>>, VoiceError> {
         self.reconcile_voice_actor();
+        if self.has_admitted_voice_activation() {
+            // Include already queued off-Root Existing values. Retirement is
+            // permanent, so clearing the admitted call cannot resurrect them.
+            // It occurs before take_ready can debit a new submission attempt.
+            self.voice_transport_actor()?
+                .source()?
+                .retire_existing_endpoint_sources();
+        }
         let free_routes = self.available_voice_routes()?;
         let source = self.voice_transport_actor()?.source()?;
         let jobs = source.take_ready_bounded(
@@ -563,11 +695,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .voice_runtime
             .as_mut()
             .ok_or(VoiceError::Unauthorized)?;
-        // Revocation suppresses effects; only actual last-owner drop releases a registry row.
+        // Revocation suppresses effects; only actual last external-owner drop
+        // permits detaching the registry's final strong row and original payer.
         // Root's exclusive borrow spans scheduling and all synchronous preparations below, so
         // another caller cannot insert a gate between this count and this bounded batch.
-        voice.routes.active.retain(|gate| gate.strong_count() > 0);
+        voice.routes.prune();
         Ok(ROUTES.saturating_sub(voice.routes.active.len()))
+    }
+    pub(crate) fn admitted_route_capacity(&mut self) -> usize {
+        self.available_voice_routes().unwrap_or(0)
     }
     fn prepare_voice_request(&mut self, job: Work) -> Result<PendingVoiceForward<T>, VoiceError> {
         let context = self.voice_v2_context(job.envelope().object().scope().room)?;
@@ -577,35 +713,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if route.device != job.target() || !job.authority().authorized() {
             return Err(VoiceError::Unauthorized);
         }
-        let descriptor = peer_descriptor_hash(
-            self.peer_records
-                .get(&route.device)
-                .ok_or(VoiceError::Unauthorized)?,
-        );
-        let connection = self
-            .transport
-            .connection_lease(route.peer)
-            .filter(|lease| lease.is_live())
-            .ok_or(VoiceError::Unauthorized)?;
-        let voice = self
-            .voice_runtime
-            .as_mut()
-            .ok_or(VoiceError::Unauthorized)?;
-        voice.routes.active.retain(|gate| gate.strong_count() > 0);
-        if voice.routes.active.len() >= ROUTES {
-            return Err(VoiceError::Capacity);
-        }
-        let gate = Arc::new(RouteGate {
-            peer: route.peer,
-            device: route.device,
-            descriptor,
-            epoch: context.epoch,
-            policy: context.scope.policy,
-            live: CallLease::default(),
-            connection,
-            _custody: job.keepalive(),
-        });
-        voice.routes.active.push(Arc::downgrade(&gate));
+        let gate = self.capture_voice_route(route, job.keepalive())?;
         let authority = Arc::new(FlightAuthority {
             route: gate,
             packet: job.authority(),
@@ -656,6 +764,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(PendingVoiceForward {
             transport: self.transport.clone(),
             request: Bytes::from(frame),
+            _custody: job.keepalive(),
             job,
             authority,
             instance: self.blob_fetch_instance.clone(),
@@ -741,3 +850,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok_or_else(|| VoiceCompletionFailure::terminal(VoiceError::Unauthorized))
     }
 }
+
+#[cfg(test)]
+mod tests;

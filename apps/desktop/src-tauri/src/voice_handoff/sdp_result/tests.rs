@@ -280,6 +280,63 @@ impl VoiceSdpResultPublisher for AfterCommit {
     }
 }
 
+/// Bound these observation/UI-race waits to the ORIGINAL SDP intent deadline.
+/// Local contention and a full mailbox cannot reset its age or hang acceptance.
+async fn within_original_sdp<T>(
+    state: &crate::AppState,
+    intent: &catcoms_sync::voice_v2::sdp::InitialSdpIntent,
+    stage: &'static str,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let clock = crate::voice_runtime(state).clock();
+    let remaining = intent
+        .remaining_at(clock.now_ms(), clock.monotonic_ms())
+        .unwrap_or_else(|_| panic!("original SDP intent expired before {stage}"));
+    let result = tokio::select! {
+        result = work => result,
+        _ = clock.sleep(std::time::Duration::from_millis(remaining)) => {
+            panic!("original SDP intent expired during {stage}");
+        }
+    };
+    // Both branches can become ready on the same poll. The timer's scheduling
+    // order cannot certify a late success; sample the SAME original intent again.
+    if intent
+        .remaining_at(clock.now_ms(), clock.monotonic_ms())
+        .is_err()
+    {
+        drop(result); // Release any returned park/UI guard before failure cleanup.
+        panic!("original SDP intent expired after {stage}");
+    }
+    result
+}
+
+async fn original_actor(
+    state: &crate::AppState,
+    context: &Context,
+    route: &Route,
+    intent: &catcoms_sync::voice_v2::sdp::InitialSdpIntent,
+) -> (
+    catcoms_app::ServerActor,
+    Arc<catcoms_sync::voice_v2::CallGrant>,
+) {
+    within_original_sdp(state, intent, "original Actor observation", async {
+        for attempt in 0..32 {
+            match factory::native::observation_actor(context, route) {
+                Ok(original) => return original,
+                Err(Refused::Protocol(VoiceError::Capacity)) if attempt < 31 => {
+                    crate::voice_runtime(state)
+                        .clock()
+                        .sleep(std::time::Duration::from_millis(10))
+                        .await;
+                }
+                Err(error) => panic!("original Actor observation refused: {error:?}"),
+            }
+        }
+        unreachable!("last bounded observation returns or fails");
+    })
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::voice_handoff) async fn exercise(
     state: &crate::AppState,
@@ -293,7 +350,6 @@ pub(in crate::voice_handoff) async fn exercise(
     maximum: bool,
 ) {
     let context = Context::new(state);
-    let (actor, _) = factory::native::observation_actor(&context, route).unwrap();
     let parent = parent_row.id();
     let row = || {
         state
@@ -315,6 +371,7 @@ pub(in crate::voice_handoff) async fn exercise(
         .sdp_input_owners(route.session().identity(), action)
         .unwrap();
     let funding = owners.funding.clone();
+    let (actor, original_grant) = original_actor(state, &context, route, &owners.intent).await;
     let payload = vec![42; if maximum { 8208 } else { 19 }];
     let tag = original.output_tag(&payload).unwrap();
     let encoded = body(parent, action, tag, &payload);
@@ -412,7 +469,7 @@ pub(in crate::voice_handoff) async fn exercise(
     for mode in 0..3 {
         let mut incoming = opened(state, public, route, child, &encoded);
         let task = construct(&context, route, &mut incoming, row(), expected, &original).unwrap();
-        let (_, grant) = factory::native::observation_actor(&context, route).unwrap();
+        let grant = original_grant.clone();
         let dropped = Arc::new(AtomicBool::new(false));
         let parked = (mode != 0).then_some(());
         let parked_actor = if parked.is_some() {
@@ -484,28 +541,123 @@ pub(in crate::voice_handoff) async fn exercise(
     // UI wins AFTER actual mailbox admission. Root preparation runs, final native
     // try-lock refuses, and the exact original Action remains pending and unpaid SDK
     // custody is retained. No stale unlocked preflight is an admission grant.
-    let parked = super::super::integration::pc::park(&actor).await;
     let mut incoming = opened(state, public, route, child, &encoded);
     let mut task = construct(&context, route, &mut incoming, row(), expected, &original).unwrap();
-    let mut executing = Box::pin(task.execute());
-    std::future::poll_fn(|cx| {
-        assert!(std::future::Future::poll(executing.as_mut(), cx).is_pending());
-        std::task::Poll::Ready(())
-    })
+    {
+        // A first Pending poll does NOT certify mailbox admission: the ordinary
+        // observation preflight may validly refuse local server-map contention.
+        // Force that exact early refusal while retaining the original Body/Task;
+        // it must neither publish a terminal receipt nor consume this SDK result.
+        let servers = within_original_sdp(
+            state,
+            &owners.intent,
+            "server-map refusal fixture",
+            state.servers.lock(),
+        )
+        .await;
+        let mut refused = Box::pin(task.execute());
+        std::future::poll_fn(|cx| {
+            assert!(matches!(
+                std::future::Future::poll(refused.as_mut(), cx),
+                std::task::Poll::Ready(Err(Refused::Protocol(VoiceError::Capacity)))
+            ));
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(refused);
+        drop(servers);
+    }
+    assert!(original.terminal_status().receipt.is_none());
+    let (pending, parked) =
+        within_original_sdp(state, &owners.intent, "actual mailbox admission", async {
+            for attempt in 0..32 {
+                let parked = super::super::integration::pc::park(&actor).await;
+                let mut queries = Vec::new();
+                if attempt == 0 {
+                    // Exercise the full-mailbox ordering deterministically. Never await
+                    // space while retaining the guard that parks its only consumer.
+                    loop {
+                        match actor
+                            .try_queue_voice_v2_context(route.selected().binding().scope.room)
+                        {
+                            Ok(query) => queries.push(query),
+                            Err(VoiceEndpointError::Protocol(VoiceError::Capacity)) => break,
+                            Err(error) => panic!("unexpected mailbox error {error:?}"),
+                        }
+                    }
+                }
+                let mut sending = Box::pin(actor.queue_voice_sdp_result_scoped(
+                    original_grant.clone(),
+                    task.target.intent.clone(),
+                    original.clone(),
+                    VoiceSdpResultInput::Sealed {
+                        body: task.body.as_ref().unwrap(),
+                        tag,
+                    },
+                    Box::new(Publisher {
+                        context: context.clone(),
+                        route: route.clone(),
+                        target: task.target.clone(),
+                        identity: expected.identity,
+                        _custody: task.custody.clone(),
+                    }),
+                ));
+                // This LOWER sender has exactly one suspension: tx.reserve. Pending
+                // therefore proves no enqueue; Ready(Ok) proves synchronous permit.send.
+                // Keep this proof aligned with ServerActor::send_sdp_result's await sites.
+                let pending = std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(match std::future::Future::poll(sending.as_mut(), cx) {
+                        std::task::Poll::Ready(result) => Some(result.unwrap()),
+                        std::task::Poll::Pending => None,
+                    })
+                })
+                .await;
+                drop(sending); // Retire exact unstarted sender before releasing the Actor.
+                drop(queries);
+                if attempt == 0 {
+                    assert!(pending.is_none(), "full mailbox cannot admit the Result");
+                }
+                if let Some(pending) = pending {
+                    return (pending, parked);
+                }
+                drop(parked);
+                actor
+                    .voice_v2_context(route.selected().binding().scope.room)
+                    .await
+                    .unwrap();
+            }
+            panic!("actual Result mailbox admission exhausted its bounded attempts");
+        })
+        .await;
+    let held = within_original_sdp(
+        state,
+        &owners.intent,
+        "UI fence acquisition",
+        state.ui_session_commit.clone().lock_owned(),
+    )
     .await;
-    let held = state.ui_session_commit.clone().lock_owned().await;
     drop(parked);
-    assert!(matches!(
-        executing.await,
-        Err(Refused::Protocol(VoiceError::Capacity))
-    ));
+    let completion = within_original_sdp(
+        state,
+        &owners.intent,
+        "admitted Result completion",
+        pending.complete(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(completion.result(), Err(VoiceError::Capacity)));
     drop(held);
+    drop(completion);
     drop(task);
     drop(incoming);
-    actor
-        .voice_v2_context(route.selected().binding().scope.room)
-        .await
-        .unwrap();
+    within_original_sdp(
+        state,
+        &owners.intent,
+        "Result publisher retirement",
+        actor.voice_v2_context(route.selected().binding().scope.room),
+    )
+    .await
+    .unwrap();
     assert!(original.terminal_status().receipt.is_none());
     assert!(!original.terminal_status().settled);
     assert_eq!(funding.in_flight(), 0);
@@ -523,7 +675,7 @@ pub(in crate::voice_handoff) async fn exercise(
                 let mut incoming = opened(state, public, route, child, &encoded);
                 let task =
                     construct(&context, route, &mut incoming, row(), expected, &original).unwrap();
-                let (_, grant) = factory::native::observation_actor(&context, route).unwrap();
+                let grant = original_grant.clone();
                 let (committed, observed) = tokio::sync::oneshot::channel();
                 let (release, wait) = std::sync::mpsc::sync_channel(1);
                 let publisher = Box::new(AfterCommit {
@@ -635,7 +787,7 @@ pub(in crate::voice_handoff) async fn exercise(
     // drops normally while SAME Body/Task/RPC still pays it; no invented refusal.
     let mut incoming = opened(state, public, route, child, &encoded);
     let task = construct(&context, route, &mut incoming, row(), expected, &original).unwrap();
-    let (_, grant) = factory::native::observation_actor(&context, route).unwrap();
+    let grant = original_grant.clone();
     let dropped = Arc::new(AtomicBool::new(false));
     let pending = actor
         .queue_voice_sdp_result_scoped(
@@ -746,7 +898,6 @@ pub(in crate::voice_handoff) async fn exercise_open(
     maximum: bool,
 ) {
     let context = Context::new(state);
-    let (actor, _) = factory::native::observation_actor(&context, route).unwrap();
     let row = || {
         state
             .voice_handoff
@@ -767,6 +918,7 @@ pub(in crate::voice_handoff) async fn exercise_open(
         .sdp_input_owners(route.session().identity(), action)
         .unwrap();
     let funding = owners.funding.clone();
+    let (actor, original_grant) = original_actor(state, &context, route, &owners.intent).await;
     let mut encoded = body(parent.id(), action, [0; 32], &[])[..66].to_vec();
     encoded[17] = 1;
     let expected = Expected {
@@ -790,7 +942,7 @@ pub(in crate::voice_handoff) async fn exercise_open(
     let mut incoming = opened_frame(public, route, h, &encoded, None);
     let mut task = construct(&context, route, &mut incoming, row(), expected, &original).unwrap();
     assert!(task.metadata.as_ref().unwrap().has_keepalive());
-    let (_, grant) = factory::native::observation_actor(&context, route).unwrap();
+    let grant = original_grant.clone();
     let dropped = Arc::new(AtomicBool::new(false));
     let sender = actor.queue_voice_sdp_result_scoped(
         grant,

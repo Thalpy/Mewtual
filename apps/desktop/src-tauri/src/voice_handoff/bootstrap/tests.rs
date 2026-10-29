@@ -1,13 +1,16 @@
 //! Actual native selected-key/actor fixtures; no Tauri serialization or live RTC is claimed.
 use super::*;
 use crate::voice_activation_tests::Fixture;
+use crate::voice_handoff::channel::SessionRef;
 use catcoms_rt::rng::RngError;
 use catcoms_rt::{CryptoRng, RngCore};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod action_history;
+mod admission_mode;
 pub(in crate::voice_handoff) use action_history::{installed, installed_when_available, retire};
+mod admitted;
 mod collection;
 
 const POINT: &str = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
@@ -84,7 +87,7 @@ impl RngCore for Rng<'_> {
     }
 }
 impl CryptoRng for Rng<'_> {}
-fn ready(status: Status) -> Arc<SetupOutput> {
+fn ready(status: Status) -> SetupOutputRef {
     match status {
         Status::Ready(public) => public,
         _ => panic!("expected immutable setup"),
@@ -118,7 +121,11 @@ async fn native_diagnostic_report_refuses_held_registry_and_row_without_waiting_
         .rows
         .iter()
         .flatten()
-        .find(|row| Arc::ptr_eq(&row.selected, &selected))
+        .find(|row| {
+            row.selected
+                .existing()
+                .is_some_and(|value| Arc::ptr_eq(value, &selected))
+        })
         .unwrap()
         .clone();
     drop(index);
@@ -151,25 +158,26 @@ async fn native_diagnostic_report_refuses_held_registry_and_row_without_waiting_
 #[test]
 fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
     let arc_words = 2 * std::mem::size_of::<usize>();
-    let index = std::mem::size_of::<Registry>()
-        + std::mem::size_of::<Index>()
-        + arc_words
-        + std::mem::size_of::<[Option<Arc<Row>>; ROWS]>();
+    let index = index_layout_bytes();
     assert!(index <= INDEX_BYTES, "index requires {index}");
     // Include retained row, its Arc, preparation, Session result/projection and a second
     // returned descriptor copy. SelectedHandoffOwner has its separate original paid owner.
     let row = std::mem::size_of::<Row>()
+        + super::admission_slot::retained_layout_bytes()
         + std::mem::size_of::<SessionIdentity>() + 2 * std::mem::size_of::<usize>()
         + arc_words
         + std::mem::size_of::<Ticket>()
         + std::mem::size_of::<SetupOutput>()
         + std::mem::size_of::<Credit>()
         + arc_words * 2
-        + std::mem::size_of::<Arc<Session>>()
+        + std::mem::size_of::<SessionRef>()
+        + std::mem::size_of::<Session>() + arc_words // actual weak-only retired Session tail
+        + super::super::channel::session_owner_layout_bytes()
         + std::mem::size_of::<Begin>()
         + std::mem::size_of::<Status>()
         + std::mem::size_of::<PublicProjection>()
         + std::mem::size_of::<MetadataProjection>()
+        + 2 * std::mem::size_of::<ReturningOwner>()
         + std::mem::size_of::<Vec<u8>>() // hard-capped JSON writer
         + 64 // serializer references and fixed integer-format scratch
         + std::mem::size_of::<crate::voice_handoff::commands::SetupReply>()
@@ -192,7 +200,7 @@ async fn maximum_public_projection_fits_the_actual_fixed_json_capacity() {
     // registry's public owner before mutating its sole output. Even the full1024-byte buffer,
     // larger than a canonical transcript, must fit without native String growth.
     drop(projection.row.state.lock().unwrap().public.take());
-    let public = &mut Arc::get_mut(&mut output).unwrap().public;
+    let public = &mut output.get_mut().unwrap().public;
     public.transcript.fill(255);
     public.length = 1024;
     let reply = crate::voice_handoff::commands::SetupReply::new(
@@ -239,17 +247,23 @@ async fn lost_setup_reply_and_duplicate_ensure_recover_original_session_without_
         .resources()
         .charge(
             group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - before.0 + INDEX_BYTES,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES
+                - selected.resources().group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    // Both bootstrap and key-index payments are process-only, not group bytes.
+    assert_eq!(
+        selected.resources().group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let mut unused = Rng::new();
     let recovered = ready(
         ensure(&f.state, &owner, [9; 32], &mut unused)
             .await
             .unwrap(),
     );
-    assert!(Arc::ptr_eq(&first, &recovered));
+    assert!(first.is_same(&recovered));
     assert_eq!(first.public.session, recovered.public.session);
     assert_eq!(first.public.transcript(), recovered.public.transcript());
     assert_eq!(unused.draws, 0);
@@ -259,6 +273,7 @@ async fn lost_setup_reply_and_duplicate_ensure_recover_original_session_without_
         "original setup engine and independent control lane survive reply loss"
     );
     drop(held);
+    assert_eq!(selected.resources().counts(), before);
     f.close().await;
 }
 
@@ -319,10 +334,13 @@ async fn process_stop_refuses_late_bootstrap_installation_without_publishing_a_s
             let (session, public, setup) = ticket.compute(&mut Rng::new()).unwrap();
             Some((
                 session,
-                Arc::new(SetupOutput {
-                    public,
-                    _credit: ticket.row._credit.clone(),
-                }),
+                SetupOutputRef::new(
+                    SetupOutput {
+                        public,
+                        _credit: ticket.row._credit.clone(),
+                    },
+                    ticket.row._credit.clone(),
+                ),
                 setup,
             ))
         } else {
@@ -556,10 +574,15 @@ async fn full_group_or_crypto_pressure_refuses_before_rng_without_stranding_a_ro
                 resources
                     .charge(
                         group,
-                        catcoms_sync::voice_v2::resources::GROUP_BYTES - resources.counts().0,
+                        catcoms_sync::voice_v2::resources::GROUP_BYTES
+                            - resources.group_counts(group).unwrap().0,
                         ResourceKind::Retained,
                     )
                     .unwrap(),
+            );
+            assert_eq!(
+                resources.group_counts(group).unwrap().0,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES
             );
         }
         let mut rng = Rng::new();
@@ -655,7 +678,7 @@ async fn exact_replies_share_one_paid_projection_until_last_output_after_registr
                 .await
                 .unwrap(),
         );
-        assert!(Arc::ptr_eq(&first, &reply));
+        assert!(first.is_same(&reply));
         assert_eq!(unused.draws, 0);
         replies.push(reply);
     }

@@ -4,7 +4,7 @@
  * import remains fixture-only; production construction uses the original selected key. */
 export type VoiceIpcDirection = 0 | 1;
 export type VoiceIpcOperation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 |
-  15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28;
+  15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30;
 export type VoiceIpcBodyKind = 0 | 1 | 2;
 export type VoiceIpcHeader = Readonly<{
   direction: VoiceIpcDirection; operation: VoiceIpcOperation; kind: VoiceIpcBodyKind;
@@ -26,7 +26,7 @@ const refuse = (): never => { throw new VoiceIpcFrameError(); };
  * Old Data remains2048; no request can choose a larger fallback. */
 function maximum(header: VoiceIpcHeader): number {
   if ((header.direction !== 0 && header.direction !== 1) ||
-      !Number.isInteger(header.operation) || header.operation < 1 || header.operation > 28 ||
+      !Number.isInteger(header.operation) || header.operation < 1 || header.operation > 30 ||
       (header.kind !== 0 && header.kind !== 1 && header.kind !== 2)) return refuse();
   if (header.operation >= 15) {
     if (header.direction === 0) {

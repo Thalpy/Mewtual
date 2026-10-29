@@ -198,6 +198,26 @@ impl OriginLimits {
             Err(VoiceError::RateLimited)
         }
     }
+    /// Final Control7 publication uses an already-prepaid row. It must never
+    /// prune/reallocate origin state after its native owner checks; a concurrent
+    /// collection that removed preparation instead causes retryable Capacity.
+    pub(super) fn prepared_origin(
+        &mut self,
+        member: DeviceId,
+        kind: Traffic,
+        now: u64,
+    ) -> Result<(), VoiceError> {
+        let record = self.records.get_mut(&member).ok_or(VoiceError::Capacity)?;
+        let allowed = match kind {
+            Traffic::Room => record.room.spend(now, 2, 8),
+            Traffic::Setup => record.setup.spend(now, 20, 40),
+        };
+        if !allowed {
+            return Err(VoiceError::RateLimited);
+        }
+        record.touched = record.touched.max(now);
+        Ok(())
+    }
     /// Commit original-issuer work only together with a newly retained packet owner. Callers
     /// first classify exact replays and reserve ALL packet/edge/ingress capacity. Reuse the
     /// existing bounded join/renewal validators transactionally: rejection restores logical
