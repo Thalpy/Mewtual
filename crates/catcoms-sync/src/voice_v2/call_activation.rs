@@ -1,9 +1,10 @@
 //! Inactive admitted-call selection. This owns local profile/activation custody only:
-//! it creates no endpoint, key delegation, packet, Ready, SDP or RTC permission.
+//! it creates no key delegation, packet, Ready, SDP or RTC permission. The separate
+//! Root-current admitted-presence API may publish discovery after NativeActive.
 //! Native keeps its original UI commit guard while selecting and finally activating.
 use super::resources::{Credit, ResourceKind, Resources};
 use super::runtime::EpochObservation;
-use super::{CallGrant, CallLease, Scope, VoiceError};
+use super::{CallGrant, CallLease, CallProfile, Scope, VoiceError, WatchLease};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -14,7 +15,7 @@ pub const ACTIVATION_BYTES: usize = 4096;
 pub const ACTIVATION_RPC_BYTES: usize = 4096;
 pub(super) const CANDIDATE: u8 = 0;
 const ROOT_SELECTED: u8 = 1;
-const NATIVE_ACTIVE: u8 = 2;
+pub(super) const NATIVE_ACTIVE: u8 = 2;
 pub(super) const CLOSED: u8 = 3;
 const RESIDENCE_AVAILABLE: u8 = 0;
 const RESIDENCE_HELD: u8 = 1;
@@ -32,12 +33,35 @@ impl Funding {
         scope: Scope,
         epoch: u64,
     ) -> Result<Arc<Self>, VoiceError> {
+        Self::reserve_bytes(resources, scope, epoch, ACTIVATION_BYTES)
+    }
+    fn reserve_bytes(
+        resources: &Arc<Resources>,
+        scope: Scope,
+        epoch: u64,
+        bytes: usize,
+    ) -> Result<Arc<Self>, VoiceError> {
         Ok(Arc::new(Self {
             resources: resources.clone(),
             group: scope.group,
             epoch,
-            _credit: resources.charge(scope.group, ACTIVATION_BYTES, ResourceKind::Retained)?,
+            _credit: resources.charge(scope.group, bytes, ResourceKind::Retained)?,
         }))
+    }
+    /// Separate original Presence payment, never activation's existing4KiB. The
+    /// private watcher child carries this SAME payer through escaped Source/peer
+    /// aliases and final lease allocation destruction; no Weak Funding escapes.
+    pub(super) fn reserve_presence(original: &ActivationObserver) -> Result<Arc<Self>, VoiceError> {
+        Self::reserve_bytes(
+            &original.core.resources,
+            original.scope(),
+            original.funding.epoch,
+            super::admitted_presence::PRESENCE_BYTES,
+        )
+    }
+    #[cfg(test)]
+    pub(super) const fn allocation_bytes() -> usize {
+        std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()
     }
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch
@@ -229,6 +253,9 @@ impl ActivationObserver {
     pub(crate) fn original_lease(&self) -> &CallLease {
         &self.core.call
     }
+    pub(crate) fn grant(&self) -> Option<Arc<CallGrant>> {
+        self.core.grant.upgrade()
+    }
     pub fn reserve_rpc(&self) -> Result<ActivationRpcPermit, VoiceError> {
         Ok(ActivationRpcPermit {
             resources: self.core.resources.clone(),
@@ -302,6 +329,7 @@ impl ActivationObserver {
         // leave a closed residence; it is still real ownership, never "never entered".
         let residence = RootResidence {
             original: Some(self.clone()),
+            presence: None,
             _returned: returned,
         };
         self.core
@@ -339,7 +367,8 @@ impl ActivationObserver {
 
 /// The actual Root selection result. Consumption belongs only inside the native
 /// ORIGINAL UI-guard/exact-owner/generation fence after actual Actor Work retirement.
-/// This activates no key/endpoint producer; those interfaces are intentionally absent.
+/// This does not itself publish a key/endpoint; the distinct admitted-presence
+/// factory must revalidate the exact current winner after this native commit.
 pub struct RootSelectedCall {
     original: ActivationObserver,
 }
@@ -368,11 +397,26 @@ impl RootSelectedCall {
 /// actual release, not native task/argument/key/SDK return or complete fee refund.
 pub(crate) struct RootResidence {
     original: Option<ActivationObserver>,
+    pub(crate) presence: Option<super::admitted_presence::PresenceStorage>,
     _returned: ReturnMarker,
 }
 impl RootResidence {
     pub(crate) fn original(&self) -> &ActivationObserver {
         self.original.as_ref().expect("original residence")
+    }
+    pub(crate) fn watch_lease(&self, funding: Arc<Funding>) -> Result<WatchLease, VoiceError> {
+        let original = self.original();
+        if !original.is_active()
+            || !funding.matches(&original.core.resources, original.scope().group)
+            || funding.epoch != original.funding.epoch
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        // This private unregistered child supplies only Watcher's independent
+        // one-shot claim. It is NEVER a directory/Actor-issued call grant. The
+        // actual admitted parent already supplies all issuer/room/epoch closure.
+        let watch = WatchLease::new(CallLease::new(CallProfile::Existing, Some(funding)));
+        watch.with_admitted_parent(original)
     }
 }
 impl Drop for RootResidence {
@@ -381,6 +425,9 @@ impl Drop for RootResidence {
         // its owned fields are actually destroyed BEFORE the marker is published.
         if let Some(original) = self.original.take() {
             original.close();
+            // The watcher and boxed presence are part of THIS residence's return,
+            // not sibling endpoint state. Its external plain payer outlives Box free.
+            drop(self.presence.take());
             drop(original);
         }
         // `_returned` drops after this body, including if an original field unwinds.

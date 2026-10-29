@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Admitted Root presence draft (29 October; unrun)
+
+The isolated admitted-presence leaf adds a dedicated Root discovery owner under the
+same selected NativeActive residence, exact immutable native join/key publication,
+opaque historical receipt and separately sealed Ann/Proof Source intake. Existing
+LocalJoin/packet factories and shared discovery bytes remain unchanged; FreshPeer
+never implies profile support. Funding stays outside Presence/proof Boxes through
+deallocation, with an explicit8KiB presence inventory plus existing per-record fees.
+Narrow rustfmt/static inspection only: compilation, focused tests, measured graph
+guards and strict lint are pending the primary's Rust slot. Full integration suites
+remain primary-owned. See [the exact boundary and regression list](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+V2 remains OFF; operation31, neutral/native consume, RoundGate/agreement/Ready and
+SDP/ICE/RTC/relay/audio are still operational blockers.
+
 ## Normal Actor mailbox retirement (29 October; focused checks pass)
 
 This separate leaf closes an inherited reserve-to-send custody gap. Normal terminal

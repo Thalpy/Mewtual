@@ -48,6 +48,7 @@ pub const CLOCK_SKEW_MS: u64 = 5_000;
 pub const MAX_REMOTE_PACKET_REMAINING_MS: u64 = MAX_PACKET_LIFETIME_MS + 2 * CLOCK_SKEW_MS;
 pub const MAX_REMOTE_DELEGATION_REMAINING_MS: u64 = MAX_DELEGATION_LIFETIME_MS + 2 * CLOCK_SKEW_MS;
 pub mod admission;
+pub mod admitted_presence;
 mod admitted_wire;
 pub mod call_activation;
 pub mod chain;
@@ -99,8 +100,9 @@ struct LeaseState {
     live: std::sync::atomic::AtomicBool,
     ledger_claimed: std::sync::atomic::AtomicBool,
     changed: tokio::sync::watch::Sender<bool>,
-    // Only admitted children carry this original plain payer. Issuer-held aliases
-    // may outlive Grant/Core. CallLease::drop keeps it OUTSIDE final Arc destruction.
+    // Admitted children and the private admitted-presence watcher child carry
+    // their original plain payer. Issuer/source aliases may outlive their Root.
+    // CallLease::drop keeps it OUTSIDE final Arc destruction.
     funding: Option<std::sync::Arc<call_activation::Funding>>,
 }
 impl Default for CallLease {
@@ -135,6 +137,16 @@ impl CallLease {
     }
     pub fn is_live(&self) -> bool {
         self.state().live.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// The phase is checked independently: invalidate closes it before clearing
+    /// `live`, so a concurrent first Source send cannot use that intermediate state.
+    pub(crate) fn admitted_active(&self) -> bool {
+        self.is_admitted()
+            && self
+                .activation_phase()
+                .load(std::sync::atomic::Ordering::Acquire)
+                == call_activation::NATIVE_ACTIVE
+            && self.is_live()
     }
     pub fn revoke(&self) {
         self.invalidate();
@@ -290,10 +302,40 @@ impl WatchLease {
         Ok(self)
     }
     pub fn is_live(&self) -> bool {
-        self.lease.is_live() && self.parent.as_ref().is_none_or(CallLease::is_live)
+        self.lease.is_live()
+            && self.parent.as_ref().is_none_or(|parent| {
+                if parent.is_admitted() {
+                    parent.admitted_active()
+                } else {
+                    parent.is_live()
+                }
+            })
+    }
+    /// Only the unique actual RootResidence may bind this separate discovery parent.
+    /// The public Existing factory above remains permanently profile-rejecting.
+    fn with_admitted_parent(
+        mut self,
+        original: &call_activation::ActivationObserver,
+    ) -> Result<Self, VoiceError> {
+        if self.parent.is_some()
+            || self
+                .lease
+                .state()
+                .ledger_claimed
+                .load(std::sync::atomic::Ordering::Acquire)
+            || !self.is_live()
+            || !original.is_active()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.parent = Some(original.original_lease().clone());
+        Ok(self)
     }
     pub fn revoke(&self) {
         self.lease.revoke();
+    }
+    pub(in crate::voice_v2) fn invalidate(&self) {
+        self.lease.invalidate();
     }
     pub fn is_same(&self, other: &Self) -> bool {
         self.lease.is_same(&other.lease)

@@ -76,6 +76,17 @@ healthy indexed media. Full End/lock/epoch owns the separate all-round fence. Or
 
 ### Required Root-wide profile gate, before a fresh call delegates keys
 
+29 October implementation status: the inactive call-activation leaf now supplies
+the issuer-sealed immutable lease profile and exact Root/NativeActive winner. The
+separate admitted-presence draft publishes only that winner's first native key,
+without constructing a legacy LocalJoin/PacketLedger. Announcement1, WatchChallenge2
+and JoinProof3 intentionally share their existing canonical bytes/domains and carry
+no admitted-profile bit. FreshPeer remains room-liveness evidence, never authenticated
+new-family support or consent. The required current new control/agreement/RoundGate
+checks below remain unchanged. The source inspection in the following paragraphs
+describes the earlier pre-activation baseline, not a claim that those profile fields
+are still absent. See [the exact presence boundary](VOICE-ADMITTED-PRESENCE.md).
+
 The physical channel pin above is not the Root call's protocol authority. The current
 native path already canonicalizes its normal setup: `Coordinator::selected_handoff_owner`
 in `voice_authority/join_key.rs` requires the published generation's exact executor and

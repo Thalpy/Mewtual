@@ -10,6 +10,7 @@ use voice_v2::{CallGrant, CallLease, JoinKey, Scope, VoiceError, WatchLease};
 
 const WATCHES: usize = 8;
 mod admission;
+mod admitted_presence;
 mod call_activation;
 mod confirmation;
 mod derivation;
@@ -86,6 +87,16 @@ impl Default for EndpointOwners {
 }
 impl EndpointOwners {
     #[cfg(test)]
+    pub(crate) fn admitted_presence_for_test(
+        &mut self,
+    ) -> Option<&mut voice_v2::admitted_presence::AdmittedPresence> {
+        self.activation
+            .as_mut()?
+            .presence
+            .as_mut()
+            .map(|presence| presence.get_mut())
+    }
+    #[cfg(test)]
     pub(crate) fn participant_join_for_test(&self) -> Option<&LocalJoin> {
         self.participant
             .as_ref()
@@ -106,6 +117,13 @@ impl EndpointOwners {
         }
         if let Some(participant) = &mut self.participant {
             participant.join.collect_expired(clock);
+        }
+        if let Some(presence) = self
+            .activation
+            .as_mut()
+            .and_then(|held| held.presence.as_mut())
+        {
+            changed |= presence.get_mut().collect_expired(clock);
         }
         if changed {
             self.changed();
@@ -151,6 +169,12 @@ impl EndpointOwners {
         // Read liveness, not presence in the map: a revoked owner awaiting prune needs no wake.
         self.participant.as_ref().is_some_and(|participant| {
             participant.grant.strong_count() > 0 && participant.lease.is_live()
+        }) || self.activation.as_ref().is_some_and(|held| {
+            held.original().is_active()
+                && held
+                    .presence
+                    .as_ref()
+                    .is_some_and(|presence| presence.get().is_live())
         }) || self
             .observers
             .values()
@@ -162,6 +186,13 @@ impl EndpointOwners {
         }
         if let Some(participant) = &mut self.participant {
             participant.join.retire_member(member);
+        }
+        if let Some(presence) = self
+            .activation
+            .as_mut()
+            .and_then(|held| held.presence.as_mut())
+        {
+            presence.get_mut().retire_member(member);
         }
         self.changed();
     }
