@@ -4,6 +4,58 @@ use super::*;
 use crate::voice_handoff::channel::{BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES, CONTROL_BYTES};
 
 #[tokio::test]
+async fn abrupt_registry_destruction_keeps_escaping_native_allocations_paid_without_claiming_sdk_return(
+) {
+    let f = Fixture::new().await;
+    let (owner, selected) = select(&f, point()).await;
+    let resources = selected.resources();
+    let baseline = resources.counts();
+    let registry = Registry::default();
+    let (output, route) = installed(&registry, selected.clone());
+    let projection = registry.project(&owner, selected.executor()).unwrap();
+    let session_tail = route.session().downgrade();
+    let public_tail = output.downgrade();
+    let header = route.session().header().unwrap();
+    let installed = resources.counts();
+    drop(registry);
+    assert_eq!(resources.counts(), (installed.0 - INDEX_BYTES, installed.1));
+    // The remaining projection/route really own Row, and the header independently
+    // owns Session. Losing the Registry does not make those allocations disappear.
+    drop(projection);
+    drop(route);
+    assert_eq!(
+        resources.counts(),
+        (
+            baseline.0 + ROW_BYTES + CONTROL_BYTES + BOOTSTRAP_BYTES + BROWSER_CONTROL_BYTES,
+            baseline.1 + 1
+        )
+    );
+    // Whole-Registry teardown still drops the inherited browser_setup escrow
+    // with Row. This is native allocation custody ONLY, not browser SDK return
+    // or an admitted ActuallyCollected receipt.
+    drop(header);
+    assert!(session_tail.upgrade().is_none());
+    assert_eq!(
+        resources.counts(),
+        (baseline.0 + ROW_BYTES + BOOTSTRAP_BYTES, baseline.1)
+    );
+    drop(output);
+    assert!(public_tail.upgrade().is_none());
+    assert_eq!(
+        resources.counts(),
+        (baseline.0 + ROW_BYTES + BOOTSTRAP_BYTES, baseline.1)
+    );
+    drop(public_tail);
+    assert_eq!(
+        resources.counts(),
+        (baseline.0 + BOOTSTRAP_BYTES, baseline.1)
+    );
+    drop(session_tail);
+    assert_eq!(resources.counts(), baseline);
+    f.close().await;
+}
+
+#[tokio::test]
 async fn header_and_public_output_independently_keep_original_capacity_and_slot_fence() {
     let f = Fixture::new().await;
     let (owner, selected) = select(&f, point()).await;
