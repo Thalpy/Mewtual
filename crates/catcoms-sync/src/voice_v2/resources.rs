@@ -453,13 +453,16 @@ impl Resources {
         (state.groups.len(), state.groups.capacity())
     }
     /// Complete full-bucket/control/alignment allowance, including simultaneous
-    /// old/new growth or shrink tables. Pinned std HashMap's7/8 load and power-of-
-    /// two buckets require at most4 tuples per remaining live group at a shrink
-    /// boundary. Empty tables are freed synchronously by remove_empty_group.
+    /// old/new growth or shrink tables. Pinned hashbrown0.16.1 may grow early
+    /// when tombstones exhaust growth_left: at n>7B/16 it allocates up to2B,
+    /// so old+new3B/n<48/7<8 buckets per live row. The immediate sparse shrink
+    /// has the same bound. Keep BOTH tables' controls/alignment. A logical
+    /// capacity() change is not evidence of a physical bucket resize.
+    /// Empty backing stays under the retiring payer AND pool fence until freed.
     pub(crate) fn group_index_invoice_bytes() -> usize {
         let tuple = std::mem::size_of::<([u8; 32], Counts)>();
         let align = std::mem::align_of::<([u8; 32], Counts)>().max(16);
-        4 * (tuple + 1) + 2 * (align - 1) + 32
+        8 * (tuple + 1) + 2 * (align - 1) + 32
     }
     /// No allocation or new group entry. A real Root/record reservation must
     /// already own this group. Both buckets commit together or neither does.

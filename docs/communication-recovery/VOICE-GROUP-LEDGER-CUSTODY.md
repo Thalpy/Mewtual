@@ -1,6 +1,8 @@
 # Original Group and ledger custody prerequisite
 
-29 October 2026. Correction draft; behavior tests **UNRUN**. The first actual
+29 October 2026. Correction draft. Runtime42 tests PASS; Resources57 tests PASS
+and1 capacity-profile diagnostic FAILS atd989ad21. The H8 correction and new churn
+regressions below are **UNRUN**. The first actual
 complete-invoice test measured3106 bytes and correctly failed the candidate3072
 guard. The fee is explicitly raised to4096, preserving every inventory term.
 Query/Support's previous12 focused
@@ -34,8 +36,9 @@ through that test-only header return.
 The full production invoice includes Group/empty-ledger/Funding construction and
 Arc headers, opaque owners, collection/retirement overlap, full sparse BTree nodes,
 and complete Resources key/Counts buckets with old+new growth/shrink controls and
-alignment. The measured3106-byte graph now has a4KiB fee guarded BEFORE payment
-or allocation. No
+alignment. The measured3106-byte H4 graph now has a4KiB fee guarded BEFORE payment
+or allocation. The source-corrected H8 allowance increases the COMPLETE invoice
+to3750/4096; actual compiled confirmation of that revised guard is pending. No
 formula or bound is trimmed to fit. Group/process byte and work/record caps remain
 unchanged; the first retained Group infrastructure costs more even while V2 is OFF.
 
@@ -46,6 +49,33 @@ table using the same hasher before releasing the lock. No ambient RNG or new
 group entry is introduced. Admission/diagnostic observers cannot enter between
 logical refund and physical bucket return. Existing generic Resources APIs remain
 unchanged.
+
+The failed first profile test made a diagnostic mistake: it treated changes in
+reported HashMap capacity as physical reallocation. Matching local primary code
+shows `RawTable::capacity = items + growth_left`, a lower bound that tombstones
+can change without resizing. This is distinct from the REAL H4 underinvoice:
+`reserve_rehash_inner` may grow early when DELETED controls exhaust growth, at
+n>7B/16, allocating up to2B alongside oldB. Thus old+new3B/n<48/7<8; the immediate
+sparse shrink has the same bound. Small4/8-bucket native tables cannot retain
+DELETED controls and need at most4n overlap. H8 retains BOTH tables' control-byte
+and alignment terms. Every-removal shrink and one-at-a-time insertion are part
+of this proof, and empty backing stays under its final payer and pool lock.
+
+This proof is pinned to [Rust1.94.0](../../rust-toolchain.toml) and the matching
+[hashbrown0.16.1 raw implementation](https://github.com/rust-lang/hashbrown/blob/1876e4f02708b93903d55ef598f68e82a826518f/src/raw/mod.rs):
+`capacity_to_buckets`, `shrink_to`, `capacity`, `reserve_rehash_inner`, and `erase`.
+The installed Rust hashbrown rlib embeds0.16.1 source paths, and the corresponding
+cached source's `.cargo_vcs_info.json` identifies that exact commit. Inspection was
+offline. Compiler/target updates must revisit the allocation model.
+
+The corrected monotone diagnostic derives minimum raw buckets after
+`shrink_to(len)` rather than from logical capacity. A separate actual Resources
+churn test grinds bounded keys against the EXISTING hasher, preserves dense
+DELETED controls and inserts into the untouched half-table. It must witness
+reported capacity112 at47 rows, proving raw growth64→128: old+new192 exceeds
+H4's188 and remains within H8's376. The structural resize proof is not an
+allocator trace; actual sparse/empty backing and admission-fence tests remain
+separate execution oracles.
 
 Draft regressions pause actual Group/ledger destruction, hold escaped both-ledger
 owners across real Runtime return, concurrently return final aliases and require
