@@ -89,7 +89,9 @@ The canonical backend page order is ascending ASCII `rowId`, independent of time
 The UI may present rows by `(presentedMs-is-null, presentedMs, rowId)` for display only. CID tie breaks
 here choose a rendering order, never authority, admission or a decision winner.
 
-Revision is an opaque string of at most 256 ASCII characters, cursor at most 512. Bind a cursor to
+Revision is a nonempty opaque string of at most 256 visible ASCII characters (`0x21..0x7e`),
+cursor at most 512 with the same alphabet. Native emits canonical lowercase hex or unpadded
+base64url tokens; neither token contains spaces/control characters. Bind a cursor to
 the exact numeric server and installed Actor/store incarnation, authorization session/policy, pin,
 immutable archive/view revision and row position, with bounded Clock expiry. Changes in proof
 availability/authority/conflict or selected admission advance revision even at equal IDs/counts.
@@ -130,6 +132,12 @@ literal invokes/TypeScript security ledger and visual fixture tests before activ
 the actual retained case and verify both opposite arrival orders, resolved-case retention, proof-only
 revision invalidation, role/session/incarnation loss, bounded pages, exact detail scope and missing
 proof/body truth. Fixture coverage complements that backend path; it cannot replace it.
+
+Committed archive/view revision changes reuse the existing scoped `ModerationUpdated` /
+`moderation-updated` notification with server ID only. Include the owner evidence view revision in
+the changed detector and emit after proof-only transitions and successful host repair even when
+legacy counts/IDs are unchanged. The event contains no held body or privileged proof payload; an
+authorized open timeline refreshes through the two privileged getters.
 
 ## Frontend consumer checkpoint (inactive)
 
