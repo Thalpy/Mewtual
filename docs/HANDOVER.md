@@ -1,5 +1,35 @@
 # Mewtual; Handover
 
+## Integrated text-chat validation (29 October; backend runtime gates pending)
+
+The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/
+Stop path. All findings from their actual-diff reviews have been corrected and re-reviewed. This
+includes server-scoped retired-token fences, restore cancellation custody, repair notifications,
+Send/Sync creator-evidence caches and a fast fence probe that avoids stalling unrelated live servers.
+The reviewed Tauri update is also integrated: native Tauri is 2.12.5, with its generated Windows
+manifest retained in test executables. No unfinished voice activation was imported with that update.
+
+At code checkpoint `e491a2a8`, the complete frontend suite passes **3,340 tests**, Svelte checks report
+zero errors/warnings and the production build passes. The real Edge flow gate passes all ten checks.
+Root strict all-target/all-feature Clippy, Root/native formatting and the deterministic-dependency
+gate pass. Native compilation including unit-test code passes at `08ca4cd2`, and the updated native
+dependency audit passes. Separate focused backend runs passed 12 durable app tests, eight sync tests
+and four fence-store tests at `05c8905c`; three creator-proof/Sync tests passed after the cache fix
+at `9e976e92`. The typed-core run passed 17 tests before integration, with a separate genuine
+signature-variant regression at `b58fb13d`. These are recorded focused results at their respective
+revisions, not complete backend-suite results or a claim that every test was rerun at `e491a2a8`.
+
+The new native durability/runtime regressions are compiling for execution. Complete Root and native
+test suites, native build/startup and final native lint remain pending. Earlier checkpoint notes
+below describe what had run at those points; this section supersedes their pending frontend and
+review status. The primary owns the backend runs and keeps Rust compilation serialized.
+
+Production historical-authority issuance/archive, typed transport/encryption, migration and live
+dispatch remain absent; legacy R6 remains open. An additional inactive-core design review is
+separating reusable member authority from approval for one exact moderation action. Governance,
+owner succession and offline revocation policy are not established by the current fixture witnesses.
+Voice V2 remains disabled and incomplete. External download resume is outside this continuation.
+
 ## Inactive typed-chat core reviewed (29 October; combined gates pending)
 
 The new replication-only typed action DAG passes17 focused tests, including20/50
