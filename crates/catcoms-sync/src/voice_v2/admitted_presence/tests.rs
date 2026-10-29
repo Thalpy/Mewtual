@@ -17,15 +17,31 @@ type Fixture = (
 async fn fixture() -> Fixture {
     let (_, mut nodes, _) = crate::tests::build_members(2).await;
     crate::tests::converge_and_publish_test_routes(&mut nodes);
+    // Finalization refuses immediately without actual P2P policy. Pairing that
+    // refusal with an idle remote.run_once in join! would wait forever because
+    // there is no request and the deterministic application Clock does not tick.
+    nodes[0]
+        .initialize_group_policy(crate::GroupMode::PeerToPeer)
+        .unwrap();
+    nodes[0].snapshot().unwrap();
+    nodes[0].publish_group_policy().unwrap();
+    let policy = nodes[0].group_policy.as_ref().unwrap().encode();
+    nodes[1].on_group_policy(&policy);
     let mut remote = nodes.pop().unwrap();
     let mut node = nodes.pop().unwrap();
     let clock = Arc::new(ManualClock::new(1000));
     node.clock = clock.clone();
     remote.clock = clock.clone();
-    let (connected, served) = tokio::join!(
-        node.finalize_member_connection(remote.local_peer()),
-        remote.run_once()
-    );
+    assert!(node.policy_allows_member_mesh() && remote.policy_allows_member_mesh());
+    // Only the outer harness watchdog uses the sanctioned real Clock seam.
+    // Protocol freshness, retries and ownership still use ManualClock below.
+    let watchdog = catcoms_rt::SystemClock;
+    let (connected, served) = tokio::select! {
+        result = async { tokio::join!(
+            node.finalize_member_connection(remote.local_peer()), remote.run_once()
+        ) } => result,
+        _ = watchdog.sleep(std::time::Duration::from_secs(30)) => panic!("admitted presence fixture finalization stalled"),
+    };
     assert!(connected.unwrap() && served.unwrap());
     let runtime = Runtime::new(clock.clone());
     let ticket = runtime.session_ticket();
@@ -213,24 +229,32 @@ async fn admitted_presence_actual_root_clear_returns_box_and_watcher_before_resi
 #[test]
 fn admitted_presence_box_watcher_and_result_have_an_independent_growth_guard() {
     use std::mem::size_of;
-    // Pinned Tokio1.53.3 watch::Shared allocation, same accounting convention as
-    // the activation guard. Intrusive waiters live in their independent RPC/Lower.
-    let watch_shared = 64 + 4 * size_of::<usize>() + 9 * size_of::<tokio::sync::Notify>() + 64;
-    let lease_allocation =
-        size_of::<super::super::LeaseState>() + 2 * size_of::<usize>() + watch_shared;
-    let bytes = 2 * size_of::<AdmittedPresence>() // prepared value/Box publication overlap
-        + size_of::<PresenceStorage>() + lease_allocation
-        + Funding::allocation_bytes()
-        + size_of::<AdmittedPresenceReceipt>() + size_of::<Result<AdmittedPresenceReceipt, VoiceError>>()
-        + MAX_PENDING * size_of::<CachedProof>() // fixed prepaid Vec backing, no growth
-        + 2 * size_of::<SignedObject>() // shared response clone/publication overlap
-        + 128;
+    let (bytes, proof) = inventory_bytes();
     eprintln!("admitted Presence prepared/Box/receipt graph {bytes}/{PRESENCE_BYTES}; body {}; receipt {}",
         size_of::<AdmittedPresence>(), size_of::<AdmittedPresenceReceipt>());
     assert!(bytes <= PRESENCE_BYTES);
     // The record's payment is outside its Box; all Vec backing and response
     // overlap belong to the original Presence fee above. No payload Vec here.
-    let proof = size_of::<ProofBody>() + 128;
     eprintln!("admitted proof record {proof}/{RECORD_BYTES}");
     assert!(proof <= RECORD_BYTES);
+}
+
+#[tokio::test]
+async fn admitted_presence_preallocation_guard_refuses_underfunding_without_new_charge() {
+    let (_node, runtime, _clock, _grant, _owner, original, _key, _remote) = fixture().await;
+    let before = runtime.resources().counts();
+    let (presence, proof) = inventory_bytes();
+    assert!(matches!(
+        PresenceStorage::reserve_checked(&original, presence - 1, RECORD_BYTES),
+        Err(VoiceError::Bounds)
+    ));
+    assert!(matches!(
+        PresenceStorage::reserve_checked(&original, PRESENCE_BYTES, proof - 1),
+        Err(VoiceError::Bounds)
+    ));
+    assert_eq!(
+        runtime.resources().counts(),
+        before,
+        "actual production preallocation guard precedes charging/Funding allocation"
+    );
 }

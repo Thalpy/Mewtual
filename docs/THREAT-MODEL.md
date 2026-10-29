@@ -9,8 +9,10 @@ authority. Existing packet factories remain rejecting. Ingress pins original wat
 recipients; replacement cannot adopt stale work. Dedicated admitted Ann/Proof Source
 publication and lower flights check NativeActive independently of `live`, including
 the first negative-store interval. Funding is external to Presence/proof Boxes and
-survives actual deallocation. Compilation, inventories and focused execution remain
-pending; operational agreement/consume/Ready/RTC/relay are separate gates. See
+survives actual deallocation. The first focused run passed five behavior cases and
+measured the full8264-byte graph; corrected9KiB funding, preallocation checks and
+fixture execution remain pending rerun. Operational agreement/consume/Ready/RTC/relay
+are separate gates. See
 [the scoped contract](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
 
 ## Normal terminal mailbox custody (29 October; focused checks pass)
