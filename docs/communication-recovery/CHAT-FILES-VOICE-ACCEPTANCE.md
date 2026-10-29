@@ -1,8 +1,30 @@
 # Chat, files and voice implementation evidence
 
+## Exact individual-media request fence (29 October; inactive)
+
+Integrated runtime `359a2eb0` adds an exact peer/driver/registry fence before positive
+native media fetches and after the existing framing callbacks/awaits. All six actual
+retained-channel queued/encrypt barriers fail before the fix and pass afterward.
+The IPC/media/status subset passes 453 tests; the final nonce/HMR subset passes 7/7,
+and strict shipped-source TypeScript passes. Broker ABI51 refuses older retained brokers
+without replacing their original ledger or blocking cleanup. The logical media graph is
+7,728/6,272/6,976/6,080 bytes by stage, each below its original 8 KiB fee. See
+[the scoped ownership, review and evidence](VOICE-MEDIA-PEER-FENCE.md).
+
+Native fixture/lint correction `a99e4c23` has independent read-only review and passing
+native history scenarios (75.00s/45.80s), concrete layouts and strict native Clippy.
+Strict Root Clippy, Root formatting and ambient checks also pass. Root inputs remain
+unchanged from the complete 4,007-test pass. Complete integrated native/frontend and
+final build/startup gates are running; the earlier unclassified native media refusal
+is still open. No deadline, security limit or protocol allowance changed.
+
+The separate operational-call and admitted-codec drafts are not integrated or accepted.
+V2 stays OFF; operational Ready/SDP/RTC/audio, member relay and combined/physical acceptance
+remain incomplete. A second physical desktop is not available.
+
 ## Native row reservation and browser memory policy (28 October; inactive draft)
 
-The current runtime checkpoint is `ca7ad276` on `communication-v2-native-admission`
+The reservation/memory runtime checkpoint is `ca7ad276` on `communication-v2-native-admission`
 (draft PR81). It integrates browser policy `cb7ecd0b`, exact reservation diagnostics
 `71453ca5`, actual native parent-row claims `91f06da3`, the stable-registration Cancel
 correction `262624bd` and the separate negative-close fixture correction `ca7ad276`.
@@ -84,8 +106,9 @@ annotation nor the hosted native pass resolves the Windows media-refusal origin.
 
 A separate review finding concerns individual-peer Close while positive media work is
 queued or encrypting: the shared Session can remain live until that work first fetches.
-An isolated exact-peer fence/regression leaf is in progress. No audio resurrection was
-demonstrated, and this checkpoint does not claim that boundary corrected or V2 activated.
+The isolated exact-peer fence/regression leaf is integrated in the later section above.
+No audio resurrection was demonstrated; this older checkpoint did not correct that
+boundary or activate V2.
 
 Hosted head `153c573f` has a separate frontend failure: 3,647 pass and one existing
 confirmation pressure test still assumes a fixed 256 KiB default. Its test-only correction

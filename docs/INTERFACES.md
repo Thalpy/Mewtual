@@ -1,11 +1,22 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Exact media request closure (29 October; inactive)
+
+Positive native media requests carry a private exact-peer/driver snapshot into the
+existing physical framing checks. It is not renderer/native wire input or new authority.
+Individual Close fences queued or encrypting requests before first fetch, while original
+Close/Release/history recovery and indexed siblings retain their existing routes.
+Retained broker ABI51 refuses ABI50 and earlier without publishing a second pool or
+waking incompatible work; original cleanup remains callable. Public method signatures,
+native command/wire formats, deadlines and caps are unchanged. See
+[the scoped contract and tests](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
+
 ## Local V2 budget and native parent claim (28 October; inactive)
 
 `voiceBrowserBudget(groupKiB)` accepts safe integer KiB values from 256 through 1024.
 The default is 512 KiB/group; the aggregate stays 2 MiB and an individual generic job
 stays at most 256 KiB. Copy caller fields once into the original immutable ledger policy
-before work allocation. `windowVoiceCryptoBroker` ABI50 refuses older brokers or a changed
+before work allocation. `windowVoiceCryptoBroker` ABI51 refuses older brokers or a changed
 requested policy without replacing the original ledger. Original cleanup remains callable.
 No settings UI/persistence or live resizing is provided. Peer/server metadata is not a
 source for this local policy. `nativeConfiguredAdmissionAppCalls` selects admission mode

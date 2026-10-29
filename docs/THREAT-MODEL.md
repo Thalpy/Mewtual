@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Individual media Close before first native fetch (29 October; inactive)
+
+A live shared Session is not currentness for each retained peer. Positive media requests
+snapshot the exact paid peer/driver before queueing; existing framing checks repeat that
+registry/negative-state fence after reentrant owner callbacks and asynchronous boundaries,
+including immediately before first fetch. Individual Close does not abort a sibling's
+controller. Queued refusal spends no nonce; encryption already entered retains its spent
+counter. Original negative recovery joins uncertain work and remains available after Close.
+No native permission, retry grant, security limit or deadline changes. Broker ABI51 requires
+reload for older classes while preserving their original ledger/cleanup; an HMR module
+must not silently reuse the unfenced implementation. See
+[the scoped evidence and remaining limits](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
+This is an inactive handoff correction, not proof of operational V2 or audible media.
+
 ## Native row reservation and local browser policy (28 October; inactive)
 
 The actual native parent claim adds no protocol permission. It binds one existing ledger

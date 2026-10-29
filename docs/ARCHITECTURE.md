@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Individual media request fence (29 October; inactive)
+
+Retained broker ABI51 binds each positive media request to its actual peer, driver and
+registry allocation before queueing. Framing repeats that exact negative-state check
+after owner callbacks, after SDK/transport awaits and before first fetch. Indexed media
+does not depend on the current negotiation generation. Individual Close leaves siblings
+and the shared controller usable; original negative recovery remains available.
+One fixed snapshot and its queued/frame/check references are included in the independently
+paid 8 KiB media inventory. See [the measured graph and tests](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
+Older brokers require reload without replacing their ledger or erasing cleanup debt.
+This does not enable V2 or complete operational admission, audio or relay.
+
 ## V2 reservation and browser budget continuation (28 October; inactive)
 
 Native capacity now includes a real inert parent-row reservation retained by the original

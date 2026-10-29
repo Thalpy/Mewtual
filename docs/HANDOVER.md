@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Individual media closure (29 October; inactive, final gates pending)
+
+`359a2eb0` integrates the reviewed exact-peer native-request fence. Queued or encrypting
+Admit/Current/Detach cannot first-fetch after that peer closes. Indexed siblings retain
+their original Session and Current; negative cleanup retains its original route. Broker
+ABI51 refuses older retained brokers without replacing their ledger or disturbing cleanup.
+The six barriers failed before the fix and now pass; the IPC/media/status subset passes
+453 tests, and strict shipped-source TypeScript passes. The updated logical media graph
+fits its original 8 KiB fee. See [the ownership and evidence note](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
+
+`a99e4c23` separately corrects exact historical observation under real Index contention,
+documents the measured inline admission outcome for Clippy, and adds bounded native media
+refusal enums. Strict Root/native Clippy, Root formatting, ambient checks and focused
+native history scenarios pass. The prior complete Root 4,007-test result applies to
+unchanged Root inputs. Complete native/frontend validation and final build/startup are
+being repeated for this integrated checkpoint. The earlier intermittent native media
+refusal remains unclassified; no timeout or security limit was increased.
+
+The operational call-profile/receiver-retirement work and admitted wire codec in separate
+worktrees remain unintegrated drafts. In particular, the former still needs the reviewed
+send-versus-receiver-retirement fence before its channel ownership cycle is resolved.
+V2 remains OFF. Operational bilateral admission/Ready/SDP/RTC/audio, member relay and
+combined/physical acceptance are still incomplete. Only one physical desktop is available.
+
 ## V2 reservation and memory integration (28 October; integrated gates pending)
 
 The parallel continuation integrates browser budget policy `cb7ecd0b`, exact native SDP
@@ -80,11 +104,11 @@ inline: the concrete enum and preparation graph are already measured and runtime
 against the original 8 KiB fee; boxing would introduce another allocation/custody path.
 Local strict native Clippy passes. The hosted pass does not explain the Windows failure.
 
-Review also identifies a separate per-peer positive-fetch fence gap: an individual media
+Review also identified a separate per-peer positive-fetch fence gap: an individual media
 Close can precede the first fetch of an already queued Admit/Detach while its shared
 Session remains live. Cleanup prevents demonstrated audio resurrection. A separate
-inactive correction and deterministic queued/encrypt barriers are in progress before
-activation; this diagnostic/fixture correction does not claim to fix that boundary.
+inactive correction and deterministic queued/encrypt barriers are integrated above;
+this diagnostic/fixture correction itself does not fix that boundary.
 
 The first hosted run of this integration (`153c573f`) stops in frontend testing:
 3,647 pass and one older confirmation pressure test assumes a fixed 256 KiB default.
