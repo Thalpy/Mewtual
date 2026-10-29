@@ -71,6 +71,7 @@ use member_finalization::KIND_MEMBER_FINALIZE;
 pub use member_finalization::{
     MAX_MEMBER_FINALIZATION_OBSERVATIONS, MEMBER_FINALIZATION_WORK_PER_PASS,
 };
+pub mod chat_scope;
 pub mod checkpoint_exchange;
 pub mod durable_chat;
 pub mod epoch_service;
@@ -1887,6 +1888,8 @@ pub struct RoutingState {
     /// Transient lifecycle state consumed while waiting for a staged Welcome. Never encoded,
     /// sealed, persisted, or sent on the wire; `new_joined` drains it exactly once.
     connection_handoff: PreOwnerConnectionHandoff,
+    /// Minted only by the live exact-KP completion path; never part of routing wire/storage.
+    fresh_chat_admission: Option<chat_scope::VerifiedFreshChatAdmission>,
 }
 
 impl std::fmt::Debug for RoutingState {
@@ -1941,6 +1944,7 @@ fn open_routing_transfer(
         file_wrap_key: Some(file_wrap_key),
         policy,
         connection_handoff: PreOwnerConnectionHandoff::default(),
+        fresh_chat_admission: None,
     })
 }
 
@@ -4320,6 +4324,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     // topic before calculating the next routing diff; never lose unsubscribe ownership.
     routing_subscription_pending: Option<Topic>,
     group: ServerGroup,
+    /// Actual constructor/join provenance, not inferred from restored MLS epoch/roster labels.
+    fresh_chat_admission: Option<chat_scope::VerifiedFreshChatAdmission>,
     /// Saved with this exact MLS group; never inferred from a received receipt or Welcome.
     owner_tenure: owner_tenure::OwnerTenure,
     group_policy: Option<GroupPolicy>,
@@ -4790,6 +4796,34 @@ impl DialOutcomeTally {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Actually create the group before minting fresh local provenance. `new` and `restore`
+    /// cannot infer this event from an epoch-zero state or a current roster label.
+    pub fn found(
+        transport: T,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+    ) -> Result<Self, SyncError> {
+        let group = ServerGroup::create(&device)?;
+        let evidence =
+            chat_scope::VerifiedFreshChatAdmission::from_fresh_creation(&group, &device)?;
+        let mut node = Self::new(transport, group, device, rng, clock);
+        node.fresh_chat_admission = Some(evidence);
+        Ok(node)
+    }
+
+    /// Inspect actual fresh provenance without consuming the local admission owner's token.
+    /// This is local completion evidence, never an owner-certified historical Add proof.
+    pub fn fresh_chat_admission(&self) -> Option<&chat_scope::VerifiedFreshChatAdmission> {
+        self.fresh_chat_admission.as_ref()
+    }
+
+    /// Move the original nonserialized completion exactly once to its native admission owner.
+    /// The caller must retain its pre-await vault/lineage capture; this token alone cannot renew it.
+    pub fn take_fresh_chat_admission(&mut self) -> Option<chat_scope::VerifiedFreshChatAdmission> {
+        self.fresh_chat_admission.take()
+    }
+
     /// Build a synchronizer over `transport` for this member's `group`/`device`.
     /// `clock` is used to check invite expiry when serving join requests.
     pub fn new(
@@ -4836,6 +4870,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             group_policy_publish_ready: false,
             group_policy_last_topic: None,
             group,
+            fresh_chat_admission: None,
             device,
             rng,
             clock: clock.clone(),
@@ -5240,6 +5275,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             file_wrap_key: None,
             policy,
             connection_handoff: PreOwnerConnectionHandoff::default(),
+            fresh_chat_admission: None,
         });
         this.group_policy_publish_ready = this.group_policy.is_some();
         this.file_wrap_key = Zeroizing::new(file_wrap_key);
@@ -5687,7 +5723,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         mut routing: RoutingState,
     ) -> Self {
         let connection_handoff = std::mem::take(&mut routing.connection_handoff);
+        // RoutingState is a public transport container and can be paired with another raw
+        // group/device. Retain fresh provenance only for its original exact MLS handoff.
+        let fresh_chat_admission = routing
+            .fresh_chat_admission
+            .take()
+            .filter(|proof| proof.matches_initial_state(&group, &device));
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.fresh_chat_admission = fresh_chat_admission;
         // `joined`, not `unknown`. A device that joins into a recycled low leaf becomes the
         // designated committer, and with `unknown` it could never issue a receipt while every witness
         // knew the answer. The inference is about current continuous membership: a tenure is an
@@ -16156,7 +16199,7 @@ fn finish_join(
     // We are now at the post-join epoch the inviter sealed the routing state under,
     // so we can open it and adopt the group's routing label/secrets. A present but
     // unopenable transfer (signature already verified) is a hard error.
-    let routing = open_routing_transfer(&group, device, sealed_routing)?;
+    let mut routing = open_routing_transfer(&group, device, sealed_routing)?;
     match (&invite.policy, &routing.policy) {
         (None, None) => {}
         (Some(expected), Some(actual)) if expected.digest() == actual.digest() => {
@@ -16167,6 +16210,14 @@ fn finish_join(
         _ => return Err(SyncError::JoinRejected),
     }
     tracing::info!(epoch = group.epoch(), "joined server via invite");
+    routing.fresh_chat_admission = Some(
+        chat_scope::VerifiedFreshChatAdmission::from_verified_welcome(
+            &group,
+            device,
+            *expected_key_package,
+            welcome,
+        )?,
+    );
     Ok((group, routing))
 }
 
@@ -16332,8 +16383,16 @@ fn finish_device_join(
         tracing::warn!("the certifying origin is not a member of the joined group");
         return Err(SyncError::JoinRejected);
     }
-    let routing = open_routing_transfer(&group, device, sealed_routing)?;
+    let mut routing = open_routing_transfer(&group, device, sealed_routing)?;
     tracing::info!(epoch = group.epoch(), "joined server as a companion device");
+    routing.fresh_chat_admission = Some(
+        chat_scope::VerifiedFreshChatAdmission::from_verified_welcome(
+            &group,
+            device,
+            *expected_key_package,
+            welcome,
+        )?,
+    );
     Ok((group, routing))
 }
 
@@ -17979,6 +18038,7 @@ mod tests {
             file_wrap_key: Some(founder_key),
             policy: None,
             connection_handoff: PreOwnerConnectionHandoff::default(),
+            fresh_chat_admission: None,
         });
         assert_eq!(
             joiner.open_file(&stored, &fref).unwrap(),

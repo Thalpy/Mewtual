@@ -3731,8 +3731,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         display_name: impl Into<String>,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
-        let group = ServerGroup::create(&device)?;
-        let mut sync = ChannelSync::new(transport, group, device, rng, clock);
+        let mut sync = ChannelSync::found(transport, device, rng, clock)?;
         sync.initialize_new_group_policy()?;
         Ok(Self {
             sync,
