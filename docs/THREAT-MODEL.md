@@ -1,5 +1,18 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Normal terminal mailbox custody (29 October; focused checks pass)
+
+Closing/dropping a Tokio bounded Receiver does not invalidate an already-held Permit's
+unconditional send. With another Sender alive, dropping the Receiver can strand that late
+command and its original Work/payment after task return. Normal terminal cleanup retains
+the closed Receiver through event delivery, then negatively drains until `recv` returns
+None, which joins pre-close permits. Root retirement stays before the event wait; late
+commands are destroyed outside guards and never dispatched. Stop ACK/Closed are not actual
+return certificates. Event backpressure or a stuck trusted producer can still delay task
+retirement; no timeout refunds custody. Explicit task abort, unwind and panic-derived early
+returns remain outside this normal-completion fix. See
+[the scope and regressions](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
 ## Individual media Close before first native fetch (29 October; inactive)
 
 A live shared Session is not currentness for each retained peer. Positive media requests

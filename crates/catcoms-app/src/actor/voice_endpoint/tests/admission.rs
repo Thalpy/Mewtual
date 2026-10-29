@@ -63,6 +63,7 @@ struct Publisher {
     completed: bool,
     panic_after_entry: bool,
     reject_accept: bool,
+    accepted_pause: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     returned: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     refused_while_paid: Option<(
         Arc<catcoms_sync::voice_v2::resources::Resources>,
@@ -77,6 +78,7 @@ impl Publisher {
             completed: false,
             panic_after_entry: false,
             reject_accept: false,
+            accepted_pause: None,
             returned: None,
             refused_while_paid: None,
         })
@@ -92,9 +94,17 @@ impl Drop for Publisher {
 }
 impl VoiceAdmissionPublisher for Publisher {
     fn accepted(&mut self, work: VoiceAdmissionWork) -> Result<(), VoiceEndpointError> {
-        let mut slot = self.sink.slot.lock().unwrap();
-        assert!(slot.accepted.is_none());
-        slot.accepted = Some(work);
+        {
+            let mut slot = self.sink.slot.lock().unwrap();
+            assert!(slot.accepted.is_none());
+            slot.accepted = Some(work);
+        }
+        if let Some((entered, resume)) = self.accepted_pause.take() {
+            // The fixture runs on a detached producer thread, outside the Actor
+            // runtime and Sink guard. Dropping its sender releases even on panic.
+            let _ = entered.send(());
+            let _ = resume.recv();
+        }
         if self.reject_accept {
             Err(VoiceEndpointError::Protocol(VoiceError::Capacity))
         } else {
@@ -479,6 +489,184 @@ async fn staged_root_outcome_does_not_retire_while_the_actual_publisher_callback
     assert!(matches!(joined, Ok(Ok(()))) && matches!(drained, Ok(Ok(()))));
     assert!(!retired_while_held, "staging is not actual callback return");
     assert!(staged_while_held);
+}
+
+/// Pause the REAL producer after its mailbox permit and SAME Work were accepted,
+/// before Permit::send. The ordinary Actor handle survives independently below.
+struct PausedAdmission {
+    sink: Arc<Sink>,
+    entered: oneshot::Receiver<()>,
+    // This original sender is also the RAII failure release. No thread join or
+    // ambient sleep may block runtime teardown when a regression assertion fails.
+    release: std::sync::mpsc::Sender<()>,
+    queued: oneshot::Receiver<Result<VoiceAdmissionWork, VoiceEndpointError>>,
+}
+fn pause_admission_producer(
+    actor: &ServerActor,
+    runtime: &Arc<Runtime>,
+    grant: &Arc<CallGrant>,
+) -> PausedAdmission {
+    let sink = Arc::new(Sink::default());
+    let (entered, accepted) = oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let (returned, queued) = oneshot::channel();
+    let payment = AdmissionRpcPermit::reserve(&runtime.resources(), grant.scope()).unwrap();
+    let mut publisher = Publisher::new(&sink);
+    publisher.accepted_pause = Some((entered, resume));
+    let producer = actor.clone();
+    let grant = grant.clone();
+    // Explicitly detached: the oneshot joins actual queue return asynchronously.
+    drop(std::thread::spawn(move || {
+        let result = producer.try_queue_voice_admission(grant, None, 1, payment, publisher);
+        let _ = returned.send(result);
+    }));
+    PausedAdmission {
+        sink,
+        entered: accepted,
+        release,
+        queued,
+    }
+}
+
+async fn receive_closed(events: &mut mpsc::Receiver<TracedEvent>) -> bool {
+    while let Some(event) = events.recv().await {
+        if matches!(event.event, AppEvent::Closed) {
+            return true;
+        }
+    }
+    false
+}
+
+fn assert_stopped_admission(sink: &Sink, work: &VoiceAdmissionWork) {
+    assert!(
+        work.is_retired(),
+        "normal Actor task return joins actual command destruction"
+    );
+    let slot = sink.slot.lock().unwrap();
+    assert!(slot.accepted.as_ref().unwrap().is_same(work));
+    assert_eq!(slot.unstarted, Some(VoiceEndpointError::Stopped));
+    assert!(
+        slot.staged.is_none() && !slot.uncertain,
+        "negative drainage never enters Root"
+    );
+}
+
+#[tokio::test]
+async fn normal_stop_drains_a_late_accepted_permit_while_the_ordinary_actor_survives() {
+    let (actor, mut events, task, runtime, grant) = start().await;
+    actor
+        .start_voice_endpoint(grant.clone(), [81; 32], point())
+        .await
+        .unwrap();
+    let parked = park(&actor).await;
+    let paused = pause_admission_producer(&actor, &runtime, &grant);
+    bounded(paused.entered).await.unwrap().unwrap();
+    let work = paused
+        .sink
+        .slot
+        .lock()
+        .unwrap()
+        .accepted
+        .as_ref()
+        .unwrap()
+        .clone();
+    saturate_events(&actor, &mut events);
+    let mut stopping = Box::pin(actor.stop_and_wait());
+    poll_fn(|cx| {
+        assert!(stopping.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(parked);
+    bounded(stopping).await.unwrap().unwrap();
+    assert!(
+        !grant.lease().is_live(),
+        "Root retires before Stop ACK and Closed"
+    );
+    assert!(!task.is_finished(), "the actual full sink blocks Closed");
+    drop(paused.release);
+    let returned = bounded(paused.queued).await.unwrap().unwrap().unwrap();
+    assert!(
+        returned.is_same(&work),
+        "the pre-close permit publishes the original Work"
+    );
+    assert!(
+        !work.is_retired(),
+        "Closed backpressure still owns the queued command"
+    );
+    assert!(bounded(receive_closed(&mut events)).await.unwrap());
+    let mut task = task;
+    bounded(&mut task).await.unwrap().unwrap();
+    assert!(
+        actor.cmd_tx.tx.is_closed(),
+        "the ordinary Sender remains alive and closed"
+    );
+    assert_stopped_admission(&paused.sink, &work);
+    let resources = runtime.resources();
+    let held = resources.counts();
+    drop(returned);
+    drop(paused.sink.take_accepted());
+    assert_eq!(
+        resources.counts(),
+        held,
+        "the original Work observer still pays"
+    );
+    drop(work);
+    assert_eq!(resources.counts().0, held.0 - ADMISSION_RPC_BYTES);
+}
+
+#[tokio::test]
+async fn normal_stop_task_waits_after_closed_for_the_original_accepted_permit_to_return() {
+    let (actor, mut events, mut task, runtime, grant) = start().await;
+    actor
+        .start_voice_endpoint(grant.clone(), [81; 32], point())
+        .await
+        .unwrap();
+    let parked = park(&actor).await;
+    let paused = pause_admission_producer(&actor, &runtime, &grant);
+    bounded(paused.entered).await.unwrap().unwrap();
+    let work = paused
+        .sink
+        .slot
+        .lock()
+        .unwrap()
+        .accepted
+        .as_ref()
+        .unwrap()
+        .clone();
+    saturate_events(&actor, &mut events);
+    let mut stopping = Box::pin(actor.stop_and_wait());
+    poll_fn(|cx| {
+        assert!(stopping.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(parked);
+    bounded(stopping).await.unwrap().unwrap();
+    assert!(bounded(receive_closed(&mut events)).await.unwrap());
+    // Await the ACTUAL task with a Clock-seam watchdog while the producer is held.
+    // An immediate Pending poll could miss old code returning on its next turn.
+    let held_join = bounded(&mut task).await;
+    let stayed_pending = held_join.is_err();
+    let retired_while_held = work.is_retired();
+    drop(paused.release);
+    let returned = bounded(paused.queued).await.unwrap().unwrap().unwrap();
+    let joined = match held_join {
+        Ok(result) => Ok(result),
+        Err(_) => bounded(&mut task).await,
+    };
+    joined.unwrap().unwrap();
+    assert!(
+        stayed_pending,
+        "Closed is not actual pre-close permit return"
+    );
+    assert!(!retired_while_held);
+    assert!(
+        actor.cmd_tx.tx.is_closed(),
+        "no last-Sender drop is needed for drainage"
+    );
+    assert!(returned.is_same(&work));
+    assert_stopped_admission(&paused.sink, &work);
 }
 
 /// Harness failure bound only. Protocol state continues to use ManualClock.

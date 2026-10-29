@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Normal Actor stop versus command return (29 October; focused checks pass)
+
+`ServerActor::stop_and_wait` acknowledges terminal first-effects closure. `AppEvent::Closed`
+also does not certify mailbox, callback or task return. Normal Actor task completion joins
+the SAME closed mailbox's outstanding pre-close permits and drops late commands through
+their existing negative destructors, even while ordinary handles remain alive. No command
+is applied during this final drain. No API/wire/payment limit changes. Abort/panic cleanup
+does not gain that join guarantee; see [the custody note](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
 ## Exact media request closure (29 October; inactive)
 
 Positive native media requests carry a private exact-peer/driver snapshot into the

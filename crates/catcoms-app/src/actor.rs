@@ -1626,7 +1626,9 @@ pub enum AppEvent {
         from_fp: String,
         payload: Vec<u8>,
     },
-    /// The actor has stopped (transport closed or shutdown requested).
+    /// Terminal effects are fenced (transport closed or shutdown requested).
+    /// Delivery is not proof that pre-close command permits, callbacks or the Actor
+    /// task have actually returned; normal task completion separately joins them.
     Closed,
 }
 
@@ -4380,6 +4382,9 @@ impl ServerActor {
     /// Dropping a queued request cancels it. Once the handler observes a live waiter, stopping
     /// is irreversible even if the ACK is lost during teardown. A timed-out caller must keep
     /// local state and may retry this idempotent operation; a closed mailbox is safely stopped.
+    /// This ACK certifies first-effects closure, not command/callback/task return. Normal
+    /// Actor task completion separately joins every pre-close mailbox permit; an ordinary
+    /// handle may remain alive through that negative-only drainage.
     pub async fn stop_and_wait(&self) -> Result<(), String> {
         let (stopped, result) = oneshot::channel();
         if self
@@ -6301,7 +6306,8 @@ where
                         if crate::shutdown::save_and_freeze(&mut server, ready).await {
                             cmd_rx.close_activation();
                             server.sync.retire_voice_actor();
-                            drop(cmd_rx);
+                            cmd_rx.close();
+                            while let Ok(command) = cmd_rx.try_recv() { drop(command); }
                             let _ = event_tx.send(AppEvent::Closed).await;
                             break;
                         }
@@ -6313,14 +6319,13 @@ where
                             file_transfers.retire();
                             server.sync.retire_voice_actor();
                             // Wake waiting producers and reject/drop already queued replies
-                            // before ACK. Drop the receiver itself below before the event await,
-                            // including permits acquired by a producer before close.
+                            // before ACK. Keep THIS closed receiver through Closed delivery:
+                            // a pre-close Permit may still send after the event await begins.
                             cmd_rx.close();
                             while let Ok(command) = cmd_rx.try_recv() {
                                 drop(command);
                             }
                         }) {
-                            drop(cmd_rx);
                             let _ = event_tx.send(AppEvent::Closed).await;
                             break;
                         }
@@ -6329,7 +6334,8 @@ where
                         cmd_rx.close_activation();
                         file_transfers.retire();
                         server.sync.retire_voice_actor();
-                        drop(cmd_rx);
+                        cmd_rx.close();
+                        while let Ok(command) = cmd_rx.try_recv() { drop(command); }
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
@@ -6631,13 +6637,23 @@ where
                         cmd_rx.close_activation();
                         file_transfers.retire();
                         server.sync.retire_voice_actor();
-                        drop(cmd_rx);
+                        cmd_rx.close();
+                        while let Ok(command) = cmd_rx.try_recv() { drop(command); }
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
                 } },
             }
         }
+        // Tokio Permit::send may publish after close, even after Receiver drop. Dropping
+        // this receiver first can therefore strand a late command while an ordinary
+        // Sender survives. A CLOSED recv returns None only after all pre-close permits
+        // send or return; no final Sender drop is needed. Never dispatch here: original
+        // file/Root fences are already retired, and ordered refusal/argument destruction
+        // must run outside every native/Group/Policy guard before normal task completion.
+        // Explicit abort/unwind and the panic-derived early returns above cannot execute
+        // this asynchronous continuation and remain a separate inherited limitation.
+        while let Some(command) = cmd_rx.recv().await { drop(command); }
     });
     (
         ServerActor {

@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Normal Actor mailbox retirement (29 October; focused checks pass)
+
+Normal terminal paths close and synchronously discard queued commands before awaiting
+`Closed`, retaining the SAME Receiver. After event delivery, a negative-only receive drain
+joins outstanding pre-close mailbox permits before the Actor task returns. Ordinary Sender
+handles need not disappear; no drained command is dispatched. Original file/Root retirement
+still precedes event backpressure, and Stop ACK remains first-effects closure. Abort, unwind
+and panic-derived early returns are separate inherited limitations. See
+[the scoped custody note](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
 ## Individual media request fence (29 October; inactive)
 
 Retained broker ABI51 binds each positive media request to its actual peer, driver and

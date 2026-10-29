@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Normal Actor mailbox retirement (29 October; focused checks pass)
+
+This separate leaf closes an inherited reserve-to-send custody gap. Normal terminal
+paths retain the SAME closed Receiver through `Closed` delivery, then negatively drain
+pre-close permits before Actor task return. Ordinary Actor handles remain alive; command
+destructors produce existing refusal/retirement without Root dispatch. Original Root/file
+retirement remains before event backpressure. Stop ACK is still first-effects closure.
+Abort/panic-derived exits remain an explicit inherited limitation. The scoped
+[custody note](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md) records the boundary.
+Both actual admission-publisher regressions failed against unchanged production `actor.rs`:
+Work remained unretired after task return, and the task returned while a pre-close permit
+was still held. After the fix the focused voice-endpoint module passes35/35, including
+existing stop/freeze/cancellation/panic and payment guards. Scoped formatting and strict
+all-target/all-feature App Clippy pass. Read-only design and actual-diff reviews have no remaining
+findings. Primary owns complete integration suites; no full-suite result is claimed here.
+
 ## Individual media closure (29 October; inactive, complete suites pass)
 
 `359a2eb0` integrates the reviewed exact-peer native-request fence. Queued or encrypting
