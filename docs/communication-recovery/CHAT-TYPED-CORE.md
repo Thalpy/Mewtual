@@ -35,7 +35,7 @@ they never retarget a legacy ID or another row with matching text.
 bound to realm, basis, grant, full subject key, rights and selected causal-basis
 coverage. There is **no production constructor or decoding path** for it. Wire
 and snapshot decoding cannot turn a signature, label or stored `verified` bit
-into permission. The sole unit-fixture constructor verifies real grant and
+into permission. Its unit-fixture constructor verifies real grant and
 coverage signatures under an explicitly pinned fixture issuer.
 
 Self-edit/delete compares the full Create signer key. A rejoined device with the

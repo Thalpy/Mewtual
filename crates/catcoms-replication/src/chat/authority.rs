@@ -8,6 +8,8 @@ impl Rights {
     pub const CREATE: Self = Self(1);
     pub const SELF_EDIT: Self = Self(2);
     pub const SELF_DELETE: Self = Self(4);
+    /// Legacy reusable bit: it preserves own-Create deletion for the original full signer.
+    /// Cross-author deletion additionally needs ordinary SELF_DELETE and an exact approval.
     pub const DELETE_ANY: Self = Self(8);
     pub const JOIN: Self = Self(16);
     pub const MEMBER: Self = Self(1 | 2 | 4 | 16);
@@ -182,7 +184,7 @@ pub(super) fn fixture_delete_approval_bytes(
     Ok(e.finish())
 }
 
-/// The ONLY witness creation seam in this checkpoint is compiled for unit fixtures.
+/// The ordinary-authority creation seam is compiled only for unit fixtures.
 /// It verifies two genuine signatures under an explicitly pinned fixture issuer: a
 /// scope/subject/rights grant and this exact basis's selected causal coverage statement.
 /// It does not purport to implement production MLS/owner/governance verification.
