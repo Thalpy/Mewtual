@@ -868,6 +868,7 @@ async fn admitted_session_drop_inflight_is_not_collection_and_cannot_be_reaped_b
         let _ = done.send(result);
     }));
     bounded(at_drop).await.unwrap();
+    assert!(f.state.voice_channels.reaper_busy.load(Ordering::Acquire));
     drop(output);
     // The last raw strong count is now0 INSIDE the actual Session destructor.
     // The independent in-flight owner/marker, not weak absence, keeps this Row.
@@ -889,6 +890,7 @@ async fn admitted_session_drop_inflight_is_not_collection_and_cannot_be_reaped_b
     );
     drop(release); // RAII also unblocks the producer if either assertion unwinds
     bounded(finished).await.unwrap().unwrap();
+    assert!(!f.state.voice_channels.reaper_busy.load(Ordering::Acquire));
     assert!(!f
         .state
         .voice_channels
