@@ -59,7 +59,6 @@ impl Funding {
             super::admitted_presence::PRESENCE_BYTES,
         )
     }
-    #[cfg(test)]
     pub(super) const fn allocation_bytes() -> usize {
         std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()
     }

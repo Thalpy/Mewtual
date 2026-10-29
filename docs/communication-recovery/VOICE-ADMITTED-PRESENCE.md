@@ -1,7 +1,9 @@
 # Admitted key publication and shared discovery
 
-This isolated Root slice is inactive. Its implementation and focused regressions are
-drafted; Rust compilation, execution, measured inventories and strict lint are pending.
+This isolated Root slice is inactive. The first primary-owned focused run compiled:
+five behavior cases passed, its full Windows growth-guard test failed at8264/8192,
+and three internal fixture cases stalled before handshake completion. The corrections
+below remain unrun; complete focused execution and strict lint are pending.
 Production V2 remains OFF. A successful key publication is not agreement, Ready, SDP,
 ICE, RTC, capture consent or relay permission.
 
@@ -46,14 +48,17 @@ publication and lower FlightAuthority check the SAME admitted lease's NativeActi
 phase as well as its live bit, covering invalidate's CLOSED-before-live=false interval.
 Current Actor/member/room/policy and existing origin/rate/attempt fences still apply.
 
-Presence reserves an explicit8KiB within unchanged512KiB/group and2MiB/process limits.
+Presence reserves an explicit9KiB/9216 bytes within unchanged512KiB/group and2MiB/process limits.
 Its plain Credit stays outside the Box through actual deallocation and includes the
 fixed32-slot proof-cache Vec backing, watcher lease allocation and response/receipt
 overlap. Each proof reserves the existing1536-byte fee before its Box allocation and
 keeps that plain Credit outside its Box through deallocation. Cache hits preserve the
 same signed result/deadline and do not charge another record. Existing Watcher caches
 retain their existing independent fees/caps. New compiled growth guards must pass;
-the source formulas alone are not execution evidence or allocator/RSS bounds.
+the source formulas alone are not execution evidence or allocator/RSS bounds. The
+complete measured8264-byte graph is preserved; the original8KiB guard failed rather
+than silently cutting inventory. A production preallocation fence now checks that
+same complete graph and proof record BEFORE charging or allocating Funding/owners.
 
 Draft regressions cover pre-NativeActive/foreign-Root/counterfeit-grant refusal, immutable
 first tuple and exact retry, old constructor fences, actual shared discovery Source and
@@ -64,8 +69,14 @@ after real route establishment; it does not claim live forwarding or audio.
 
 Read-only design and actual-diff review found and resolved wrong-room recipient
 selection, bare peer-vector output and watcher-child payer-tail issues. The final
-static re-review has no remaining findings. Nine drafted tests and all compiled
-measurements/lint remain unrun; narrow rustfmt and diff whitespace checks pass.
+static re-review had no remaining findings. The initial focused run then exposed
+the fee shortfall and a test-fixture defect: without actual PeerToPeer policy,
+`finalize_member_connection` immediately returns false, while a paired idle
+`remote.run_once` waits forever under ManualClock. The fixture now establishes and
+distributes the real P2P policy, checks eligibility before joining, and has a sanctioned
+Clock watchdog outside protocol time. A tenth test pins preallocation refusal before
+new charges. The corrected focused filter/inventory and lint remain unrun; narrow
+rustfmt and diff whitespace checks pass. No runtime behavioral assertion was relaxed.
 
 A separate UNRUN follow-up exposes pure `ActivationObserver::uses_resources` pointer
 identity for native foreign-pool preflight before index/generation charges. It is

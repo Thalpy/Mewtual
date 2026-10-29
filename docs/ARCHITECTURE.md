@@ -8,7 +8,9 @@ confirmation/action queue. Its implicit watcher stays under that SAME residence;
 external plain payments survive Presence/proof Box deallocation. Shared tags1–3 and
 FreshPeer remain profile-neutral. Only the opaque new discovery Source entry admits
 admitted Announcement/Proof; final publication and flights require NativeActive.
-Compilation/inventory/runtime evidence is pending for this isolated draft. See
+First focused compilation passed five behavior cases, while the full8264-byte
+inventory growth-guard test failed against its initial8KiB fee. The explicit9KiB correction preserves that
+graph and adds a preallocation fence; corrected fixture/tests remain pending. See
 [the contract and unfinished operational gates](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
 V2 remains OFF.
 

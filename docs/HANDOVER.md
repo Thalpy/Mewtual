@@ -1,15 +1,19 @@
 # Mewtual; Handover
 
-## Admitted Root presence draft (29 October; unrun)
+## Admitted Root presence draft (29 October; corrections pending rerun)
 
 The isolated admitted-presence leaf adds a dedicated Root discovery owner under the
 same selected NativeActive residence, exact immutable native join/key publication,
 opaque historical receipt and separately sealed Ann/Proof Source intake. Existing
 LocalJoin/packet factories and shared discovery bytes remain unchanged; FreshPeer
 never implies profile support. Funding stays outside Presence/proof Boxes through
-deallocation, with an explicit8KiB presence inventory plus existing per-record fees.
-Narrow rustfmt/static inspection only: compilation, focused tests, measured graph
-guards and strict lint are pending the primary's Rust slot. Full integration suites
+deallocation. The first primary focused run compiled and passed five behavior cases;
+the complete Windows growth-guard test failed at8264/8192 and three internal fixtures stalled
+because their real P2P finalization policy was absent. Only the Presence fee rises to
+9KiB/9216 within unchanged group/process caps; full inventory is preserved and checked
+before allocation. The fixture now establishes policy and bounds its handshake with
+the sanctioned Clock watchdog. Ten corrected focused tests and strict lint are pending
+rerun; narrow rustfmt/static inspection passes. Full integration suites
 remain primary-owned. See [the exact boundary and regression list](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
 V2 remains OFF; operation31, neutral/native consume, RoundGate/agreement/Ready and
 SDP/ICE/RTC/relay/audio are still operational blockers.

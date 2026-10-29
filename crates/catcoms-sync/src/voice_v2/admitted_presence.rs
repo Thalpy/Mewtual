@@ -14,10 +14,30 @@ use std::sync::Arc;
 
 /// Complete boxed presence, its implicit watcher, lease allocation and publication
 /// result overlap. Cache records retain their original independent1536-byte fees.
-pub(crate) const PRESENCE_BYTES: usize = 8192;
+pub(crate) const PRESENCE_BYTES: usize = 9 * 1024;
 const RECORD_BYTES: usize = 1536;
 const MAX_PENDING: usize = 32;
 const RENEW_MS: u64 = 5000;
+
+/// Keep this full retained/construction graph in the production preallocation
+/// fence as well as the regression. Pinned Tokio1.53.3 watch::Shared layout uses
+/// the same conservative convention as the activation graph; intrusive waiters
+/// remain in their separately paid RPC/Lower futures. No inventory was trimmed
+/// when the measured Windows graph exceeded the initial8KiB fee.
+fn inventory_bytes() -> (usize, usize) {
+    use std::mem::size_of;
+    let watch_shared = 64 + 4 * size_of::<usize>() + 9 * size_of::<tokio::sync::Notify>() + 64;
+    let lease_allocation = size_of::<super::LeaseState>() + 2 * size_of::<usize>() + watch_shared;
+    let presence = 2 * size_of::<AdmittedPresence>() // prepared value/Box publication overlap
+        + size_of::<PresenceStorage>() + lease_allocation
+        + Funding::allocation_bytes()
+        + size_of::<AdmittedPresenceReceipt>() + size_of::<Result<AdmittedPresenceReceipt, VoiceError>>()
+        + MAX_PENDING * size_of::<CachedProof>() // fixed prepaid Vec backing, no growth
+        + 2 * size_of::<SignedObject>() // shared response clone/publication overlap
+        + 128;
+    let proof = size_of::<ProofBody>() + 128;
+    (presence, proof)
+}
 
 /// Historical proof of exact native key installation, not present-time authority.
 /// End/epoch replacement can invalidate positive use immediately after this return.
@@ -58,6 +78,21 @@ pub(crate) struct PresenceStorage {
 }
 impl PresenceStorage {
     pub(crate) fn reserve(original: &ActivationObserver) -> Result<Arc<Funding>, VoiceError> {
+        Self::reserve_checked(original, PRESENCE_BYTES, RECORD_BYTES)
+    }
+    fn reserve_checked(
+        original: &ActivationObserver,
+        presence_limit: usize,
+        proof_limit: usize,
+    ) -> Result<Arc<Funding>, VoiceError> {
+        let (presence, proof) = inventory_bytes();
+        if std::mem::size_of::<std::sync::RwLock<bool>>() > 64
+            || presence > presence_limit
+            || proof > proof_limit
+        {
+            return Err(VoiceError::Bounds);
+        }
+        // Refuse BEFORE charging or allocating Funding/lease/Watcher/Vec/Box.
         Funding::reserve_presence(original)
     }
     pub(crate) fn new(body: AdmittedPresence, funding: Arc<Funding>) -> Self {
