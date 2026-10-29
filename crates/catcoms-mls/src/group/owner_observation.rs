@@ -2,7 +2,6 @@
 //! certificate may attest these facts under its independently pinned trust profile; this
 //! token itself is neither portable historical proof nor permission to publish before save.
 use super::*;
-use tls_codec::Serialize as _;
 
 /// Which actual operation produced this observation. Unsupported staged/remote operations
 /// do not acquire a local owner observation merely because today's roster looks plausible.
@@ -74,7 +73,7 @@ impl LocalMembershipChange {
     pub fn matches_current(&self, group: &ServerGroup, device: &MlsDevice) -> bool {
         self.group == group.group_id()
             && group.is_active()
-            && group.has_local_device(&device.device_id())
+            && group.has_local_signer(&self.author)
             && self.author.as_slice() == device.public_key_bytes()
             && self.after_epoch == group.epoch()
             && self.state == group.epoch_authenticator_id()
@@ -223,7 +222,7 @@ fn local_key(device: &MlsDevice) -> Result<[u8; 32], MlsError> {
         .map_err(|_| MlsError::Internal("non-Ed25519 local key"))
 }
 fn require_local_device(group: &ServerGroup, device: &MlsDevice) -> Result<(), MlsError> {
-    if !group.is_active() || !group.has_local_device(&device.device_id()) {
+    if !group.is_active() || !group.has_local_signer(&device.public_key_bytes()) {
         return Err(MlsError::Internal(
             "owner observation needs active local device",
         ));

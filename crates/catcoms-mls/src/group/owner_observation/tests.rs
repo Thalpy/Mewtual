@@ -1,6 +1,5 @@
 use super::*;
 use crate::{restore_server, snapshot_server};
-use tls_codec::Serialize as _;
 
 #[test]
 fn local_owner_observation_is_actual_add_fresh_kp_and_remove_bytes() {
@@ -137,6 +136,7 @@ fn local_owner_observation_wrong_actual_local_member_refuses_before_mutation() {
     let _joined = ServerGroup::join_for_key_package(&member, &outcome.welcome, &expected).unwrap();
     assert!(group.contains_device(&member.device_id()));
     assert!(!group.has_local_device(&member.device_id()));
+    assert!(!group.has_local_signer(&member.public_key_bytes()));
     let newcomer = MlsDevice::generate().unwrap();
     let package = newcomer
         .key_package_for_invite(&group.group_id(), [13; 16])
