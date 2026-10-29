@@ -9,6 +9,11 @@ pub(super) struct Retained<T> {
     body: Arc<T>,
     _funding: Arc<Funding>,
 }
+impl<T> std::fmt::Debug for Retained<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetainedControlOwner { .. }")
+    }
+}
 impl Payment {
     pub(super) fn reserve(
         resources: &Arc<Resources>,

@@ -9,7 +9,7 @@ use voice_v2::{Disposition, Envelope, VoiceError, MAX_ENVELOPE};
 mod admitted_control;
 mod forwarding;
 mod reply;
-pub(crate) use admitted_control::{CompletedAdmittedControl, PendingAdmittedControl};
+pub(crate) use admitted_control::CompletedAdmittedControl;
 pub(super) use forwarding::RouteOwners;
 pub use forwarding::{
     CompletedVoiceForward, CompletedVoiceSource, PendingVoiceForward, PendingVoiceSource,

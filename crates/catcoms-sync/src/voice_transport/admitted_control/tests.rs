@@ -1,6 +1,7 @@
 //! Actual normal-dispatch fixture. The transport rejects A-C, including direct
 //! requests/dials; merely omitting a bound proof would not establish this oracle.
 use super::*;
+use catcoms_rt::RngCore;
 use catcoms_rt::{ConnectionLease, ManualClock, PeerConnectionSnapshot};
 use rand_core::SeedableRng;
 use std::sync::Mutex;
@@ -136,6 +137,16 @@ fn activate(
         .unwrap()
         .matches(&original, &grant, key.join, key.public_key));
     (grant, owner, original)
+}
+fn has_peers(
+    node: &mut Node,
+    resources: &Arc<voice_v2::resources::Resources>,
+    grant: &Arc<voice_v2::CallGrant>,
+    original: &ActivationObserver,
+) -> bool {
+    let permit = voice_v2::presence::PeerSnapshotPermit::new(resources, grant.scope()).unwrap();
+    let snapshot = node.admitted_voice_presence_peer_snapshot(grant, original, permit);
+    !snapshot.result().unwrap().1.is_empty()
 }
 async fn bind(a: &mut Node, b: &mut Node) {
     let pending = a.finalize_member_connection(b.local_peer());
@@ -308,16 +319,8 @@ async fn admitted_control_actual_queries_and_support_cross_only_restricted_unjoi
                     .admitted_direct_helper_support_observation(&cg, &cp, &ch)
                     .unwrap()
                     == (HelperObservation::Observed { features: 1 })
-                && !f
-                    .a
-                    .admitted_voice_presence_peers(&ag, &ap)
-                    .unwrap()
-                    .is_empty()
-                && !f
-                    .c
-                    .admitted_voice_presence_peers(&cg, &cp)
-                    .unwrap()
-                    .is_empty()
+                && has_peers(&mut f.a, &f.runtimes[0].resources(), &ag, &ap)
+                && has_peers(&mut f.c, &f.runtimes[2].resources(), &cg, &cp)
             {
                 break;
             }

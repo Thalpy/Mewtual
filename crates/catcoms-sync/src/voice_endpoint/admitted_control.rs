@@ -261,7 +261,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Ok(owner.features_at(wall, mono))
             })
     }
-    pub(super) fn pump_admitted_support_queries(&mut self) -> Result<(), VoiceError> {
+    pub(crate) fn pump_admitted_support_queries(&mut self) -> Result<(), VoiceError> {
         let voice = self
             .voice_runtime
             .as_ref()
@@ -292,7 +292,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         Ok(())
     }
-    pub(super) fn admitted_control_helpers(
+    pub(crate) fn admitted_control_helpers(
         &self,
         scope: Scope,
         wall: u64,
@@ -319,7 +319,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 queries.compatible_helpers(wall, mono, skip, after)
             })
     }
-    pub(super) fn admit_admitted_control(
+    pub(crate) fn admit_admitted_control(
         &mut self,
         ticket: &voice_v2::runtime::IngressTicket,
         envelope: &control::wire::Envelope<'_>,

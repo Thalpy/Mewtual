@@ -40,7 +40,7 @@ impl RequestAuthority for Authority {
     }
 }
 pub(crate) struct PendingAdmittedControl<T: MeshTransport> {
-    transport: T,
+    transport: Arc<T>,
     request: Bytes,
     permit: Option<Box<control::wire::Permit>>,
     job: Arc<Job>,
