@@ -359,10 +359,10 @@ impl RequestAuthority for AdmissionAuthority {
     async fn revoked(&self) {
         let mut mount = self.mount.clone();
         let mut admission = self.admission.clone();
-        while self.authorized() {
+        if self.authorized() {
             tokio::select! {
-                _ = mount.cancelled() => return,
-                _ = admission.cancelled() => return,
+                _ = mount.cancelled() => {},
+                _ = admission.cancelled() => {},
             }
         }
     }
