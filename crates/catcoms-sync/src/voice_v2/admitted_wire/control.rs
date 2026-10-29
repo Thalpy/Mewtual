@@ -220,7 +220,7 @@ impl<'a> Control<'a> {
     }
 }
 impl Operation<'_> {
-    fn target(&self) -> DeviceId {
+    pub(super) fn target(&self) -> DeviceId {
         match self {
             Self::Query { target, .. }
             | Self::Support { target, .. }

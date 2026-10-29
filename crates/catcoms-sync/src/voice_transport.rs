@@ -6,8 +6,10 @@
 use super::*;
 use voice_v2::helper::BoundRoute;
 use voice_v2::{Disposition, Envelope, VoiceError, MAX_ENVELOPE};
+mod admitted_control;
 mod forwarding;
 mod reply;
+pub(crate) use admitted_control::{CompletedAdmittedControl, PendingAdmittedControl};
 pub(super) use forwarding::RouteOwners;
 pub use forwarding::{
     CompletedVoiceForward, CompletedVoiceSource, PendingVoiceForward, PendingVoiceSource,
@@ -382,9 +384,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return None;
         }
         let outer = Outer::parse(frame).ok()?;
-        let route = self.voice_bound_route(from)?;
-        let requester = route.device;
+        let admitted_control = voice_v2::admitted_control::wire::Envelope::is_control(outer.inner);
         self.reconcile_voice_actor();
+        let route = if admitted_control {
+            self.admitted_bound_peer_route(from).ok()??
+        } else {
+            self.voice_bound_route(from)?
+        };
+        let requester = route.device;
         if DeviceId::from_public_key_bytes(outer.key) != requester
             || self.group.member_signature_key(&requester).as_deref() != Some(outer.key.as_slice())
             || outer.auth.epoch != self.group.epoch()
@@ -428,6 +435,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Do not retain a full outer transcript alongside decoded ciphertext and canonical
         // encodings. The ticket accounts the remaining serialized-buffer peak explicitly.
         drop(transcript);
+        if admitted_control {
+            // Authenticated duplicates also spend this shared service budget.
+            // No nested signature decode, retained copy or response signing has
+            // happened yet. Existing outer verification remains independently paid.
+            self.voice_transport_actor()
+                .ok()?
+                .admit_control_service()
+                .ok()?;
+            return self.prepare_admitted_control_reply(
+                from,
+                &outer,
+                ticket,
+                verification_authority,
+                reply_route,
+                verification_work,
+            );
+        }
         ticket
             .check(self.voice_transport_actor().ok()?, outer.inner)
             .ok()?;

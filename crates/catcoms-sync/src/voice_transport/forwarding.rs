@@ -701,6 +701,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         voice.routes.prune();
         Ok(ROUTES.saturating_sub(voice.routes.active.len()))
     }
+    pub(crate) fn admitted_route_capacity(&mut self) -> usize {
+        self.available_voice_routes().unwrap_or(0)
+    }
     fn prepare_voice_request(&mut self, job: Work) -> Result<PendingVoiceForward<T>, VoiceError> {
         let context = self.voice_v2_context(job.envelope().object().scope().room)?;
         let route = self

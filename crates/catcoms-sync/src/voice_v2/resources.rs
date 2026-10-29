@@ -61,6 +61,97 @@ struct Counts {
     // Affine claim's exact opaque stamp, retained through actual final destruction.
     // Lookup Weak owners above are housekeeping indices, never capacity certificates.
     progress: usize,
+    control: ControlService,
+}
+/// Control7 service uses discrete250ms periods. It is shared by EVERY room,
+/// Root and original in this exact Resources pool, independently of requester/
+/// issuer tokens and packet retries. Backward samples never refill it.
+#[derive(Default, Clone, Copy)]
+struct ControlService {
+    last: u64,
+    tokens: u64,
+    initialized: bool,
+}
+impl ControlService {
+    fn spend(&mut self, now: u64, burst: u64, refill: u64) -> bool {
+        if !self.initialized {
+            self.last = now;
+            self.tokens = burst;
+            self.initialized = true;
+        }
+        let periods = now.saturating_sub(self.last) / 250;
+        self.tokens = self
+            .tokens
+            .saturating_add(periods.saturating_mul(refill))
+            .min(burst);
+        self.last = self.last.saturating_add(periods * 250);
+        if self.tokens == 0 {
+            false
+        } else {
+            self.tokens -= 1;
+            true
+        }
+    }
+}
+#[cfg(test)]
+mod control_service_tests {
+    use super::*;
+    #[test]
+    fn admitted_control_service_periods_preserve_subperiod_remainder_and_backward_extreme_samples()
+    {
+        let mut bucket = ControlService::default();
+        for _ in 0..16 {
+            assert!(bucket.spend(1000, 16, 2));
+        }
+        for now in [1001, 1100, 1249, 999, 0] {
+            assert!(!bucket.spend(now, 16, 2));
+        }
+        assert!(bucket.spend(1251, 16, 2));
+        assert!(bucket.spend(1499, 16, 2));
+        assert!(!bucket.spend(1499, 16, 2));
+        assert!(bucket.spend(1500, 16, 2));
+        assert!(bucket.spend(1500, 16, 2));
+        assert!(!bucket.spend(1500, 16, 2));
+        for _ in 0..16 {
+            assert!(bucket.spend(u64::MAX, 16, 2));
+        }
+        assert!(!bucket.spend(u64::MAX, 16, 2));
+    }
+    #[test]
+    fn admitted_control_service_aggregates_rooms_roots_and_groups_without_reset_or_partial_debit() {
+        let pool = Arc::new(Resources::default());
+        let held: Vec<_> = (1..=5)
+            .map(|n| pool.charge([n; 32], 512, ResourceKind::Retained).unwrap())
+            .collect();
+        for group in 1..=4 {
+            for _ in 0..16 {
+                pool.admit_voice_control([group; 32], 1000).unwrap();
+            }
+        }
+        assert_eq!(
+            pool.admit_voice_control([5; 32], 1000),
+            Err(VoiceError::RateLimited)
+        );
+        assert_eq!(
+            pool.admit_voice_control([1; 32], 1249),
+            Err(VoiceError::RateLimited)
+        );
+        pool.admit_voice_control([1; 32], 1250).unwrap();
+        pool.admit_voice_control([1; 32], 1250).unwrap();
+        assert_eq!(
+            pool.admit_voice_control([1; 32], 1250),
+            Err(VoiceError::RateLimited)
+        );
+        // Group refusal did not debit the process's remaining six tokens.
+        for _ in 0..6 {
+            pool.admit_voice_control([5; 32], 1250).unwrap();
+        }
+        assert_eq!(
+            pool.admit_voice_control([5; 32], 1250),
+            Err(VoiceError::RateLimited)
+        );
+        drop(held);
+    }
 }
 #[derive(Default)]
 struct State {
@@ -323,6 +414,27 @@ impl ByteBudget {
 }
 
 impl Resources {
+    /// No allocation or new group entry. A real Root/record reservation must
+    /// already own this group. Both buckets commit together or neither does.
+    pub(crate) fn admit_voice_control(&self, group: [u8; 32], now: u64) -> Result<(), VoiceError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut process = state.total.control;
+        let mut local = state
+            .groups
+            .get(&group)
+            .ok_or(VoiceError::Unauthorized)?
+            .control;
+        if !process.spend(now, 64, 8) || !local.spend(now, 16, 2) {
+            return Err(VoiceError::RateLimited);
+        }
+        state.total.control = process;
+        state
+            .groups
+            .get_mut(&group)
+            .ok_or(VoiceError::Unauthorized)?
+            .control = local;
+        Ok(())
+    }
     #[cfg(test)]
     pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
         self.state.lock().unwrap()

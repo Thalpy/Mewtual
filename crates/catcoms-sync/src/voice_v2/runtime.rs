@@ -23,6 +23,7 @@ const CHILDREN: usize = 64;
 // authentication transcripts are dropped before decode; the small ACK fits the fixed allowance.
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
+mod admitted_control;
 mod local;
 mod ready_source;
 pub(in crate::voice_v2) use local::EpochObservation;
@@ -136,6 +137,7 @@ struct Group {
     helper: Arc<super::helper::HelperLedger>,
     source: Arc<super::source::SourceLedger>,
     verification: Arc<Mutex<super::limits::Bucket>>,
+    control: Mutex<Option<super::admitted_control::ControlLedger>>,
 }
 struct Policy {
     pin: Option<[u8; 32]>,
@@ -323,6 +325,14 @@ impl Runtime {
         for group in groups {
             group.source.collect_expired();
             group.helper.collect_expired();
+            let control = group
+                .control
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(control) = control {
+                control.collect_expired();
+            }
             group
                 .state
                 .lock()
@@ -406,6 +416,7 @@ impl Runtime {
                     hash,
                     _credit: credit,
                     verification: self.verification.clone(),
+                    control: Mutex::new(None),
                     helper: super::helper::HelperLedger::new(
                         hash,
                         self.clock.clone(),

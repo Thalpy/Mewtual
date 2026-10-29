@@ -48,6 +48,7 @@ pub const CLOCK_SKEW_MS: u64 = 5_000;
 pub const MAX_REMOTE_PACKET_REMAINING_MS: u64 = MAX_PACKET_LIFETIME_MS + 2 * CLOCK_SKEW_MS;
 pub const MAX_REMOTE_DELEGATION_REMAINING_MS: u64 = MAX_DELEGATION_LIFETIME_MS + 2 * CLOCK_SKEW_MS;
 pub mod admission;
+pub mod admitted_control;
 pub mod admitted_presence;
 mod admitted_wire;
 pub mod call_activation;

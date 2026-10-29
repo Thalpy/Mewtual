@@ -1,5 +1,13 @@
 # Mewtual; Handover
 
+## Control7 Query/Support snapshot (29 October; UNRUN, OFF)
+
+The new separately typed production Source/kind28 ingress/helper draft and its
+restricted A–B–C dispatch/adversarial regressions are unrun. Early actual-path
+review corrected Source attempts to3 and found no remaining confirmed high/blocker;
+final review, actual layouts, focused tests, strict lint and complete integration
+remain pending. [Exact ownership, fees, API and remaining V2 work](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+
 ## Shared route registry custody prerequisite (29 October; focused passes)
 
 Before adding Control7 transport, this leaf fixes inherited raw-Weak route tails with

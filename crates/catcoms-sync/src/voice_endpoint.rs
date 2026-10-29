@@ -10,6 +10,7 @@ use voice_v2::{CallGrant, CallLease, JoinKey, Scope, VoiceError, WatchLease};
 
 const WATCHES: usize = 8;
 mod admission;
+mod admitted_control;
 mod admitted_presence;
 mod call_activation;
 mod confirmation;
@@ -86,6 +87,10 @@ impl Default for EndpointOwners {
     }
 }
 impl EndpointOwners {
+    #[cfg(test)]
+    pub(crate) fn is_unjoined_for_test(&self) -> bool {
+        self.activation.is_none() && self.participant.is_none() && self.observers.is_empty()
+    }
     #[cfg(test)]
     pub(crate) fn admitted_presence_for_test(
         &mut self,

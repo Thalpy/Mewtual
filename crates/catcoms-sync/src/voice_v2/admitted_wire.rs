@@ -1,13 +1,15 @@
-//! Inactive, separately typed admitted-family codecs. Nothing in this private
-//! module is a live dispatcher, producer, signing command or native authority.
+//! Separately typed admitted-family codecs. The private protocol bridge signs
+//! only closed Query/Support shapes for the separately authorized Control7 path.
+//! Other syntax remains inactive; no generic payload signing command is exposed.
 //! Existing Body1–6/SdpProfile1 consumers deliberately cannot accept these bytes.
 //! Future producers require the actual issued profile, paid round and final gates.
-#![allow(dead_code)] // Staged codec only; no operational adapter is exposed yet.
+#![allow(dead_code)] // Other staged grammar still has no operational consumers.
 
 use super::*;
 
 mod agreement;
 mod control;
+pub(crate) mod protocol;
 mod signed;
 use signed::{AdmittedBody, Header, SignedAdmitted};
 

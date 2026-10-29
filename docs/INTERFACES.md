@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Admitted protocol support (29 October; UNRUN draft, OFF)
+
+Root has distinct endpoint and direct-helper ensure/refresh/observe APIs. Only the
+actual selected NativeActive original/Presence may create a query; endpoint evidence
+comes from its original Watcher. Opaque refresh identity closes q1 before q2 source
+publication. Observed feature bits are historical observations, never Availability,
+consent or reservation. [Exact API ownership and pending gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+
 ## Voice route ownership (29 October; focused passes)
 
 First fallible Root voice attachment prepays4KiB for the shared64-row route registry
