@@ -114,9 +114,13 @@ was source-verified, not executed. A separate long-reply projection regression f
 with WorkLimit before the traversal was bounded at the target Create, then passed.
 
 Strict changed-crate Clippy passes. A broader affected-crate run was intentionally
-stopped while unchanged Studio/registry stress cases ran, so the newly completed
-durable mutation implementation could be compiled. Its partial output is not a
+stopped while unchanged Studio/registry stress cases ran, so the new durable
+mutation draft could be compiled. Its partial output is not a
 complete pass. Complete Root/native/frontend validation remains pending for the combined text-chat
-change; focused results do not replace it. Genuine alternate-valid-signature vectors,
-additional malformed-cursor and wide-fanout cases remain explicit coverage follow-ups.
+change; focused results do not replace it. A later genuine alternate-nonce signature
+vector passes its focused test (one test, 0.05s): real verification accepts both
+signatures over identical semantics, opposite orders retain one deterministic
+representative, signatures alone grant no authority and a corrupted duplicate cannot
+replace valid evidence. Its read-only re-review is clear. Additional malformed-cursor
+and wide-fanout cases remain explicit coverage follow-ups.
 No executed result from earlier Main inputs covers this new core.

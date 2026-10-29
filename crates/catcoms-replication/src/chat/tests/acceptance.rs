@@ -508,3 +508,81 @@ fn typed_chat_short_snapshot_cannot_allocate_an_advertised_billion_actions() {
         );
     }
 }
+
+#[test]
+fn typed_chat_genuine_signature_variants_are_one_action_in_both_arrival_orders() {
+    fn unhex(text: &str) -> Vec<u8> {
+        assert_eq!(text.len() % 2, 0);
+        text.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+    // Both signatures are over the SAME canonical bytes under the deterministic
+    // seed03 test key. The second uses a different signing nonce; it is not a
+    // corrupted-signature fixture or a substitute verifier that returns true.
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("signature-variants.json")).unwrap();
+    let actions: Vec<_> = vectors["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|frame| SignedAction::decode(&unhex(frame.as_str().unwrap())).unwrap())
+        .collect();
+    assert_eq!(actions.len(), 2);
+    for action in &actions {
+        assert!(action.verify());
+        assert_eq!(
+            action.signer().as_slice(),
+            unhex(vectors["public_key"].as_str().unwrap())
+        );
+    }
+    assert_eq!(actions[0].semantic_bytes(), actions[1].semantic_bytes());
+    assert_eq!(actions[0].id(), actions[1].id());
+    assert_ne!(actions[0].signature(), actions[1].signature());
+    assert_ne!(actions[0].envelope_hash(), actions[1].envelope_hash());
+    let f = Fixture::new(actions[0].spec().realm.clone(), 1);
+    let mut replicas = [f.ledger(), f.ledger()];
+    for (replica, order) in replicas.iter_mut().zip([[0, 1], [1, 0]]) {
+        assert!(matches!(
+            replica.import(actions[order[0]].clone()).unwrap(),
+            ImportOutcome::Retained(_)
+        ));
+        assert!(matches!(
+            replica.import(actions[order[1]].clone()).unwrap(),
+            ImportOutcome::Duplicate(_)
+        ));
+        drain(replica);
+        assert_eq!(replica.action_ids().count(), 1);
+        assert_eq!(
+            replica.state(actions[0].id()),
+            Some(ActionState::Pending(PendingReason::Authority)),
+            "valid signatures alone cannot manufacture a historical permission witness"
+        );
+    }
+    assert_eq!(
+        replicas[0].snapshot().unwrap().encode(),
+        replicas[1].snapshot().unwrap().encode()
+    );
+    let expected = actions
+        .iter()
+        .min_by_key(|action| action.signature())
+        .unwrap();
+    assert_eq!(
+        replicas[0].action(expected.id()).unwrap().encode(),
+        expected.encode()
+    );
+
+    let mut corrupted = expected.encode();
+    *corrupted.last_mut().unwrap() ^= 1;
+    let before = replicas[0].snapshot().unwrap().encode();
+    assert_eq!(
+        replicas[0].import(SignedAction::decode(&corrupted).unwrap()),
+        Err(ChatError::Signature)
+    );
+    assert_eq!(
+        replicas[0].snapshot().unwrap().encode(),
+        before,
+        "a bad variant cannot replace a valid stored signature representative"
+    );
+}
