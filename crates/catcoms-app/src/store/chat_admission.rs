@@ -77,6 +77,12 @@ pub struct ChatAdmissionCapture {
     mount_identity: Arc<()>,
     mount: RequestCancellation,
 }
+impl std::fmt::Debug for ChatAdmissionCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatAdmissionCapture")
+            .finish_non_exhaustive()
+    }
+}
 
 /// An exact initialization reservation, never a publication/storage capability.
 #[derive(Clone)]
@@ -87,9 +93,16 @@ pub struct ChatAdmissionPreparation {
     mount_identity: Arc<()>,
     mount: RequestCancellation,
 }
+impl std::fmt::Debug for ChatAdmissionPreparation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatAdmissionPreparation")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Restore classification. Initializing resumes the same recorded nonce; Retired permits only
 /// retained reads/original-store negative repair, never automatic bootstrap or publication.
+#[derive(Debug)]
 pub enum ChatAdmissionResolution {
     Current(ChatAdmissionBinding),
     Initializing(ChatAdmissionPreparation),
@@ -97,6 +110,7 @@ pub enum ChatAdmissionResolution {
 }
 /// Saved covers the supplied snapshot callback; AlreadyCurrent is only an exact scope replay
 /// and cannot acknowledge a newer dirty snapshot ticket or reinstall an old candidate graph.
+#[derive(Debug)]
 pub enum ChatAdmissionFinish {
     Saved(ChatAdmissionBinding),
     AlreadyCurrent(ChatAdmissionBinding),
@@ -129,6 +143,13 @@ pub struct ChatAdmissionBinding {
     mount_identity: Arc<()>,
     mount: RequestCancellation,
     publication: RequestCancellation,
+}
+impl std::fmt::Debug for ChatAdmissionBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Opaque runtime custody: never print group/full key, nonce/domain, revision or mount.
+        f.debug_struct("ChatAdmissionBinding")
+            .finish_non_exhaustive()
+    }
 }
 impl ChatAdmissionBinding {
     pub fn nonce(&self) -> [u8; 32] {

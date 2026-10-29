@@ -23,13 +23,28 @@ fn issue(
     rng: &mut ChaCha20Rng,
 ) -> ChatAdmissionBinding {
     let capture = store.capture_chat_admission(key).unwrap();
+    assert_eq!(format!("{capture:?}"), "ChatAdmissionCapture { .. }");
     let prepared = store
         .prepare_legacy_chat_admission(&capture, b"exact legacy fixture", rng)
         .unwrap();
-    store
+    assert_eq!(format!("{prepared:?}"), "ChatAdmissionPreparation { .. }");
+    let finished = store
         .finish_chat_admission(&prepared, rng, |_, _| Ok(()))
-        .unwrap()
-        .into_binding()
+        .unwrap();
+    assert_eq!(
+        format!("{finished:?}"),
+        "Saved(ChatAdmissionBinding { .. })"
+    );
+    let binding = finished.into_binding();
+    assert_eq!(format!("{binding:?}"), "ChatAdmissionBinding { .. }");
+    let resolved = store
+        .resolve_chat_admission(&binding.key, binding.nonce())
+        .unwrap();
+    assert_eq!(
+        format!("{resolved:?}"),
+        "Current(ChatAdmissionBinding { .. })"
+    );
+    binding
 }
 
 #[test]

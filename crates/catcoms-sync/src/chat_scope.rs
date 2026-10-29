@@ -26,6 +26,13 @@ pub struct VerifiedFreshChatAdmission {
     kind: FreshKind,
     attempt: [u8; 32],
 }
+impl std::fmt::Debug for VerifiedFreshChatAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Do not expose signer, group, admission/attempt identifiers or Welcome material.
+        f.debug_struct("VerifiedFreshChatAdmission")
+            .finish_non_exhaustive()
+    }
+}
 impl VerifiedFreshChatAdmission {
     pub(super) fn matches_initial_state(&self, group: &ServerGroup, device: &MlsDevice) -> bool {
         self.group == group.group_id()

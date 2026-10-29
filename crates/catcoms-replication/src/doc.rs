@@ -60,6 +60,14 @@ pub struct SavedLocalChatRecovery {
     position: usize,
     found: Option<SavedLocalChatOp>,
 }
+impl fmt::Debug for SavedLocalChatRecovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // This cursor owns a full signer and may retain original signed plaintext. Neither
+        // those values nor archive position/document identity belong in diagnostics.
+        f.debug_struct("SavedLocalChatRecovery")
+            .finish_non_exhaustive()
+    }
+}
 pub const MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS: usize = 128;
 pub const MAX_LOCAL_CHAT_RECOVERY_SCANNED_BYTES: usize = 512 * 1024;
 #[derive(Default)]
@@ -157,6 +165,7 @@ mod saved_local_chat_tests {
                 .unwrap();
         }
         let mut progress = document.start_saved_local_chat_recovery(&device, target);
+        assert_eq!(format!("{progress:?}"), "SavedLocalChatRecovery { .. }");
         assert!(document
             .recover_saved_local_chat_op(&device, &mut progress)
             .unwrap()

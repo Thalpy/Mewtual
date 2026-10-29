@@ -852,11 +852,12 @@ mod m1_tests {
             .add_member(&charlie, fresh_package)
             .unwrap()
             .welcome;
-        let parse = |bytes: &[u8]| {
-            MlsMessageIn::tls_deserialize(&mut &bytes[..])
-                .unwrap()
-                .into_welcome()
-                .unwrap()
+        let parse = |bytes: &[u8]| match MlsMessageIn::tls_deserialize(&mut &bytes[..])
+            .unwrap()
+            .extract()
+        {
+            MlsMessageBodyIn::Welcome(welcome) => welcome,
+            _ => panic!("expected the actual Welcome fixture"),
         };
         let mut value = serde_json::to_value(parse(&old_welcome)).unwrap();
         value["secrets"]

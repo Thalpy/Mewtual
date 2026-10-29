@@ -105,6 +105,7 @@ fn raw_epoch_zero_restore_or_default_routing_cannot_mint_fresh_creation_or_join_
     )
     .unwrap();
     let actual = founded.take_fresh_chat_admission().unwrap();
+    assert_eq!(format!("{actual:?}"), "VerifiedFreshChatAdmission { .. }");
     assert_eq!(actual.group(), founded.group_id());
     assert!(actual.key_package_reference().is_none());
     let snapshot = founded.snapshot().unwrap();
