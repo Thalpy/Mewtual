@@ -1,5 +1,18 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Inactive exact Delete approval contract (29 October; validation pending)
+
+`ChatLedger::approve_delete(ActionId, VerifiedDeleteApproval)` attaches one opaque externally
+verified positive decision to an already imported exact semantic Delete. It binds that action's
+Create target, realm, full signer, basis and grant. Mismatches and unknown actions refuse without
+state changes; identical normalized facts are equivalent duplicates. A missing approval is
+`Pending(ModerationApproval)` and approval alone grants no ordinary member permission. Cross-author
+Delete additionally requires ordinary SELF_DELETE and all existing dependency/causal checks; own
+Delete keeps its existing SELF_DELETE or bare DELETE_ANY behavior. The unchanged three-argument
+restore API does not restore approvals; callers supply them again before bounded advance can admit
+moderation. No signing/snapshot/wire bytes or production constructor/decoder are introduced.
+
+
 ## Inactive typed-chat restore contract (29 October)
 
 `chat::ChatLedger::restore(bytes, limits, &[(ActionId, VerifiedAuthorityBasis)])`

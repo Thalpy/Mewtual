@@ -72,6 +72,12 @@ impl Fixture {
         )
         .unwrap()
     }
+    /// A real independent exact-Delete approval signature, not a grant rights upgrade.
+    pub(super) fn approval(&self, action: &SignedAction) -> VerifiedDeleteApproval {
+        let issuer = self.issuer.verifying_key().to_bytes();
+        let bytes = authority::fixture_delete_approval_bytes(&issuer, action).unwrap();
+        authority::verified_delete_fixture(&issuer, action, self.issuer.sign(&bytes)).unwrap()
+    }
     pub(super) fn action(
         &self,
         subject: &DeviceKeypair,

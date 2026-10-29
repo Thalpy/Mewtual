@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Inactive exact moderation approval (29 October; validation pending)
+
+The separate typed chat ledger now distinguishes ordinary historical authority from one exact
+positive Delete approval. Cross-author Delete needs ordinary SELF_DELETE, existing causal coverage
+and an opaque action/Create/realm/full-signer/basis/grant-bound `VerifiedDeleteApproval`.
+Reusable DELETE_ANY is sufficient only for the original Create signer. A missing exact approval
+stays pending and can arrive before or after ordinary authority. One constant-size normalized
+approval slot is covered by each existing retained-entry quota; no unknown-action cache exists.
+Snapshots retain only their original signed action bytes and require approval resupply after restore.
+No live producer, archive, native dispatch or activation is added; production R6 remains open.
+
+
 ## Separate typed chat action core (29 October; inactive)
 
 `catcoms-replication::chat` retains a content-addressed semantic DAG separately from

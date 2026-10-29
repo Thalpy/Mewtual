@@ -1,6 +1,7 @@
 use super::*;
 mod acceptance;
 mod fixtures;
+mod moderation;
 use fixtures::*;
 
 #[test]
@@ -154,7 +155,7 @@ fn typed_chat_causal_edit_wins_without_wall_clock_and_delete_never_resurrects() 
 }
 
 #[test]
-fn typed_chat_cross_author_mutation_rejected_and_exact_moderator_grant_required() {
+fn typed_chat_cross_author_edit_refuses_and_delete_needs_exact_approval() {
     let f = Fixture::standard();
     let alice = key(1);
     let bob = key(2);
@@ -207,13 +208,21 @@ fn typed_chat_cross_author_mutation_rejected_and_exact_moderator_grant_required(
     );
     assert_eq!(
         ledger.state(delete.id()),
-        Some(ActionState::Invalid(ChatError::Permission))
+        Some(ActionState::Pending(PendingReason::ModerationApproval))
     );
     assert_eq!(
         ledger.authorize(delete.id(), mw.clone()),
         Err(ChatError::Authority)
     );
     admit(&mut ledger, &moderate, &mw);
+    drain(&mut ledger);
+    assert_eq!(
+        ledger.state(moderate.id()),
+        Some(ActionState::Pending(PendingReason::ModerationApproval))
+    );
+    ledger
+        .approve_delete(moderate.id(), f.approval(&moderate))
+        .unwrap();
     drain(&mut ledger);
     assert_eq!(ledger.state(moderate.id()), Some(ActionState::Valid));
     assert!(ledger
@@ -503,7 +512,7 @@ fn typed_chat_fresh_same_key_basis_self_edit_does_not_inherit_privileged_rights(
     assert_eq!(ledger.state(edit.id()), Some(ActionState::Valid));
     assert_eq!(
         ledger.state(delete.id()),
-        Some(ActionState::Invalid(ChatError::Permission))
+        Some(ActionState::Pending(PendingReason::ModerationApproval))
     );
     assert_eq!(
         ledger

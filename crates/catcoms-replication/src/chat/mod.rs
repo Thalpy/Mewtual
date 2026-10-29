@@ -13,7 +13,7 @@ mod projection;
 mod storage;
 
 pub use action::{ActionSpec, Body, Realm, SignedAction};
-pub use authority::{Rights, VerifiedAuthorityBasis};
+pub use authority::{Rights, VerifiedAuthorityBasis, VerifiedDeleteApproval};
 pub use ledger::{ActionState, Advance, ChatLedger, ImportOutcome, LedgerLimits, PendingReason};
 pub use projection::{EditAlternative, MessageProjection};
 pub use storage::{ChatSnapshot, Page, PageCursor, MAX_PAGE_BYTES, MAX_PAGE_RECORDS};
@@ -24,6 +24,12 @@ pub const MAX_PARENTS: usize = 64;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_ACTION_BYTES: usize = 128 * 1024;
 pub const MAX_GROUP_ID_BYTES: usize = 256;
+/// Fixed in-memory optional approval slot reserved by every retained action entry. The
+/// existing `LedgerLimits::max_actions` quota covers at most one such slot per action;
+/// this is a logical structural charge, not an allocator/RSS or native payer invoice.
+/// It is not encoded or included in canonical action-envelope byte accounting.
+pub const DELETE_APPROVAL_ENTRY_BYTES: usize =
+    std::mem::size_of::<Option<VerifiedDeleteApproval>>();
 pub const PROFILE: u16 = 1;
 
 macro_rules! digest {

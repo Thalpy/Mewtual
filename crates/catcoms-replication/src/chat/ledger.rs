@@ -2,8 +2,11 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Explicit caller storage allowance. Limits refuse new evidence; they NEVER evict an
-/// accepted/pending action or required proof. Bytes count canonical action envelopes only,
-/// not allocator/RSS or a complete production payer invoice (activation is absent).
+/// accepted/pending action or required proof. Each retained-entry slot also covers its one
+/// optional normalized Delete approval (`DELETE_APPROVAL_ENTRY_BYTES`), so approval metadata
+/// cannot outgrow max_actions or allocate a separate unknown-action cache. The byte allowance
+/// counts canonical action envelopes only, not this entry metadata, allocator/RSS or a complete
+/// production payer invoice (activation is absent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedgerLimits {
     pub max_actions: usize,
@@ -14,6 +17,9 @@ pub enum PendingReason {
     Authority,
     Dependencies,
     CausalAuthority,
+    /// Cross-author Delete awaits a distinct exact-action positive decision. Reusable rights
+    /// alone cannot turn this missing evidence into either permission or permanent invalidity.
+    ModerationApproval,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionState {
@@ -37,6 +43,9 @@ pub(super) struct Entry {
     pub(super) action: SignedAction,
     pub(super) state: ActionState,
     authority: Option<VerifiedAuthorityBasis>,
+    // At most one constant-size normalized approval for this already imported action. There
+    // is no unknown-action cache or unbounded collection of equivalent proof representations.
+    delete_approval: Option<VerifiedDeleteApproval>,
 }
 #[derive(Clone, Copy)]
 enum Task {
@@ -135,6 +144,7 @@ impl ChatLedger {
                 action,
                 state: ActionState::Pending(PendingReason::Authority),
                 authority: None,
+                delete_approval: None,
             },
         );
         self.bytes = total;
@@ -158,6 +168,33 @@ impl ChatLedger {
         } else {
             entry.authority = Some(witness);
         }
+        if matches!(entry.state, ActionState::Pending(_)) {
+            self.enqueue(id);
+        }
+        Ok(())
+    }
+
+    /// Attach an externally verified exact positive moderation decision. Unknown actions and
+    /// mismatches refuse without state mutation. Authority/approval can arrive in either order;
+    /// only pending actions are requeued, and duplicate positive bindings add no stored proof.
+    pub fn approve_delete(
+        &mut self,
+        id: ActionId,
+        approval: VerifiedDeleteApproval,
+    ) -> Result<(), ChatError> {
+        let entry = self.entries.get_mut(&id).ok_or(ChatError::Unknown)?;
+        if approval.action != id || !approval.matches(&entry.action) {
+            return Err(ChatError::Authority);
+        }
+        if let Some(original) = &entry.delete_approval {
+            // Matching exact facts have only one normalized representation. A signature or
+            // external proof ID is deliberately not a first-arrival conflict selector here.
+            if original != &approval {
+                return Err(ChatError::AuthorityConflict);
+            }
+            return Ok(());
+        }
+        entry.delete_approval = Some(approval);
         if matches!(entry.state, ActionState::Pending(_)) {
             self.enqueue(id);
         }
@@ -252,6 +289,16 @@ impl ChatLedger {
                 }
             }
         }
+        let original = if let Some(create) = spec.body.create() {
+            let original = &self.entries[&create].action;
+            if !matches!(original.spec().body, Body::Create { .. }) {
+                return ActionState::Invalid(ChatError::Dependency);
+            }
+            Some(original)
+        } else {
+            None
+        };
+        let own = original.is_some_and(|original| action.signer() == original.signer());
         let needed = match &spec.body {
             Body::Create { reply_to, .. } => {
                 if reply_to.is_some_and(|id| {
@@ -262,28 +309,33 @@ impl ChatLedger {
                 Rights::CREATE
             }
             Body::Join { .. } => Rights::JOIN,
-            Body::Edit { .. } => Rights::SELF_EDIT,
-            Body::Delete { .. } if authority.rights.contains(Rights::DELETE_ANY) => {
-                Rights::DELETE_ANY
+            Body::Edit { .. } => {
+                if !own {
+                    return ActionState::Invalid(ChatError::Permission);
+                }
+                Rights::SELF_EDIT
             }
-            Body::Delete { .. } => Rights::SELF_DELETE,
+            Body::Delete { .. } if own => {
+                // Preserve the existing own-message right, including a historical bare
+                // DELETE_ANY grant. That reusable bit supplies no cross-author permission.
+                if authority.rights.contains(Rights::SELF_DELETE) {
+                    Rights::SELF_DELETE
+                } else {
+                    Rights::DELETE_ANY
+                }
+            }
+            Body::Delete { .. } => {
+                // Missing specific approval remains retryable even when ordinary authority
+                // arrived first. Approval never upgrades the action's immutable base grant:
+                // after it arrives, SELF_DELETE and all existing causal checks still apply.
+                if entry.delete_approval.is_none() {
+                    return ActionState::Pending(PendingReason::ModerationApproval);
+                }
+                Rights::SELF_DELETE
+            }
         };
         if !authority.rights.contains(needed) {
             return ActionState::Invalid(ChatError::Permission);
-        }
-        if let Some(create) = spec.body.create() {
-            let original = &self.entries[&create].action;
-            if !matches!(original.spec().body, Body::Create { .. }) {
-                return ActionState::Invalid(ChatError::Dependency);
-            }
-            // Stable full-key authorship is intentional across rejoin/incarnations. A fresh
-            // ordinary grant does not inherit the old incarnation's DELETE_ANY permission.
-            if (matches!(spec.body, Body::Edit { .. })
-                || (matches!(spec.body, Body::Delete { .. }) && needed != Rights::DELETE_ANY))
-                && action.signer() != original.signer()
-            {
-                return ActionState::Invalid(ChatError::Permission);
-            }
         }
         ActionState::Valid
     }

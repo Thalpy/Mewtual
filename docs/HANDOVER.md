@@ -19,16 +19,28 @@ at `9e976e92`. The typed-core run passed 17 tests before integration, with a sep
 signature-variant regression at `b58fb13d`. These are recorded focused results at their respective
 revisions, not complete backend-suite results or a claim that every test was rerun at `e491a2a8`.
 
-The new native durability/runtime regressions are compiling for execution. Complete Root and native
-test suites, native build/startup and final native lint remain pending. Earlier checkpoint notes
+All five native durability/runtime regressions pass at `1f9367c7`, as does native strict all-target
+Clippy. Complete Root/native test suites and native build/startup remain pending. Earlier checkpoint notes
 below describe what had run at those points; this section supersedes their pending frontend and
 review status. The primary owns the backend runs and keeps Rust compilation serialized.
 
 Production historical-authority issuance/archive, typed transport/encryption, migration and live
-dispatch remain absent; legacy R6 remains open. An additional inactive-core design review is
-separating reusable member authority from approval for one exact moderation action. Governance,
+dispatch remain absent; legacy R6 remains open. The reviewed inactive-core extension below
+separates reusable member authority from approval for one exact moderation action. Governance,
 owner succession and offline revocation policy are not established by the current fixture witnesses.
 Voice V2 remains disabled and incomplete. External download resume is outside this continuation.
+## Exact typed moderation approval extension (29 October; focused/full gates pending)
+
+The integrated replication-only continuation adds opaque exact positive Delete approvals and retryable
+missing-approval state. Reusable DELETE_ANY cannot authorize cross-author deletion; existing own
+Delete semantics remain. Ordinary member SELF_DELETE and causal coverage are still required.
+One normalized constant-size approval belongs to each imported entry's existing action-count quota;
+original action/snapshot bytes and restore API stay unchanged. The fixture verifier uses real action
+and pinned-issuer signatures, and fresh restore needs explicit approval resupply. No producer,
+authority archive, native/network integration or activation is added; production R6 remains open.
+Scoped formatting/diff checks pass. Design and actual-diff adversarial reviews have no remaining
+findings. The eight added regressions await primary execution; focused/full validation remains pending.
+
 
 ## Inactive typed-chat core reviewed (29 October; combined gates pending)
 

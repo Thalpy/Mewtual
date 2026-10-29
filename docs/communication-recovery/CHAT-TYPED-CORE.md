@@ -40,9 +40,26 @@ coverage signatures under an explicitly pinned fixture issuer.
 
 Self-edit/delete compares the full Create signer key. A rejoined device with the
 same key and a fresh valid ordinary grant can edit its older Creates; that grant
-does not inherit another incarnation's DeleteAny right. A privileged delete
-requires an explicit matching DeleteAny witness. Parent and target authorization
-bases must be covered by the supplied witness; absent coverage stays pending.
+does not inherit another incarnation's moderation decision. Own Delete retains its
+existing SELF_DELETE or bare DELETE_ANY permission. A cross-author Delete requires
+ordinary SELF_DELETE authority **plus** a separately supplied `VerifiedDeleteApproval`
+for that exact semantic ActionId, Create target, realm, full signer, basis and grant.
+Reusable DELETE_ANY alone cannot authorize another signer's deletion. Parent and target
+authorization bases must still be covered by the ordinary witness; absent coverage stays pending.
+
+`ChatLedger::approve_delete(id, approval)` attaches one constant-size normalized positive
+approval only to an already imported matching Delete. No production constructor, decoder,
+unknown-action proof cache, denial, revocation or withdrawal is added. Its sole fixture verifier
+checks genuine action and pinned-issuer approval signatures over the full exact tuple. Different
+verified positive proof representations with identical binding facts normalize to one equivalent
+approval. A mismatch refuses before any state mutation; external governance/conflict resolution
+must happen before a verifier constructs this opaque positive value.
+
+Missing approval is `Pending(ModerationApproval)`, including when a reusable DELETE_ANY witness
+arrived first. Approval alone remains `Pending(Authority)`. Ordinary authority and approval can
+arrive in either order; pending target/dependency and causal-coverage checks remain independent.
+An accepted exact approval cannot authorize another action, including a same-nonce variant or a
+second Delete of the same Create. It never upgrades ordinary member/grant rights.
 
 This module does **not** decide native membership, root continuity, authority
 succession/forks, revocation or whether a delayed old-context moderator action
@@ -60,8 +77,12 @@ dependencies and semantically invalid evidence. Rights/target checks determine
 the projection; evidence is not deleted because a current roster changed.
 
 The ledger's explicit caller limits bound action count and canonical envelope
-bytes. Full capacity refuses new evidence without evicting old evidence. These
-are logical limits, not a complete allocator/RSS or native funding invoice.
+bytes. Each existing `max_actions` entry slot also reserves exactly one optional normalized
+approval slot, whose target-platform structural size is `DELETE_APPROVAL_ENTRY_BYTES`.
+The approval has six fixed 32-byte binding facts and no variable proof/signature archive.
+Approval metadata therefore stays within that per-entry charge; `max_action_bytes` continues
+to count original canonical action envelopes only. Full capacity refuses new evidence without
+evicting old evidence. These are logical limits, not a complete allocator/RSS or native funding invoice.
 Each dependency evaluation examines at most65 labels; a wide dependent fanout
 wakes one child per charged work unit. Iterative projection/heads scans have an
 explicit allowance and return WorkLimit rather than a partial complete result.
@@ -79,6 +100,9 @@ An immutable `ChatSnapshot` retains all canonical signed action bodies and
 authorization references in CID order. It stores no status or authority tokens.
 Restore imports the evidence again and requires externally supplied action-bound
 `(ActionId, VerifiedAuthorityBasis)` pairs, followed by explicit bounded resolution.
+The restore API and snapshot bytes stay unchanged. Exact cross-author approvals must be supplied
+again afterward through `approve_delete`; they and all approval/status flags are absent from the
+snapshot. Recovered ordinary grants alone cannot restore a moderation tombstone's permission.
 Selected coverage remains with its exact action even while a parent is missing;
 unrelated actions under one grant do not share one capped coverage union. Conflicting
 rights for the same grant are refused. The separate native
@@ -124,3 +148,15 @@ representative, signatures alone grant no authority and a corrupted duplicate ca
 replace valid evidence. Its read-only re-review is clear. Additional malformed-cursor
 and wide-fanout cases remain explicit coverage follow-ups.
 No executed result from earlier Main inputs covers this new core.
+
+## Exact moderation approval extension (29 October; validation pending)
+
+The isolated continuation adds exact positive approvals without changing realm/action/CID signing
+domains, action/page/snapshot bytes, DocTypes or any live native/network producer. The updated
+cross-author Delete contract deliberately changes earlier permanent refusal into pending approval
+where ordinary SELF_DELETE authority exists. Own edits/deletes, causal coverage and signed history
+remain under their existing rules. New regressions cover both authority/approval orders, delayed
+Create and dependent wake, scope/signer/basis/grant/nonce/parent binding, genuine bad signatures/pins,
+normalized positive duplicates, proof-only and bare-rights controls, bounded entry storage, byte-exact
+snapshot/restart and real alternate Delete signatures sharing one approval. Those regressions have
+not run in this preparation checkout; primary owns focused and complete suites after review.

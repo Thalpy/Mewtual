@@ -85,6 +85,103 @@ impl VerifiedAuthorityBasis {
     }
 }
 
+/// An externally verified positive moderation decision for ONE semantic Delete.
+///
+/// No production constructor, decoder, revocation/denial or first-issuer selection exists in
+/// this inactive core. An external verifier must resolve governance before issuing this value.
+/// It carries only normalized binding facts: two genuinely verified positive proofs for the
+/// same tuple are equivalent, regardless of proof ID or signature representation. It cannot
+/// supply ordinary member authority, causal coverage, or permission for a second action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedDeleteApproval {
+    pub(super) action: ActionId,
+    pub(super) create: ActionId,
+    pub(super) realm: RealmId,
+    pub(super) subject: [u8; 32],
+    pub(super) basis: BasisId,
+    pub(super) grant: GrantId,
+}
+impl VerifiedDeleteApproval {
+    pub fn action(&self) -> ActionId {
+        self.action
+    }
+    pub fn create(&self) -> ActionId {
+        self.create
+    }
+    pub fn realm(&self) -> RealmId {
+        self.realm
+    }
+    pub fn subject(&self) -> &[u8; 32] {
+        &self.subject
+    }
+    pub fn basis(&self) -> BasisId {
+        self.basis
+    }
+    pub fn grant(&self) -> GrantId {
+        self.grant
+    }
+    pub(super) fn matches(&self, action: &SignedAction) -> bool {
+        matches!(action.spec().body,Body::Delete{create} if create==self.create)
+            && action.id() == self.action
+            && action.spec().realm.id() == self.realm
+            && action.signer() == &self.subject
+            && action.spec().basis == self.basis
+            && action.spec().grant == self.grant
+    }
+}
+
+/// Unit-fixture-only verifier of a genuine pinned-issuer signature over the complete exact
+/// moderation tuple. This is independent of the reusable grant/basis witness. Neither action
+/// decoding nor its own device signature can construct a positive approval in production.
+#[cfg(test)]
+pub(super) fn verified_delete_fixture(
+    pinned_issuer: &[u8; 32],
+    action: &SignedAction,
+    signature: [u8; 64],
+) -> Result<VerifiedDeleteApproval, ChatError> {
+    let Body::Delete { create } = action.spec().body else {
+        return Err(ChatError::Authority);
+    };
+    if !action.verify()
+        || !catcoms_crypto::verify_with_public_bytes(
+            pinned_issuer,
+            &fixture_delete_approval_bytes(pinned_issuer, action)?,
+            &signature,
+        )
+    {
+        return Err(ChatError::Signature);
+    }
+    Ok(VerifiedDeleteApproval {
+        action: action.id(),
+        create,
+        realm: action.spec().realm.id(),
+        subject: *action.signer(),
+        basis: action.spec().basis,
+        grant: action.spec().grant,
+    })
+}
+#[cfg(test)]
+pub(super) fn fixture_delete_approval_bytes(
+    issuer: &[u8; 32],
+    action: &SignedAction,
+) -> Result<Vec<u8>, ChatError> {
+    use catcoms_wire::Encoder;
+    let Body::Delete { create } = action.spec().body else {
+        return Err(ChatError::Authority);
+    };
+    let mut e = Encoder::new();
+    // A fixture-only statement domain, never a change to action/CID/wire signing domains.
+    e.put_bytes(b"mewtual/chat/test-delete-approval/v1\0")?;
+    e.put_bytes(action.id().as_bytes())?;
+    e.put_bytes(create.as_bytes())?;
+    e.put_bytes(action.spec().realm.id().as_bytes())?;
+    e.put_bytes(action.signer())?;
+    e.put_bytes(action.spec().basis.as_bytes())?;
+    e.put_bytes(action.spec().grant.as_bytes())?;
+    e.put_bytes(issuer)?;
+    Ok(e.finish())
+}
+
 /// The ONLY witness creation seam in this checkpoint is compiled for unit fixtures.
 /// It verifies two genuine signatures under an explicitly pinned fixture issuer: a
 /// scope/subject/rights grant and this exact basis's selected causal coverage statement.

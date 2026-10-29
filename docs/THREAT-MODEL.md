@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive exact moderation decision boundary (29 October; validation pending)
+
+An ordinary historical grant is not a reusable permission to delete another signer's typed Create.
+The inactive core now requires a separate exact positive approval bound to the complete semantic
+Delete ID, Create, realm, full signer, basis and grant, alongside ordinary SELF_DELETE and causal
+coverage. Missing approval remains pending; bad signatures, issuer pins and binding mismatches
+cannot poison a later good proof or withdraw an accepted tombstone. Equivalent positive proofs
+normalize to one fixed per-entry value, with no unknown-action cache. External governance must
+resolve conflicts before creating an opaque approval; denial/revocation/quarantine policy is absent.
+Snapshots never manufacture this permission and require explicit approval resupply after restart.
+These are library/fixture boundaries only: production issuance, durable archive, live dispatch and
+activation remain absent, and legacy R6 is unchanged.
+
+
 ## Typed chat witness boundary (29 October; inactive)
 
 The separate `replication::chat` core verifies signatures before duplicate admission
