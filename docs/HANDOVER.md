@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## Text-chat priority and current durability boundaries (29 October)
+
+The user prioritised text-chat protocol completion ahead of voice V2. The new text branch starts
+from current main `613a7782`; unfinished voice work remains in its separate checkpoints.
+
+Source tracing confirms desktop new-message sends already save the exact original operation,
+retry receipt and publication obligation before acceptance/export. Received history and ordinary
+edits/deletes have separate background/save-later boundaries; current delivery receipts record
+historical receipt confirmation, not receiver durability. Native edit/delete paths also ignore Pending/Superseded
+persistence outcomes while logging PERSISTED. Those paths are being addressed by extending the
+existing durable transaction, rather than adding an unrelated second send mechanism.
+
+Raw CRDT receive-time message authorization, full signer/target binding and cloned-writer fork
+convergence remain open in production. A separate typed ledger is being implemented and reviewed;
+its production historical-authorization issuer, migration and protocol activation remain absent.
+Historical authorization must be causal: an old certificate cannot prove physical creation before
+removal, and current-roster filtering must not erase legitimate older history.
+
+This documentation-only correction ran no suites; it records inspected current code, not a new
+test result. [Canonical flow](MESSAGE-FLOW.md) and
+[history/security limits](communication-recovery/CHAT-HISTORY-CONVERGENCE.md).
+
 ## Corrected combined validation passed locally (28 October)
 
 The stacked Score candidate at `fa3107d2` passes the complete native command:

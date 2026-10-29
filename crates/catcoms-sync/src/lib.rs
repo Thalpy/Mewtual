@@ -9230,7 +9230,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         fps.into_iter().collect()
     }
 
-    /// The current members that **provably hold** `change` in `(doc_type, doc_id)`, as sorted
+    /// Current members with authenticated receipt evidence for `change`, as sorted
     /// fingerprints; the delivery-state query (`docs/design-delivery-states.md`, D1).
     ///
     /// The design's primary route (read each peer's confirmed heads out of an automerge
@@ -9241,11 +9241,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// request/response; so there is no per-peer, per-doc sync session to interrogate, and
     /// publishing tells us nothing about who received anything.
     ///
-    /// What the document itself proves is used instead: a member counts when it authored a
+    /// The document's signed causal claims are used instead: a member counts when it authored a
     /// change that causally descends from `change` (see [`EncryptedDoc::holders_of`]). That is
     /// the design's own predicate; "the peer's heads causally include the op"; backed by the
-    /// peer's *signature* rather than by its self-report, so it is if anything harder to lie
-    /// with. It is one-sided: a member that received `change` and has not written since is
+    /// peer's signature. This authenticates the claim; a modified writer can name a known hash
+    /// without retaining its contents. Neither this nor an explicit receipt proves a disk save
+    /// or continuing custody. A member that received `change` and has not written since is
     /// indistinguishable from one that never got it, so **absence means "unknown", not "not
     /// delivered"** while the roster is unchanged. The local device is excluded (it authored
     /// the change), as is any device no longer on the roster.

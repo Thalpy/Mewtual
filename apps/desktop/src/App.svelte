@@ -8088,7 +8088,7 @@
       latest: isLatestOwn(mi),
     };
   }
-  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ held by
+  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ received by
   // part of the roster · ✓✓ the whole roster confirmed. We intentionally do not infer "all live
   // peers confirmed" from two unrelated counts. Shown on EVERY message of yours
   // the actor still has evidence for, not only the newest: the point of a per-message tick is to

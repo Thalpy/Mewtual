@@ -1,5 +1,11 @@
 # Chat history across partitions and MLS epochs
 
+29 October clarification: current desktop new-message sends use a separate save-before-export
+transaction with a persisted retry identity. The accepted-in-memory boundary below still applies
+to received history and ordinary legacy mutations, including current edits/deletes. Delivery
+receipts are not receiver disk-flush evidence. See the corrected desktop/ordinary-send distinction
+in [MESSAGE-FLOW](../MESSAGE-FLOW.md). No new implementation or validation is claimed by this note.
+
 Status, 20 October 2026: current source `985c1f1d` on `chat-update-implementation` passes
 complete suites: root 3,079 (24 existing ignored), native 443+5 and frontend 2,254, alongside
 formatting, strict root Clippy, root dependency checks, builds, actual startup and ten rendered flows.

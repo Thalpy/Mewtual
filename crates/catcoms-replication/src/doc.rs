@@ -443,17 +443,18 @@ impl EncryptedDoc {
         Ok(out)
     }
 
-    /// Which devices **provably hold** each of `targets` (automerge change hashes), from the
+    /// Which devices signed causal receipt evidence for `targets` (Automerge change hashes), from the
     /// document alone; the read-only half of the delivery-state query.
     ///
     /// A device `D` counts for target `C` when `D` authored some change whose causal history
-    /// contains `C`: `D` could not have built on `C` without holding it, and the change carrying
-    /// that proof is signed by `D`. This is the same predicate the design's `their_heads` route
+    /// contains `C`. An ordinary writer received `C` before building on it; a modified writer can
+    /// also name a known dependency hash without retaining its contents. The signature attributes
+    /// the claim, not continuing storage or a disk save. This is the predicate the `their_heads` route
     /// describes ("the peer's confirmed heads causally include the op"), evaluated against
     /// evidence already in the doc rather than against a sync session; Mewtual replicates by
     /// broadcasting sealed ops, so no per-peer automerge sync state exists to read.
     ///
-    /// The result is *sound but incomplete*: a device that received `C` and has not written since
+    /// The result is incomplete: a device that received `C` and has not written since
     /// leaves no evidence and is simply absent. Callers must render absence as "unknown", never
     /// as "not delivered". Returns one entry per element of `targets` (sorted, deduped); targets
     /// past [`MAX_DELIVERY_TARGETS`] always come back empty.

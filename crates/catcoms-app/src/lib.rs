@@ -3686,13 +3686,14 @@ pub const MAX_TRACKED_OWN_MESSAGES: usize = 50;
 pub struct DeliveryState {
     /// The message id, as it appears in [`ChatMessage::id`].
     pub id: String,
-    /// How many **other current-roster** members have proved they hold this message. Evidence is
+    /// How many **other current-roster** members have confirmed receipt. Evidence is
     /// positive and one-sided, but the count may fall when membership changes. `0` means "no proof
     /// yet", *not* "not delivered", so a renderer must not turn it into a failure by itself.
     pub delivered: usize,
     /// How many current members claim a transport peer connected here; the same self-asserted
     /// projection that drives [`Server::online_members`]. Independent of `delivered`, which can
-    /// exceed it (a member that received the message and has since disconnected still holds it).
+    /// exceed it (disconnecting does not undo the historical receipt). Neither count proves
+    /// continuing custody or a receiver disk save.
     pub reachable: usize,
     /// Whether this node has a live peer that previously served a roster-verified signed catch-up.
     /// This is intentionally stricter than `reachable`: a self-asserted descriptor claim or bare
