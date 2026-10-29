@@ -8,6 +8,9 @@
 //! a `u64` server id. Every command takes a `server` id selecting which one to act on, and
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+mod native_test_manifest;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Write};

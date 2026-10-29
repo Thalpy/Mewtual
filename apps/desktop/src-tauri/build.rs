@@ -46,6 +46,45 @@ fn main() {
     println!("cargo:rerun-if-changed={POLICY_PATH}");
     tauri_build::try_build(Attributes::new().app_manifest(AppManifest::new().commands(commands())))
         .expect("failed to build the Tauri application manifest");
+    link_native_test_resources();
+}
+
+/// Tauri links its generated Windows resources to application binaries only.
+/// The native libtest also imports rfd's Common Controls v6 entry points, so it
+/// must load the SAME manifest before Windows resolves those imports. Cargo's
+/// `rustc-link-arg-tests` covers integration targets but not `--test src/lib.rs`;
+/// the cfg(test) native_test_manifest module supplies that missing library link.
+/// Keep production Tauri resource generation/linkage unchanged: creating another
+/// RT_MANIFEST or globally enabling /MANIFEST:EMBED could replace its app resource.
+fn link_native_test_resources() {
+    // Build-script cfg! describes the HOST; these inputs describe the TARGET.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+    {
+        return;
+    }
+    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
+    // Pinned tauri-winres/embed-resource names its MSVC resource output
+    // resource.lib. It is a linkable .res, not an additional runtime DLL.
+    let resource = output.join("resource.lib");
+    assert!(
+        resource.is_file(),
+        "Tauri did not generate {}",
+        resource.display()
+    );
+    // An absolute +verbatim link prevents another dependency's resource.lib or
+    // native search path from satisfying this test-only link. link's name must
+    // be a literal (env! is not accepted), so emit a tiny private declaration.
+    // Rust's own string Debug formatter escapes quotes/backslashes in OUT_DIR.
+    let literal = resource.to_str().expect("Cargo OUT_DIR is valid Unicode");
+    fs::write(
+        output.join("native_test_manifest_link.rs"),
+        format!(
+            "#[link(name = {literal:?}, kind = \"dylib\", modifiers = \"+verbatim\")]\nunsafe extern \"C\" {{}}\n"
+        ),
+    )
+    .expect("failed to write the native test resource link");
+    println!("cargo:rustc-link-arg-tests={}", resource.display());
 }
 
 /// Parse and validate the command policy, returning the command names for the ACL manifest.
