@@ -1,6 +1,9 @@
 # Original Group and ledger custody prerequisite
 
-29 October 2026. Correction draft, **UNRUN**. Query/Support's previous12 focused
+29 October 2026. Correction draft; behavior tests **UNRUN**. The first actual
+complete-invoice test measured3106 bytes and correctly failed the candidate3072
+guard. The fee is explicitly raised to4096, preserving every inventory term.
+Query/Support's previous12 focused
 passes remain exactly snapshotc5c8b7d8; they do not validate these changes.
 
 The inherited1024-byte Group payment covered Group, two separately allocated empty
@@ -31,8 +34,8 @@ through that test-only header return.
 The full production invoice includes Group/empty-ledger/Funding construction and
 Arc headers, opaque owners, collection/retirement overlap, full sparse BTree nodes,
 and complete Resources key/Counts buckets with old+new growth/shrink controls and
-alignment. The candidate3KiB fee is guarded BEFORE payment or allocation and must
-be measured; it will be raised explicitly if the complete graph exceeds it. No
+alignment. The measured3106-byte graph now has a4KiB fee guarded BEFORE payment
+or allocation. No
 formula or bound is trimmed to fit. Group/process byte and work/record caps remain
 unchanged; the first retained Group infrastructure costs more even while V2 is OFF.
 

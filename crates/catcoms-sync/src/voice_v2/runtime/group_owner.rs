@@ -4,7 +4,10 @@
 use super::*;
 use std::ops::Deref;
 
-pub(super) const GROUP_METADATA_BYTES: usize = 3 * 1024;
+// Windows pinned1.94 execution measured the COMPLETE3106-byte graph, including
+// the unwind retirement guard, above the first3KiB candidate. Preserve every
+// term and explicitly pay4KiB; group/process/work/record caps stay unchanged.
+pub(super) const GROUP_METADATA_BYTES: usize = 4 * 1024;
 struct GroupFunding {
     _credit: Credit,
 }
@@ -52,7 +55,7 @@ macro_rules! owner {
             }
             /// Pure original-allocation identity, including after retirement.
             /// Actual ledger operations independently recheck the current actor.
-            pub fn is_same(&self, other: &Self) -> bool {
+            $visibility fn is_same(&self, other: &Self) -> bool {
                 Arc::ptr_eq(self.body.as_ref().expect("original body"),other.body.as_ref().expect("original body"))
             }
         }
