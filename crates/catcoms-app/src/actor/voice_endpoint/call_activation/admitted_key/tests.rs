@@ -1,6 +1,7 @@
 //! Actual Root publication and argument ownership, without browser SDK/audio claims.
 use super::*;
 use std::sync::Mutex;
+mod admission;
 
 #[derive(Default)]
 struct Slot {
