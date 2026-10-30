@@ -1,5 +1,61 @@
 # Mewtual; Handover
 
+## Studio save, departure and performance pass (2026-10-30, branch `codex/lab-performance-pass`)
+
+A review of the "edit, cannot save, cannot leave" reports found that ordinary preview-local and
+Closing saves were turned into errors, that leaving the editor required native receipts while
+failed edits were only checkpointed on lock, and several sources of avoidable read and redraw
+work. Code changes only so far: **no test suite, build or compile has been run on this branch**,
+and the adversarial review is still owed.
+
+What changed:
+
+- **Pending/busy continuation** (`studio-session.ts` `runUnconfirmed`). Native answers new
+  Unconfirmed/Closing authoring `pending` (plan prepared off the actor) or `busy`, and its contract
+  is to repeat the identical request until saved. The worker now does that itself, paced 100, 200,
+  400, 800 ms then 1 s, for up to 20 s of waiting (inside native's 30 s `OVERLAY_PARK_MS`). Only an
+  exhausted continuation reaches the member: uncertain if any visit said `pending`, not written if
+  every visit said `busy`. Tests that pinned "pending becomes uncertain, member presses Retry" were
+  updated to the new contract.
+- **Delivery attempts count real dispatches** (`run`). A refusal before anything was sent (binding
+  check, missing epoch, refused ticket, failed explicit access) no longer counts as an attempt, so
+  Retry repeats first-delivery admission instead of sending the frozen request to a retired epoch.
+- **Local preservation milestone.** `StudioSession.workRevision`/`onWorkChange` signal changes to
+  retained work only (not reads or blob arrivals); App checkpoints them into the sealed continuity
+  snapshot within about a second (`scheduleStudioCheckpoint`). Leaving the Studio *surface* now
+  stages the drawing, sends queued edits, seals a snapshot and leaves (`preserveForDeparture`,
+  `studio-exit.ts` `preserve`/`preserved`); the session keeps saving in the background and a failed
+  Save waits in the editor with its exact retry identity. Channel and server changes still wait for
+  receipts. Window close tries the strict Save first and, only if that fails, closes with the work
+  in the final snapshot (restored on the next unlock); without a loaded continuity record it still
+  refuses. Still not a write-ahead log: see the header of `studio-draft.ts`.
+- **Fewer reads.** A document `studio-updated` event no longer re-reads the Index unless the Index
+  does not list that document yet (a Create's event names only the new document). Invalidation
+  reads are one in flight per target plus one "read again" flag (`coalesceRefresh`).
+- **Native inline slots.** Studio reads, overlay inspections and receiver passes leave one of the
+  four slots free (`FOREGROUND_RESERVED_INLINE_DOWNLOADS`, `InvokeContext::background`), so they
+  cannot refuse a Save. The classification of control actions is an exhaustive match.
+- **Server snapshot rewrite skipped when identical** (`catcoms-app/src/studio.rs`). A Save still
+  makes MLS/device/tenure durable first, but no longer re-seals and fsyncs a byte-identical
+  snapshot through the same mount (`Server::studio_saved_snapshot`, in memory only).
+- **Thumbnails** (`Studio.svelte`). Each thumbnail redraws only when its own bytes or the palette
+  change (it used to decode on every `studio.rev`, N(N+1)/2 decodes while N frames loaded), and
+  asks for bytes only while within a strip-width of view. `focusBlobs` keeps visible frames, the
+  open frame and its onion neighbour out of cache eviction, ending the evict/refetch loop.
+- **Sound shelf** keeps recipes read for the same unlocked scope when the member leaves the Studio
+  and returns; reads pause instead of clearing. **Studio code** starts loading on pointer or focus
+  over the Studio tab.
+- **Score layout**: the same header as the flipnote (save state, Save) and a right-hand
+  Music/History inspector with a show/hide toggle.
+
+Known gaps and follow-ups: unconfirmed-preview drafts are still excluded from automatic handoff
+(reconciliation needs a design); restored queued work still waits for an explicit Save after
+unlock; a retry identity minted inside a checkpoint window is not journalled ahead of dispatch;
+the Index cold-reconstruction cache (P1-PERFORMANCE) and an echo-skip for our own Save's
+`studio-updated` were not attempted; the main canvas still repaints on every session revision;
+the native epoch rejection of a retired request is still untyped (the frontend no longer sends it
+after a local refusal). No new regression covers `focusBlobs` eviction or the App checkpoint wiring.
+
 ## Image viewer: a screen-sized fit copy after a Linux GPU hang (2026-10-20)
 
 A Linux tester's whole laptop froze while they flipped an image in the full-screen viewer between

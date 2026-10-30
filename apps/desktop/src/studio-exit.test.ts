@@ -56,6 +56,42 @@ test("a stroke drawn while Save awaited its receipt is saved too before leaving"
   assert.equal(saves, 2); assert.equal(went, true);
 });
 
+// Performance/save review (2026-10-30), finding 2: leaving the surface waited for definite native
+// receipts, so a Save that failed or was still running trapped the member in the editor.
+test("with preserve, leaving the surface seals the work locally instead of waiting for receipts", async () => {
+  let sealed = false, preserves = 0, saves = 0, went = false;
+  const gate = createStudioExit({ onStudio: () => true, closing: () => false, hasWork: () => true,
+    claim: () => () => true, save: async () => { saves++; return false; },
+    preserve: async () => { preserves++; sealed = true; return true; }, preserved: () => sealed });
+  gate.leaveThen(() => { went = true; }); for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(went, true, "held work that is sealed on this device does not keep the member here");
+  assert.deepEqual([preserves, saves], [1, 0], "no receipt is awaited for a surface departure");
+  // Already sealed: the next departure runs in the same turn.
+  let again = false; gate.leaveThen(() => { again = true; });
+  assert.equal(again, true); assert.equal(preserves, 1);
+});
+
+test("with preserve, a refused seal keeps the member here, and a channel change still needs receipts", async () => {
+  let saves = 0, went = false;
+  const gate = createStudioExit({ onStudio: () => true, closing: () => false, hasWork: () => true,
+    claim: () => () => true, save: async () => { saves++; return false; },
+    preserve: async () => false, preserved: () => false });
+  gate.leaveThen(() => { went = true; }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(went, false, "a stroke that cannot be staged, or a snapshot that was not written, refuses");
+  assert.equal(await gate.begin().scope(), false);
+  assert.equal(saves, 1, "the scope route used the receipt-waiting Save");
+});
+
+test("with preserve, a stroke drawn while the snapshot was written is sealed by another round", async () => {
+  let author = 1, sealedAt = 0, preserves = 0, went = false;
+  const gate = createStudioExit({ onStudio: () => true, closing: () => false, hasWork: () => true,
+    claim: () => () => true, save: async () => false,
+    preserve: async () => { preserves++; sealedAt = author; if (preserves === 1) author++; return true; },
+    preserved: () => sealedAt === author });
+  gate.leaveThen(() => { went = true; }); for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(preserves, 2); assert.equal(went, true);
+});
+
 // The route an action carries across its awaits (re-review of 13e338eb, finding 1).
 test("a route never renews its claim: once a newer action begins, it resolves false and saves nothing", async () => {
   const h = fakeHost({ pending: 1, saves: [async () => true] });

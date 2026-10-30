@@ -9090,8 +9090,27 @@ fn reclaim_abandoned_inline_download_at_capacity(
 fn require_inline_download_capacity(
     table: &mut HashMap<String, InlineDownloadCancellation>,
 ) -> Result<(), String> {
+    require_inline_download_capacity_below(table, MAX_CANCELLABLE_INLINE_DOWNLOADS)
+}
+
+/// Inline slots a background claim leaves free for foreground work. Studio reads, retained-draft
+/// inspections and the native receiver's passes are background: they claim only while fewer than
+/// `MAX - 1` slots are taken. A state-changing Studio request (and every other existing caller)
+/// may still take the last one. Without the reservation a burst of document reads, lifecycle
+/// reads and receiver passes could hold all four slots and refuse the member's Save, which the
+/// renderer resends only a few times before reporting it as not written.
+const FOREGROUND_RESERVED_INLINE_DOWNLOADS: usize = 1;
+const _: () = assert!(FOREGROUND_RESERVED_INLINE_DOWNLOADS < MAX_CANCELLABLE_INLINE_DOWNLOADS);
+
+/// The capacity check with an explicit bound. The refusal text is the same at either bound on
+/// purpose: the renderer recognises it exactly as a pre-dispatch refusal that wrote nothing
+/// (`NATIVE_NO_WRITE` in studio-session.ts, pinned by studio-native-no-write.test.ts).
+fn require_inline_download_capacity_below(
+    table: &mut HashMap<String, InlineDownloadCancellation>,
+    limit: usize,
+) -> Result<(), String> {
     reclaim_abandoned_inline_download_at_capacity(table);
-    if table.len() >= MAX_CANCELLABLE_INLINE_DOWNLOADS {
+    if table.len() >= limit {
         Err("too many inline downloads are already active".to_string())
     } else {
         Ok(())
@@ -9144,6 +9163,24 @@ fn register_inline_download(state: &AppState, id: &str) -> Result<(), String> {
 fn claim_internal_inline_download(
     state: &AppState,
 ) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
+    claim_internal_inline_download_below(state, MAX_CANCELLABLE_INLINE_DOWNLOADS)
+}
+
+/// `claim_internal_inline_download` for background work, which leaves
+/// [`FOREGROUND_RESERVED_INLINE_DOWNLOADS`] slots free for a foreground claim.
+fn claim_background_inline_download(
+    state: &AppState,
+) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
+    claim_internal_inline_download_below(
+        state,
+        MAX_CANCELLABLE_INLINE_DOWNLOADS - FOREGROUND_RESERVED_INLINE_DOWNLOADS,
+    )
+}
+
+fn claim_internal_inline_download_below(
+    state: &AppState,
+    limit: usize,
+) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
     let (id, generation, receiver) = {
         let mut table = state
             .inline_downloads
@@ -9152,7 +9189,7 @@ fn claim_internal_inline_download(
         if state.session_lock_requested.load(Ordering::Acquire) {
             return Err("the vault is locked".to_string());
         }
-        require_inline_download_capacity(&mut table)?;
+        require_inline_download_capacity_below(&mut table, limit)?;
 
         // At most four ids can be live. Even after the theoretical u64 wrap, five attempts find
         // an unused id without allowing a stale RAII lease to alias the new registration.

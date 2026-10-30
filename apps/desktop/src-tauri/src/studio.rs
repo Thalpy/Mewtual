@@ -146,7 +146,11 @@ async fn invoke_custody<V>(
         )),
         _ => None,
     };
-    let mut context = InvokeContext::new(state, server, None).await?;
+    let mut context = if foreground(&request) {
+        InvokeContext::new(state, server, None).await?
+    } else {
+        InvokeContext::background(state, server, None).await?
+    };
     context.view_request = target.map(|(target, save)| {
         if save {
             requests::ViewRequest::begin_save(state, server, target)
@@ -155,6 +159,47 @@ async fn invoke_custody<V>(
         }
     });
     invoke_with_context(state, &context, request, convert).await
+}
+
+/// Whether a Studio request may take the last inline slot (see
+/// `FOREGROUND_RESERVED_INLINE_DOWNLOADS`): it writes, or is a step of a write the member asked
+/// for. Reads, inspections, listings and previews are background. Exhaustive on purpose, so a new
+/// control action has to be classified here rather than defaulting either way.
+fn foreground(request: &InvokeRequest) -> bool {
+    use catcoms_app::studio::StudioControlAction as A;
+    match request {
+        InvokeRequest::Document(request) => !matches!(request, StudioRequest::Read { .. }),
+        InvokeRequest::Control(control) => match &control.action {
+            A::ArchiveOverlay
+            | A::FinishOverlayArchive(_)
+            | A::ReleaseOverlayArchive(_)
+            | A::ApplyOverlayCopy(_)
+            | A::DisposeOverlay(_)
+            | A::BeginUnconfirmedOverlaySave
+            | A::BeginClosingOverlaySave
+            | A::SaveClosingOverlay(_)
+            | A::SaveUnconfirmedOverlay(_)
+            | A::RestorePointer
+            | A::Apply(_)
+            | A::RepairFault(_)
+            | A::RepairRegistryFault(_)
+            | A::Acknowledge { .. } => true,
+            A::InspectOverlay
+            | A::FinishOverlayInspection(_)
+            | A::OverlayLifecycle
+            | A::ExportOverlay
+            | A::FinishOverlayExport(_)
+            | A::ReadOverlayArchive
+            | A::PrepareOverlayCopy(_)
+            | A::FinishOverlayCopyPreview(_)
+            | A::Preview { .. }
+            | A::ReadFault
+            | A::ReadRegistryFault
+            | A::List
+            | A::Read { .. }
+            | A::Export { .. } => false,
+        },
+    }
 }
 
 /// One original operation registration/session/request spans every custody visit.
@@ -168,13 +213,38 @@ struct InvokeContext {
     _slot: InlineDownloadLease,
 }
 impl InvokeContext {
+    /// A foreground operation: it may take the last free inline slot.
     async fn new(
         state: &AppState,
         server: u64,
         target: Option<StudioTarget>,
     ) -> Result<Self, String> {
+        Self::claiming(state, server, target, true).await
+    }
+
+    /// A read-only operation (a document or list read, a retained-draft inspection): it leaves a
+    /// slot free for the member's next Save (`FOREGROUND_RESERVED_INLINE_DOWNLOADS`). Refused with
+    /// the same pre-dispatch text, which the renderer resends after a short backoff.
+    async fn background(
+        state: &AppState,
+        server: u64,
+        target: Option<StudioTarget>,
+    ) -> Result<Self, String> {
+        Self::claiming(state, server, target, false).await
+    }
+
+    async fn claiming(
+        state: &AppState,
+        server: u64,
+        target: Option<StudioTarget>,
+        foreground: bool,
+    ) -> Result<Self, String> {
         let generation = unlocked_ui_session_generation(state).await?;
-        let (slot, signal) = claim_internal_inline_download(state)?;
+        let (slot, signal) = if foreground {
+            claim_internal_inline_download(state)?
+        } else {
+            claim_background_inline_download(state)?
+        };
         let view_request = target.map(|target| requests::ViewRequest::begin(state, server, target));
         let (actor, instance) = actor_instance_of(state, server).await?;
         let cancellation = RequestCancellation::new(signal, Some(slot.request_keepalive()));
@@ -456,7 +526,8 @@ async fn receive_once(
     actor: &ServerActor,
 ) -> Result<(), String> {
     let generation = unlocked_ui_session_generation(state).await?;
-    let (slot, signal) = claim_internal_inline_download(state)?;
+    // A receive pass is background work: it never takes the slot a member's Save may need.
+    let (slot, signal) = claim_background_inline_download(state)?;
     let mut cancellation = RequestCancellation::new(signal, Some(slot.request_keepalive()));
     let ready = tokio::select! {
         biased;

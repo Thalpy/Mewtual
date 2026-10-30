@@ -3543,6 +3543,18 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// Re-validating that registry costs one signature check per entry, so it is rebuilt only
     /// when the document actually changed; not on every tick. `None` = never reconciled.
     devices_sig: Option<u64>,
+    /// The server snapshot a state-changing Studio transaction last made durable: the numeric
+    /// server id, the vault mount it was written through (`ServerStore::registry_mount`) and a
+    /// BLAKE3 digest of the plaintext snapshot bytes. Studio must have the MLS/device/tenure state
+    /// that reopens an edit on disk before the edit names it, so every Save used to seal and
+    /// atomically rewrite the whole server record (membership, ledger, commit history, peers)
+    /// even when nothing in it had changed since the previous Save. When the snapshot it would
+    /// write now is byte-identical to the one it wrote last through the same mount, that exact
+    /// record is already durable and the rewrite is skipped (`studio.rs`). In memory only:
+    /// `None` after construction or restore, so a session's first Studio write always saves, and a
+    /// different mount (lock and unlock opens a new one) never matches. A `Weak` keeps the old
+    /// mount's allocation alive, so a later mount cannot reuse its address and compare equal.
+    studio_saved_snapshot: Option<(u64, std::sync::Weak<()>, [u8; 32])>,
 }
 
 /// How many of this device's most recent messages per channel carry delivery state. Bounded so a
@@ -3609,6 +3621,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            studio_saved_snapshot: None,
         })
     }
 
@@ -3671,6 +3684,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            studio_saved_snapshot: None,
         })
     }
 
@@ -3718,6 +3732,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            studio_saved_snapshot: None,
         })
     }
 
@@ -3801,6 +3816,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
+                studio_saved_snapshot: None,
             },
             contact,
         ))
@@ -3855,6 +3871,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
+                studio_saved_snapshot: None,
             },
             contact,
         ))
@@ -3948,6 +3965,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            studio_saved_snapshot: None,
         })
     }
 
@@ -3978,6 +3996,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
+            studio_saved_snapshot: None,
         })
     }
 

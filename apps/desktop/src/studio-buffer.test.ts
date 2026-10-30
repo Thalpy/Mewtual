@@ -542,6 +542,57 @@ test("before the Index is read, a restored edit is refused as unread without cou
   h.session.reset();
 });
 
+test("leaving the surface sends queued edits but never waits for their receipt; background progress is not new authoring", async () => {
+  const h = await harness(), ack = deferred<unknown>();
+  h.ipc.on("studio_apply", () => ack.promise);
+  let work = 0; h.session.onWorkChange(() => work++);
+  const author = h.session.authorRevision;
+  h.session.setFps(object, 7);
+  assert.ok(h.session.authorRevision > author, "new authoring moves the author revision");
+  assert.ok(work > 0, "a change to retained work is signalled for a checkpoint");
+  const held = await h.session.preserveForDeparture(0);
+  assert.equal(held, 1, "the record is still held: the departure did not wait for its receipt");
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 1, "leaving still sends what was queued");
+  const sealed = h.session.authorRevision, signalled = work;
+  ack.resolve(h.view()); await settle(8);
+  assert.equal(h.session.saves.length, 0, "the Save lands in the background after the member left");
+  assert.equal(h.session.authorRevision, sealed, "a landing receipt is not unpreserved work");
+  assert.ok(work > signalled, "the emptier queue is signalled so the next checkpoint drops it");
+  h.session.reset();
+});
+
+test("leaving the surface keeps a failed Save, with its exact request, instead of refusing to leave", async () => {
+  const h = await harness();
+  h.ipc.on("studio_apply", () => { throw new Error("outcome=uncertain; commit response was lost"); });
+  h.session.setFps(object, 7);
+  await assert.rejects(h.session.save(), /Could not confirm the save/);
+  const [failed] = h.session.saves;
+  assert.equal(failed.status, "uncertain");
+  assert.equal(await h.session.preserveForDeparture(0), 1, "the uncertain record is preserved, not a reason to stay");
+  assert.deepEqual(decodeStudioDraft(h.session.draftSnapshot()!).records.map(r => [r.id, r.status, r.mayHaveCommitted]), [[failed.id, "uncertain", true]]);
+  h.session.reset();
+});
+
+// Performance/save review (2026-10-30), finding 3: an admission refusal raised before anything was
+// sent still counted as a delivery attempt, so the member's Retry skipped first-delivery admission
+// and sent the frozen request to the retired epoch; native's untyped rejection then read as
+// "may have committed" and disabled "save again as a new edit".
+test("a retry after a pre-dispatch admission refusal compares again instead of sending the frozen request", async () => {
+  const h = await harness();
+  h.session.setFps(object, 7); // authored against the first epoch
+  await h.rotate(); // a newer epoch arrives before the deadline
+  await h.tick(5000);
+  const [refused] = h.session.saves;
+  assert.deepEqual([refused.status, refused.attempts, refused.mayHaveCommitted], ["blocked", 0, false], "a refusal before sending is not a delivery");
+  assert.match(refused.error, /Shared history changed/);
+  h.session.retry(refused.id); await settle(8);
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0, "the frozen request never left");
+  const [again] = h.session.saves;
+  assert.deepEqual([again.status, again.attempts, again.mayHaveCommitted], ["blocked", 0, false]);
+  assert.equal(h.session.canReauthor(again.id), true, "saving it again as a new edit stays available");
+  h.session.reset();
+});
+
 // Re-review of 22e4ed77, finding 2: a document's Save covered `object === id`, which a Closing or
 // Unconfirmed Index record (native target null, entry in its op) never matches. A restored rename
 // then saved only its document half, and the held Index half vanished from the editor.

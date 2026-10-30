@@ -43,6 +43,46 @@ test("ABA replaces stale shared-file reads serially and trust revocation suppres
   shelf.update(null, null, []); second.update(null, null, []);
 });
 
+// Performance/save review (2026-10-30), finding 9: leaving the Studio cleared the shelf, so every
+// return to the same channel downloaded all sixteen recipes again.
+test("pausing the shelf keeps what it read for the same scope; resuming reads only what is missing", async () => {
+  let downloads = 0, held: ReadonlyMap<string, unknown> = new Map();
+  const shelf = new StudioSharedPatches(async <T>(command: string) => {
+    if (command === "download_file") downloads++;
+    return (command === "download_file" ? encoded : undefined) as T;
+  }, "test", values => { held = values; });
+  const candidates = [file(1), file(2), file(3)];
+  shelf.update("A", 1, candidates); await settle();
+  assert.equal(downloads, 3); assert.equal(held.size, 3);
+  shelf.update("A", 1, candidates, false); await settle();
+  assert.equal(held.size, 3, "leaving the surface pauses without forgetting");
+  shelf.update("A", 1, candidates, true); await settle();
+  assert.equal(downloads, 3, "returning to the same scope reads nothing again");
+  shelf.update("A", 1, [...candidates, file(4)], true); await settle();
+  assert.equal(downloads, 4, "only the new candidate is read");
+  shelf.update("B", 1, candidates, false); await settle();
+  assert.equal(held.size, 0, "a scope change still clears, paused or not");
+  shelf.update(null, null, []);
+});
+
+test("pausing mid-read cancels that read and starts no further downloads", async () => {
+  const first = deferred<string>(); let downloads = 0, held: ReadonlyMap<string, unknown> = new Map();
+  const calls: string[] = [];
+  const shelf = new StudioSharedPatches(async <T>(command: string) => {
+    calls.push(command);
+    if (command !== "download_file") return undefined as T;
+    return (++downloads === 1 ? await first.promise : encoded) as T;
+  }, "test", values => { held = values; });
+  shelf.update("A", 1, [file(1), file(2)]); await settle();
+  shelf.update("A", 1, [file(1), file(2)], false);
+  first.resolve(encoded); await settle();
+  assert.equal(downloads, 1); assert.equal(held.size, 0, "a read retired by the pause is not installed");
+  assert.ok(calls.includes("cancel_inline_download"));
+  shelf.update("A", 1, [file(1), file(2)], true); await settle();
+  assert.equal(downloads, 3); assert.equal(held.size, 2);
+  shelf.update(null, null, []);
+});
+
 test("closing during registration cancels after begin and starts no shared patch download", async () => {
   const begin = deferred<void>(), calls: string[] = [];
   const shelf = new StudioSharedPatches(async <T>(command: string) => {

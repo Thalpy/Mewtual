@@ -32,6 +32,15 @@ export type StudioExitHost = {
   claim: () => () => boolean;
   /** The awaited Save of every retained edit. Resolves false on refusal; the host says why. */
   save: () => Promise<boolean>;
+  /** Leaving the Studio SURFACE only (`leave`), when the host can keep the work on this device:
+   * stage the drawing, send what is queued, and seal a continuity snapshot holding every retained
+   * edit. Resolves true once that snapshot is written, whatever the native Saves did; false on a
+   * refusal (a stroke that cannot be staged, a snapshot write that failed), and the host says why.
+   * Absent: `leave` waits for definite receipts through `save`, as `scope` always does. */
+  preserve?: () => Promise<boolean>;
+  /** With `preserve`: the retained work as it is now is already in a sealed snapshot, so leaving
+   * the surface needs nothing more. Must stage the drawing first (or report false if it cannot). */
+  preserved?: () => boolean;
   /** A departure gave up after MAX_SAVE_ROUNDS because new work kept arriving; say so. */
   exhausted?: () => void;
 };
@@ -64,27 +73,34 @@ export type StudioExit = {
 const MAX_SAVE_ROUNDS = 16;
 
 export function createStudioExit(host: StudioExitHost): StudioExit {
+  /** Leaving the surface needs nothing: not on the Studio, no work, or work already sealed. */
+  const leaveFree = () => !host.onStudio() || !host.hasWork() || (!!host.preserve && !!host.preserved?.());
   function begin(): StudioRoute {
     const current = host.claim();
-    async function settle(needsSave: () => boolean): Promise<boolean> {
+    async function settle(needsSave: () => boolean, step: () => Promise<boolean>): Promise<boolean> {
       for (let round = 0; ; round++) {
         if (!current()) return false;
         if (!needsSave()) return true;
         if (host.closing()) return false;
         if (round >= MAX_SAVE_ROUNDS) { host.exhausted?.(); return false; }
-        if (!(await host.save())) return false;
-        // Loop: a stroke drawn while Save awaited its receipt is new work and needs its own Save.
+        if (!(await step())) return false;
+        // Loop: a stroke drawn while Save awaited its receipt (or while the snapshot was written)
+        // is new work and needs its own round.
       }
     }
+    const preserve = host.preserve;
     return {
       current,
-      leave: () => settle(() => host.onStudio() && host.hasWork()),
-      scope: () => settle(() => host.hasWork()),
+      // Leaving the surface keeps the session (and its workers) alive, so with `preserve` it only
+      // has to make the work durable on this device; native receipts follow in the background.
+      leave: () => preserve ? settle(() => !leaveFree(), preserve) : settle(() => host.onStudio() && host.hasWork(), host.save),
+      // A channel or server change replaces the session's scope, so it still needs receipts.
+      scope: () => settle(() => host.hasWork(), host.save),
     };
   }
   function leaveThen(go: (route: StudioRoute) => void): void {
     const route = begin();
-    if (!host.onStudio() || !host.hasWork()) { go(route); return; }
+    if (leaveFree()) { go(route); return; }
     void route.leave().then((released) => { if (released) go(route); });
   }
   return { begin, release: () => begin().leave(), leaveThen };

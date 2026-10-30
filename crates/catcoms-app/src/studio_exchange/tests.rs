@@ -246,6 +246,7 @@ impl Pair {
                 messages_cache: Default::default(),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
+                studio_saved_snapshot: None,
             }
         } else {
             Server::found(

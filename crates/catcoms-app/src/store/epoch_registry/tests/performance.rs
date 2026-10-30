@@ -402,6 +402,7 @@ fn measure(case: &str, build: impl FnOnce(&mut Source), clock: &dyn Clock, max_p
         messages_cache: Default::default(),
         delivery_snapshot_revision: 0,
         devices_sig: None,
+        studio_saved_snapshot: None,
     };
     let mut provider = server
         .begin_registry_page_provider(&store, SERVER, bucket)

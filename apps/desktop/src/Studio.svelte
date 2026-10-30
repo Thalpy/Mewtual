@@ -179,6 +179,9 @@
   // svelte-ignore state_referenced_locally
   let adaptOn = $state(adapt);
   let inspectorTab = $state<"art" | "sound" | "music" | "history">("art");
+  /// The score editor's right-hand inspector. Open by default, as the flipnote's always is; the
+  /// header toggle hides it when the window is too narrow for the grid and the panel side by side.
+  let scoreInspectorOpen = $state(true);
   let stampIdx = $state(0);
   let textDraft = $state("nya~");
   // A one-note audition ("hear it", the popup keyboard) runs through the same audio session as
@@ -640,38 +643,95 @@
     untrack(() => { if (id) session.watchRecovery(id); });
   });
 
-  /// Thumbnail action: decode the frame's held bytes into a small canvas, or ask for them.
-  function thumb(node: HTMLCanvasElement, arg: { cid: string; bytes: number; rev: number }) {
-    const draw = (a: { cid: string; bytes: number; rev: number }) => {
-      const ctx = node.getContext("2d");
-      if (!ctx) return;
-      ctx.imageSmoothingEnabled = false;
-      ctx.clearRect(0, 0, node.width, node.height);
-      const bytes = session.blob(a.cid, a.bytes);
-      if (!bytes) { session.want(a.cid, a.bytes, 2); return; }
-      try {
-        const img = decodePix(bytes);
-        const s = scratchCanvas(img.w, img.h);
-        s.putImageData(new ImageData(pixToRgba(img, resolve), img.w, img.h), 0, 0);
-        ctx.drawImage(scratch!, 0, 0, node.width, node.height);
-      } catch { /* shown as invalid by the frame's state */ }
-    };
-    draw(arg);
-    return { update: draw };
+  /// What a thumbnail's colours depend on besides its own bytes. A new object only when the
+  /// adaptive palette is switched or the theme's role colours are re-read.
+  const thumbPalette = $derived({ adaptOn, roleLut });
+  /// Held bytes for one timeline record, re-read with the session (a blob arriving, an eviction).
+  function heldOf(cid: string, bytes: number): Uint8Array | undefined { void studio.rev; return session.blob(cid, bytes); }
+
+  // Thumbnails on screen (or within the strip's lookahead), by canvas, and the CID each shows. The
+  // session keeps these, the open frame and its onion neighbour out of cache eviction.
+  const visibleThumbs = new Map<HTMLCanvasElement, string>();
+  function pushBlobFocus() {
+    const cids = new Set(visibleThumbs.values());
+    const at = frames.findIndex((f) => f.id === frameId);
+    if (at >= 0) { cids.add(frames[at].cid); if (at > 0) cids.add(frames[at - 1].cid); }
+    session.focusBlobs(cids);
+  }
+  $effect(() => {
+    void frameId; void frames;
+    untrack(pushBlobFocus);
+  });
+  $effect(() => () => { visibleThumbs.clear(); session.focusBlobs([]); });
+
+  /// Paint decoded PIX bytes into a thumbnail canvas.
+  function paintThumb(node: HTMLCanvasElement, bytes: Uint8Array | null) {
+    const ctx = node.getContext("2d");
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, node.width, node.height);
+    if (!bytes) return;
+    try {
+      const img = decodePix(bytes);
+      const s = scratchCanvas(img.w, img.h);
+      s.putImageData(new ImageData(pixToRgba(img, resolve), img.w, img.h), 0, 0);
+      ctx.drawImage(scratch!, 0, 0, node.width, node.height);
+    } catch { /* shown as invalid by the frame's state */ }
   }
 
-  /// A pending insert's thumbnail comes from its own unsaved pixels.
-  function thumbBytes(node: HTMLCanvasElement, arg: { bytes: Uint8Array; rev: number }) {
-    const draw = (a: { bytes: Uint8Array; rev: number }) => {
-      const ctx = node.getContext("2d");
-      if (!ctx) return;
-      ctx.imageSmoothingEnabled = false;
-      try {
-        const img = decodePix(a.bytes);
-        const s = scratchCanvas(img.w, img.h);
-        s.putImageData(new ImageData(pixToRgba(img, resolve), img.w, img.h), 0, 0);
-        ctx.drawImage(scratch!, 0, 0, node.width, node.height);
-      } catch { /* nothing to show */ }
+  /// Watch whether a strip thumbnail is on screen or within one strip-width of it. Without
+  /// IntersectionObserver (the unit-test DOM) everything counts as visible, as before.
+  function observeStrip(node: HTMLElement, onVisible: (visible: boolean) => void): () => void {
+    if (typeof IntersectionObserver === "undefined") { onVisible(true); return () => {}; }
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) onVisible(entry.isIntersecting);
+    }, { root: node.closest(".st-strip"), rootMargin: "0px 100% 0px 100%" });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }
+
+  /// Thumbnail action for a saved frame. It used to decode and redraw on every session revision
+  /// (`studio.rev`), for every frame of the timeline, mounted or scrolled away: a blob arriving, a
+  /// save changing state or a read landing redrew all N, so loading N frames cost N(N+1)/2 decodes.
+  /// Now it draws only when its own bytes or the palette change, and only asks the fetch scheduler
+  /// for bytes while it is visible, so a long timeline no longer fetches (and, past the cache
+  /// bounds, evicts and refetches) frames nobody is looking at.
+  function thumb(node: HTMLCanvasElement, arg: { cid: string; bytes: number; held: Uint8Array | undefined; palette: unknown }) {
+    let current = arg, visible = false;
+    let drawn: { bytes: Uint8Array | null; palette: unknown } | null = null;
+    const paint = () => {
+      if (!visible) return;
+      const a = current, bytes = a.held ?? null;
+      if (!bytes) session.want(a.cid, a.bytes, 2);
+      if (drawn && drawn.bytes === bytes && drawn.palette === a.palette) return;
+      paintThumb(node, bytes);
+      drawn = { bytes, palette: a.palette };
+    };
+    const stop = observeStrip(node, (seen) => {
+      visible = seen;
+      if (seen) visibleThumbs.set(node, current.cid); else visibleThumbs.delete(node);
+      pushBlobFocus();
+      paint();
+    });
+    return {
+      update(next: typeof arg) {
+        const moved = next.cid !== current.cid;
+        current = next;
+        if (moved && visible) { visibleThumbs.set(node, next.cid); pushBlobFocus(); }
+        paint();
+      },
+      destroy() { stop(); if (visibleThumbs.delete(node)) pushBlobFocus(); },
+    };
+  }
+
+  /// A pending insert's thumbnail comes from its own unsaved pixels; redrawn only when those
+  /// bytes or the palette change.
+  function thumbBytes(node: HTMLCanvasElement, arg: { bytes: Uint8Array; palette: unknown }) {
+    let drawn: { bytes: Uint8Array; palette: unknown } | null = null;
+    const draw = (a: { bytes: Uint8Array; palette: unknown }) => {
+      if (drawn && drawn.bytes === a.bytes && drawn.palette === a.palette) return;
+      paintThumb(node, a.bytes);
+      drawn = { bytes: a.bytes, palette: a.palette };
     };
     draw(arg);
     return { update: draw };
@@ -1362,19 +1422,40 @@
     </div>
   {:else if isScore}
     <div class="st-score">
+      <!-- The same persistent header the flipnote has: where this document's saves stand, and
+           an explicit Save. The title is edited inside the composer. -->
+      <div class="st-head">
+        <span class="micro">score</span>
+        <span class="st-chip {settlementChip().tone}" title={settlementChip().title}><i></i><span class="micro">{settlementChip().text}</span></span>
+        {#if inflight}<span class="st-chip"><span class="micro">{pending.some(s => s.status === "inflight") ? "Saving…" : "Unsaved changes"}</span></span>{/if}
+        <button type="button" class="st-btn" onclick={() => void session.saveDocument(objectId).catch(e => onnotice(reason(e), "warn"))}>Save</button>
+        <span class="grow"></span>
+        <button type="button" class="st-btn ghost" aria-expanded={scoreInspectorOpen} aria-controls="st-score-inspector" onclick={() => (scoreInspectorOpen = !scoreInspectorOpen)}>{scoreInspectorOpen ? "Hide panel" : "Show panel"}</button>
+      </div>
       {@render pendingSaves()}{@render heldQueuedCard()}
-      <div class="st-itabs"><button class="st-itab" class:on={inspectorTab !== "history"} onclick={() => inspectorTab = "music"}>Music</button><button class="st-itab" class:on={inspectorTab === "history"} onclick={() => inspectorTab = "history"}>History</button></div>
-      {#if inspectorTab === "history"}{@render historyStatus()}{@render historyRail()}{:else}
-      <label class="micro st-score-loop"><input type="checkbox" aria-label="Loop whole authored score" bind:checked={loop} disabled={playing} /><span>loop whole authored score</span></label>
-      <span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .jamtake</button><button class="st-btn" disabled={mediaBusy || playing || !onshareScore} onclick={() => downloadMedia(true)}>share .jamtake</button></span>
-      {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
-      {#key objectId}
-        <ScoreEditor model={score} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary}
-          onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onaddpatch={addStudioPatch}
-          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing}
-          onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
-      {/key}
-      {/if}
+      <div class="st-row st-score-row">
+        <div class="st-score-main">
+          {#key objectId}
+            <ScoreEditor model={score} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary}
+              onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onaddpatch={addStudioPatch}
+              onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing}
+              onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
+          {/key}
+        </div>
+        <!-- Inspector: the flipnote's right-hand convention, with the score's own tabs. -->
+        {#if scoreInspectorOpen}
+          <div class="st-inspector" id="st-score-inspector">
+            <div class="st-itabs"><button type="button" class="st-itab" class:on={inspectorTab !== "history"} onclick={() => inspectorTab = "music"}>Music</button><button type="button" class="st-itab" class:on={inspectorTab === "history"} onclick={() => inspectorTab = "history"}>History</button></div>
+            <div class="st-ibody">
+              {#if inspectorTab === "history"}{@render historyStatus()}{@render historyRail()}{:else}
+              <label class="micro st-score-loop"><input type="checkbox" aria-label="Loop whole authored score" bind:checked={loop} disabled={playing} /><span>loop whole authored score</span></label>
+              <span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .jamtake</button><button class="st-btn" disabled={mediaBusy || playing || !onshareScore} onclick={() => downloadMedia(true)}>share .jamtake</button></span>
+              {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
+              {/if}
+            </div>
+          </div>
+        {/if}
+      </div>
     </div>
   {:else if !model}
     <div class="studio-empty">
@@ -1732,7 +1813,7 @@
             <span class="ix">{i + 1}</span>
             <span class="fr" class:fetching={st === "fetching" || st === "queued" || st === "idle"} class:missing={st === "unavailable" || st === "invalid" || st === "failed"}>
               {#if st === "held"}
-                <canvas width="64" height="48" use:thumb={{ cid: f.cid, bytes: f.bytes, rev: studio.rev }}></canvas>
+                <canvas width="64" height="48" use:thumb={{ cid: f.cid, bytes: f.bytes, held: heldOf(f.cid, f.bytes), palette: thumbPalette }}></canvas>
               {:else if st === "invalid"}
                 <span class="micro">rejected</span>
               {:else if st === "failed"}
@@ -1740,7 +1821,7 @@
               {:else if st === "unavailable"}
                 <span class="micro">not here</span>
               {:else}
-                <canvas width="64" height="48" use:thumb={{ cid: f.cid, bytes: f.bytes, rev: studio.rev }}></canvas>
+                <canvas width="64" height="48" use:thumb={{ cid: f.cid, bytes: f.bytes, held: heldOf(f.cid, f.bytes), palette: thumbPalette }}></canvas>
                 <span class="micro tag">fetching</span>
               {/if}
               <i class="dot" style="background: {tint(f.author)}"></i>
@@ -1755,7 +1836,7 @@
           <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.mayHaveCommitted || s.status === "uncertain" ? `save uncertain: ${s.error}` : s.status === "blocked" ? `save not written: ${s.error}` : "saving this new frame"}>
             <span class="ix">{s.status === "uncertain" || s.status === "blocked" ? "?" : "…"}</span>
             <span class="fr pending" class:uncertain={s.status === "uncertain" || s.status === "blocked"}>
-              <canvas width="64" height="48" use:thumbBytes={{ bytes: s.pix, rev: studio.rev }}></canvas>
+              <canvas width="64" height="48" use:thumbBytes={{ bytes: s.pix, palette: thumbPalette }}></canvas>
               <i class="dot" style="background: var(--accent)"></i>
             </span>
           </button>
@@ -1783,6 +1864,9 @@
   .st-score { flex: 1; overflow: auto; min-height: 0; padding: 10px; }
   /* The application-wide input width is for text fields. A full-width checkbox pushed its
      visible consent label outside the 900px desktop viewport, leaving an unexplained square. */
+  .st-score .st-head { margin: -10px -10px 8px; }
+  .st-score-row { align-items: flex-start; }
+  .st-score-main { flex: 1; min-width: 0; }
   .st-score-loop { display: flex; align-items: center; gap: 6px; margin: 6px 0; white-space: normal; }
   .st-score-loop input { width: auto; flex: none; margin: 0; }
   .st-score-loop span { min-width: 0; }

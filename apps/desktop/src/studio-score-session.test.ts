@@ -56,7 +56,7 @@ test("Score component title keeps the pinned family and coordinated Index title"
   assert.equal(JSON.parse(String(h.calls("studio_apply_index")[0].args.body)).title, "new");
 });
 
-test("preview Score Save stays local and preserves kind/ticket/nonce/body on exact retry", async () => {
+test("preview Score Save stays local and continues a pending visit with the same kind/ticket/nonce/body", async () => {
   const { ipc, session, sync, calls } = await harness(true);
   session.open(object); await sync();
   ipc.on("studio_unconfirmed_overlay_save_begin", () => ({ v: 1, kind: "unconfirmedOverlaySaveTicket", channel: CHANNEL,
@@ -66,13 +66,12 @@ test("preview Score Save stays local and preserves kind/ticket/nonce/body on exa
     ? { v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object, state: "pending", retry: "sameRequest" }
     : { v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "unconfirmed" });
   session.clearScoreCell(object, 0, 0); await sync();
-  assert.equal(session.saves[0]?.kind, "overlayApply");
-  assert.equal(session.saves[0]?.status, "uncertain");
-  session.retry(session.saves[0].id); await sync();
+  // Contract change: pending is continued by the worker; no uncertain state, no member Retry.
   assert.deepEqual(calls("studio_unconfirmed_overlay_save")[0].args, calls("studio_unconfirmed_overlay_save")[1].args);
   assert.equal(calls("studio_unconfirmed_overlay_save")[0].args.objectKind, "score");
   assert.equal(calls("studio_unconfirmed_overlay_save_begin").length, 1);
   assert.equal(calls("studio_apply").length, 0);
+  assert.equal(session.saves.length, 0, "the continuation landed the edit without a Retry");
 });
 
 test("Score recovery choices put recipes first and keep explicit removals Copy-only", async () => {

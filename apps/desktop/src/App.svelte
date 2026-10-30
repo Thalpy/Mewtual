@@ -3524,6 +3524,12 @@
   let dividerId = $state("");
   let uiStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let uiStateSaveChain: Promise<void> = Promise.resolve();
+  /// The Studio author token (studio-state.svelte.ts `studioSnapshotAuthor`) carried by the last
+  /// continuity snapshot the vault confirmed. Equal to the live token: every retained Studio edit
+  /// is in a sealed snapshot, so leaving the Studio surface needs no native receipt (studioExit).
+  let studioSealedAuthor: string | null = null;
+  /// One pending Studio checkpoint at a time (see scheduleStudioCheckpoint).
+  let studioCheckpointTimer: ReturnType<typeof setTimeout> | undefined;
   // Server actions remain hidden until the sealed continuity snapshot (including
   // file-trust policy) has been restored. This must be reactive: the load
   // completes asynchronously after unlock.
@@ -3596,7 +3602,11 @@
     const session = uiStateLoadGeneration;
     clearTimeout(uiStateSaveTimer);
     try {
-      await queueUiStateSave(continuityJson);
+      // The snapshot is built when the queued save runs; the Studio token read in that same turn
+      // names exactly the Studio authoring it carries.
+      const sealing: { author: string | null } = { author: null };
+      await queueUiStateSave(() => { const json = continuityJson(); sealing.author = studioSnapshotAuthor?.() ?? null; return json; });
+      if (sealing.author !== null && session === uiStateLoadGeneration) studioSealedAuthor = sealing.author;
       uiStateSaveFailed = false;
       if (uiStateFailureToast) {
         updateToast(uiStateFailureToast, "Vault preferences saved", "ok", 2500);
@@ -3619,6 +3629,23 @@
     uiStateSaveTimer = setTimeout(() => {
       void saveUiStateImmediately();
     }, 250);
+  }
+  /**
+   * Checkpoint retained Studio work in the sealed continuity snapshot soon after it changes, so
+   * an edit whose native Save failed, or has not run yet, survives a crash or forced exit and not
+   * only an orderly lock. A fixed window rather than a debounce: the snapshot is built when it
+   * runs and so includes every change made meanwhile, and continuous drawing (whose staging is
+   * itself a change) cannot postpone it forever. The cost is one snapshot per window while the
+   * queue changes; reads, blob arrivals and redraws never schedule one (StudioSession.workRevision).
+   * Still not a write-ahead log: a crash inside the window can lose the newest change, and a retry
+   * identity minted inside it is restored without that identity (studio-draft.ts).
+   */
+  function scheduleStudioCheckpoint() {
+    if (studioCheckpointTimer !== undefined || !uiStateReady || locked || windowCloseInFlight) return;
+    studioCheckpointTimer = setTimeout(() => {
+      studioCheckpointTimer = undefined;
+      scheduleUiStateSave();
+    }, 750);
   }
   async function loadUiContinuity(generation: number) {
     let loaded = false;
@@ -6507,6 +6534,8 @@
     stopStudioAudio();
     studioReset?.(); // and the studio's views, held pixels and unsaved strokes
     restoredStudioDraft = null;
+    studioSealedAuthor = null; // a new session proves its own preservation before a departure skips saving
+    clearTimeout(studioCheckpointTimer); studioCheckpointTimer = undefined;
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
     // studio-exit: forced edge. Lock does not ask the Studio to save: studioSnapshot() above
@@ -8569,6 +8598,9 @@
   let studioSnapshot: (() => string | null) | null = null;
   let studioRestore: ((json: string | null) => void) | null = null;
   let studioSave: (() => Promise<void>) | null = null;
+  let studioPreserve: ((settleMs: number) => Promise<number>) | null = null;
+  let studioAuthorToken: (() => string | null) | null = null;
+  let studioSnapshotAuthor: (() => string | null) | null = null;
   let studioHasWork: (() => boolean) | null = null;
   let studioWork: (() => { server: number; restored: boolean } | null) | null = null;
   let retireStudioServer: ((server: number, keep: boolean) => "none" | "kept" | "partial" | "dropped") | null = null;
@@ -8596,13 +8628,39 @@
     // Supersession, lock and reload are the route's own current() check, made after this resolves.
     save: async () => {
       try { await studioSave?.(); return true; }
+      catch (e) {
+        // A channel or server change waits on receipts even when the editor is not on screen
+        // (its work was kept when the member left the surface); say where the controls are.
+        if (!locked) toast(view === "studio" ? String(e) : `${String(e)} Open the Studio to retry or discard it.`, "err", 6000);
+        return false;
+      }
+    },
+    // Leaving only the surface keeps the Studio session running, so the member may go once the
+    // work is sealed on this device: the queued Saves keep running behind them, a failed one waits
+    // in the editor with its exact retry identity, and a crash restores it from this snapshot.
+    // Without a loaded continuity record there is nowhere to seal it, so `leave` falls back to
+    // waiting for receipts exactly as before.
+    preserve: async () => {
+      if (!uiStateReady) {
+        try { await studioSave?.(); return true; }
+        catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
+      }
+      try { await studioPreserve?.(0); }
       catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
+      // saveUiStateImmediately reports its own failure ("…not saved; retry before closing").
+      return await saveUiStateImmediately();
+    },
+    preserved: () => {
+      if (!uiStateReady || studioSealedAuthor === null) return false;
+      return studioAuthorToken?.() === studioSealedAuthor;
     },
     exhausted: () => { if (!locked) toast("The Studio kept changing while it saved. Try again once you stop drawing.", "warn", 6000); },
   });
   const releaseStudio = studioExit.release;
   const leaveStudioThen = studioExit.leaveThen;
-  async function loadStudio() {
+  /// `preload`: an intent to open the Studio (pointer or focus on its tab), not the opening itself.
+  /// A failure then stays quiet; the real opening tries again and reports it.
+  async function loadStudio(preload = false) {
     if ((StudioSurface && StudioNav) || studioLoading) return;
     studioLoading = true;
     try {
@@ -8612,12 +8670,17 @@
       studioReset = st.resetStudio;
       studioSnapshot = st.studioDraftSnapshot; studioRestore = st.restoreStudioDraft;
       studioSave = st.saveStudio; studioHasWork = st.studioHasPending;
+      studioPreserve = st.preserveStudio; studioAuthorToken = st.studioAuthorToken; studioSnapshotAuthor = st.studioSnapshotAuthor;
+      // Retained Studio work is checkpointed into the sealed continuity snapshot as it changes.
+      st.onStudioWork(scheduleStudioCheckpoint);
       studioWork = st.studioWork; retireStudioServer = st.retireStudioServer;
       studioClaimNavigation = st.claimStudioNavigation;
       studioBeginClose = st.beginStudioClose; studioEndClose = st.endStudioClose;
       if (restoredStudioDraft) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
     } catch (cause) {
-      toast(`The studio failed to load: ${String(cause)}`, "err");
+      // A preload the member has since clicked through to is the real opening (the click's own
+      // load returned early while this one ran), so its failure is reported too.
+      if (!preload || view === "studio") toast(`The studio failed to load: ${String(cause)}`, "err");
     } finally {
       studioLoading = false;
     }
@@ -14181,11 +14244,16 @@
   onDestroy(() => studioSharedShelf.update(null, null, []));
   $effect(() => {
     const server = activeServerId;
-    const scope = !locked && uiStateReady && !windowCloseInFlight && view === "studio" && server !== null
+    // The scope is the unlocked session's server, channel and membership, not the surface:
+    // leaving the Studio only pauses the shelf (reads stop, `allowed` still requires the Studio),
+    // so returning to the same channel reuses the recipes already read instead of downloading all
+    // sixteen again. Any scope change, lock or close clears them as before.
+    const scope = !locked && uiStateReady && !windowCloseInFlight && server !== null
       ? `${server}:${cur?.active}:${studioMembership}` : null;
     const candidates = files.filter((f) => isJamPatchFile(f.name, f.mime) && mayFetchJamPatch(f.size) && mayAutoLoadSharedFile(f, server)).slice(0, STUDIO_SHARED_PATCH_LIMIT);
+    const active = view === "studio";
     untrack(() => studioSharedShelf.update(scope, server, candidates.map(f => ({ cid: f.cid, name: f.name,
-      binding: JSON.stringify([f.size, f.mime, f.author_identity, f.author_verified]) }))));
+      binding: JSON.stringify([f.size, f.mime, f.author_identity, f.author_verified]) })), active));
   });
   const studioPatchShelves = $derived([
     ...JAM_PRESETS.map((p) => ({ name: p.name, patch: p.patch, shelf: "preset" as const })),
@@ -21021,9 +21089,28 @@
           return;
         }
         windowCloseInFlight = true;
+        // Set when Studio work without a native receipt rides only in the final snapshot below, so
+        // a failure to write that snapshot is reported as losing those edits, not "screen state".
+        let studioOnlyInSnapshot = false;
         if (!locked) {
           try { studioBeginClose?.(); await studioSave?.(); }
-          catch (e) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
+          catch (e) {
+            // The Studio could not get every receipt (a Save failed, is uncertain or is still
+            // running). That must not trap the member in the window when the final continuity
+            // snapshot below can carry the work: it is captured after this point and restored, with
+            // each record's exact retry identity, on the next unlock. Without a loaded continuity
+            // record there is no such snapshot, and a drawing the queue cannot stage exists only on
+            // the canvas; either way the window stays open with the reason, as before.
+            // Staging only (studioAuthorToken is null when the drawing cannot be staged): queued
+            // records are not released here, because a request sent now would be cut off by the
+            // close and come back uncertain instead of simply queued.
+            const token = studioAuthorToken?.() ?? null;
+            const kept = uiStateReady && !locked && token !== null;
+            if (!kept) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
+            // A checkpoint may already have sealed exactly this work; the record it wrote survives
+            // a failed final write, so the edits come back on the next unlock either way.
+            studioOnlyInSnapshot = studioSealedAuthor === null || token !== studioSealedAuthor;
+          }
         }
         pendingSendRetry.cancel();
         const closingGeneration = uiStateLoadGeneration;
@@ -21070,7 +21157,9 @@
             error = `The vault is locked, but message history has not finished saving. ${result.history_error}`;
           } else if (result.deferred) {
             closeAfterContinuityError = true;
-            error = `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`;
+            error = studioOnlyInSnapshot
+              ? `The vault is locked, but Mewtual could not save the latest screen state, including Studio edits that had not finished saving: ${result.continuity_error}. Close the window again to exit without them.`
+              : `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`;
           } else if (result.destroy_error) {
             error = `The vault is locked, but the window could not close: ${result.destroy_error}`;
           }
@@ -26309,7 +26398,9 @@
               <span class="sb-ico">⧗</span>events
               {#if upcomingEvents.length}<span class="tab-count">{upcomingEvents.length}</span>{/if}
             </button>
-            <button type="button" class:active={view === "studio"} onclick={() => switchView("studio")} title="Flipnotes made together in this channel">
+            <!-- Pointing at or focusing the tab starts loading the Studio code, so the click finds
+                 it ready instead of waiting for the import before the channel's list is read. -->
+            <button type="button" class:active={view === "studio"} onclick={() => switchView("studio")} onpointerenter={() => void loadStudio(true)} onfocus={() => void loadStudio(true)} title="Flipnotes made together in this channel">
               <span class="sb-ico">◫</span>studio
             </button>
             <button type="button" class:active={view === "downloads"} onclick={() => switchView("downloads")}>

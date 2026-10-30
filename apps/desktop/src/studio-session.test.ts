@@ -213,13 +213,12 @@ test("an awaiting-tenure edit stays local and retries the exact ticket, nonce an
   assert.match((h.session.editableEpoch(OBJ) as { refused: string }).refused, /read-only preview/, "it still cannot authorize ordinary Apply");
   h.session.setFps(OBJ, 8);
   await h.sync();
-  assert.equal(h.session.saves[0]?.status, "uncertain", "a detached pending save may still write");
-  assert.equal(h.session.saves[0]?.kind, "overlayApply");
-  const first = h.calls("studio_unconfirmed_overlay_save")[0].args;
-  h.session.retry(h.session.saves[0].id);
-  await h.sync();
-  assert.deepEqual(h.calls("studio_unconfirmed_overlay_save")[1].args, first, "retry is byte-for-byte the same request");
-  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 1, "an exact retry does not mint another ticket");
+  // Contract change: `pending` is the native "repeat the identical request" answer. The worker
+  // continues it itself (no member Retry, no save error), with the same ticket, nonce and body.
+  const overlaySaves = h.calls("studio_unconfirmed_overlay_save");
+  assert.equal(overlaySaves.length, 2, "the pending visit was continued automatically");
+  assert.deepEqual(overlaySaves[1].args, overlaySaves[0].args, "the continuation is byte-for-byte the same request");
+  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 1, "a continuation does not mint another ticket");
   assert.equal(h.session.saves.length, 0);
   assert.equal(h.session.doc?.model?.fps, 8, "the retained branch projection, not the preview base, is displayed");
   assert.equal(h.session.overlay?.inspection?.kind, "local-draft");
@@ -235,11 +234,15 @@ test("Closing edits use a distinct local ticket and freeze identity across pendi
     : { v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "closing" });
   h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
   assert.equal(h.session.canEdit(OBJ), true); assert.ok("refused" in h.session.editableEpoch(OBJ), "Closing never supplies ordinary Apply authority");
-  h.session.setTitle(OBJ, "local while rotating"); await h.sync();
+  h.session.setTitle(OBJ, "local while rotating");
+  // The first visit answers pending; before its continuation fires, the source settles. The
+  // continuation must still be the frozen Closing request, never re-routed to an ordinary Apply.
+  for (let i = 0; i < 6 && !h.calls("studio_closing_overlay_save").length; i++) await settle(3);
+  assert.equal(h.calls("studio_closing_overlay_save").length, 1);
   const first = h.calls("studio_closing_overlay_save")[0].args;
-  assert.equal(h.session.saves[0].status, "uncertain"); assert.equal(h.session.canReauthor(h.session.saves[0].id), false);
+  assert.equal(h.session.saves[0].status, "inflight", "pending is progress, not a save error");
   phase = "open"; await h.session.refreshDoc(OBJ);
-  h.session.retry(h.session.saves[0].id); await h.sync();
+  await h.sync();
   assert.deepEqual(h.calls("studio_closing_overlay_save")[1].args, first);
   assert.equal(h.calls("studio_closing_overlay_save_begin").length, 1);
   assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 0); assert.equal(h.calls("studio_apply").length, 0);
@@ -540,7 +543,7 @@ test("a scope change during paused-save access cannot mutate the abandoned targe
   assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 1);
 });
 
-test("a first-attempt local-draft Busy remains a truthful known-no-write result", async () => {
+test("a local-draft Busy is continued with the same request, and only an exhausted one is a known-no-write result", async () => {
   const h = await harness();
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));
   h.ipc.on("studio_read", () => previewView(flipnoteContent({ frames: [] })));
@@ -563,7 +566,16 @@ test("a first-attempt local-draft Busy remains a truthful known-no-write result"
   await h.sync();
   h.session.setFps(OBJ, 9);
   await h.sync();
+  assert.equal(h.session.saves[0].status, "inflight", "busy is the native 'repeat the same request' answer, not a failure");
+  // Drive the paced continuation past its budget: every visit is the identical request, and a
+  // continuation that only ever saw `busy` ends as truthfully not written (Retry stays available).
+  for (let i = 0; i < 12 && h.session.saves[0]?.status === "inflight"; i++) await h.sync();
+  const visits = h.calls("studio_unconfirmed_overlay_save");
+  assert.ok(visits.length > 4, "the busy visit was repeated");
+  for (const visit of visits) assert.deepEqual(visit.args, visits[0].args);
+  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 1);
   assert.equal(h.session.saves[0].status, "blocked");
+  assert.equal(h.session.saves[0].mayHaveCommitted, false);
   assert.match(h.session.saves[0].error, /busy/);
 });
 
@@ -603,15 +615,69 @@ test("a Busy retry cannot erase an earlier local-draft Save delivery uncertainty
   const exact = h.calls("studio_unconfirmed_overlay_save")[0].args;
   assert.equal(record.status, "uncertain");
   h.session.retry(record.id);
-  await h.sync();
-  assert.equal(h.session.saves[0].status, "uncertain", "Busy describes only the retry, not the lost earlier result");
-  assert.equal(h.session.saves[0].mayHaveCommitted, true);
-  assert.match(h.session.saves[0].error, /earlier attempt may already have committed/);
+  // The retry's Busy is continued with the same request; the uncertainty stays on the record
+  // while it runs (a lock snapshot taken now must restore it as uncertain).
+  for (let i = 0; i < 6 && h.calls("studio_unconfirmed_overlay_save").length < 2; i++) await settle(3);
+  assert.equal(h.session.saves[0].status, "inflight");
+  assert.equal(h.session.saves[0].mayHaveCommitted, true, "Busy describes only this visit, not the lost earlier result");
   assert.deepEqual(h.calls("studio_unconfirmed_overlay_save")[1].args, exact);
-  h.session.retry(record.id);
   await h.sync();
   assert.deepEqual(h.calls("studio_unconfirmed_overlay_save")[2].args, exact);
   assert.equal(h.session.saves.length, 0, "the exact acknowledgement resolves the retained uncertainty");
+});
+
+test("a Busy that never clears after an earlier lost result still ends uncertain, not 'not written'", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => previewView(flipnoteContent({ frames: [] })));
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(1), branch: id64(2), provenance: "unconfirmed",
+  }));
+  let attempts = 0;
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => {
+    if (++attempts === 1) throw new Error("outcome=uncertain; commit response was lost");
+    return { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "busy", retry: "sameRequest" };
+  });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.setFps(OBJ, 9);
+  await h.sync();
+  h.session.retry(h.session.saves[0].id);
+  for (let i = 0; i < 12 && h.session.saves[0]?.status !== "uncertain"; i++) await h.sync();
+  assert.equal(h.session.saves[0].status, "uncertain");
+  assert.equal(h.session.saves[0].mayHaveCommitted, true);
+  assert.match(h.session.saves[0].error, /earlier attempt may already have committed/);
+});
+
+test("a pending continuation that runs out of budget stays uncertain with its exact request", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => previewView(flipnoteContent({ frames: [] })));
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(1), branch: id64(2), provenance: "unconfirmed",
+  }));
+  let done = false;
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => done
+    ? { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "unconfirmed" }
+    : { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "pending", retry: "sameRequest" });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.setFps(OBJ, 9);
+  for (let i = 0; i < 14 && h.session.saves[0]?.status !== "uncertain"; i++) await h.sync();
+  const record = h.session.saves[0];
+  assert.equal(record.status, "uncertain", "a plan of this request may still be committed by a later visit");
+  assert.equal(record.mayHaveCommitted, true);
+  assert.equal(h.session.canReauthor(record.id), false);
+  const exact = h.calls("studio_unconfirmed_overlay_save")[0].args;
+  done = true;
+  h.session.retry(record.id);
+  await h.sync();
+  assert.deepEqual(h.calls("studio_unconfirmed_overlay_save").at(-1)?.args, exact, "the member's retry is still the exact request");
+  assert.equal(h.session.saves.length, 0);
 });
 
 test("a pixel refusal re-publishes retained bytes before an explicitly re-authored local frame save", async () => {
@@ -1179,6 +1245,45 @@ test("events for another server or channel are ignored; matching ones coalesce i
   h.session.open(OBJ);
   await h.sync();
   assert.equal(h.session.receivePaused, false, "a successful explicit read resumes the receiver");
+});
+
+test("a document event re-reads the Index only when the Index does not list that document yet", async () => {
+  const h = await harness(), OTHER = id32(0x0c);
+  h.ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "listed" }) } })));
+  h.ipc.on("studio_read", () => docView());
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  const lists = h.calls("studio_list").length, reads = h.calls("studio_read").length;
+  // A note or a frame of a listed document changes that document, not the Index.
+  h.ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OBJ });
+  await h.sync();
+  assert.equal(h.calls("studio_list").length, lists, "no list read for a listed document's edit");
+  assert.equal(h.calls("studio_read").length, reads + 1, "the open document is still re-read");
+  // A Create's event names only the new document: an unlisted object still re-reads the Index.
+  h.ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OTHER });
+  await h.sync();
+  assert.equal(h.calls("studio_list").length, lists + 1);
+});
+
+test("invalidations arriving while a document read is out cause exactly one more read after it", async () => {
+  const h = await harness(), slow = deferred<unknown>();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "listed" }) } })));
+  h.ipc.on("studio_read", () => docView());
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  const reads = h.calls("studio_read").length;
+  h.ipc.on("studio_read", () => slow.promise);
+  for (let window = 0; window < 4; window++) {
+    h.ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OBJ });
+    await h.sync();
+  }
+  assert.equal(h.calls("studio_read").length, reads + 1, "one read per target while the first is unanswered");
+  h.ipc.on("studio_read", () => docView());
+  slow.resolve(docView());
+  await h.sync();
+  assert.equal(h.calls("studio_read").length, reads + 2, "the later invalidations are served by one read that starts after them");
 });
 
 test("all nine native settlement states invalidate media and reread the matching document and recovery", async () => {

@@ -32,7 +32,8 @@ async fn read_with(
     after_rebuild: impl FnOnce(&InvokeContext),
     convert: impl FnOnce(StudioOverlayInspection) -> Result<Value, String>,
 ) -> Result<Value, String> {
-    let context = InvokeContext::new(state, server, Some(target)).await?;
+    // Read-only: leaves the last inline slot to a member's Save.
+    let context = InvokeContext::background(state, server, Some(target)).await?;
     let job = invoke_with_context(
         state,
         &context,

@@ -576,10 +576,32 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         // MLS/device/tenure needed to reopen must be durable before a new Studio source names
         // them. Native holds the same numeric-id and incarnation guards as ordinary snapshots.
+        //
+        // The ordering is unchanged; only a redundant rewrite is skipped. When the snapshot is
+        // byte-identical to the one this Server last wrote through this very mount, its MLS
+        // epoch, device and tenure are exactly the ones already on disk: that state only moves
+        // forward, so any server record written since (by the actor's own snapshot path) came
+        // from a state between the two and carries the same authority. Sealing and fsyncing it
+        // again proves nothing new. Any difference, another mount, a restore or a failed write
+        // saves, as before.
         if request.changes_state() {
             let snapshot = self.snapshot()?;
-            self.sync
-                .with_registry_context(|_, _, _, rng| store.save_server(server, &snapshot, rng))?;
+            let digest = *blake3::hash(&snapshot).as_bytes();
+            let mount = std::sync::Arc::downgrade(&store.registry_mount());
+            let unchanged = matches!(
+                &self.studio_saved_snapshot,
+                Some((id, saved_mount, saved))
+                    if *id == server && *saved == digest && saved_mount.ptr_eq(&mount)
+            );
+            if !unchanged {
+                // Forget the old record first: if this write fails part-way, nothing may claim
+                // that an earlier snapshot is still the durable one.
+                self.studio_saved_snapshot = None;
+                self.sync.with_registry_context(|_, _, _, rng| {
+                    store.save_server(server, &snapshot, rng)
+                })?;
+                self.studio_saved_snapshot = Some((server, mount, digest));
+            }
         }
         let view = self
             .sync
