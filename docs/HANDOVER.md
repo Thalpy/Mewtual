@@ -2,6 +2,12 @@
 
 ## Chat V2 production continuation (30 October; implementation in progress)
 
+The separate Automerge observer prerequisite vendors the exact lock-pinned 0.10.0 archive with an
+additive borrowed applied/queued inventory API and a nonserialized replacement identity. It does
+not activate a reader or reconstruct applied changes. Its focused upstream-style tests are authored;
+compilation, focused execution and integration suites remain the primary agent's responsibility.
+See [source provenance and patch inventory](../vendor/automerge/MEWTUAL-PATCH.md).
+
 The new branch starts from validated PR82 head `5b057afc`; the complete results recorded below
 belong to that earlier runtime checkpoint, not this new implementation. Live typed dispatch,
 canonical historical-authority archive, migration and the full privileged admin view remain open.

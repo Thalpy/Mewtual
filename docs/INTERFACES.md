@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Borrowed Automerge inventory prerequisite (30 October; reader not activated)
+
+The pinned 0.10.0 dependency has a narrow temporary local observer patch, shared by root and native
+workspaces. `Automerge` and `AutoCommit` expose borrowed `applied_change_hashes()` and
+`queued_changes()` plus expected-constant-time `has_applied_change()`. These inspect existing
+storage without whole-history metadata, graph clones, applied-change reconstruction or transaction
+closing. Queue entries have exact retained raw change bytes; applied hashes do not promise an
+original signed envelope or reconstructible bounded raw detail.
+
+`history_instance_id()` is an opaque nonserialized replacement identity: token copies compare equal,
+while New/load/Clone/fork get fresh identities. Ordinary mutation keeps it, so it is not a mutation
+revision or MVCC. Queue positions can change or drain when parents arrive. A host must use its own
+mutation/policy/incarnation guards, take fresh borrows each turn and refuse pending local operations
+without committing them. These APIs grant no admin permission, historical authorship or complete
+ledger claim. [Pinned source and exact patch inventory](../vendor/automerge/MEWTUAL-PATCH.md).
+
 ## Retained signed-log prefix inspection (30 October; production reader in progress)
 
 `EncryptedDoc::signed_history_index(max_records)` captures an immutable upper bound of the private

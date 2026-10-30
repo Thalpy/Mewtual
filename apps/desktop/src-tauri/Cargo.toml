@@ -113,3 +113,7 @@ rand_core = "0.6"
 
 # Own workspace so the heavy Tauri/webview deps stay out of the root `cargo test --all`.
 [workspace]
+
+# Cargo patches belong to each workspace root, including this separate native workspace.
+[patch.crates-io]
+automerge = { path = "../../../vendor/automerge" }
