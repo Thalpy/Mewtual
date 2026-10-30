@@ -1,6 +1,6 @@
 # Owner evidence storage and the first retained admin case
 
-Concrete next persistence/candidate supplement, pending independent review before implementation.
+Reviewed persistence/candidate contract; concrete source still requires actual-diff review.
 This is the minimum safety boundary needed to deliver the same actual held case through
 [the privileged admin reads](CHAT-ADMIN-READ-CONTRACT.md). No production activation or completed
 owner succession is claimed.
@@ -60,9 +60,11 @@ owner operation, action admission or publication is authorized, including non-na
 Mounted known-pin consumers enter required mode BEFORE start even when their supplied snapshot
 lacks a tail; raw snapshot fields cannot install a runtime verified root. Preserve ordinary unpinned groups'
 existing behavior; do not silently convert their legacy messages into proved history.
-This is API-level immutable retention, not cryptographic anti-rollback of an entire vault or all its
-authenticated files. No external monotonic witness exists for an attacker/user replacing all state
-with an old consistent backup. Known missing proof/custody references still fail closed; do not
+This is API-level immutable retention, not cryptographic anti-rollback. In particular, after restart
+an older authenticated canonical file ALONE can replace its latest version while the same Current
+scope nonce/revision and immutable pin remain unchanged. No independent latest-head freshness
+anchor exists; this component rollback does not require replacing the whole vault. A copied vault
+or old consistent full backup has the same external-freshness limitation. Known missing proof/custody references still fail closed; do not
 promise to recover a later deletion whose entire authoritative history was rolled back away.
 
 First founder initialization uses a wholly private unpublished Server wrapper, before ANY legacy
@@ -104,8 +106,8 @@ through the ordinary new-admission capacity path. It confers no positive unknown
 
 The canonical plaintext wrapper is length-prefixed domain `catcoms/owner-canonical-snapshot/v1`,
 group, full local signer, root ProfileCID, original scope domain/nonce (all exact 32-byte fields),
-scope revision `u64`, local head generation `u64`, closed optional parent-head digest, then the
-bounded full private Sync snapshot. Its digest uses `catcoms/owner-head-id/v1\0` plus the canonical
+scope revision `u64`, local head generation `u64`, closed optional parent-head digest, exact32-byte initialization/operation retry identity, then
+the bounded full private Sync snapshot. Its digest uses `catcoms/owner-head-id/v1\0` plus the canonical
 wrapper. This is local writer progress, NEVER public governance finality. The CHECKPOINT-1 private
 snapshot bound is 144 MiB plus 1 KiB wrapper overhead; separately bound its 64 MiB proof archive,
 64 MiB action frames, 8 MiB provider state and 8 MiB other snapshot data. No full-state hash/provider
@@ -127,7 +129,12 @@ actual ENOSPC remains an honest failure and cannot release publication. Physical
 before allocation/decryption, and concurrent reader/candidate buffers need separately acquired bounded
 permits. These persistent charges are not a claim about allocator/RSS: implementation review must
 inventory every simultaneous plaintext, sealed and candidate buffer rather than multiplying a single
-file bound silently. Tests exercise replacement at the configured quota, full ordinary record rows,
+file bound silently. Initial private founder/join freeze additionally prepays FOUR configured
+max-snapshot buffers: the retained outer encoding, bounded MLS encoding, SDK roster scratch backed
+by that checked private provider material, and bounded fixed metadata. The64KiB closed initialization
+metadata invoice is output framing only, not the whole-memory fee; pending member-finalization retry
+pairs are preserved and charged. The frozen buffer is retained once across retry, then released at
+the saved-head/Current transfer. Tests exercise replacement at the configured quota, full ordinary record rows,
 and uncertainty without accepting a second replacement.
 
 Use ONE fixed exact staging slot per canonical head (`owner-state/<key>.replace.tmp`), created only
@@ -263,3 +270,5 @@ crash/orphan-stage cleanup at full quota, reopen of a real rename/parent-sync fa
 failing restore barrier (no export) followed by exact successful barrier, and the
 committed retained case appearing in the existing frontend timeline. Owner reply retry alone does
 not recover a crashed joiner whose original private KeyPackage state was lost.
+
+Production scale is specified separately in [the proposed paged archive successor](CHAT-OWNER-SCALABLE-ARCHIVE.md). CHECKPOINT-1 is not the long-lived production profile.

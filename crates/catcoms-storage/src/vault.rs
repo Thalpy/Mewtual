@@ -33,6 +33,10 @@ const LONG_SECRET_DOMAIN: &str = "mewtual-vault-long-secret/v2";
 /// not let an old reader decrypt a managed vault while ignoring its retirement inventory.
 const VAULT_VERSION_CHAT_SCOPE: u8 = 3;
 const CHAT_SCOPE_SECRET_DOMAIN: &str = "mewtual-vault-chat-scope/v3";
+/// A scope-only v3 reader does not enforce immutable owner roots/canonical heads. This critical
+/// format therefore has its OWN KDF domain, not a feature bit an older reader could ignore.
+const VAULT_VERSION_OWNER_EVIDENCE: u8 = 4;
+const OWNER_EVIDENCE_SECRET_DOMAIN: &str = "mewtual-vault-chat-owner-evidence/v4";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const SEALED_DEK_LEN: usize = 32 + 16; // 32-byte DEK plus Poly1305 authentication tag.
@@ -56,6 +60,8 @@ pub enum VaultFormat {
     Legacy,
     /// Cryptographically distinct v3 wrapper; an actual mounted Store must require its inventory.
     ChatScope,
+    /// Mandatory v4 owner pin/canonical-head inventory, in addition to local admission lineage.
+    OwnerEvidence,
 }
 
 /// Authenticated keys and their indivisible format classification. Construction is private;
@@ -163,6 +169,7 @@ fn open_classified_with_hooks(
         let format = match version {
             VAULT_VERSION_RAW_SECRET | VAULT_VERSION_PREHASHED_SECRET => VaultFormat::Legacy,
             VAULT_VERSION_CHAT_SCOPE => VaultFormat::ChatScope,
+            VAULT_VERSION_OWNER_EVIDENCE => VaultFormat::OwnerEvidence,
             // New authenticated versions must extend this classification deliberately. Refuse
             // rather than treating a future mandatory format as legacy or panicking on it.
             _ => return Err(StorageError::Malformed),
@@ -179,7 +186,7 @@ fn open_classified_with_hooks(
     // The deterministic test hook may alter the physical header after authentication. Never
     // reread it to infer format: equality of a later public byte is not authenticated metadata.
     authenticated(dir);
-    if format == VaultFormat::ChatScope {
+    if format != VaultFormat::Legacy {
         sync_parent(dir).map_err(|error| {
             StorageError::Io(format!("managed vault reopen durability barrier: {error}"))
         })?;
@@ -193,6 +200,9 @@ fn open_classified_with_hooks(
 #[cfg(test)]
 #[path = "vault_classification_tests.rs"]
 mod classification_tests;
+#[cfg(test)]
+#[path = "vault_owner_evidence_tests.rs"]
+mod owner_evidence_tests;
 
 /// Does a vault already exist under `dir`? The gate before [`open_or_create_vault`] is asked to
 /// open one: that call *creates* on first use, so a UI with no way to tell the two cases apart
@@ -206,10 +216,10 @@ pub fn vault_exists(dir: impl AsRef<Path>) -> bool {
 /// MUST NOT classify an already-opened Store: use [`open_or_create_vault_classified`] so the
 /// format comes from the same bytes that authenticated its keys. This returns no live permit.
 pub fn chat_scope_vault_managed(dir: impl AsRef<Path>) -> Result<bool, StorageError> {
-    Ok(
-        vault_version(&read_vault_wrapper(&dir.as_ref().join(VAULT_FILE))?)?
-            == VAULT_VERSION_CHAT_SCOPE,
-    )
+    Ok(matches!(
+        vault_version(&read_vault_wrapper(&dir.as_ref().join(VAULT_FILE))?)?,
+        VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE
+    ))
 }
 
 /// Commit mandatory managed-chat format after the host has durably initialized its sealed
@@ -241,12 +251,57 @@ fn activate_chat_scope_vault_with_hooks(
     phase: impl FnMut(AtomicWritePhase, &Path),
     sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<(), StorageError> {
+    activate_managed_vault_with_hooks(
+        dir,
+        passphrase,
+        rng,
+        VAULT_VERSION_CHAT_SCOPE,
+        phase,
+        sync_parent,
+    )
+}
+
+/// Activate critical owner-evidence storage ONLY after the actual mounted host has durably
+/// initialized its immutable root inventory while preserving every existing scope row. This
+/// low-level key-wrapper operation creates no owner pin, admission, writer or publication grant.
+/// On failure the host must not expose an owner-managed Store. Exact retries cross a real sync.
+pub fn activate_owner_evidence_vault(
+    dir: impl AsRef<Path>,
+    passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Result<(), StorageError> {
+    activate_managed_vault_with_hooks(
+        dir.as_ref(),
+        passphrase,
+        rng,
+        VAULT_VERSION_OWNER_EVIDENCE,
+        |_, _| {},
+        sync_managed_directory,
+    )
+}
+
+fn activate_managed_vault_with_hooks(
+    dir: &Path,
+    passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+    requested_version: u8,
+    phase: impl FnMut(AtomicWritePhase, &Path),
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), StorageError> {
     validate_existing_vault_secret_shape(passphrase)?;
     let _lock = lock_vault(dir)?;
     let path = dir.join(VAULT_FILE);
     let old = read_vault_wrapper(&path)?;
+    let old_version = vault_version(&old)?;
     let dek = decode_and_unseal(&old, passphrase)?;
-    let replacement = seal_and_encode_version(&dek, passphrase, rng, VAULT_VERSION_CHAT_SCOPE)?;
+    let version = match (requested_version, old_version) {
+        // Scope-only callers must not turn off mandatory owner semantics on an existing v4 vault.
+        (VAULT_VERSION_CHAT_SCOPE, VAULT_VERSION_OWNER_EVIDENCE)
+        | (VAULT_VERSION_OWNER_EVIDENCE, _) => VAULT_VERSION_OWNER_EVIDENCE,
+        (VAULT_VERSION_CHAT_SCOPE, _) => VAULT_VERSION_CHAT_SCOPE,
+        _ => return Err(StorageError::Malformed),
+    };
+    let replacement = seal_and_encode_version(&dek, passphrase, rng, version)?;
     let _ = decode_and_unseal(&replacement, passphrase)?;
     write_atomic_with_hook_and_sync(&path, &replacement, phase, sync_parent)
 }
@@ -324,10 +379,12 @@ fn change_vault_passphrase_with_hooks(
     let old = read_vault_wrapper(&path)?;
     let dek = decode_and_unseal(&old, current_passphrase)?;
     // A secret change must never silently re-enable old binaries that ignore admission fences.
-    let replacement = if vault_version(&old)? == VAULT_VERSION_CHAT_SCOPE {
-        seal_and_encode_version(&dek, new_passphrase, rng, VAULT_VERSION_CHAT_SCOPE)?
-    } else {
-        seal_and_encode(&dek, new_passphrase, rng)?
+    let version = vault_version(&old)?;
+    let replacement = match version {
+        VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE => {
+            seal_and_encode_version(&dek, new_passphrase, rng, version)?
+        }
+        _ => seal_and_encode(&dek, new_passphrase, rng)?,
     };
     // Authenticate the generated wrapper before it can replace the user's only live vault file.
     let _ = decode_and_unseal(&replacement, new_passphrase)?;
@@ -415,7 +472,10 @@ fn read_vault_wrapper(path: &Path) -> Result<[u8; VAULT_ENCODED_LEN], StorageErr
 fn vault_version(bytes: &[u8]) -> Result<u8, StorageError> {
     match bytes.first().copied() {
         Some(
-            VAULT_VERSION_RAW_SECRET | VAULT_VERSION_PREHASHED_SECRET | VAULT_VERSION_CHAT_SCOPE,
+            VAULT_VERSION_RAW_SECRET
+            | VAULT_VERSION_PREHASHED_SECRET
+            | VAULT_VERSION_CHAT_SCOPE
+            | VAULT_VERSION_OWNER_EVIDENCE,
         ) => Ok(bytes[0]),
         _ => Err(StorageError::Malformed),
     }
@@ -435,8 +495,13 @@ fn derive_passphrase_store(
             let normalized = Zeroizing::new(*hasher.finalize().as_bytes());
             Ok(PassphraseKeyStore::derive(normalized.as_slice(), salt)?)
         }
-        VAULT_VERSION_CHAT_SCOPE => {
-            let mut hasher = blake3::Hasher::new_derive_key(CHAT_SCOPE_SECRET_DOMAIN);
+        VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE => {
+            let domain = if version == VAULT_VERSION_OWNER_EVIDENCE {
+                OWNER_EVIDENCE_SECRET_DOMAIN
+            } else {
+                CHAT_SCOPE_SECRET_DOMAIN
+            };
+            let mut hasher = blake3::Hasher::new_derive_key(domain);
             hasher.update(&(passphrase.len() as u64).to_be_bytes());
             hasher.update(passphrase);
             let normalized = Zeroizing::new(*hasher.finalize().as_bytes());

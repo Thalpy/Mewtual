@@ -69,10 +69,13 @@ pub fn snapshot_server(
 /// This is the owner-candidate persistence path, not a new format or a membership capability.
 /// Check count, every field length and the complete encoded size BEFORE allocating output, while
 /// holding the SAME provider read guard through encoding. No preflight/unlock/second-clone race
-/// exists. Both occupied rows AND HashMap bucket capacity must fit the byte-derived scan fee
-/// (one scan unit per eight budget bytes). A sparse reused map can therefore refuse even if its
-/// output bytes fit; HashMap iteration costs O(capacity), not O(len). Refusal never compacts or
-/// mutates the source. One zeroizing output buffer encodes the map directly; legacy is unchanged.
+/// exists. Occupied rows AND the HashMap's REPORTED capacity must fit the byte-derived fee
+/// (one reported unit per eight budget bytes), so many sparse retained maps refuse even when
+/// output would fit. This is NOT yet a hard raw-bucket scan bound: standard HashMap::capacity
+/// can underreport its allocation after tombstone-heavy deletion, while iteration scans that
+/// allocation. Production activation needs independently tracked provider allocation/work custody
+/// or a storage adapter that can expose that bound. Refusal never compacts or mutates the source.
+/// The exact output-allocation bound still holds; one zeroizing buffer preserves legacy bytes.
 /// The caller must reserve this output plus any enclosing candidate/sealing buffers first.
 pub fn snapshot_server_bounded(
     device: &MlsDevice,

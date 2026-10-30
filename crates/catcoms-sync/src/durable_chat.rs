@@ -1175,6 +1175,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     pub fn durable_send_context(&self) -> Result<[u8; 32], String> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable.to_string());
+        }
         if self.local_chat_scope.managed() {
             return self.managed_chat_context().map_err(|e| e.to_string());
         }
@@ -1830,7 +1833,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
     pub(crate) fn next_durable_chat_retry_delay(&self) -> Option<u64> {
-        if self.local_chat_scope.managed() && !self.local_chat_scope.live() {
+        if self.owner_evidence_unbound()
+            || (self.local_chat_scope.managed() && !self.local_chat_scope.live())
+        {
             return None;
         }
         let now = self.clock.monotonic_ms();

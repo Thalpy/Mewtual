@@ -567,3 +567,72 @@ async fn initializing_tail_resumes_bounded_original_recovery_without_bootstrappi
     );
     assert_eq!(n.durable_chat.records[&[1; 16]].sealed, original);
 }
+
+#[tokio::test]
+async fn owner_unbound_refusal_preserves_real_accepted_v1_alias_and_original_publication() {
+    let hub = Hub::new();
+    let mut n = node(&hub, 940);
+    let prepared = n.prepare_owner_evidence_checkpoint(5).unwrap();
+    n.open_channel(DocType::Channel, 5).await.unwrap();
+    let context = n.durable_send_context().unwrap();
+    prepare(&mut n, 1);
+    n.commit_durable_chat([1; 16], |_, _| Ok(())).unwrap();
+    assert!(
+        !n.durable_chat.v2,
+        "fixture is actual accepted legacy v1 work"
+    );
+    let binding = Binding::fixture(&n, 12);
+    binding.stage_and_bind(&mut n);
+    // Retention-defense fixture only: the fresh production initializer explicitly REFUSES
+    // history-bearing state. This tests that a retained authenticated owner-tail source cannot
+    // launder an owner-unbound error into stop_obsolete(None) for already accepted v1 bytes.
+    n.initial_owner_evidence =
+        Some(owner_evidence::InitialOwnerEvidence::founder(&prepared, &n.device).unwrap());
+    let before_receipts = n.durable_chat.encode().unwrap();
+    let before_scope = n
+        .local_chat_scope
+        .encode(&n.group_id(), &n.my_public_key(), &n.durable_chat)
+        .unwrap()
+        .unwrap();
+    let original = n.durable_chat.records[&[1; 16]].sealed.clone();
+    assert!(!original.is_empty());
+    let snapshot = n.snapshot().unwrap();
+    let mut restored = restore(&snapshot, &hub, 941);
+    restored.bind_managed_chat_scope(&binding).unwrap();
+    assert!(
+        restored.owner_evidence_unbound(),
+        "plain Current is not the owner saved-head binding"
+    );
+    assert!(restored.durable_send_context().is_err());
+    assert!(restored.next_durable_chat_retry_delay().is_none());
+    restored.drain_durable_chat().await;
+    assert!(restored
+        .post(DocType::Channel, 5, |_| panic!(
+            "owner unbound must not edit"
+        ))
+        .await
+        .is_err());
+    assert_eq!(restored.durable_chat.encode().unwrap(), before_receipts);
+    assert_eq!(
+        restored
+            .local_chat_scope
+            .encode(
+                &restored.group_id(),
+                &restored.my_public_key(),
+                &restored.durable_chat
+            )
+            .unwrap()
+            .unwrap(),
+        before_scope
+    );
+    let receipt = &restored.durable_chat.records[&[1; 16]];
+    assert!(receipt.durable && !receipt.stopped);
+    assert_eq!(receipt.sealed, original);
+    assert!(
+        restored
+            .durable_chat_lookup([1; 16], [1; 32], context, 5)
+            .unwrap()
+            .unwrap()
+            .durable
+    );
+}

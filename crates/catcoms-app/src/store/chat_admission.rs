@@ -9,6 +9,10 @@ use catcoms_rt::{RequestAuthority, RequestCancellation};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 mod custody;
+pub(crate) mod fresh;
+mod owner_writer;
+pub(crate) mod restore;
+pub(crate) mod retired;
 mod revocation;
 mod storage;
 pub(crate) use storage::ChatAdmissionStoragePermit;
@@ -164,6 +168,7 @@ pub struct ChatAdmissionBinding {
     publication: RequestCancellation,
     owner_identity: Arc<()>,
     revoker: ChatAdmissionRevoker,
+    owner_writer_identity: Option<Arc<()>>,
 }
 impl std::fmt::Debug for ChatAdmissionBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -314,7 +319,7 @@ impl MountOwner {
             before_writer: Mutex::new(None),
         }
     }
-    fn observer(&self) -> RequestCancellation {
+    pub(super) fn observer(&self) -> RequestCancellation {
         self.life.observer()
     }
     pub(super) fn revoke(&self) {
@@ -494,7 +499,8 @@ impl ServerStore {
         }
         let managed = match format {
             catcoms_storage::VaultFormat::Legacy => false,
-            catcoms_storage::VaultFormat::ChatScope => true,
+            catcoms_storage::VaultFormat::ChatScope
+            | catcoms_storage::VaultFormat::OwnerEvidence => true,
         };
         let table = self.read_chat_admissions(managed)?;
         if !managed && !table.is_empty() {
@@ -584,7 +590,8 @@ impl ServerStore {
         }
         let managed = match format {
             catcoms_storage::VaultFormat::Legacy => false,
-            catcoms_storage::VaultFormat::ChatScope => true,
+            catcoms_storage::VaultFormat::ChatScope
+            | catcoms_storage::VaultFormat::OwnerEvidence => true,
         };
         if runtime.table.is_none() {
             runtime.table = Some(self.read_chat_admissions(managed)?);
@@ -597,7 +604,12 @@ impl ServerStore {
             &self.dir, passphrase, rng,
         ))?;
         runtime.managed = true;
-        runtime.format = Some(catcoms_storage::VaultFormat::ChatScope);
+        runtime.format = Some(match format {
+            catcoms_storage::VaultFormat::OwnerEvidence => {
+                catcoms_storage::VaultFormat::OwnerEvidence
+            }
+            _ => catcoms_storage::VaultFormat::ChatScope,
+        });
         Ok(())
     }
 
@@ -929,6 +941,7 @@ impl ServerStore {
             publication: custody.admission,
             owner_identity: custody.owner_identity,
             revoker: custody.revoker,
+            owner_writer_identity: None,
         })
     }
 

@@ -4,7 +4,12 @@
 //! A forthcoming mounted-store Ready/lease adapter must cover the profile/archive/MLS state
 //! before exposing certificates. This does not activate a protocol or install a trusted pin.
 use super::*;
-use catcoms_replication::chat::{owner_facts::*, ChatError};
+use catcoms_replication::chat::{owner_facts::*, ChatError, Rights};
+mod initial_tail;
+mod joined;
+pub(super) use initial_tail::InitialOwnerEvidence;
+pub use initial_tail::ManagedOwnerEvidenceBinding;
+pub use joined::VerifiedJoinedOwnerEvidence;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OwnerEvidencePrepareError {
@@ -108,3 +113,101 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
 #[cfg(test)]
 mod tests;
+
+impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Stage original signed facts privately. No bytes are exported and no runtime authority is
+    /// installed. The actual founder preparation and unchanged MLS/source are checked again;
+    /// exact retry retains the SAME already-signed facts rather than resampling signatures.
+    pub fn stage_owner_evidence_checkpoint(
+        &mut self,
+        prepared: &PreparedOwnerEvidence,
+    ) -> Result<(), SyncError> {
+        if !prepared.matches_original_mls_state(self)
+            || self.fresh_chat_admission().is_none()
+            || !self.docs.is_empty()
+            || !self.ledger.is_empty()
+            || !self.durable_chat.initialization_empty()
+            || !self.local_chat_scope.initialization_snapshot_allowed()
+        {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        if let Some(existing) = &self.initial_owner_evidence {
+            return if existing.matches_preparation(prepared) {
+                Ok(())
+            } else {
+                Err(SyncError::ChatScopeUnavailable)
+            };
+        }
+        self.initial_owner_evidence = Some(InitialOwnerEvidence::founder(prepared, &self.device)?);
+        Ok(())
+    }
+
+    /// Stage this actual exact-KP join's independently verified owner certificates. The host
+    /// still must reserve original lineage/budget, sync the immutable pin + canonical snapshot,
+    /// commit Current, and bind the actual Saved/head writer before any context/publication.
+    pub fn stage_joined_owner_evidence_checkpoint(
+        &mut self,
+        verified: &VerifiedJoinedOwnerEvidence,
+    ) -> Result<(), SyncError> {
+        if !verified.matches_original(self)
+            || !self.docs.is_empty()
+            || !self.ledger.is_empty()
+            || !self.durable_chat.initialization_empty()
+            || !self.local_chat_scope.initialization_snapshot_allowed()
+        {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        if let Some(existing) = &self.initial_owner_evidence {
+            return if existing.matches_joined(verified) {
+                Ok(())
+            } else {
+                Err(SyncError::ChatScopeUnavailable)
+            };
+        }
+        self.initial_owner_evidence = Some(InitialOwnerEvidence::joined(verified));
+        Ok(())
+    }
+
+    /// Trusted mounted canonical-host seam, analogous to the exact scope binding. Only the
+    /// actual Saved+Current+writer result may implement this. A plain Current scope, decoded
+    /// pin/tail, or current roster is insufficient. Host MUST validate complete frozen bytes
+    /// and canonical source immediately before this synchronous call; Sync cannot authenticate
+    /// arbitrary Rust trait implementations. No decoder invokes it.
+    pub fn bind_managed_owner_evidence(
+        &mut self,
+        binding: &impl ManagedOwnerEvidenceBinding,
+    ) -> Result<(), SyncError> {
+        let state = self
+            .initial_owner_evidence
+            .as_mut()
+            .ok_or(SyncError::ChatScopeUnavailable)?;
+        if state.profile() != binding.profile_id()
+            || binding.group() != self.group.group_id()
+            || binding.signer().as_slice() != self.device.public_key_bytes()
+            || binding.publication_authority().is_cancelled()
+            || !self.local_chat_scope.live()
+        {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        state.verify_local_chain(
+            &self.group,
+            &self.device,
+            binding.owner_founder(),
+            binding.signer(),
+        )?;
+        state.bind(binding.publication_authority())
+    }
+
+    /// Saved metadata only. A tail/profile label cannot construct canonical runtime authority.
+    pub fn owner_evidence_profile_id(&self) -> Option<OwnerFactId> {
+        self.initial_owner_evidence
+            .as_ref()
+            .map(InitialOwnerEvidence::profile)
+    }
+
+    pub(super) fn owner_evidence_unbound(&self) -> bool {
+        self.initial_owner_evidence
+            .as_ref()
+            .is_some_and(|state| !state.live())
+    }
+}

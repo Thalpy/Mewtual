@@ -49,10 +49,16 @@ pub(crate) fn studio_refused(
 
 mod chat_admission;
 mod chat_fences;
+mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
     ChatAdmissionPreparation, ChatAdmissionResolution, ChatAdmissionRevoker, ChatMountRevoker,
     MAX_CHAT_ADMISSION_IDENTITIES,
+};
+pub use owner_evidence::canonical::{
+    OfflineOwnerEvidence, OwnedOwnerServer, OwnerCheckpointJoinAttempt, OwnerEvidenceBudget,
+    OwnerFounderInitialization, OwnerJoinedInitialization, OwnerRestoreClassification,
+    OwnerRestoreInitialization, OwnerRestorePreparation,
 };
 mod creative_references;
 mod epoch_draft_archive;
@@ -629,6 +635,102 @@ mod persistence {
                 .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
         }
         Ok(())
+    }
+
+    /// Owner storage has one prepaid replacement slot, not a PID/counter temp collection.
+    /// Only fixed path selectors inside this persistence module may reach this generic helper.
+    fn cleanup_owner_fixed_stage(stage: &Path, parent: &Path) -> Result<(), AppError> {
+        cleanup_owner_fixed_stage_with_sync(stage, parent, sync_owner_directory)
+    }
+
+    fn cleanup_owner_fixed_stage_with_sync(
+        stage: &Path,
+        parent: &Path,
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), AppError> {
+        match fs::symlink_metadata(stage) {
+            // A prior unlink may have succeeded before its parent barrier failed. Missing on
+            // retry is not proof of durability: settle the SAME parent before allocating the
+            // next replacement slot, including after fresh startup orphan inventory.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(metadata) if metadata.file_type().is_file() => {
+                fs::remove_file(stage).map_err(|error| AppError::Io(error.to_string()))?;
+            }
+            _ => return Err(AppError::Invalid("unsupported owner staging entry".into())),
+        }
+        sync_parent(parent).map_err(|error| AppError::Io(error.to_string()))
+    }
+
+    #[cfg(test)]
+    mod owner_stage_tests {
+        use super::*;
+
+        #[test]
+        fn absent_stage_retry_still_settles_real_unlink_parent_barrier() {
+            let directory = tempfile::tempdir().unwrap();
+            let parent = directory.path();
+            let stage = parent.join("exact.replace.tmp");
+            let missing = parent.join("proven-missing-sync-parent");
+            fs::write(&stage, b"unpublished exact candidate").unwrap();
+            assert!(!missing.exists());
+            for _ in 0..2 {
+                assert!(cleanup_owner_fixed_stage_with_sync(&stage, parent, |_| {
+                    sync_owner_directory(&missing)
+                })
+                .is_err());
+                assert!(
+                    !stage.exists(),
+                    "actual unlink happened, retry still owes barrier"
+                );
+                assert!(
+                    fs::read_dir(parent).unwrap().next().is_none(),
+                    "no new replacement was allocated after failed cleanup"
+                );
+            }
+            cleanup_owner_fixed_stage(&stage, parent).unwrap();
+            assert!(!stage.exists());
+        }
+    }
+
+    fn write_owner_fixed_record(
+        path: &Path,
+        stage: &Path,
+        bytes: &[u8],
+        mut phase: impl FnMut(AtomicWritePhase, &Path),
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), AppError> {
+        let mut file =
+            open_staging_candidate(stage).map_err(|error| AppError::Io(error.to_string()))?;
+        let mut staging = StagingPath {
+            path: stage.to_path_buf(),
+            remove_on_drop: true,
+        };
+        file.write_all(bytes)
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        drop(file);
+        phase(AtomicWritePhase::TempSynced, stage);
+        fs::rename(stage, path).map_err(|error| AppError::Io(error.to_string()))?;
+        staging.remove_on_drop = false;
+        phase(AtomicWritePhase::Renamed, stage);
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            sync_parent(parent)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    fn sync_owner_directory(path: &Path) -> std::io::Result<()> {
+        sync_directory(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    fn sync_owner_directory(_path: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "owner evidence requires a real directory-sync implementation",
+        ))
     }
 
     /// I-4's guard. Obtainable only from [`ServerStore::epoch_mutation_guard`], which rotates
@@ -1277,6 +1379,237 @@ mod persistence {
         /// These deliberately do **not** rotate `inventory_generation`. None of them belongs to an
         /// inventoried family, and rotating for them would invalidate a captured inventory every
         /// time the UI saved a preference.
+        /// Exact private root-registry staging namespace, independent of inventoried server
+        /// families. Only one global root writer may call this; crash cleanup never touches the
+        /// current registry. `create_new` rejects links/races rather than truncating another file.
+        pub(super) fn cleanup_owner_pins_stage(&self) -> Result<(), AppError> {
+            let staged = self.dir.join("chat-owner-pins.replace.tmp");
+            cleanup_owner_fixed_stage(&staged, &self.dir)
+        }
+
+        /// A preactivation legacy read with no owner staging entry need not acquire a new
+        /// owner-format durability requirement on unsupported platforms. It allocates no stage
+        /// and authorizes no owner effect. Managed open and EVERY writer settle absence too.
+        pub(super) fn cleanup_owner_pins_stage_for_open(
+            &self,
+            format: catcoms_storage::VaultFormat,
+        ) -> Result<(), AppError> {
+            if format != catcoms_storage::VaultFormat::OwnerEvidence {
+                let stage = self.dir.join("chat-owner-pins.replace.tmp");
+                if matches!(fs::symlink_metadata(&stage), Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    return Ok(());
+                }
+            }
+            self.cleanup_owner_pins_stage()
+        }
+
+        pub(super) fn write_owner_pins_record(&self, bytes: &[u8]) -> Result<(), AppError> {
+            if bytes.len() > 32 * 1024 * 1024 + 40 {
+                return Err(AppError::Invalid(
+                    "owner root registry exceeds its sealed bound".into(),
+                ));
+            }
+            self.cleanup_owner_pins_stage()?;
+            let path = self.dir.join("chat-owner-pins.bin");
+            let staged = self.dir.join("chat-owner-pins.replace.tmp");
+            #[cfg(test)]
+            let fault = self.owner_evidence.pin_fault.swap(0, Ordering::SeqCst);
+            #[cfg(not(test))]
+            let fault = 0;
+            write_owner_fixed_record(
+                &path,
+                &staged,
+                bytes,
+                |phase, stage| {
+                    #[cfg(test)]
+                    if fault == 1 && phase == AtomicWritePhase::TempSynced {
+                        fs::remove_file(stage)
+                            .expect("remove actual synced owner-pin stage before rename");
+                    }
+                    let _ = (phase, stage);
+                },
+                |parent| {
+                    #[cfg(test)]
+                    if fault == 2 {
+                        let missing = parent.join("owner-pin-sync-proven-missing-test-only");
+                        assert!(!missing.exists());
+                        return sync_owner_directory(&missing);
+                    }
+                    let _ = fault;
+                    sync_owner_directory(parent)
+                },
+            )
+        }
+
+        /// The canonical owner namespace is private and independent of numeric server mirrors.
+        /// Reject links/unsupported entries and sync creation into the actual mounted root.
+        pub(super) fn owner_canonical_directory(&self) -> Result<PathBuf, AppError> {
+            let path = self.dir.join("owner-state");
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(&path).map_err(|e| AppError::Io(e.to_string()))?;
+                }
+                _ => {
+                    return Err(AppError::Invalid(
+                        "unsupported canonical owner directory".into(),
+                    ))
+                }
+            }
+            // A failed first mkdir-parent barrier leaves a visible directory. Existence on
+            // retry is NOT evidence that its parent entry was synced. Always settle this exact
+            // root dependency before any child record/restore barrier can authorize export.
+            #[cfg(test)]
+            if self
+                .owner_evidence
+                .directory_sync_failure
+                .load(Ordering::SeqCst)
+            {
+                let missing = self.dir.join("owner-root-sync-proven-missing-test-only");
+                assert!(!missing.exists());
+                return sync_owner_directory(&missing)
+                    .map(|()| path)
+                    .map_err(|error| AppError::Io(error.to_string()));
+            }
+            sync_owner_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+            // Startup may see no orphan after an earlier successful unlink/failed sync. Settle
+            // the child directory too before inventory/reserving another stage; existence or an
+            // empty read_dir is not a deletion durability receipt.
+            sync_owner_directory(&path).map_err(|error| AppError::Io(error.to_string()))?;
+            Ok(path)
+        }
+
+        /// A fixed configured read allocation, never an untrusted file-length reservation.
+        /// Return the SAME write-enabled handle so restart durability can flush the exact bytes
+        /// authenticated by its caller. Merely preparing this read grants no publication.
+        pub(super) fn read_owner_canonical_record(
+            &self,
+            key: &[u8; 32],
+            cap: usize,
+        ) -> Result<(File, Vec<u8>), AppError> {
+            let parent = self.owner_canonical_directory()?;
+            let path = parent.join(format!("{}.bin", hex::encode(key)));
+            let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
+            if !metadata.file_type().is_file() || metadata.len() > cap as u64 {
+                return Err(AppError::Invalid(
+                    "unsupported canonical owner source".into(),
+                ));
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| AppError::Io(e.to_string()))?;
+            let actual = file.metadata().map_err(|e| AppError::Io(e.to_string()))?;
+            if !actual.is_file() || actual.len() > cap as u64 {
+                return Err(AppError::Invalid(
+                    "unsupported opened canonical owner source".into(),
+                ));
+            }
+            let amount = cap
+                .checked_add(1)
+                .ok_or_else(|| AppError::Invalid("owner read bound overflow".into()))?;
+            let mut raw = Vec::with_capacity(amount);
+            (&file)
+                .take(amount as u64)
+                .read_to_end(&mut raw)
+                .map_err(|e| AppError::Io(e.to_string()))?;
+            if raw.len() > cap {
+                return Err(AppError::Invalid(
+                    "canonical owner source grew beyond its bound".into(),
+                ));
+            }
+            Ok((file, raw))
+        }
+
+        /// Actual file + leaf-parent barrier for the exact authenticated opened canonical source.
+        /// Root entry debt is settled even on retry where owner-state was already visible.
+        pub(super) fn sync_opened_owner_canonical_record(
+            &self,
+            permit: &chat_admission::ChatAdmissionStoragePermit<'_>,
+            head: &owner_evidence::canonical::OwnerHeadWriteGuard<'_>,
+            file: &File,
+        ) -> Result<(), AppError> {
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            let _ = head.identifier(permit)?;
+            let parent = self.owner_canonical_directory()?;
+            file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
+            #[cfg(test)]
+            if self
+                .owner_evidence
+                .restore_sync_failure
+                .load(Ordering::SeqCst)
+            {
+                let missing = parent.join("owner-restore-sync-proven-missing-test-only");
+                assert!(!missing.exists());
+                return sync_owner_directory(&missing).map_err(|e| AppError::Io(e.to_string()));
+            }
+            sync_owner_directory(&parent).map_err(|e| AppError::Io(e.to_string()))?;
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            Ok(())
+        }
+
+        pub(super) fn cleanup_owner_canonical_stage(&self, key: &[u8; 32]) -> Result<(), AppError> {
+            let parent = self.owner_canonical_directory()?;
+            let stage = parent.join(format!("{}.replace.tmp", hex::encode(key)));
+            cleanup_owner_fixed_stage(&stage, &parent)
+        }
+
+        /// Only an already-held original admission/head writer can reach the physical write.
+        /// Final negative revocation is sampled immediately before the synchronous operation.
+        pub(super) fn write_owner_canonical_record(
+            &self,
+            permit: &chat_admission::ChatAdmissionStoragePermit<'_>,
+            head: &owner_evidence::canonical::OwnerHeadWriteGuard<'_>,
+            bytes: &[u8],
+        ) -> Result<(), AppError> {
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            let key = head.identifier(permit)?;
+            if bytes.len() > 144 * 1024 * 1024 + 1024 + 40 {
+                return Err(AppError::Invalid(
+                    "canonical owner snapshot exceeds its bound".into(),
+                ));
+            }
+            let parent = self.owner_canonical_directory()?;
+            self.cleanup_owner_canonical_stage(&key)?;
+            let path = parent.join(format!("{}.bin", hex::encode(key)));
+            let stage = parent.join(format!("{}.replace.tmp", hex::encode(key)));
+            #[cfg(test)]
+            let fault = self
+                .owner_evidence
+                .canonical_fault
+                .swap(0, Ordering::SeqCst);
+            #[cfg(not(test))]
+            let fault = 0;
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            write_owner_fixed_record(
+                &path,
+                &stage,
+                bytes,
+                |phase, staged| {
+                    #[cfg(test)]
+                    if fault == 1 && phase == AtomicWritePhase::TempSynced {
+                        fs::remove_file(staged)
+                            .expect("remove actual synced canonical stage before rename");
+                    }
+                    let _ = (phase, staged);
+                },
+                |directory| {
+                    #[cfg(test)]
+                    if fault == 2 {
+                        let missing =
+                            directory.join("canonical-parent-sync-proven-missing-test-only");
+                        assert!(!missing.exists());
+                        return sync_owner_directory(&missing);
+                    }
+                    let _ = fault;
+                    sync_owner_directory(directory)
+                },
+            )
+        }
+
         pub(super) fn write_chat_fences_record(&self, bytes: &[u8]) -> Result<(), AppError> {
             #[cfg(test)]
             if self
@@ -1567,6 +1900,7 @@ pub struct ServerStore {
     keys: KeyHierarchy,
     // Actual physical-mount custody and serialized admission lineage, never restored from bytes.
     chat_mount: chat_admission::MountOwner,
+    owner_evidence: owner_evidence::StoreOwnerState,
     // Process-local freshness only, never wire authority. Replaced before any intent-file I/O;
     // budgets made from older scans (or another mounted vault) cannot authorize a new write.
     intent_generation: std::sync::Arc<()>,
@@ -1644,6 +1978,7 @@ impl ServerStore {
             dir,
             keys,
             chat_mount: chat_admission::MountOwner::new(),
+            owner_evidence: owner_evidence::StoreOwnerState::default(),
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
             inventory_generation: std::sync::Arc::new(()),
@@ -1665,6 +2000,7 @@ impl ServerStore {
         // before returning any usable mount. A later public-header read cannot replace this
         // evidence. Even legacy wrappers cannot ignore a nonempty prior managed inventory.
         store.open_chat_admission_inventory(format)?;
+        store.open_owner_evidence_inventory(format)?;
         // Persist the `servers` directory entry as well as later contents. Without this flush, a
         // first-launch power loss could retain a synced record but forget the newly created
         // parent. It runs through the store so the destination cannot be supplied by a caller.
@@ -1914,6 +2250,7 @@ impl ServerStore {
         snapshot: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        self.refuse_pinned_numeric_snapshot(snapshot)?;
         let sealed = seal(&self.keys.db_key()?, snapshot, rng)?;
         self.write_server_record(id, &frame(&sealed))
     }
@@ -1922,7 +2259,9 @@ impl ServerStore {
     pub fn load_server(&self, id: u64) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let bytes = fs::read(self.server_path(id)).map_err(|e| AppError::Io(e.to_string()))?;
         let sealed = unframe(&bytes)?;
-        Ok(Zeroizing::new(unseal(&self.keys.db_key()?, &sealed)?))
+        let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &sealed)?);
+        self.refuse_pinned_numeric_snapshot(&plain)?;
+        Ok(plain)
     }
 
     /// Delete a server's on-disk snapshot, its network record, its address cache, its cache limit

@@ -6,13 +6,13 @@
 //! create a membership or persistence capability and cannot replace the later cold-archive saver.
 use super::*;
 
-// The closed metadata invoice below is < 32 KiB: routing <= 364B; empty ledger 8B;
+// The closed metadata invoice below is < 64 KiB: routing <= 364B; empty ledger 8B;
 // empty inventories/framing < 128B; <=8 fixed finalization pairs < 1KiB; wrap key 36B;
 // <=8 rendezvous entries each
 // <=1024+128+8B (9280B); tenure <=256B; policy <=4101B; admin <=64*36+4B;
-// scope <=512B. Reserve 32 KiB including all outer framing and future fixed fields.
+// scope <=512B; <=8 small owner facts/tail <33KiB. Reserve64KiB for all outer framing.
 // New variable fields MUST enter this preflight/invoice before the shared encoder changes.
-const METADATA_FEE: usize = 32 * 1024;
+const METADATA_FEE: usize = 64 * 1024;
 const MAX_INITIAL_RENDEZVOUS: usize = 8;
 const MAX_INITIAL_ADMINS: usize = 64;
 const MAX_INITIAL_FINALIZATIONS: usize = 8;
@@ -36,7 +36,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// covers both its checked lengths and actual output. The canonical reservation additionally
     /// pays four max-snapshot buffers, covering this output, bounded MLS output, SDK roster
     /// scratch (whose original credential/key material is in the checked provider snapshot),
-    /// and fixed metadata. The 32KiB metadata invoice is output framing, not the whole-memory fee.
+    /// and fixed metadata. The 64KiB metadata invoice is output framing, not the whole-memory fee.
+    /// The underlying provider's reported-capacity test is not yet a raw-bucket work proof
+    /// after tombstone-heavy deletion; activation remains blocked on that independently reviewed
+    /// storage/work fix. The checked output allocations and exact framing are still bounded.
     /// The returned bytes confer no save,
     /// Current scope, trusted root or publication authority.
     pub fn snapshot_owner_initialization(

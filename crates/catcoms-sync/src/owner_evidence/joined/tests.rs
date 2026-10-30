@@ -472,3 +472,106 @@ fn actual_applied_removal_and_raw_restore_cannot_mint_joined_staging_provenance(
     assert!(!evidence.matches_original(&f.member));
     assert!(verify(&f.member, &f.expected, &f.facts).is_err());
 }
+
+#[test]
+fn decoded_local_chain_still_matches_actual_restored_credential_and_epoch() {
+    let mut f = fixture();
+    let snapshot = f.member.snapshot().unwrap();
+    let restored = ChannelSync::restore(
+        &snapshot,
+        Hub::new().join(PeerId::from_u64(0xe199)),
+        ChaCha20Rng::seed_from_u64(0xe199),
+        Box::new(ManualClock::new(1_000)),
+    )
+    .unwrap();
+    assert!(
+        restored.fresh_chat_admission().is_none(),
+        "restore supplies no fresh admission"
+    );
+    let decode = |facts: &[SignedOwnerFact]| {
+        let mut encoder = Encoder::new();
+        encoder
+            .put_str("catcoms/owner-evidence-initial/v1")
+            .unwrap();
+        encoder.put_bytes(f.facts[0].id().as_bytes()).unwrap();
+        encoder.put_u32(facts.len() as u32);
+        let ordered: BTreeMap<_, _> = facts.iter().map(|fact| (fact.id(), fact)).collect();
+        for fact in ordered.values() {
+            encoder.put_bytes(&fact.encode()).unwrap();
+        }
+        InitialOwnerEvidence::decode(&encoder.finish(), f.member.group_id().as_slice()).unwrap()
+    };
+    let valid = decode(&f.facts);
+    assert!(valid
+        .verify_local_chain(
+            &restored.group,
+            &restored.device,
+            f.facts[0].issuer(),
+            &restored.device.public_key_bytes().try_into().unwrap()
+        )
+        .is_ok());
+    for credential_mismatch in [true, false] {
+        let mut facts = f.facts.clone();
+        let mut body = facts[1].spec().body.clone();
+        let OwnerFactBody::Admission {
+            origin:
+                AdmissionOrigin::Add {
+                    credential,
+                    before_epoch,
+                    after_epoch,
+                    ..
+                },
+            ..
+        } = &mut body
+        else {
+            unreachable!()
+        };
+        if credential_mismatch {
+            *credential = [211; 32];
+        } else {
+            *before_epoch += 1;
+            *after_epoch += 1;
+        }
+        facts[1] = sign(&f.owner, &facts[0], body);
+        let mut body = facts[2].spec().body.clone();
+        let OwnerFactBody::RealmGrant { admission, .. } = &mut body else {
+            unreachable!()
+        };
+        *admission = facts[1].id();
+        facts[2] = sign(&f.owner, &facts[0], body);
+        let mut body = facts[3].spec().body.clone();
+        let OwnerFactBody::Basis {
+            admission, grant, ..
+        } = &mut body
+        else {
+            unreachable!()
+        };
+        *admission = facts[1].id();
+        *grant = facts[2].grant_id().unwrap();
+        facts[3] = sign(&f.owner, &facts[0], body);
+        assert!(
+            f.expected
+                .verify_basis(
+                    &facts[0],
+                    OwnerBasisFacts {
+                        admission: &facts[1],
+                        grant: &facts[2],
+                        basis: &facts[3]
+                    },
+                    &[]
+                )
+                .is_ok(),
+            "complete signed semantic chain is valid before local-source comparison"
+        );
+        let decoded = decode(&facts);
+        assert!(decoded
+            .verify_local_chain(
+                &restored.group,
+                &restored.device,
+                facts[0].issuer(),
+                &restored.device.public_key_bytes().try_into().unwrap()
+            )
+            .is_err());
+        assert!(!decoded.live(), "decoding never supplies runtime authority");
+    }
+}

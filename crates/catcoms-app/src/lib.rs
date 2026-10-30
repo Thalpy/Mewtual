@@ -4107,6 +4107,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self.sync.snapshot()?)
     }
 
+    /// Private canonical initialization only. The caller owns the actual original creation,
+    /// configured buffer reservation and staged Active scope; Sync preflights the closed field
+    /// grammar and provider map before allocating. This is secret data, not a save receipt or
+    /// a way to publish an arbitrary restored Server. Legacy snapshot framing is unchanged.
+    pub(crate) fn snapshot_owner_initialization(
+        &mut self,
+        max_snapshot_bytes: usize,
+        max_mls_bytes: usize,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+        Ok(self
+            .sync
+            .snapshot_owner_initialization(max_snapshot_bytes, max_mls_bytes)?)
+    }
+
     /// Reconstruct a server from a [`Server::snapshot`] blob plus a **fresh** transport (the
     /// caller re-dials peers, Phase 9g). The display name comes from the registry; the device
     /// id is re-derived from the restored MLS device.

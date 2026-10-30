@@ -252,3 +252,77 @@ fn owner_evidence_actual_mls_admission_chain_verifies_on_member_and_fresh_restor
         )
         .is_ok());
 }
+
+/// The critical tail is original evidence only. Neither raw restore nor public legacy owner
+/// controls can use it as Current/canonical authority; refusals precede mutating/signing work.
+#[tokio::test]
+async fn owner_evidence_raw_tail_is_strict_unbound_and_refuses_positive_owner_controls() {
+    let mut owner = ChannelSync::found(
+        Hub::new().join(PeerId::from_u64(0xe001)),
+        MlsDevice::generate().unwrap(),
+        ChaCha20Rng::seed_from_u64(0xe001),
+        Box::new(ManualClock::new(1_000)),
+    )
+    .unwrap();
+    owner.initialize_new_group_policy().unwrap();
+    let prepared = owner.prepare_owner_evidence_checkpoint(9).unwrap();
+    owner.stage_managed_chat_scope([1; 32], [2; 32]).unwrap();
+    owner.stage_owner_evidence_checkpoint(&prepared).unwrap();
+    let bytes = owner.snapshot().unwrap();
+    let mut restored = ChannelSync::restore(
+        &bytes,
+        Hub::new().join(PeerId::from_u64(0xe002)),
+        ChaCha20Rng::seed_from_u64(0xe002),
+        Box::new(ManualClock::new(1_000)),
+    )
+    .unwrap();
+    assert!(restored.owner_evidence_unbound());
+    assert!(restored.durable_send_context().is_err());
+    let epoch = restored.group.epoch();
+    let admin = restored.device.device_id();
+    assert!(restored.open_channel(DocType::Channel, 9).await.is_err());
+    let edited = std::cell::Cell::new(false);
+    assert!(restored
+        .post(DocType::Channel, 9, |_| {
+            edited.set(true);
+            Ok(())
+        })
+        .await
+        .is_err());
+    assert!(!edited.get());
+    assert!(restored.subscribe_control().await.is_err());
+    assert!(restored.run_once().await.is_err());
+    assert!(restored.set_admin(&admin, true).await.is_err());
+    assert!(restored.mint_invite([2; 16], 10_000, vec![]).is_err());
+    assert!(restored.publish_group_policy().is_err());
+    assert!(restored.request_remove(&admin).await.is_err());
+    assert!(restored.remove(&admin).await.is_err());
+    assert_eq!(restored.group.epoch(), epoch);
+    assert!(restored.docs.is_empty());
+    assert!(restored.admin_roster.is_empty());
+    assert!(restored.outbox.is_empty());
+    assert_eq!(restored.snapshot().unwrap().as_slice(), bytes.as_slice());
+    let mut trailing = bytes.to_vec();
+    trailing.extend_from_slice(&0u32.to_be_bytes());
+    assert!(ChannelSync::restore(
+        &trailing,
+        Hub::new().join(PeerId::from_u64(0xe003)),
+        ChaCha20Rng::seed_from_u64(0xe003),
+        Box::new(ManualClock::new(1_000)),
+    )
+    .is_err());
+    let mut unknown = bytes.to_vec();
+    let tag = b"catcoms/owner-evidence-initial/v1";
+    let at = unknown
+        .windows(tag.len())
+        .position(|window| window == tag)
+        .unwrap();
+    unknown[at + tag.len() - 1] = b'9';
+    assert!(ChannelSync::restore(
+        &unknown,
+        Hub::new().join(PeerId::from_u64(0xe004)),
+        ChaCha20Rng::seed_from_u64(0xe004),
+        Box::new(ManualClock::new(1_000)),
+    )
+    .is_err());
+}

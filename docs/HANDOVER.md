@@ -44,8 +44,10 @@ is lifted. New work receives static/actual-diff review and records tests as unex
 Root, native and frontend suites and remaining applicable gates are still mandatory before final
 handoff when the user permits them. Older complete results below apply only to PR82.
 
-Canonical founder/member initialization and private restore are developed in the isolated
-`chat-admission-admin-audit-worktree` (checkpoint `72c790d5`); they are not yet integrated here.
+Canonical founder/member initialization and private restore from the isolated
+`chat-admission-admin-audit-worktree` (checkpoint `72c790d5`) are now integrated locally but remain
+uncompiled and unexecuted. Their destination-member verifier checks the actual selected fresh KP,
+Welcome, credential and incarnation; a generic downloaded fact chain cannot replace that source.
 Membership candidate/strict operation persistence and safe automatic retirement of never-exposed
 initialization are in progress. The provider's physical allocation invoice and bounded restore need
 correction before claiming an end-to-end resource bound. The old bounded checkpoint profile remains
@@ -179,6 +181,20 @@ DTO conversion, original-session authorization and actual App/admin-panel integr
 These helpers are not an implemented full ledger view or activation of typed chat.
 
 ## Integrated text-chat validation (29 October; local gates passed)
+
+## Private canonical owner kernel (30 October; new tests uncompiled)
+
+The isolated admission/admin branch now drafts actual private founder and destination-member
+canonical initialization plus exact canonical restart/Initializing recovery. Immutable real-group
+pins and one logical head/writer fence numeric aliases; original admission -> head -> Store custody
+and whole candidate uncertainty precede transfer. Real directory fault tests are authored, not run.
+Read-only actual review corrected cleanup-barrier retry and copied-adapter integration defects.
+The generic MLS provider raw-bucket scan bound is still OPEN; reported HashMap capacity is not its
+allocation after all deletion patterns. Production typed dispatch remains OFF. The owner-side
+covering Add/save-before-Welcome, scalable v2 archive, held/admin decision vertical and native
+activation are unfinished. See [the precise kernel checkpoint](communication-recovery/CHAT-OWNER-CANONICAL-KERNEL-CHECKPOINT.md)
+for actual paths, focused commands, review limits and remaining gates. Primary owns all compilation
+and the mandatory full suites; this note does not supersede PR82's separate passed validation.
 
 ## Owner fact-chain verifier continuation (30 October; focused execution pending)
 

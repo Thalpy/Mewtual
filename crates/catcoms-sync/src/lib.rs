@@ -4350,6 +4350,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     docs: HashMap<(DocType, u128), EncryptedDoc>,
     durable_chat: durable_chat::DurableChatState,
     local_chat_scope: local_chat_scope::LocalChatScope,
+    initial_owner_evidence: Option<owner_evidence::InitialOwnerEvidence>,
     /// Managed raw-post retries retain their ORIGINAL observer. They never fall back into the
     /// unscoped generic outbox, and rebind/restart cannot authorize an old queued handoff.
     managed_chat_outbox: Vec<(Topic, Vec<u8>, catcoms_rt::RequestCancellation)>,
@@ -4894,6 +4895,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             docs: HashMap::new(),
             durable_chat: durable_chat::DurableChatState::default(),
             local_chat_scope: local_chat_scope::LocalChatScope::default(),
+            initial_owner_evidence: None,
             managed_chat_outbox: Vec::new(),
             // Placeholder; set from `ns_secret_L` by `capture_routing_secret` below.
             control_topic: Topic::new(Vec::<u8>::new()),
@@ -5134,6 +5136,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         )? {
             e.put_bytes(&scope).map_err(|_| oversize())?;
         }
+        if let Some(owner) = &self.initial_owner_evidence {
+            e.put_bytes(&owner.encode()?).map_err(|_| oversize())?;
+        }
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -5283,6 +5288,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             Some(d.get_bytes().map_err(|_| bad())?)
         };
+        let initial_owner_bytes = if d.is_empty() {
+            None
+        } else {
+            Some(d.get_bytes().map_err(|_| bad())?)
+        };
+        if initial_owner_bytes.is_some() && local_scope_bytes.is_none() {
+            return Err(bad());
+        }
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -5313,6 +5326,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 &mut durable_chat,
             )?,
         };
+        this.initial_owner_evidence = initial_owner_bytes
+            .map(|bytes| {
+                owner_evidence::InitialOwnerEvidence::decode(bytes, &this.group.group_id())
+            })
+            .transpose()?;
         this.owner_tenure = tenure;
         this.durable_chat = durable_chat;
         let (label, secrets) = decode_routing_state(&routing_bytes)?;
@@ -5451,6 +5469,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// copy by a malicious member cannot affect the gate. Errors `Unauthorized` if not the owner;
     /// `NoSuchDoc` if the roles doc isn't open.
     pub async fn set_admin(&mut self, device: &DeviceId, admin: bool) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if !self.is_designated_committer() {
             return Err(SyncError::Unauthorized);
         }
@@ -5812,6 +5833,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Subscribe to this group's control topic so the member receives membership
     /// commits. Call once after construction (and after joining).
     pub async fn subscribe_control(&mut self) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         self.control_subscribed = true;
         self.resync_subscriptions().await
     }
@@ -5975,6 +5999,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Open a document: create it locally (if absent) and subscribe to its topic.
     pub async fn open_channel(&mut self, doc_type: DocType, doc_id: u128) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         let key = (doc_type, doc_id);
         let actor = self.device.device_id();
         self.docs
@@ -6016,6 +6043,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), AutomergeError>,
     {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         let current_context = self.durable_send_context();
         let managed_chat = doc_type == DocType::Channel && self.local_chat_scope.managed();
         // This check must precede the edit/signing callback. stop_obsolete alone previously
@@ -6616,6 +6646,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         T: 'static,
     {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         self.reconcile_voice_actor();
         self.drain_durable_chat().await;
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
@@ -6801,6 +6834,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// by `max_outbox` (drop oldest on overflow so a persistently failing transport
     /// cannot grow the queue without bound).
     async fn drain_outbox(&mut self) {
+        if self.owner_evidence_unbound() {
+            return;
+        }
         // This bounded queue retains the original observer and never samples a replacement
         // mount's authority. Revoked work cannot fall through into generic publish().
         let mut index = 0;
@@ -12018,6 +12054,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// config, remove via the local MLS path instead. Errors if a commit is
     /// already staged here (one pending commit at a time).
     pub async fn remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if self.pending.is_some() {
             tracing::warn!("a commit is already staged here; remove deferred");
             return Err(SyncError::JoinRejected);
@@ -12426,6 +12465,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// window needed). If *this* node is already the designated committer, the
     /// removal is performed directly.
     pub async fn request_remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         // Removal is owner-only (THREAT-MODEL R1): only the designated committer (the server
         // owner) may remove, and it does so directly. A non-owner caller is unauthorized; we
         // return an error rather than broadcasting a request the committer would only reject.

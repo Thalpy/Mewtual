@@ -1,0 +1,297 @@
+//! Explicit persistent replacement and hot-buffer capacity, acquired BEFORE private freeze.
+use super::*;
+
+/// Host configuration for the inactive whole-state checkpoint. These are local resource limits,
+/// not a signed public profile or authority. Finite retention is honest: no proof/history is
+/// evicted to fit. Production uses the separately reviewed scalable cold-page successor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnerEvidenceBudget {
+    pub(super) max_heads: usize,
+    pub(super) persistent_bytes: u64,
+    pub(super) hot_bytes: usize,
+    pub(super) snapshot: usize,
+    pub(super) mls: usize,
+}
+impl OwnerEvidenceBudget {
+    /// Require an explicit whole-current + replacement allowance for EACH admitted head and
+    /// four simultaneous initialization buffers. Zero, overflow and unsupported maxima refuse.
+    pub fn checkpoint(
+        max_heads: usize,
+        persistent_bytes: u64,
+        hot_bytes: usize,
+        max_snapshot_bytes: usize,
+        max_mls_bytes: usize,
+    ) -> Result<Self, AppError> {
+        if max_heads == 0
+            || max_heads > MAX_HEADS
+            || max_snapshot_bytes > MAX_SNAPSHOT_BYTES
+            || max_mls_bytes == 0
+            || max_mls_bytes > MAX_MLS_BYTES
+            || max_mls_bytes
+                .checked_add(64 * 1024)
+                .is_none_or(|fee| fee > max_snapshot_bytes)
+        {
+            return Err(refused());
+        }
+        let value = Self {
+            max_heads,
+            persistent_bytes,
+            hot_bytes,
+            snapshot: max_snapshot_bytes,
+            mls: max_mls_bytes,
+        };
+        if value.head_fee()? > persistent_bytes || value.buffer_fee()? > hot_bytes {
+            return Err(refused());
+        }
+        Ok(value)
+    }
+    pub(super) fn head_fee(&self) -> Result<u64, AppError> {
+        self.snapshot
+            .checked_add(WRAPPER_FEE + SEALED_FEE)
+            .and_then(|fee| fee.checked_mul(2))
+            .and_then(|fee| u64::try_from(fee).ok())
+            .ok_or_else(refused)
+    }
+    pub(super) fn buffer_fee(&self) -> Result<usize, AppError> {
+        self.snapshot
+            .checked_add(WRAPPER_FEE + SEALED_FEE + 1)
+            .and_then(|fee| fee.checked_mul(4))
+            .ok_or_else(refused)
+    }
+}
+
+/// Prepaid bounded creation slot acquired BEFORE actual Server::found/Profile preparation.
+/// It is transferred to the known-head reservation, never released beside retained frozen data.
+pub(crate) struct OwnerPendingCreation {
+    runtime: Weak<Mutex<Runtime>>,
+    mount: Arc<()>,
+    negative: RequestCancellation,
+    hot_fee: usize,
+    active: bool,
+}
+impl Drop for OwnerPendingCreation {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(runtime) = self.runtime.upgrade() {
+            if let Ok(mut runtime) = runtime.lock() {
+                if let (Some(bytes), Some(count)) = (
+                    runtime.hot_bytes.checked_sub(self.hot_fee),
+                    runtime.pending_creations.checked_sub(1),
+                ) {
+                    runtime.hot_bytes = bytes;
+                    runtime.pending_creations = count;
+                }
+            }
+        }
+    }
+}
+
+/// Closed limits carried by an actual original Store capacity reservation. Labels alone never
+/// authorize a save; final storage still needs an opaque admission permit and original head CAS.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OwnerInitializationSnapshotLimits {
+    pub(crate) max_snapshot_bytes: usize,
+    pub(crate) max_mls_bytes: usize,
+}
+
+/// One paid original initialization. Non-Clone/nonserialized; retaining it keeps its exact
+/// writer alive, but only weakly observes the mounted Store/admission. Dropping cannot keep the
+/// vault OS session or keys alive, and it cannot release a retained canonical history allowance.
+pub(crate) struct OwnerInitializationReservation {
+    pub(super) runtime: Weak<Mutex<Runtime>>,
+    pub(super) cell: Arc<head::HeadCell>,
+    pub(super) writer: Option<OwnerWriterRegistration>,
+    limits: OwnerInitializationSnapshotLimits,
+    hot_fee: usize,
+    attempt: [u8; 32],
+    admission: ChatAdmissionPreparation,
+}
+impl std::fmt::Debug for OwnerInitializationReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerInitializationReservation")
+            .finish_non_exhaustive()
+    }
+}
+impl OwnerInitializationReservation {
+    pub(crate) fn validate_private_source(
+        &self,
+        group: &[u8],
+        signer: &[u8; 32],
+        attempt: [u8; 32],
+        preparation: &ChatAdmissionPreparation,
+    ) -> Result<(), AppError> {
+        if group != self.admission.group()
+            || signer != self.admission.signer()
+            || attempt != self.attempt
+            || preparation.group() != group
+            || preparation.signer() != signer
+            || preparation.nonce() != self.admission.nonce()
+            || preparation.domain() != self.admission.domain()
+            || !Arc::ptr_eq(
+                &preparation.owner_identity(),
+                &self.admission.owner_identity(),
+            )
+            || self.admission.reservation_observer().is_cancelled()
+            || self.runtime.upgrade().is_none()
+            || self
+                .writer
+                .as_ref()
+                .is_none_or(|writer| writer.publication_authority().is_cancelled())
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    pub(crate) fn snapshot_limits(&self) -> OwnerInitializationSnapshotLimits {
+        self.limits
+    }
+    pub(super) fn attempt(&self) -> [u8; 32] {
+        self.attempt
+    }
+}
+impl Drop for OwnerInitializationReservation {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.upgrade() {
+            if let Ok(mut runtime) = runtime.lock() {
+                // The same pool issued this exact fee. Poison/underflow fails closed rather
+                // than granting extra capacity; retained per-head persistent charge is sticky.
+                if let Some(remaining) = runtime.hot_bytes.checked_sub(self.hot_fee) {
+                    runtime.hot_bytes = remaining;
+                }
+            }
+        }
+    }
+}
+
+impl ServerStore {
+    /// Configure the whole-state checkpoint once per physical mount, BEFORE allocating any
+    /// head/candidate. Repeating identical configuration is harmless; changing limits while
+    /// obligations exist refuses. Startup disk inventory must complete before reservation.
+    pub fn configure_owner_evidence_budget(
+        &self,
+        budget: OwnerEvidenceBudget,
+    ) -> Result<(), AppError> {
+        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence {
+            return Err(refused());
+        }
+        let mut runtime = self
+            .owner_evidence
+            .canonical
+            .lock()
+            .map_err(|_| refused())?;
+        if let Some(original) = runtime.budget {
+            return if original == budget {
+                Ok(())
+            } else {
+                Err(refused())
+            };
+        }
+        // The physical exclusive mount is already held. Exact canonical inventory/restore is
+        // the only permitted source for existing files; first creation cannot ignore them.
+        self.inventory_owner_heads(&mut runtime, budget)?;
+        runtime.budget = Some(budget);
+        Ok(())
+    }
+
+    pub(super) fn reserve_pending_owner_creation(&self) -> Result<OwnerPendingCreation, AppError> {
+        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence {
+            return Err(refused());
+        }
+        let mut runtime = self
+            .owner_evidence
+            .canonical
+            .lock()
+            .map_err(|_| refused())?;
+        let budget = runtime.budget.ok_or_else(refused)?;
+        let count = runtime
+            .pending_creations
+            .checked_add(1)
+            .ok_or_else(refused)?;
+        let all = runtime.heads.len().checked_add(count).ok_or_else(refused)?;
+        let fee = budget.buffer_fee()?;
+        let hot = runtime
+            .hot_bytes
+            .checked_add(fee)
+            .filter(|bytes| *bytes <= budget.hot_bytes)
+            .ok_or_else(refused)?;
+        if all > budget.max_heads
+            || (all as u64)
+                .checked_mul(budget.head_fee()?)
+                .is_none_or(|bytes| bytes > budget.persistent_bytes)
+        {
+            return Err(refused());
+        }
+        runtime.pending_creations = count;
+        runtime.hot_bytes = hot;
+        Ok(OwnerPendingCreation {
+            runtime: Arc::downgrade(&self.owner_evidence.canonical),
+            mount: self.registry_mount(),
+            negative: self.chat_mount.observer(),
+            hot_fee: fee,
+            active: true,
+        })
+    }
+
+    pub(super) fn reserve_owner_initialization(
+        &self,
+        preparation: &ChatAdmissionPreparation,
+        attempt: [u8; 32],
+        creation: &mut OwnerPendingCreation,
+    ) -> Result<OwnerInitializationReservation, AppError> {
+        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence
+            || preparation.reservation_observer().is_cancelled()
+        {
+            return Err(refused());
+        }
+        if !creation.active
+            || creation.negative.is_cancelled()
+            || !Arc::ptr_eq(&creation.mount, &self.registry_mount())
+            || !Weak::ptr_eq(
+                &creation.runtime,
+                &Arc::downgrade(&self.owner_evidence.canonical),
+            )
+        {
+            return Err(refused());
+        }
+        let mut runtime = self
+            .owner_evidence
+            .canonical
+            .lock()
+            .map_err(|_| refused())?;
+        let budget = runtime.budget.ok_or_else(refused)?;
+        let identifier = key(preparation.group(), preparation.signer());
+        // No caller-controlled numeric IDs can grow an unbounded mutex map. Existing source
+        // refuses first initialization; supported restore/rejoin must use its exact known head.
+        if runtime.heads.contains_key(&identifier)
+            || runtime.heads.len() >= budget.max_heads
+            || ((runtime.heads.len() as u64) + 1)
+                .checked_mul(budget.head_fee()?)
+                .is_none_or(|fee| fee > budget.persistent_bytes)
+        {
+            return Err(refused());
+        }
+        let hot_fee = creation.hot_fee;
+        if hot_fee != budget.buffer_fee()? || runtime.pending_creations == 0 {
+            return Err(refused());
+        }
+        let cell = Arc::new(head::HeadCell::new(identifier));
+        let writer = OwnerWriterRegistration::initial(self, &cell, preparation)?;
+        runtime.heads.insert(identifier, cell.clone());
+        runtime.pending_creations -= 1;
+        creation.active = false;
+        Ok(OwnerInitializationReservation {
+            runtime: Arc::downgrade(&self.owner_evidence.canonical),
+            cell,
+            writer: Some(writer),
+            limits: OwnerInitializationSnapshotLimits {
+                max_snapshot_bytes: budget.snapshot,
+                max_mls_bytes: budget.mls,
+            },
+            hot_fee,
+            attempt,
+            admission: preparation.clone(),
+        })
+    }
+}
