@@ -1,5 +1,23 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Inactive retained-history inspection primitives (30 October)
+
+`SignedOpFrame` borrows one immutable original SignedOp. Checked length, `visit_chunk` and
+`read_chunk` reproduce the existing exact frame without a full encode allocation. A visit/copy
+is at most64 KiB, supports the exact-end empty chunk, and rejects an out-of-range offset before
+calling the visitor. The caller must preserve original record/revision identity across visits.
+Legacy-only `verify_signature` bounds its contiguous preimage at256 KiB; larger/domain-bearing
+records return explicit not-checked, while malformed keys/signatures return invalid. Even valid
+does not prove group, epoch, membership or moderator authority.
+
+`history_inspection::inspect_legacy_change` is a read-only raw observer, not admission. It checks
+the64 KiB raw ceiling and separate actor/RLE/cell/predecessor/string budgets before parsing,
+including actor-table reference bounds; checksum validation precedes expanded decoding. Results
+are Decoded, Unsupported, TooLarge or Invalid. Refusal keeps exact raw bytes readable and changes
+no document or ingestion policy. Expanded actor-name cloning has its own bounded cost beyond
+the raw ceiling. Neither helper supplies native authorization, an index, a DTO or an admin panel;
+those production consumers remain in progress under the full retained-ledger read contract.
+
 ## Inactive exact Delete approval contract (29 October; validation pending)
 
 `ChatLedger::approve_delete(ActionId, VerifiedDeleteApproval)` attaches one opaque externally

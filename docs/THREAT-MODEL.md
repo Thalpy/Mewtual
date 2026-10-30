@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive admin history observer boundary (30 October)
+
+Restored SignedOp presence is not proof of valid signature, containing document scope or historical
+membership. The observer preserves malformed and foreign-scope originals for inspection. A bounded
+valid legacy signature attributes the exact envelope; v1 does not sign the MLS group or epoch.
+Historical Automerge actor names and today's mutable author/roster fields cannot upgrade it.
+
+Read-only decoding is an untrusted-input boundary even when ordinary ingestion has other checks.
+The raw observer refuses compressed chunks and excess raw/expanded work before Automerge parsing,
+and checks actor-table references before its expanded conversion (which assumes valid references).
+It explicitly validates the chunk checksum, which the pinned standalone Change parser does not.
+These are observer safeguards, not relaxed ingestion or authority rules. Oversized originals remain
+chunk-readable; their unavailable decode/verification status must never become positive evidence.
+Original-session/role authorization and scoped cache invalidation belong to the not-yet-wired
+Actor/native read consumers, so this primitive checkpoint claims no privileged UI access boundary.
+
 ## Inactive exact moderation decision boundary (29 October; validation pending)
 
 An ordinary historical grant is not a reusable permission to delete another signer's typed Create.
