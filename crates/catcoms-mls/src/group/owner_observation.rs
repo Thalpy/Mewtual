@@ -95,6 +95,42 @@ impl LocalMembershipChange {
 }
 
 impl ServerGroup {
+    /// Digest this ACTIVE instance's exact own credential, including credential type and TLS
+    /// framing, under the same domain as an actual Add observation. This is a local comparison
+    /// helper, not evidence that any historical Add ran. It borrows the own leaf instead of
+    /// cloning a roster and bounds the credential BEFORE its sole serialization allocation.
+    pub fn own_credential_digest(&self, device: &MlsDevice) -> Result<[u8; 32], MlsError> {
+        self.own_credential_digest_with(device, || {})
+    }
+
+    // The private hook marks the real serialization entry. Tests can prove an unsupported
+    // restored shape refuses before encoding, rather than merely checking its output size.
+    fn own_credential_digest_with(
+        &self,
+        device: &MlsDevice,
+        before_encode: impl FnOnce(),
+    ) -> Result<[u8; 32], MlsError> {
+        require_local_device(self, device)?;
+        let credential = self
+            .group
+            .own_leaf()
+            .ok_or(MlsError::Internal("active own credential is unavailable"))?
+            .credential();
+        if credential.serialized_content().len() > MAX_MEMBER_CATALOG_CREDENTIAL_BYTES {
+            return Err(MlsError::Internal(
+                "owner observation credential exceeds bound",
+            ));
+        }
+        before_encode();
+        let encoded = credential.tls_serialize_detached().map_err(proto)?;
+        if encoded.len() > MAX_MEMBER_CATALOG_CREDENTIAL_BYTES + 8 {
+            return Err(MlsError::Internal(
+                "owner credential TLS frame exceeds bound",
+            ));
+        }
+        Ok(credential_digest(&encoded))
+    }
+
     /// Actual Add plus an opaque exact-KP observation for the gated owner-fact producer.
     /// This does not replace invite/role policy checks: perform them before this mutation.
     /// Construct candidates on an isolated provider and save them before exporting Welcome.

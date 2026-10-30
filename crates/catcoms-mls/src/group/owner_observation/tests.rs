@@ -28,6 +28,21 @@ fn local_owner_observation_is_actual_add_fresh_kp_and_remove_bytes() {
     assert_eq!(added.commit(), outcome.commit);
     assert!(added.matches_current(&group, &founder));
     let joined = ServerGroup::join_for_key_package(&member, &outcome.welcome, &expected).unwrap();
+    assert_eq!(
+        joined.own_credential_digest(&member).unwrap(),
+        added.credential_digest().unwrap(),
+        "actual selected member credential matches the owner's exact Add observation"
+    );
+    assert!(joined.own_credential_digest(&founder).is_err());
+    let saved = snapshot_server(&member, &joined).unwrap();
+    let (restored_member, restored_group) = restore_server(&saved).unwrap();
+    assert_eq!(
+        restored_group
+            .own_credential_digest(&restored_member)
+            .unwrap(),
+        added.credential_digest().unwrap(),
+        "local credential comparison survives restore without minting a fresh Add proof"
+    );
     assert_eq!(joined.group_id(), group.group_id());
     assert_eq!(
         joined.epoch_authenticator_id(),
@@ -167,4 +182,50 @@ fn local_owner_observation_wrong_actual_local_member_refuses_before_mutation() {
     assert_eq!(group.epoch_authenticator_id(), state);
     group.add_member_observed(&founder, package).unwrap();
     assert_eq!(group.epoch(), epoch + 1);
+}
+
+#[test]
+fn own_credential_restored_byte_boundary_refuses_before_tls_serialization() {
+    use openmls_traits::OpenMlsProvider;
+    use std::cell::Cell;
+    for length in [
+        MAX_MEMBER_CATALOG_CREDENTIAL_BYTES,
+        MAX_MEMBER_CATALOG_CREDENTIAL_BYTES + 1,
+    ] {
+        let owner = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&owner).unwrap();
+        // Alter the actual stored own leaf then use the normal loader. This tests a restored
+        // unsupported shape, not a claim anyone can forge MLS input or the Store's seal.
+        {
+            let mut values = owner.provider().storage().values.write().unwrap();
+            let (_, bytes) = values
+                .iter_mut()
+                .find(|(key, _)| key.starts_with(b"Tree"))
+                .expect("one actual group tree");
+            let mut tree: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            *tree
+                .pointer_mut(
+                    "/tree/leaf_nodes/0/node/payload/credential/serialized_credential_content/vec",
+                )
+                .expect("actual persisted own credential") = serde_json::json!(vec![7u8; length]);
+            *bytes = serde_json::to_vec(&tree).unwrap();
+        }
+        let snapshot = snapshot_server(&owner, &group).unwrap();
+        let (device, restored) = restore_server(&snapshot).unwrap();
+        let encodings = Cell::new(0);
+        let result = restored.own_credential_digest_with(&device, || {
+            encodings.set(encodings.get() + 1);
+        });
+        if length == MAX_MEMBER_CATALOG_CREDENTIAL_BYTES {
+            assert!(result.is_ok());
+            assert_eq!(encodings.get(), 1);
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                encodings.get(),
+                0,
+                "unsupported own body must not be serialized"
+            );
+        }
+    }
 }
