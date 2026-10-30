@@ -291,6 +291,7 @@ struct Runtime {
     table: Option<BTreeMap<ChatAdmissionKey, Record>>,
     dirty: bool,
     managed: bool,
+    format: Option<catcoms_storage::VaultFormat>,
     owners: BTreeMap<ChatAdmissionKey, AdmissionOwner>,
 }
 #[cfg(test)]
@@ -471,6 +472,40 @@ fn decode(bytes: &[u8], domain: &[u8; 32]) -> Result<BTreeMap<ChatAdmissionKey, 
 }
 
 impl ServerStore {
+    /// The actual authenticated mounted format, not a live authoring permit. Restore consumers
+    /// must require managed mode for no-tail bytes too, BEFORE any owner run/network handoff.
+    /// A raw snapshot does not supply this physical-vault classification.
+    pub fn chat_vault_format(&self) -> Result<catcoms_storage::VaultFormat, AppError> {
+        self.chat_mount.locked()?.format.ok_or_else(refused)
+    }
+
+    /// Called only by the actual Store constructor under its exclusive physical mount, before
+    /// exposure. Staged empty inventory under a legacy wrapper stays inert; previously issued
+    /// lineage cannot be cleared by restoring an older authenticated legacy wrapper.
+    pub(super) fn open_chat_admission_inventory(
+        &self,
+        format: catcoms_storage::VaultFormat,
+    ) -> Result<(), AppError> {
+        let mut runtime = self.chat_mount.locked()?;
+        if runtime.table.is_some() || runtime.format.is_some() {
+            // This is a constructor-only transition. A later reload must never discard live
+            // negative custody or replace an uncertain candidate with older installed bytes.
+            return Err(refused());
+        }
+        let managed = match format {
+            catcoms_storage::VaultFormat::Legacy => false,
+            catcoms_storage::VaultFormat::ChatScope => true,
+        };
+        let table = self.read_chat_admissions(managed)?;
+        if !managed && !table.is_empty() {
+            return Err(refused());
+        }
+        runtime.table = Some(table);
+        runtime.managed = managed;
+        runtime.format = Some(format);
+        Ok(())
+    }
+
     /// Revoke before any replacement/unmount await. Locking the UI alone does not unmount.
     pub fn revoke_chat_mount(&self) {
         self.chat_mount.revoke();
@@ -541,12 +576,16 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         let mut runtime = self.chat_mount.locked()?;
-        let opened = open_or_create_vault(&self.dir, passphrase, rng)?;
+        let (opened, format) =
+            open_or_create_vault_classified(&self.dir, passphrase, rng)?.into_parts();
         if opened.db_key()? != self.keys.db_key()? {
             self.chat_mount.revoke();
             return Err(refused());
         }
-        let managed = catcoms_storage::vault::chat_scope_vault_managed(&self.dir)?;
+        let managed = match format {
+            catcoms_storage::VaultFormat::Legacy => false,
+            catcoms_storage::VaultFormat::ChatScope => true,
+        };
         if runtime.table.is_none() {
             runtime.table = Some(self.read_chat_admissions(managed)?);
         }
@@ -558,6 +597,7 @@ impl ServerStore {
             &self.dir, passphrase, rng,
         ))?;
         runtime.managed = true;
+        runtime.format = Some(catcoms_storage::VaultFormat::ChatScope);
         Ok(())
     }
 

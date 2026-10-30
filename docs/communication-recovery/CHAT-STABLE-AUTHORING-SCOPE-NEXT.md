@@ -586,3 +586,37 @@ while waiting for a held subordinate writer, and a completed private save follow
 by revocation refusing Current promotion. They are uncompiled/unexecuted pending
 primary execution. Exact native Actor incarnation and canonical owner-head CAS
 remain host obligations; this borrowed permit alone does not implement them.
+
+### Authenticated Store open continuation (uncompiled)
+
+Storage now has an opaque `OpenedVault` result containing the keys and closed
+`VaultFormat` from the SAME successfully authenticated wrapper. The existing
+key-only open method remains a wrapper. Neither a later public-header read nor a
+caller-supplied format can replace that constructor source. Managed open crosses
+the actual root-directory durability barrier; unsupported targets refuse rather
+than claim it. This can settle a prior root-metadata rename before new exposure.
+
+Under the already acquired exclusive physical session, `ServerStore::open` loads
+and validates the bounded sealed inventory before returning any usable Store. A
+managed wrapper requires a valid present inventory. An authenticated legacy
+wrapper paired with nonempty previously issued lineage also refuses: it cannot
+silently ignore Current/Initializing/Retired rows. An empty staged inventory under
+a legacy wrapper remains inert and cannot capture or issue a scope. This load is
+constructor-only, so it cannot replace live or uncertain in-memory negative state.
+Explicit management activation also uses the authenticated classification instead
+of reparsing a later header, retaining the same DEK and existing inventory.
+
+`chat_vault_format()` is mounted metadata only. It cannot mint an observer or
+authorize a scope, and raw no-tail Server bytes cannot infer their physical vault
+from it. Store-backed restore must still apply required mode before any owner run,
+then resolve lineage/stage and save metadata/bind the exact original mount. Raw
+unmanaged compatibility constructors are not automatic managed restore adapters.
+No default activation or native/CLI integration is claimed by this continuation.
+
+New regressions retain authenticated classification through a post-authentication
+header change, exercise actual OS sync failure before classified keys return,
+preserve the legacy-long v2 migration, reopen Current/Retired lineage without
+re-enabling, reject corrupt/missing inventory before exposure, and keep legacy
+empty staging inert. The existing missing-inventory test now requires refusal at
+Store open, rather than accepting a mount and refusing only later activation.
+These tests are uncompiled/unexecuted pending primary execution.

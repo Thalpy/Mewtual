@@ -22,6 +22,12 @@ admission capture, metadata repair/exposure, durable Leave and offline Retired r
 unwired. Owner-evidence logical-head persistence is another separate unresolved activation gate;
 local scope/current roster metadata is not historical membership authority.
 
+A further uncompiled classified-open continuation retains format from the same authenticated
+vault bytes and validates mandatory managed admission inventory before returning Store. Missing/
+corrupt managed metadata and legacy-wrapper/nonempty-lineage combinations refuse. This is one
+constructor gate; raw no-tail restore still needs the original Store classification before any
+owner run, and production fresh factories/native activation remain absent.
+
 ## Integrated text-chat validation (29 October; backend runtime gates pending)
 
 The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/

@@ -47,6 +47,36 @@ pub const MAX_VAULT_SECRET_BYTES: usize = 4096;
 /// path bounded rather than accepting an attacker-sized IPC allocation forever.
 const MAX_LEGACY_VAULT_SECRET_BYTES: usize = 64 * 1024;
 
+/// Closed classification of the SAME wrapper bytes that actually authenticated the root DEK.
+/// This is metadata, not a mount/admission capability. A host must not reconstruct it by reading
+/// a mutable wrapper header again after opening the keys or accept it from a wire boolean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultFormat {
+    /// Original raw or legacy-long normalized passphrase wrapper; no managed chat authority.
+    Legacy,
+    /// Cryptographically distinct v3 wrapper; an actual mounted Store must require its inventory.
+    ChatScope,
+}
+
+/// Authenticated keys and their indivisible format classification. Construction is private;
+/// the ordinary key-only open API remains a compatibility wrapper. No private key is printed.
+pub struct OpenedVault {
+    keys: KeyHierarchy,
+    format: VaultFormat,
+}
+impl std::fmt::Debug for OpenedVault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenedVault").finish_non_exhaustive()
+    }
+}
+impl OpenedVault {
+    /// Consume the authenticated result without rereading mutable wrapper bytes. Neither field
+    /// alone authenticates a runtime Store lifetime or replaces its independent admission CAS.
+    pub fn into_parts(self) -> (KeyHierarchy, VaultFormat) {
+        (self.keys, self.format)
+    }
+}
+
 /// Open the key vault under `dir`, creating it (a fresh random DEK) on first use, and
 /// returning the [`KeyHierarchy`] unsealed with `passphrase`. A wrong passphrase fails with
 /// an authentication error rather than silently returning the wrong key, and never
@@ -61,6 +91,26 @@ pub fn open_or_create_vault(
     open_or_create_vault_with_hooks(dir, passphrase, rng, || {}, || {})
 }
 
+/// Open the actual wrapper once and retain its authenticated format with the keys. Managed
+/// readers cross a real root-directory durability barrier before this returns, including when
+/// the prior process died after a wrapper/metadata rename. The host must still validate the
+/// mandatory managed inventory under its exclusive mount BEFORE returning a usable Store.
+pub fn open_or_create_vault_classified(
+    dir: impl AsRef<Path>,
+    passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Result<OpenedVault, StorageError> {
+    open_classified_with_hooks(
+        dir,
+        passphrase,
+        rng,
+        || {},
+        || {},
+        |_| {},
+        sync_managed_directory,
+    )
+}
+
 fn open_or_create_vault_with_hooks(
     dir: impl AsRef<Path>,
     passphrase: &[u8],
@@ -68,6 +118,27 @@ fn open_or_create_vault_with_hooks(
     lock_acquired: impl FnOnce(),
     candidate_ready: impl FnOnce(),
 ) -> Result<KeyHierarchy, StorageError> {
+    open_classified_with_hooks(
+        dir,
+        passphrase,
+        rng,
+        lock_acquired,
+        candidate_ready,
+        |_| {},
+        sync_managed_directory,
+    )
+    .map(|opened| opened.into_parts().0)
+}
+
+fn open_classified_with_hooks(
+    dir: impl AsRef<Path>,
+    passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+    lock_acquired: impl FnOnce(),
+    candidate_ready: impl FnOnce(),
+    authenticated: impl FnOnce(&Path),
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<OpenedVault, StorageError> {
     validate_existing_vault_secret_shape(passphrase)?;
     let dir = dir.as_ref();
     std::fs::create_dir_all(dir).map_err(|e| StorageError::Io(e.to_string()))?;
@@ -77,7 +148,7 @@ fn open_or_create_vault_with_hooks(
     let _lock = lock_vault(dir)?;
     lock_acquired();
     let path = dir.join(VAULT_FILE);
-    let dek = if path.exists() {
+    let (dek, format) = if path.exists() {
         let bytes = read_vault_wrapper(&path)?;
         let version = vault_version(&bytes)?;
         let dek = decode_and_unseal(&bytes, passphrase)?;
@@ -89,17 +160,39 @@ fn open_or_create_vault_with_hooks(
             let _ = decode_and_unseal(&migrated, passphrase)?;
             write_atomic(&path, &migrated)?;
         }
-        dek
+        let format = match version {
+            VAULT_VERSION_RAW_SECRET | VAULT_VERSION_PREHASHED_SECRET => VaultFormat::Legacy,
+            VAULT_VERSION_CHAT_SCOPE => VaultFormat::ChatScope,
+            // New authenticated versions must extend this classification deliberately. Refuse
+            // rather than treating a future mandatory format as legacy or panicking on it.
+            _ => return Err(StorageError::Malformed),
+        };
+        (dek, format)
     } else {
         validate_new_vault_secret(passphrase)?;
         let dek = Dek::generate(rng);
         let bytes = seal_and_encode(&dek, passphrase, rng)?;
         candidate_ready();
         write_atomic(&path, &bytes)?;
-        dek
+        (dek, VaultFormat::Legacy)
     };
-    Ok(KeyHierarchy::new(dek))
+    // The deterministic test hook may alter the physical header after authentication. Never
+    // reread it to infer format: equality of a later public byte is not authenticated metadata.
+    authenticated(dir);
+    if format == VaultFormat::ChatScope {
+        sync_parent(dir).map_err(|error| {
+            StorageError::Io(format!("managed vault reopen durability barrier: {error}"))
+        })?;
+    }
+    Ok(OpenedVault {
+        keys: KeyHierarchy::new(dek),
+        format,
+    })
 }
+
+#[cfg(test)]
+#[path = "vault_classification_tests.rs"]
+mod classification_tests;
 
 /// Does a vault already exist under `dir`? The gate before [`open_or_create_vault`] is asked to
 /// open one: that call *creates* on first use, so a UI with no way to tell the two cases apart
@@ -109,8 +202,9 @@ pub fn vault_exists(dir: impl AsRef<Path>) -> bool {
     dir.as_ref().join(VAULT_FILE).exists()
 }
 
-/// Whether the authenticated-open path must require managed chat admission inventory.
-/// This parses only the closed wrapper version; callers must still unseal the vault normally.
+/// Unauthenticated header inspection for diagnostics/format tests only. A later header read
+/// MUST NOT classify an already-opened Store: use [`open_or_create_vault_classified`] so the
+/// format comes from the same bytes that authenticated its keys. This returns no live permit.
 pub fn chat_scope_vault_managed(dir: impl AsRef<Path>) -> Result<bool, StorageError> {
     Ok(
         vault_version(&read_vault_wrapper(&dir.as_ref().join(VAULT_FILE))?)?

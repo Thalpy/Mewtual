@@ -38,6 +38,15 @@ cover private storage only; publication still requires the separately returned C
 after the inventory barrier, with the same runtime owner. Existing public storage callbacks remain
 wrappers. This permit continuation is uncompiled/unexecuted pending primary validation.
 
+The next classified-open source continuation returns opaque storage `OpenedVault` keys plus a
+closed `VaultFormat` from the SAME authenticated wrapper bytes; a later raw header query cannot
+replace it. Managed reads cross a real vault-root directory barrier. `ServerStore::open` validates
+the bounded mandatory inventory before exposing a mount, refuses missing/corrupt managed metadata,
+and refuses a legacy wrapper paired with already-issued nonempty lineage. Empty legacy staging
+stays inert. `chat_vault_format()` exposes only authenticated mounted metadata, never a permit.
+This continuation is uncompiled/unexecuted and does not activate defaults, classify a raw no-tail
+Server by itself, or supply the still-required Store-backed restore/fresh factories/native hooks.
+
 The tail has closed Active/Retired/Initializing phases. Initializing carries the exact reserved
 domain/nonce while original recovery spans turns, has no aliases or runtime authority, and must
 be saved before exposing that instance to any negative/background writer. Resume it against the

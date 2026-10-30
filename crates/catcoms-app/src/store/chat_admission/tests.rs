@@ -2,6 +2,8 @@ use super::*;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[path = "open_tests.rs"]
+mod authenticated_open;
 #[path = "storage_tests.rs"]
 mod held_storage;
 #[path = "revocation_tests.rs"]
@@ -299,14 +301,11 @@ fn full_inventory_refuses_new_identity_but_reserved_retirement_still_fits() {
 }
 
 #[test]
-fn managed_missing_inventory_and_nonempty_legacy_staging_refuse_activation() {
+fn managed_missing_inventory_and_nonempty_legacy_staging_refuse_before_mount_exposure() {
     let (dir, store, mut rng) = mounted();
     drop(store);
     fs::remove_file(dir.path().join(FILE)).unwrap();
-    let reopened = ServerStore::open(dir.path(), SECRET, &mut rng).unwrap();
-    assert!(reopened
-        .enable_chat_scope_management(SECRET, &mut rng)
-        .is_err());
+    assert!(ServerStore::open(dir.path(), SECRET, &mut rng).is_err());
 
     let dir = tempfile::tempdir().unwrap();
     let store = ServerStore::open(dir.path(), SECRET, &mut rng).unwrap();
@@ -317,12 +316,9 @@ fn managed_missing_inventory_and_nonempty_legacy_staging_refuse_activation() {
     let _binding = issue(&store, key(7), &mut rng);
     drop(store);
     fs::write(dir.path().join("vault.bin"), old_wrapper).unwrap();
-    let reopened = ServerStore::open(dir.path(), SECRET, &mut rng).unwrap();
     assert!(
-        reopened
-            .enable_chat_scope_management(SECRET, &mut rng)
-            .is_err(),
-        "legacy activation cannot clear previously managed nonempty lineage"
+        ServerStore::open(dir.path(), SECRET, &mut rng).is_err(),
+        "legacy mount cannot ignore previously managed nonempty lineage"
     );
 }
 

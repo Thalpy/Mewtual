@@ -26,7 +26,7 @@ use catcoms_discovery::reconnect::{
 };
 use catcoms_rt::{CryptoRngCore, OsCryptoRng};
 use catcoms_storage::{
-    acquire_vault_session, change_vault_passphrase, open_or_create_vault, vault_exists,
+    acquire_vault_session, change_vault_passphrase, open_or_create_vault_classified, vault_exists,
     verify_vault_passphrase, BlobStore, SealingBlobStore, StorageError, VaultSessionGuard,
 };
 use catcoms_wire::{Decoder, Encoder};
@@ -1625,6 +1625,9 @@ impl ServerStore {
     /// Open (or initialize) the store at `dir`, unlocking the vault with `passphrase`. A
     /// wrong passphrase for an existing vault is an error (the DEK never decrypts), never a
     /// silent re-init that would orphan the existing sealed servers.
+    /// Authenticated managed wrappers additionally require their valid retained admission
+    /// inventory before return; opening never silently activates an unmanaged vault. Restore
+    /// consumers must still apply this Store's classification to no-tail bytes before running.
     pub fn open(
         dir: impl AsRef<Path>,
         passphrase: &[u8],
@@ -1634,7 +1637,7 @@ impl ServerStore {
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
         // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
         let session = acquire_vault_session(&dir)?;
-        let keys = open_or_create_vault(&dir, passphrase, rng)?;
+        let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
         let store = Self {
             creative_protection: creative_references::Protection::new(&dir.join("servers")),
@@ -1658,6 +1661,10 @@ impl ServerStore {
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         };
+        // Classify from the SAME authenticated wrapper bytes, then validate mandatory lineage
+        // before returning any usable mount. A later public-header read cannot replace this
+        // evidence. Even legacy wrappers cannot ignore a nonempty prior managed inventory.
+        store.open_chat_admission_inventory(format)?;
         // Persist the `servers` directory entry as well as later contents. Without this flush, a
         // first-launch power loss could retain a synced record but forget the newly created
         // parent. It runs through the store so the destination cannot be supplied by a caller.
