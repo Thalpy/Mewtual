@@ -267,6 +267,19 @@ impl MeshTransport for MemNetwork {
         }
     }
 
+    async fn publish_once_authorized(
+        &self,
+        topic: Topic,
+        data: Bytes,
+        authority: RequestCancellation,
+    ) -> Result<PublishSubmission, PublishOnceError> {
+        if authority.is_cancelled() {
+            return Err(PublishOnceError::Revoked);
+        }
+        // Hub publication completes synchronously when polled; there is no queued lower owner.
+        self.publish_once(topic, data).await
+    }
+
     async fn request(
         &self,
         peer: PeerId,

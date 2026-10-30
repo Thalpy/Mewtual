@@ -148,6 +148,48 @@ These helpers are not an implemented full ledger view or activation of typed cha
 
 ## Integrated text-chat validation (29 October; local gates passed)
 
+## Owner fact-chain verifier continuation (30 October; focused execution pending)
+
+The isolated admission/admin branch now has a real stateless owner-attested ordinary-basis
+verifier, separate from the still-unimplemented archive/canonical-save producer. Expected root is
+explicit host configuration, never learned from the signed records being checked. Every exact
+Profile/Admission/RealmGrant/Basis signature and direct covered target chain must match that root
+and realm before a semantic witness escapes. It grants no action admission or publication and
+cannot approve a cross-author Delete. Authored tests cover wrong roots/incarnations/coverage,
+semantic restore requiring resupply and an actual fresh-KP MLS member/provider restore using the
+actual-founder host handoff. No new tests executed here; primary owns the complete gates. The same
+real retained held-case/admin timeline milestone and long-lived scale/succession remain unfinished.
+
+## Dormant stable authoring scope: focused validation (29 October)
+
+The isolated scope foundation through `1661965a` preserves opaque existing context/RPC shapes,
+adds strict Active/Retired/Initializing persistence and exact accepted-v1 publication migration,
+and keeps native activation closed. The primary's isolated combined `05e36622` all-feature test
+metadata check for rt/net/storage/MLS/replication/sync/app passed without warnings. Focused runtime
+passes: MLS group 39, fresh join 3, scope 9, Store admission inventory 9, managed vault 3, actual
+Windows directory flush 1 and publication 10. These are focused results, not a complete-suite
+claim for the new scope code. See
+[`CHAT-STABLE-AUTHORING-SCOPE-NEXT.md`](communication-recovery/CHAT-STABLE-AUTHORING-SCOPE-NEXT.md)
+for fixture corrections, remaining host hooks and the honest snapshot rollback limits.
+
+The subsequent negative-custody slice passed the primary's isolated app/sync all-feature test
+metadata check and focused Store admission 16/16, scope 9/9 and join 3/3 runtime checks. A further
+borrowed already-held storage permit
+prevents owner-head initialization from recursively acquiring the admission writer. It preserves
+the original Store/nonce/owner and closed Initializing/Current phase through synchronous I/O;
+that continuation is uncompiled/unexecuted. Native managed/no-tail classification, inseparable
+admission capture, metadata repair/exposure, durable Leave and offline Retired restore remain
+unwired. Owner-evidence logical-head persistence is another separate unresolved activation gate;
+local scope/current roster metadata is not historical membership authority.
+
+A further uncompiled classified-open continuation retains format from the same authenticated
+vault bytes and validates mandatory managed admission inventory before returning Store. Missing/
+corrupt managed metadata and legacy-wrapper/nonempty-lineage combinations refuse. This is one
+constructor gate; raw no-tail restore still needs the original Store classification before any
+owner run, and production fresh factories/native activation remain absent.
+
+## Integrated text-chat validation (29 October; backend runtime gates pending)
+
 The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/
 Stop path. All findings from their actual-diff reviews have been corrected and re-reviewed. This
 includes server-scoped retired-token fences, restore cancellation custody, repair notifications,

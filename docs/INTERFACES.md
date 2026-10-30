@@ -101,6 +101,78 @@ no document or ingestion policy. Expanded actor-name cloning has its own bounded
 the raw ceiling. Neither helper supplies native authorization, an index, a DTO or an admin panel;
 those production consumers remain in progress under the full retained-ledger read contract.
 
+## Dormant owner-fact semantic verifier (30 October)
+
+`owner_facts::OwnerProfileExpectation::from_trusted_host` is explicit host trust configuration,
+with no decoder or source-authentication claim. `verify_basis(Profile, OwnerBasisFacts, covered)`
+verifies exact original root/admission/grant/basis and all selected same-root/realm target bundles
+before returning ordinary `VerifiedAuthorityBasis`. At most65 direct target bundles/199 small-fact
+signature checks; no recursive expansion, saved verified bit or rights inheritance. It returns no
+admission/acceptance/finality/current-role/export permit. Existing action bytes and snapshot bytes
+are unchanged; restore still requires original proofs again. The active adapter must obtain the
+expectation from the mounted immutable pin, never a returned Profile/current roster. New tests are
+authored pending primary execution; owner archive/canonical save and native activation remain gated.
+
+## Dormant managed local authoring scope (29 October; not activated)
+
+`sync::local_chat_scope` adds a strict optional snapshot tail and the existing opaque 32-byte
+context's epoch-independent derivation. The native request/RPC shapes, v1 send/mutation binding
+domains and v1 receipt encoder remain unchanged. Stable preparations explicitly retain original
+signed bytes through the existing durable v2 format. Exact accepted legacy publication uses a
+separate bounded alias in the new tail; its token, original context, binding and signed operation
+do not change. Tail/alias decode alone never creates a runtime permit.
+
+`ManagedChatScopeBinding` is a trusted Rust host seam, implemented in production only by the
+opaque mounted-store `ChatAdmissionBinding`. Arbitrary implementations are not authenticated by
+sync; a new production implementation requires authorization review. Saved labels and generic
+cancellation channels are not issuers. Managed-vault consumers must call
+`require_managed_chat_scope` before any await/run/publication, including no-tail legacy restore,
+then validate independent lineage and complete saved-before-exposure initialization before binding.
+The current desktop does not yet activate this integration. See
+[`CHAT-STABLE-AUTHORING-SCOPE-NEXT.md`](communication-recovery/CHAT-STABLE-AUTHORING-SCOPE-NEXT.md).
+
+Its base `ManagedChatScopeReservation` is also implemented by opaque Initializing preparation
+and carries only original lifetime observation/revocation. Attach it before any Initializing owner
+run; Current binding must match that same runtime dummy identity. The dummy allocation keeps no
+publisher/Store alive. Weak negative handles target their original owner, never a logical-key
+lookup, and invalidate all aliases without acquiring the admission/evidence writers. Captures
+and preparations retain this original liveness; a private own-issued retry slot preserves exact
+pre-rename debt without accepting a later revoked completion. The primary's isolated app/sync
+all-feature test metadata check passed for this negative-custody source. Focused runtime passed
+Store admission 16/16, scope 9/9 and join 3/3; it has no native activation at this checkpoint.
+
+Trusted Store children can use `ChatAdmissionStoragePermit` while the outer admission writer
+is already held. Its closed Initializing/Current mode, original Store/group/full signer, nonce,
+revision, dummy owner identity and composed weak observer cannot be constructed from saved
+labels. The non-Clone, nonserialized, non-Send permit is confined to a higher-ranked synchronous
+callback. An owner-head saver must acquire its subordinate writer and revalidate the permit
+immediately before I/O; recursively entering an admission API would deadlock. Initializing permits
+cover private storage only; publication still requires the separately returned Current binding
+after the inventory barrier, with the same runtime owner. Existing public storage callbacks remain
+wrappers. This permit continuation is uncompiled/unexecuted pending primary validation.
+
+The next classified-open source continuation returns opaque storage `OpenedVault` keys plus a
+closed `VaultFormat` from the SAME authenticated wrapper bytes; a later raw header query cannot
+replace it. Managed reads cross a real vault-root directory barrier. `ServerStore::open` validates
+the bounded mandatory inventory before exposing a mount, refuses missing/corrupt managed metadata,
+and refuses a legacy wrapper paired with already-issued nonempty lineage. Empty legacy staging
+stays inert. `chat_vault_format()` exposes only authenticated mounted metadata, never a permit.
+This continuation is uncompiled/unexecuted and does not activate defaults, classify a raw no-tail
+Server by itself, or supply the still-required Store-backed restore/fresh factories/native hooks.
+
+The tail has closed Active/Retired/Initializing phases. Initializing carries the exact reserved
+domain/nonce while original recovery spans turns, has no aliases or runtime authority, and must
+be saved before exposing that instance to any negative/background writer. Resume it against the
+same sealed inventory reservation. Active requires every accepted old-context pending operation
+to have its exact alias; unknown phases refuse. A later Stop may save in Initializing without
+promoting Current. Host uncertainty repair must preserve the whole candidate and original custody.
+
+Accepted legacy original recovery is resumable, limited per step to 128 archive entries and 512 KiB
+of body comparisons per obligation, with at most 32 pending obligations. It reads exact retained
+signed envelopes and never decompresses the archive during metadata staging. Advance staging
+outside final save leases and retry unfinished work on another owner turn; missing/contradictory
+evidence refuses whole promotion. A pending uncertain Stop must be repaired first.
+
 ## Inactive exact Delete approval contract (29 October; validation pending)
 
 `ChatLedger::approve_delete(ActionId, VerifiedDeleteApproval)` attaches one opaque externally

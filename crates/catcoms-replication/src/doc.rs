@@ -57,6 +57,26 @@ pub struct AppliedOp {
 #[derive(Clone)]
 pub struct SavedLocalChatOp(SignedOp);
 const MAX_SAVED_LOCAL_CHAT_BYTES: usize = 256 * 1024;
+/// Bounded progress while recovering one accepted legacy original from retained signed history.
+/// Private document-incarnation and exact-target bindings prevent cursor reuse across a replaced
+/// graph. This cursor is derived, untrusted for admission, and never persisted.
+pub struct SavedLocalChatRecovery {
+    document: std::sync::Arc<()>,
+    signer: Vec<u8>,
+    change: ChangeHash,
+    position: usize,
+    found: Option<SavedLocalChatOp>,
+}
+impl fmt::Debug for SavedLocalChatRecovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // This cursor owns a full signer and may retain original signed plaintext. Neither
+        // those values nor archive position/document identity belong in diagnostics.
+        f.debug_struct("SavedLocalChatRecovery")
+            .finish_non_exhaustive()
+    }
+}
+pub const MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS: usize = 128;
+pub const MAX_LOCAL_CHAT_RECOVERY_SCANNED_BYTES: usize = 512 * 1024;
 #[derive(Default)]
 struct CreatorEvidenceIndex {
     indexed: usize,
@@ -118,6 +138,102 @@ impl SavedLocalChatOp {
 #[cfg(test)]
 mod saved_local_chat_tests {
     use super::*;
+    use rand_core::SeedableRng;
+    #[test]
+    fn retained_original_recovery_yields_on_real_archive_history_without_losing_progress() {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([0x94; 32]);
+        let mut document = EncryptedDoc::new(DocType::Channel, 5, &device.device_id());
+        let (_, target) = document
+            .edit_tracked(&device, &group, &mut rng, |graph| {
+                graph.put(ROOT, "accepted", "original")
+            })
+            .unwrap();
+        let other = MlsDevice::generate().unwrap();
+        let mut foreign =
+            AutoCommit::new().with_actor(ActorId::from(other.device_id().as_bytes().to_vec()));
+        for index in 0..MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS + 2 {
+            foreign.put(ROOT, "counter", index as u64).unwrap();
+            foreign.commit();
+            let signed = SignedOp::sign(
+                &other,
+                DocType::Channel,
+                5,
+                foreign
+                    .get_last_local_change()
+                    .unwrap()
+                    .raw_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            document
+                .apply_signed_tracked_observed(signed, |_, _| {})
+                .unwrap();
+        }
+        let mut progress = document.start_saved_local_chat_recovery(&device, target);
+        assert_eq!(format!("{progress:?}"), "SavedLocalChatRecovery { .. }");
+        assert!(document
+            .recover_saved_local_chat_op(&device, &mut progress)
+            .unwrap()
+            .is_none());
+        assert_eq!(progress.position, MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS);
+        assert!(document
+            .recover_saved_local_chat_op(&device, &mut progress)
+            .unwrap()
+            .is_some());
+        assert_eq!(progress.position, document.log.len());
+    }
+
+    #[test]
+    fn accepted_local_original_recovery_reverifies_retained_log_and_exact_identity() {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([0x91; 32]);
+        let mut doc = EncryptedDoc::new(DocType::Channel, 5, &device.device_id());
+        let (sealed, change) = doc
+            .edit_tracked(&device, &group, &mut rng, |graph| {
+                graph.put(ROOT, "message", "original")
+            })
+            .unwrap();
+        let original =
+            EncryptedDoc::capture_local_chat_op(&sealed, &group, &device, change).unwrap();
+        let snapshot = doc.snapshot().unwrap();
+        let mut restored = EncryptedDoc::restore_for_actor(&snapshot, &device.device_id()).unwrap();
+        let mut progress = restored.start_saved_local_chat_recovery(&device, change);
+        assert_eq!(
+            restored
+                .recover_saved_local_chat_op(&device, &mut progress)
+                .unwrap()
+                .unwrap()
+                .encode(),
+            original.encode()
+        );
+        let mut missing = restored.start_saved_local_chat_recovery(&device, ChangeHash([0; 32]));
+        assert!(restored
+            .recover_saved_local_chat_op(&device, &mut missing)
+            .is_err());
+        assert!(restored
+            .recover_saved_local_chat_op(&MlsDevice::generate().unwrap(), &mut progress)
+            .is_err());
+        restored.log[0].signature[0] ^= 1;
+        let mut tampered = restored.start_saved_local_chat_recovery(&device, change);
+        assert!(restored
+            .recover_saved_local_chat_op(&device, &mut tampered)
+            .is_err());
+        assert!(
+            restored
+                .recover_saved_local_chat_op(&device, &mut tampered)
+                .is_err(),
+            "retry cannot skip the envelope that failed verification"
+        );
+        assert!(
+            doc.recover_saved_local_chat_op(&device, &mut progress)
+                .is_err(),
+            "cursor cannot skip a replaced document's prefix"
+        );
+    }
+
     #[test]
     fn encrypted_chat_document_and_saved_proof_remain_send_sync() {
         fn require_send_sync<T: Send + Sync>() {}
@@ -240,6 +356,7 @@ pub struct EncryptedDoc {
     // Disposable derived metadata must preserve EncryptedDoc's shared-read contract, which
     // is also inherited by retained documents inside ServerStore.
     creator_evidence: std::sync::Mutex<CreatorEvidenceIndex>,
+    local_recovery_identity: std::sync::Arc<()>,
     /// The last [`EncryptedDoc::snapshot`] and the exact document state it describes: the
     /// automerge heads plus the op-log length, which together are everything the serialization
     /// reads. Persistence re-serializes every open document of a server on every write, so an
@@ -289,6 +406,7 @@ impl EncryptedDoc {
             change_authors: HashMap::new(),
             authors_indexed: 0,
             creator_evidence: Default::default(),
+            local_recovery_identity: std::sync::Arc::new(()),
             snapshot_cache: None,
             checkpoint: None,
             catchup_index: AncestryIndex::default(),
@@ -464,6 +582,90 @@ impl EncryptedDoc {
     pub fn repair_local_chat_op(&mut self, original: &SavedLocalChatOp) -> Result<(), ReplError> {
         self.apply_signed_tracked_observed(original.0.clone(), |_, _| {})
             .map(|_| ())
+    }
+
+    /// Recover the exact original of an already accepted local receipt after its sealing epoch
+    /// expired. This reads the retained signed log, not rendered author fields or MLS roster
+    /// membership. The caller must separately prove that the receipt was durably accepted in
+    /// this same local admission; this proof grants neither new authoring nor publication.
+    ///
+    /// Start this outside any final storage lease, then advance with bounded recovery steps.
+    /// Conflicting envelopes for one change refuse promotion; no matching original is fabricated.
+    pub fn start_saved_local_chat_recovery(
+        &self,
+        device: &MlsDevice,
+        change: ChangeHash,
+    ) -> SavedLocalChatRecovery {
+        SavedLocalChatRecovery {
+            document: self.local_recovery_identity.clone(),
+            signer: device.public_key_bytes(),
+            change,
+            position: 0,
+            found: None,
+        }
+    }
+
+    /// Inspect at most the documented operation/byte budget. None means genuine unfinished
+    /// work, so the host retries on another owner turn without holding a metadata save lease.
+    /// A completed but missing/contradictory original refuses promotion visibly; a later appended
+    /// authenticated catch-up can be scanned on a subsequent retry with this same cursor.
+    pub fn recover_saved_local_chat_op(
+        &mut self,
+        device: &MlsDevice,
+        progress: &mut SavedLocalChatRecovery,
+    ) -> Result<Option<SavedLocalChatOp>, ReplError> {
+        if self.doc_type != DocType::Channel
+            || !std::sync::Arc::ptr_eq(&progress.document, &self.local_recovery_identity)
+            || progress.signer != device.public_key_bytes()
+            || progress.position > self.log.len()
+        {
+            return Err(ReplError::Malformed);
+        }
+        let target = self
+            .doc
+            .get_change_by_hash(&progress.change)
+            .ok_or(ReplError::Malformed)?;
+        let target = target.raw_bytes();
+        if target.len() > MAX_SAVED_LOCAL_CHAT_BYTES {
+            return Err(ReplError::Malformed);
+        }
+        let mut scanned = 0usize;
+        let mut bytes = 0usize;
+        while let Some(op) = self.log.get(progress.position) {
+            let candidate = op.doc_type == self.doc_type
+                && op.doc_id == self.doc_id
+                && op.author_device == device.device_id()
+                && op.delta.len() == target.len();
+            let body_work = if candidate { op.delta.len() } else { 0 };
+            if scanned == MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS
+                || bytes.saturating_add(body_work) > MAX_LOCAL_CHAT_RECOVERY_SCANNED_BYTES
+            {
+                return Ok(None);
+            }
+            scanned += 1;
+            bytes += body_work;
+            // The already accepted DAG supplies canonical target bytes. Compare bounded raw
+            // bytes instead of parsing/decompressing every archived change under a metadata turn.
+            // Never infer a signature from actor bytes; the exact matching envelope is reverified.
+            if !candidate || op.delta.as_slice() != target {
+                progress.position += 1;
+                continue;
+            }
+            let exact =
+                SavedLocalChatOp::decode(&op.encode(), device, self.doc_id, progress.change)?;
+            if progress
+                .found
+                .as_ref()
+                .is_some_and(|previous| previous.encode() != exact.encode())
+            {
+                return Err(ReplError::BadSignature);
+            }
+            progress.found = Some(exact);
+            // Advance only after verification. A retry must never skip an envelope that failed
+            // signature/ambiguity checks on the preceding turn.
+            progress.position += 1;
+        }
+        progress.found.clone().map(Some).ok_or(ReplError::Malformed)
     }
 
     /// Verified signer of the change that created an object, where that signed history exists.
@@ -874,6 +1076,7 @@ impl EncryptedDoc {
             change_authors: HashMap::new(),
             authors_indexed: 0,
             creator_evidence: Default::default(),
+            local_recovery_identity: std::sync::Arc::new(()),
             snapshot_cache: None,
             checkpoint,
             catchup_index,

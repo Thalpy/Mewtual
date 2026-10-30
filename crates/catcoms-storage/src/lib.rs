@@ -51,8 +51,9 @@ pub use retention::{
     ServerId, ONE_MONTH_MS,
 };
 pub use vault::{
-    acquire_vault_session, change_vault_passphrase, open_or_create_vault, vault_exists,
-    verify_vault_passphrase, VaultSessionGuard, MAX_VAULT_SECRET_BYTES,
+    acquire_vault_session, change_vault_passphrase, open_or_create_vault,
+    open_or_create_vault_classified, vault_exists, verify_vault_passphrase, OpenedVault,
+    VaultFormat, VaultSessionGuard, MAX_VAULT_SECRET_BYTES,
 };
 
 /// Errors from the storage layer.

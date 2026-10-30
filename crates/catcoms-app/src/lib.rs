@@ -30,7 +30,9 @@ pub use catcoms_crypto::DeviceId;
 use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
 pub use catcoms_mls::GroupMode;
-use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
+#[cfg(test)]
+use catcoms_mls::ServerGroup;
+use catcoms_mls::{InviteToken, MlsDevice, MlsError};
 use catcoms_rt::{
     Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, RequestCancellation,
 };
@@ -3731,8 +3733,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         display_name: impl Into<String>,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
-        let group = ServerGroup::create(&device)?;
-        let mut sync = ChannelSync::new(transport, group, device, rng, clock);
+        let mut sync = ChannelSync::found(transport, device, rng, clock)?;
         sync.initialize_new_group_policy()?;
         Ok(Self {
             sync,

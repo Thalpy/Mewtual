@@ -59,6 +59,46 @@ chunk-readable; their unavailable decode/verification status must never become p
 Original-session/role authorization and scoped cache invalidation belong to the not-yet-wired
 Actor/native read consumers, so this primitive checkpoint claims no privileged UI access boundary.
 
+## Dormant owner-attested ordinary basis verifier (30 October; validation pending)
+
+The owner-fact checkpoint has a stateless verifier from an explicit host-configured expected
+(group, full founder key, ProfileCID) and original signed Profile/Admission/RealmGrant/Basis facts
+into ordinary semantic authority. The expectation constructor authenticates no provenance: the
+future active adapter must obtain it only from the immutable mounted pin, and the staged second
+member uses the actual-founder trusted handoff captured before join. Self-signed downloaded facts,
+snapshot metadata and the current roster cannot choose their own root. Every direct covered basis
+needs its independent exact admission/grant/basis chain under that same expected root/realm; a
+signed list alone grants no unchecked coverage and no recursive expansion occurs.
+
+This remains the conditional truthful non-equivocating owner attestation model, not public replay
+of private MLS membership or a physical clock. It establishes neither exact-action acceptance nor
+late-action approval, present office, publication or persistence. A historical A1 semantic witness
+can remain valid after removal while that exact action is Held; A2 rejoin cannot reuse its grant.
+Cross-author Delete still needs its separate exact approval. Active pin/archive/canonical owner
+candidate and admission-aware projection adapters remain absent and production stays inactive.
+The new stateless/actual-key tests are authored, not executed by the implementing/review agents.
+
+## Dormant managed local lifetime boundary (29 October; host activation open)
+
+The isolated stable-scope foundation distinguishes local admission custody from historical MLS
+authority. A tail-bearing restore has metadata but no live publication observer. A managed host
+must classify even a captured no-tail legacy snapshot before any owner run; tail absence is not
+fresh admission evidence. Independent vault lineage, original mounted-store lifetime and an exact
+active own leaf must all match before positive use. The desktop activation, original pre-await
+capture coupling, metadata repair and durable Leave/offline-restore wiring remain open gates.
+
+Queued managed chat carries its original observer to driver admission, with no generic publish
+fallback. Actual local removal revokes it even if the synchronous transition unwinds. An already
+admitted transport attempt may still retain its original bytes/cache; revocation cannot recall it.
+Legacy publication migration associates only accepted, unstopped, unambiguous exact receipts;
+it never upgrades unaccepted intents or manufactures a lost historical operation.
+
+The independent admission fence prevents old-scope revival, not all snapshot rollback within a
+still-Current admission. A captured current snapshot can omit a later live-Actor Stop/receipt
+unless those facts or latest snapshot freshness are independently anchored. Rolling back all
+authorizing records with the same DEK is also undetectable without an external monotonic anchor.
+Neither limitation is claimed solved by this dormant foundation.
+
 ## Inactive exact moderation decision boundary (29 October; validation pending)
 
 An ordinary historical grant is not a reusable permission to delete another signer's typed Create.

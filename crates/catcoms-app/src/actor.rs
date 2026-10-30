@@ -6844,6 +6844,7 @@ struct SnapshotVersions {
     epoch: u64,
     group_policy_revision: u64,
     peer_record_revision: u64,
+    chat_scope_revision: u64,
     documents: HashMap<(crate::DocType, u128), u64>,
 }
 
@@ -6853,6 +6854,7 @@ impl SnapshotVersions {
             epoch: server.epoch(),
             group_policy_revision: server.sync().group_policy_revision(),
             peer_record_revision: server.sync().peer_record_revision(),
+            chat_scope_revision: server.sync().chat_scope_revision(),
             documents: server.sync().document_versions().collect(),
         }
     }
@@ -6862,6 +6864,7 @@ impl SnapshotVersions {
         let changed = self.epoch != next.epoch
             || self.group_policy_revision != next.group_policy_revision
             || self.peer_record_revision != next.peer_record_revision
+            || self.chat_scope_revision != next.chat_scope_revision
             || self.documents != next.documents;
         *self = next;
         changed

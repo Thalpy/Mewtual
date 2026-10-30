@@ -30,9 +30,11 @@ impl Rights {
 
 /// An externally verified HISTORICAL decision, not present-time membership/role authority.
 ///
-/// There is intentionally NO production constructor, Deserialize implementation, wire
-/// decoder, current-peer attestation adapter or "verified" boolean. Future native issuance,
-/// root continuity and governance-conflict policy require their own reviewed boundary.
+/// The owner-fact checkpoint's stateless verifier can construct this only from an explicitly
+/// expected root and exact original signed chain. No Deserialize implementation, wire decoder,
+/// current-peer attestation adapter or "verified" boolean exists. Active mounted-root issuance,
+/// root continuity and governance conflicts remain separately gated. This semantic witness never
+/// establishes projection admission or historical acceptance of an exact late action.
 /// A snapshot restores only signed evidence and must be supplied matching witnesses again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedAuthorityBasis {

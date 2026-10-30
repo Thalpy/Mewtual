@@ -26,7 +26,7 @@ use catcoms_discovery::reconnect::{
 };
 use catcoms_rt::{CryptoRngCore, OsCryptoRng};
 use catcoms_storage::{
-    acquire_vault_session, change_vault_passphrase, open_or_create_vault, vault_exists,
+    acquire_vault_session, change_vault_passphrase, open_or_create_vault_classified, vault_exists,
     verify_vault_passphrase, BlobStore, SealingBlobStore, StorageError, VaultSessionGuard,
 };
 use catcoms_wire::{Decoder, Encoder};
@@ -47,7 +47,13 @@ pub(crate) fn studio_refused(
     }
 }
 
+mod chat_admission;
 mod chat_fences;
+pub use chat_admission::{
+    ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
+    ChatAdmissionPreparation, ChatAdmissionResolution, ChatAdmissionRevoker, ChatMountRevoker,
+    MAX_CHAT_ADMISSION_IDENTITIES,
+};
 mod creative_references;
 mod epoch_draft_archive;
 mod epoch_intents;
@@ -1307,6 +1313,42 @@ mod persistence {
             }
             atomic_write(&self.dir.join("chat-stop-fences.bin"), bytes)
         }
+        /// Independent current-admission fence; per-server deletion never removes this file.
+        pub(super) fn write_chat_admissions_record(&self, bytes: &[u8]) -> Result<(), AppError> {
+            #[cfg(test)]
+            if self
+                .chat_fence_pre_rename_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return atomic_write_with_hook(
+                    &self.dir.join("chat-admissions.bin"),
+                    bytes,
+                    |phase, staged| {
+                        if phase == AtomicWritePhase::TempSynced {
+                            fs::remove_file(staged)
+                                .expect("remove actual admission staging file before rename");
+                        }
+                    },
+                );
+            }
+            #[cfg(test)]
+            if self
+                .chat_parent_sync_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return atomic_write_with_hook_and_sync(
+                    &self.dir.join("chat-admissions.bin"),
+                    bytes,
+                    |_, _| {},
+                    |_| {
+                        Err(std::io::Error::other(
+                            "injected admission parent-sync failure after actual rename",
+                        ))
+                    },
+                );
+            }
+            atomic_write(&self.dir.join("chat-admissions.bin"), bytes)
+        }
         pub(super) fn write_ui_state_record(&self, bytes: &[u8]) -> Result<(), AppError> {
             atomic_write(&self.ui_state_path(), bytes)
         }
@@ -1523,6 +1565,8 @@ impl SavedLimitLoad {
 pub struct ServerStore {
     dir: PathBuf,
     keys: KeyHierarchy,
+    // Actual physical-mount custody and serialized admission lineage, never restored from bytes.
+    chat_mount: chat_admission::MountOwner,
     // Process-local freshness only, never wire authority. Replaced before any intent-file I/O;
     // budgets made from older scans (or another mounted vault) cannot authorize a new write.
     intent_generation: std::sync::Arc<()>,
@@ -1581,6 +1625,9 @@ impl ServerStore {
     /// Open (or initialize) the store at `dir`, unlocking the vault with `passphrase`. A
     /// wrong passphrase for an existing vault is an error (the DEK never decrypts), never a
     /// silent re-init that would orphan the existing sealed servers.
+    /// Authenticated managed wrappers additionally require their valid retained admission
+    /// inventory before return; opening never silently activates an unmanaged vault. Restore
+    /// consumers must still apply this Store's classification to no-tail bytes before running.
     pub fn open(
         dir: impl AsRef<Path>,
         passphrase: &[u8],
@@ -1590,12 +1637,13 @@ impl ServerStore {
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
         // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
         let session = acquire_vault_session(&dir)?;
-        let keys = open_or_create_vault(&dir, passphrase, rng)?;
+        let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
         let store = Self {
             creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,
+            chat_mount: chat_admission::MountOwner::new(),
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
             inventory_generation: std::sync::Arc::new(()),
@@ -1613,6 +1661,10 @@ impl ServerStore {
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         };
+        // Classify from the SAME authenticated wrapper bytes, then validate mandatory lineage
+        // before returning any usable mount. A later public-header read cannot replace this
+        // evidence. Even legacy wrappers cannot ignore a nonempty prior managed inventory.
+        store.open_chat_admission_inventory(format)?;
         // Persist the `servers` directory entry as well as later contents. Without this flush, a
         // first-launch power loss could retain a synced record but forget the newly created
         // parent. It runs through the store so the destination cannot be supplied by a caller.
@@ -2163,6 +2215,8 @@ impl ServerStore {
 
 impl Drop for ServerStore {
     fn drop(&mut self) {
+        // Close original publication/repair custody before any other destructor can wait.
+        self.chat_mount.revoke();
         // A blob handle may outlive its vault mount. It must not delete under stale pins after
         // a new mount has written metadata. This does not grant old handles new read authority.
         if let Ok(mut state) = self.creative_protection.lock() {

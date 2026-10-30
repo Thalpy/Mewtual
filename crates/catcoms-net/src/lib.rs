@@ -6414,6 +6414,22 @@ impl MeshTransport for MeshService {
         publication::publish_once(&self.cmd_tx, &self.publish_once_slots, topic, data).await
     }
 
+    async fn publish_once_authorized(
+        &self,
+        topic: Topic,
+        data: Bytes,
+        authority: RequestCancellation,
+    ) -> Result<catcoms_rt::PublishSubmission, catcoms_rt::PublishOnceError> {
+        publication::publish_once_with_authority(
+            &self.cmd_tx,
+            &self.publish_once_slots,
+            topic,
+            data,
+            Some(authority),
+        )
+        .await
+    }
+
     async fn request(
         &self,
         peer: PeerId,

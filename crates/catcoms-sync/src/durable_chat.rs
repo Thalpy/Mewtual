@@ -10,6 +10,10 @@ const MAX_SEALED_CHAT: usize = 256 * 1024;
 const MAX_NOOP_HEADS: usize = 256;
 const PUBLICATION_RETRY_MS: u64 = 1_000;
 
+#[cfg(test)]
+#[path = "durable_chat_scope_tests.rs"]
+mod scope_tests;
+
 /// Exact saved-request fence: retry token, canonical request binding, original context and
 /// channel. Keeping all four fields together prevents a token-only match from stopping a
 /// different request. This in-process alias does not change the persisted fence format.
@@ -694,6 +698,9 @@ struct ChatRecord {
     explicit_stop: bool,
     sealed: Vec<u8>,
     next_attempt_ms: u64,
+    // Runtime hydration from the separately versioned scope tail. Never changes the request's
+    // original context/binding or the legacy v1 receipt bytes. Only accepted work receives it.
+    publication_context: Option<[u8; 32]>,
 }
 #[derive(Debug, Clone)]
 pub struct PreparedChat {
@@ -737,6 +744,67 @@ impl DurableChatState {
                 .filter(|token| !self.records.contains_key(*token))
                 .count()
     }
+
+    pub(crate) fn validate_scope_publications(&self, context: [u8; 32]) -> Result<(), SyncError> {
+        for token in &self.active {
+            let Some(record) = self.records.get(token) else {
+                continue;
+            };
+            if record.durable
+                && !record.stopped
+                && !record.sealed.is_empty()
+                && record.publication_context.unwrap_or(record.context) != context
+            {
+                // An omitted alias cannot silently stop an accepted old-context obligation.
+                return Err(SyncError::Malformed);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publication_alias_live(
+        &self,
+        alias: &local_chat_scope::PublicationAlias,
+    ) -> bool {
+        self.records.get(&alias.token).is_some_and(|record| {
+            record.binding == alias.binding
+                && record.context == alias.context
+                && record.channel == alias.channel
+                && record.action == alias.action
+                && record.target == alias.target
+                && *blake3::hash(&record.sealed).as_bytes() == alias.sealed_hash
+                && record.durable
+                && !record.stopped
+                && !record.explicit_stop
+                && !record.sealed.is_empty()
+                && matches!(record.effect, ChatEffect::Signed { change, .. } if change == alias.change)
+                && !self.replacement_uncertain.contains_key(&alias.token)
+        })
+    }
+
+    pub(crate) fn hydrate_publication_alias(
+        &mut self,
+        alias: &local_chat_scope::PublicationAlias,
+        context: [u8; 32],
+    ) -> Result<(), SyncError> {
+        if !self.publication_alias_live(alias) {
+            return Err(SyncError::Malformed);
+        }
+        let record = self.records.get_mut(&alias.token).unwrap();
+        let ChatEffect::Signed { original, .. } = &mut record.effect else {
+            return Err(SyncError::Malformed);
+        };
+        if original
+            .as_ref()
+            .is_some_and(|original| original.encode() != alias.original.encode())
+        {
+            return Err(SyncError::Malformed);
+        }
+        *original = Some(alias.original.clone());
+        record.publication_context = Some(context);
+        Ok(())
+    }
+
     pub(crate) fn snapshot_allowed(&self) -> bool {
         self.reconciling || self.replacement_uncertain.is_empty()
     }
@@ -769,7 +837,11 @@ impl DurableChatState {
             let Some(record) = self.records.get_mut(&token) else {
                 continue;
             };
-            if context != Some(&record.context) && !record.stopped {
+            let publication_context = record
+                .publication_context
+                .as_ref()
+                .unwrap_or(&record.context);
+            if context != Some(publication_context) && !record.stopped {
                 record.stopped = true;
                 record.sealed.clear();
                 if let ChatEffect::Signed { original, .. } = &mut record.effect {
@@ -1009,6 +1081,7 @@ impl DurableChatState {
                 explicit_stop,
                 sealed: sealed.to_vec(),
                 next_attempt_ms: 0,
+                publication_context: None,
             };
             if this.records.insert(token, record).is_some() {
                 return Err(bad());
@@ -1020,7 +1093,80 @@ impl DurableChatState {
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    pub(super) fn capture_legacy_publication_aliases(
+        &mut self,
+    ) -> Result<BTreeMap<[u8; 16], local_chat_scope::PublicationAlias>, SyncError> {
+        self.local_chat_scope.recovery.retain(|token, _| {
+            self.durable_chat.records.get(token).is_some_and(|record| {
+                record.durable && !record.stopped && !record.sealed.is_empty()
+            })
+        });
+        let mut aliases = BTreeMap::new();
+        for token in &self.durable_chat.active {
+            let Some(record) = self.durable_chat.records.get(token) else {
+                continue;
+            };
+            if !record.durable || record.stopped || record.explicit_stop || record.sealed.is_empty()
+            {
+                continue;
+            }
+            if self.durable_chat.replacement_uncertain.contains_key(token) {
+                return Err(SyncError::ChatPreparationPending);
+            }
+            let ChatEffect::Signed { change, original } = &record.effect else {
+                return Err(SyncError::Malformed);
+            };
+            let original = match original {
+                Some(original) => original.clone(),
+                None => {
+                    let doc = self
+                        .docs
+                        .get_mut(&(DocType::Channel, record.channel))
+                        .ok_or(SyncError::NoSuchDoc)?;
+                    let progress =
+                        self.local_chat_scope
+                            .recovery
+                            .entry(*token)
+                            .or_insert_with(|| {
+                                doc.start_saved_local_chat_recovery(&self.device, *change)
+                            });
+                    match doc.recover_saved_local_chat_op(&self.device, progress) {
+                        Ok(Some(original)) => original,
+                        Ok(None) => return Err(SyncError::ChatScopeMigrationPending),
+                        Err(error) => {
+                            // A local receive/negative repair may replace the graph incarnation.
+                            // Restart derived progress on the next turn; never skip bad evidence.
+                            self.local_chat_scope.recovery.remove(token);
+                            return Err(error.into());
+                        }
+                    }
+                }
+            };
+            aliases.insert(
+                *token,
+                local_chat_scope::PublicationAlias {
+                    token: *token,
+                    binding: record.binding,
+                    context: record.context,
+                    channel: record.channel,
+                    change: *change,
+                    action: record.action,
+                    target: record.target,
+                    sealed_hash: *blake3::hash(&record.sealed).as_bytes(),
+                    original,
+                },
+            );
+            if aliases.len() > MAX_CHAT_PENDING {
+                return Err(SyncError::Malformed);
+            }
+        }
+        Ok(aliases)
+    }
+
     pub fn durable_send_context(&self) -> Result<[u8; 32], String> {
+        if self.local_chat_scope.managed() {
+            return self.managed_chat_context().map_err(|e| e.to_string());
+        }
         if !self.group.contains_device(&self.device.device_id()) {
             return Err("CHAT_SEND_CONTEXT_CHANGED: this device is no longer a member".into());
         }
@@ -1116,7 +1262,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         F: FnOnce(&mut AutoCommit) -> Result<(), AutomergeError>,
     {
         let current = self.durable_send_context();
-        self.durable_chat.stop_obsolete(current.as_ref().ok());
+        // Missing runtime custody on a managed restore is not a new obsolete-context verdict.
+        // Retain accepted obligations until the host validates/binds the original admission.
+        if !self.local_chat_scope.managed() || current.is_ok() {
+            self.durable_chat.stop_obsolete(current.as_ref().ok());
+        }
         if let Some(found) = self.durable_chat_lookup(token, binding, context, channel)? {
             if found.durable || self.durable_chat.replacement_uncertain.contains_key(&token) {
                 return Ok(found);
@@ -1188,7 +1338,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 bytes,
             )
         };
-        self.durable_chat.v2 |= action != ChatAction::Send || noop;
+        // Stable preparations can outlive the retained MLS key window. Persist their ORIGINAL
+        // signed operation with the existing v2 codec, even for an ordinary Send.
+        self.durable_chat.v2 |=
+            action != ChatAction::Send || noop || self.local_chat_scope.managed();
         let r = ChatRecord {
             binding,
             context,
@@ -1202,6 +1355,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             explicit_stop: false,
             sealed,
             next_attempt_ms: 0,
+            publication_context: None,
         };
         let outcome = r.outcome(false);
         self.durable_chat.records.insert(token, r);
@@ -1281,6 +1435,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 explicit_stop: true,
                 sealed: Vec::new(),
                 next_attempt_ms: 0,
+                publication_context: None,
             });
         if !self.durable_chat.records.contains_key(&token)
             && !self.durable_chat.replacement_uncertain.contains_key(&token)
@@ -1610,7 +1765,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
     pub(crate) async fn drain_durable_chat(&mut self) {
         let current = self.durable_send_context();
-        self.durable_chat.stop_obsolete(current.as_ref().ok());
+        if !self.local_chat_scope.managed() || current.is_ok() {
+            self.durable_chat.stop_obsolete(current.as_ref().ok());
+        }
         let Ok(context) = current else {
             return;
         };
@@ -1623,7 +1780,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let r = self.durable_chat.records.get(t)?;
                 (r.durable
                     && !r.stopped
-                    && r.context == context
+                    && r.publication_context.unwrap_or(r.context) == context
                     && !r.sealed.is_empty()
                     && r.next_attempt_ms <= now
                     && !self.durable_chat.replacement_uncertain.contains_key(t))
@@ -1640,20 +1797,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             else {
                 continue;
             };
-            if matches!(
-                self.transport.publish_once(topic, Bytes::from(bytes)).await,
-                Ok(catcoms_rt::PublishSubmission::Submitted)
-            ) {
+            let submitted = if self.local_chat_scope.managed() {
+                let Some(authority) = self.local_chat_scope.authority() else {
+                    return;
+                };
+                self.transport
+                    .publish_once_authorized(topic, Bytes::from(bytes), authority)
+                    .await
+            } else {
+                self.transport.publish_once(topic, Bytes::from(bytes)).await
+            };
+            if matches!(submitted, Ok(catcoms_rt::PublishSubmission::Submitted)) {
                 let r = self.durable_chat.records.get_mut(&token).unwrap();
                 r.sealed.clear();
                 if let ChatEffect::Signed { original, .. } = &mut r.effect {
                     *original = None;
                 }
                 self.durable_chat.active.remove(&token);
+                self.local_chat_scope.prune_alias(&token);
             }
         }
     }
     pub(crate) fn next_durable_chat_retry_delay(&self) -> Option<u64> {
+        if self.local_chat_scope.managed() && !self.local_chat_scope.live() {
+            return None;
+        }
         let now = self.clock.monotonic_ms();
         self.durable_chat
             .active
