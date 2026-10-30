@@ -296,8 +296,15 @@ after the prior native lock and the native unlock reply. Successful restoration 
 so first-run setup continues only with that attempt's matching success receipt. Stale errors, secret
 resets and finally blocks cannot mutate another attempt. Restoration itself also refuses an open UI.
 
-After a fulfilled lock and current-owner check, the coordinator is reset immediately before unlock
-dispatch. A locked-screen cancellation can then submit a fresh null-snapshot native lock; cancellation
+Each authentication joins its prior lock and checks current ownership. A present result must have a
+valid actual generation before it can be retired; rejected settlement or malformed proof never falls
+through to a replacement. The attempt then establishes one fresh null-snapshot native barrier and
+checks ownership/proof again before resetting that fulfilled result and dispatching unlock without
+another await. A cold attempt needs only that one fresh barrier. A cached result can be stale after
+a surviving native close, whose DTO intentionally supplies no reusable unlock generation; the fresh
+barrier avoids a needless correct-secret rejection. It also joins a newer pending exact JS snapshot
+before rotating custody, rather than blindly resetting the coordinator on a confirmed close.
+A locked-screen cancellation can then submit a fresh null-snapshot native lock; cancellation
 while settling instead joins the original exact lock/snapshot. Rejected bridge settlement keeps JS
 snapshot custody. Fulfilled valid-JSON write debt is retained by native and retried before native unlock
 opens IPC; malformed JSON retains its existing explicit warning/acknowledgement limitation. Native

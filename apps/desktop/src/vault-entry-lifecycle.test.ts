@@ -19,19 +19,22 @@ async function settle() { for (let n = 0; n < 40; n++) await Promise.resolve(); 
 const rows = [{ server: 1, channel: "1", name: "Original", channels: [{ id: "1", name: "general" }], invite: "", is_dm: false }];
 
 /** Actual entry/restore/startup/locked cancellation and close handlers; only I/O/UI rendering differ. */
-function entry() {
+function entry(initialNativeGeneration = 6n) {
   const closeStart = source.indexOf("      appWindow.onCloseRequested(async (event) => {");
   const closeEnd = source.indexOf("      // Capture is a native setting,", closeStart);
   assert.ok(closeStart >= 0 && closeEnd > closeStart);
   const close = ts.transpile("[" + source.slice(closeStart, closeEnd) + "];", { target: ts.ScriptTarget.ES2022 });
-  return new Function("NativeVaultLockCoordinator", "rows", `
+  return new Function("NativeVaultLockCoordinator", "rows", "initialNativeGeneration", `
     let locked = true, unlocking = false, unlockAttempt = 0, windowCloseInFlight = false;
     let uiStateLoadGeneration = 0, uiStateReady = false, vaultExists = true, error = "";
     let passphrase = "first secret", revealPassphrase = true, unlockMethod = "sigil";
     let sigilStrokes = [1], sigilDrawing = [2], sigilColors = [], sigilEmojis = [3], sigilWord = "private", melodySeq = [4];
     let inSetup = false, setupStep = "secret", setupFirst = "setup secret", setupPath = "sync", syncIntent = false;
     let closeAfterContinuityError = false, servers = [], restores = 0, loads = 0, resets = 0, pairs = 0, summons = 0, aborts = 0;
-    let studio = null, unmounts = 0, events = [], warnings = [], nativePending = null, closeHandler;
+    let studio = null, unmounts = 0, events = [], warnings = [], nativePending = null, nativeDurable = null, closeHandler;
+    let nativeGeneration = initialNativeGeneration;
+    const registerNativeLock = () => { nativeGeneration = (nativeGeneration + 1n) & ((1n << 64n) - 1n); return nativeGeneration.toString(); };
+    const saveNativePending = () => { if (nativePending !== null) nativeDurable = nativePending; nativePending = null; };
     const unlockGates = [], lockGates = [], resumeGates = [], existsGates = [], closeGates = [], unlockPromises = [];
     const explicit = new Map();
     const sessionStorage = { getItem: key => explicit.get(key) ?? null, setItem: (key,value) => explicit.set(key,value), removeItem: key => explicit.delete(key) };
@@ -60,22 +63,30 @@ function entry() {
       events.push({ command, args });
       if (command === "resume_session") return await (resumeGates.shift()?.promise ?? Promise.resolve(null));
       if (command === "vault_exists") return await (existsGates.shift()?.promise ?? Promise.resolve(true));
-      if (command === "close_vault_window") return await (closeGates.shift()?.promise ?? Promise.resolve({ deferred: true, continuity_error: "saved warning", destroy_error: null }));
+      if (command === "close_vault_window") {
+        registerNativeLock();
+        if (args.uiStateJson !== null && args.uiStateJson !== undefined) nativePending = args.uiStateJson;
+        const result = await (closeGates.shift()?.promise ?? Promise.resolve({ deferred: true, continuity_error: "saved warning", destroy_error: null }));
+        if (!result.continuity_error) saveNativePending();
+        return result;
+      }
       throw new Error("unexpected command " + command);
     };
     const invokeDebugged = (command, args) => {
       events.push({ command, args });
       assertCommand(command);
+      if (args.expectedUiGeneration !== nativeGeneration.toString()) return Promise.reject(new Error("native generation was superseded"));
       return (unlockGates.shift()?.promise ?? Promise.resolve(rows)).then(value => ({ value }));
     };
     function assertCommand(command) { if (command !== "unlock") throw new Error("unexpected auth command"); }
     const nativeVaultLock = new NativeVaultLockCoordinator(async json => {
+      const generation = registerNativeLock();
       events.push({ command: "lock_session", args: { json } });
       // Model the DECLARED native custody contract: valid pending JSON is registered
       // before lock commit; a null cancellation does not overwrite failed native debt.
       if (json !== null) nativePending = json;
-      const result = await (lockGates.shift()?.promise ?? Promise.resolve({ continuity_error: null, generation: "7" }));
-      if (!result.continuity_error) nativePending = null;
+      const result = await (lockGates.shift()?.promise ?? Promise.resolve({ continuity_error: null, generation }));
+      if (!result.continuity_error) saveNativePending();
       return result;
     });
     const originalReset = nativeVaultLock.reset.bind(nativeVaultLock);
@@ -111,10 +122,11 @@ function entry() {
       openStudio(value = "retained unsaved strokes") { if (!locked && uiStateReady) studio = value; else throw new Error("Studio not ready"); },
       finish: () => Promise.all([...unlockPromises]),
       state() { return { locked, unlocking, unlockAttempt, uiStateLoadGeneration, uiStateReady, vaultExists, passphrase, error,
-        restores, loads, resets, pairs, summons, aborts, studio, unmounts, setupFirst, syncIntent, events: [...events], nativePending,
+        restores, loads, resets, pairs, summons, aborts, studio, unmounts, setupFirst, syncIntent, events: [...events], nativePending, nativeDurable,
+        nativeGeneration: nativeGeneration.toString(),
         windowCloseInFlight, explicit: explicit.get("catcoms.explicit-lock") }; }
     };
-  `)(NativeVaultLockCoordinator, rows);
+  `)(NativeVaultLockCoordinator, rows, initialNativeGeneration);
 }
 
 test("actual double Enter sends one unlock and restores once; another Enter cannot unmount live Studio", async () => {
@@ -145,7 +157,7 @@ test("locked cancellation after dispatch owns a new negative lock; stale error/f
   app.holdLock(negative); app.lock(); app.secret("new secret"); app.holdUnlock(fresh);
   const newer = app.unlock(); await settle();
   assert.equal(app.state().events.filter(e => e.command === "unlock").length, 1, "new attempt joins exact cancellation lock");
-  negative.resolve({ continuity_error: null, generation: "9" }); await settle();
+  negative.resolve({ continuity_error: null, generation: "8" }); await settle();
   assert.equal(app.state().events.filter(e => e.command === "unlock").length, 2);
   assert.deepEqual(app.state().events.filter(e => e.command === "unlock").map(e => e.args.expectedUiGeneration), ["7", "9"]);
   const current = app.state(); old.reject(new Error("stale wrong secret")); assert.equal(await opening, null);
@@ -200,15 +212,15 @@ test("rejected settle retains JS snapshot for retry; fulfilled valid IO warning 
   failure.reject(new Error("bridge reply lost")); await observed; assert.equal(await opening, null);
   assert.equal(rejected.state().resets, 0); assert.equal(rejected.snapshot(), json);
   rejected.secret("again"); assert.ok(await rejected.unlock());
-  assert.deepEqual(rejected.state().events.filter(e => e.command === "lock_session").map(e => e.args.json), [json, json]);
+  assert.deepEqual(rejected.state().events.filter(e => e.command === "lock_session").map(e => e.args.json), [json, json, null]);
 
   const app = entry(), warning = deferred(), wrong = deferred(); app.holdLock(warning); const lock = app.beginLock(json);
   warning.resolve({ continuity_error: "valid JSON write failed", generation: "7" }); await lock;
   app.holdUnlock(wrong); const bad = app.unlock(); await settle(); wrong.reject(new Error("wrong secret")); assert.equal(await bad, null);
-  assert.equal(app.state().nativePending, json, "host custody survives JS coordinator reset and failed authentication");
+  assert.equal(app.state().nativePending ?? app.state().nativeDurable, json, "exact host bytes remain pending or were durably repaired before failed authentication");
   const cancel = deferred(); app.holdLock(cancel); app.lock();
   assert.equal(app.state().events.filter(e => e.command === "lock_session").at(-1).args.json, null);
-  assert.equal(app.state().nativePending, json, "null cancellation does not replace native pending JSON");
+  assert.equal(app.state().nativePending ?? app.state().nativeDurable, json, "null cancellation cannot erase pending or repaired original bytes");
   cancel.resolve({ continuity_error: "still pending", generation: "7" }); await settle();
 });
 
@@ -263,7 +275,8 @@ test("a refused close retires startup even after its closing flag clears", async
 
 test("cold unlock obtains one actual lock barrier before dispatch and forwards its exact native generation", async () => {
   for (const generation of ["0", "18446744073709551615"]) {
-    const app = entry(), barrier = deferred(); app.holdLock(barrier);
+    const before = generation === "0" ? (1n << 64n) - 1n : BigInt(generation) - 1n;
+    const app = entry(before), barrier = deferred(); app.holdLock(barrier);
     app.gateSubmit(); app.gateSubmit(); await settle();
     assert.equal(app.state().events.filter(e => e.command === "lock_session").length, 1);
     assert.equal(app.state().events.filter(e => e.command === "unlock").length, 0);
@@ -298,4 +311,58 @@ test("canceling the cold barrier cannot dispatch auth or reset newer lock custod
   assert.equal(app.state().resets, current.resets);
   assert.equal(app.state().events.filter(e => e.command === "unlock").length, 0);
   assert.equal(app.state().locked, true);
+});
+
+test("cached lock7 followed by a surviving close8 authenticates once with a fresh actual barrier9", async () => {
+  for (const outcome of [
+    { deferred: true, continuity_error: "screen state warning", destroy_error: null },
+    { deferred: true, continuity_error: null, history_error: "history still saving", destroy_error: null },
+    { deferred: false, continuity_error: null, destroy_error: "window stayed open" },
+  ]) {
+    const app = entry(), close = deferred();
+    const json = '{"version":3,"drafts":{"room":"exact original"},"readMarks":{}}';
+    await app.beginLock(json); assert.equal(app.state().nativeGeneration, "7");
+    app.holdClose(close); const closing = app.close(); await settle();
+    assert.equal(app.state().nativeGeneration, "8"); close.resolve(outcome); await closing;
+    assert.equal(app.snapshot(), json, "confirmed close does not blindly reset original coordinator custody");
+    app.secret("correct after close"); assert.ok(await app.unlock()); await settle();
+    const requests = app.state().events.filter(e => e.command === "unlock");
+    assert.equal(requests.length, 1); assert.equal(requests[0].args.expectedUiGeneration, "9");
+    assert.equal(app.state().restores, 1); assert.equal(app.state().nativeDurable, json);
+    assert.deepEqual(app.state().events.filter(e => e.command === "lock_session").map(e => e.args.json), [json, null]);
+  }
+});
+
+test("an older close7 reply cannot discard newer pending exact JS lock8 before fresh auth barrier9", async () => {
+  const app = entry(), close = deferred(), pending = deferred(); app.holdClose(close);
+  const closing = app.close(); await settle(); assert.equal(app.state().nativeGeneration, "7");
+  const json = '{"version":3,"drafts":{"room":"newer Ctrl+L snapshot"},"readMarks":{}}';
+  app.holdLock(pending); const exact = app.beginLock(json); assert.equal(app.state().nativeGeneration, "8");
+  close.resolve({ deferred: true, continuity_error: "warning", destroy_error: null }); await closing;
+  app.secret("correct after close"); const opening = app.unlock(); await settle();
+  assert.equal(app.snapshot(), json); assert.equal(app.state().resets, 0);
+  assert.equal(app.state().events.filter(e => e.command === "lock_session").length, 1);
+  assert.equal(app.state().events.filter(e => e.command === "unlock").length, 0);
+  pending.resolve({ continuity_error: null, generation: "8" }); await exact; assert.ok(await opening);
+  assert.equal(app.state().events.find(e => e.command === "unlock").args.expectedUiGeneration, "9");
+  assert.equal(app.state().nativeDurable, json);
+  assert.deepEqual(app.state().events.filter(e => e.command === "lock_session").map(e => e.args.json), [json, null]);
+});
+
+test("a malformed present prior proof is not retired or replaced, and a malformed fresh proof never reaches auth", async () => {
+  const json = '{"version":3,"drafts":{"room":"retained"},"readMarks":{}}';
+  for (const malformed of [{ continuity_error: null }, { continuity_error: null, generation: "01" }]) {
+    const prior = entry(), bad = deferred(); prior.holdLock(bad); const existing = prior.beginLock(json);
+    bad.resolve(malformed); await existing; assert.equal(await prior.unlock(), null);
+    assert.equal(prior.snapshot(), json); assert.equal(prior.state().resets, 0);
+    assert.equal(prior.state().events.filter(e => e.command === "lock_session").length, 1);
+    assert.equal(prior.state().events.filter(e => e.command === "unlock").length, 0);
+
+    const fresh = entry(); await fresh.beginLock(json); const replacement = deferred(); fresh.holdLock(replacement);
+    const opening = fresh.unlock(); await settle(); replacement.resolve(malformed); assert.equal(await opening, null);
+    assert.equal(fresh.state().resets, 1, "only the fulfilled valid prior was retired");
+    assert.equal(fresh.state().events.filter(e => e.command === "lock_session").length, 2);
+    assert.equal(fresh.state().events.filter(e => e.command === "unlock").length, 0);
+    assert.equal(fresh.state().nativePending ?? fresh.state().nativeDurable, json);
+  }
 });

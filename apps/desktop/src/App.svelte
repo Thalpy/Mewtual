@@ -6599,21 +6599,31 @@
       // Ctrl+L clears the webview immediately but native persistence can still be finishing. Join
       // that exact request before authenticating a new generation; otherwise a late old lock could
       // invalidate the session immediately after this unlock appears to succeed.
-      let barrier = await nativeVaultLock.settle();
+      const requireGeneration = (outcome: NativeVaultLockOutcome | null): string => {
+        const generation = outcome?.generation;
+        if (typeof generation !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(generation)
+          || BigInt(generation) > (1n << 64n) - 1n) {
+          throw new Error("Could not confirm this unlock session. Restart Mewtual and try again.");
+        }
+        return generation;
+      };
+      const prior = await nativeVaultLock.settle();
       if (!current()) return null;
-      if (barrier === null) {
-        // Cold entry still needs an actual native barrier. Its returned generation
-        // binds authentication even if native polls the queued command after Ctrl+L.
-        nativeVaultLock.begin(null);
-        barrier = await nativeVaultLock.settle();
-        if (!current()) return null;
+      if (prior !== null) {
+        // Join and validate original custody BEFORE retiring it. A malformed present
+        // result must not silently fall through to a replacement/guessed generation.
+        requireGeneration(prior);
+        nativeVaultLock.reset();
       }
-      const expectedUiGeneration = barrier?.generation;
-      if (typeof expectedUiGeneration !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(expectedUiGeneration)
-        || BigInt(expectedUiGeneration) > (1n << 64n) - 1n) {
-        throw new Error("Could not confirm this unlock session. Restart Mewtual and try again.");
-      }
-      // Retire only a fulfilled original lock, before auth leaves this JS turn.
+      // A confirmed window close may have registered another native lock without a
+      // reusable token. Establish one fresh barrier for THIS authentication rather
+      // than submit an otherwise valid cached generation which is now stale. A null
+      // snapshot preserves native pending bytes; never reset a newer pending JS lock.
+      nativeVaultLock.begin(null);
+      const barrier = await nativeVaultLock.settle();
+      if (!current()) return null;
+      const expectedUiGeneration = requireGeneration(barrier);
+      // Retire only this fulfilled fresh lock, before auth leaves this JS turn.
       // A fresh Ctrl+L can now issue its own null-snapshot native lock. Native
       // command admission must check THIS barrier generation at first poll and final
       // publication, rather than adopt its then-current generation. The UI ticket also

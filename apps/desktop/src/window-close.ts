@@ -74,9 +74,10 @@ export class NativeVaultLockCoordinator {
   }
 
   /**
-   * Retire a fulfilled lock under the current UI unlock attempt, immediately before
-   * authentication is dispatched (no intervening await). This permits one fresh negative
-   * lock while authentication is pending. Never call after a rejected settle or stale reply.
+   * Retire a fulfilled, validated lock under the current UI unlock attempt before
+   * registering its fresh null-snapshot barrier; retire that fresh result immediately
+   * before authentication dispatch (no intervening await). Never call after rejected
+   * settlement, malformed proof or a stale reply, or to discard a pending newer lock.
    * Native retains valid failed-continuity bytes across a fulfilled warning and retries
    * them before opening IPC; this does not promise retention of malformed JSON.
    */
