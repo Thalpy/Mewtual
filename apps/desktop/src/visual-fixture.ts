@@ -266,6 +266,10 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       return null;
     case "get_channels":
       return clone(server === 2 ? [{ id: "1", name: "Juniper" }] : CHAT_CHANNELS);
+    // Existing native lock metadata, with a fixed opaque generation for this UI fixture.
+    // This mock does not establish native command polling or persistence guarantees.
+    case "lock_session":
+      return { continuity_error: null, generation: "7" };
     // Explicit metadata/result mocks keep the real queue available in visual validation.
     // They model a durable local terminal, never a peer delivery acknowledgement.
     case "durable_send_context":

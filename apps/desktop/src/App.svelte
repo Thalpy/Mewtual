@@ -6599,18 +6599,31 @@
       // Ctrl+L clears the webview immediately but native persistence can still be finishing. Join
       // that exact request before authenticating a new generation; otherwise a late old lock could
       // invalidate the session immediately after this unlock appears to succeed.
-      await nativeVaultLock.settle();
+      let barrier = await nativeVaultLock.settle();
       if (!current()) return null;
+      if (barrier === null) {
+        // Cold entry still needs an actual native barrier. Its returned generation
+        // binds authentication even if native polls the queued command after Ctrl+L.
+        nativeVaultLock.begin(null);
+        barrier = await nativeVaultLock.settle();
+        if (!current()) return null;
+      }
+      const expectedUiGeneration = barrier?.generation;
+      if (typeof expectedUiGeneration !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(expectedUiGeneration)
+        || BigInt(expectedUiGeneration) > (1n << 64n) - 1n) {
+        throw new Error("Could not confirm this unlock session. Restart Mewtual and try again.");
+      }
       // Retire only a fulfilled original lock, before auth leaves this JS turn.
       // A fresh Ctrl+L can now issue its own null-snapshot native lock. Native
-      // command admission owns its ordering against queued authentication; the
-      // UI ticket below independently refuses stale replies. Never reset a newer lock.
+      // command admission must check THIS barrier generation at first poll and final
+      // publication, rather than adopt its then-current generation. The UI ticket also
+      // refuses stale replies. Never reset a newer lock or substitute local UI counters.
       // Fulfilled valid-snapshot IO debt is retained by native pending_ui_lock_snapshot
       // and retried before native unlock opens IPC. Rejected bridges keep JS custody.
       nativeVaultLock.reset();
       // The passphrase is an argument and never a recorded field: invokeDebugged records the
       // command name and its outcome, not what it was called with.
-      const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret });
+      const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret, expectedUiGeneration });
       if (!current()) return null;
       closeAfterContinuityError = false;
       passphrase = "";

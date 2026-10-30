@@ -301,8 +301,16 @@ dispatch. A locked-screen cancellation can then submit a fresh null-snapshot nat
 while settling instead joins the original exact lock/snapshot. Rejected bridge settlement keeps JS
 snapshot custody. Fulfilled valid-JSON write debt is retained by native and retried before native unlock
 opens IPC; malformed JSON retains its existing explicit warning/acknowledgement limitation. Native
-command admission must independently order queued authentication against lock; JS call order alone
-does not prove the order in which spawned native command futures first run.
+command admission independently orders queued authentication against lock; JS call order alone
+does not prove the order in which spawned native command futures first run. Every real lock result
+therefore carries its registered `generation` as a canonical decimal u64 string. Unlock must forward
+that exact result as required `expectedUiGeneration`; a cold entry first establishes a null-snapshot
+native lock. The generation is cancellation context; passphrase authentication is still required.
+Missing, malformed or out-of-range results refuse authentication before coordinator
+reset, without a local counter or current-generation fallback. Native checks the supplied generation
+before its first await/KDF and at every final admission, so a future first polled after cancellation
+cannot adopt the newer generation. Old unlock requests missing the field are refused. The optional
+TypeScript outcome field is solely for legacy non-authentication mocks, never a runtime fallback.
 
 Initial resume and gate reads capture the original attempt/generation and cannot restore or change
 the gate after a manual attempt, lock or close. A canceled initial read or surviving failed/deferred

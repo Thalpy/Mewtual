@@ -2,6 +2,12 @@
 export interface NativeVaultLockOutcome {
   /** Present only when native locking completed but the last UI snapshot could not be saved. */
   continuity_error: string | null;
+  /**
+   * Canonical decimal u64 from the actual registered native lock barrier. Real
+   * lock_session responses always supply it; optional only for legacy non-auth mocks.
+   * Active authentication must refuse an absent/malformed value, never guess one.
+   */
+  generation?: string;
 }
 
 /** Result returned only when native close deliberately leaves the window alive or cannot destroy it. */

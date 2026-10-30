@@ -28,6 +28,10 @@ test("recovery screenshot opt-in leaves ordinary chat fixture continuity unchang
   assert.deepEqual(ordinary.drafts, { "1:1": "A deterministic composer draft" });
 });
 
+test("fixture models the existing native lock barrier generation explicitly", () => {
+  assert.deepEqual(visualFixtureResponse("lock_session", { uiStateJson: null }), { continuity_error: null, generation: "7" });
+});
+
 test("the Transfers fixture shows every row state, closed and path free", () => {
   // Transfers UX (PR #51): `?fixture=chat&transfers=1` lists one row per state for screenshots.
   const rows = checkedPrivateDownloads(visualFixtureResponse("get_private_downloads", { server: 1 }, false, true));

@@ -74,7 +74,7 @@ function entry() {
       // Model the DECLARED native custody contract: valid pending JSON is registered
       // before lock commit; a null cancellation does not overwrite failed native debt.
       if (json !== null) nativePending = json;
-      const result = await (lockGates.shift()?.promise ?? Promise.resolve({ continuity_error: null }));
+      const result = await (lockGates.shift()?.promise ?? Promise.resolve({ continuity_error: null, generation: "7" }));
       if (!result.continuity_error) nativePending = null;
       return result;
     });
@@ -134,7 +134,7 @@ test("locked cancellation before prior lock settles keeps its exact snapshot and
   const prior = app.beginLock(snapshot), opening = app.unlock(); await settle(); app.lock();
   assert.equal(app.snapshot(), snapshot); assert.equal(app.state().resets, 0);
   assert.deepEqual(app.state().events.filter(e => e.command === "lock_session").map(e => e.args.json), [snapshot]);
-  lock.resolve({ continuity_error: null }); await prior; assert.equal(await opening, null);
+  lock.resolve({ continuity_error: null, generation: "7" }); await prior; assert.equal(await opening, null);
   assert.equal(app.state().events.filter(e => e.command === "unlock").length, 0);
   assert.equal(app.state().locked, true); assert.equal(app.state().explicit, "1");
 });
@@ -145,8 +145,9 @@ test("locked cancellation after dispatch owns a new negative lock; stale error/f
   app.holdLock(negative); app.lock(); app.secret("new secret"); app.holdUnlock(fresh);
   const newer = app.unlock(); await settle();
   assert.equal(app.state().events.filter(e => e.command === "unlock").length, 1, "new attempt joins exact cancellation lock");
-  negative.resolve({ continuity_error: null }); await settle();
+  negative.resolve({ continuity_error: null, generation: "9" }); await settle();
   assert.equal(app.state().events.filter(e => e.command === "unlock").length, 2);
+  assert.deepEqual(app.state().events.filter(e => e.command === "unlock").map(e => e.args.expectedUiGeneration), ["7", "9"]);
   const current = app.state(); old.reject(new Error("stale wrong secret")); assert.equal(await opening, null);
   assert.equal(app.state().unlocking, true); assert.equal(app.state().passphrase, "new secret");
   assert.equal(app.state().error, current.error); assert.equal(app.state().aborts, current.aborts); assert.equal(app.state().resets, current.resets);
@@ -169,7 +170,7 @@ test("closing guards both pre-dispatch settle and returned replies without UI re
     if (duringSettle) { app.holdLock(gate); prior = app.beginLock('{"drafts":{},"readMarks":{}}'); }
     else app.holdUnlock(gate);
     const opening = app.unlock(); await settle(); app.closing(true); const current = app.state();
-    gate.resolve(duringSettle ? { continuity_error: null } : rows); await prior; assert.equal(await opening, null);
+    gate.resolve(duringSettle ? { continuity_error: null, generation: "7" } : rows); await prior; assert.equal(await opening, null);
     assert.equal(app.state().locked, true); assert.equal(app.state().restores, 0);
     assert.equal(app.state().passphrase, current.passphrase); assert.equal(app.state().resets, current.resets);
     assert.equal(app.state().events.filter(e => e.command === "unlock").length, duringSettle ? 0 : 1);
@@ -202,13 +203,13 @@ test("rejected settle retains JS snapshot for retry; fulfilled valid IO warning 
   assert.deepEqual(rejected.state().events.filter(e => e.command === "lock_session").map(e => e.args.json), [json, json]);
 
   const app = entry(), warning = deferred(), wrong = deferred(); app.holdLock(warning); const lock = app.beginLock(json);
-  warning.resolve({ continuity_error: "valid JSON write failed" }); await lock;
+  warning.resolve({ continuity_error: "valid JSON write failed", generation: "7" }); await lock;
   app.holdUnlock(wrong); const bad = app.unlock(); await settle(); wrong.reject(new Error("wrong secret")); assert.equal(await bad, null);
   assert.equal(app.state().nativePending, json, "host custody survives JS coordinator reset and failed authentication");
   const cancel = deferred(); app.holdLock(cancel); app.lock();
   assert.equal(app.state().events.filter(e => e.command === "lock_session").at(-1).args.json, null);
   assert.equal(app.state().nativePending, json, "null cancellation does not replace native pending JSON");
-  cancel.resolve({ continuity_error: "still pending" }); await settle();
+  cancel.resolve({ continuity_error: "still pending", generation: "7" }); await settle();
 });
 
 test("late initial resume or chooseGate cannot reinitialize a manually opened Studio", async () => {
@@ -258,4 +259,43 @@ test("a refused close retires startup even after its closing flag clears", async
   assert.equal(app.state().windowCloseInFlight, false); assert.equal(app.state().vaultExists, true);
   resume.resolve(rows); await settle();
   assert.equal(app.state().locked, true); assert.equal(app.state().restores, 0);
+});
+
+test("cold unlock obtains one actual lock barrier before dispatch and forwards its exact native generation", async () => {
+  for (const generation of ["0", "18446744073709551615"]) {
+    const app = entry(), barrier = deferred(); app.holdLock(barrier);
+    app.gateSubmit(); app.gateSubmit(); await settle();
+    assert.equal(app.state().events.filter(e => e.command === "lock_session").length, 1);
+    assert.equal(app.state().events.filter(e => e.command === "unlock").length, 0);
+    assert.equal(app.state().resets, 0);
+    barrier.resolve({ continuity_error: null, generation }); await app.finish(); await settle();
+    const auth = app.state().events.find(e => e.command === "unlock");
+    assert.equal(auth.args.expectedUiGeneration, generation);
+    assert.equal(auth.args.passphrase, "first secret");
+    assert.equal(app.state().restores, 1);
+  }
+});
+
+test("missing or malformed native generation refuses authentication without reset, guesses or fallback", async () => {
+  for (const generation of [undefined, null, 7, {}, [], "", "01", "-1", "+1", "1.0", " 7", "7 ", "1e2",
+    "18446744073709551616", "9".repeat(21)]) {
+    const app = entry(), barrier = deferred(); app.holdLock(barrier); const opening = app.unlock(); await settle();
+    barrier.resolve({ continuity_error: null, ...(generation === undefined ? {} : { generation }) });
+    assert.equal(await opening, null);
+    assert.equal(app.state().events.filter(e => e.command === "unlock").length, 0);
+    assert.equal(app.state().restores, 0); assert.equal(app.state().resets, 0);
+    assert.equal(app.state().passphrase, "first secret"); assert.equal(app.state().locked, true);
+    assert.match(app.state().error, /Could not confirm this unlock session/);
+    assert.equal(await app.unlock(), null, "a present invalid result is refused rather than replaced with a guessed/current proof");
+    assert.equal(app.state().events.filter(e => e.command === "lock_session").length, 1);
+  }
+});
+
+test("canceling the cold barrier cannot dispatch auth or reset newer lock custody when its reply arrives", async () => {
+  const app = entry(), barrier = deferred(); app.holdLock(barrier); const opening = app.unlock(); await settle();
+  app.lock(); const current = app.state(); barrier.resolve({ continuity_error: null, generation: "7" });
+  assert.equal(await opening, null);
+  assert.equal(app.state().resets, current.resets);
+  assert.equal(app.state().events.filter(e => e.command === "unlock").length, 0);
+  assert.equal(app.state().locked, true);
 });
