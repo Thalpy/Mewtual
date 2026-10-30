@@ -222,6 +222,33 @@ the recovered draft; failure/lost reply retains the original intent and its
 resolution, and retries Stop with the same token. UI lock/unlock cannot revive
 a stopped token. No native exception is treated as proof of nonacceptance.
 
+Frontend admission validates the complete mutation before queue insertion, including the
+64 KiB UTF-8 text bound, 128-byte target id bound and well-formed Unicode required by native
+JSON decoding. Lone UTF-16 surrogates are refused without normalization. User payload validation runs before
+context lookup, and rejection leaves the editor intact. Permanent `CHAT_MUTATION_TARGET_CHANGED`,
+`CHAT_MUTATION_AUTHOR_CONFLICT`, `CHAT_MUTATION_NOT_AUTHORIZED` and `CHAT_MUTATION_INVALID`
+refusals persist an automatic-retry pause. They never erase an earlier ambiguous attempt;
+manual retry and ordinary Stop retain the exact original request identity.
+
+An older frontend could seal an oversized edit or a target ID longer than 128 UTF-8 bytes
+before native rejected it. Its queue checked only aggregate storage; old ID hydration's
+128-code-unit check was already lossy. The target-ID bug affects both edit and delete.
+Native Stop also validates that original payload. Continuity v2 therefore reads the old
+sealable payload within aggregate storage bounds and retains these known invalid cases
+within the existing 32-row/256 KiB per-shelf bounds, with every original custody, acceptance,
+retry-disposition and resolution field. Quarantine is derived from the original invalid bytes,
+not a saved authorization flag. Automatic/manual retry, direct submission and Stop all refuse
+those rows. Other invalid custody or unknown kinds/versions remain fail closed.
+
+The manager offers Copy and an explicit saved-text/request recovery for such rows, distinct from Stop.
+Recovery atomically seals removal from pending and the complete unchanged original in the
+nonretry recovered shelf, then commits both in memory. Failed writes or a full shelf retain the
+pending original; Copy remains available. Reload accepts either shelf and ordinary chat/continuity
+work continues. This local move establishes neither native nonacceptance nor a durable Stop.
+An invalid-ID deletion retains its full request identity with a visible action/message ID, without
+empty-text composer controls. Recovered text never publishes automatically and any later new submission must pass ordinary
+admission. No native validation, request/receipt identity or continuity version changes here.
+
 ## Required verification
 
 Design review precedes runtime edits. Focused deterministic tests must cover real

@@ -40,7 +40,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
-  import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedMutation, quarantinedPendingMutation, validateMutationPayload, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
@@ -3563,7 +3563,7 @@
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      Object.values(pendingSends).some(intent => intent.resolution || !intent.retryBlock),
+      Object.values(pendingSends).some(intent => !quarantinedPendingMutation(intent) && (intent.resolution || !intent.retryBlock)),
       sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
     );
   });
@@ -20701,6 +20701,9 @@
   // `onDispatch` is told just before the request leaves for the native side: from then on it may
   // have committed whatever comes back (see `send`).
   async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined, onDispatch: () => void = () => {}): Promise<SendMessageResult> {
+    // Native Stop validates the original mutation too. Never dispatch this old invalid
+    // payload, including a previously sealed resolution, or rewrite its diagnostics.
+    if (quarantinedPendingMutation(intent)) throw new Error("Open Pending messages to recover this saved request. It cannot be retried.");
     const draftKey = chatScopeKey(intent.server, intent.channel);
     const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
     let result: SendMessageResult;
@@ -20845,6 +20848,17 @@
   }
 
   async function resolvePendingMessage(token: string, action: PendingResolution): Promise<void> {
+    if (pendingSends[token] && quarantinedPendingMutation(pendingSends[token])) {
+      if (action !== "recover") throw new Error("Open Pending messages to recover this saved request. This request will stay paused.");
+      // This local custody move makes no claim about the original native outcome.
+      // Failure keeps BOTH shelves unchanged; the saved original is never truncated.
+      await savePendingDecision(token, () => {
+        const next = recoverQuarantinedMutation(pendingSends, recoveredSendDrafts, token);
+        return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
+          commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; } };
+      });
+      return;
+    }
     const session = uiStateLoadGeneration;
     // First seal the irreversible choice with the complete original request. No native
     // Stop may outlive this recovery identity, and no later retry may author positively.
@@ -20913,6 +20927,7 @@
       for (const intent of Object.values(pendingSends)) {
         if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
+        if (quarantinedPendingMutation(intent)) continue;
         if (automatic && intent.retryBlock && !intent.resolution) continue;
         // A refusal now cannot establish absence of an older invocation whose reply was lost.
         const priorMayHaveGone = intent.acceptance !== "not_accepted";
@@ -21046,6 +21061,9 @@
     if (locked || !uiStateReady || windowCloseInFlight || sending || retryingPendingSends || pendingSendResolution !== null || pendingManagerOpen) {
       throw new Error("Wait until the vault is ready before changing this message.");
     }
+    // Reject before context lookup or queue insertion so an editor admission error
+    // cannot strand continuity behind a request that even native Stop will refuse.
+    validateMutationPayload(server, channel, messageId, kind, text);
     const session = uiStateLoadGeneration;
     const operation = ++pendingSendNonce;
     sending = true;
@@ -28239,7 +28257,7 @@
                 <summary>{Object.keys(pendingSends).length} message(s) awaiting save confirmation</summary>
                 <p>Pending messages keep their original identity. Temporary save failures retry automatically while unlocked.</p>
                 {#each Object.values(pendingSends).filter((item) => item.server === activeServerId) as item (item.token)}
-                  <p>{pendingActionLabel(item)}{item.resolution ? " · Stop awaiting confirmation" : ""}</p>
+                  <p>{pendingActionLabel(item)}{quarantinedPendingMutation(item) ? " · Saved request needs recovery" : item.resolution ? " · Stop awaiting confirmation" : ""}</p>
                   {#if item.kind !== "delete"}<p>{item.text}</p>{/if}
                   {#if item.retryBlock}<p>Automatic retry paused. Review this message before retrying.</p>{/if}
                   {#if pendingSendErrors[item.token]}
