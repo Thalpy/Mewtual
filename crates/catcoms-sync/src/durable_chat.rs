@@ -54,6 +54,40 @@ pub enum ChatDisposition {
     StoppedAfterCommit,
 }
 
+/// One exact local Send whose signed history became durably installed in THIS transaction.
+/// This is session bookkeeping only, not a new operation, receipt or publication permission.
+/// Identities come only from the installed candidate; callers never supply them separately.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CommittedChatSend {
+    pub token: [u8; 16],
+    pub binding: [u8; 32],
+    pub context: [u8; 32],
+    pub channel: u128,
+    pub message_id: String,
+    pub change: ChangeHash,
+}
+impl std::fmt::Debug for CommittedChatSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommittedChatSend")
+            .field("channel", &self.channel)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Ephemeral effects of a successfully saved AND installed covering transaction. Includes
+/// unrelated-channel uncertainty repaired implicitly by commit/Stop. No failure returns effects.
+/// Both vectors are bounded by the existing MAX_CHAT_RECEIPTS update set, not a separate queue;
+/// no message text, sealed payload or new persistent/wire field is added. The application must
+/// consume Send bookkeeping synchronously before yielding or resuming autonomous publication.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use = "consume committed Send tracking and all affected channels before publication"]
+pub struct ChatCommitEffects {
+    pub newly_committed_sends: Vec<CommittedChatSend>,
+    /// Sorted unique channels whose signed graph candidate was installed. A caller may filter
+    /// unchanged projections, but must not replace this with only the selected request's channel.
+    pub affected_channels: Vec<u128>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct DurableChatState {
     records: BTreeMap<[u8; 16], ChatRecord>,
@@ -1106,6 +1140,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
     /// Save an exact-token Stop even if its original positive request never reached this Actor.
     /// This negative transaction performs no fresh authorization or operation authoring.
+    /// Compatibility API for sync-only callers. Application owners must use the effect-aware
+    /// variant so implicit repaired Sends/channels are observed before publication resumes.
     #[allow(clippy::too_many_arguments)]
     pub fn stop_durable_chat<F>(
         &mut self,
@@ -1121,12 +1157,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
+        self.stop_durable_chat_with_effects(
+            token, binding, context, channel, message_id, action, target, save,
+        )
+        .map(|(prepared, _)| prepared)
+    }
+    /// Exact Stop plus every successfully installed covering repair effect.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stop_durable_chat_with_effects<F>(
+        &mut self,
+        token: [u8; 16],
+        binding: [u8; 32],
+        context: [u8; 32],
+        channel: u128,
+        message_id: String,
+        action: ChatAction,
+        target: Option<[u8; 32]>,
+        save: F,
+    ) -> Result<(PreparedChat, ChatCommitEffects), ChatSaveError>
+    where
+        F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
+    {
         if let Some(saved) = self
             .durable_chat_lookup(token, binding, context, channel)
             .map_err(ChatSaveError::NotReplaced)?
         {
             if saved.durable && saved.disposition != ChatDisposition::Committed {
-                return Ok(saved);
+                return Ok((saved, ChatCommitEffects::default()));
             }
         }
         if message_id.is_empty()
@@ -1169,15 +1226,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !record.durable {
             record.effect = ChatEffect::NeverAuthored;
         }
-        self.chat_storage_transaction(Some((token, record)), true, save)?;
-        Ok(self.durable_chat.records[&token].outcome(true))
+        let effects = self.chat_storage_transaction(Some((token, record)), true, save)?;
+        Ok((self.durable_chat.records[&token].outcome(true), effects))
     }
+    /// Compatibility API; application owners consume the effect-aware result instead.
     pub fn commit_durable_chat<F>(&mut self, token: [u8; 16], save: F) -> Result<(), ChatSaveError>
     where
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
+        self.commit_durable_chat_with_effects(token, save)
+            .map(|_| ())
+    }
+    /// Save the selected request and return ALL installed repairs, not just that request.
+    pub fn commit_durable_chat_with_effects<F>(
+        &mut self,
+        token: [u8; 16],
+        save: F,
+    ) -> Result<ChatCommitEffects, ChatSaveError>
+    where
+        F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
+    {
         if self.durable_chat.replacement_uncertain.contains_key(&token) {
-            return self.repair_durable_chat(save);
+            return self.repair_durable_chat_with_effects(save);
         }
         let record = self
             .durable_chat
@@ -1185,7 +1255,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .get(&token)
             .ok_or_else(|| ChatSaveError::NotReplaced("unknown chat preparation".into()))?;
         if record.durable || record.explicit_stop {
-            return Ok(());
+            return Ok(ChatCommitEffects::default());
         }
         if record.stopped
             || self
@@ -1207,8 +1277,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
+        self.repair_durable_chat_with_effects(save).map(|_| ())
+    }
+    /// Host repair with exact committed Send/channel effects for session bookkeeping.
+    pub fn repair_durable_chat_with_effects<F>(
+        &mut self,
+        save: F,
+    ) -> Result<ChatCommitEffects, ChatSaveError>
+    where
+        F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
+    {
         if !self.durable_chat_needs_repair() {
-            return Ok(());
+            return Ok(ChatCommitEffects::default());
         }
         self.chat_storage_transaction(None, false, save)
     }
@@ -1219,6 +1299,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         identities: &[SavedChatFenceIdentity],
         save: F,
     ) -> Result<(), ChatSaveError>
+    where
+        F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
+    {
+        self.fence_saved_durable_chat_with_effects(identities, save)
+            .map(|_| ())
+    }
+    /// Effect-aware saved fencing for an already running application owner. Fresh restore may
+    /// intentionally use the compatibility wrapper because delivery tracking is session-local.
+    pub fn fence_saved_durable_chat_with_effects<F>(
+        &mut self,
+        identities: &[SavedChatFenceIdentity],
+        save: F,
+    ) -> Result<ChatCommitEffects, ChatSaveError>
     where
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
@@ -1243,7 +1336,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             stopped.insert(token, record);
         }
         if stopped.is_empty() {
-            return Ok(());
+            return Ok(ChatCommitEffects::default());
         }
         self.chat_storage_transaction_records(stopped, true, save)
     }
@@ -1252,7 +1345,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         selected: Option<([u8; 16], ChatRecord)>,
         v2: bool,
         save: F,
-    ) -> Result<(), ChatSaveError>
+    ) -> Result<ChatCommitEffects, ChatSaveError>
     where
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
@@ -1263,7 +1356,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         selected: BTreeMap<[u8; 16], ChatRecord>,
         explicit_v2: bool,
         save: F,
-    ) -> Result<(), ChatSaveError>
+    ) -> Result<ChatCommitEffects, ChatSaveError>
     where
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
@@ -1342,6 +1435,35 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 old.effect = record.effect.clone();
             }
         }
+        // Capture identities from the exact candidate vs its prior LIVE state. In particular,
+        // uncertain signed Sends have not yet entered application delivery tracking, even when
+        // the selected operation here is Stop or another channel's edit/delete. Stopped-signed
+        // history is still real history; NeverAuthored and NoOp never fabricate a change hash.
+        let effects = ChatCommitEffects {
+            newly_committed_sends: updates
+                .iter()
+                .filter_map(|(token, record)| {
+                    if record.action != ChatAction::Send
+                        || !record.durable
+                        || previous.records.get(token).is_some_and(|old| old.durable)
+                    {
+                        return None;
+                    }
+                    let ChatEffect::Signed { change, .. } = record.effect else {
+                        return None;
+                    };
+                    Some(CommittedChatSend {
+                        token: *token,
+                        binding: record.binding,
+                        context: record.context,
+                        channel: record.channel,
+                        message_id: record.message_id.clone(),
+                        change,
+                    })
+                })
+                .collect(),
+            affected_channels: candidates.keys().map(|(_, channel)| *channel).collect(),
+        };
         for (key, candidate) in candidates {
             originals.insert(key, self.docs.insert(key, candidate).unwrap());
         }
@@ -1368,7 +1490,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.durable_chat.replacement_uncertain.clear();
                 self.durable_chat.reconciling = false;
                 self.durable_chat.rebuild_active();
-                Ok(())
+                Ok(effects)
             }
             failed => {
                 for (key, original) in originals {

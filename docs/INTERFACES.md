@@ -1,5 +1,18 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Durable chat covering-transaction effects (30 October; validation pending)
+
+Sync effect-aware commit/Stop/repair/fence APIs return ephemeral `ChatCommitEffects` only after a
+covering snapshot is durably saved and its complete candidate installed. This includes implicit
+repairs outside the selected request's channel. Exact newly committed Send metadata carries original
+token/binding/context/channel/message ID/real change hash; no text, payload, new receipt or permission.
+The application installs both recent-message and receipt-target bookkeeping synchronously before
+lease release/reply/publication. Actor refreshes every affected channel, filtering unchanged actual
+projections. Failed writes return no successful effects while retaining SnapshotNeeded repair work.
+Existing public compatibility wrappers/native replies/persisted and signing bytes remain unchanged.
+Tracking is still bounded/session-local and intentionally forgotten after restart. Authored real
+Store/Actor/quiet-peer regressions are pending primary execution and independent actual review.
+
 ## Inactive exact Delete approval contract (29 October; validation pending)
 
 `ChatLedger::approve_delete(ActionId, VerifiedDeleteApproval)` attaches one opaque externally

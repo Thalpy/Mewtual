@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## PR82 repair bookkeeping and channel effects (30 October; validation pending)
+
+The review found that automatic durable Send repair bypassed delivery tracking and implicit repair
+of A during a transaction in B omitted A's channel event. The repair-effects continuation returns
+exact newly committed Send metadata and the full installed channel set from the covering transaction,
+registers tracking before publication, and notifies all changed channels after success. Native result
+and persistence/signature formats stay unchanged; failures still schedule host repair with no false
+effect. Five authored regressions cover real rename/parent-sync faults, implicit Stop/commit across
+quiet channels, stopped-signed history, and SnapshotNeeded-driven host repair followed by a real
+quiet peer receipt without frontend retry. No Rust checks run by the implementing agent; primary
+owns focused execution, complete backend/frontend suites and independent actual-diff review.
+
 ## Integrated text-chat validation (29 October; local gates passed)
 
 The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/

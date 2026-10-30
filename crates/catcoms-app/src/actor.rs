@@ -5069,11 +5069,12 @@ where
                         let _ = reply.send(server.sync.durable_send_context());
                     }
                     Some(AppCommand::DurableSend { request, ready }) => {
-                        let channel = request.channel;
-                        if crate::durable_chat::execute(&mut server, crate::durable_chat::DurableChatRequest::Send(request), false, ready).await {
+                        if let Some(channels) = crate::durable_chat::execute(&mut server, crate::durable_chat::DurableChatRequest::Send(request), false, ready).await {
                             let _ = event_tx.send(AppEvent::SnapshotNeeded).await;
-                            if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
-                                let _ = event_tx.send(AppEvent::ChannelUpdated { channel, change }).await;
+                            for channel in channels {
+                                if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
+                                    let _ = event_tx.send(AppEvent::ChannelUpdated { channel, change }).await;
+                                }
                             }
                         }
                     }
@@ -5081,11 +5082,12 @@ where
                         let _=reply.send(server.durable_mutation_context(channel,&id));
                     }
                     Some(AppCommand::DurableChat { request,stop,ready }) => {
-                        let channel=request.channel();
-                        if crate::durable_chat::execute(&mut server,request,stop,ready).await {
+                        if let Some(channels)=crate::durable_chat::execute(&mut server,request,stop,ready).await {
                             let _=event_tx.send(AppEvent::SnapshotNeeded).await;
-                            if let Some(change)=channel_delta_if_moved(&server,channel,&mut counts,&mut versions) {
-                                let _=event_tx.send(AppEvent::ChannelUpdated{channel,change}).await;
+                            for channel in channels {
+                                if let Some(change)=channel_delta_if_moved(&server,channel,&mut counts,&mut versions) {
+                                    let _=event_tx.send(AppEvent::ChannelUpdated{channel,change}).await;
+                                }
                             }
                         }
                     }

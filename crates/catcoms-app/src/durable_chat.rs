@@ -11,7 +11,7 @@ use crate::{
     MAX_TRACKED_OWN_MESSAGES,
 };
 use automerge::{transaction::Transactable, ObjId};
-use catcoms_sync::durable_chat::{ChatAction, ChatDisposition, ChatSaveError};
+use catcoms_sync::durable_chat::{ChatAction, ChatCommitEffects, ChatDisposition, ChatSaveError};
 
 pub const MAX_SEND_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_SEND_REPLY_BYTES: usize = 256;
@@ -407,19 +407,57 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         Ok(matches!(&request.action,DurableMutationAction::Edit{text} if text==&message.text))
     }
+    /// Install bookkeeping for the ENTIRE covering transaction before its publication can
+    /// resume. Exact duplicates are inert; an ID already bound to another real change is never
+    /// retargeted, which would let a receipt for one body falsely confirm a different body.
+    fn track_committed_chat_sends(&mut self, effects: &ChatCommitEffects) {
+        for committed in &effects.newly_committed_sends {
+            let recent = self
+                .own_message_changes
+                .entry(committed.channel)
+                .or_default();
+            if let Some((_, change)) = recent.iter().find(|(id, _)| id == &committed.message_id) {
+                if change != &committed.change {
+                    tracing::warn!(
+                        "durable chat delivery identity conflicts with retained tracking"
+                    );
+                }
+                continue;
+            }
+            self.sync
+                .track_delivery_target(DocType::Channel, committed.channel, committed.change);
+            recent.push_back((committed.message_id.clone(), committed.change));
+            while recent.len() > MAX_TRACKED_OWN_MESSAGES {
+                recent.pop_front();
+            }
+        }
+    }
+
+    // Retain compact existing unit-fixture calls while every production caller uses the
+    // effect-bearing result below. This wrapper exercises the same tracking consumer.
+    #[cfg(test)]
     fn commit_chat_request(
         &mut self,
         request: &DurableChatRequest,
         store: &ServerStore,
         server_id: u64,
     ) -> Result<DurableSendOutcome, String> {
+        self.commit_chat_request_with_effects(request, store, server_id)
+            .map(|(outcome, _)| outcome)
+    }
+    fn commit_chat_request_with_effects(
+        &mut self,
+        request: &DurableChatRequest,
+        store: &ServerStore,
+        server_id: u64,
+    ) -> Result<(DurableSendOutcome, ChatCommitEffects), String> {
         request.validate()?;
         let (token, binding, context, channel, id, action, target) = request.identity();
         let existing = self
             .sync
             .durable_chat_lookup(token, binding, context, channel)?;
         if let Some(saved) = existing.as_ref().filter(|p| p.durable) {
-            return Ok(outcome(saved.clone(), None));
+            return Ok((outcome(saved.clone(), None), ChatCommitEffects::default()));
         }
         // Uncertainty is historical repair only. Every ordinary uncommitted retry still checks
         // current membership, exact target and role, including same-epoch admin demotion.
@@ -469,41 +507,48 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 }
             }
         }
-        let result = self.sync.commit_durable_chat(token, |bytes, rng| {
-            store.save_server(server_id, bytes, rng).map_err(save_error)
-        });
+        let result = self
+            .sync
+            .commit_durable_chat_with_effects(token, |bytes, rng| {
+                store.save_server(server_id, bytes, rng).map_err(save_error)
+            });
+        let (effects, storage_error) = match result {
+            Ok(effects) => {
+                self.track_committed_chat_sends(&effects);
+                (effects, None)
+            }
+            Err(error) => (ChatCommitEffects::default(), Some(error.to_string())),
+        };
         let mut prepared = self
             .sync
             .durable_chat_lookup(token, binding, context, channel)?
             .ok_or_else(|| "chat preparation disappeared".to_string())?;
         prepared.replayed = existing.is_some();
-        if result.is_ok() && action == ChatAction::Send {
-            if let Some(change) = prepared.change {
-                self.sync
-                    .track_delivery_target(DocType::Channel, channel, change);
-                let recent = self.own_message_changes.entry(channel).or_default();
-                if !recent.iter().any(|(id, _)| id == &prepared.message_id) {
-                    recent.push_back((prepared.message_id.clone(), change));
-                    while recent.len() > MAX_TRACKED_OWN_MESSAGES {
-                        recent.pop_front();
-                    }
-                }
-            }
-        }
-        Ok(outcome(prepared, result.err().map(|e| e.to_string())))
+
+        Ok((outcome(prepared, storage_error), effects))
     }
+    #[cfg(test)]
     fn stop_chat_request(
         &mut self,
         request: &DurableStopRequest,
         store: &ServerStore,
         server_id: u64,
     ) -> Result<DurableSendOutcome, String> {
+        self.stop_chat_request_with_effects(request, store, server_id)
+            .map(|(outcome, _)| outcome)
+    }
+    fn stop_chat_request_with_effects(
+        &mut self,
+        request: &DurableStopRequest,
+        store: &ServerStore,
+        server_id: u64,
+    ) -> Result<(DurableSendOutcome, ChatCommitEffects), String> {
         request.original.validate()?;
         let (token, binding, context, channel, id, action, target) = request.original.identity();
         let before = self
             .sync
             .durable_chat_lookup(token, binding, context, channel)?;
-        match self.sync.stop_durable_chat(
+        match self.sync.stop_durable_chat_with_effects(
             token,
             binding,
             context,
@@ -513,20 +558,26 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             target,
             |bytes, rng| store.save_server(server_id, bytes, rng).map_err(save_error),
         ) {
-            Ok(saved) => Ok(outcome(saved, None)),
+            Ok((saved, effects)) => {
+                self.track_committed_chat_sends(&effects);
+                Ok((outcome(saved, None), effects))
+            }
             Err(error) => {
                 let possible = self
                     .sync
                     .durable_chat_lookup(token, binding, context, channel)?
                     .or(before);
-                Ok(DurableSendOutcome {
-                    message_id: id,
-                    durable: false,
-                    replayed: possible.as_ref().is_some_and(|p| p.replayed),
-                    disposition: possible
-                        .map_or(ChatDisposition::StoppedBeforeCommit, |p| p.disposition),
-                    storage_error: Some(error.to_string()),
-                })
+                Ok((
+                    DurableSendOutcome {
+                        message_id: id,
+                        durable: false,
+                        replayed: possible.as_ref().is_some_and(|p| p.replayed),
+                        disposition: possible
+                            .map_or(ChatDisposition::StoppedBeforeCommit, |p| p.disposition),
+                        storage_error: Some(error.to_string()),
+                    },
+                    ChatCommitEffects::default(),
+                ))
             }
         }
     }
@@ -538,33 +589,38 @@ pub(crate) async fn execute<T: MeshTransport, R: CryptoRngCore>(
     request: DurableChatRequest,
     stop: bool,
     ready: oneshot::Sender<DurableSendReady>,
-) -> bool {
+) -> Option<Vec<u128>> {
     let (lease, rx) = oneshot::channel();
     let (tx, result) = oneshot::channel();
     if ready.send(DurableSendReady { lease, result }).is_err() {
-        return false;
+        return None;
     }
     let Ok(lease) = rx.await else {
-        return false;
+        return None;
     };
     let result = match lease.store.as_ref() {
         Some(store) => {
             if stop {
-                server.stop_chat_request(
+                server.stop_chat_request_with_effects(
                     &DurableStopRequest { original: request },
                     store,
                     lease.server,
                 )
             } else {
-                server.commit_chat_request(&request, store, lease.server)
+                server.commit_chat_request_with_effects(&request, store, lease.server)
             }
         }
         None => Err("vault is not mounted".into()),
     };
-    let touched = result.is_ok();
+    let (reply, channels) = match result {
+        Ok((outcome, effects)) => (Ok(outcome), Some(effects.affected_channels)),
+        Err(error) => (Err(error), None),
+    };
+    // A failed-save Outcome still returns Some(empty) to retain SnapshotNeeded scheduling;
+    // only a successfully installed transaction can report changed channels or Send tracking.
     drop(lease);
-    let _ = tx.send(result);
-    touched
+    let _ = tx.send(reply);
+    channels
 }
 #[derive(Debug)]
 pub struct DurableRepairReady {
@@ -600,11 +656,10 @@ pub(crate) async fn execute_repair<T: MeshTransport, R: CryptoRngCore>(
     let Ok(lease) = rx.await else {
         return None;
     };
-    let channels = server.sync.durable_chat_repair_channels();
     let result = match lease.store.as_ref() {
         Some(store) => server
             .sync
-            .repair_durable_chat(|bytes, rng| {
+            .repair_durable_chat_with_effects(|bytes, rng| {
                 store
                     .save_server(lease.server, bytes, rng)
                     .map_err(save_error)
@@ -612,10 +667,16 @@ pub(crate) async fn execute_repair<T: MeshTransport, R: CryptoRngCore>(
             .map_err(|e| e.to_string()),
         None => Err("vault is not mounted".into()),
     };
-    let touched = result.is_ok();
+    let (reply, channels) = match result {
+        Ok(effects) => {
+            server.track_committed_chat_sends(&effects);
+            (Ok(()), Some(effects.affected_channels))
+        }
+        Err(error) => (Err(error), None),
+    };
     drop(lease);
-    let _ = tx.send(result);
-    touched.then_some(channels)
+    let _ = tx.send(reply);
+    channels
 }
 #[cfg(test)]
 mod tests {
@@ -1395,3 +1456,7 @@ mod tests {
         assert_eq!(ops(&restored(store.lock().await.as_ref().unwrap(), 9)), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "durable_chat/repair_effects_tests.rs"]
+mod repair_effects_tests;
