@@ -9,6 +9,9 @@ use super::{ActionId, BasisId, ChatError, GrantId, Rights, MAX_GROUP_ID_BYTES, P
 use catcoms_crypto::verify_with_public_bytes;
 use catcoms_wire::{Decoder, Encoder};
 
+mod authority;
+pub use authority::{OwnerBasisFacts, OwnerProfileExpectation};
+
 const FACT_DOMAIN: &[u8] = b"mewtual/chat/owner-fact/v1\0";
 const ENVELOPE_DOMAIN: &[u8] = b"mewtual/chat/owner-fact-envelope/v1\0";
 const ID_DOMAIN: &[u8] = b"mewtual/chat/owner-fact-id/v1\0";

@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Owner fact-chain verifier continuation (30 October; focused execution pending)
+
+The isolated admission/admin branch now has a real stateless owner-attested ordinary-basis
+verifier, separate from the still-unimplemented archive/canonical-save producer. Expected root is
+explicit host configuration, never learned from the signed records being checked. Every exact
+Profile/Admission/RealmGrant/Basis signature and direct covered target chain must match that root
+and realm before a semantic witness escapes. It grants no action admission or publication and
+cannot approve a cross-author Delete. Authored tests cover wrong roots/incarnations/coverage,
+semantic restore requiring resupply and an actual fresh-KP MLS member/provider restore using the
+actual-founder host handoff. No new tests executed here; primary owns the complete gates. The same
+real retained held-case/admin timeline milestone and long-lived scale/succession remain unfinished.
+
 ## Dormant stable authoring scope: focused validation (29 October)
 
 The isolated scope foundation through `1661965a` preserves opaque existing context/RPC shapes,

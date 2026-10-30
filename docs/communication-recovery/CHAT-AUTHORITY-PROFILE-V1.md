@@ -119,7 +119,21 @@ A1 removal/A2 rejoin uses a new actual Add/KeyPackage/Admission/Grant commitment
 action never acquires A2 authority. Unsupported succession blocks new issuance, retaining old proofs.
 
 The verifier constructs ordinary historical `VerifiedAuthorityBasis` only from the exact verified
-Admission/RealmGrant/Basis chain. Admission/projection results additionally bind the entire original ActionCID,
+Profile/Admission/RealmGrant/Basis chain. Its explicit nonserialized
+`OwnerProfileExpectation::from_trusted_host(group, founder, ProfileCID)` is a CALLER trust-configuration
+decision, not a verifier of its own provenance or a membership capability. It has no decoder or
+current-roster/snapshot adapter. The staged second member obtains that expectation through the
+actual-founder trusted handoff above; the future active adapter constructs it only from the opaque
+mounted immutable pin. Validate all four original signatures, exact group/root/full issuer,
+Founder creation or Add admission, subject, channel, derived GrantID and BasisID before returning
+ordinary semantic authority. Supply at most65 selected target admission/grant/basis bundles for
+EXACTLY the direct signed covered IDs; independently verify each under the same expected root/realm.
+Missing, extra, duplicate or foreign target chains refuse; do not recursively expand their coverage
+or inherit their rights. This bounds the batch to199 small-fact signature checks. Each causal action
+still requires its own independently matching semantic authority and dependencies.
+This stateless verifier returns NO admission, acceptance, finality, current-role or publication
+capability. Missing/foreign/invalid facts cannot be converted into a successful witness; no saved
+status is accepted. Admission/projection results additionally bind the entire original ActionCID,
 realm, full signer, admission, grant/basis and target. They cannot release another action, accept a
 different body sharing a nonce, or turn ordinary reusable authority into late-action approval.
 Approval for a later cross-author Delete remains a distinct exact moderation requirement.

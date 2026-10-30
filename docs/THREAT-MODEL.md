@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Dormant owner-attested ordinary basis verifier (30 October; validation pending)
+
+The owner-fact checkpoint has a stateless verifier from an explicit host-configured expected
+(group, full founder key, ProfileCID) and original signed Profile/Admission/RealmGrant/Basis facts
+into ordinary semantic authority. The expectation constructor authenticates no provenance: the
+future active adapter must obtain it only from the immutable mounted pin, and the staged second
+member uses the actual-founder trusted handoff captured before join. Self-signed downloaded facts,
+snapshot metadata and the current roster cannot choose their own root. Every direct covered basis
+needs its independent exact admission/grant/basis chain under that same expected root/realm; a
+signed list alone grants no unchecked coverage and no recursive expansion occurs.
+
+This remains the conditional truthful non-equivocating owner attestation model, not public replay
+of private MLS membership or a physical clock. It establishes neither exact-action acceptance nor
+late-action approval, present office, publication or persistence. A historical A1 semantic witness
+can remain valid after removal while that exact action is Held; A2 rejoin cannot reuse its grant.
+Cross-author Delete still needs its separate exact approval. Active pin/archive/canonical owner
+candidate and admission-aware projection adapters remain absent and production stays inactive.
+The new stateless/actual-key tests are authored, not executed by the implementing/review agents.
+
 ## Dormant managed local lifetime boundary (29 October; host activation open)
 
 The isolated stable-scope foundation distinguishes local admission custody from historical MLS

@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Dormant owner-fact semantic verifier (30 October)
+
+`owner_facts::OwnerProfileExpectation::from_trusted_host` is explicit host trust configuration,
+with no decoder or source-authentication claim. `verify_basis(Profile, OwnerBasisFacts, covered)`
+verifies exact original root/admission/grant/basis and all selected same-root/realm target bundles
+before returning ordinary `VerifiedAuthorityBasis`. At most65 direct target bundles/199 small-fact
+signature checks; no recursive expansion, saved verified bit or rights inheritance. It returns no
+admission/acceptance/finality/current-role/export permit. Existing action bytes and snapshot bytes
+are unchanged; restore still requires original proofs again. The active adapter must obtain the
+expectation from the mounted immutable pin, never a returned Profile/current roster. New tests are
+authored pending primary execution; owner archive/canonical save and native activation remain gated.
+
 ## Dormant managed local authoring scope (29 October; not activated)
 
 `sync::local_chat_scope` adds a strict optional snapshot tail and the existing opaque 32-byte
