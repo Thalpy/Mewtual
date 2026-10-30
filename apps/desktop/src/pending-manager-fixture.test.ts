@@ -37,7 +37,9 @@ export function pendingManagerApp(initial: unknown) {
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = {}, recoveredSendDrafts = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
-    let windowCloseInFlight = false, unlocking = false, closeAfterContinuityError = false;
+    let windowCloseInFlight = false, unlocking = false, unlockAttempt = 0, closeAfterContinuityError = false;
+    // This fixture is an already-known vault; lifecycle tests exercise actual gate reads.
+    const vaultExists = true, refreshVaultGate = () => { throw new Error("unexpected startup gate read"); };
     let videoScopeEpoch = 0;
     const videoEditorScope = "closing", videoReviews = new VideoReviewQueue(() => {});
     // These chat tests leave the lazy Studio chunk unmounted. Keep its real continuity

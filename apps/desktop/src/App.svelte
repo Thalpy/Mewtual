@@ -1525,6 +1525,9 @@
   let locked = $state(true);
   let passphrase = $state("");
   let unlocking = $state(false);
+  // Attempt ownership is separate from UI generation: a successful restore advances
+  // the latter, while only the owning authentication may release its busy flag.
+  let unlockAttempt = 0;
   type VaultChangeStep = "" | "current" | "new" | "confirm";
   let vaultChangeStep = $state<VaultChangeStep>("");
   let vaultChangeCurrent = $state("");
@@ -1689,6 +1692,7 @@
   // What Enter (and the primary button) means on the gate, which is not always "unlock": during
   // setup the same keystroke must advance the wizard, never write the vault early.
   function gateSubmit() {
+    if (!locked || unlocking || windowCloseInFlight) return;
     if (!unlockSecret()) return;
     if (!inSetup) {
       unlock();
@@ -1705,13 +1709,16 @@
   }
   // Last step: this is the call that writes the vault. Everything before it is reversible.
   async function setupFinish() {
-    if (!setupFirst) return;
-    syncIntent = setupPath === "sync";
-    await unlock(setupFirst);
-    if (!locked) {
+    if (!setupFirst || !locked || unlocking || windowCloseInFlight) return;
+    const requestedSync = setupPath === "sync";
+    const opened = await unlock(setupFirst);
+    // An old setup continuation cannot complete somebody else's newer unlock.
+    if (opened && opened.attempt === unlockAttempt && opened.generation === uiStateLoadGeneration
+      && !locked && !windowCloseInFlight) {
       setupFirst = "";
       vaultExists = true;
-      if (syncIntent) pairBegin(); // the companion's half of the ceremony, ready to hand over
+      syncIntent = requestedSync;
+      if (requestedSync) pairBegin(); // the companion's half of the ceremony, ready to hand over
     }
   }
 
@@ -6516,7 +6523,20 @@
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
   // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
+  async function refreshVaultGate() {
+    const generation = uiStateLoadGeneration, attempt = unlockAttempt;
+    const current = () => generation === uiStateLoadGeneration && attempt === unlockAttempt
+      && locked && !unlocking && !windowCloseInFlight;
+    if (!current()) return;
+    try {
+      const exists = await invoke<boolean>("vault_exists");
+      if (current()) vaultExists = exists;
+    } catch { if (current()) vaultExists = true; }
+  }
   function restoreReloaded(reloaded: Reloaded[]) {
+    // Restoration is an entry edge, never an in-session refresh. In particular it
+    // must not reset readiness underneath a live Studio and its retained work.
+    if (!locked || windowCloseInFlight) return false;
     servers = reloaded.map((r) => ({
       id: r.server,
       name: r.name,
@@ -6557,32 +6577,42 @@
     refreshAllDmRequests();
     loadInbox();
     refreshAllServerIcons();
+    return true;
   }
 
-  async function unlock(secret = unlockSecret()) {
-    if (!secret) return;
+  async function unlock(secret = unlockSecret()): Promise<{ attempt: number; generation: number } | null> {
     // Close and unlock are competing generation changes. The close handler sets this before its
     // first await, so an unlock can never reopen native IPC underneath an older close operation.
-    if (windowCloseInFlight) return;
+    if (!locked || unlocking || windowCloseInFlight || !secret) return null;
+    const attempt = ++unlockAttempt;
+    const generation = uiStateLoadGeneration;
+    const current = () => attempt === unlockAttempt && generation === uiStateLoadGeneration
+      && locked && !windowCloseInFlight;
     unlocking = true;
     error = "";
     // The summon starts alongside the KDF call and never gates it: the animation fills
     // latency that exists anyway, and a failed unlock aborts it below.
-    if (unlockMethod === "sigil") startSummon();
     try {
+      if (unlockMethod === "sigil") startSummon();
       // Ctrl+L clears the webview immediately but native persistence can still be finishing. Join
       // that exact request before authenticating a new generation; otherwise a late old lock could
       // invalidate the session immediately after this unlock appears to succeed.
       await nativeVaultLock.settle();
+      if (!current()) return null;
+      // Retire only a fulfilled original lock, before auth leaves this JS turn.
+      // A fresh Ctrl+L can now issue its own null-snapshot native lock. Native
+      // command admission owns its ordering against queued authentication; the
+      // UI ticket below independently refuses stale replies. Never reset a newer lock.
+      // Fulfilled valid-snapshot IO debt is retained by native pending_ui_lock_snapshot
+      // and retried before native unlock opens IPC. Rejected bridges keep JS custody.
+      nativeVaultLock.reset();
       // The passphrase is an argument and never a recorded field: invokeDebugged records the
       // command name and its outcome, not what it was called with.
       const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret });
-      // The prior session's native lock promise (settled or otherwise) must never be reused after
-      // an authenticated unlock establishes a new command generation.
-      nativeVaultLock.reset();
+      if (!current()) return null;
       closeAfterContinuityError = false;
       passphrase = "";
-    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
+      revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
       sigilStrokes = [];
       sigilDrawing = [];
       sigilColors = Array(19).fill(0);
@@ -6590,14 +6620,23 @@
       sigilWord = "";
       stopPlayback();
       melodySeq = [];
-      restoreReloaded(reloaded);
+      if (!restoreReloaded(reloaded)) return null;
+      return { attempt, generation: uiStateLoadGeneration };
     } catch (e) {
+      if (!current()) return null;
       abortSummon(); // wrong secret ⇒ no cat: the failure must read as a failure
       // `unlock` returns a typed AppError. Stringifying that object produces only
       // "[object Object]"; the shared reader preserves its useful message, code and trace.
       error = vaultUnlockErrorText(e);
+      return null;
     } finally {
-      unlocking = false;
+      // The successful restore itself advances UI generation. Ticket ownership,
+      // rather than the pre-restore predicate, releases only this attempt's busy state.
+      if (attempt === unlockAttempt) {
+        unlocking = false;
+        // A manual attempt may have superseded startup before its gate query landed.
+        if (locked && vaultExists === null && !windowCloseInFlight) void refreshVaultGate();
+      }
     }
   }
 
@@ -6607,6 +6646,9 @@
   // passphrase again. Re-entering calls `unlock`, which no-ops on an already-open vault and hands
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
+    unlockAttempt += 1;
+    unlocking = false;
+    abortSummon();
     pendingSendRetry.cancel();
     callMappingSession.resetController();
     // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
@@ -6619,7 +6661,21 @@
     storageHealthCache.clear();
     imageSrcCache.clear(); // avatars and icons are member content; do not retain them behind lock
     stopSearchWorker(); // likewise its copy of the searched history
-    if (locked) return;
+    if (locked) {
+      // Ctrl+L can arrive during settle/auth while the gate is still visible. Revoke
+      // both UI and native entry; a later unlock must join this exact negative call.
+      uiStateLoadGeneration += 1;
+      uiStateReady = false;
+      clearUnlockEntry();
+      try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
+      if (!nativeAlreadyLocked) void nativeVaultLock.begin(null).then(
+        (outcome) => { if (outcome.continuity_error) console.warn("Session locked; final UI continuity save failed", outcome.continuity_error); },
+        (e) => console.warn("Could not confirm the native session lock", e),
+      );
+      // Canceling an initial startup read must not leave a permanently blank gate.
+      if (vaultExists === null && !windowCloseInFlight) void refreshVaultGate();
+      return;
+    }
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
     vaultChangeFirst = "";
@@ -22401,18 +22457,20 @@
     // the ordinary vault gate.
     let explicitlyLocked = false;
     try { explicitlyLocked = sessionStorage.getItem("catcoms.explicit-lock") === "1"; } catch { /* best effort */ }
-    const chooseGate = () => invoke<boolean>("vault_exists")
-      .then((v) => (vaultExists = v))
-      .catch(() => (vaultExists = true));
-    if (explicitlyLocked) chooseGate();
-    else invoke<Reloaded[] | null>("resume_session")
+    const resumeGeneration = uiStateLoadGeneration, resumeAttempt = unlockAttempt;
+    const resumeCurrent = () => resumeGeneration === uiStateLoadGeneration && resumeAttempt === unlockAttempt
+      && locked && !unlocking && !windowCloseInFlight;
+    const chooseGate = () => { if (resumeCurrent()) return refreshVaultGate(); };
+    if (explicitlyLocked) void chooseGate();
+    else if (resumeCurrent()) void invoke<Reloaded[] | null>("resume_session")
       .then((running) => {
+        if (!resumeCurrent()) return;
         if (running) {
           vaultExists = true;
           restoreReloaded(running);
         } else chooseGate();
       })
-      .catch(chooseGate);
+      .catch(() => { if (resumeCurrent()) void chooseGate(); });
     // Where the stream is, before listening to it. Read first on purpose: anything emitted between
     // this answer and the listeners going live is genuinely missed, and seeding is what makes that
     // a detected gap rather than an invisible one. Unseeded, the tracker takes whatever it sees
@@ -22439,13 +22497,22 @@
           return;
         }
         windowCloseInFlight = true;
+        // A close may later be refused and clear its flag. Startup work captured
+        // before that boundary must stay retired rather than become current again.
+        unlockAttempt += 1;
+        const releaseClose = () => {
+          windowCloseInFlight = false;
+          // Startup may have yielded to closing before its gate query completed.
+          // A surviving locked window needs its own fresh read after that barrier.
+          if (locked && vaultExists === null && !unlocking) void refreshVaultGate();
+        };
         // Cancel review ownership immediately, before Studio/native close can await or snapshot.
         // A refused close cannot revive an earlier batch even if the derived key returns to open.
         videoScopeEpoch++;
         videoReviews.rescope(videoEditorScope);
         if (!locked) {
           try { studioBeginClose?.(); await studioSave?.(); }
-          catch (e) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
+          catch (e) { releaseClose(); if (!locked) error = String(e); return; }
         }
         pendingSendRetry.cancel();
         const closingGeneration = uiStateLoadGeneration;
@@ -22459,7 +22526,7 @@
         // afterSave commit. Keep that logical transaction alive, then take fresh state. A stalled
         // bridge defers this close attempt; it is not a reason to destroy the webview below.
         if (!(await drainUiStateForClose())) {
-          windowCloseInFlight = false;
+          releaseClose();
           if (!locked && closingGeneration === uiStateLoadGeneration) {
             error = "Vault state is still saving. The window remains open; wait and try closing again.";
           }
@@ -22469,7 +22536,7 @@
           // Ctrl+L can interrupt a decision and a replacement session has different authority.
           // Neither may reuse this close attempt. An already-locked fresh close below reuses the
           // lock coordinator's exact snapshot; it never reads the cleared UI state as a snapshot.
-          windowCloseInFlight = false;
+          releaseClose();
           return;
         }
         const finalContinuityJson = locked
@@ -22486,7 +22553,7 @@
           // A response means the window deliberately remained alive (continuity warning or native
           // destroy failure) and native locking is confirmed, so frontend teardown is now safe.
           lockScreen(true);
-          windowCloseInFlight = false;
+          releaseClose();
           if (result.history_error) {
             closeAfterContinuityError = false;
             error = `The vault is locked, but message history has not finished saving. ${result.history_error}`;
@@ -22508,7 +22575,7 @@
             try {
               await relaunch();
             } catch (restartError) {
-              windowCloseInFlight = false;
+              releaseClose();
               error = `Mewtual could not confirm the native vault lock or close this window. Treat this session as unlocked; save your work and try again. Lock error: ${errorText(e)}. Window error: ${errorText(destroyError)}. Restart error: ${errorText(restartError)}.`;
             }
           }

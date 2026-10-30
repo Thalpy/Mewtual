@@ -13,7 +13,7 @@ const restore = ts.transpileModule(source.slice(start, end), {
 
 function reopen(reloaded: object[]) {
   return new Function("reloaded", `
-    let servers = [], locked = true, uiStateLoadGeneration = 0;
+    let servers = [], locked = true, windowCloseInFlight = false, uiStateLoadGeneration = 0;
     const warnings = [];
     let callControllerClaims = 0;
     const callMappingSession = { claimController() { callControllerClaims++; return Promise.resolve(null); } };

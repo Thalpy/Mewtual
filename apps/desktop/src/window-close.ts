@@ -67,7 +67,13 @@ export class NativeVaultLockCoordinator {
     }
   }
 
-  /** A successful unlock starts a new UI session and therefore permits one new lock request. */
+  /**
+   * Retire a fulfilled lock under the current UI unlock attempt, immediately before
+   * authentication is dispatched (no intervening await). This permits one fresh negative
+   * lock while authentication is pending. Never call after a rejected settle or stale reply.
+   * Native retains valid failed-continuity bytes across a fulfilled warning and retries
+   * them before opening IPC; this does not promise retention of malformed JSON.
+   */
   reset(): void {
     this.inFlight = null;
     this.capturedSnapshot = undefined;

@@ -287,6 +287,27 @@ envelope reader still supports old versions; this is not a universal ban on a st
 running frontend writing an older envelope. Mixed old/new development or HMR runtimes sharing an
 already open UI session are unsupported, as is a rollback of the authorizing stored bytes themselves.
 
+### Vault entry ownership
+
+Unlock is a locked-to-open entry, never a refresh of an already open UI. Its synchronous guard
+rejects duplicate Enter/button submissions and closing/unlocked surfaces. A separate attempt ticket
+owns busy cleanup; the captured UI generation and locked/closing checks gate both the continuation
+after the prior native lock and the native unlock reply. Successful restoration advances UI generation,
+so first-run setup continues only with that attempt's matching success receipt. Stale errors, secret
+resets and finally blocks cannot mutate another attempt. Restoration itself also refuses an open UI.
+
+After a fulfilled lock and current-owner check, the coordinator is reset immediately before unlock
+dispatch. A locked-screen cancellation can then submit a fresh null-snapshot native lock; cancellation
+while settling instead joins the original exact lock/snapshot. Rejected bridge settlement keeps JS
+snapshot custody. Fulfilled valid-JSON write debt is retained by native and retried before native unlock
+opens IPC; malformed JSON retains its existing explicit warning/acknowledgement limitation. Native
+command admission must independently order queued authentication against lock; JS call order alone
+does not prove the order in which spawned native command futures first run.
+
+Initial resume and gate reads capture the original attempt/generation and cannot restore or change
+the gate after a manual attempt, lock or close. A canceled initial read or surviving failed/deferred
+close starts a fresh rightful gate query rather than inferring vault existence or remaining stuck.
+
 ## Required verification
 
 Design review precedes runtime edits. Focused deterministic tests must cover real
