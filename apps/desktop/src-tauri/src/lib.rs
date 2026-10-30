@@ -12189,7 +12189,7 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
         object.get("version").and_then(serde_json::Value::as_u64),
         // v3 protects exact retained Send copies that old v2 frontends silently omitted.
         // This gates only the sealed UI envelope; native authoring/Stop limits stay intact.
-        Some(1 | 2 | 3)
+        Some(1..=3)
     ) || !object
         .get("drafts")
         .is_some_and(serde_json::Value::is_object)
@@ -26773,6 +26773,7 @@ mod tests {
         // these known envelopes are readable; the next unknown successor still refuses.
         assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_ok());
         assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":0,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
