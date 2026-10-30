@@ -414,7 +414,7 @@ const ORPHANED_PENDING_SCENARIO = `(async () => {
     if (cmd === "lock_session") {
       // The first lock leaves the starting chat fixture; subsequent locks save this fixture vault.
       if (unlocks && payload.uiStateJson) sealed = JSON.parse(payload.uiStateJson);
-      return { continuity_error: null };
+      return { continuity_error: null, generation: "7" };
     }
     if (cmd === "get_ui_state") return JSON.stringify(sealed);
     if (cmd === "save_ui_state") {
