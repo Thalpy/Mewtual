@@ -765,6 +765,11 @@ impl ServerGroup {
         self.group.group_id().as_slice().to_vec()
     }
 
+    /// Borrow the exact group label while bounded private persistence checks its full fee.
+    pub(crate) fn group_id_ref(&self) -> &[u8] {
+        self.group.group_id().as_slice()
+    }
+
     /// The number of current members.
     pub fn member_count(&self) -> usize {
         // This observation already traversed the whole native roster. Retain its small summary

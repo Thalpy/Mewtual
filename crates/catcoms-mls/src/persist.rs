@@ -23,12 +23,25 @@ use catcoms_wire::{Decoder, Encoder};
 
 use crate::{MlsDevice, MlsError, ServerGroup};
 
+// Test-only work boundary, local to each synchronous test thread. Mark legacy entry too so a
+// future "serialize everything, then check length" implementation cannot pass refusal tests.
+#[cfg(test)]
+std::thread_local! {
+    static SNAPSHOT_ENCODING_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn note_snapshot_encoding() {
+    SNAPSHOT_ENCODING_ENTRIES.with(|entries| entries.set(entries.get() + 1));
+}
+
 /// Serialize a server's full MLS state; provider storage + signer public key + group id;
 /// into a single blob. **Secret**: it contains private keys, so seal it before persisting.
 pub fn snapshot_server(
     device: &MlsDevice,
     group: &ServerGroup,
 ) -> Result<Zeroizing<Vec<u8>>, MlsError> {
+    #[cfg(test)]
+    note_snapshot_encoding();
     // openmls' built-in storage `serialize` is test-only, but `values` is public; so we
     // serialize the key/value map ourselves with the canonical wire codec.
     let storage = {
@@ -49,6 +62,88 @@ pub fn snapshot_server(
     e.put_bytes(&pk).map_err(|_| too_large())?;
     e.put_bytes(&gid).map_err(|_| too_large())?;
     Ok(Zeroizing::new(e.finish()))
+}
+
+/// Serialize the SAME legacy snapshot bytes under an explicit whole-output byte budget.
+///
+/// This is the owner-candidate persistence path, not a new format or a membership capability.
+/// Check count, every field length and the complete encoded size BEFORE allocating output, while
+/// holding the SAME provider read guard through encoding. No preflight/unlock/second-clone race
+/// exists. Both occupied rows AND HashMap bucket capacity must fit the byte-derived scan fee
+/// (one scan unit per eight budget bytes). A sparse reused map can therefore refuse even if its
+/// output bytes fit; HashMap iteration costs O(capacity), not O(len). Refusal never compacts or
+/// mutates the source. One zeroizing output buffer encodes the map directly; legacy is unchanged.
+/// The caller must reserve this output plus any enclosing candidate/sealing buffers first.
+pub fn snapshot_server_bounded(
+    device: &MlsDevice,
+    group: &ServerGroup,
+    max_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, MlsError> {
+    let too_large = || MlsError::Internal("MLS snapshot exceeds explicit byte budget");
+    let public_key = device.public_key_ref();
+    let group_id = group.group_id_ref();
+    if public_key.len() > u32::MAX as usize || group_id.len() > u32::MAX as usize {
+        return Err(too_large());
+    }
+    let outer = 12usize
+        .checked_add(public_key.len())
+        .and_then(|size| size.checked_add(group_id.len()))
+        .ok_or_else(too_large)?;
+    let storage_budget = max_bytes.checked_sub(outer).ok_or_else(too_large)?;
+    let map = device
+        .provider()
+        .storage()
+        .values
+        .read()
+        .map_err(|_| MlsError::Internal("MLS storage lock poisoned"))?;
+    let count = u32::try_from(map.len()).map_err(|_| too_large())?;
+    // Refuse huge maps without scanning them once even their minimum frame cannot fit.
+    if storage_budget < 4
+        || map.len() > (storage_budget - 4) / 8
+        || map.capacity() > (storage_budget - 4) / 8
+    {
+        return Err(too_large());
+    }
+    let mut storage_size = 4usize;
+    for (key, value) in map.iter() {
+        if key.len() > u32::MAX as usize || value.len() > u32::MAX as usize {
+            return Err(too_large());
+        }
+        storage_size = storage_size
+            .checked_add(8)
+            .and_then(|size| size.checked_add(key.len()))
+            .and_then(|size| size.checked_add(value.len()))
+            .filter(|size| *size <= storage_budget && *size <= u32::MAX as usize)
+            .ok_or_else(too_large)?;
+    }
+    let total = outer.checked_add(storage_size).ok_or_else(too_large)?;
+    if total > max_bytes {
+        return Err(too_large());
+    }
+    // All checks precede the ONLY output allocation. Keep this read guard until the buffer is
+    // complete: the provider's public interior storage can otherwise change through another handle.
+    #[cfg(test)]
+    note_snapshot_encoding();
+    let mut output = Zeroizing::new(Vec::with_capacity(total));
+    output.extend_from_slice(&(storage_size as u32).to_be_bytes());
+    output.extend_from_slice(&count.to_be_bytes());
+    for (key, value) in map.iter() {
+        append_preflighted_field(&mut output, key);
+        append_preflighted_field(&mut output, value);
+    }
+    append_preflighted_field(&mut output, public_key);
+    append_preflighted_field(&mut output, group_id);
+    debug_assert_eq!(output.len(), total);
+    Ok(output)
+}
+
+// The caller owns both the exact length preflight and any interior-data read guard. This fixed
+// framing is byte-identical to Encoder::put_bytes; the zeroizing buffer also covers unwind/error.
+fn append_preflighted_field(output: &mut Vec<u8>, field: &[u8]) {
+    let length =
+        u32::try_from(field.len()).expect("snapshot field was preflighted under its read guard");
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(field);
 }
 
 /// Reconstruct a `(device, group)` from a [`snapshot_server`] blob.
@@ -177,6 +272,119 @@ mod tests {
         group2.merge_staged_self(&alice2).unwrap();
         assert_eq!(group2.epoch(), staged_epoch + 1);
         assert_eq!(group2.member_count(), 2);
+    }
+
+    #[test]
+    fn bounded_snapshot_matches_legacy_bytes_and_exact_budget_before_allocation() {
+        let alice = MlsDevice::generate().unwrap();
+        let mut group = ServerGroup::create(&alice).unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        group
+            .add_member(&alice, bob.key_package().unwrap())
+            .unwrap();
+        let legacy = snapshot_server(&alice, &group).unwrap();
+        for budget in [legacy.len(), legacy.len() + 1] {
+            let before = SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get);
+            let bounded = snapshot_server_bounded(&alice, &group, budget).unwrap();
+            assert_eq!(
+                SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get),
+                before + 1
+            );
+            assert_eq!(bounded.as_slice(), legacy.as_slice());
+            let (restored, actual) = restore_server(&bounded).unwrap();
+            assert_eq!(restored.device_id(), alice.device_id());
+            assert_eq!(actual.epoch(), group.epoch());
+            assert_eq!(actual.group_id(), group.group_id());
+        }
+        for budget in [0, 1, legacy.len() - 1] {
+            let before = SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get);
+            assert!(snapshot_server_bounded(&alice, &group, budget).is_err());
+            assert_eq!(
+                SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get),
+                before,
+                "refuse before output allocation/legacy encoding work"
+            );
+        }
+        assert_eq!(
+            snapshot_server(&alice, &group).unwrap().as_slice(),
+            legacy.as_slice()
+        );
+    }
+
+    #[test]
+    fn bounded_snapshot_accounts_for_all_provider_rows_without_mutating_source() {
+        let alice = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&alice).unwrap();
+        let original = snapshot_server(&alice, &group).unwrap();
+        let label = b"unknown provider row is still retained private state".to_vec();
+        let value = vec![0x5a; 1024 * 1024];
+        alice
+            .provider()
+            .storage()
+            .values
+            .write()
+            .unwrap()
+            .insert(label.clone(), value.clone());
+        let before = SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get);
+        assert!(snapshot_server_bounded(&alice, &group, original.len()).is_err());
+        assert_eq!(
+            SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get),
+            before,
+            "huge field is refused before any complete snapshot encoding"
+        );
+        assert_eq!(
+            alice
+                .provider()
+                .storage()
+                .values
+                .read()
+                .unwrap()
+                .get(&label),
+            Some(&value)
+        );
+        let complete = snapshot_server(&alice, &group).unwrap();
+        assert_eq!(
+            snapshot_server_bounded(&alice, &group, complete.len())
+                .unwrap()
+                .as_slice(),
+            complete.as_slice()
+        );
+        let (restored, actual) = restore_server(&complete).unwrap();
+        assert_eq!(restored.device_id(), alice.device_id());
+        assert_eq!(actual.group_id(), group.group_id());
+    }
+
+    #[test]
+    fn bounded_snapshot_refuses_sparse_high_capacity_before_scanning_or_encoding() {
+        let alice = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&alice).unwrap();
+        let capacity = {
+            let mut map = alice.provider().storage().values.write().unwrap();
+            for index in 0..65_536u64 {
+                let mut key = b"bounded-snapshot-capacity-fixture-".to_vec();
+                key.extend_from_slice(&index.to_be_bytes());
+                map.insert(key, Vec::new());
+            }
+            map.retain(|key, _| !key.starts_with(b"bounded-snapshot-capacity-fixture-"));
+            map.capacity()
+        };
+        let before_bytes = snapshot_server(&alice, &group).unwrap();
+        assert!(
+            capacity > before_bytes.len() / 8,
+            "real sparse provider must exceed its scan fee"
+        );
+        let before = SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get);
+        assert!(snapshot_server_bounded(&alice, &group, before_bytes.len()).is_err());
+        assert_eq!(SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get), before);
+        assert_eq!(
+            alice.provider().storage().values.read().unwrap().capacity(),
+            capacity
+        );
+        assert_eq!(
+            snapshot_server(&alice, &group).unwrap().as_slice(),
+            before_bytes.as_slice(),
+            "refusal must not compact/mutate the actual provider"
+        );
     }
 
     #[test]

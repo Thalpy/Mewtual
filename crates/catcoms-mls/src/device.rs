@@ -211,6 +211,11 @@ impl MlsDevice {
         self.signer.public().to_vec()
     }
 
+    /// Borrow for bounded private persistence preflight; no label clone precedes its budget.
+    pub(crate) fn public_key_ref(&self) -> &[u8] {
+        self.signer.public()
+    }
+
     /// The MLS reference selected by a Welcome for this exact newly minted KeyPackage.
     /// Callers retain it across every direct/pushed/helper completion of the same join attempt;
     /// the signing-device key alone cannot distinguish an older init key in a restored provider.
