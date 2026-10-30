@@ -3651,6 +3651,8 @@
     if (generation !== uiStateLoadGeneration || locked) return;
     const attempt = ++uiStateHydrationAttempt;
     const current = () => generation === uiStateLoadGeneration && attempt === uiStateHydrationAttempt && !locked;
+    // studio-exit: forced edge. Only restoreReloaded calls this reader during initial mount or
+    // completed unlock, when Studio is absent; lock has already captured its owned draft queue.
     uiStateReady = false;
     let loaded = false;
     try {
@@ -6665,6 +6667,7 @@
       // Ctrl+L can arrive during settle/auth while the gate is still visible. Revoke
       // both UI and native entry; a later unlock must join this exact negative call.
       uiStateLoadGeneration += 1;
+      // studio-exit: forced edge. Already locked; any former Studio queue was captured by its first lock.
       uiStateReady = false;
       clearUnlockEntry();
       try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
