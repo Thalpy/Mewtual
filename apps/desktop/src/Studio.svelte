@@ -489,8 +489,30 @@
     if (stroking) { stroking = false; last = null; commit(); }
   }
 
-  function doUndo() { if (raster && undo.undo(raster)) { dirty = true; paintRev++; commit(); } }
-  function doRedo() { if (raster && undo.redo(raster)) { dirty = true; paintRev++; commit(); } }
+  // Undo and Redo are edits: they change the raster and mark it for saving, so they run only where
+  // a stroke could (`canEdit`). In a document that had turned read-only they dirtied a raster that
+  // staging then refused, leaving no save card and refusing every departure (review of 13792739).
+  function doUndo() { if (canEdit && raster && undo.undo(raster)) { dirty = true; paintRev++; commit(); } }
+  function doRedo() { if (canEdit && raster && undo.redo(raster)) { dirty = true; paintRev++; commit(); } }
+
+  /// Strokes on the canvas that can no longer enter the save queue, because the document became
+  /// read-only under them (a history fault). Staging refuses them, and so would every departure
+  /// that stages first, so the member needs an explicit way out: discard them, two-step like every
+  /// other discard, and reload the frame's newest saved or queued pixels.
+  /// The confirmation is keyed to the exact strokes it was armed for (document, frame and paint
+  /// revision) and cleared whenever the banner goes away, so a click armed for strokes that were
+  /// later saved can never discard newer ones with a single click.
+  let discardStrokesArmed = $state("");
+  const strandedKey = () => `${objectId}:${frameId}:${paintRev}`;
+  const strokesStranded = $derived(dirty && !!raster && !!readOnlyWhy);
+  $effect(() => { if (!strokesStranded) discardStrokesArmed = ""; });
+  function discardUnsaveableStrokes() {
+    if (discardStrokesArmed !== strandedKey()) { discardStrokesArmed = strandedKey(); return; }
+    discardStrokesArmed = "";
+    stroking = false; last = null; anchor = null; previewCells = [];
+    dirty = false;
+    loadRaster();
+  }
 
   // --- Rendering ---------------------------------------------------------------------------------
   let scratch: HTMLCanvasElement | null = null;
@@ -1499,6 +1521,13 @@
     {:else if readOnlyWhy}
       <div class="st-banner {view?.phase === 'fault' ? 'danger' : 'warn'}">{readOnlyWhy}</div>
     {/if}
+    {#if strokesStranded}
+      <div class="st-banner warn" data-unsaveable-strokes>
+        These strokes can't be saved while this flipnote is read-only. Discard them to keep working.
+        <button type="button" class="st-btn" onclick={discardUnsaveableStrokes}>{discardStrokesArmed === strandedKey() ? "Discard for real" : "Discard strokes"}</button>
+        {#if discardStrokesArmed === strandedKey()}<button type="button" class="st-btn ghost" onclick={() => (discardStrokesArmed = "")}>Cancel</button>{/if}
+      </div>
+    {/if}
     {#if receivePaused}
       <div class="st-banner warn">Studio sync is paused. <button type="button" class="st-btn" onclick={() => { commit(); session.open(objectId); }}>Retry</button>{#if receivePauseDetail}<details><summary>Details</summary>{receivePauseDetail}</details>{/if}</div>
     {/if}
@@ -1522,8 +1551,8 @@
         <button type="button" class="st-tool" class:on={onion} title="onion skin [o]" onclick={() => (onion = !onion)}><svg viewBox="0 0 16 16"><rect x="2" y="2" width="8" height="8" rx="1"></rect><rect x="6" y="6" width="8" height="8" rx="1"></rect></svg><span class="k">o</span></button>
         <button type="button" class="st-tool" class:on={grid} title="gridlines [#]" onclick={() => (grid = !grid)}><svg viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="1"></rect><path d="M6 2v12M10 2v12M2 6h12M2 10h12"></path></svg><span class="k">#</span></button>
         <span class="grow"></span>
-        <button type="button" class="st-tool" title="undo [ctrl+z]" disabled={!undo.canUndo} onclick={doUndo}><svg viewBox="0 0 16 16"><path d="M6 4L3 7l3 3"></path><path d="M3 7h6.5a3.5 3.5 0 010 7H7"></path></svg></button>
-        <button type="button" class="st-tool" title="redo [ctrl+shift+z]" disabled={!undo.canRedo} onclick={doRedo}><svg viewBox="0 0 16 16"><path d="M10 4l3 3-3 3"></path><path d="M13 7H6.5a3.5 3.5 0 000 7H9"></path></svg></button>
+        <button type="button" class="st-tool" title="undo [ctrl+z]" disabled={!canEdit || !undo.canUndo} onclick={doUndo}><svg viewBox="0 0 16 16"><path d="M6 4L3 7l3 3"></path><path d="M3 7h6.5a3.5 3.5 0 010 7H7"></path></svg></button>
+        <button type="button" class="st-tool" title="redo [ctrl+shift+z]" disabled={!canEdit || !undo.canRedo} onclick={doRedo}><svg viewBox="0 0 16 16"><path d="M10 4l3 3-3 3"></path><path d="M13 7H6.5a3.5 3.5 0 000 7H9"></path></svg></button>
       </div>
 
       <div class="st-canvas-card">
@@ -1748,7 +1777,7 @@
                 <details class="st-fold"><summary class="micro">file details</summary><code>{exported.cid}</code></details>
               </div>
             {/each}
-            {#if savedPreview}<div class="st-card"><p class="micro wrap">saved version · the immutable package, not the timeline you are editing</p><canvas width={FLIPNOTE_W} height={FLIPNOTE_H} style="width:100%;image-rendering:pixelated" use:thumbBytes={{ bytes: savedPreview.frames[Math.min(savedPreview.frames.length - 1, Math.floor(audioState.elapsedMs * savedPreview.fps / 1000))], rev: 0 }}></canvas><button type="button" class="st-btn" onclick={() => { audioActions?.stop(); savedPreview = null; }}>close saved preview</button></div>{/if}
+            {#if savedPreview}<div class="st-card"><p class="micro wrap">saved version · the immutable package, not the timeline you are editing</p><canvas width={FLIPNOTE_W} height={FLIPNOTE_H} style="width:100%;image-rendering:pixelated" use:thumbBytes={{ bytes: savedPreview.frames[Math.min(savedPreview.frames.length - 1, Math.floor(audioState.elapsedMs * savedPreview.fps / 1000))], palette: thumbPalette }}></canvas><button type="button" class="st-btn" onclick={() => { audioActions?.stop(); savedPreview = null; }}>close saved preview</button></div>{/if}
 
             <div class="st-sec nxt">previous edits</div>
             {@render historyRail()}

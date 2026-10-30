@@ -352,7 +352,7 @@ test("UI-003: a sidebar row rendered while a create is in flight changes when th
   }
 });
 
-test("UI-003: a pending frame's thumbnail rendered while its publish is in flight changes when the save goes uncertain", async () => {
+test("UI-003: a pending frame's thumbnail rendered while its publish is in flight changes when the save fails", async () => {
   const ipc = fakeIpc();
   const publish = deferred<unknown>();
   ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
@@ -373,13 +373,14 @@ test("UI-003: a pending frame's thumbnail rendered while its publish is in fligh
     assert.ok(pendingThumb(), "the pending thumbnail is on screen while the publish is held");
     assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "…");
     assert.equal(pendingThumb()?.querySelector(".fr.pending.uncertain"), null);
-    // A failure after dispatch (a pre-dispatch "busy" refusal is a definite no-write, resent).
+    // The pixel publication fails. It stores bytes and writes no document, so the frame edit itself
+    // was never sent: not written, and still re-authorable (contract change, review of 13792739).
     publish.reject(new Error("Studio transaction expired, cancelled or server stopped"));
     await settled();
-    assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save is uncertain");
+    assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save failed");
     assert.ok(pendingThumb()?.querySelector(".fr.pending.uncertain"));
-    assert.match(m.text(), /save uncertain/);
-    assert.match(m.text(), /Studio transaction expired/);
+    assert.match(m.text(), /local save not written/);
+    assert.match(m.text(), /Studio transaction expired, cancelled or server stopped; nothing of this edit was sent/);
   } finally {
     m.done();
   }

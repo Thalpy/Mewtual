@@ -79,6 +79,8 @@ test("failed continuity hydration cannot replace the sealed pending identities w
     let recoveredSendDrafts = {};
     // The Studio chunk is unmounted, so actual App continuity must preserve the sealed fallback.
     let studioSnapshot = null, studioRestore = null, restoredStudioDraft = null;
+    // The Studio checkpoint handles App declares beside its continuity state (unmounted here).
+    let studioSnapshotAuthor = null, studioSealedAuthor = null, studioCheckpointTimer;
     let windowCloseInFlight = false;
     let readMarks = {}, statusCursors = {}, fileTrustPolicies = {}, latePast = {}, embedAutoLoad = false, error = "";
     let sealed = JSON.stringify(initial), failLoad = true, writes = 0, flushed = 0;

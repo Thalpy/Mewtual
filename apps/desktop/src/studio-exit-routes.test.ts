@@ -676,6 +676,80 @@ test("a removed server is moved off without a Save to its stopped actor, and the
   } finally { disposeStudio(); }
 });
 
+// Review of 13792739, P1: leaving the Studio surface may now keep work in the session (sealed on
+// this device), but switchView re-entered its gate on "the Studio has work" after `leave()` had
+// succeeded. With the work preserved that gate succeeded at once, every time, so the tab never
+// changed and the resolved-promise loop starved the timers that would have saved the work. This
+// runs App's production switchView and its preservation functions over the real Studio session,
+// studio-state and exit gate; the continuity write is App's own Studio half of it (build the
+// snapshot, then record the author token it carried).
+async function productionTabSwitch(applyFails: boolean) {
+  const st = await import("./studio-state.svelte.ts");
+  const ipc = fakeIpc(), toasts: string[] = [];
+  let applies = 0, checks = 0, preserves = 0;
+  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent()), group: "deadbeef" }));
+  ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ frames: [] })), group: "deadbeef" }));
+  ipc.on("studio_apply", () => {
+    applies++;
+    if (applyFails) throw new Error("outcome=uncertain; commit response was lost");
+    return { ...ordinaryView(flipnoteContent({ fps: 7, frames: [] })), group: "deadbeef" };
+  });
+  st.useStudioIpc(ipc, 5000);
+  const session = st.ensureStudio(ME);
+  st.setStudioScope(SERVER, CHANNEL); session.flush(); session.open(DOC); await settle(8);
+  const state = {
+    view: "studio", menu: null, windowCloseInFlight: false, locked: false, uiStateReady: true, canModerate: false,
+    cur: { active: CHANNEL, isDm: false }, studioSealedAuthor: null as string | null,
+    toast: (text: string) => { toasts.push(text); },
+    studioSave: st.saveStudio, studioPreserve: st.preserveStudio, studioAuthorToken: st.studioAuthorToken, studioHasWork: st.studioHasPending,
+    saveUiStateImmediately: async () => {
+      st.studioDraftSnapshot(); state.studioSealedAuthor = st.studioSnapshotAuthor(); return true;
+    },
+    studioExit: createStudioExit({
+      onStudio: () => state.view === "studio", hasWork: st.studioHasPending, closing: () => false,
+      // A runaway loop must end the test, not hang it: the claim expires after 1,000 checks.
+      claim: () => { const lease = st.claimStudioNavigation(); return () => ++checks <= 1000 && lease(); },
+      save: async () => { try { await st.saveStudio(); return true; } catch (e) { toasts.push(String(e)); return false; } },
+      preserve: () => { preserves++; return app.preserveStudioDeparture(); }, preserved: () => app.studioPreserved(),
+    }),
+  };
+  const app = production<{ switchView: (v: string) => void; preserveStudioDeparture: () => Promise<boolean>; studioPreserved: () => boolean }>(
+    ["switchView", "preserveStudioDeparture", "studioPreserved"], state);
+  return { st, session, state, app, toasts, applies: () => applies, checks: () => checks, preserves: () => preserves };
+}
+
+test("leaving the Studio with work sealed on this device changes the tab once and keeps the work", async () => {
+  const { disposeStudio } = await import("./studio-state.svelte.ts");
+  try {
+    // An ordinary edit: its checkpoint completed before the five-second autosave deadline.
+    const queued = await productionTabSwitch(false);
+    queued.session.setFps(DOC, 7);
+    await queued.state.saveUiStateImmediately();
+    queued.app.switchView("chat");
+    let timerRan = false; setTimeout(() => { timerRan = true; }, 0);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(timerRan, true, "timers still run: nothing monopolises the microtask queue");
+    assert.equal(queued.state.view, "chat");
+    assert.ok(queued.checks() < 20, `navigation claim checked ${queued.checks()} times`);
+    assert.equal(queued.preserves(), 0, "the checkpoint already covered it");
+    assert.deepEqual([queued.session.saves.length, queued.session.saves[0].status], [1, "queued"], "kept for its deadline");
+    assert.equal(queued.applies(), 0);
+
+    // A failed Save: preserved once by the departure, then the tab changes with it still held.
+    const failed = await productionTabSwitch(true);
+    failed.session.setFps(DOC, 7);
+    await assert.rejects(failed.st.saveStudio());
+    assert.equal(failed.session.saves[0].status, "uncertain");
+    failed.app.switchView("chat");
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(failed.state.view, "chat");
+    assert.ok(failed.checks() < 20, `navigation claim checked ${failed.checks()} times`);
+    assert.equal(failed.preserves(), 1);
+    assert.deepEqual([failed.session.saves.length, failed.session.saves[0].status], [1, "uncertain"]);
+    assert.deepEqual(failed.toasts, []);
+  } finally { disposeStudio(); }
+});
+
 // Re-review of the fix: the event's timing, a failed leave, a lock and a window close.
 test("a removed server stays coherent when the leave fails after the stop, the event is late, or a lock or close races it", async () => {
   const { disposeStudio } = await import("./studio-state.svelte.ts");

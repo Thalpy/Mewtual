@@ -41,6 +41,8 @@ export function pendingManagerApp(initial: unknown) {
     // fallback and close hooks in scope so the extracted App functions run unchanged.
     let studioSnapshot = null, studioRestore = null, restoredStudioDraft = null;
     const studioBeginClose = null, studioSave = null;
+    // The Studio checkpoint handles App declares beside its continuity state (unmounted here).
+    let studioSnapshotAuthor = null, studioAuthorToken = null, studioSealedAuthor = null, studioCheckpointTimer;
     let drafts = {}, readMarks = {}, statusCursors = {}, fileTrustPolicies = {}, latePast = {}, embedAutoLoad = false;
     let servers = [], cur = null, activeServerId = null, draft = "", replyingTo = "", draftRevisions = {};
     let pendingSendNonce = 0, mentionQuery = null, chatStickToBottom = false, tailLoaded = false;

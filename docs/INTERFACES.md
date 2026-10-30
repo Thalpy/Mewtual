@@ -59,18 +59,30 @@ admitted afresh against the current history, and reauthor is available subject t
 kind's usual restrictions. A record whose earlier attempt was uncertain (it failed after dispatch,
 and the member retried its exact request) stays uncertain, keeps its original request and cannot
 be reauthored. Later refusals cannot show what that first attempt did. Every other native error
-stays uncertain, including the few rarer refusals that also precede the lease (a server change
-before commit, a cancelled request, a lease-send expiry); that errs toward "may have committed".
-`studio-native-no-write.test.ts` pins all three texts to their single pre-execution sites in the
-Rust sources.
+raised by a document write stays uncertain, including the few rarer refusals that also precede
+the lease (a server change before commit, a cancelled request, a lease-send expiry); that errs
+toward "may have committed". An error raised before the visit reached its document write (the
+frame's pixel publication, a local-draft ticket, an explicit access read, the admission checks)
+settles as not written and uncounted whatever its text, because nothing of the edit was sent;
+an earlier uncertain delivery stays uncertain. `studio-native-no-write.test.ts` pins all three
+texts to their single pre-execution sites in the Rust sources.
 A partial departure Save leaves the shared five-second deadline running for uncovered records.
-`saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
-record. Before a first delivery, admission reads a record's document when no view of it is held
+`saveBeforeLeaving()` (leaving a channel, a server, or the window when the continuity snapshot
+cannot carry the work) still covers every record; leaving only the Studio surface uses
+`preserveForDeparture()` and a sealed continuity snapshot instead (studio-exit.ts `preserve`).
+Before a first delivery, admission reads a record's document when no view of it is held
 (restored or evicted) and compares the authoring binding with that fresh view. That read runs
 while the record is still `queued` and uncounted, so a lock during it restores the record as
-unsent. An unreadable document ("could not read"), a read overtaken by a newer one ("still
-reading"), an unread channel Index and a changed server group are all refused as no-write
-without counting an attempt, so a retry is admitted afresh.
+unsent. A snapshot taken while a record is `inflight` restores it as uncertain only when it may
+have reached its write (a frame or local-draft edit whose request identity exists, or any other
+kind); one still publishing pixels or awaiting its ticket restores as queued and uncounted. An
+unreadable document ("could not read"), a read overtaken by a newer one ("still reading"), an
+unread channel Index and a changed server group are all refused as no-write without counting an
+attempt, so a retry is admitted afresh.
+A preview-local (Unconfirmed or Closing) Save answered `pending` or `busy` is continued with the
+identical request until saved, for at most 20 s of elapsed time on the session clock (native
+visits included) and never more visits than the backoff schedule allows; only then does it settle,
+uncertain if any visit answered `pending`, not written if every visit answered `busy`.
 
 `studio-exit.ts` `createStudioExit(host)` is the gate for App routes that change the main pane
 directly (`view`, the inbox, DM home, the add-server and vault-change screens). `begin()` claims

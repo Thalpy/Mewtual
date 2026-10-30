@@ -184,3 +184,82 @@ test("a drawing the full draft queue refused keeps its editor and pixels when a 
     assert.notEqual(decodePix(staged.pix).pixels[10 + 10 * 192], 0, "the refused stroke survived the attempted exit");
   } finally { if (!unmounted) await unmount(editor); disposeStudio(); target.remove(); }
 });
+
+// Review of 13792739, P2 (carried over from the previous review): Undo/Redo changed the raster and
+// marked it for saving before asking whether the document could take an edit. In a document that
+// had turned read-only, staging then refused it: no save card, and every departure refused.
+test("Undo cannot dirty a read-only flipnote, and strokes stranded by one can be discarded to leave", async () => {
+  const w = (globalThis as unknown as { window: Window & typeof globalThis }).window;
+  Object.assign(globalThis, { MutationObserver: w.MutationObserver, HTMLInputElement: w.HTMLInputElement, HTMLSelectElement: w.HTMLSelectElement, HTMLCanvasElement: w.HTMLCanvasElement, HTMLMediaElement: w.HTMLMediaElement, MouseEvent: w.MouseEvent, KeyboardEvent: w.KeyboardEvent, Event: w.Event });
+  globalThis.getComputedStyle = w.getComputedStyle.bind(w);
+  w.HTMLCanvasElement.prototype.getContext = (() => null) as typeof w.HTMLCanvasElement.prototype.getContext;
+  w.HTMLElement.prototype.setPointerCapture = () => {};
+  const { mount, unmount, flushSync } = await import("svelte");
+  const { default: Studio } = await import("./Studio.svelte");
+  const { ensureStudio, useStudioIpc, disposeStudio, studio, studioHasPending } = await import("./studio-state.svelte.ts");
+  const object = id32(1), frame = id32(3), cid = id64(4), pixels = pixBytes();
+  let phase = "open", held = { cid, bytes: pixels.length };
+  const ipc = fakeIpc();
+  const view = () => ({ ...ordinaryView(flipnoteContent({ frames: [{ id: frame, ...held }] }), { phase }), group: "deadbeef" });
+  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent()), group: "deadbeef" }));
+  ipc.on("studio_read", view);
+  ipc.on("request_blob_bounded", () => ({ bytes: pixels.length, bytes_b64: b64(pixels) }));
+  // The saved frame selects the published pixels, as native does, so the editor keeps its raster
+  // (and its undo history) instead of reloading the older value.
+  let published = 4;
+  ipc.on("publish_pix", (a) => { held = { cid: id64(++published), bytes: atob(String(a.bytesB64)).length }; return held; });
+  ipc.on("studio_apply", view);
+  useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+  const settle = async () => { for (let i = 0; i < 12; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+  const target = document.createElement("div"); document.body.append(target);
+  const editor = mount(Studio, { target, props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: () => "member", colorOf: () => "#fff", onnotice: () => {} } });
+  const pointer = (type: "pointerdown" | "pointerup", at: number) => {
+    const canvas = target.querySelector<HTMLCanvasElement>(".st-canvas")!, overlay = target.querySelector<HTMLCanvasElement>(".st-overlay")!;
+    canvas.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 192, bottom: 144, width: 192, height: 144, toJSON() {} });
+    overlay.dispatchEvent(new MouseEvent(type, { bubbles: true, button: 0, clientX: at, clientY: at })); flushSync();
+  };
+  const stroke = (at: number) => { pointer("pointerdown", at); pointer("pointerup", at); };
+  const undoButton = () => target.querySelector<HTMLButtonElement>('button[title="undo [ctrl+z]"]')!;
+  try {
+    await settle(); studio.selected = object; flushSync(); await settle();
+    // A saved stroke leaves undo history behind.
+    stroke(10); await session.save(); await settle();
+    assert.equal(session.saves.length, 0); assert.equal(undoButton().disabled, false, "undo is offered while editable");
+    // The document turns read-only (a history fault) under the editor.
+    phase = "fault"; await session.refreshDoc(object); await settle();
+    assert.equal(undoButton().disabled, true, "the toolbar reflects the edit gate, not only the history");
+    const root = target.querySelector<HTMLElement>(".studio")!; root.focus();
+    assert.ok(root.contains(document.activeElement), "the shortcut reaches the editor's key handler");
+    w.dispatchEvent(new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true })); flushSync();
+    w.dispatchEvent(new KeyboardEvent("keydown", { key: "y", ctrlKey: true, bubbles: true })); flushSync();
+    assert.equal(studioHasPending(), false, "nothing unsaveable was created, so leaving stays possible");
+    assert.equal(target.querySelector("[data-unsaveable-strokes]"), null);
+
+    // A stroke under way when the document turns read-only: pointer-up's commit is refused, so its
+    // pixels are stranded on the canvas. The banner offers the only way out, two-step like every
+    // discard. (A finished stroke is staged at pointer-up and waits on the save card instead.)
+    phase = "open"; await session.refreshDoc(object); await settle();
+    pointer("pointerdown", 60); // a pixel the first stroke did not touch, so the raster changes
+    phase = "fault"; await session.refreshDoc(object); await settle();
+    pointer("pointerup", 60); await settle();
+    assert.equal(studioHasPending(), true, "staging refuses them, so a departure would too");
+    const banner = () => target.querySelector<HTMLElement>("[data-unsaveable-strokes]");
+    assert.ok(banner(), target.textContent!);
+    banner()!.querySelector("button")!.click(); flushSync();
+    assert.match(banner()!.textContent!, /Discard for real/);
+    // The fault clears before the second click. The confirmation leaves with the banner, so
+    // strokes stranded later need their own two clicks (review of the fix, LOW 1).
+    phase = "open"; await session.refreshDoc(object); await settle();
+    assert.equal(banner(), null);
+    pointer("pointerdown", 90);
+    phase = "fault"; await session.refreshDoc(object); await settle();
+    pointer("pointerup", 90); await settle();
+    assert.match(banner()!.textContent!, /Discard strokes/, "an old confirmation does not carry over");
+    banner()!.querySelector("button")!.click(); flushSync();
+    assert.match(banner()!.textContent!, /Discard for real/);
+    banner()!.querySelector("button")!.click(); flushSync(); await settle();
+    assert.equal(banner(), null);
+    assert.equal(studioHasPending(), false, "after the explicit discard the member can leave");
+    assert.equal(session.saves.length, 0);
+  } finally { await unmount(editor); disposeStudio(); target.remove(); }
+});

@@ -9090,31 +9090,54 @@ fn reclaim_abandoned_inline_download_at_capacity(
 fn require_inline_download_capacity(
     table: &mut HashMap<String, InlineDownloadCancellation>,
 ) -> Result<(), String> {
-    require_inline_download_capacity_below(table, MAX_CANCELLABLE_INLINE_DOWNLOADS)
+    require_inline_download_capacity_reserving(table, 0)
 }
 
-/// Inline slots a background claim leaves free for foreground work. Studio reads, retained-draft
-/// inspections and the native receiver's passes are background: they claim only while fewer than
-/// `MAX - 1` slots are taken. A state-changing Studio request (and every other existing caller)
-/// may still take the last one. Without the reservation a burst of document reads, lifecycle
-/// reads and receiver passes could hold all four slots and refuse the member's Save, which the
-/// renderer resends only a few times before reporting it as not written.
-const FOREGROUND_RESERVED_INLINE_DOWNLOADS: usize = 1;
-const _: () = assert!(FOREGROUND_RESERVED_INLINE_DOWNLOADS < MAX_CANCELLABLE_INLINE_DOWNLOADS);
-
-/// The capacity check with an explicit bound. The refusal text is the same at either bound on
-/// purpose: the renderer recognises it exactly as a pre-dispatch refusal that wrote nothing
-/// (`NATIVE_NO_WRITE` in studio-session.ts, pinned by studio-native-no-write.test.ts).
-fn require_inline_download_capacity_below(
+/// The one capacity check, and the one source of its refusal text: the renderer recognises that
+/// text exactly as a pre-dispatch refusal that wrote nothing (`NATIVE_NO_WRITE` in
+/// studio-session.ts, pinned to a single source by studio-native-no-write.test.ts). The table
+/// must have room after the usual reclamation at capacity; `reserve` slots must additionally stay
+/// free of STARTED work (zero for an ordinary claim, which that bound already implies).
+fn require_inline_download_capacity_reserving(
     table: &mut HashMap<String, InlineDownloadCancellation>,
-    limit: usize,
+    reserve: usize,
 ) -> Result<(), String> {
-    reclaim_abandoned_inline_download_at_capacity(table);
-    if table.len() >= limit {
+    // Reclamation removes only begin-only entries, so the started count is the same after it. A
+    // claim the reserve refuses anyway must not reclaim first: that would cancel a registration
+    // (perhaps a live webview's, between its begin and its claim) for no gain.
+    let started = table.values().filter(|entry| entry.started).count();
+    let reserved = started + reserve >= MAX_CANCELLABLE_INLINE_DOWNLOADS;
+    if !reserved {
+        reclaim_abandoned_inline_download_at_capacity(table);
+    }
+    if reserved || table.len() >= MAX_CANCELLABLE_INLINE_DOWNLOADS {
         Err("too many inline downloads are already active".to_string())
     } else {
         Ok(())
     }
+}
+
+/// Inline slots a background claim leaves free for foreground work. Studio reads, retained-draft
+/// inspections and the native receiver's passes are background: they claim only while fewer than
+/// `MAX - 1` entries are doing work. A state-changing Studio request (and every other existing
+/// caller) may still take the last slot. Without the reservation a burst of document reads,
+/// lifecycle reads and receiver passes could hold all four slots and refuse the member's Save,
+/// which the renderer resends only a few times before reporting it as not written.
+const FOREGROUND_RESERVED_INLINE_DOWNLOADS: usize = 1;
+const _: () = assert!(FOREGROUND_RESERVED_INLINE_DOWNLOADS < MAX_CANCELLABLE_INLINE_DOWNLOADS);
+
+/// Background admission. The table must have room after the usual reclamation at capacity, as for
+/// any claim. The reserve is then counted over STARTED entries only: a begin-only registration
+/// holds no actor work, and one whose webview reloaded has no completion path at all, so letting
+/// it count would refuse every background claim while nothing runs (review of 13792739, P2: three
+/// abandoned registrations sat below the reclamation threshold and at the reserve, so Studio could
+/// not read its Index). Such registrations still occupy the table, where a later claim at capacity
+/// reclaims the oldest of them, which is also how the reserved slot stays reachable: with every
+/// entry started, background work stops at `MAX - 1`. Active entries are never displaced.
+fn require_background_inline_download_capacity(
+    table: &mut HashMap<String, InlineDownloadCancellation>,
+) -> Result<(), String> {
+    require_inline_download_capacity_reserving(table, FOREGROUND_RESERVED_INLINE_DOWNLOADS)
 }
 
 fn register_inline_download(state: &AppState, id: &str) -> Result<(), String> {
@@ -9163,23 +9186,21 @@ fn register_inline_download(state: &AppState, id: &str) -> Result<(), String> {
 fn claim_internal_inline_download(
     state: &AppState,
 ) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
-    claim_internal_inline_download_below(state, MAX_CANCELLABLE_INLINE_DOWNLOADS)
+    claim_internal_inline_download_with(state, false)
 }
 
 /// `claim_internal_inline_download` for background work, which leaves
-/// [`FOREGROUND_RESERVED_INLINE_DOWNLOADS`] slots free for a foreground claim.
+/// [`FOREGROUND_RESERVED_INLINE_DOWNLOADS`] slots free for a foreground claim (see
+/// [`require_background_inline_download_capacity`]).
 fn claim_background_inline_download(
     state: &AppState,
 ) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
-    claim_internal_inline_download_below(
-        state,
-        MAX_CANCELLABLE_INLINE_DOWNLOADS - FOREGROUND_RESERVED_INLINE_DOWNLOADS,
-    )
+    claim_internal_inline_download_with(state, true)
 }
 
-fn claim_internal_inline_download_below(
+fn claim_internal_inline_download_with(
     state: &AppState,
-    limit: usize,
+    background: bool,
 ) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
     let (id, generation, receiver) = {
         let mut table = state
@@ -9189,7 +9210,11 @@ fn claim_internal_inline_download_below(
         if state.session_lock_requested.load(Ordering::Acquire) {
             return Err("the vault is locked".to_string());
         }
-        require_inline_download_capacity_below(&mut table, limit)?;
+        if background {
+            require_background_inline_download_capacity(&mut table)?;
+        } else {
+            require_inline_download_capacity(&mut table)?;
+        }
 
         // At most four ids can be live. Even after the theoretical u64 wrap, five attempts find
         // an unused id without allowing a stale RAII lease to alias the new registration.
@@ -17953,6 +17978,54 @@ mod tests {
             &"x".repeat(INLINE_DOWNLOAD_CANCELLATION_ID_MAX_BYTES + 1)
         )
         .is_err());
+    }
+
+    /// Review of 13792739, P2: abandoned begin-only registrations (a webview that reloaded before
+    /// its downloads started) must not hold the background reserve, or Studio cannot read at all.
+    #[test]
+    fn abandoned_registrations_never_block_a_background_claim() {
+        for abandoned in [3, MAX_CANCELLABLE_INLINE_DOWNLOADS] {
+            let state = AppState::default();
+            for index in 0..abandoned {
+                register_inline_download(&state, &format!("jam:1:{index}")).unwrap();
+            }
+            let (_lease, _receiver) = claim_background_inline_download(&state)
+                .unwrap_or_else(|e| panic!("{abandoned} abandoned registrations refused: {e}"));
+            // The foreground slot is still reachable: a Save reclaims another begin-only entry.
+            let (_save, _save_receiver) = claim_internal_inline_download(&state).unwrap();
+        }
+    }
+
+    #[test]
+    fn background_claims_leave_the_last_slot_and_never_displace_active_work() {
+        let state = AppState::default();
+        let active = (0..MAX_CANCELLABLE_INLINE_DOWNLOADS - FOREGROUND_RESERVED_INLINE_DOWNLOADS)
+            .map(|_| claim_internal_inline_download(&state).unwrap())
+            .collect::<Vec<_>>();
+        let refused = match claim_background_inline_download(&state) {
+            Err(error) => error,
+            Ok(_) => panic!("a background claim took the slot reserved for a Save"),
+        };
+        // `contains`, not the full text: studio-native-no-write.test.ts pins that text to one source.
+        assert!(refused.contains("too many"));
+        assert!(
+            active.iter().all(|(_, receiver)| !*receiver.borrow()),
+            "a refused background claim cancels nothing that is running"
+        );
+        let (_save, _receiver) = claim_internal_inline_download(&state).unwrap();
+        drop(active);
+    }
+
+    #[test]
+    fn a_refused_background_claim_does_not_reclaim_a_registration() {
+        let state = AppState::default();
+        let _active = (0..MAX_CANCELLABLE_INLINE_DOWNLOADS - FOREGROUND_RESERVED_INLINE_DOWNLOADS)
+            .map(|_| claim_internal_inline_download(&state).unwrap())
+            .collect::<Vec<_>>();
+        register_inline_download(&state, "jam:1:pending").unwrap();
+        assert!(claim_background_inline_download(&state).is_err());
+        // The registration survived the refusal: its own download can still start.
+        let _lease = claim_inline_download(&state, "jam:1:pending").unwrap();
     }
 
     #[test]

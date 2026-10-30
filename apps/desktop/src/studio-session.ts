@@ -271,7 +271,8 @@ const BUSY_BACKOFF_MS = [250, 500, 1000];
 /// is progress, not failure, so the worker repeats it itself: quickly at first, because a small
 /// edit's plan is usually ready within a few hundred milliseconds, then once a second. The budget
 /// stays well inside native's 30 s park (catchup.rs `OVERLAY_PARK_MS`): a plan left parked longer
-/// is discarded and the next visit has to prepare it again.
+/// is discarded and the next visit has to prepare it again. The budget is elapsed time on the
+/// session clock, native visits included; the backoff sum is a second bound (see runUnconfirmed).
 const OVERLAY_CONTINUE_MS = [100, 200, 400, 800];
 const OVERLAY_CONTINUE_STEADY_MS = 1000;
 const OVERLAY_CONTINUE_BUDGET_MS = 20_000;
@@ -673,7 +674,7 @@ export class StudioSession {
   get waitingDraft(): { server: number; channel: string; first: number; edits: number; uncertain: number } | null {
     const draft = this.restoredDraft;
     return draft ? { server: draft.scope.server, channel: draft.scope.channel, first: draft.records[0]?.id ?? 0, edits: draft.records.length,
-      uncertain: draft.records.filter(r => r.status === "inflight" || r.mayHaveCommitted).length } : null;
+      uncertain: draft.records.filter(r => mayHaveDispatched(r) || r.mayHaveCommitted).length } : null;
   }
 
   /// The member's explicit discard of a waiting restored draft: its channel may never open again
@@ -1857,8 +1858,13 @@ export class StudioSession {
     this.restoredDraft = null; this.draftGroup = draft.group;
     for (const record of draft.records) {
       // An interrupted delivery may have committed. Never automatically turn it into a new edit.
-      const interrupted = record.status === "inflight" || record.mayHaveCommitted;
-      const restored = { ...record, status: interrupted ? "uncertain" as const : record.status,
+      // An in-flight record that never reached its write (its pixels were still publishing, say)
+      // was not a delivery: it comes back queued, with this visit's count undone (see
+      // `mayHaveDispatched` for why the frozen identity is the evidence).
+      const interrupted = mayHaveDispatched(record) || record.mayHaveCommitted;
+      const unsent = record.status === "inflight" && !interrupted;
+      const restored = { ...record, status: interrupted ? "uncertain" as const : unsent ? "queued" as const : record.status,
+        attempts: unsent ? Math.max(0, record.attempts - 1) : record.attempts,
         mayHaveCommitted: interrupted || record.mayHaveCommitted };
       this.records.push(restored); this.saveSeq = Math.max(this.saveSeq, record.id);
       this.restoredHeld.add(record.id);
@@ -2287,9 +2293,20 @@ export class StudioSession {
       this.finish(s);
     } catch (e) {
       if (!this.current(gen)) return;
-      // Undo only this visit's count, and never below an earlier uncertain delivery (a restored
-      // draft must keep attempts >= 1 whenever mayHaveCommitted is set; studio-draft.ts).
-      if (!dispatched && e instanceof OverlayNoWrite && !s.mayHaveCommitted) s.attempts = Math.max(0, s.attempts - 1);
+      // Nothing of this edit reached a native document write in this visit, whatever the error
+      // was: the admission and epoch checks, a refused local-draft ticket, a failed explicit
+      // access, and the frame's pixel publication all come before it. Publishing stores the PIX
+      // bytes and writes no document, so its failure (a storage or bridge error) proves nothing
+      // about the edit; classifying it as "may have committed" left a frame that a later epoch
+      // change made impossible to retry or re-author (review of 13792739, P2). The bridge's own
+      // pre-dispatch refusals keep their automatic resend below. Undo only this visit's count, and
+      // never below an earlier uncertain delivery, whose uncertainty settleFailure also keeps (a
+      // restored draft must keep attempts >= 1 whenever mayHaveCommitted is set; studio-draft.ts).
+      if (!dispatched && !nativeNoWrite(e)) {
+        if (!s.mayHaveCommitted) s.attempts = Math.max(0, s.attempts - 1);
+        this.settleFailure(s, e instanceof OverlayNoWrite ? e : new OverlayNoWrite(`${reason(e)}; nothing of this edit was sent`));
+        return;
+      }
       if (nativeNoWrite(e) && this.resendLater(s)) return;
       this.settleFailure(s, e);
     }
@@ -2421,6 +2438,13 @@ export class StudioSession {
     }
     if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft Save");
     const frozen = request;
+    // The budget is elapsed time on the session clock, so time spent inside each native visit
+    // counts as well as the backoff between them (review of 13792739, P2: a slow bridge kept the
+    // lane for minutes while only the sleeps were counted). The summed backoff stays a second
+    // bound, which ends the continuation even where the clock does not move (tests, a frozen
+    // clock). A visit already in flight is never abandoned: its outcome would be unknown, and
+    // native bounds each visit itself (actor admission, publication deadline).
+    const deadline = this.now() + OVERLAY_CONTINUE_BUDGET_MS;
     let scheduled = false, waited = 0;
     try {
       for (let visit = 0; ; visit++) {
@@ -2441,11 +2465,12 @@ export class StudioSession {
         // Out of budget: hand the record to the member with its exact request intact, as before.
         // A plan parked natively past its 30 s bound is discarded, and a later exact retry simply
         // prepares it again.
-        if (waited >= OVERLAY_CONTINUE_BUDGET_MS) {
+        const remaining = deadline - this.now();
+        if (remaining <= 0 || waited >= OVERLAY_CONTINUE_BUDGET_MS) {
           if (result.state === "busy" && !scheduled) throw new OverlayNoWrite("local draft Save stayed busy; retry the same request");
           throw new StudioNativeError("local draft Save is still being prepared and may still complete; retry the same request exactly");
         }
-        const delay = OVERLAY_CONTINUE_MS[visit] ?? OVERLAY_CONTINUE_STEADY_MS;
+        const delay = Math.min(OVERLAY_CONTINUE_MS[visit] ?? OVERLAY_CONTINUE_STEADY_MS, remaining);
         await new Promise<void>((resolve) => { this.schedule(resolve, delay); });
         waited += delay;
         // A reset or scope change ends this worker (run() drops the outcome); the native plan, if
@@ -2950,6 +2975,21 @@ function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice
     if (mode === "copy") for (const id of Object.keys(content.tombstones)) out.push({ choice: { kind: "objectDeletion", id }, label: `deletion of entry ${id.slice(0, 8)}` });
   }
   return out;
+}
+
+/** Whether an `inflight` record captured by a snapshot may have handed a write to native. `run()`
+ * calls `sent()` synchronously right before every writing IPC, so a write is possible only once
+ * the identity that call carries exists: a frame's minted Apply or local-draft request, a
+ * local-draft edit's request. Every other kind sends its frozen request first thing after it is
+ * marked in flight. Before that point the visit was only reading, checking admission, getting a
+ * ticket or publishing pixels, none of which writes the document (review of the departure seal:
+ * a frame sealed mid-publication used to come back "may have committed" and could then be
+ * neither retried into a moved epoch nor re-authored). */
+function mayHaveDispatched(s: SaveRecord): boolean {
+  if (s.status !== "inflight") return false;
+  if (s.kind === "frame") return s.apply !== null || s.overlay !== null;
+  if (s.kind === "overlayApply") return s.request !== null;
+  return true;
 }
 
 function laneOf(s: SaveRecord): string {

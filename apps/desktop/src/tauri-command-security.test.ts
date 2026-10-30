@@ -578,12 +578,15 @@ test("every helper the session-gate audit trusts does the checking itself", () =
   const recovery = readFileSync(join(nativeDir, "studio", "recovery.rs"), "utf8");
   const inspection = readFileSync(join(nativeDir, "studio", "inspection.rs"), "utf8");
   const lifecycle = readFileSync(join(nativeDir, "studio", "lifecycle.rs"), "utf8");
+  // `InvokeContext::background` is the same context with a lower inline-slot priority (it leaves
+  // one slot for a Save); both constructors are proved below to go through the one constructor
+  // that establishes the unlocked session.
   const chain = [
-    ["studio.rs", studio, "invoke_custody", "InvokeContext::new"],
+    ["studio.rs", studio, "invoke_custody", "InvokeContext::(?:new|background)"],
     ["studio.rs", studio, "invoke", "invoke_custody"],
     ["studio/recovery.rs", recovery, "invoke_control", "invoke_custody"],
     ["studio/inspection.rs", inspection, "read(", "read_with"],
-    ["studio/inspection.rs", inspection, "read_with", "InvokeContext::new"],
+    ["studio/inspection.rs", inspection, "read_with", "InvokeContext::(?:new|background)"],
     // Archive/export are two-visit operations. They retain one context across the detached
     // rebuild so both custody visits and the final delivery fence belong to the same session.
     ["studio/lifecycle.rs", lifecycle, "two_visit_archive", "InvokeContext::new"],
@@ -604,6 +607,20 @@ test("every helper the session-gate audit trusts does the checking itself", () =
   const context = studio.slice(contextStart, studio.indexOf("\n}", contextStart));
   assert.match(context, /unlocked_ui_session_generation\s*\(/,
     "original operation context must establish the unlocked session");
+  // Every public constructor is a thin wrapper over the one that establishes the session, and that
+  // one does so before it claims a slot or looks up the actor.
+  const fnBody = (name: string) => {
+    const at = context.indexOf(`async fn ${name}(`);
+    assert.ok(at >= 0, `InvokeContext::${name} exists`);
+    return context.slice(at, context.indexOf("\n    }", at));
+  };
+  for (const wrapper of ["new", "background"]) {
+    assert.match(fnBody(wrapper), /Self::claiming\s*\(/, `InvokeContext::${wrapper} must go through the session-establishing constructor`);
+  }
+  const claiming = fnBody("claiming");
+  const session = claiming.search(/unlocked_ui_session_generation\s*\(/);
+  assert.ok(session >= 0 && session < claiming.search(/claim_(?:internal|background)_inline_download\s*\(/) && session < claiming.search(/actor_instance_of\s*\(/),
+    "the unlocked session is established before a slot is claimed or the actor is looked up");
 });
 
 test("instrumented actor handles can only be trace-bound through Operation", () => {

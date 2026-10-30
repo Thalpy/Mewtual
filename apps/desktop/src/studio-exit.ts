@@ -66,6 +66,12 @@ export type StudioExit = {
    * nothing needs saving, otherwise only after the Save succeeds and the action is still current.
    * It receives the action's route to hand to any switch it starts. */
   leaveThen: (go: (route: StudioRoute) => void) => void;
+  /** Whether leaving the Studio surface now still needs a departure step: exactly the condition
+   * `leave` settles on. With `preserve`, retained work that is already sealed does NOT need one;
+   * a caller that asked "is there work?" instead would be told yes forever after a successful
+   * departure, because preserved work stays in the session by design (review of 13792739, P1:
+   * switchView re-entered on `hasWork` after `leave()` succeeded and looped without yielding). */
+  mustLeave: () => boolean;
 };
 
 /** Saves one departure may run while new work keeps arriving during them. Beyond this the action
@@ -103,5 +109,5 @@ export function createStudioExit(host: StudioExitHost): StudioExit {
     if (leaveFree()) { go(route); return; }
     void route.leave().then((released) => { if (released) go(route); });
   }
-  return { begin, release: () => begin().leave(), leaveThen };
+  return { begin, release: () => begin().leave(), leaveThen, mustLeave: () => !leaveFree() };
 }

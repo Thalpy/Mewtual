@@ -8635,27 +8635,32 @@
         return false;
       }
     },
-    // Leaving only the surface keeps the Studio session running, so the member may go once the
-    // work is sealed on this device: the queued Saves keep running behind them, a failed one waits
-    // in the editor with its exact retry identity, and a crash restores it from this snapshot.
-    // Without a loaded continuity record there is nowhere to seal it, so `leave` falls back to
-    // waiting for receipts exactly as before.
-    preserve: async () => {
-      if (!uiStateReady) {
-        try { await studioSave?.(); return true; }
-        catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
-      }
-      try { await studioPreserve?.(0); }
-      catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
-      // saveUiStateImmediately reports its own failure ("…not saved; retry before closing").
-      return await saveUiStateImmediately();
-    },
-    preserved: () => {
-      if (!uiStateReady || studioSealedAuthor === null) return false;
-      return studioAuthorToken?.() === studioSealedAuthor;
-    },
+    preserve: () => preserveStudioDeparture(),
+    preserved: () => studioPreserved(),
     exhausted: () => { if (!locked) toast("The Studio kept changing while it saved. Try again once you stop drawing.", "warn", 6000); },
   });
+  /// Leaving only the Studio surface keeps the Studio session running, so the member may go once
+  /// the work is sealed on this device: the queued Saves keep running behind them, a failed one
+  /// waits in the editor with its exact retry identity, and a crash restores it from this
+  /// snapshot. Without a loaded continuity record there is nowhere to seal it, so leaving falls
+  /// back to waiting for receipts exactly as before. Callers must not treat the work that remains
+  /// afterwards as a reason to ask again (studio-exit.ts `mustLeave`).
+  async function preserveStudioDeparture(): Promise<boolean> {
+    if (!uiStateReady) {
+      try { await studioSave?.(); return true; }
+      catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
+    }
+    try { await studioPreserve?.(0); }
+    catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
+    // saveUiStateImmediately reports its own failure ("…not saved; retry before closing").
+    return await saveUiStateImmediately();
+  }
+  /// Every retained Studio edit, as it is now (the drawing staged first), is in the last sealed
+  /// continuity snapshot.
+  function studioPreserved(): boolean {
+    if (!uiStateReady || studioSealedAuthor === null) return false;
+    return studioAuthorToken?.() === studioSealedAuthor;
+  }
   const releaseStudio = studioExit.release;
   const leaveStudioThen = studioExit.leaveThen;
   /// `preload`: an intent to open the Studio (pointer or focus on its tab), not the opening itself.
@@ -8693,11 +8698,15 @@
   }
 
   /// `route` is the action this tab change belongs to; a standalone call is its own action. A route
-  /// a newer action has retired changes nothing.
-  function switchView(v: Tab, route: StudioRoute = studioExit.begin()) {
+  /// a newer action has retired changes nothing. `released` is set only by this function's own
+  /// continuation: that route's departure has just succeeded, so the change commits now. Leaving
+  /// may keep work in the Studio session (sealed on this device), so asking the gate a second time
+  /// is never the test; the gate's own `mustLeave` is, for callers arriving with a route that has
+  /// already left (review of 13792739, P1: re-checking "has work" looped forever without yielding).
+  function switchView(v: Tab, route: StudioRoute = studioExit.begin(), released = false) {
     if (windowCloseInFlight || !route.current()) return;
-    if (view === "studio" && v !== "studio" && studioHasWork?.()) {
-      void route.leave().then((released) => { if (released) switchView(v, route); }); return;
+    if (!released && view === "studio" && v !== "studio" && studioExit.mustLeave()) {
+      void route.leave().then((ok) => { if (ok) switchView(v, route, true); }); return;
     }
     menu = null;
     if (v === "moderation" && !canModerate) {

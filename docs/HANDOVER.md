@@ -1,19 +1,54 @@
 # Mewtual; Handover
 
-## Studio save, departure and performance pass (2026-10-30, branch `codex/lab-performance-pass`)
+## Studio save, departure and performance pass (2026-10-30, PR #83, branch `lab-performance-pass`)
 
 A review of the "edit, cannot save, cannot leave" reports found that ordinary preview-local and
 Closing saves were turned into errors, that leaving the editor required native receipts while
 failed edits were only checkpointed on lock, and several sources of avoidable read and redraw
-work. Code changes only so far: **no test suite, build or compile has been run on this branch**,
-and the adversarial review is still owed.
+work. The branch is based on Gate7 (`afb2b2bb`) and deliberately not merged with its target yet.
+
+Review of `13792739` (all fixed in the follow-up commit):
+
+- **P1 tab-switch freeze.** `switchView` re-entered its gate on "the Studio has work" after
+  `route.leave()` succeeded; preserved work stays in the session, so it looped through resolved
+  promises forever. It now asks the gate's own `studioExit.mustLeave()` (false once the work is
+  sealed) and commits directly after its own successful departure (`released`). The preservation
+  host lives in named App functions (`preserveStudioDeparture`, `studioPreserved`) so the
+  production-text regression in `studio-exit-routes.test.ts` runs them with the real session.
+- **Reserved slot vs abandoned registrations.** The background reserve now counts started
+  entries only, through the single capacity check (`require_inline_download_capacity_reserving`);
+  begin-only registrations no longer starve Studio reads.
+- **Pixel publication failure** before any document write settles as not written (re-authorable),
+  not "may have committed"; an earlier genuine delivery's uncertainty is kept.
+- **Continuation budget** is elapsed time on the session clock, native visits included, with the
+  backoff sum as a second bound.
+- **Read-only Undo/Redo.** Both require `canEdit` (toolbar and shortcut); strokes stranded
+  mid-stroke by a document turning read-only get a two-step "Discard strokes" banner.
+- `thumbBytes` caller type error fixed. Test fixtures that run App's continuity text declare the
+  new Studio handles; the session-gate audit accepts `InvokeContext::background` and proves both
+  constructors go through the session-establishing `claiming`.
+
+From the adversarial review of those fixes (no blocker or high):
+
+- **Restore after a departure seal** (medium). A frame sealed while its pixels were still
+  publishing came back "may have committed". A sealed `inflight` record now restores as uncertain
+  only when it may have reached its write (`mayHaveDispatched`: a frame or local-draft edit whose
+  request identity exists, or any other kind); otherwise as queued and uncounted.
+- The "Discard strokes" confirmation is keyed to the strokes it was armed for and cleared with
+  the banner, with a Cancel. A background inline claim the reserve refuses no longer reclaims (and
+  cancels) a begin-only registration first.
+- Residual, accepted for now: with begin-only registrations present a background claim can take
+  the fourth slot, so if those turn out to be real downloads a Save can be refused and resent;
+  Ctrl+Z during playback does nothing silently; a stranded stroke's autosave staging error lands
+  in `indexError` until the next Index read.
 
 What changed:
 
 - **Pending/busy continuation** (`studio-session.ts` `runUnconfirmed`). Native answers new
   Unconfirmed/Closing authoring `pending` (plan prepared off the actor) or `busy`, and its contract
   is to repeat the identical request until saved. The worker now does that itself, paced 100, 200,
-  400, 800 ms then 1 s, for up to 20 s of waiting (inside native's 30 s `OVERLAY_PARK_MS`). Only an
+  400, 800 ms then 1 s, for up to 20 s of elapsed time including native visits (inside native's
+  30 s `OVERLAY_PARK_MS`). Only an
   exhausted continuation reaches the member: uncertain if any visit said `pending`, not written if
   every visit said `busy`. Tests that pinned "pending becomes uncertain, member presses Retry" were
   updated to the new contract.

@@ -651,6 +651,29 @@ test("a Busy that never clears after an earlier lost result still ends uncertain
   assert.match(h.session.saves[0].error, /earlier attempt may already have committed/);
 });
 
+// Review of 13792739, P2: only the backoff sleeps counted toward the budget, so a slow native path
+// held the lane for close to two minutes. Here only the native visits advance the clock.
+test("the continuation budget is elapsed time, native visits included", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => previewView(flipnoteContent({ frames: [] })));
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(1), branch: id64(2), provenance: "unconfirmed",
+  }));
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => {
+    h.tick(4000); // each visit spends four seconds in native
+    return { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "pending", retry: "sameRequest" };
+  });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.setFps(OBJ, 9);
+  for (let i = 0; i < 14 && h.session.saves[0]?.status !== "uncertain"; i++) await h.sync();
+  assert.equal(h.session.saves[0].status, "uncertain");
+  assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 5, "the fifth visit ends at the 20 s deadline");
+});
+
 test("a pending continuation that runs out of budget stays uncertain with its exact request", async () => {
   const h = await harness();
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));
