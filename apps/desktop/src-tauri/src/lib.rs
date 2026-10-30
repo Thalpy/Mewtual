@@ -16308,6 +16308,26 @@ async fn finalize_unlock_session_with_voice(
     Ok(servers)
 }
 
+#[cfg(test)]
+#[path = "unlock_generation_tests.rs"]
+mod unlock_generation_tests;
+
+/// Parse the exact native lock-barrier generation without accepting alternate spellings or
+/// allocating proportional to attacker input. This is stale-work correlation, not a capability:
+/// passphrase authentication and all existing final commit checks still apply.
+fn parse_unlock_generation(value: &str) -> Result<u64, &'static str> {
+    if value.is_empty()
+        || value.len() > 20
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("unlock requires a canonical native lock generation");
+    }
+    value
+        .parse()
+        .map_err(|_| "unlock requires a canonical native lock generation")
+}
+
 /// Unlock the on-disk store with `passphrase` and reload every persisted server. Called once
 /// at launch. A wrong passphrase fails (the vault won't open); a first-ever launch just
 /// creates the vault and returns no servers. Returns the reloaded servers for the rail.
@@ -16316,8 +16336,38 @@ async fn unlock(
     app: AppHandle,
     state: State<'_, AppState>,
     passphrase: String,
+    expected_ui_generation: String,
     trace: Option<String>,
 ) -> Result<Vec<ReloadedServer>, AppError> {
+    let native = &*state;
+    unlock_authentication(
+        native,
+        passphrase,
+        expected_ui_generation,
+        trace,
+        |generation, voice_ticket, op, passphrase| {
+            unlock_cold(app, native, passphrase, generation, voice_ticket, op)
+        },
+    )
+    .await
+}
+
+/// The actual RPC's shared authentication/admission path. A cold continuation is trusted native
+/// code, invoked only after the exact generation gate and real mounted-vault authentication have
+/// run. The SAME mount guard spans the entire continuation; neither tests nor callers receive a
+/// bare success flag or a replacement generation. Owned inputs avoid a second authorization seam.
+/// Tests can hold this production future completely unpolled without constructing a Wry window.
+async fn unlock_authentication<C, CF>(
+    state: &AppState,
+    passphrase: String,
+    expected_ui_generation: String,
+    trace: Option<String>,
+    cold: C,
+) -> Result<Vec<ReloadedServer>, AppError>
+where
+    C: FnOnce(u64, SessionTicket, Operation, String) -> CF,
+    CF: Future<Output = Result<Vec<ReloadedServer>, AppError>>,
+{
     // Unlock is the one operation whose failures a user meets before anything else works, and the
     // three of them are entirely different: the passphrase is wrong, the vault is unreadable, or it
     // opened and some servers did not come back. All three were one string.
@@ -16328,19 +16378,28 @@ async fn unlock(
         None,
         None,
     );
-    // Capture before the first await. Any lock command that starts after this unlock invalidates
-    // its generation, even if the unlock was queued behind another mount or expensive KDF work.
-    let unlock_generation = state.ui_session_generation.load(Ordering::Acquire);
-    let voice_ticket = voice_runtime(&state).session_ticket();
+    // Bind to the generation returned by the caller's completed native lock barrier. Tauri
+    // schedules async command futures independently, so sampling current here could let an old,
+    // entirely unpolled unlock adopt a newer cancellation lock. Check the original value before
+    // ANY await/authentication/KDF and retain it through every existing finalization barrier.
+    let unlock_generation = parse_unlock_generation(&expected_ui_generation)
+        .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;
+    if state.ui_session_generation.load(Ordering::Acquire) != unlock_generation {
+        return Err(op.fail(
+            codes::SESSION_LOCKED,
+            "unlock was superseded by a newer lock request; try again",
+        ));
+    }
+    let voice_ticket = voice_runtime(state).session_ticket();
     // This lock covers both the already-mounted authentication path and first reload. Without it,
     // two concurrent webview mounts can both observe `None` and start duplicate actors.
     let _mount = state.vault_mount.lock().await;
-    if authenticate_mounted_store(&state, passphrase.as_bytes())
+    if authenticate_mounted_store(state, passphrase.as_bytes())
         .await
         .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
     {
         let servers =
-            finalize_unlock_session_with_voice(&state, unlock_generation, true, &voice_ticket)
+            finalize_unlock_session_with_voice(state, unlock_generation, true, &voice_ticket)
                 .await
                 .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
                 .expect("the mounted-store path requests a running-server projection");
@@ -16348,6 +16407,20 @@ async fn unlock(
         return Ok(servers);
     }
 
+    cold(unlock_generation, voice_ticket, op, passphrase).await
+}
+
+/// Unchanged real first-mount work, reachable only under `unlock_authentication`'s original
+/// mount custody. Production always supplies the actual AppHandle; there is no missing-app,
+/// skip-reload or test-success fallback. All reload/finalization uses the SAME expected generation.
+async fn unlock_cold(
+    app: AppHandle,
+    state: &AppState,
+    passphrase: String,
+    unlock_generation: u64,
+    voice_ticket: SessionTicket,
+    op: Operation,
+) -> Result<Vec<ReloadedServer>, AppError> {
     let dir = app
         .path()
         .app_data_dir()
@@ -16410,24 +16483,17 @@ async fn unlock(
             failed += 1;
             continue;
         };
-        if let Err(e) = reload_one(
-            &app,
-            &state,
-            bytes,
-            record,
-            unlock_generation,
-            &voice_ticket,
-        )
-        .await
+        if let Err(e) =
+            reload_one(&app, state, bytes, record, unlock_generation, &voice_ticket).await
         {
             tracing::error!(target: "catcoms_app", server = record.id, error = %e, "VAULT.SERVER.RESTORE_FAILED");
             failed += 1;
             continue;
         }
-        let actor = actor_of_unchecked(&state, record.id)
+        let actor = actor_of_unchecked(state, record.id)
             .await
             .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
-        let reconnect_warning = member_reconnect::saved_warning(&state, record.id, &actor).await;
+        let reconnect_warning = member_reconnect::saved_warning(state, record.id, &actor).await;
         reloaded.push(ReloadedServer {
             server: record.id,
             name: record.display_name.clone(),
@@ -16438,7 +16504,7 @@ async fn unlock(
             reconnect_warning,
         });
     }
-    finalize_unlock_session_with_voice(&state, unlock_generation, false, &voice_ticket)
+    finalize_unlock_session_with_voice(state, unlock_generation, false, &voice_ticket)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The summary that makes a partial unlock visible.
@@ -16519,15 +16585,24 @@ async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<Reloade
 async fn lock_session(
     state: State<'_, AppState>,
     ui_state_json: Option<String>,
-) -> Result<LockSessionOutcome, String> {
+) -> Result<RegisteredLockSessionOutcome, String> {
     // Tauri requires async commands borrowing `State` to use a `Result` return. The outer error is
     // reserved for bridge/dispatch failure; application-level continuity failure stays inside the
     // resolved outcome so the webview knows native locking completed.
     Ok(lock_session_outcome_inner(&state, ui_state_json).await)
 }
 
-/// IPC-visible lock completion. A continuity error is data-loss evidence, not evidence that the
-/// security boundary remained open, so it must not be collapsed into a rejected command.
+/// IPC-visible completion of one ACTUAL registered lock, even if its continuity save failed.
+/// Decimal text preserves every u64 bit across JavaScript. It correlates a later authenticated
+/// unlock with this exact barrier; it grants no permission and is never inferred from UI state.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RegisteredLockSessionOutcome {
+    continuity_error: Option<String>,
+    generation: String,
+}
+
+// Close policy may replay an earlier latched failure without registering a new lock. Keep that
+// internal report separate so it cannot manufacture a fresh unlock correlation token.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct LockSessionOutcome {
     continuity_error: Option<String>,
@@ -16536,9 +16611,11 @@ struct LockSessionOutcome {
 async fn lock_session_outcome_inner(
     state: &AppState,
     ui_state_json: Option<String>,
-) -> LockSessionOutcome {
-    LockSessionOutcome {
-        continuity_error: lock_session_inner(state, ui_state_json).await.err(),
+) -> RegisteredLockSessionOutcome {
+    let (generation, result) = lock_session_with_generation_inner(state, ui_state_json).await;
+    RegisteredLockSessionOutcome {
+        continuity_error: result.err(),
+        generation: generation.to_string(),
     }
 }
 
@@ -16670,6 +16747,7 @@ async fn close_vault_window(
 /// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
 /// malformed continuity state or a vault write failure is reported, but must never leave the
 /// sensitive webview session open as a side effect of that error.
+#[cfg(test)]
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
     lock_session_with_generation_inner(state, ui_state_json)
         .await

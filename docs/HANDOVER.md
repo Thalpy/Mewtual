@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Native queued-unlock correction (30 October; validation pending)
+
+A follow-up review found that synchronous frontend dispatch does not order Tauri command futures'
+first polls. An old queued unlock could otherwise sample a newer lock generation and reopen native
+IPC. The native command now requires the actual completed lock barrier's canonical generation,
+checks it before its first await/authentication/KDF, and carries it unchanged through all final
+barriers. Lock outcomes expose their actual registered generation even on continuity failure;
+passphrase verification and persistence formats are unchanged. The frontend proof consumer is a
+separate coordinated commit; the pair must be integrated together.
+
+Eight focused regressions are authored, including entirely unpolled cold/mounted old authentication,
+actual generation response ownership, malformed tokens, genuine mounted secret checks, and both
+post-first-poll cancellation paths. These exercise the same production auth body used by the RPC;
+the controlled cold continuation opens a real Store but does not claim Wry/reload/sweep execution.
+Only scoped rustfmt/diff checks ran in this isolated worktree. Tests, Clippy and complete final
+suites remain primary-owned and unrun for this native checkpoint until explicitly recorded.
+
 ## PR82 receipt-union capacity correction (30 October; execution pending)
 
 Review of the effects bound found an adjacent receipt-cap defect: a token-absent Stop whose

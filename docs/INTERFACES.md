@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native unlock generation contract (30 October; validation pending)
+
+`lock_session` returns `{ continuity_error, generation }`, where `generation` is the canonical
+unsigned-u64 decimal text captured by that exact native lock registration, including when the
+continuity save reports an error. `unlock` requires `expectedUiGeneration` as a String alongside
+the unchanged passphrase and optional trace. Missing, noncanonical or out-of-range values refuse;
+there is no fallback to the native generation current when the task finally starts. The value
+correlates stale work and is not a capability: real passphrase verification still applies.
+
+The first poll checks the supplied original generation before any await/authentication/KDF, and
+that same value and original voice ticket flow through mounted authentication and cold restore's
+existing final barriers. Cold first entry must establish a real native lock barrier too. The
+frontend may reset its lock coordinator only after it has the exact completed barrier result and
+still owns the original UI attempt; native scheduling order is not inferred from JavaScript call
+order. Close's internal latched-error report does not mint an unlock token.
+
 ## Critical UI continuity v3 (30 October; integration validation pending)
 
 This is the local sealed UI envelope, not a chat wire or typed-ledger protocol version. Native

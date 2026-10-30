@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Queued unlock versus a newer lock (30 October; validation pending)
+
+Tauri schedules async command futures, so a dispatched older unlock may first run after a newer
+lock completes. Sampling the native generation inside that old task would adopt the cancellation
+instead of being invalidated by it. Native unlock now requires the exact canonical generation
+returned by the caller's actual completed native lock barrier. It compares that supplied value on
+its first poll, before awaits/authentication/KDF, and keeps the same expected generation through all
+finalization checks. A later lock therefore refuses the old authentication in either first-poll
+order. The generation is correlation metadata, never an authentication capability; the original
+passphrase, mount serialization, voice ownership and final commit checks remain mandatory.
+
+The focused regressions hold the actual shared production authentication future entirely unpolled,
+complete a newer real lock, then verify immediate refusal for cold and mounted states. Real Store
+mounted success/wrong-secret and controlled cold Store-open/finalization tests cover the other
+ordering. They do not construct a Wry window or claim full WebView/reload/sweep execution. Production
+cold restore still uses the unchanged real AppHandle continuation under the same held mount guard.
+
 ## Critical recovery-copy compatibility (30 October; integration validation pending)
 
 Old UI readers could seal Send payloads they later silently dropped, while invalid mutation
