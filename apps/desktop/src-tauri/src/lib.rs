@@ -12187,7 +12187,9 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
     if !matches!(
         object.get("version").and_then(serde_json::Value::as_u64),
-        Some(1 | 2)
+        // v3 protects exact retained Send copies that old v2 frontends silently omitted.
+        // This gates only the sealed UI envelope; native authoring/Stop limits stay intact.
+        Some(1 | 2 | 3)
     ) || !object
         .get("drafts")
         .is_some_and(serde_json::Value::is_object)
@@ -26688,10 +26690,12 @@ mod tests {
             r#"{"version":1,"drafts":{"1:2":"hello"},"readMarks":{"1:2":9}}"#
         )
         .is_ok());
-        // Mutation/Stop continuity deliberately uses sticky v2, including after the queue
-        // empties. Both supported envelopes remain readable; an unknown successor refuses.
+        // Mutation/Stop continuity uses minimum v2. Expanded retained Send recovery needs
+        // critical sticky v3 because old v2 readers silently dropped those payloads. Only
+        // these known envelopes are readable; the next unknown successor still refuses.
         assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_ok());
-        assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());

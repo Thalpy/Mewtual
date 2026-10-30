@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Critical UI continuity v3 (30 October; integration validation pending)
+
+This is the local sealed UI envelope, not a chat wire or typed-ledger protocol version. Native
+accepts only versions1,2,3; unknown successors refuse. Native Send/Edit/Delete/Stop validation and
+their retry bindings are unchanged. Ordinary mutation/Stop custody requires minimumv2.
+
+Version3 protects retained Send payloads and reply IDs that older v2 frontends silently omitted.
+The updated reader retains recognizable original requests within the existing count/aggregate
+budgets, quarantines native-invalid payloads without positive/Stop dispatch, and supports explicit
+lossless movement to nonretry saved copies. Native-valid replies beyond the older reader's128
+UTF-16-unit bound also requirev3 before sealing. New admission validates complete native payload
+bounds and well-formed Unicode before context/queue admission; it does not rewrite old originals.
+
+When loading requiresv3, the original root's version is upgraded and a covering write through the
+existing continuity-save chain must succeed before UI readiness or new frontend dispatch. Every
+already-v3 load repeats that write: merely reading bytes left by a failed post-rename save is not
+durability evidence. Failure preserves the sealed original for retry. Captured-session checks and
+the ordered save chain prevent a superseded load from installing stale state. Later mutation/Stop
+saves cannot downgradev3, including after its queues empty. This gate does not retract or fence
+native publication of an original request that was already admitted independently.
+Version3 is consumed by this recovery grammar; a future critical admin-review journal must use
+a further successor or a separately sealed format that existing writers cannot overwrite.
+
 ## Durable chat covering-transaction effects (30 October; validation pending)
 
 Sync effect-aware commit/Stop/repair/fence APIs return ephemeral `ChatCommitEffects` only after a

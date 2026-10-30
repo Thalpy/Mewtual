@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Critical recovery-copy compatibility (30 October; integration validation pending)
+
+Old UI readers could seal Send payloads they later silently dropped, while invalid mutation
+payloads could instead block the whole load. Recovery retains known original identities/payloads
+within existing bounded sealed storage; it does not turn malformed input into authoring authority.
+Native-invalid originals cannot enter positive or Stop IPC, and moving them to saved copies is
+not evidence of native rejection, nonacceptance or a durable Stop.
+
+The expanded retained Send grammar requires critical envelopev3. Existing v2 readers acceptv2
+and can silently discard those copies, so retaining them under merely stickyv2 would be unsafe.
+Older native/frontends must refusev3 rather than rewrite its contents. A real coveringv3 save,
+including on every already-v3 hydration after possible post-rename failure, precedes UI readiness.
+Normal later saves retain the higher version. This is local persistence compatibility; it neither
+activates typed chat nor changes membership, signatures, network admission or native mutation limits.
+The downgrade guarantee covers a fresh older reader and this frontend's ordered, monotone saves.
+Native still accepts supported lower envelopes: it does not persist an independent monotone version
+floor. A development-only mixed-bundle hot reload with an already admitted old writer is outside
+that guarantee; packaged application updates restart native rather than overlap old/new bundles.
+
 ## Inactive exact moderation decision boundary (29 October; validation pending)
 
 An ordinary historical grant is not a reusable permission to delete another signer's typed Create.
