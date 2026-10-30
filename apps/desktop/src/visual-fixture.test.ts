@@ -4,9 +4,29 @@ import { VISUAL_FIXTURE_NOW, visualFixtureResponse } from "./visual-fixture.ts";
 import { VISUAL_SAVED_FILES, VISUAL_TRANSFER_ROWS } from "./visual-transfers-fixture.ts";
 import { checkedPrivateDownloads, checkedSavedCheck, type SavedCheck } from "./private-downloads.ts";
 import { savedRowView } from "./transfer-rows.ts";
+import { sanitizeUiContinuity } from "./ui-continuity.ts";
 import {
   checkedSavedFileChecks, checkedSavedFiles, checkedSavedFilesLimit, checkedSavedLimitChange, savedListRowView,
 } from "./saved-files.ts";
+
+test("oversized recovery screenshot uses the real continuity decoder and preserves its original", () => {
+  const original = JSON.parse(visualFixtureResponse("get_ui_state", {}, false, false, true) as string);
+  const state = sanitizeUiContinuity(original);
+  assert.equal(state.version, 2);
+  assert.deepEqual(state.pendingSends, original.pendingSends);
+  const entries = Object.values(state.pendingSends);
+  assert.equal(entries.length, 1);
+  assert.ok(new TextEncoder().encode(entries[0].text).length > 64 * 1024);
+  assert.equal(entries[0].resolution, "recover");
+  assert.equal(entries[0].acceptance, "ambiguous");
+});
+
+test("recovery screenshot opt-in leaves ordinary chat fixture continuity unchanged", () => {
+  const ordinary = JSON.parse(visualFixtureResponse("get_ui_state") as string);
+  assert.equal(ordinary.version, 1);
+  assert.equal(ordinary.pendingSends, undefined);
+  assert.deepEqual(ordinary.drafts, { "1:1": "A deterministic composer draft" });
+});
 
 test("the Transfers fixture shows every row state, closed and path free", () => {
   // Transfers UX (PR #51): `?fixture=chat&transfers=1` lists one row per state for screenshots.
@@ -97,7 +117,12 @@ test("visual fixture resumes into a deterministic unlocked server", () => {
   }>;
 
   assert.equal(servers[0]?.name, "Lantern Room");
-  assert.deepEqual(servers[0]?.channels.map((channel) => channel.id), ["general", "design", "notes"]);
+  assert.deepEqual(servers[0]?.channels.map((channel) => channel.id), ["1", "2", "3"]);
+  assert.deepEqual(visualFixtureResponse("get_channels", { server: 1 }), servers[0].channels);
+  assert.deepEqual(visualFixtureResponse("get_messages", { server: 1, channel: "1" }),
+    visualFixtureResponse("get_messages", { server: 1, channel: "general" }));
+  assert.deepEqual(visualFixtureResponse("get_messages", { server: 2, channel: "1" }),
+    visualFixtureResponse("get_messages", { server: 2, channel: "dm" }));
 });
 
 test("visual fixture returns isolated channel message copies", () => {

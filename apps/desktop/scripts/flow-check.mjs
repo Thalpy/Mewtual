@@ -243,12 +243,12 @@ const SEND_SCENARIO = `(async () => {
       });
       return { accepted: true, persistence: { status: "durable" } };
     }
-    if (cmd === "get_messages" && payload.server === 1 && payload.channel === "general") {
+    if (cmd === "get_messages" && payload.server === 1 && payload.channel === "1") {
       const rows = await base(cmd, payload, opts);
       return rows.concat(sent);
     }
     // The log reads pages now; the appended rows ride the tail page the fixture serves.
-    if (cmd === "get_message_page" && payload.server === 1 && payload.channel === "general") {
+    if (cmd === "get_message_page" && payload.server === 1 && payload.channel === "1") {
       const page = await base(cmd, payload, opts);
       const extra = sent.map((m) => ({ ...m, targets_me: false, reply_count: 0, reply_to_preview: null }));
       return { ...page, rows: page.rows.concat(extra), total: page.total + sent.length };
@@ -349,7 +349,7 @@ const ACCEPT_SCENARIO = `(async () => {
     }
     if (cmd === "join_server") {
       nativeCalls.push({ cmd, payload });
-      return { server: 7, channel: "dm", channels: [{ id: "dm", name: "general" }], is_dm: true };
+      return { server: 7, channel: "1", channels: [{ id: "1", name: "general" }], is_dm: true };
     }
     if (cmd === "dismiss_dm_request") {
       nativeCalls.push({ cmd, payload });
