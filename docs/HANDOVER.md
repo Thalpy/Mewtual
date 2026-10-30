@@ -101,6 +101,31 @@ peer receipt without frontend retry. Both non-author actual-diff reviews found n
 blocker/high/medium in the effects boundary. No Rust commands ran in the implementing worktree;
 the primary owns complete backend/frontend suites for the final combined changes.
 
+## Full admin ledger reader in progress (30 October; inactive primitives only)
+
+The user reaffirmed automatic, non-destructive ordinary conflict resolution and a FULL retained
+admin ledger. The held-case-only frontend checkpoint does not satisfy that full view. Verified
+history is preserved; unproven late posts from removed members remain the selected review exception.
+
+Replication now provides borrowed exact SignedOp frame length/chunks/stream visits without a
+whole-envelope encoding, plus bounded legacy signature attribution and a raw historical-change
+inspector. Malformed claimed keys and signed scope mismatches remain readable evidence, not
+authority. Signature verification has a 256 KiB preimage ceiling; raw change parsing has a separate
+64 KiB ceiling and expansion budgets. Historical actor names are data, never membership proof.
+
+Actual-diff review caught and resolved an out-of-table actor-reference panic in Automerge expansion
+and a checksum assumption: the inspector checks all three actor-reference families before parsing
+and explicitly compares the parsed hash checksum before expansion. Existing ingestion/projection
+actor rules are unchanged. Regression frames are otherwise accepted by the pinned parser, and
+parser traps demonstrate early refusal. Work observations pin small reads of huge retained fields
+without a full encode/preimage allocation. The short re-review has no remaining findings.
+
+All 18 focused tests pass (eight frame, seven raw inspection, three existing strict preflight
+controls); replication strict all-target/all-feature Clippy and formatting pass. Complete combined
+suites are deferred until the read vertical is coherent. The privileged index, Actor/native commands,
+DTO conversion, original-session authorization and actual App/admin-panel integration remain open.
+These helpers are not an implemented full ledger view or activation of typed chat.
+
 ## Integrated text-chat validation (29 October; local gates passed)
 
 The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/
