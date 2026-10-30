@@ -170,6 +170,12 @@ fn actual_finished_member_bundle_is_private_exact_and_verification_does_not_muta
     assert_eq!(evidence.facts.len(), 5);
     assert!(evidence.matches_original(&f.member));
     assert!(!evidence.matches_original(&f.owner));
+    let exact_retry = verify(&f.member, &f.expected, &f.facts).unwrap();
+    assert!(evidence.equivalent_proof(&exact_retry));
+    let reordered: Vec<_> = f.facts.iter().rev().cloned().collect();
+    let equivalent_retry = verify(&f.member, &f.expected, &reordered).unwrap();
+    assert!(evidence.equivalent_proof(&equivalent_retry));
+    assert!(equivalent_retry.equivalent_proof(&evidence));
     assert_eq!(f.member.group.epoch_authenticator_id(), original);
     assert!(f.member.outbox.is_empty());
     assert!(f.member.durable_send_context().is_err());
@@ -223,9 +229,9 @@ fn wrong_expected_root_or_same_key_other_actual_admission_cannot_borrow_old_bund
     );
     assert!(!evidence.matches_original(&second));
     assert!(verify(&second, &f.expected, &f.facts).is_err());
-    assert!(verify(&second, &f.expected, &second_facts)
-        .unwrap()
-        .matches_original(&second));
+    let second_evidence = verify(&second, &f.expected, &second_facts).unwrap();
+    assert!(second_evidence.matches_original(&second));
+    assert!(!evidence.equivalent_proof(&second_evidence));
 }
 
 #[test]
@@ -359,6 +365,16 @@ fn bounded_bundle_rejects_missing_duplicate_extra_and_oversized_originals() {
             .verify_joined_owner_evidence(&f.expected, &frames, 9),
         Err(OwnerEvidencePrepareError::Fact(ChatError::Bound))
     ));
+    // Bootstrap is outside verify_basis's three-fact authority chain, so specifically pin
+    // its OWN signature check even when every KP/subject/Welcome/root field matches the source.
+    let mut signed: Vec<_> = f.facts.iter().map(SignedOwnerFact::encode).collect();
+    *signed[4].last_mut().unwrap() ^= 1;
+    assert!(!SignedOwnerFact::decode(&signed[4]).unwrap().verify());
+    let borrowed: Vec<_> = signed.iter().map(Vec::as_slice).collect();
+    assert!(f
+        .member
+        .verify_joined_owner_evidence(&f.expected, &borrowed, 9)
+        .is_err());
 }
 
 #[test]
@@ -405,9 +421,12 @@ fn only_complete_same_realm_verified_founder_coverage_is_retained() {
     *covered = vec![basis.basis_id().unwrap()];
     facts[3] = sign(&f.owner, &facts[0], own);
     facts.extend([admission, grant, basis]);
-    assert_eq!(
-        verify(&f.member, &f.expected, &facts).unwrap().facts.len(),
-        8
+    let covered = verify(&f.member, &f.expected, &facts).unwrap();
+    assert_eq!(covered.facts.len(), 8);
+    let original = verify(&f.member, &f.expected, &f.facts).unwrap();
+    assert!(
+        !original.equivalent_proof(&covered),
+        "a different valid signed proof set cannot replace the cached one"
     );
     assert!(verify(&f.member, &f.expected, &facts[..7]).is_err());
     assert!(verify(&f.member, &f.expected, &facts[1..]).is_err());

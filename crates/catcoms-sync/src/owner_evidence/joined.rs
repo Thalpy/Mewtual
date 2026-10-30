@@ -40,6 +40,20 @@ impl VerifiedJoinedOwnerEvidence {
         self.channel
     }
 
+    /// Whether two ALREADY verified bundles describe the same original private completion and
+    /// semantic proof set. Signature representations/order do not choose a new initialization.
+    /// This is neither verification nor current liveness: the host must fully verify every
+    /// retry against the SAME before-await pin, then retain the original cached bytes on true.
+    pub fn equivalent_proof(&self, other: &Self) -> bool {
+        self.group == other.group
+            && self.subject == other.subject
+            && self.profile == other.profile
+            && self.attempt == other.attempt
+            && self.authenticator == other.authenticator
+            && self.channel == other.channel
+            && self.facts.keys().eq(other.facts.keys())
+    }
+
     /// Negative staging check only. Compare the ORIGINAL source and MLS state again immediately
     /// before freezing; an unrelated transition must not let the initializer reconstruct the
     /// original Add from a newer roster. This private path cannot run before its covering save.
