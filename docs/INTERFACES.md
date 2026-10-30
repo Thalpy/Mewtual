@@ -1,6 +1,6 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Native unlock generation contract (30 October; validation pending)
+## Native unlock generation contract (30 October)
 
 `lock_session` returns `{ continuity_error, generation }`, where `generation` is the canonical
 unsigned-u64 decimal text captured by that exact native lock registration, including when the
@@ -12,11 +12,14 @@ correlates stale work and is not a capability: real passphrase verification stil
 The first poll checks the supplied original generation before any await/authentication/KDF, and
 that same value and original voice ticket flow through mounted authentication and cold restore's
 existing final barriers. Cold first entry must establish a real native lock barrier too. The
-frontend may reset its lock coordinator only after it has the exact completed barrier result and
-still owns the original UI attempt; native scheduling order is not inferred from JavaScript call
-order. Close's internal latched-error report does not mint an unlock token.
+frontend first joins and validates any prior barrier before retiring it, then obtains one fresh native
+barrier with a null snapshot for each authentication. Null preserves native pending continuity bytes.
+Only the still-current UI attempt may consume that completed generation; a rejected bridge result
+retains the original JavaScript snapshot, and a malformed present result never falls back to a new
+proof. Native scheduling order is not inferred from JavaScript call order. Close's internal saved
+error report does not mint an unlock token, so its surviving window cannot reuse a cached old token.
 
-## Critical UI continuity v3 (30 October; integration validation pending)
+## Critical UI continuity v3 (30 October)
 
 This is the local sealed UI envelope, not a chat wire or typed-ledger protocol version. Native
 accepts only versions1,2,3; unknown successors refuse. Native Send/Edit/Delete/Stop validation and
@@ -39,7 +42,7 @@ native publication of an original request that was already admitted independentl
 Version3 is consumed by this recovery grammar; a future critical admin-review journal must use
 a further successor or a separately sealed format that existing writers cannot overwrite.
 
-## Durable chat covering-transaction effects (30 October; validation pending)
+## Durable chat covering-transaction effects (30 October)
 
 Sync effect-aware commit/Stop/repair/fence APIs return ephemeral `ChatCommitEffects` only after a
 covering snapshot is durably saved and its complete candidate installed. This includes implicit
@@ -53,10 +56,10 @@ Receipt capacity counts the distinct live/possibly-installed token union, includ
 uncertain Stops. New tokens are refused at the cap, while exact existing negative retries and repair
 remain admissible; covering merge and encoder independently enforce the decoder's existing count
 limit before candidate/output allocation. No receipt is evicted or reclassified as absent.
-Tracking is still bounded/session-local and intentionally forgotten after restart. Authored real
-Store/Actor/quiet-peer effects regressions passed in the primary's five-test focused run; actual
-effects reviews are clear. The separate receipt-cap regressions and final combined full suites are
-pending primary execution.
+Tracking is still bounded/session-local and intentionally forgotten after restart. Real Store/Actor/
+quiet-peer effects regressions passed in the primary's five-test focused run, followed by the seven-
+test app effects/cap batch and the sync cap regression. Actual effects reviews are clear. Current
+complete-suite results and limitations are recorded in [HANDOVER.md](HANDOVER.md).
 
 ## Inactive exact Delete approval contract (29 October; validation pending)
 

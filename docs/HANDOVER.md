@@ -1,6 +1,62 @@
 # Mewtual; Handover
 
-## Native queued-unlock correction (30 October; validation pending)
+## PR82 follow-up review corrections (30 October; local gates passed)
+
+The five findings against `6fc7ae6d` are corrected in the text-chat branch. Complete Send/Edit/Delete
+payloads are validated before queue admission or sealing, including UTF-8 byte limits and Unicode.
+Known invalid requests written by older builds retain their complete original payload and identity
+in bounded nonretry recovery storage. Critical UI continuity v3 prevents older lossy readers from
+rewriting those saved copies; its covering save must succeed before frontend readiness.
+
+Windows installers now explicitly bundle the dynamically linked VC runtime. The final native build
+at `a7035253` was packaged as a 17.73 MiB debug NSIS archive, tested and extracted into a fresh
+directory. Its executable matches the final built and started binary byte for byte; both imported
+VCRUNTIME DLLs and the other bundled MSVC runtime files are present. That packaging inspection is
+not a clean-Windows installation test.
+
+Durable repair returns every newly committed Send's exact change identity and all affected channels.
+The application installs delivery bookkeeping before publication, and the Actor refreshes channels
+repaired implicitly by another transaction. Permanent mutation refusals persist an automatic-retry
+pause without discarding an earlier ambiguous acceptance. Adjacent receipt-cap tests also cover
+uncertain Stops at the real 65,536-record limit, without evicting existing retry evidence.
+
+Actual-diff adversarial reviews are clear on these corrections and the integrated native/browser
+unlock-generation pair. Follow-up lifecycle tests prevent duplicate/stale unlock and startup replies
+from replacing a current editor. Every frontend authentication joins prior snapshot custody, then
+obtains a fresh native lock generation; an old cached barrier cannot strand the first unlock after
+a surviving failed/deferred close. Native checks that exact generation before its first await and
+at finalization.
+
+Current executed evidence: complete frontend **3,388 passed**, zero failed/skipped, including the
+post-lint refresh (78.77 seconds); Svelte check **zero errors/warnings**; production build passed
+(44.92 seconds; existing chunk-size warning);
+all **10 real Edge/App flows passed**. The recovery screen was inspected at 900 x 640 with the
+complete 69,649-byte original retained and Copy/Recover actions. Root/native formatting,
+deterministic-dependency check and both dependency audits passed.
+Five repair-effects tests passed, followed by the seven-test app effects/cap batch and the sync cap
+regression. The native known-continuity-version test passed. All **eight native authentication tests
+passed** (2.02 seconds after a 5m03 compile), including the entirely unpolled old-task schedules.
+Root strict all-target/all-feature Clippy passed (4m17), as did native strict all-target/all-feature
+Clippy (2m17), explicit native check (59.84 seconds) and pre-suite native build (3m36). Native Clippy's
+initial equivalent-pattern lint was corrected without suppression; the continuity regression also
+pins rejection of version 0 as well as the unknown successor. The complete Root run passes
+**3,991 tests**, zero failed and 25 existing ignored across 59 result groups, including doc tests.
+Its application group passed 1,327 tests and replication passed 432; the separate catch-up regression
+after 10,000 operations also passed. The complete native suite passes **1,028 tests**, zero failed
+or ignored across four result groups (1,022 library tests in 2,128.31 seconds plus six ACL tests).
+The final post-suite native rebuild passed (1m36), and the actual startup gate observed setup's
+completion marker. The final installer payload matches that exact executable. These are local
+results at runtime checkpoint `a7035253`; later documentation-only changes do not change runtime
+sources. Hosted CI and review remain separate evidence, and no clean-Windows or physical multi-device
+audio/network acceptance is claimed.
+Earlier sections below record historical checkpoints, not final evidence for this revised code.
+
+This correction does not activate typed chat. Historical authority/proof restoration, production
+dispatch, migration, the removed-member review workflow and the full admin ledger remain unfinished.
+The administrator must eventually see originals, all edits/deletions, conflicting branches and
+decisions, while ordinary conflicts resolve automatically. Voice V2 also remains disabled.
+
+## Native queued-unlock correction (30 October; author checkpoint)
 
 A follow-up review found that synchronous frontend dispatch does not order Tauri command futures'
 first polls. An old queued unlock could otherwise sample a newer lock generation and reopen native
@@ -14,10 +70,10 @@ Eight focused regressions are authored, including entirely unpolled cold/mounted
 actual generation response ownership, malformed tokens, genuine mounted secret checks, and both
 post-first-poll cancellation paths. These exercise the same production auth body used by the RPC;
 the controlled cold continuation opens a real Store but does not claim Wry/reload/sweep execution.
-Only scoped rustfmt/diff checks ran in this isolated worktree. Tests, Clippy and complete final
-suites remain primary-owned and unrun for this native checkpoint until explicitly recorded.
+Only scoped rustfmt/diff checks ran in the isolated author worktree. The primary's subsequent
+execution and current full-suite status are recorded above.
 
-## PR82 receipt-union capacity correction (30 October; execution pending)
+## PR82 receipt-union capacity correction (30 October; author checkpoint)
 
 Review of the effects bound found an adjacent receipt-cap defect: a token-absent Stop whose
 rename succeeded but parent sync failed occupied hidden uncertainty without counting toward the
@@ -28,7 +84,8 @@ count before output allocation. Exact existing Stop/retry/repair remains admissi
 no receipt or uncertainty is evicted. Authored regressions use the actual declared cap, a real sealed
 Store rename/parent-sync failure, byte-preserving extra-token refusal and exact at-cap repair/reopen.
 A separate real-effect regression pins refusal to retarget an existing message ID to a different
-change hash. Scoped formatting/diff checks only; primary owns focused execution and all full suites.
+change hash. The isolated author ran scoped formatting/diff checks only; primary execution and
+current complete-suite status are recorded above.
 
 ## PR82 repair bookkeeping and channel effects (30 October; focused tests passed)
 

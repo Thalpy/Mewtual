@@ -1,6 +1,6 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Queued unlock versus a newer lock (30 October; validation pending)
+## Queued unlock versus a newer lock (30 October)
 
 Tauri schedules async command futures, so a dispatched older unlock may first run after a newer
 lock completes. Sampling the native generation inside that old task would adopt the cancellation
@@ -11,13 +11,20 @@ finalization checks. A later lock therefore refuses the old authentication in ei
 order. The generation is correlation metadata, never an authentication capability; the original
 passphrase, mount serialization, voice ownership and final commit checks remain mandatory.
 
+Each frontend authentication first joins existing snapshot custody, then obtains one fresh native
+lock barrier with a null snapshot. This prevents a surviving failed/deferred window close from leaving a stale
+cached generation that rejects the next legitimate unlock. It never resets a newer pending
+JavaScript snapshot merely because an older native close has completed. Rejected bridge results
+retain JavaScript custody; fulfilled valid snapshots remain native-owned across wrong secrets and
+cancellation until their exact bytes save successfully.
+
 The focused regressions hold the actual shared production authentication future entirely unpolled,
 complete a newer real lock, then verify immediate refusal for cold and mounted states. Real Store
 mounted success/wrong-secret and controlled cold Store-open/finalization tests cover the other
 ordering. They do not construct a Wry window or claim full WebView/reload/sweep execution. Production
 cold restore still uses the unchanged real AppHandle continuation under the same held mount guard.
 
-## Critical recovery-copy compatibility (30 October; integration validation pending)
+## Critical recovery-copy compatibility (30 October)
 
 Old UI readers could seal Send payloads they later silently dropped, while invalid mutation
 payloads could instead block the whole load. Recovery retains known original identities/payloads
