@@ -562,6 +562,60 @@ mod tests {
             ChatDisposition::StoppedAfterCommit
         );
     }
+    #[test]
+    fn durable_chat_merge_and_encoder_enforce_declared_receipt_cap_before_work() {
+        let mut n = node();
+        let record = ChatRecord {
+            binding: [1; 32],
+            context: n.durable_send_context().unwrap(),
+            channel: 5,
+            message_id: "terminal fixture".into(),
+            action: ChatAction::Send,
+            target: None,
+            effect: ChatEffect::NeverAuthored,
+            durable: false,
+            stopped: true,
+            explicit_stop: true,
+            sealed: Vec::new(),
+            next_attempt_ms: 0,
+        };
+        n.durable_chat.v2 = true;
+        for index in 0..MAX_CHAT_RECEIPTS {
+            let mut token = [0xa1; 16];
+            token[8..].copy_from_slice(&(index as u64).to_be_bytes());
+            n.durable_chat.records.insert(token, record.clone());
+        }
+        let existing = *n.durable_chat.records.keys().next().unwrap();
+        n.durable_chat
+            .replacement_uncertain
+            .insert(existing, record.clone());
+        assert_eq!(
+            n.durable_chat.retained_receipt_count(),
+            MAX_CHAT_RECEIPTS,
+            "the same token in live and uncertain maps uses one slot"
+        );
+        // Repairing existing debt at capacity is legitimate and must not require a new slot.
+        let effects = n
+            .chat_storage_transaction(None, true, |_, _| Ok(()))
+            .unwrap();
+        assert!(effects.newly_committed_sends.is_empty() && effects.affected_channels.is_empty());
+        assert!(n.durable_chat.replacement_uncertain.is_empty());
+        let before = n.durable_chat.encode().unwrap();
+        let error = n
+            .chat_storage_transaction(Some(([0xff; 16], record.clone())), true, |_, _| {
+                panic!("over-cap merge must never reach snapshot/write work")
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, ChatSaveError::NotReplaced(ref reason) if reason.contains("CHAT_SEND_CAPACITY"))
+        );
+        assert_eq!(n.durable_chat.encode().unwrap(), before);
+        assert!(!n.durable_chat.records.contains_key(&[0xff; 16]));
+        // An internal future caller cannot bypass admission and write an unreadable count.
+        n.durable_chat.records.insert([0xff; 16], record);
+        assert!(matches!(n.durable_chat.encode(), Err(SyncError::Malformed)));
+    }
+
     #[tokio::test]
     async fn durable_chat_noop_refuses_real_frontier_over_retained_head_cap() {
         let mut n = node();
@@ -672,6 +726,17 @@ impl ChatRecord {
     }
 }
 impl DurableChatState {
+    /// A possibly installed token owns receipt capacity even while absent from the live map.
+    /// Counting the distinct union keeps post-rename negative Stops from overfilling the next
+    /// covering snapshot. Existing tokens still repair/stop at the cap; none are evicted.
+    fn retained_receipt_count(&self) -> usize {
+        self.records.len()
+            + self
+                .replacement_uncertain
+                .keys()
+                .filter(|token| !self.records.contains_key(*token))
+                .count()
+    }
     pub(crate) fn snapshot_allowed(&self) -> bool {
         self.reconciling || self.replacement_uncertain.is_empty()
     }
@@ -722,6 +787,11 @@ impl DurableChatState {
         });
     }
     pub(crate) fn encode(&self) -> Result<Vec<u8>, SyncError> {
+        // The decoder's count limit is also an encoder invariant. Refuse before allocating an
+        // output buffer instead of persisting a snapshot that this same reader cannot reopen.
+        if self.records.len() > MAX_CHAT_RECEIPTS {
+            return Err(SyncError::Malformed);
+        }
         let mut e = Encoder::new();
         e.put_u8(if self.v2 { 2 } else { 1 });
         e.put_u32(self.records.len() as u32);
@@ -1062,7 +1132,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if current? != context {
             return Err("CHAT_SEND_CONTEXT_CHANGED: intent belongs to an earlier epoch".into());
         }
-        if self.durable_chat.records.len() >= MAX_CHAT_RECEIPTS
+        if self.durable_chat.retained_receipt_count() >= MAX_CHAT_RECEIPTS
             || self.durable_chat.active.len() >= MAX_CHAT_PENDING
         {
             return Err("CHAT_SEND_CAPACITY: retained retry/publication capacity exhausted".into());
@@ -1214,7 +1284,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             });
         if !self.durable_chat.records.contains_key(&token)
             && !self.durable_chat.replacement_uncertain.contains_key(&token)
-            && self.durable_chat.records.len() >= MAX_CHAT_RECEIPTS
+            && self.durable_chat.retained_receipt_count() >= MAX_CHAT_RECEIPTS
         {
             return Err(ChatSaveError::NotReplaced(
                 "CHAT_SEND_CAPACITY: retained receipt capacity exhausted".into(),
@@ -1360,6 +1430,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
     {
+        // Defend the merge itself too, before cloning hidden records, graph candidates or a
+        // covering snapshot. Selected existing tokens need no new slot. This catches internal
+        // callers as well as public admission and never drops possibly installed history.
+        let added = selected
+            .keys()
+            .filter(|token| {
+                !self.durable_chat.records.contains_key(*token)
+                    && !self.durable_chat.replacement_uncertain.contains_key(*token)
+            })
+            .count();
+        if self
+            .durable_chat
+            .retained_receipt_count()
+            .saturating_add(added)
+            > MAX_CHAT_RECEIPTS
+        {
+            return Err(ChatSaveError::NotReplaced(
+                "CHAT_SEND_CAPACITY: retained receipt capacity exhausted".into(),
+            ));
+        }
         let mut updates = self.durable_chat.replacement_uncertain.clone();
         updates.extend(selected);
         let mut previous = self.durable_chat.clone();

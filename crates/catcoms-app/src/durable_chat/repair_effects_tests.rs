@@ -460,3 +460,235 @@ async fn automatic_repair_tracks_send_before_real_peer_receipt_without_frontend_
     host.await.unwrap();
     bob_drain.await.unwrap();
 }
+
+/// Seed terminal slots from one real encoded NeverAuthored Stop. This avoids 65,535 disk
+/// transactions while preserving the exact closed record grammar, MLS/provider snapshot and
+/// encrypted Store path. These fixture-only repeated terminal bodies grant no signing authority.
+fn snapshot_with_stopped_slots(
+    server: &mut Node,
+    template_token: [u8; 16],
+    slots: usize,
+) -> Vec<u8> {
+    use catcoms_wire::{Decoder, Encoder};
+    let snapshot = server.snapshot().unwrap();
+    let mut prefix = vec![2, 0, 0, 0, 1, 0, 0, 0, 16];
+    prefix.extend_from_slice(&template_token);
+    let positions: Vec<_> = snapshot
+        .windows(prefix.len())
+        .enumerate()
+        .filter_map(|(position, bytes)| (bytes == prefix).then_some(position))
+        .collect();
+    assert_eq!(
+        positions.len(),
+        1,
+        "locate the exact singleton durable-chat field"
+    );
+    let start = positions[0];
+    let length = u32::from_be_bytes(snapshot[start - 4..start].try_into().unwrap()) as usize;
+    let field = &snapshot[start..start + length];
+    let mut decoder = Decoder::new(field);
+    assert_eq!(decoder.get_u8().unwrap(), 2);
+    assert_eq!(decoder.get_u32().unwrap(), 1);
+    assert_eq!(decoder.get_bytes().unwrap(), template_token);
+    let record_body = &field[length - decoder.remaining()..];
+    let mut header = Encoder::new();
+    header.put_u8(2);
+    header.put_u32(u32::try_from(slots).unwrap());
+    let mut seeded = header.finish();
+    for index in 0..slots {
+        let mut token = [0xa1; 16];
+        token[8..].copy_from_slice(&(index as u64).to_be_bytes());
+        seeded.extend_from_slice(&16u32.to_be_bytes());
+        seeded.extend_from_slice(&token);
+        seeded.extend_from_slice(record_body);
+    }
+    let mut replaced = snapshot[..start - 4].to_vec();
+    replaced.extend_from_slice(&u32::try_from(seeded.len()).unwrap().to_be_bytes());
+    replaced.extend_from_slice(&seeded);
+    replaced.extend_from_slice(&snapshot[start + length..]);
+    replaced
+}
+
+#[tokio::test]
+async fn uncertain_stop_owns_last_receipt_slot_and_exact_repair_remains_admissible_at_cap() {
+    use catcoms_sync::durable_chat::MAX_CHAT_RECEIPTS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = ServerStore::open(
+        dir.path(),
+        b"capacity",
+        &mut ChaCha20Rng::seed_from_u64(908),
+    )
+    .unwrap();
+    let mut original = node().await;
+    let template = send(&original, 0xe7, A, "fixture terminal");
+    assert!(
+        original
+            .stop_chat_request(&DurableStopRequest { original: template }, &store, 9,)
+            .unwrap()
+            .durable
+    );
+    let seeded = snapshot_with_stopped_slots(&mut original, [0xe7; 16], MAX_CHAT_RECEIPTS - 1);
+    let mut server = Server::restore(
+        &seeded,
+        Hub::new().join(PeerId::from_u64(908)),
+        ChaCha20Rng::seed_from_u64(908),
+        Box::new(ManualClock::new(2_000)),
+        "alice",
+    )
+    .unwrap();
+    store
+        .save_server(9, &seeded, &mut ChaCha20Rng::seed_from_u64(909))
+        .unwrap();
+    let last = send(&server, 0xfe, B, "never authored last slot");
+    let extra = send(&server, 0xff, A, "must not allocate a receipt");
+    store.fail_next_chat_parent_sync();
+    let (pending, effects) = server
+        .stop_chat_request_with_effects(
+            &DurableStopRequest {
+                original: last.clone(),
+            },
+            &store,
+            9,
+        )
+        .unwrap();
+    assert!(!pending.durable);
+    assert!(effects.newly_committed_sends.is_empty() && effects.affected_channels.is_empty());
+    assert!(server.sync.durable_chat_needs_repair());
+    assert!(
+        server.snapshot().is_err(),
+        "uncertainty cannot be snapshotted away"
+    );
+    let path = dir.path().join("servers").join("9.bin");
+    let previous_file = std::fs::read(&path).unwrap();
+    let (refused, effects) = server
+        .stop_chat_request_with_effects(
+            &DurableStopRequest {
+                original: extra.clone(),
+            },
+            &store,
+            9,
+        )
+        .unwrap();
+    assert!(!refused.durable);
+    assert!(refused
+        .storage_error
+        .as_deref()
+        .unwrap()
+        .contains("CHAT_SEND_CAPACITY"));
+    assert!(effects.newly_committed_sends.is_empty() && effects.affected_channels.is_empty());
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        previous_file,
+        "refusal must not replace ciphertext"
+    );
+    let (token, binding, context, channel, id, _, _) = extra.identity();
+    assert!(server
+        .sync
+        .durable_chat_lookup(token, binding, context, channel)
+        .unwrap()
+        .is_none());
+    let error = server
+        .sync
+        .prepare_durable_chat(token, binding, context, channel, id, |_| {
+            panic!("a new positive candidate must not be allocated at the union cap")
+        })
+        .unwrap_err();
+    assert!(error.contains("CHAT_SEND_CAPACITY"));
+    assert_eq!(std::fs::read(&path).unwrap(), previous_file);
+    assert!(server.messages(A).is_empty() && server.messages(B).is_empty());
+    assert!(server.own_message_changes.is_empty());
+    let (token, binding, context, channel, id, _, _) = last.identity();
+    let same_token = server
+        .sync
+        .prepare_durable_chat(token, binding, context, channel, id, |_| {
+            panic!("an uncertain Stop must never remint positively, including at capacity")
+        })
+        .unwrap();
+    assert!(!same_token.durable);
+    assert_eq!(same_token.disposition, ChatDisposition::StoppedBeforeCommit);
+
+    // Existing debt is still allowed into the actual Store barrier at the declared cap.
+    // Another real rename+parent-sync failure distinguishes this from a capacity refusal.
+    store.fail_next_chat_parent_sync();
+    let error = server
+        .sync
+        .repair_durable_chat_with_effects(|bytes, rng| {
+            store.save_server(9, bytes, rng).map_err(save_error)
+        })
+        .unwrap_err();
+    assert!(matches!(error, ChatSaveError::ReplacedNotDurable(_)));
+    assert_ne!(std::fs::read(&path).unwrap(), previous_file);
+    assert!(server.sync.durable_chat_needs_repair());
+    let (stopped, effects) = server
+        .stop_chat_request_with_effects(
+            &DurableStopRequest {
+                original: last.clone(),
+            },
+            &store,
+            9,
+        )
+        .unwrap();
+    assert!(stopped.durable);
+    assert_eq!(stopped.disposition, ChatDisposition::StoppedBeforeCommit);
+    assert!(effects.newly_committed_sends.is_empty() && effects.affected_channels.is_empty());
+    assert!(!server.sync.durable_chat_needs_repair());
+    let reopened = original_from_store(&store, 9);
+    let (token, binding, context, channel, _, _, _) = last.identity();
+    assert!(
+        reopened
+            .sync
+            .durable_chat_lookup(token, binding, context, channel)
+            .unwrap()
+            .unwrap()
+            .durable
+    );
+    let (token, binding, context, channel, _, _, _) = extra.identity();
+    assert!(reopened
+        .sync
+        .durable_chat_lookup(token, binding, context, channel)
+        .unwrap()
+        .is_none());
+    assert!(reopened.messages(A).is_empty() && reopened.messages(B).is_empty());
+}
+
+#[tokio::test]
+async fn real_committed_effect_cannot_retarget_an_existing_message_id_to_a_different_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ServerStore::open(
+        dir.path(),
+        b"conflict",
+        &mut ChaCha20Rng::seed_from_u64(910),
+    )
+    .unwrap();
+    let mut server = node().await;
+    let first = send(&server, 9, A, "first real change");
+    let (_, effects) = server
+        .commit_chat_request_with_effects(&first, &store, 9)
+        .unwrap();
+    let first_hash = effects.newly_committed_sends[0].change;
+    let second = send(&server, 10, A, "second real change");
+    let (_, _, _, _, second_id, _, _) = second.identity();
+    server
+        .own_message_changes
+        .get_mut(&A)
+        .unwrap()
+        .push_back((second_id, first_hash));
+    let retained = server.own_message_changes[&A].clone();
+    let (committed, effects) = server
+        .commit_chat_request_with_effects(&second, &store, 9)
+        .unwrap();
+    assert!(committed.durable);
+    assert_eq!(effects.newly_committed_sends.len(), 1);
+    assert_ne!(effects.newly_committed_sends[0].change, first_hash);
+    assert_eq!(
+        server.own_message_changes[&A], retained,
+        "foreign hash must never replace/reorder retained identity"
+    );
+    server.track_committed_chat_sends(&effects);
+    assert_eq!(server.own_message_changes[&A], retained);
+    assert_eq!(
+        server.messages(A).len(),
+        2,
+        "both genuine saved bodies remain in history"
+    );
+}

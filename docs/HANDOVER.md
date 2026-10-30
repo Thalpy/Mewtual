@@ -1,16 +1,31 @@
 # Mewtual; Handover
 
-## PR82 repair bookkeeping and channel effects (30 October; validation pending)
+## PR82 receipt-union capacity correction (30 October; execution pending)
+
+Review of the effects bound found an adjacent receipt-cap defect: a token-absent Stop whose
+rename succeeded but parent sync failed occupied hidden uncertainty without counting toward the
+65,536 live-record limit. Repeated such failures could overfill the next merged snapshot, whose
+old encoder accepted a count its own decoder rejected. New-token admission now counts the distinct
+live/uncertain union; the merge checks capacity before candidate cloning and the encoder checks its
+count before output allocation. Exact existing Stop/retry/repair remains admissible at the cap;
+no receipt or uncertainty is evicted. Authored regressions use the actual declared cap, a real sealed
+Store rename/parent-sync failure, byte-preserving extra-token refusal and exact at-cap repair/reopen.
+A separate real-effect regression pins refusal to retarget an existing message ID to a different
+change hash. Scoped formatting/diff checks only; primary owns focused execution and all full suites.
+
+## PR82 repair bookkeeping and channel effects (30 October; focused tests passed)
 
 The review found that automatic durable Send repair bypassed delivery tracking and implicit repair
 of A during a transaction in B omitted A's channel event. The repair-effects continuation returns
 exact newly committed Send metadata and the full installed channel set from the covering transaction,
 registers tracking before publication, and notifies all changed channels after success. Native result
 and persistence/signature formats stay unchanged; failures still schedule host repair with no false
-effect. Five authored regressions cover real rename/parent-sync faults, implicit Stop/commit across
-quiet channels, stopped-signed history, and SnapshotNeeded-driven host repair followed by a real
-quiet peer receipt without frontend retry. No Rust checks run by the implementing agent; primary
-owns focused execution, complete backend/frontend suites and independent actual-diff review.
+effect. The primary executed all five focused regressions successfully (1.66 seconds after a
+9m29 cold compile), covering real rename/parent-sync faults, implicit Stop/commit across quiet
+channels, stopped-signed history, and SnapshotNeeded-driven host repair followed by a real quiet
+peer receipt without frontend retry. Both non-author actual-diff reviews found no remaining
+blocker/high/medium in the effects boundary. No Rust commands ran in the implementing worktree;
+the primary owns complete backend/frontend suites for the final combined changes.
 
 ## Integrated text-chat validation (29 October; local gates passed)
 

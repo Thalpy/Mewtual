@@ -33,8 +33,14 @@ The application installs both recent-message and receipt-target bookkeeping sync
 lease release/reply/publication. Actor refreshes every affected channel, filtering unchanged actual
 projections. Failed writes return no successful effects while retaining SnapshotNeeded repair work.
 Existing public compatibility wrappers/native replies/persisted and signing bytes remain unchanged.
+Receipt capacity counts the distinct live/possibly-installed token union, including never-authored
+uncertain Stops. New tokens are refused at the cap, while exact existing negative retries and repair
+remain admissible; covering merge and encoder independently enforce the decoder's existing count
+limit before candidate/output allocation. No receipt is evicted or reclassified as absent.
 Tracking is still bounded/session-local and intentionally forgotten after restart. Authored real
-Store/Actor/quiet-peer regressions are pending primary execution and independent actual review.
+Store/Actor/quiet-peer effects regressions passed in the primary's five-test focused run; actual
+effects reviews are clear. The separate receipt-cap regressions and final combined full suites are
+pending primary execution.
 
 ## Inactive exact Delete approval contract (29 October; validation pending)
 
