@@ -9,8 +9,8 @@ Replace it with an equivalent reviewed upstream observer if one becomes availabl
 
 ## Exact provenance
 
-The complete 184-file crates.io archive was extracted without pruning. Before extraction its
-SHA-256 was checked against BOTH original Mewtual workspace lockfile entries:
+The complete 184-file crates.io archive was extracted without pruning. Its SHA-256 matches BOTH
+original Mewtual workspace lockfile entries:
 
 ```text
 crate:     automerge-0.10.0.crate
@@ -39,10 +39,21 @@ Only these upstream source files differ from the archive:
   makes a document clone/fork a fresh instance without changing copied document content.
 - `src/change_graph.rs`: a private borrowed slice over the existing applied hash vector.
 - `src/change_queue.rs`: a private borrowed slice over the existing queued Change vector.
+- `src/autocommit.rs`: readonly ROOT-value metadata forwarding with explicit isolation refusal.
+- `src/op_set2/op_set.rs`: declare the private metadata-only ROOT lookup module.
 
-New files are this note, `LICENSE.upstream`, `src/history.rs` and `src/history/tests.rs`.
-The new module adds four readonly inherent methods on BOTH Automerge and AutoCommit:
+New files are this note, `LICENSE.upstream`, `src/history.rs`, `src/history/tests.rs`,
+`src/value_metadata.rs` and `src/op_set2/op_set/value_metadata.rs`.
+The history module adds four readonly inherent methods on BOTH Automerge and AutoCommit:
 `applied_change_hashes`, `queued_changes`, `has_applied_change`, `history_instance_id`.
+The metadata modules add `root_value_metadata` and bounded borrowed `root_bytes` on both types,
+plus four fixed metadata/limit/error types. The ROOT lookup uses the same property range and indexed last-visible winner as current
+unisolated get, while reading only visibility, action and type/length columns. It never constructs
+an Op, a conflict vector or actor identity, and never decodes/copies raw scalar bytes. Explicit
+operation/key-column limits precede lookup. Physical object-counter/object-actor/key/visibility/action/type metadata slab counts
+are checked in O(1) before key-byte summation/lookup, and raw slab count is checked before a nonempty
+raw read, each at most checked `max_ops + 1`. Padding slabs cannot fund a hidden scan. Isolated
+AutoCommit views refuse before clock creation.
 Existing constructor bodies initialize the new process-local identity. No parser, serializer,
 encoding, ingestion, verification or admission rule changes. No unsafe code, private-layout
 assumptions, change reconstruction or all-history metadata collection is added.
@@ -70,6 +81,16 @@ moving the original document keep its identity. The token is not a mutation revi
 epoch, a permission or a guarantee that no history changed. It makes no full-ledger completeness
 or production-admin authorization claim.
 
+`root_value_metadata` addresses a distinct trap: upstream `get` returns an owned legacy ScalarValue,
+so checking a Bytes/String length AFTER get is too late to bound allocation. Metadata alone is also
+NOT sufficient preflight for a later get: get decodes losing conflicting scalars and clones an actor
+ID. For bounded Bytes reads use `root_bytes`, which checks winner kind and byte cap BEFORE touching
+only that winner's raw slice. No losing scalar, actor ID or content copy is read/created. Bodies
+cannot change while that immutable slice is borrowed. Retained operation/key-metadata saturation
+returns WorkLimit, and isolated views return UnsupportedIsolation. Neither is permission to modify
+history or fall back to an unbounded getter. Pending local operations remain open; the host supplies
+its committed-only guard.
+
 ## Authored regression tests
 
 `src/history/tests.rs` covers pending-transaction rollback after every getter, pointer-identical
@@ -78,6 +99,17 @@ transition on the missing parent, fresh new/clone/fork/load identity, and stable
 and ordinary edits. Incremental load also pins upstream's existing distinction between replacing
 an empty document and merging into a populated one. The primary integration agent owns compilation
 and all required suites.
-Run the focused upstream-style unit tests through the patched package with
-`cargo test -p automerge --lib history::tests`, then the affected replication tests and both full
-Mewtual workspaces before handoff. No execution is implied by the presence of these tests.
+The vendor is not a workspace member. Run its focused upstream-style unit tests with
+`cargo test --manifest-path vendor/automerge/Cargo.toml --locked --lib history::tests`, then the
+affected replication tests and both full Mewtual workspaces before handoff. No execution is implied
+by the presence of these tests.
+
+Nine metadata/borrow regressions in `src/op_set2/op_set/value_metadata.rs` cover huge Bytes and wrong-type
+String without any raw-value-column access (the test removes that private column), normal get kind
+and size equivalence, current conflict winners in opposite arrival orders, work/key refusal, and
+rollbackable pending operations plus explicit isolation refusal. Exact borrowed winner pointer
+identity is pinned with a retained huge losing String and huge winning actor, plus unchanged saved
+history. Benign get equivalence, missing raw storage, zero-length Bytes and physical padding slabs
+have explicit cases, including a one-operation huge-key refusal.
+The focused selector is
+`cargo test --manifest-path vendor/automerge/Cargo.toml --locked --lib value_metadata::tests`.

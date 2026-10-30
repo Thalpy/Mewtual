@@ -88,6 +88,39 @@ impl AutoCommit {
         AutoCommit::default()
     }
 
+    /// Inspect only the kind and stored byte length of the current ROOT-map winner.
+    ///
+    /// See [`Automerge::root_value_metadata`] for limits and the metadata-only contract.
+    /// This never closes a pending transaction or reads a scalar body. Isolated/historical views
+    /// are refused before building their potentially large graph clock; no current-view metadata
+    /// is substituted for the winner that an isolated [`ReadDoc::get`] would return.
+    pub fn root_value_metadata(
+        &self,
+        key: &str,
+        limits: crate::RootValueReadLimits,
+    ) -> Result<Option<crate::RootValueMetadata>, crate::RootValueReadError> {
+        if self.isolation.is_some() {
+            return Err(crate::RootValueReadError::UnsupportedIsolation);
+        }
+        self.doc.root_value_metadata(key, limits)
+    }
+
+    /// Borrow only the bounded current ROOT-map winning Bytes field, without closing a transaction.
+    ///
+    /// See [`Automerge::root_bytes`]. Isolated/historical views refuse without building a clock.
+    /// A committed-only caller must separately refuse pending operations, never commit as a read.
+    pub fn root_bytes(
+        &self,
+        key: &str,
+        limits: crate::RootValueReadLimits,
+        max_bytes: usize,
+    ) -> Result<Option<&[u8]>, crate::RootValueReadError> {
+        if self.isolation.is_some() {
+            return Err(crate::RootValueReadError::UnsupportedIsolation);
+        }
+        self.doc.root_bytes(key, limits, max_bytes)
+    }
+
     pub fn diff_opset(&self, other: &AutoCommit) -> Result<(), AutomergeError> {
         self.doc.diff_opset(&other.doc)
     }

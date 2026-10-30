@@ -16,6 +16,15 @@ mutation/policy/incarnation guards, take fresh borrows each turn and refuse pend
 without committing them. These APIs grant no admin permission, historical authorship or complete
 ledger claim. [Pinned source and exact patch inventory](../vendor/automerge/MEWTUAL-PATCH.md).
 
+The same patch exposes `root_value_metadata(key, limits)` for small trusted ROOT fields in an
+untrusted document. Normal Automerge `get` already copies scalar content, so a length check after
+it cannot bound large Bytes/String allocation. The metadata-only preflight uses the same current
+unisolated winner, caps operation/key-column work first, and reads only kind/length columns. Metadata
+alone cannot bound get's losing scalar decoding or actor-ID copy: bounded readers use `root_bytes`
+instead, which enforces kind/length before borrowing only the exact winning Bytes slice. Pending
+operations are left open; isolated views explicitly refuse rather than build a graph clock or
+substitute current metadata. These helpers do not verify a roster signature or grant reader rights.
+
 ## Retained signed-log prefix inspection (30 October; production reader in progress)
 
 `EncryptedDoc::signed_history_index(max_records)` captures an immutable upper bound of the private

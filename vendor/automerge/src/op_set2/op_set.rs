@@ -34,6 +34,7 @@ mod marks;
 mod op_iter;
 mod op_query;
 mod top_op;
+mod value_metadata;
 mod visible;
 
 pub(crate) use index::{IndexBuilder, ObjIndex, ObjInfo};
