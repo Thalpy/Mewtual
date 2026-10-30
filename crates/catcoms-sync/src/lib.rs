@@ -125,8 +125,8 @@ pub use voice_transport::{
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
 pub use roles::{
-    encode_roster, fingerprint, read_published_roster, roster_payload, ROLES_DOC,
-    ROLE_ROSTER_DOMAIN, ROSTER_KEY,
+    encode_roster, fingerprint, read_published_roster, read_published_roster_bounded,
+    roster_payload, ROLES_DOC, ROLE_ROSTER_DOMAIN, ROSTER_KEY,
 };
 
 /// Request/response protocol (one RR protocol; the first payload byte selects the
@@ -5518,6 +5518,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// store directory, so a reloaded server finds its sealed blobs.
     pub fn group_id(&self) -> Vec<u8> {
         self.group.group_id()
+    }
+
+    /// Namespace bytes without a preliminary allocation. Bounded observers check their own
+    /// supported namespace size before making DTOs; this is not an authority assertion.
+    pub fn group_id_ref(&self) -> &[u8] {
+        self.group.group_id_ref()
     }
 
     /// Replace the blob store (default in-memory); e.g. with a persistent, sealing on-disk
@@ -13584,6 +13590,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.docs
             .iter()
             .map(|(key, doc)| (*key, doc.op_count() as u64))
+    }
+
+    /// Borrow installed documents only if the actual HashMap scan is bounded. Iteration
+    /// visits capacity, not merely live length; an old large allocation must not bypass a
+    /// reader's scan allowance. No document, graph or original envelope is cloned here.
+    pub fn bounded_documents(
+        &self,
+        max_scan_buckets: usize,
+    ) -> Option<impl Iterator<Item = ((DocType, u128), &EncryptedDoc)> + '_> {
+        (self.docs.capacity() <= max_scan_buckets)
+            .then(|| self.docs.iter().map(|(key, doc)| (*key, doc)))
     }
 
     /// The ids of every open chat-channel document (excludes profile/roles/status/etc.); lets the

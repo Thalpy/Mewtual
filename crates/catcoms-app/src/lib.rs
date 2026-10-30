@@ -55,6 +55,7 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+pub mod admin_chat_ledger;
 pub mod cache_housekeeping;
 pub mod cache_plan;
 pub mod creative;
@@ -3667,6 +3668,8 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// across a call that could re-enter it. Derived state; never persisted; a `RefCell` (not a
     /// lock) because a `Server` is owned by exactly one actor task.
     messages_cache: std::cell::RefCell<HashMap<u128, MaterializedChannel>>,
+    /// Privileged original-history cache; ephemeral and never part of ordinary message DTOs.
+    admin_chat_ledger: admin_chat_ledger::AdminLedgerCache,
     /// Total order of delivery snapshots issued by this actor session. Queries and emitted events
     /// share it, so a delayed IPC query can never overwrite a newer event in the webview.
     delivery_snapshot_revision: u64,
@@ -3741,6 +3744,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
@@ -3804,6 +3808,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
@@ -3852,6 +3857,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
@@ -3936,6 +3942,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 device_id,
                 own_message_changes: HashMap::new(),
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
+                admin_chat_ledger: Default::default(),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
                 cache: Default::default(),
@@ -3991,6 +3998,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 device_id,
                 own_message_changes: HashMap::new(),
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
+                admin_chat_ledger: Default::default(),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
                 cache: Default::default(),
@@ -4085,6 +4093,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
@@ -4116,6 +4125,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),

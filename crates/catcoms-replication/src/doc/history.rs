@@ -127,6 +127,45 @@ impl SignedHistoryIndex {
         self.upper_bound
     }
 
+    /// Distinct original frames already indexed, rather than physical log entries. Exact
+    /// duplicate envelopes do not inflate the admin's known row count.
+    pub fn known_row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Stricter observation fence for policy sources whose appended evidence must stale a
+    /// view. History pages deliberately permit appends through `require_source` instead.
+    pub fn is_current_version(&self, doc: &EncryptedDoc) -> bool {
+        Arc::ptr_eq(&self.owner, &doc.history_owner) && doc.log.len() == self.upper_bound
+    }
+
+    /// The captured original prefix still exists in this exact document. Appending ordinary
+    /// history does not invalidate it; replacing a document always does.
+    pub fn is_same_source(&self, doc: &EncryptedDoc) -> bool {
+        self.require_source(doc).is_ok()
+    }
+
+    /// Fixed metadata for one exact original after host scope and permission checks.
+    pub fn row(
+        &self,
+        doc: &EncryptedDoc,
+        hash: &[u8; 32],
+    ) -> Result<Option<SignedHistoryRow>, SignedHistoryError> {
+        self.require_ready(doc)?;
+        Ok(self.rows.get(hash).cloned())
+    }
+
+    /// Exact retained signature without allocating the original frame or preimage.
+    pub fn signature(
+        &self,
+        doc: &EncryptedDoc,
+        hash: &[u8; 32],
+    ) -> Result<[u8; 64], SignedHistoryError> {
+        self.require_ready(doc)?;
+        let row = self.rows.get(hash).ok_or(SignedHistoryError::Request)?;
+        Ok(doc.log[row.position].signature)
+    }
+
     /// Advance one fixed work allowance. New appends do not move the captured upper bound and
     /// cannot starve a finite snapshot; a replacement cannot borrow the old allocation identity.
     pub fn advance(

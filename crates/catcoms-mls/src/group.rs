@@ -765,8 +765,9 @@ impl ServerGroup {
         self.group.group_id().as_slice().to_vec()
     }
 
-    /// Borrow the exact group label while bounded private persistence checks its full fee.
-    pub(crate) fn group_id_ref(&self) -> &[u8] {
+    /// Borrow the exact group label before a bounded reader/persistence path checks its fee.
+    /// This supplies namespace bytes only, never membership or historical authority.
+    pub fn group_id_ref(&self) -> &[u8] {
         self.group.group_id().as_slice()
     }
 

@@ -1333,6 +1333,36 @@ pub enum AppCommand {
     ModerationState {
         reply: oneshot::Sender<ModerationState>,
     },
+    /// Privileged exact retained originals. The native scope is custody, never role authority;
+    /// the Server checks both before inspecting cursor/revision metadata or bodies.
+    AdminChatLedgerPage {
+        scope: crate::admin_chat_ledger::AdminReadScope,
+        cursor: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<
+            Result<
+                crate::admin_chat_ledger::AdminLedgerPage,
+                crate::admin_chat_ledger::AdminLedgerError,
+            >,
+        >,
+    },
+    /// Original-scope revision recovery after a stale read; still requires current reader role.
+    AdminChatLedgerRevision {
+        scope: crate::admin_chat_ledger::AdminReadScope,
+        reply: oneshot::Sender<Result<String, crate::admin_chat_ledger::AdminLedgerError>>,
+    },
+    AdminChatLedgerDetail {
+        scope: crate::admin_chat_ledger::AdminReadScope,
+        row_id: String,
+        revision: String,
+        offset: usize,
+        reply: oneshot::Sender<
+            Result<
+                crate::admin_chat_ledger::AdminLedgerDetail,
+                crate::admin_chat_ledger::AdminLedgerError,
+            >,
+        >,
+    },
     /// Preserve a message snapshot as a signed warning (owner/admin).
     WarnMessage {
         channel: u128,
@@ -4044,6 +4074,77 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Read the admin ledger under the original native session and this exact Actor. Stopped
+    /// actors return unavailable, never an empty success that could hide missing history.
+    pub async fn admin_chat_ledger_page(
+        &self,
+        scope: crate::admin_chat_ledger::AdminReadScope,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<crate::admin_chat_ledger::AdminLedgerPage, crate::admin_chat_ledger::AdminLedgerError>
+    {
+        use crate::admin_chat_ledger::AdminLedgerError;
+        if scope.is_cancelled() {
+            return Err(AdminLedgerError::SessionUnavailable);
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::AdminChatLedgerPage {
+                scope,
+                cursor,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| AdminLedgerError::SessionUnavailable)?;
+        rx.await.map_err(|_| AdminLedgerError::SessionUnavailable)?
+    }
+
+    pub async fn admin_chat_ledger_revision(
+        &self,
+        scope: crate::admin_chat_ledger::AdminReadScope,
+    ) -> Result<String, crate::admin_chat_ledger::AdminLedgerError> {
+        use crate::admin_chat_ledger::AdminLedgerError;
+        if scope.is_cancelled() {
+            return Err(AdminLedgerError::SessionUnavailable);
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::AdminChatLedgerRevision { scope, reply })
+            .await
+            .map_err(|_| AdminLedgerError::SessionUnavailable)?;
+        rx.await.map_err(|_| AdminLedgerError::SessionUnavailable)?
+    }
+
+    /// Exact revision-bound original bytes; no ordinary message lookup can substitute for it.
+    pub async fn admin_chat_ledger_detail(
+        &self,
+        scope: crate::admin_chat_ledger::AdminReadScope,
+        row_id: String,
+        revision: String,
+        offset: usize,
+    ) -> Result<
+        crate::admin_chat_ledger::AdminLedgerDetail,
+        crate::admin_chat_ledger::AdminLedgerError,
+    > {
+        use crate::admin_chat_ledger::AdminLedgerError;
+        if scope.is_cancelled() {
+            return Err(AdminLedgerError::SessionUnavailable);
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::AdminChatLedgerDetail {
+                scope,
+                row_id,
+                revision,
+                offset,
+                reply,
+            })
+            .await
+            .map_err(|_| AdminLedgerError::SessionUnavailable)?;
+        rx.await.map_err(|_| AdminLedgerError::SessionUnavailable)?
+    }
+
     pub async fn warn_message(
         &self,
         channel: u128,
@@ -4889,6 +4990,7 @@ where
             }));
             let automatic_keep_due = file_transfers.pump_automatic(&mut server, keep_session);
             server.collect_expired_voice();
+            server.collect_admin_chat_ledger();
             maintenance.pump(&mut server);
             // Cache housekeeping: cheap unless a pass, an evaluation or a held status is due. A
             // pass deletes at most one bounded batch per turn and replans before the next.
@@ -4939,6 +5041,7 @@ where
             };
             let delivery_due = [delivery_due, member_reconnect.next_due(), cache_due].into_iter().flatten().min();
             let voice_wake = server.voice_housekeeping_wake();
+            let admin_read_wake = server.admin_chat_ledger_wake();
             let turn = {
             let keep_session_changed = async {
                 if keep_sessions_open {
@@ -4954,11 +5057,12 @@ where
                         std::future::pending::<()>().await;
                     }
                 };
-                tokio::pin!(delivery, voice, keep_session_changed);
+                tokio::pin!(delivery, voice, keep_session_changed, admin_read_wake);
                 // Both wakes enter the same fair turn; no clock-domain conversion or separate
                 // unbounded owner source is needed. Each future retains its absolute deadline.
                 std::future::poll_fn(|cx| {
-                    if delivery.as_mut().poll(cx).is_ready() || voice.as_mut().poll(cx).is_ready() {
+                    if delivery.as_mut().poll(cx).is_ready() || voice.as_mut().poll(cx).is_ready()
+                        || admin_read_wake.as_mut().poll(cx).is_ready() {
                         std::task::Poll::Ready(())
                     } else {
                         keep_session_changed.as_mut().poll(cx)
@@ -6020,6 +6124,15 @@ where
                     }
                     Some(AppCommand::ModerationState { reply }) => {
                         let _ = reply.send(server.moderation_state());
+                    }
+                    Some(AppCommand::AdminChatLedgerPage { scope, cursor, limit, reply }) => {
+                        let _ = reply.send(server.admin_chat_ledger_page(&scope, cursor.as_deref(), limit));
+                    }
+                    Some(AppCommand::AdminChatLedgerRevision { scope, reply }) => {
+                        let _ = reply.send(server.admin_chat_ledger_revision(&scope));
+                    }
+                    Some(AppCommand::AdminChatLedgerDetail { scope, row_id, revision, offset, reply }) => {
+                        let _ = reply.send(server.admin_chat_ledger_detail(&scope, &row_id, &revision, offset));
                     }
                     Some(AppCommand::WarnMessage {
                         channel,
