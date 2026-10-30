@@ -387,6 +387,11 @@ impl InviteToken {
 /// here it is a local set with the same admission rules.)
 #[derive(Debug, Default)]
 pub struct InviteLedger {
+    // Production operations are APPEND-ONLY for BOTH private sets, including restore/duplicate.
+    // Besides never reviving a spent invite, this prevents deletion tombstones from making
+    // HashSet::capacity underreport the backing scan/allocation footprint. Any future erase,
+    // retain, clear-without-rebuild or custom restore needs a separately tracked allocation
+    // high-water bound before it may preserve duplicate_bounded's work guarantee.
     consumed: HashSet<[u8; 16]>,
     revoked: HashSet<[u8; 16]>,
 }
@@ -402,6 +407,61 @@ impl InviteLedger {
     /// iterating or encoding either hash set; it confers no membership authority.
     pub fn is_empty(&self) -> bool {
         self.consumed.is_empty() && self.revoked.is_empty()
+    }
+
+    /// Duplicate all existing negative admission evidence for an isolated membership candidate.
+    /// Both nonce sets count separately, including a nonce present in BOTH sets. No eviction,
+    /// deduplication across sets, parsing or live-source mutation occurs.
+    ///
+    /// `max_buckets` bounds the combined reported [`HashSet::capacity`], so a sparse retained
+    /// table cannot hide scanning/allocation work behind a small len. It is not an allocator-
+    /// exact byte invoice; the caller must reserve table overhead before requesting this copy.
+    /// Unsupported counts/capacity refuse BEFORE cloning either table. This is neither invite
+    /// authorization nor a durable result; install only through the actual covering transaction.
+    pub fn duplicate_bounded(
+        &self,
+        max_entries: usize,
+        max_buckets: usize,
+    ) -> Result<Self, InviteError> {
+        self.duplicate_bounded_with(max_entries, max_buckets, || {})
+    }
+
+    // Marks the actual clone entry for refusal-before-allocation regressions. Source tables
+    // remain immutably borrowed through preflight and BOTH copies; no await can invalidate it.
+    fn duplicate_bounded_with(
+        &self,
+        max_entries: usize,
+        max_buckets: usize,
+        before_copy: impl FnOnce(),
+    ) -> Result<Self, InviteError> {
+        let entries = self
+            .consumed
+            .len()
+            .checked_add(self.revoked.len())
+            .ok_or(InviteError::Malformed)?;
+        let capacity = self
+            .consumed
+            .capacity()
+            .checked_add(self.revoked.capacity())
+            .ok_or(InviteError::Malformed)?;
+        if entries > max_entries
+            || capacity > max_buckets
+            || self.consumed.len() > u32::MAX as usize
+            || self.revoked.len() > u32::MAX as usize
+        {
+            return Err(InviteError::Malformed);
+        }
+        // Keep the unchanged legacy serializer's two u32 counts and length-framed16B rows
+        // representable too. This is arithmetic only: no snapshot or table scan is allocated.
+        entries
+            .checked_mul(4 + 16)
+            .and_then(|bytes| bytes.checked_add(4 + 4))
+            .ok_or(InviteError::Malformed)?;
+        before_copy();
+        Ok(Self {
+            consumed: self.consumed.clone(),
+            revoked: self.revoked.clone(),
+        })
     }
 
     /// Revoke an invite nonce so it can never be admitted.
@@ -490,6 +550,70 @@ impl InviteLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_ledger_copy_preserves_all_sets_and_original_at_exact_count_capacity() {
+        let mut original = InviteLedger::new();
+        original.consume([1; 16]).unwrap();
+        original.consume([2; 16]).unwrap();
+        original.revoke([2; 16]); // Physical rows in both sets MUST each be paid/preserved.
+        original.revoke([3; 16]);
+        let bytes = original.snapshot();
+        let capacity = original.consumed.capacity() + original.revoked.capacity();
+        let copies = std::cell::Cell::new(0);
+        let mut duplicate = original
+            .duplicate_bounded_with(4, capacity, || copies.set(copies.get() + 1))
+            .unwrap();
+        assert_eq!(copies.get(), 1);
+        assert_eq!(duplicate.consumed, original.consumed);
+        assert_eq!(duplicate.revoked, original.revoked);
+        let restored = InviteLedger::restore(&duplicate.snapshot()).unwrap();
+        assert_eq!(restored.consumed, original.consumed);
+        assert_eq!(restored.revoked, original.revoked);
+        duplicate.consume([4; 16]).unwrap();
+        duplicate.revoke([5; 16]);
+        assert_eq!(original.snapshot(), bytes);
+        assert!(!original.is_consumed(&[4; 16]));
+        assert!(!original.is_revoked(&[5; 16]));
+    }
+
+    #[test]
+    fn bounded_ledger_refuses_count_and_sparse_capacity_before_copying() {
+        let mut original = InviteLedger::new();
+        original.consume([1; 16]).unwrap();
+        original.revoke([2; 16]);
+        let bytes = original.snapshot();
+        let capacity = original.consumed.capacity() + original.revoked.capacity();
+        let copies = std::cell::Cell::new(0);
+        assert!(original
+            .duplicate_bounded_with(1, capacity, || copies.set(copies.get() + 1))
+            .is_err());
+        assert!(original
+            .duplicate_bounded_with(2, capacity - 1, || copies.set(copies.get() + 1))
+            .is_err());
+        assert_eq!(copies.get(), 0);
+        assert_eq!(original.snapshot(), bytes);
+
+        // Real reserve produces a sparse standard-library table without violating the private
+        // append-only/no-tombstone invariant. Its len alone is not a scan/allocation bound.
+        original.consumed.reserve(2048);
+        original.revoked.reserve(2048);
+        assert_eq!(original.consumed.len() + original.revoked.len(), 2);
+        let sparse_capacity = original.consumed.capacity() + original.revoked.capacity();
+        assert!(sparse_capacity > capacity);
+        assert!(original
+            .duplicate_bounded_with(2, capacity, || copies.set(copies.get() + 1))
+            .is_err());
+        assert_eq!(copies.get(), 0);
+        assert_eq!(original.snapshot(), bytes);
+        let duplicate = original.duplicate_bounded(2, sparse_capacity).unwrap();
+        assert_eq!(duplicate.consumed, original.consumed);
+        assert_eq!(duplicate.revoked, original.revoked);
+        assert!(InviteLedger::new()
+            .duplicate_bounded(0, 0)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn ledger_snapshot_round_trips_consumed_and_revoked() {
