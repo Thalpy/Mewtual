@@ -574,6 +574,8 @@ mod tests {
             context: n.durable_send_context().unwrap(),
             channel: 5,
             message_id: "terminal fixture".into(),
+            // This negative never-authored fixture owns no publication alias.
+            publication_context: None,
             action: ChatAction::Send,
             target: None,
             effect: ChatEffect::NeverAuthored,
