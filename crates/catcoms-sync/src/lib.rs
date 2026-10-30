@@ -76,6 +76,7 @@ pub mod checkpoint_exchange;
 pub mod durable_chat;
 pub mod epoch_service;
 mod group_policy;
+mod initialization_snapshot;
 pub mod local_chat_scope;
 pub mod owner_evidence;
 mod owner_tenure;
@@ -5030,6 +5031,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::ChatPreparationPending);
         }
         let mls = snapshot_server(&self.device, &self.group)?;
+        self.snapshot_with_mls(&mls, None)
+    }
+
+    // Shared unchanged framing. The private bounded initializer reaches this ONLY after its
+    // closed field/count preflight and the same-guard bounded MLS encoder have succeeded.
+    fn snapshot_with_mls(
+        &mut self,
+        mls: &[u8],
+        capacity: Option<usize>,
+    ) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+        #[cfg(test)]
+        initialization_snapshot::note_encoding();
         // `routing` carries the live routing secrets in the clear; zeroize the intermediate
         // (the returned blob is already `Zeroizing`).
         let routing = {
@@ -5042,9 +5055,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let ledger = self.ledger.snapshot();
 
-        let mut e = Encoder::new();
+        let mut e = capacity.map_or_else(Encoder::new, Encoder::with_capacity);
         let oversize = || SyncError::Malformed;
-        e.put_bytes(&mls).map_err(|_| oversize())?;
+        e.put_bytes(mls).map_err(|_| oversize())?;
         e.put_bytes(&routing).map_err(|_| oversize())?;
         e.put_bytes(&ledger).map_err(|_| oversize())?;
         e.put_u32(self.docs.len() as u32);

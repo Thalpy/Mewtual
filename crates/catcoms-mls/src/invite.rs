@@ -397,6 +397,13 @@ impl InviteLedger {
         Self::default()
     }
 
+    /// Whether no nonce has ever been consumed or revoked in this retained ledger.
+    /// This O(1) check lets the private initialization saver refuse existing history before
+    /// iterating or encoding either hash set; it confers no membership authority.
+    pub fn is_empty(&self) -> bool {
+        self.consumed.is_empty() && self.revoked.is_empty()
+    }
+
     /// Revoke an invite nonce so it can never be admitted.
     pub fn revoke(&mut self, invite_nonce: [u8; 16]) {
         self.revoked.insert(invite_nonce);

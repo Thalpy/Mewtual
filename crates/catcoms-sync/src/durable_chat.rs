@@ -807,6 +807,15 @@ impl DurableChatState {
         Ok(())
     }
 
+    // Initial owner snapshots have no retained or possibly installed chat obligations. A
+    // bounded initializer must not accidentally serialize a live chat ledger under a fresh fee.
+    pub(super) fn initialization_empty(&self) -> bool {
+        self.records.is_empty()
+            && self.active.is_empty()
+            && self.replacement_uncertain.is_empty()
+            && !self.reconciling
+    }
+
     pub(crate) fn snapshot_allowed(&self) -> bool {
         self.reconciling || self.replacement_uncertain.is_empty()
     }

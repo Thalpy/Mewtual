@@ -126,6 +126,18 @@ pub(super) struct LocalChatScope {
     revision: u64,
 }
 impl LocalChatScope {
+    // Negative budget gate only. An initial private owner has an Active saved label, but no
+    // publication binding, legacy aliases or retained migration work. Current issuance remains
+    // the Store's separate durable barrier; this predicate cannot bind or publish the scope.
+    pub(super) fn initialization_snapshot_allowed(&self) -> bool {
+        self.label
+            .as_ref()
+            .is_some_and(|label| !label.retired && !label.initializing)
+            && self.aliases.is_empty()
+            && self.recovery.is_empty()
+            && self.runtime.is_none()
+    }
+
     pub(super) fn managed(&self) -> bool {
         self.required || self.label.is_some()
     }
