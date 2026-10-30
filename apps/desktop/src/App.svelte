@@ -40,7 +40,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
-  import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedMutation, quarantinedPendingMutation, validateMutationPayload, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
@@ -3547,7 +3547,7 @@
   // completes asynchronously after unlock.
   let uiStateReady = $state(false);
   let pendingSends = $state<PendingSends>({});
-  let uiContinuityVersion: 1 | 2 = 1;
+  let uiContinuityVersion: 1 | 2 | 3 = 1;
   let recoveredSendDrafts = $state<PendingSends>({});
   // Holds submissions/result mutations while a user's explicit resolution crosses the vault barrier.
   let pendingSendResolution = $state<string | null>(null);
@@ -3557,13 +3557,14 @@
   let uiStateSaveFailed = $state(false);
   let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
+  let uiStateHydrationAttempt = 0;
   const pendingSendRetry = new PendingSendRetry(async (session) => {
     if (!locked && uiStateReady && session === uiStateLoadGeneration) await retryPendingSends(true);
   });
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      Object.values(pendingSends).some(intent => !quarantinedPendingMutation(intent) && (intent.resolution || !intent.retryBlock)),
+      Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
       sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
     );
   });
@@ -3640,18 +3641,43 @@
     }, 250);
   }
   async function loadUiContinuity(generation: number) {
+    if (generation !== uiStateLoadGeneration || locked) return;
+    const attempt = ++uiStateHydrationAttempt;
+    const current = () => generation === uiStateLoadGeneration && attempt === uiStateHydrationAttempt && !locked;
+    uiStateReady = false;
     let loaded = false;
     try {
-      let next = sanitizeUiContinuity(JSON.parse(await invoke<string>("get_ui_state")));
-      if (generation !== uiStateLoadGeneration || locked) return;
+      // A reload must read after previously admitted writes. Only the newest load in
+      // this session may expose its snapshot; an older get/covering write can finish late.
+      await uiStateSaveChain;
+      if (!current()) return;
+      const original = JSON.parse(await invoke<string>("get_ui_state"));
+      let next = sanitizeUiContinuity(original);
+      if (!current()) return;
+      if (uiContinuityVersion > next.version) next = { ...next, version: uiContinuityVersion };
+      if (next.version === 3) {
+        // Preserve the complete original root, not a sanitized replacement. Old v2 native
+        // readers must reject before their frontend silently drops these Send copies.
+        // Re-save even already-v3 roots: a preceding rename may have succeeded while its
+        // parent-sync acknowledgement failed. Only this actual barrier opens the UI.
+        await queueUiStateSave(() => {
+          if (!current()) throw new Error("The continuity load was replaced before its upgrade could be saved.");
+          return JSON.stringify({ ...original, version: 3 });
+        });
+        if (!current()) return;
+      }
       // Older builds kept read positions in plaintext localStorage. Migrate that one app-owned
       // key only when the sealed record has none, and erase it only after the native save succeeds.
       // A failed save leaves the legacy copy recoverable for the next launch.
       try {
         const migration = planLegacyReadMarkMigration(next, localStorage.getItem("catcoms.readmarks"));
         if (migration.saveBeforeRemoval) {
-          await queueUiStateSave(JSON.stringify(migration.state));
+          await queueUiStateSave(() => {
+            if (!current()) throw new Error("The continuity load changed before read marks could be saved.");
+            return JSON.stringify(migration.state);
+          });
         }
+        if (!current()) return;
         if (migration.removeLegacy) {
           localStorage.removeItem("catcoms.readmarks");
         }
@@ -3659,7 +3685,7 @@
       } catch (migrationError) {
         console.warn("Legacy read-mark migration failed", migrationError);
       }
-      if (generation !== uiStateLoadGeneration || locked) return;
+      if (!current()) return;
       pendingSends = next.pendingSends;
       uiContinuityVersion = next.version;
       recoveredSendDrafts = next.recoveredSendDrafts;
@@ -3673,14 +3699,14 @@
       if (restoredStudioDraft && studioRestore) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
       loaded = true;
     } catch (e) {
-      if (generation !== uiStateLoadGeneration || locked) return;
+      if (!current()) return;
       console.warn("UI continuity load failed", e);
       // Preserve the last sealed record and block replacements until a successful load.
       // An unreadable record may contain the only retry identity for an accepted message.
       embedAutoLoad = false; // an unreadable record is not permission to start contacting anyone
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
-      if (generation === uiStateLoadGeneration && !locked) {
+      if (current()) {
         uiStateReady = loaded;
         // Anything marked read while this was in flight was held rather than written, because the
         // assignments above would have overwritten it. Replay it now, against what actually loaded.
@@ -20703,7 +20729,7 @@
   async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined, onDispatch: () => void = () => {}): Promise<SendMessageResult> {
     // Native Stop validates the original mutation too. Never dispatch this old invalid
     // payload, including a previously sealed resolution, or rewrite its diagnostics.
-    if (quarantinedPendingMutation(intent)) throw new Error("Open Pending messages to recover this saved request. It cannot be retried.");
+    if (quarantinedPendingIntent(intent)) throw new Error("Open Pending messages to recover this saved request. It cannot be retried.");
     const draftKey = chatScopeKey(intent.server, intent.channel);
     const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
     let result: SendMessageResult;
@@ -20764,7 +20790,7 @@
         resolving = { ...pendingSends[intent.token], acceptance: "ambiguous",
           resolution: intent.kind === "delete" ? "cancel" : "recover" };
         const next = { ...pendingSends, [intent.token]: resolving };
-        uiContinuityVersion = 2;
+        if (uiContinuityVersion < 2) uiContinuityVersion = 2;
         return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next }),
           commit: () => { pendingSends = next; } };
       });
@@ -20848,12 +20874,12 @@
   }
 
   async function resolvePendingMessage(token: string, action: PendingResolution): Promise<void> {
-    if (pendingSends[token] && quarantinedPendingMutation(pendingSends[token])) {
+    if (pendingSends[token] && quarantinedPendingIntent(pendingSends[token])) {
       if (action !== "recover") throw new Error("Open Pending messages to recover this saved request. This request will stay paused.");
       // This local custody move makes no claim about the original native outcome.
       // Failure keeps BOTH shelves unchanged; the saved original is never truncated.
       await savePendingDecision(token, () => {
-        const next = recoverQuarantinedMutation(pendingSends, recoveredSendDrafts, token);
+        const next = recoverQuarantinedIntent(pendingSends, recoveredSendDrafts, token);
         return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
           commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; } };
       });
@@ -20868,7 +20894,7 @@
       if (original.resolution && original.resolution !== action) throw new Error("This request already has a saved Stop decision.");
       // Check recovery capacity before committing Stop: retain the requested full copy.
       resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
-      uiContinuityVersion = 2;
+      if (uiContinuityVersion < 2) uiContinuityVersion = 2;
       const next = { ...pendingSends, [token]: { ...original, resolution: action } };
       return {
         json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next }),
@@ -20927,7 +20953,7 @@
       for (const intent of Object.values(pendingSends)) {
         if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
-        if (quarantinedPendingMutation(intent)) continue;
+        if (quarantinedPendingIntent(intent)) continue;
         if (automatic && intent.retryBlock && !intent.resolution) continue;
         // A refusal now cannot establish absence of an older invocation whose reply was lost.
         const priorMayHaveGone = intent.acceptance !== "not_accepted";
@@ -20973,8 +20999,9 @@
     let priorMayHaveGone = false;
     try {
       intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
-      if (intent?.resolution) throw new Error("This exact request is awaiting Stop confirmation. Review Pending messages before sending it again.");
       if (intent) priorMayHaveGone = intent.acceptance !== "not_accepted";
+      validateSendPayload(server, channel, text, reply_to);
+      if (intent?.resolution) throw new Error("This exact request is awaiting Stop confirmation. Review Pending messages before sending it again.");
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
         if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return "refused";
@@ -20982,6 +21009,7 @@
           text, replyTo: reply_to, expectedContext, acceptance: "not_accepted" };
         pendingSends = addPendingSend(pendingSends, intent);
       }
+      if (pendingContinuityVersion(intent) === 3) uiContinuityVersion = 3;
       // Keep the composer intact until its retry identity and payload have crossed the vault
       // barrier. A lock at either await captures the draft or this resumable intent.
       clearTimeout(uiStateSaveTimer);
@@ -21032,7 +21060,7 @@
       const kept = intent ? pendingSends[intent.token] : undefined;
       const provenUnaccepted = sendRefusedUnaccepted(errorText(e));
       const outcome: SendOutcome = !intent ? "failed"
-        : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain"
+        : !sessionCurrent() || (kept && !kept.retryBlock && !quarantinedPendingIntent(kept)) ? "uncertain"
         : priorMayHaveGone ? "uncertain"
         : mayHaveGone && !provenUnaccepted ? "uncertain"
         : "failed";
@@ -21082,7 +21110,7 @@
       }
       // Sticky v2 must cross the sealed barrier before any mutation dispatch. Old native
       // strict-v1 readers will reject this envelope instead of posting recovered edit text.
-      uiContinuityVersion = 2;
+      if (uiContinuityVersion < 2) uiContinuityVersion = 2;
       clearTimeout(uiStateSaveTimer);
       await queueUiStateSave(continuityJson);
       if (!pendingSubmissionCurrent(intent, session)) throw new Error("The message intent was taken over before dispatch.");
@@ -28257,7 +28285,7 @@
                 <summary>{Object.keys(pendingSends).length} message(s) awaiting save confirmation</summary>
                 <p>Pending messages keep their original identity. Temporary save failures retry automatically while unlocked.</p>
                 {#each Object.values(pendingSends).filter((item) => item.server === activeServerId) as item (item.token)}
-                  <p>{pendingActionLabel(item)}{quarantinedPendingMutation(item) ? " · Saved request needs recovery" : item.resolution ? " · Stop awaiting confirmation" : ""}</p>
+                  <p>{pendingActionLabel(item)}{quarantinedPendingIntent(item) ? " · Saved request needs recovery" : item.resolution ? " · Stop awaiting confirmation" : ""}</p>
                   {#if item.kind !== "delete"}<p>{item.text}</p>{/if}
                   {#if item.retryBlock}<p>Automatic retry paused. Review this message before retrying.</p>{/if}
                   {#if pendingSendErrors[item.token]}

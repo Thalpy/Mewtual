@@ -204,8 +204,8 @@ variants. Posts remain their existing shape. Mutation matching includes exact
 kind/target/text; composer matching excludes mutations. Delete permits empty text
 ONLY in its closed variant. Reactions and pins remain unchanged in this slice.
 
-The first mutation seals sticky continuity v2 BEFORE dispatch. Native load/save
-accepts v1/v2; old native `version == 1` rejects v2 rather than letting its old
+The first mutation seals at least sticky continuity v2 BEFORE dispatch. Native load/save
+accepts v1/v2/v3; old native `version == 1` rejects v2 rather than letting its old
 frontend strip mutation fields and replay edit text as a post. The new sanitizer
 rejects unknown action/version instead of coercing to Send. Preserve every other
 continuity field and saved copy on rejection. Ordinary post-only v1 remains valid.
@@ -247,7 +247,45 @@ pending original; Copy remains available. Reload accepts either shelf and ordina
 work continues. This local move establishes neither native nonacceptance nor a durable Stop.
 An invalid-ID deletion retains its full request identity with a visible action/message ID, without
 empty-text composer controls. Recovered text never publishes automatically and any later new submission must pass ordinary
-admission. No native validation, request/receipt identity or continuity version changes here.
+admission. These mutation recovery changes preserve native payload validation and request/receipt
+identity; the related Send retention below separately requires a critical envelope version.
+
+### Critical v3 for lossless Send retention
+
+The related old Send path also sealed text above 64 KiB or reply IDs above 256 UTF-8 bytes.
+Existing v1/v2 hydration silently dropped these Send rows, and even dropped native-valid reply
+IDs above 128 UTF-16 code units. Therefore retaining enlarged Send fields uses critical continuity
+v3, which old native v1/v2 readers reject before their lossy frontend can touch the payload.
+New Send admission checks the native byte bounds, Unicode and full fixed custody before queue
+insertion; payload checks precede context lookup. Invalid input stays in the composer. A new
+native-valid reply above the old 128-unit read limit also seals v3 before frontend dispatch.
+
+Read grammar follows the old queue's sealable payload: recognized kind, valid fixed custody,
+nonempty text/ID where applicable and the closed delete shape, bounded by the existing
+32-row/256 KiB shelf. Native-invalid byte lengths derive non-dispatch quarantine for sends,
+edits and deletions; neither positive IPC nor Stop receives those originals. Known invalid Send
+text/replies use the same lossless Copy/recovered shelf; native-valid long replies retain exact
+token/context/payload and normal retry, including earlier acceptance uncertainty. Malformed fixed
+custody, count/byte overflow, present unsupported collection shapes (including null), and unknown
+kinds/versions fail closed with the sealed copy retained,
+instead of dropping rows or truncating the queue. No positive or Stop payload validation is relaxed.
+
+Loading a record which needs v3, or already has v3, drains previously admitted continuity writes,
+reads the sealed root, then queues a covering save of that complete original root with only its
+version changed to 3. UI readiness and new frontend dispatch stay blocked until acknowledgement.
+Even an already-v3 root is re-saved: observing bytes after a failed post-rename parent sync is not
+proof of durability. Failure retains the full original payload and blocks readiness until retry.
+Generation and per-load attempt checks surround reads, queued save admission and completion;
+superseded same-session loads cannot expose stale state. All version assignments are monotonic,
+including mutation/Stop conversion, legacy read-mark migration and empty queues. Unknown v4 is
+refused. The native envelope extension accepts v3 without changing request or receipt bytes.
+This metadata barrier does not retract native transport work already admitted under a valid saved
+Send; existing native membership, session, token and publication guards still own that obligation.
+Compatibility assumes a supported fresh startup with matching bundled frontend/native versions and
+exclusive mounted-vault ownership. The new frontend never downgrades its envelope. The native
+envelope reader still supports old versions; this is not a universal ban on a stale independently
+running frontend writing an older envelope. Mixed old/new development or HMR runtimes sharing an
+already open UI session are unsupported, as is a rollback of the authorizing stored bytes themselves.
 
 ## Required verification
 

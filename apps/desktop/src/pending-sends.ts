@@ -24,6 +24,7 @@ export type PendingSends = Record<string, PendingSend>;
 export const MAX_PENDING_SENDS = 32;
 export const MAX_PENDING_SEND_BYTES = 256 * 1024;
 export const MAX_MUTATION_TEXT_BYTES = 64 * 1024;
+export const MAX_SEND_REPLY_BYTES = 256;
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
 
 /** UTF-16 length is a cheap lower bound; only encode a bounded candidate. */
@@ -43,6 +44,16 @@ function wellFormedUnicode(value: string): boolean {
   return true;
 }
 
+/** Native Send bounds, checked before looking up context or changing pending custody. */
+export function validateSendPayload(server: number, channel: string, text: string, replyTo: string): void {
+  if (!fitsUtf8(text, MAX_MUTATION_TEXT_BYTES)) throw new Error("Message text exceeds the 64 KiB UTF-8 limit. Your composer text has been kept.");
+  if (!Number.isSafeInteger(server) || server < 0 || !/^(0|[1-9][0-9]{0,38})$/.test(channel)
+    || BigInt(channel) >= (1n << 128n) || !text.trim() || !fitsUtf8(replyTo, MAX_SEND_REPLY_BYTES)) {
+    throw new Error("Invalid message or reply target. Your composer text has been kept.");
+  }
+  if (!wellFormedUnicode(text) || !wellFormedUnicode(replyTo)) throw new Error("This message contains an incomplete Unicode character. Your composer text has been kept.");
+}
+
 /** Check user input before obtaining context, minting a token, or sealing caller custody. */
 export function validateMutationPayload(server: number, channel: string, messageId: string,
   kind: "edit" | "delete", text: string): void {
@@ -60,37 +71,59 @@ export function validateMutationPayload(server: number, channel: string, message
 }
 
 /** An admission check, never a migration of already sealed invalid requests. */
-function validatePendingMutation(intent: PendingSend): void {
-  if (intent.kind !== "edit" && intent.kind !== "delete") return;
-  validateMutationPayload(intent.server, intent.channel, intent.messageId, intent.kind, intent.text);
-  if (!/^[a-f0-9]{32}$/.test(intent.token) || !/^[a-f0-9]{64}$/.test(intent.expectedContext)
-    || !/^[a-f0-9]{64}$/.test(intent.target) || intent.replyTo !== "") {
-    throw new Error("Invalid message change identity. Your editor text has been kept.");
+function validatePendingIntent(intent: PendingSend): void {
+  if (intent.kind === "edit" || intent.kind === "delete") {
+    validateMutationPayload(intent.server, intent.channel, intent.messageId, intent.kind, intent.text);
+    if (!/^[a-f0-9]{64}$/.test(intent.target) || intent.replyTo !== "") throw new Error("Invalid message change identity. Your editor text has been kept.");
+  } else {
+    if (intent.kind !== undefined && intent.kind !== "send") throw new Error("Unsupported pending message action.");
+    validateSendPayload(intent.server, intent.channel, intent.text, intent.replyTo);
+  }
+  if (!/^[a-f0-9]{32}$/.test(intent.token) || !/^[a-f0-9]{64}$/.test(intent.expectedContext)) {
+    throw new Error("Invalid message retry identity. Your text has been kept.");
   }
 }
 
 /**
- * Older frontends could seal oversized edits or byte-oversized target IDs that native
+ * Older frontends could seal oversized Sends/edits or byte-oversized reply/target IDs that native
  * authoring AND Stop refuse. The old queue's admission enforced only aggregate storage,
  * so even IDs beyond the old hydrator's 128-code-unit check can already be sealed.
  * Derive quarantine from the immutable payload, never from a saved permission flag.
  * It establishes neither acceptance nor a native Stop; only lossless local recovery is safe.
  */
-export function quarantinedPendingMutation(intent: PendingSend): boolean {
-  return (intent.kind === "edit" || intent.kind === "delete")
-    && (!fitsUtf8(intent.messageId, 128) || (intent.kind === "edit" && !fitsUtf8(intent.text, MAX_MUTATION_TEXT_BYTES)));
+export function quarantinedPendingIntent(intent: PendingSend): boolean {
+  if (intent.kind === "edit" || intent.kind === "delete") return !fitsUtf8(intent.messageId, 128)
+    || (intent.kind === "edit" && !fitsUtf8(intent.text, MAX_MUTATION_TEXT_BYTES));
+  return !fitsUtf8(intent.text, MAX_MUTATION_TEXT_BYTES) || !fitsUtf8(intent.replyTo, MAX_SEND_REPLY_BYTES);
 }
 
-export function sanitizePendingSends(value: unknown, version: 1 | 2 = 1): PendingSends {
+/**
+ * V3 is critical: existing v2 readers silently dropped enlarged Send fields. Even a
+ * native-valid 150-character reply needs v3 because those readers imposed 128 units.
+ * This classifies compatibility only; it confers no native publication authority.
+ */
+export function pendingContinuityVersion(intent: PendingSend): 1 | 2 | 3 {
+  if ((intent.kind === undefined || intent.kind === "send")
+    && (quarantinedPendingIntent(intent) || intent.replyTo.length > 128)) return 3;
+  return intent.kind === "edit" || intent.kind === "delete" || intent.resolution ? 2 : 1;
+}
+
+export function sanitizePendingSends(value: unknown, version: 1 | 2 | 3 = 1): PendingSends {
   const result: PendingSends = {};
-  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  // Missing fields predate the queue. A present unsupported collection, including null,
+  // is not an empty queue: it may hold the only caller identity and must stay sealed.
+  if (value === undefined) return result;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Saved chat request collection is unsupported. The sealed copy has been kept.");
+  }
   let used = 0;
   for (const [token, raw] of Object.entries(value)) {
     if (Object.keys(result).length >= MAX_PENDING_SENDS) {
-      if (version === 2) throw new Error("Saved chat actions exceed pending capacity. The sealed copy has been kept.");
-      break;
+      throw new Error("Saved chat actions exceed pending capacity. The sealed copy has been kept.");
     }
-    if (!/^[a-f0-9]{32}$/.test(token) || !raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    if (!/^[a-f0-9]{32}$/.test(token) || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("Saved chat request has invalid custody. The sealed copy has been kept.");
+    }
     const entry = raw as Record<string, unknown>;
     // An unknown action must never become a post. Refuse the load so the only sealed
     // identity survives, rather than overwriting it with a sanitized empty queue.
@@ -105,15 +138,12 @@ export function sanitizePendingSends(value: unknown, version: 1 | 2 = 1): Pendin
       || typeof entry.channel !== "string" || !/^(0|[1-9][0-9]{0,38})$/.test(entry.channel)
       || BigInt(entry.channel) >= (1n << 128n)
       || typeof entry.expectedContext !== "string" || !/^[a-f0-9]{64}$/.test(entry.expectedContext)
-      // Only known old mutation admission bugs are recoverable. The complete original counts
-      // against the existing aggregate budget; unknown actions/custody remain fail closed.
+      // Old queue admission enforced only aggregate storage, for both Sends and mutations.
+      // Keep known originals readable; invalid native byte bounds derive quarantine below.
+      // The existing aggregate budget still applies; malformed fixed custody fails closed.
       || typeof entry.text !== "string" || (entry.kind !== "delete" && !entry.text.trim())
-      || (entry.kind !== "edit" && !fitsUtf8(entry.text, MAX_MUTATION_TEXT_BYTES))
-      || typeof entry.replyTo !== "string" || entry.replyTo.length > 128) {
-      if (entry.kind === "edit" || entry.kind === "delete" || entry.resolution !== undefined) {
-        throw new Error("Saved chat action has invalid custody. The sealed copy has been kept.");
-      }
-      continue;
+      || typeof entry.replyTo !== "string") {
+      throw new Error("Saved chat action has invalid custody. The sealed copy has been kept.");
     }
     if ((entry.kind === "edit" || entry.kind === "delete") && (typeof entry.messageId !== "string"
       // Read the old SEALABLE payload, not its already-lossy per-field hydration bound.
@@ -135,8 +165,7 @@ export function sanitizePendingSends(value: unknown, version: 1 | 2 = 1): Pendin
     // a refusal must not push an existing payload over the hydration budget and lose its token.
     used += bytes(intent);
     if (used > MAX_PENDING_SEND_BYTES) {
-      if (version === 2) throw new Error("Saved chat actions exceed pending storage. The sealed copy has been kept.");
-      break;
+      throw new Error("Saved chat actions exceed pending storage. The sealed copy has been kept.");
     }
     if (entry.retryBlock !== undefined) {
       intent.retryBlock = ["invalid", "conflict", "context_changed"].includes(String(entry.retryBlock))
@@ -173,10 +202,10 @@ export function resolvePendingSend(
  * custody/diagnostic fields, even an earlier saved Stop decision. The caller seals both
  * shelves atomically before committing memory. This is deliberately separate from Stop.
  */
-export function recoverQuarantinedMutation(pending: PendingSends, recovered: PendingSends, token: string)
+export function recoverQuarantinedIntent(pending: PendingSends, recovered: PendingSends, token: string)
   : { pending: PendingSends; recovered: PendingSends } {
   const intent = pending[token];
-  if (!intent || !quarantinedPendingMutation(intent)) throw new Error("This saved request does not need recovery.");
+  if (!intent || !quarantinedPendingIntent(intent)) throw new Error("This saved request does not need recovery.");
   const nextRecovered = retainPendingCopy(recovered, intent);
   const nextPending = { ...pending };
   delete nextPending[token];
@@ -184,7 +213,8 @@ export function recoverQuarantinedMutation(pending: PendingSends, recovered: Pen
 }
 
 export function pendingAcceptanceWarning(intent: PendingSend): string {
-  if (quarantinedPendingMutation(intent)) {
+  if (quarantinedPendingIntent(intent)) {
+    if (intent.kind !== "edit" && intent.kind !== "delete") return "This saved message cannot be retried. Copy the text or move it to Saved drafts. Earlier attempts remain unconfirmed.";
     if (intent.kind === "delete") return "This saved deletion has a target that cannot be retried. Keep the request in Saved drafts. Earlier attempts remain unconfirmed.";
     return intent.kind === "edit" && !fitsUtf8(intent.messageId, 128)
       ? "This saved edit has a target that cannot be retried. Copy the text or keep the request in Saved drafts. Earlier attempts remain unconfirmed."
@@ -201,7 +231,7 @@ export function pendingAcceptanceWarning(intent: PendingSend): string {
 
 /** Refuse capacity pressure; never evict an unresolved send or give it another retry token. */
 export function addPendingSend(current: PendingSends, intent: PendingSend): PendingSends {
-  validatePendingMutation(intent);
+  validatePendingIntent(intent);
   return retainPendingCopy(current, intent);
 }
 

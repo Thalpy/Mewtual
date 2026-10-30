@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedMutation, quarantinedPendingMutation, validateMutationPayload, sendRefusedUnaccepted } from "./pending-sends.ts";
+import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted } from "./pending-sends.ts";
 import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
 import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.ts";
 import { NativeVaultLockCoordinator } from "./window-close.ts";
@@ -30,10 +30,10 @@ function productionCloseCallback() {
 
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown) {
-  const dependencies = { initial, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedMutation, quarantinedPendingMutation, validateMutationPayload, sendRefusedUnaccepted,
+  const dependencies = { initial, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
     MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, VideoReviewQueue };
   return new Function(...Object.keys(dependencies), `
-    let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateSaveTimer;
+    let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = {}, recoveredSendDrafts = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
@@ -48,7 +48,7 @@ export function pendingManagerApp(initial: unknown) {
     let servers = [], cur = null, activeServerId = null, draft = "", replyingTo = "", draftRevisions = {};
     let pendingSendNonce = 0, mentionQuery = null, chatStickToBottom = false, tailLoaded = false;
     let messageWindowScope = "", messages = [], pageTotal = 0, replyingToRow, error = "", warnings = [];
-    let sealed = JSON.stringify(sanitizeUiContinuity(initial)), writes = [], savesFail = false, gates = [], submissions = [], stops = [];
+    let sealed = JSON.stringify(sanitizeUiContinuity(initial)), writes = [], savesFail = false, gates = [], readGates = [], submissions = [], stops = [];
     let nativeWrites = Promise.resolve(), nativeLocked = false, nativeGeneration = 1;
     let closeHandler, closeCalls = [], destroyCalls = 0, restartCalls = 0, closeTimers = new Map();
     const hostSetTimeout = globalThis.setTimeout, hostClearTimeout = globalThis.clearTimeout;
@@ -71,7 +71,7 @@ export function pendingManagerApp(initial: unknown) {
     const chatScopeKey = (s,c) => s + ":" + c;
     const chanKey = () => activeServerId === null || !cur?.active ? null : chatScopeKey(activeServerId,cur.active);
     const invoke = async (command, args) => {
-      if (command === "get_ui_state") return sealed;
+      if (command === "get_ui_state") { const captured = sealed; const gate = readGates.shift(); if (gate) await gate; return captured; }
       if (command === "durable_send_context") { contextCalls++; if (contextGate) await contextGate; return "a".repeat(64); }
       if (command === "durable_mutation_context") { contextCalls++; if (contextGate) await contextGate; return {context: "a".repeat(64), target: "b".repeat(64)}; }
       if (command === "close_vault_window" || command === "lock_session") {
@@ -125,6 +125,7 @@ export function pendingManagerApp(initial: unknown) {
       saveImmediately: saveUiStateImmediately,
       replaceSealed(value) { sealed = JSON.stringify(value); },
       holdSave: promise => gates.push(promise), failSaves: yes => savesFail = yes,
+      holdLoad: promise => readGates.push(promise),
       holdContext: promise => contextGate = promise,
       answer: fn => submitAnswer = fn,
       answerStop: fn => stopAnswer = fn,
@@ -133,6 +134,7 @@ export function pendingManagerApp(initial: unknown) {
       manager: value => pendingManagerOpen = value,
       conversation(server, channel) { activeServerId = server; cur = channel === null ? null : { active: channel }; draft = chanKey() ? drafts[chanKey()] ?? "" : ""; },
       type(text) { draft = text; const key = chanKey(); if (key) { drafts[key] = text; draftRevisions[key] = (draftRevisions[key] ?? 0) + 1; } },
+      reply(id) { replyingTo = id; },
       add(intent) { pendingSends = addPendingSend(pendingSends, intent); },
       bulkyPreferences() { latePast = { fixture: "x".repeat(1024*1024) }; },
       lock() { lockScreen(); },
@@ -142,7 +144,7 @@ export function pendingManagerApp(initial: unknown) {
       replaceUiGeneration() { uiStateLoadGeneration++; },
       async unlock() { await nativeVaultLock.settle(); nativeVaultLock.reset(); nativeLocked = false; nativeGeneration++; locked = false; uiStateLoadGeneration++; return loadUiContinuity(uiStateLoadGeneration); },
       done() { clearTimeout(uiStateSaveTimer); },
-      state() { return { pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, editingId, editDraft, sealed: JSON.parse(sealed), writes, submissions, stops, warnings, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, videoScopeEpoch, videoReview: videoReviews.current }; }
+      state() { return { pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, editingId, editDraft, sealed: JSON.parse(sealed), writes, submissions, stops, warnings, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, uiStateReady, videoScopeEpoch, videoReview: videoReviews.current }; }
     };
   `)(...Object.values(dependencies));
 }

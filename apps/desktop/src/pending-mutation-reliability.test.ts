@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { addPendingSend, durableStopOriginal, MAX_PENDING_SENDS, pendingSendRetryBlock,
-  quarantinedPendingMutation, sanitizePendingSends, sendRefusedUnaccepted, validateMutationPayload,
+  quarantinedPendingIntent, sanitizePendingSends, sendRefusedUnaccepted, validateMutationPayload,
   type PendingSend } from "./pending-sends.ts";
 import { deferred, pendingManagerApp, settle } from "./pending-manager-fixture.test.ts";
 
@@ -75,7 +75,7 @@ test("old oversized edit hydrates losslessly but no retry, direct submit or Stop
   for (const resolution of [undefined, "recover", "cancel"] as const) {
     const { resolution: _priorResolution, ...base } = oversized;
     const original = { ...base, ...(resolution ? { resolution } : {}) };
-    assert.equal(quarantinedPendingMutation(original), true);
+    assert.equal(quarantinedPendingIntent(original), true);
     assert.deepEqual(sanitizePendingSends(collection(original), 2), collection(original));
     const app = pendingManagerApp({ version: 2, pendingSends: collection(original), drafts: { "7:9": "ordinary draft" } });
     await app.hydrate(); await app.retry(true); await app.retry();

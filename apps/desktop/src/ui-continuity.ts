@@ -1,11 +1,11 @@
 import { sanitizeStatusCursor, type StatusCursors } from "./statusread.ts";
 import { MAX_LATE_PAST, type LatePast, type ReadMark } from "./unread.ts";
 import { sanitizeFileTrustPolicies, type FileTrustPolicies } from "./file-trust.ts";
-import { sanitizePendingSends, type PendingSends } from "./pending-sends.ts";
+import { pendingContinuityVersion, sanitizePendingSends, type PendingSends } from "./pending-sends.ts";
 import { decodeStudioDraft } from "./studio-draft.ts";
 
 export type UiContinuity = {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   pendingSends: PendingSends;
   /** Explicitly recovered text, independent of whether its original conversation still exists. */
   recoveredSendDrafts: PendingSends;
@@ -63,12 +63,12 @@ function record(value: unknown): Record<string, unknown> {
 /** Treat native continuity JSON as untrusted even though the bridge also validates its envelope. */
 export function sanitizeUiContinuity(value: unknown): UiContinuity {
   const root = record(value);
-  // Unknown envelopes must stay sealed. V2 is sticky after the first mutation/Stop:
-  // an old strict-v1 native reader then refuses instead of replaying edit text as a post.
-  if (root.version !== undefined && root.version !== 1 && root.version !== 2) {
+  // Critical versions are sticky: v2 protects mutation/Stop custody from v1, while v3
+  // protects enlarged Send retention from the existing v2 reader's silent field drops.
+  if (root.version !== undefined && root.version !== 1 && root.version !== 2 && root.version !== 3) {
     throw new Error("Saved UI continuity version is unsupported. The sealed copy has been kept.");
   }
-  const version = root.version === 2 ? 2 : 1;
+  let version: 1 | 2 | 3 = root.version === 3 ? 3 : root.version === 2 ? 2 : 1;
   const drafts: Record<string, string> = {};
   const readMarks: Record<string, ReadMark> = {};
   for (const [key, item] of Object.entries(record(root.drafts)).slice(0, MAX_ENTRIES)) {
@@ -113,6 +113,7 @@ export function sanitizeUiContinuity(value: unknown): UiContinuity {
   const embedAutoLoad = root.embedAutoLoad === true;
   const pendingSends = sanitizePendingSends(root.pendingSends, version);
   const recoveredSendDrafts = sanitizePendingSends(root.recoveredSendDrafts, version);
+  if ([...Object.values(pendingSends), ...Object.values(recoveredSendDrafts)].some(intent => pendingContinuityVersion(intent) === 3)) version = 3;
   if (root.studioDraft !== undefined && root.studioDraft !== null && typeof root.studioDraft !== "string") throw new Error("Saved Studio edits have an invalid format. The sealed copy has been kept.");
   const studioDraft = typeof root.studioDraft === "string" ? root.studioDraft : null;
   if (studioDraft !== null) decodeStudioDraft(studioDraft);

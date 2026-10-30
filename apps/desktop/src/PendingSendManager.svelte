@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { pendingAcceptanceWarning, pendingActionLabel, quarantinedPendingMutation, type PendingSends, type PendingResolution } from "./pending-sends.ts";
+  import { pendingAcceptanceWarning, pendingActionLabel, quarantinedPendingIntent, type PendingSends, type PendingResolution } from "./pending-sends.ts";
   let { pending, recovered, busy = false, ready, conversationName, activeLabel = null,
     onresolve, onuse, onremove }:
     { pending: PendingSends; recovered: PendingSends; busy?: boolean; ready: boolean;
@@ -42,13 +42,13 @@
       {#if item.replyTo}<p>Original reply: {item.replyTo}</p>{/if}
       {#if item.retryBlock && !item.resolution}<p>Automatic retry paused: {item.retryBlock === "context_changed" ? "Conversation changed" : item.retryBlock === "conflict" ? "Retry identity conflict" : "Request cannot be accepted"}.</p>{/if}
       <p>{pendingAcceptanceWarning(item)}</p>
-      {#if quarantinedPendingMutation(item) && item.kind !== "delete"}<button type="button" onclick={() => copy(item.text)}>Copy text</button>{/if}
+      {#if quarantinedPendingIntent(item) && item.kind !== "delete"}<button type="button" onclick={() => copy(item.text)}>Copy text</button>{/if}
       {#if confirmation?.token === item.token && confirmation.action !== "remove"}
-        <p>{quarantinedPendingMutation(item) ? (item.kind === "delete" ? "Keep the complete saved request in Saved drafts? This request will stay paused." : "Keep the full text and request in Saved drafts? This request will stay paused.") : confirmation.action === "recover" ? "Keep the full text in saved drafts and stop retrying this request?" : "Stop retrying and remove the stored request and its text after the vault saves? Recover to a saved draft first if you want to keep this copy."}</p>
+        <p>{quarantinedPendingIntent(item) ? (item.kind === "delete" ? "Keep the complete saved request in Saved drafts? This request will stay paused." : "Keep the full text and request in Saved drafts? This request will stay paused.") : confirmation.action === "recover" ? "Keep the full text in saved drafts and stop retrying this request?" : "Stop retrying and remove the stored request and its text after the vault saves? Recover to a saved draft first if you want to keep this copy."}</p>
         <button type="button" disabled={busy || !ready} onclick={confirm}>{confirmation.action === "recover" ? "Confirm recovery" : "Confirm stop retrying"}</button>
         <button type="button" disabled={busy} onclick={() => confirmation = null}>Keep pending</button>
       {:else}
-        {#if quarantinedPendingMutation(item)}
+        {#if quarantinedPendingIntent(item)}
           <button type="button" disabled={busy || !ready} onclick={() => confirmation = { token: item.token, action: "recover" }}>{item.kind === "delete" ? "Recover saved request" : "Recover saved text"}</button>
         {:else}
           {#if item.kind !== "delete"}<button type="button" disabled={busy || !ready || !!item.resolution} onclick={() => confirmation = { token: item.token, action: "recover" }}>Recover to saved draft</button>{/if}

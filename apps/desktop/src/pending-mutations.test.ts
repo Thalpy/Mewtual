@@ -25,7 +25,7 @@ test("v1 sends retain their original shape while v2 action and Stop hydration re
   assert.equal(state.version, 2);
   assert.equal(planLegacyReadMarkMigration(state, '{"legacy":1}').state.version, 2);
   assert.deepEqual(sanitizePendingSends(collection(deletion), 2), collection(deletion));
-  for (const input of [{ version: 3 }, { version: "2" },
+  for (const input of [{ version: 4 }, { version: "2" },
     { version: 1, pendingSends: collection(edit) }, { version: 1, pendingSends: collection({ ...post, resolution: "cancel" }) },
     ...["future", ["edit"], {}, null].map(kind => ({ version: 2, pendingSends: collection({ ...edit, kind } as unknown as PendingSend) })),
     { version: 2, pendingSends: collection({ ...post, action: "edit" } as unknown as PendingSend) },
@@ -124,7 +124,7 @@ test("unchanged text still reaches native once for a durable no-op receipt and a
 test("unknown continuity action/version preserves all sealed bytes and blocks replacement saves", async () => {
   const app = pendingManagerApp({ version: 2, drafts: { "7:9": "keep draft" }, pendingSends: collection(edit) });
   await app.hydrate();
-  for (const saved of [{ version: 3, drafts: { "7:9": "future draft" }, pendingSends: collection(edit) },
+  for (const saved of [{ version: 4, drafts: { "7:9": "future draft" }, pendingSends: collection(edit) },
     { version: 2, drafts: { "7:9": "future draft" }, pendingSends: collection({ ...edit, kind: "future" } as unknown as PendingSend) }]) {
     app.replaceSealed(saved); const writes = app.state().writes.length;
     await app.hydrate(); assert.equal(await app.saveImmediately(), false);

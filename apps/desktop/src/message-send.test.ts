@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import ts from "typescript";
-import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted } from "./pending-sends.ts";
+import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted } from "./pending-sends.ts";
 import { readFileSync } from "node:fs";
 import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult } from "./message-send.ts";
 
@@ -54,7 +54,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
   const body = ts.transpile(source.slice(source.indexOf("  async function submitPendingSend("),
     source.indexOf("  // Inline edit of one of your own messages.")), { target: ts.ScriptTarget.ES2022 });
-  return new Function("submit", "refresh", "context", "onSeal", "sendAndRefresh", "persistenceWarning", "sendOutcome", "addPendingSend", "durableStopOriginal", "durableStopTerminal", "retiredStopWarning", "matchingPendingSend", "samePendingIntent", "pendingSendRetryBlock", "resolvePendingSend", "sendRefusedUnaccepted", `
+  return new Function("submit", "refresh", "context", "onSeal", "sendAndRefresh", "persistenceWarning", "sendOutcome", "addPendingSend", "durableStopOriginal", "durableStopTerminal", "retiredStopWarning", "matchingPendingSend", "samePendingIntent", "pendingSendRetryBlock", "resolvePendingSend", "recoverQuarantinedIntent", "quarantinedPendingIntent", "validateSendPayload", "pendingContinuityVersion", "sendRefusedUnaccepted", `
     let draft = "one message", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
@@ -79,7 +79,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
       lock() { sealed = JSON.parse(continuityJson()); locked = true; uiStateLoadGeneration++; draft = ""; drafts = {}; pendingSends = {}; sending = false; pendingSendNonce++; },
       state() { return { draft, drafts, pendingSends, recoveredSendDrafts, sealed, warnings, error, sending }; }
     };
-  `)(submit, refresh, context, onSeal, sendAndRefresh, persistenceWarning, sendOutcome, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted);
+  `)(submit, refresh, context, onSeal, sendAndRefresh, persistenceWarning, sendOutcome, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted);
 }
 
 test("composer keeps the draft until its retry identity can be sealed", async () => {
