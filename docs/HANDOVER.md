@@ -1,5 +1,25 @@
 # Mewtual; Handover
 
+## Chat V2 production continuation (30 October; implementation in progress)
+
+The new branch starts from validated PR82 head `5b057afc`; the complete results recorded below
+belong to that earlier runtime checkpoint, not this new implementation. Live typed dispatch,
+canonical historical-authority archive, migration and the full privileged admin view remain open.
+
+The first read-index slice now captures original signed-log prefixes and hashes/verifies them in
+bounded turns without cloning whole original frames. Seven focused regressions pass, including
+50 writers appending between every visit, original create/edit/delete frames, huge originals,
+bad signatures and foreign signed scopes after real snapshot restore, same-count replacement,
+partial-edit panic without transaction closing, and quota/page refusals. Actual-diff review is
+clear. This is explicitly not complete graph inventory, a native authorization boundary, or an
+activated admin panel. Applied and orphaned unattributed changes need separate bounded observation;
+the current upstream getters clone/reconstruct whole histories and must not be used per page.
+
+Factory/canonical owner evidence is progressing in isolated sibling worktrees. Its old bounded
+checkpoint profile is nonactivatable for long-lived 20/50-member groups; scalable proof/cold-archive
+format and actual publication/restore consumers are still required. No full suites have been run
+for this new branch yet; primary will run them after the production continuation is integrated.
+
 ## PR82 follow-up review corrections (30 October; local gates passed)
 
 The five findings against `6fc7ae6d` are corrected in the text-chat branch. Complete Send/Edit/Delete

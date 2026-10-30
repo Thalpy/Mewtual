@@ -28,6 +28,13 @@ use crate::op::{SealedOp, SignedOp};
 use crate::ReplError;
 use crate::{CheckpointOrigin, VerifiedCheckpoint};
 
+mod history;
+pub use history::{
+    SignedHistoryError, SignedHistoryIndex, SignedHistoryProgress, SignedHistoryRow,
+    HISTORY_HASH_BYTES_PER_TURN, HISTORY_RECORDS_PER_TURN, HISTORY_SIGNATURES_PER_TURN,
+    HISTORY_SIGNATURE_BYTES_PER_TURN,
+};
+
 /// Cap on how many changes one [`EncryptedDoc::holders_of`] query may ask about; each
 /// target takes one bit of the propagation mask the single DAG pass carries.
 pub const MAX_DELIVERY_TARGETS: usize = 64;
@@ -213,6 +220,10 @@ mod saved_local_chat_tests {
 
 /// One encrypted, replicated CRDT document.
 pub struct EncryptedDoc {
+    /// Nonserialized identity of this exact retained log. A restored/replaced document receives
+    /// a fresh allocation even when counts and bytes match. An index retains the allocation,
+    /// preventing address-reuse ABA without ambient randomness or a portable authority token.
+    history_owner: std::sync::Arc<()>,
     doc_type: DocType,
     doc_id: u128,
     doc: AutoCommit,
@@ -269,6 +280,7 @@ impl EncryptedDoc {
         let mut doc = AutoCommit::new();
         doc.set_actor(ActorId::from(actor.as_bytes().to_vec()));
         Self {
+            history_owner: std::sync::Arc::new(()),
             doc_type,
             doc_id,
             doc,
@@ -853,6 +865,7 @@ impl EncryptedDoc {
         };
         d.finish().map_err(|_| ReplError::Malformed)?;
         Ok(Self {
+            history_owner: std::sync::Arc::new(()),
             doc_type,
             doc_id,
             doc,

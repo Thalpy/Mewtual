@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Retained signed-log prefix inspection (30 October; production reader in progress)
+
+`EncryptedDoc::signed_history_index(max_records)` captures an immutable upper bound of the private
+append-only original log without cloning the graph or original payloads. The host prepays the
+aggregate metadata quota, including tree/row/key overhead and the incremental hasher, and supplies
+session, current full-key role, namespace and Actor/store authorization before every read. The
+index grants none of those permissions. New appends do not restart the captured prefix; a restored
+or replaced document has a new nonserialized allocation identity and refuses old references.
+
+Each `advance` hashes at most 512 KiB, completes at most 128 originals, admits at most 512 KiB
+of signature-preimage bytes and performs at most 16 signature checks. These are logical work
+charges; the host's memory reservation separately covers allocator capacity. Oversized originals resume their
+hash rather than encode/clone the whole frame. Large or unsupported verification terminates with
+an explicit not-checked label. Pages contain at most 32 fixed metadata rows in complete-frame CID
+order; exact detail chunks remain capped at 64 KiB. Identical complete frames deduplicate, whereas
+different signatures, messages, concurrent branches and edits remain distinct originals.
+
+Completion is **only this captured signed-log prefix**. It says nothing about unsigned/unattributed
+applied changes, orphan queues, membership or full-ledger coverage. Graph observation and the
+privileged native/App consumers remain in progress. A known row count must use completed unique
+rows, not the physical captured record count. No getter closes an AutoCommit transaction.
+
 ## Native unlock generation contract (30 October)
 
 `lock_session` returns `{ continuity_error, generation }`, where `generation` is the canonical
