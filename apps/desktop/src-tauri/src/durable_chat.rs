@@ -1,6 +1,10 @@
 //! Native custody for a chat operation's durable acceptance barrier.
 use super::*;
-use catcoms_app::durable_chat::{DurableSendLease, DurableSendRequest};
+use catcoms_app::durable_chat::{
+    DurableChatRequest, DurableMutationAction, DurableMutationRequest, DurableSendLease,
+    DurableSendOutcome, DurableSendRequest, DurableStopRequest,
+};
+use catcoms_sync::durable_chat::ChatDisposition;
 
 fn fixed_hex<const N: usize>(text: &str) -> Result<[u8; N], String> {
     if text.len() != N * 2
@@ -21,6 +25,7 @@ fn authorize(
     server: u64,
     instance: u64,
     generation: u64,
+    positive: Option<&catcoms_app::durable_chat::DurableChatIdentity>,
 ) -> Result<DurableSendLease, String> {
     let busy = || "Message storage is busy; retry this pending message.".to_string();
     // The actor already owns Ready. Waiting for a native lock here can deadlock another actor
@@ -50,6 +55,17 @@ fn authorize(
     {
         return Err("The conversation changed before this message could be saved.".into());
     }
+    if let Some(identity) = positive {
+        let store = store
+            .as_ref()
+            .ok_or_else(|| "vault is not mounted".to_string())?;
+        if store
+            .has_chat_stop_fence(server, identity)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("CHAT_SEND_STOPPED: this retired token is permanently fenced; repeat Stop to resolve its saved terminal".into());
+        }
+    }
     Ok(DurableSendLease::new(
         store,
         server,
@@ -74,24 +90,23 @@ pub(super) async fn send(
     let channel = channel
         .parse()
         .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
-    let (actor, instance) = actor_instance_of(state, server)
-        .await
-        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
-    let actor = op.bind_actor(actor);
+    let mut captured = None;
     let (token, expected_context) = match (retry_token, expected_context) {
         (Some(token), Some(context)) => (
             fixed_hex(&token).map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?,
             fixed_hex(&context).map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?,
         ),
-        // Older local callers still cross the same save barrier. Updated callers retain the
-        // token before invocation so they can also recover an ambiguous IPC completion.
         (None, None) => {
-            let mut token = [0u8; 16];
+            let (actor, instance) = actor_instance_of(state, server)
+                .await
+                .map_err(|failure| op.fail(failure.code(), failure.message()))?;
+            let mut token = [0; 16];
             OsCryptoRng.fill_bytes(&mut token);
             let context = actor
                 .durable_send_context()
                 .await
                 .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
+            captured = Some((actor, instance));
             (token, context)
         }
         _ => {
@@ -101,39 +116,65 @@ pub(super) async fn send(
             ))
         }
     };
+    let request = DurableSendRequest {
+        token,
+        expected_context,
+        channel,
+        text,
+        reply_to: reply_to.unwrap_or_default(),
+    };
+    request
+        .validate()
+        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
+    let original = DurableChatRequest::Send(request.clone());
+    if let Some(terminal) = stop_request_at(state, server, original.clone(), generation, true)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?
+    {
+        op.succeeded(if terminal.persistence == PersistOutcome::Durable {
+            "CHANNEL.SEND.RETIRED_FENCE_PERSISTED"
+        } else {
+            "CHANNEL.SEND.RETIRED_FENCE_PENDING"
+        });
+        return Ok(terminal);
+    }
+    let (actor, instance) = match captured {
+        Some(captured) => captured,
+        None => actor_instance_of(state, server)
+            .await
+            .map_err(|failure| op.fail(failure.code(), failure.message()))?,
+    };
+    let actor = op.bind_actor(actor);
+    let identity = original.retired_identity();
     let ready = actor
-        .prepare_durable_send(DurableSendRequest {
-            token,
-            expected_context,
-            channel,
-            text,
-            reply_to: reply_to.unwrap_or_default(),
-        })
+        .prepare_durable_send(request)
         .await
         .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
-    let lease = authorize(state, server, instance, generation)
-        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
+    let lease = match authorize(state, server, instance, generation, Some(&identity)) {
+        Ok(lease) => lease,
+        Err(error) if error.starts_with("CHAT_SEND_STOPPED:") => {
+            // Release the original Ready and all failed final-lease custody before negative
+            // recovery. The same request may only rewrite an already existing exact fence.
+            drop(ready);
+            return stop_request_at(state, server, original, generation, true)
+                .await
+                .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?
+                .ok_or_else(|| op.fail(codes::CHAT_SEND_REJECTED, "retired fence disappeared"));
+        }
+        Err(error) => return Err(op.fail(codes::CHAT_SEND_REJECTED, error)),
+    };
     let outcome = ready
         .commit(lease)
         .await
         .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
-    op.succeeded(if outcome.durable {
-        "CHANNEL.SEND.PERSISTED"
-    } else {
+    op.succeeded(if !outcome.durable {
         "CHANNEL.SEND.PREPARED_PENDING"
+    } else if outcome.disposition != ChatDisposition::Committed {
+        "CHANNEL.SEND.STOPPED"
+    } else {
+        "CHANNEL.SEND.PERSISTED"
     });
-    Ok(SendMessageResult {
-        accepted: outcome.durable,
-        persistence: if outcome.durable {
-            PersistOutcome::Durable
-        } else {
-            PersistOutcome::Pending {
-                reason: PersistFailure::WriteFailed,
-            }
-        },
-        message_id: Some(outcome.message_id),
-        replayed: outcome.replayed,
-    })
+    Ok(response(outcome))
 }
 
 #[tauri::command]
@@ -157,12 +198,413 @@ pub(super) async fn durable_send_context(
     Ok(hex::encode(context))
 }
 
+fn disposition(value: ChatDisposition) -> &'static str {
+    match value {
+        ChatDisposition::Committed => "committed",
+        ChatDisposition::StoppedBeforeCommit => "stopped-before-commit",
+        ChatDisposition::StoppedAfterCommit => "stopped-after-commit",
+    }
+}
+fn response(outcome: DurableSendOutcome) -> SendMessageResult {
+    SendMessageResult {
+        accepted: outcome.durable && outcome.disposition == ChatDisposition::Committed,
+        persistence: if outcome.durable {
+            PersistOutcome::Durable
+        } else {
+            PersistOutcome::Pending {
+                reason: PersistFailure::WriteFailed,
+            }
+        },
+        message_id: Some(outcome.message_id),
+        replayed: outcome.replayed,
+        disposition: disposition(outcome.disposition),
+    }
+}
+/// Mutations have no missing-token fallback: every production caller must first seal its
+/// immutable request. Capturing Actor/incarnation before Ready fences replacement races.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn mutation(
+    state: &AppState,
+    op: &Operation,
+    server: u64,
+    channel: &str,
+    id: String,
+    action: DurableMutationAction,
+    retry_token: String,
+    expected_context: String,
+    target: String,
+    generation: u64,
+) -> Result<SendMessageResult, AppError> {
+    // Both actions share the durable transaction, but callers still need the action's
+    // existing diagnostic/remediation contract. Select before moving it into the request.
+    let rejected = match &action {
+        DurableMutationAction::Edit { .. } => codes::CHAT_EDIT_REJECTED,
+        DurableMutationAction::Delete => codes::CHAT_DELETE_REJECTED,
+    };
+    let channel = channel
+        .parse()
+        .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
+    let request = DurableMutationRequest {
+        token: fixed_hex(&retry_token).map_err(|e| op.fail(rejected, e))?,
+        expected_context: fixed_hex(&expected_context).map_err(|e| op.fail(rejected, e))?,
+        channel,
+        message_id: id,
+        target: fixed_hex(&target).map_err(|e| op.fail(rejected, e))?,
+        action,
+    };
+    request.validate().map_err(|e| op.fail(rejected, e))?;
+    let original = DurableChatRequest::Mutation(request.clone());
+    if let Some(terminal) = stop_request_at(state, server, original.clone(), generation, true)
+        .await
+        .map_err(|e| op.fail(rejected, e))?
+    {
+        return Ok(terminal);
+    }
+    let (actor, instance) = actor_instance_of(state, server)
+        .await
+        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
+    let actor = op.bind_actor(actor);
+    let identity = original.retired_identity();
+    let ready = actor
+        .prepare_durable_mutation(request)
+        .await
+        .map_err(|e| op.fail(rejected, e))?;
+    let lease = match authorize(state, server, instance, generation, Some(&identity)) {
+        Ok(lease) => lease,
+        Err(error) if error.starts_with("CHAT_SEND_STOPPED:") => {
+            drop(ready);
+            return stop_request_at(state, server, original, generation, true)
+                .await
+                .map_err(|e| op.fail(rejected, e))?
+                .ok_or_else(|| op.fail(rejected, "retired fence disappeared"));
+        }
+        Err(error) => return Err(op.fail(rejected, error)),
+    };
+    let outcome = ready
+        .commit(lease)
+        .await
+        .map_err(|e| op.fail(rejected, e))?;
+    op.succeeded(if !outcome.durable {
+        "CHANNEL.MUTATION.PREPARED_PENDING"
+    } else if outcome.disposition != ChatDisposition::Committed {
+        "CHANNEL.MUTATION.STOPPED"
+    } else {
+        "CHANNEL.MUTATION.PERSISTED"
+    });
+    Ok(response(outcome))
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct MutationContextResult {
+    context: String,
+    target: String,
+}
+#[tauri::command]
+pub(super) async fn durable_mutation_context(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    id: String,
+) -> Result<MutationContextResult, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let channel = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let (actor, instance) = actor_instance_of(&state, server)
+        .await
+        .map_err(|failure| failure.message())?;
+    let result = actor.durable_mutation_context(channel, id).await?;
+    let _session = require_ui_session_generation(&state, generation).await?;
+    let registry = state.servers.lock().await;
+    if registry
+        .get(&server)
+        .is_none_or(|entry| entry.instance != instance)
+    {
+        return Err("The conversation changed while preparing the mutation.".into());
+    }
+    Ok(MutationContextResult {
+        context: hex::encode(result.context),
+        target: hex::encode(result.target),
+    })
+}
+/// A closed, action-aware IPC request. Unknown tags/fields refuse rather than reinterpret a
+/// recovered edit or deletion as a new post. Every field contributes to the original binding.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub(super) enum OriginalChatRequest {
+    Send {
+        token: String,
+        expected_context: String,
+        channel: String,
+        text: String,
+        reply_to: String,
+    },
+    Edit {
+        token: String,
+        expected_context: String,
+        channel: String,
+        message_id: String,
+        target: String,
+        text: String,
+    },
+    Delete {
+        token: String,
+        expected_context: String,
+        channel: String,
+        message_id: String,
+        target: String,
+    },
+}
+impl OriginalChatRequest {
+    fn into_request(self) -> Result<DurableChatRequest, String> {
+        let channel_id =
+            |channel: String| channel.parse().map_err(|_| "bad channel id".to_string());
+        let request = match self {
+            Self::Send {
+                token,
+                expected_context,
+                channel,
+                text,
+                reply_to,
+            } => DurableChatRequest::Send(DurableSendRequest {
+                token: fixed_hex(&token)?,
+                expected_context: fixed_hex(&expected_context)?,
+                channel: channel_id(channel)?,
+                text,
+                reply_to,
+            }),
+            Self::Edit {
+                token,
+                expected_context,
+                channel,
+                message_id,
+                target,
+                text,
+            } => DurableChatRequest::Mutation(DurableMutationRequest {
+                token: fixed_hex(&token)?,
+                expected_context: fixed_hex(&expected_context)?,
+                channel: channel_id(channel)?,
+                message_id,
+                target: fixed_hex(&target)?,
+                action: DurableMutationAction::Edit { text },
+            }),
+            Self::Delete {
+                token,
+                expected_context,
+                channel,
+                message_id,
+                target,
+            } => DurableChatRequest::Mutation(DurableMutationRequest {
+                token: fixed_hex(&token)?,
+                expected_context: fixed_hex(&expected_context)?,
+                channel: channel_id(channel)?,
+                message_id,
+                target: fixed_hex(&target)?,
+                action: DurableMutationAction::Delete,
+            }),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+#[tauri::command]
+pub(super) async fn stop_durable_chat(
+    state: State<'_, AppState>,
+    server: u64,
+    original: OriginalChatRequest,
+) -> Result<SendMessageResult, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    stop_request_at(&state, server, original.into_request()?, generation, false)
+        .await?
+        .ok_or_else(|| "missing exact Stop result".to_string())
+}
+#[cfg(test)]
+async fn stop_request(
+    state: &AppState,
+    server: u64,
+    original: DurableChatRequest,
+) -> Result<SendMessageResult, String> {
+    let generation = unlocked_ui_session_generation(state).await?;
+    stop_request_at(state, server, original, generation, false)
+        .await?
+        .ok_or_else(|| "missing exact Stop result".to_string())
+}
+async fn stop_request_at(
+    state: &AppState,
+    server: u64,
+    original: DurableChatRequest,
+    generation: u64,
+    existing_only: bool,
+) -> Result<Option<SendMessageResult>, String> {
+    original.validate()?;
+    let identity = original.retired_identity();
+    if existing_only {
+        // Ordinary positive traffic must not wait behind an unrelated pre-registration
+        // restore. This probe only observes absence; it grants no lease or admission. Its
+        // mounted-store guard ends BEFORE any global wait. Final authorize still repeats the
+        // exact scoped fence check while holding session/store/registry custody, so a fence
+        // installed after this probe cannot authorize a late positive transaction.
+        let present = {
+            let mounted = state.store.lock().await;
+            mounted
+                .as_ref()
+                .ok_or_else(|| "vault is not mounted".to_string())?
+                .has_chat_stop_fence(server, &identity)
+                .map_err(|e| e.to_string())?
+        };
+        if !present {
+            return Ok(None);
+        }
+    }
+    // One constant serializer covers all orphan IDs. An arbitrary missing numeric ID cannot
+    // create an unbounded persist_locks entry. Restores retain this same guard through register.
+    let orphan = state.chat_orphan_commit.clone().lock_owned().await;
+    let existing_fence = {
+        let mounted = state.store.lock().await;
+        mounted
+            .as_ref()
+            .ok_or_else(|| "vault is not mounted".to_string())?
+            .has_chat_stop_fence(server, &identity)
+            .map_err(|e| e.to_string())?
+    };
+    if existing_only && !existing_fence {
+        return Ok(None);
+    }
+    let current = state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| (entry.actor.clone(), entry.instance));
+    if let Some((actor, instance)) = current.filter(|_| !existing_fence) {
+        drop(orphan);
+        let ready = actor
+            .prepare_durable_stop(DurableStopRequest { original })
+            .await?;
+        let lease = authorize(state, server, instance, generation, None)?;
+        return Ok(Some(response(ready.commit(lease).await?)));
+    }
+    let _session = require_ui_session_generation(state, generation).await?;
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "vault is not mounted".to_string())?;
+    let registry = state.servers.lock().await;
+    if registry.contains_key(&server) && !existing_fence {
+        return Err(
+            "The conversation changed before its retired retry could be fenced; repeat Stop."
+                .into(),
+        );
+    }
+    // Decode/foreign bindings fail closed. Identical visible fences are rewritten, since a
+    // previous post-rename parent-sync failure cannot acknowledge this durable terminal.
+    store
+        .has_chat_stop_fence(server, &identity)
+        .map_err(|e| e.to_string())?;
+    let durable = store
+        .save_chat_stop_fence(server, &identity, &mut OsCryptoRng)
+        .is_ok();
+    Ok(Some(SendMessageResult {
+        accepted: false,
+        persistence: if durable {
+            PersistOutcome::Durable
+        } else {
+            PersistOutcome::Pending {
+                reason: PersistFailure::WriteFailed,
+            }
+        },
+        message_id: Some(identity.message_id().to_string()),
+        replayed: existing_fence,
+        disposition: "stopped-retired",
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use catcoms_rt::{Hub, ManualClock};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    /// Exercise the actual native boundary, rather than only the code-selection match:
+    /// each malformed field must preserve the operation's code and existing user message.
+    #[tokio::test]
+    async fn native_mutation_rejections_keep_edit_and_delete_error_contracts() {
+        let state = AppState::default();
+        for action in [
+            DurableMutationAction::Edit {
+                text: "changed text".into(),
+            },
+            DurableMutationAction::Delete,
+        ] {
+            let deleting = matches!(action, DurableMutationAction::Delete);
+            for invalid_field in 0..4 {
+                let op = Operation::start(
+                    None,
+                    catcoms_diagnostics::Section::Channels,
+                    if deleting {
+                        "delete_message"
+                    } else {
+                        "edit_message"
+                    },
+                    12,
+                    Some("5"),
+                );
+                let result = mutation(
+                    &state,
+                    &op,
+                    12,
+                    "5",
+                    if invalid_field == 3 { "" } else { "message" }.into(),
+                    action.clone(),
+                    if invalid_field == 0 {
+                        "bad".into()
+                    } else {
+                        "1".repeat(32)
+                    },
+                    if invalid_field == 1 {
+                        "bad".into()
+                    } else {
+                        "2".repeat(64)
+                    },
+                    if invalid_field == 2 {
+                        "bad".into()
+                    } else {
+                        "3".repeat(64)
+                    },
+                    0,
+                )
+                .await;
+                let Err(error) = result else {
+                    panic!("malformed mutation was accepted");
+                };
+                let encoded = serde_json::to_value(error).unwrap();
+                assert_eq!(
+                    encoded["code"],
+                    if deleting {
+                        "CHAT.DELETE.REJECTED"
+                    } else {
+                        "CHAT.EDIT.REJECTED"
+                    }
+                );
+                assert_eq!(encoded["retryable"], false);
+                assert_eq!(
+                    encoded["remediation"],
+                    if deleting {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!("amend_input")
+                    }
+                );
+                assert_eq!(
+                    encoded["message"],
+                    if invalid_field < 3 {
+                        "Invalid message retry identity."
+                    } else {
+                        "CHAT_MUTATION_INVALID: target or text length is outside the supported bound"
+                    }
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn native_durable_send_failure_retry_restart_and_stale_session() {
@@ -268,7 +710,7 @@ mod tests {
             .await
             .unwrap();
         let generation = state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
-        assert!(authorize(&state, 12, 40, generation).is_err());
+        assert!(authorize(&state, 12, 40, generation, None).is_err());
         drop(ready);
         assert_eq!(actor.messages(1).await.len(), 1);
         // No clean shutdown or background persistence is available to rescue the accepted op.
@@ -292,5 +734,433 @@ mod tests {
             Some(restored.messages(1)[0].id.clone()),
             accepted.message_id
         );
+    }
+
+    #[derive(Debug, Default)]
+    struct PublicationProbe {
+        chat: Arc<AtomicU64>,
+    }
+    #[async_trait::async_trait]
+    impl MeshTransport for PublicationProbe {
+        fn local_peer(&self) -> PeerId {
+            PeerId::from_u64(1004)
+        }
+        async fn subscribe(&self, _: catcoms_rt::Topic) -> Result<(), catcoms_rt::TransportError> {
+            Ok(())
+        }
+        async fn unsubscribe(
+            &self,
+            _: catcoms_rt::Topic,
+        ) -> Result<(), catcoms_rt::TransportError> {
+            Ok(())
+        }
+        async fn publish(
+            &self,
+            _: catcoms_rt::Topic,
+            _: bytes::Bytes,
+        ) -> Result<(), catcoms_rt::TransportError> {
+            Ok(())
+        }
+        async fn publish_once(
+            &self,
+            _: catcoms_rt::Topic,
+            bytes: bytes::Bytes,
+        ) -> Result<catcoms_rt::PublishSubmission, catcoms_rt::PublishOnceError> {
+            if catcoms_replication::SealedOp::decode(&bytes)
+                .is_ok_and(|op| op.doc_type == catcoms_wire::DocType::Channel && op.doc_id == 5)
+            {
+                self.chat.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(catcoms_rt::PublishSubmission::Submitted)
+        }
+        async fn request(
+            &self,
+            _: PeerId,
+            _: catcoms_rt::ProtocolId,
+            _: bytes::Bytes,
+        ) -> Result<bytes::Bytes, catcoms_rt::TransportError> {
+            Err(catcoms_rt::TransportError::Closed)
+        }
+        async fn request_cancellable(
+            &self,
+            p: PeerId,
+            k: catcoms_rt::ProtocolId,
+            b: bytes::Bytes,
+            _: catcoms_rt::RequestCancellation,
+        ) -> Result<bytes::Bytes, catcoms_rt::TransportError> {
+            self.request(p, k, b).await
+        }
+        async fn next_event(&self) -> Option<catcoms_rt::TransportEvent> {
+            std::future::pending().await
+        }
+    }
+    #[tokio::test]
+    async fn native_retired_stop_fences_missing_actor_reopen_publication_and_same_id_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (entry, task, drain) = leaving::tests::running(1001);
+        let actor = entry.actor.clone();
+        state.servers.lock().await.insert(12, entry);
+        actor.open_channel(5).await;
+        let context = actor.durable_send_context().await.unwrap();
+        let request = DurableChatRequest::Send(DurableSendRequest {
+            token: [193; 16],
+            expected_context: context,
+            channel: 5,
+            text: "retained original".into(),
+            reply_to: String::new(),
+        });
+        let op = Operation::start(
+            None,
+            catcoms_diagnostics::Section::Channels,
+            "send_message",
+            12,
+            Some("5"),
+        );
+        assert!(
+            send(
+                &state,
+                &op,
+                12,
+                "5",
+                "retained original".into(),
+                None,
+                Some(hex::encode([193; 16])),
+                Some(hex::encode(context))
+            )
+            .await
+            .unwrap()
+            .accepted
+        );
+        let foreign_scope = stop_request(&state, 999, request.clone()).await.unwrap();
+        assert_eq!(foreign_scope.disposition, "stopped-retired");
+        assert!(!state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .has_chat_stop_fence(12, &request.retired_identity())
+            .unwrap());
+        assert!(
+            send(
+                &state,
+                &op,
+                12,
+                "5",
+                "retained original".into(),
+                None,
+                Some(hex::encode([193; 16])),
+                Some(hex::encode(context))
+            )
+            .await
+            .unwrap()
+            .accepted
+        );
+        // The actual stop handshake closes authoring/publication before registry retirement.
+        let stopped = leaving::stop_server(&state, 12, &ManualClock::new(1_000))
+            .await
+            .unwrap()
+            .unwrap();
+        let old = stopped.remove(&mut *state.servers.lock().await).unwrap();
+        drop(old);
+        task.await.unwrap();
+        drain.await.unwrap();
+        let retained = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_server(12)
+            .unwrap()
+            .to_vec();
+        let terminal = stop_request(&state, 12, request.clone()).await.unwrap();
+        assert_eq!(terminal.disposition, "stopped-retired");
+        assert!(!terminal.accepted);
+        assert_eq!(terminal.persistence, PersistOutcome::Durable);
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_server(12)
+                .unwrap()
+                .as_slice(),
+            retained,
+            "fence installation preserves retained old signed history"
+        );
+        assert!(state.persist_locks.lock().unwrap().len() <= 1);
+        drop(state.store.lock().await.take());
+        let reopened = AppState::default();
+        *reopened.store.lock().await =
+            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+        *reopened.session_resumable.lock().await = true;
+        let probe = PublicationProbe::default();
+        let published = probe.chat.clone();
+        let restored = restore_server_actor(
+            &reopened,
+            &retained,
+            &ServerRecord {
+                id: 12,
+                display_name: "test".into(),
+                invite: String::new(),
+                is_dm: false,
+            },
+            probe,
+            ChaCha20Rng::seed_from_u64(1004),
+            Box::new(ManualClock::new(2_000)),
+            &[],
+            0,
+            ReconnectPolicy::MemberMesh,
+            vec![],
+            false,
+        )
+        .await
+        .unwrap();
+        let restored_actor = restored.actor.clone();
+        let mut events = restored.events;
+        let events_task = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        assert_eq!(restored_actor.messages(5).await.len(), 1);
+        for _ in 0..4 {
+            let _ = restored_actor.snapshot().await.unwrap();
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            published.load(Ordering::SeqCst),
+            0,
+            "retired saved publication is stopped before Actor spawn"
+        );
+        restored_actor.stop_and_wait().await.unwrap();
+        restored.task.await.unwrap();
+        events_task.await.unwrap();
+        drop(restored.chat_fence_commit);
+        let (replacement, task, drain) = leaving::tests::running(1005);
+        let replacement_actor = replacement.actor.clone();
+        reopened.servers.lock().await.insert(12, replacement);
+        replacement_actor.open_channel(5).await;
+        let late = send(
+            &reopened,
+            &op,
+            12,
+            "5",
+            "retained original".into(),
+            None,
+            Some(hex::encode([193; 16])),
+            Some(hex::encode(context)),
+        )
+        .await
+        .unwrap();
+        assert!(!late.accepted);
+        assert_eq!(late.disposition, "stopped-retired");
+        assert_eq!(late.persistence, PersistOutcome::Durable);
+        assert!(replacement_actor.messages(5).await.is_empty());
+        let terminal = stop_request(&reopened, 12, request).await.unwrap();
+        assert_eq!(terminal.disposition, "stopped-retired");
+        assert!(terminal.replayed);
+        assert_eq!(terminal.persistence, PersistOutcome::Durable);
+        replacement_actor.stop_and_wait().await.unwrap();
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+    #[tokio::test]
+    async fn pre_registration_chat_owner_retains_guard_until_actual_aborted_actor_completion() {
+        use libp2p::futures::FutureExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let guard = state.chat_orphan_commit.clone().lock_owned().await;
+        let custody = Arc::new(std::sync::Mutex::new(Some(guard)));
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(1006)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1006),
+            Box::new(ManualClock::new(1_000)),
+            "test",
+        )
+        .unwrap();
+        let (actor, mut events, task) =
+            catcoms_app::spawn_with_lifetime(server, Box::new(custody.clone()));
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let owner = PreRegistrationChatOwner {
+            custody,
+            abort: Some(task.abort_handle()),
+        };
+        actor.open_channel(5).await;
+        let request = DurableSendRequest {
+            token: [194; 16],
+            expected_context: actor.durable_send_context().await.unwrap(),
+            channel: 5,
+            text: "must not escape canceled restore".into(),
+            reply_to: String::new(),
+        };
+        // A real Ready parks the actual Actor before its original storage lease. Dropping the
+        // pre-registration owner aborts that task, but its lifetime still owns the absence guard.
+        let ready = actor.prepare_durable_send(request.clone()).await.unwrap();
+        let mut stopped = Box::pin(stop_request(&state, 12, DurableChatRequest::Send(request)));
+        assert!(stopped.as_mut().now_or_never().is_none());
+        drop(owner);
+        assert!(state.chat_orphan_commit.try_lock().is_err());
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(ready);
+        drain.await.unwrap();
+        let result = stopped.await.unwrap();
+        assert_eq!(result.persistence, PersistOutcome::Durable);
+        assert_eq!(result.disposition, "stopped-retired");
+        assert!(actor.messages(5).await.is_empty());
+    }
+    #[tokio::test]
+    async fn live_durable_send_does_not_wait_for_unrelated_pre_registration_custody() {
+        use libp2p::futures::FutureExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (entry, task, drain) = leaving::tests::running(1011);
+        let actor = entry.actor.clone();
+        state.servers.lock().await.insert(12, entry);
+        actor.open_channel(5).await;
+        let context = actor.durable_send_context().await.unwrap();
+        let op = Operation::start(
+            None,
+            catcoms_diagnostics::Section::Channels,
+            "send_message",
+            12,
+            Some("5"),
+        );
+        // Hold the same real state-wide guard an unrelated restoring Actor retains before
+        // registration. A live group's ordinary no-fence send must complete its real store save
+        // while that guard remains held, without waiting for unrelated dialing/startup work.
+        let unrelated = state.chat_orphan_commit.clone().lock_owned().await;
+        let mut sending = Box::pin(send(
+            &state,
+            &op,
+            12,
+            "5",
+            "independent live write".into(),
+            None,
+            Some(hex::encode([201; 16])),
+            Some(hex::encode(context)),
+        ));
+        let mut completed = None;
+        // The current-thread fixture has only the actual native future and Actor to advance.
+        // A fixed poll/yield budget detects the old global wait without an ambient timeout.
+        for _ in 0..32 {
+            if let Some(result) = sending.as_mut().now_or_never() {
+                completed = Some(result);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let accepted = completed
+            .expect("unrelated pre-registration custody blocked a live durable send")
+            .unwrap();
+        assert!(accepted.accepted);
+        assert_eq!(accepted.persistence, PersistOutcome::Durable);
+        assert!(state.chat_orphan_commit.try_lock().is_err());
+        let snapshot = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_server(12)
+            .unwrap();
+        let saved = Server::restore(
+            &snapshot,
+            Hub::new().join(PeerId::from_u64(1012)),
+            ChaCha20Rng::seed_from_u64(1012),
+            Box::new(ManualClock::new(2_000)),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(saved.messages(5).len(), 1);
+        assert_eq!(saved.messages(5)[0].text, "independent live write");
+        drop(sending);
+        drop(unrelated);
+        actor.stop_and_wait().await.unwrap();
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn positive_fence_probe_keeps_final_race_check_and_malformed_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (entry, task, drain) = leaving::tests::running(1013);
+        let actor = entry.actor.clone();
+        state.servers.lock().await.insert(12, entry);
+        actor.open_channel(5).await;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let request = DurableSendRequest {
+            token: [202; 16],
+            expected_context: actor.durable_send_context().await.unwrap(),
+            channel: 5,
+            text: "must stay unstarted".into(),
+            reply_to: String::new(),
+        };
+        let original = DurableChatRequest::Send(request.clone());
+        let identity = original.retired_identity();
+        assert!(
+            stop_request_at(&state, 12, original.clone(), generation, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let ready = actor.prepare_durable_send(request.clone()).await.unwrap();
+        // Install the actual exact fence after the absence probe and before final custody. This
+        // trusted test seam drives the race directly; the positive path cannot mint a fence.
+        state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .save_chat_stop_fence(12, &identity, &mut OsCryptoRng)
+            .unwrap();
+        assert!(authorize(&state, 12, 1013, generation, Some(&identity))
+            .unwrap_err()
+            .starts_with("CHAT_SEND_STOPPED:"));
+        drop(ready);
+        let terminal = stop_request_at(&state, 12, original, generation, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.persistence, PersistOutcome::Durable);
+        assert_eq!(terminal.disposition, "stopped-retired");
+        assert!(actor.messages(5).await.is_empty());
+        let fence_path = dir.path().join("chat-stop-fences.bin");
+        std::fs::write(&fence_path, b"not authenticated fence state").unwrap();
+        let unrelated = state.chat_orphan_commit.clone().lock_owned().await;
+        let foreign = DurableChatRequest::Send(DurableSendRequest {
+            token: [203; 16],
+            ..request
+        });
+        assert!(
+            stop_request_at(&state, 12, foreign, generation, true)
+                .await
+                .is_err(),
+            "malformed probe must fail closed before waiting for the unrelated global guard"
+        );
+        assert_eq!(
+            std::fs::read(fence_path).unwrap(),
+            b"not authenticated fence state"
+        );
+        assert!(actor.messages(5).await.is_empty());
+        drop(unrelated);
+        actor.stop_and_wait().await.unwrap();
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 }

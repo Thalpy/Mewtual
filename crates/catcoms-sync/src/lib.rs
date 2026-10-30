@@ -4976,6 +4976,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// holds the signer private key, group secrets, routing secrets and plaintext document
     /// content; the registry seals it under the vault key before it touches disk (9f).
     pub fn snapshot(&mut self) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+        // Rollback-only history must never overwrite a possibly installed chat terminal.
+        if !self.durable_chat.snapshot_allowed() {
+            return Err(SyncError::ChatPreparationPending);
+        }
         let mls = snapshot_server(&self.device, &self.group)?;
         // `routing` carries the live routing secrets in the clear; zeroize the intermediate
         // (the returned blob is already `Zeroizing`).
@@ -5171,10 +5175,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             group_policy::decode_pin(d.get_bytes().map_err(|_| bad())?)?
         };
-        let durable_chat = if d.is_empty() {
-            durable_chat::DurableChatState::default()
+        // Keep the authenticated tail borrowed until closed framing is checked and the actual
+        // local MLS device exists; saved-local proof decoding must use that exact identity.
+        let durable_chat_bytes = if d.is_empty() {
+            None
         } else {
-            durable_chat::DurableChatState::decode(d.get_bytes().map_err(|_| bad())?)?
+            Some(d.get_bytes().map_err(|_| bad())?)
         };
         let pending_finalization = if d.is_empty() {
             HashMap::new()
@@ -5209,6 +5215,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
         let (device, group) = restore_server(&mls)?;
+        let durable_chat = match durable_chat_bytes {
+            Some(bytes) => durable_chat::DurableChatState::decode(bytes, &device)?,
+            None => Default::default(),
+        };
         if let Some(policy) = &policy {
             group_policy::require_supported(policy)?;
             policy.verify_pin(&group)?;
@@ -9230,7 +9240,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         fps.into_iter().collect()
     }
 
-    /// The current members that **provably hold** `change` in `(doc_type, doc_id)`, as sorted
+    /// Current members with authenticated receipt evidence for `change`, as sorted
     /// fingerprints; the delivery-state query (`docs/design-delivery-states.md`, D1).
     ///
     /// The design's primary route (read each peer's confirmed heads out of an automerge
@@ -9241,11 +9251,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// request/response; so there is no per-peer, per-doc sync session to interrogate, and
     /// publishing tells us nothing about who received anything.
     ///
-    /// What the document itself proves is used instead: a member counts when it authored a
+    /// The document's signed causal claims are used instead: a member counts when it authored a
     /// change that causally descends from `change` (see [`EncryptedDoc::holders_of`]). That is
     /// the design's own predicate; "the peer's heads causally include the op"; backed by the
-    /// peer's *signature* rather than by its self-report, so it is if anything harder to lie
-    /// with. It is one-sided: a member that received `change` and has not written since is
+    /// peer's signature. This authenticates the claim; a modified writer can name a known hash
+    /// without retaining its contents. Neither this nor an explicit receipt proves a disk save
+    /// or continuing custody. A member that received `change` and has not written since is
     /// indistinguishable from one that never got it, so **absence means "unknown", not "not
     /// delivered"** while the roster is unchanged. The local device is excluded (it authored
     /// the change), as is any device no longer on the roster.

@@ -4,6 +4,11 @@ Mewtual ships as an unsigned Windows NSIS installer and unsigned Linux `.AppImag
 bundles, all built by [`.github/workflows/release.yml`](../.github/workflows/release.yml), and
 installed copies update themselves through Tauri's updater. This is the maintainer's checklist.
 
+Windows builds dynamically link the Microsoft VC runtime. The base Tauri configuration therefore
+sets `bundle.windows.bundleVCRuntime: true`; ordinary and official NSIS installers must include
+those DLLs alongside the application. Keep that setting when changing release overrides. A launch
+on a development machine with Visual Studio installed does not establish installer completeness.
+
 The workflow is three jobs. **Build Windows installer** runs the version checks, the frontend
 tests and the checks, then creates the draft release; **Build Linux bundles** waits for it and
 adds its artifacts to that same release, addressing it by the id the first job reports; **Verify

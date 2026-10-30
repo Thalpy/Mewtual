@@ -101,6 +101,37 @@ an append-only `Vec<SignedOp>` of the inner-signed changes that built it
 
 ## 2. Sending a message
 
+### Current desktop send transaction (29 October)
+
+The desktop `send_message` command uses
+[`durable_chat::send`](../apps/desktop/src-tauri/src/durable_chat.rs), not the ordinary
+`Server::send_reply`/`post` path traced below. The UI saves a sealed pending request with one
+stable retry token before dispatch. The actor prepares the original signed operation outside
+exportable history, then the native caller obtains the exact server incarnation, persistence
+serializer, UI-session and mounted-store custody. The
+[`durable chat transaction`](../crates/catcoms-app/src/durable_chat.rs) saves the complete
+candidate snapshot before installing the history or publishing that operation.
+
+Successful desktop acceptance therefore means a covering encrypted local save completed.
+A failed save leaves the preparation unaccepted and unexportable; an ambiguous/lost reply must
+retry the SAME token and request. The saved retry receipt and publication obligation recover
+the original operation across restart. Publication may retry those original bytes; it must not
+author a replacement message. A post-rename storage failure can be ambiguous, so it is never
+evidence that the original operation does not exist.
+
+Received operations still use the background snapshot path in section 3. Their receipt or
+visibility alone is not proof of a completed local save.
+
+The desktop's durable caller-intent path also covers text edits and deletions. It prepares one exact
+signed operation outside the exportable graph, then crosses the encrypted server snapshot barrier
+before acceptance/publication. Identical-text edits save a no-op frontier receipt; exact-token Stop
+saves a negative terminal and never removes saved history. Post-rename uncertainty blocks ordinary
+snapshots until the original operation/terminal is repaired additively with latest received history.
+The ordinary persistence worker owns this repair while UI is locked. The low-level trace below still
+describes the non-durable compatibility APIs; it is not the desktop acceptance contract. R6 remains.
+
+### Ordinary product/sync post path
+
 1. **Product builds the row.** [`Server::send_reply`](../crates/catcoms-app/src/lib.rs#L3993)
    mints a random message id, takes this device's fingerprint, and stamps a timestamp from
    [`next_message_ts`](../crates/catcoms-app/src/lib.rs#L3983). That stamp is
@@ -128,18 +159,17 @@ an append-only `Vec<SignedOp>` of the inner-signed changes that built it
 5. **Product tracks it.** [`track_delivery_target`](../crates/catcoms-sync/src/lib.rs) plus a
    bounded per-channel ring of `(message id, change hash)` so the UI can later ask who holds it.
 
-**The acceptance point is the local edit, not the broadcast.** This is stated explicitly in
+**For ordinary `post`, the acceptance point is the local edit, not the broadcast.** This is stated explicitly in
 `post`'s own comment, immediately above its signature. Everything that can
 legitimately refuse a write (unopened document, missing routing secret, seal or Automerge failure)
-happens before the op exists; past that the message is accepted in memory and servable. Local
-disk durability is a separate boundary: the desktop send result reports `durable` only after a
-covering snapshot write succeeds. A failed write returns an accepted `pending` outcome, retains
-the dirty snapshot ticket, and retries through the existing discovery worker. Neither that
-failure nor a later UI refresh failure should invite authoring the same message again.
+happens before the op exists; past that the operation is accepted in memory and servable.
+The later background snapshot is a separate durability boundary. This is not the current desktop
+new-message acceptance contract described above. A later save or UI-refresh failure must not
+invite authoring the same operation again.
 
-**There is no application-level resend.** A message is authored exactly once. It is not re-sent on
-timeout, so there is no duplicate-message hazard from retries, and no `client_message_id`
-deduplication is needed at this layer.
+**Transport retries and a new authored action are different.** Outbox and durable-publication
+retries retain the original signed operation. The desktop additionally uses its persisted
+token-to-request binding to prevent an uncertain caller retry from creating another message.
 
 The desktop's durable caller-intent path separately retains a sealed retry identity when a
 native response is uncertain. Its vault-wide **Settings > Pending messages** manager can
@@ -197,7 +227,8 @@ count. The tracker replaces its map, costs O(open documents), and does not seria
 
 The native event consumer marks the exact server incarnation dirty before the UI lock gate and
 wakes a separate, coalescing persistence worker. That worker requests an initial save and batches
-later wakes in fixed 250-ms windows using the same snapshot tickets/write locks as local sends.
+later wakes in fixed 250-ms windows using existing snapshot tickets and the shared per-server
+write lock. The durable desktop send transaction uses that lock directly, without a snapshot ticket.
 It can write to the mounted encrypted store while the UI is locked. Failures stay dirty for a
 later wake or discovery retry. The consumer never waits on the actor for snapshot I/O, avoiding a
 cycle with the actor's bounded event channel. A marker is not a completed-save acknowledgement;
@@ -416,6 +447,11 @@ Two independent kinds of positive evidence, both within the current roster:
 - a causally descending change, computed in one DAG pass by
   [`holders_of`](../crates/catcoms-replication/src/doc.rs), where attribution comes from the
   **signed** op envelope, not the Automerge actor id.
+
+These are historical receipt confirmations, not a receiver disk-flush acknowledgement.
+An authenticated receipt is the member's self-report, not independent proof of current storage.
+The recipient can queue its receipt before the background covering snapshot finishes; an abrupt
+receiver crash can lose that tail. Neither evidence type proves durable custody on another device.
 
 The UI verdict function [`deliveryVerdict`](../apps/desktop/src/delivery.ts#L59) maps evidence to
 `pending | waiting | partial | everyone | queued`, or to silence. It refuses to invent a negative:
@@ -710,10 +746,11 @@ old notes will otherwise re-derive them.
 - **`delivery.ts` is not a retry state machine.** It has no `sent`/`retrying`/`failed` states, no
   ten-minute cutoff, and no resend. It is a pure function from evidence to a display verdict
   ([delivery.ts:59](../apps/desktop/src/delivery.ts#L59)). The duplicate-message-after-retry
-  hazard described in earlier notes does not exist, because nothing retries a send.
+  hazard described in earlier notes is avoided by retrying the same original operation/token,
+  rather than authoring a replacement message.
 - **Delivery evidence is not a bare local-accept claim.** `post` returning success does mean only
   "accepted locally", and that is documented as intentional, but the UI does not render that as
-  delivered: `waiting` is the state for "sent, nobody has proved they hold it", and `everyone`
+  delivered: `waiting` is the state for "sent, no receipt confirmation yet", and `everyone`
   requires positive per-member evidence.
 
 ---

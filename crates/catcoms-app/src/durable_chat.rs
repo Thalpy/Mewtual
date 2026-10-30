@@ -6,7 +6,12 @@ use catcoms_rt::{CryptoRngCore, MeshTransport};
 use catcoms_wire::DocType;
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
-use crate::{append_message, Server, ServerStore, MAX_TRACKED_OWN_MESSAGES};
+use crate::{
+    append_message, fingerprint, read_message, resolve_message, Role, Server, ServerStore,
+    MAX_TRACKED_OWN_MESSAGES,
+};
+use automerge::{transaction::Transactable, ObjId};
+use catcoms_sync::durable_chat::{ChatAction, ChatCommitEffects, ChatDisposition, ChatSaveError};
 
 pub const MAX_SEND_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_SEND_REPLY_BYTES: usize = 256;
@@ -75,6 +80,7 @@ pub struct DurableSendOutcome {
     /// Local encrypted storage accepted the complete snapshot. This is not a peer receipt.
     pub durable: bool,
     pub replayed: bool,
+    pub disposition: ChatDisposition,
     /// When present, retain the original request and token; the preparation is not accepted.
     pub storage_error: Option<String>,
 }
@@ -126,79 +132,552 @@ impl DurableSendReady {
     }
 }
 
+/// A mutation binds an immutable message object, never mutable text or edited time.
+#[derive(Debug, Clone)]
+pub enum DurableMutationAction {
+    Edit { text: String },
+    Delete,
+}
+#[derive(Clone)]
+pub struct DurableMutationRequest {
+    pub token: [u8; 16],
+    pub expected_context: [u8; 32],
+    pub channel: u128,
+    pub message_id: String,
+    pub target: [u8; 32],
+    pub action: DurableMutationAction,
+}
+impl std::fmt::Debug for DurableMutationRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableMutationRequest")
+            .field("channel", &self.channel)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Debug, Clone)]
+pub enum DurableChatRequest {
+    Send(DurableSendRequest),
+    Mutation(DurableMutationRequest),
+}
+#[derive(Debug, Clone)]
+pub struct DurableStopRequest {
+    pub original: DurableChatRequest,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationContext {
+    pub context: [u8; 32],
+    pub target: [u8; 32],
+}
+impl DurableMutationRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.message_id.is_empty()
+            || self.message_id.len() > 128
+            || matches!(&self.action,DurableMutationAction::Edit{text} if text.is_empty() || text.len()>MAX_SEND_TEXT_BYTES)
+        {
+            return Err(
+                "CHAT_MUTATION_INVALID: target or text length is outside the supported bound"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+    fn binding(&self) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"catcoms/chat-mutation-request/v1");
+        h.update(&self.expected_context);
+        h.update(&self.channel.to_be_bytes());
+        h.update(&[match self.action {
+            DurableMutationAction::Edit { .. } => 1,
+            DurableMutationAction::Delete => 2,
+        }]);
+        h.update(&(self.message_id.len() as u64).to_be_bytes());
+        h.update(self.message_id.as_bytes());
+        h.update(&self.target);
+        if let DurableMutationAction::Edit { text } = &self.action {
+            h.update(&(text.len() as u64).to_be_bytes());
+            h.update(text.as_bytes());
+        }
+        *h.finalize().as_bytes()
+    }
+}
+// Canonical request components used together at lookup/admission. The message id and target
+// are derived from the request, never reconstructed from mutable rendered message text.
+type ChatRequestIdentityParts = (
+    [u8; 16],
+    [u8; 32],
+    [u8; 32],
+    u128,
+    String,
+    ChatAction,
+    Option<[u8; 32]>,
+);
+
+impl DurableChatRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Send(r) => r.validate(),
+            Self::Mutation(r) => r.validate(),
+        }
+    }
+    pub fn channel(&self) -> u128 {
+        match self {
+            Self::Send(r) => r.channel,
+            Self::Mutation(r) => r.channel,
+        }
+    }
+    fn identity(&self) -> ChatRequestIdentityParts {
+        match self {
+            Self::Send(r) => {
+                let b = r.binding();
+                (
+                    r.token,
+                    b,
+                    r.expected_context,
+                    r.channel,
+                    r.message_id(&b),
+                    ChatAction::Send,
+                    None,
+                )
+            }
+            Self::Mutation(r) => (
+                r.token,
+                r.binding(),
+                r.expected_context,
+                r.channel,
+                r.message_id.clone(),
+                match r.action {
+                    DurableMutationAction::Edit { .. } => ChatAction::Edit,
+                    DurableMutationAction::Delete => ChatAction::Delete,
+                },
+                Some(r.target),
+            ),
+        }
+    }
+}
+
+/// Opaque, plaintext-free exact identity for a vault-level retired retry fence. Only the
+/// canonical request binding and authenticated store decoder construct this metadata.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DurableChatIdentity {
+    pub(crate) token: [u8; 16],
+    pub(crate) binding: [u8; 32],
+    pub(crate) context: [u8; 32],
+    pub(crate) channel: u128,
+    pub(crate) message_id: String,
+    pub(crate) action: ChatAction,
+    pub(crate) target: Option<[u8; 32]>,
+}
+impl std::fmt::Debug for DurableChatIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableChatIdentity")
+            .finish_non_exhaustive()
+    }
+}
+impl DurableChatIdentity {
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+}
+impl DurableChatRequest {
+    pub fn retired_identity(&self) -> DurableChatIdentity {
+        let (token, binding, context, channel, message_id, action, target) = self.identity();
+        DurableChatIdentity {
+            token,
+            binding,
+            context,
+            channel,
+            message_id,
+            action,
+            target,
+        }
+    }
+}
+fn save_error(error: crate::AppError) -> ChatSaveError {
+    match error {
+        crate::AppError::CommittedButNotDurable(e) => ChatSaveError::ReplacedNotDurable(e),
+        other => ChatSaveError::NotReplaced(other.to_string()),
+    }
+}
+fn outcome(
+    prepared: catcoms_sync::durable_chat::PreparedChat,
+    error: Option<String>,
+) -> DurableSendOutcome {
+    DurableSendOutcome {
+        message_id: prepared.message_id,
+        durable: error.is_none() && prepared.durable,
+        replayed: prepared.replayed,
+        disposition: prepared.disposition,
+        storage_error: error,
+    }
+}
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Before restored history can run, apply every exact retired token to any saved/private
+    /// receipt it actually names. Unknown tokens do not inject tombstones into unrelated groups.
+    /// A conflicting token or malformed fence store fails closed before Actor publication.
+    pub fn apply_retired_chat_fences<F>(
+        &mut self,
+        store: &ServerStore,
+        server_id: u64,
+        save: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(&[u8], &mut R) -> Result<(), ChatSaveError>,
+    {
+        let fences = store
+            .load_chat_stop_fences(server_id)
+            .map_err(|e| e.to_string())?;
+        let identities: Vec<_> = fences
+            .iter()
+            .map(|f| (f.token, f.binding, f.context, f.channel))
+            .collect();
+        self.sync
+            .fence_saved_durable_chat(&identities, save)
+            .map_err(|e| e.to_string())
+    }
+    /// Metadata only, not a capability. Resolves the exact same unique visible map as the writer.
+    pub fn durable_mutation_context(
+        &self,
+        channel: u128,
+        id: &str,
+    ) -> Result<MutationContext, String> {
+        let context = self.sync.durable_send_context()?;
+        let doc = self
+            .sync
+            .doc(DocType::Channel, channel)
+            .ok_or_else(|| "document not open".to_string())?;
+        let location = resolve_message(doc.doc(), id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "message is missing or ambiguous".to_string())?;
+        let mut h = blake3::Hasher::new();
+        h.update(b"catcoms/chat-mutation-target/v1");
+        let group = self.group_id();
+        h.update(&(group.len() as u64).to_be_bytes());
+        h.update(&group);
+        h.update(&channel.to_be_bytes());
+        h.update(&(id.len() as u64).to_be_bytes());
+        h.update(id.as_bytes());
+        // ObjId's actor-index hint and the current list index are local/mutable, not identity.
+        for object in [&location.list, &location.object] {
+            let ObjId::Id(counter, actor, _) = object else {
+                return Err("invalid message object".into());
+            };
+            let bytes = actor.to_bytes();
+            h.update(&(bytes.len() as u64).to_be_bytes());
+            h.update(bytes);
+            h.update(&counter.to_be_bytes());
+        }
+        Ok(MutationContext {
+            context,
+            target: *h.finalize().as_bytes(),
+        })
+    }
+    fn check_mutation(&self, request: &DurableMutationRequest) -> Result<bool, String> {
+        let current = self.durable_mutation_context(request.channel, &request.message_id)?;
+        if current.context != request.expected_context || current.target != request.target {
+            return Err("CHAT_MUTATION_TARGET_CHANGED: original target or context changed".into());
+        }
+        let doc = self.sync.doc(DocType::Channel, request.channel).unwrap();
+        let location = resolve_message(doc.doc(), &request.message_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "message is missing or ambiguous".to_string())?;
+        let message = read_message(doc.doc(), &location.object);
+        let creator = doc
+            .verified_object_creator(&location.object)
+            .map_err(|e| e.to_string())?;
+        if creator
+            .as_ref()
+            .is_some_and(|signer| fingerprint(signer) != message.author)
+        {
+            return Err(
+                "CHAT_MUTATION_AUTHOR_CONFLICT: stored author contradicts verified creator".into(),
+            );
+        }
+        let own = creator.map_or_else(
+            || message.author == self.my_fingerprint(),
+            |signer| signer == self.device_id,
+        );
+        let permitted = match request.action {
+            DurableMutationAction::Edit { .. } => own,
+            DurableMutationAction::Delete => {
+                own || matches!(self.my_role(), Role::Owner | Role::Admin)
+            }
+        };
+        if !permitted {
+            return Err("CHAT_MUTATION_NOT_AUTHORIZED: current action permission refused".into());
+        }
+        Ok(matches!(&request.action,DurableMutationAction::Edit{text} if text==&message.text))
+    }
+    /// Install bookkeeping for the ENTIRE covering transaction before its publication can
+    /// resume. Exact duplicates are inert; an ID already bound to another real change is never
+    /// retargeted, which would let a receipt for one body falsely confirm a different body.
+    fn track_committed_chat_sends(&mut self, effects: &ChatCommitEffects) {
+        for committed in &effects.newly_committed_sends {
+            let recent = self
+                .own_message_changes
+                .entry(committed.channel)
+                .or_default();
+            if let Some((_, change)) = recent.iter().find(|(id, _)| id == &committed.message_id) {
+                if change != &committed.change {
+                    tracing::warn!(
+                        "durable chat delivery identity conflicts with retained tracking"
+                    );
+                }
+                continue;
+            }
+            self.sync
+                .track_delivery_target(DocType::Channel, committed.channel, committed.change);
+            recent.push_back((committed.message_id.clone(), committed.change));
+            while recent.len() > MAX_TRACKED_OWN_MESSAGES {
+                recent.pop_front();
+            }
+        }
+    }
+
+    // Retain compact existing unit-fixture calls while every production caller uses the
+    // effect-bearing result below. This wrapper exercises the same tracking consumer.
+    #[cfg(test)]
     fn commit_chat_request(
         &mut self,
-        request: &DurableSendRequest,
+        request: &DurableChatRequest,
         store: &ServerStore,
         server_id: u64,
     ) -> Result<DurableSendOutcome, String> {
+        self.commit_chat_request_with_effects(request, store, server_id)
+            .map(|(outcome, _)| outcome)
+    }
+    fn commit_chat_request_with_effects(
+        &mut self,
+        request: &DurableChatRequest,
+        store: &ServerStore,
+        server_id: u64,
+    ) -> Result<(DurableSendOutcome, ChatCommitEffects), String> {
         request.validate()?;
-        let binding = request.binding();
-        let id = request.message_id(&binding);
-        let author = self.my_fingerprint();
-        let ts = self.next_message_ts(request.channel);
-        let prepared = self.sync.prepare_durable_chat(
-            request.token,
-            binding,
-            request.expected_context,
-            request.channel,
-            id.clone(),
-            |doc| append_message(doc, &id, &author, &request.text, ts, &request.reply_to),
-        )?;
-        let result = self
+        let (token, binding, context, channel, id, action, target) = request.identity();
+        let existing = self
             .sync
-            .commit_durable_chat(request.token, |snapshot, rng| {
-                store
-                    .save_server(server_id, snapshot, rng)
-                    .map_err(|e| e.to_string())
-            });
-        let durable = result.is_ok();
-        if durable {
-            self.sync
-                .track_delivery_target(DocType::Channel, request.channel, prepared.change);
-            let recent = self.own_message_changes.entry(request.channel).or_default();
-            if !recent.iter().any(|(id, _)| id == &prepared.message_id) {
-                recent.push_back((prepared.message_id.clone(), prepared.change));
-                while recent.len() > MAX_TRACKED_OWN_MESSAGES {
-                    recent.pop_front();
+            .durable_chat_lookup(token, binding, context, channel)?;
+        if let Some(saved) = existing.as_ref().filter(|p| p.durable) {
+            return Ok((outcome(saved.clone(), None), ChatCommitEffects::default()));
+        }
+        // Uncertainty is historical repair only. Every ordinary uncommitted retry still checks
+        // current membership, exact target and role, including same-epoch admin demotion.
+        let needs_repair = self.sync.durable_chat_token_needs_repair(token);
+        if existing.is_none() || !needs_repair {
+            match request {
+                DurableChatRequest::Send(r) => {
+                    let author = self.my_fingerprint();
+                    let ts = self.next_message_ts(channel);
+                    self.sync.prepare_durable_chat(
+                        token,
+                        binding,
+                        context,
+                        channel,
+                        id.clone(),
+                        |doc| append_message(doc, &id, &author, &r.text, ts, &r.reply_to),
+                    )?;
+                }
+                DurableChatRequest::Mutation(r) => {
+                    let noop = self.check_mutation(r)?;
+                    let edited = self.sync.now_ms();
+                    self.sync.prepare_durable_chat_action(
+                        token,
+                        binding,
+                        context,
+                        channel,
+                        id.clone(),
+                        action,
+                        target,
+                        noop,
+                        |doc| {
+                            let location = resolve_message(doc, &id)?.ok_or_else(|| {
+                                automerge::AutomergeError::InvalidObjId(id.clone())
+                            })?;
+                            match &r.action {
+                                DurableMutationAction::Edit { text } => {
+                                    doc.put(&location.object, crate::TEXT, text.as_str())?;
+                                    doc.put(&location.object, crate::EDITED, edited as i64)?;
+                                }
+                                DurableMutationAction::Delete => {
+                                    doc.delete(&location.list, location.index)?
+                                }
+                            }
+                            Ok(())
+                        },
+                    )?;
                 }
             }
         }
-        Ok(DurableSendOutcome {
-            message_id: prepared.message_id,
-            durable,
-            replayed: prepared.replayed,
-            storage_error: result.err(),
-        })
+        let result = self
+            .sync
+            .commit_durable_chat_with_effects(token, |bytes, rng| {
+                store.save_server(server_id, bytes, rng).map_err(save_error)
+            });
+        let (effects, storage_error) = match result {
+            Ok(effects) => {
+                self.track_committed_chat_sends(&effects);
+                (effects, None)
+            }
+            Err(error) => (ChatCommitEffects::default(), Some(error.to_string())),
+        };
+        let mut prepared = self
+            .sync
+            .durable_chat_lookup(token, binding, context, channel)?
+            .ok_or_else(|| "chat preparation disappeared".to_string())?;
+        prepared.replayed = existing.is_some();
+
+        Ok((outcome(prepared, storage_error), effects))
+    }
+    #[cfg(test)]
+    fn stop_chat_request(
+        &mut self,
+        request: &DurableStopRequest,
+        store: &ServerStore,
+        server_id: u64,
+    ) -> Result<DurableSendOutcome, String> {
+        self.stop_chat_request_with_effects(request, store, server_id)
+            .map(|(outcome, _)| outcome)
+    }
+    fn stop_chat_request_with_effects(
+        &mut self,
+        request: &DurableStopRequest,
+        store: &ServerStore,
+        server_id: u64,
+    ) -> Result<(DurableSendOutcome, ChatCommitEffects), String> {
+        request.original.validate()?;
+        let (token, binding, context, channel, id, action, target) = request.original.identity();
+        let before = self
+            .sync
+            .durable_chat_lookup(token, binding, context, channel)?;
+        match self.sync.stop_durable_chat_with_effects(
+            token,
+            binding,
+            context,
+            channel,
+            id.clone(),
+            action,
+            target,
+            |bytes, rng| store.save_server(server_id, bytes, rng).map_err(save_error),
+        ) {
+            Ok((saved, effects)) => {
+                self.track_committed_chat_sends(&effects);
+                Ok((outcome(saved, None), effects))
+            }
+            Err(error) => {
+                let possible = self
+                    .sync
+                    .durable_chat_lookup(token, binding, context, channel)?
+                    .or(before);
+                Ok((
+                    DurableSendOutcome {
+                        message_id: id,
+                        durable: false,
+                        replayed: possible.as_ref().is_some_and(|p| p.replayed),
+                        disposition: possible
+                            .map_or(ChatDisposition::StoppedBeforeCommit, |p| p.disposition),
+                        storage_error: Some(error.to_string()),
+                    },
+                    ChatCommitEffects::default(),
+                ))
+            }
+        }
     }
 }
-
-/// Returns true when retry metadata or committed history may need an ordinary background
-/// snapshot. No actor or native lock is retained while the caller emits renderer events.
+/// No native guard is queued behind Actor commands. Ready owns the synchronous transaction
+/// only after the host transfers its exact mounted-store/incarnation lease.
 pub(crate) async fn execute<T: MeshTransport, R: CryptoRngCore>(
     server: &mut Server<T, R>,
-    request: DurableSendRequest,
+    request: DurableChatRequest,
+    stop: bool,
     ready: oneshot::Sender<DurableSendReady>,
-) -> bool {
-    let (lease, lease_rx) = oneshot::channel();
-    let (result_tx, result) = oneshot::channel();
+) -> Option<Vec<u128>> {
+    let (lease, rx) = oneshot::channel();
+    let (tx, result) = oneshot::channel();
     if ready.send(DurableSendReady { lease, result }).is_err() {
-        return false;
+        return None;
     }
-    let Ok(lease) = lease_rx.await else {
-        return false;
+    let Ok(lease) = rx.await else {
+        return None;
     };
     let result = match lease.store.as_ref() {
-        Some(store) => server.commit_chat_request(&request, store, lease.server),
-        None => Err("vault is not mounted".to_string()),
+        Some(store) => {
+            if stop {
+                server.stop_chat_request_with_effects(
+                    &DurableStopRequest { original: request },
+                    store,
+                    lease.server,
+                )
+            } else {
+                server.commit_chat_request_with_effects(&request, store, lease.server)
+            }
+        }
+        None => Err("vault is not mounted".into()),
     };
-    let touched = result.is_ok();
+    let (reply, channels) = match result {
+        Ok((outcome, effects)) => (Ok(outcome), Some(effects.affected_channels)),
+        Err(error) => (Err(error), None),
+    };
+    // A failed-save Outcome still returns Some(empty) to retain SnapshotNeeded scheduling;
+    // only a successfully installed transaction can report changed channels or Send tracking.
     drop(lease);
-    let _ = result_tx.send(result);
-    touched
+    let _ = tx.send(reply);
+    channels
 }
-
+#[derive(Debug)]
+pub struct DurableRepairReady {
+    lease: oneshot::Sender<DurableSendLease>,
+    result: oneshot::Receiver<Result<(), String>>,
+}
+impl DurableRepairReady {
+    pub async fn commit(self, lease: DurableSendLease) -> Result<(), String> {
+        self.lease
+            .send(lease)
+            .map_err(|_| "server stopped before repair".to_string())?;
+        self.result
+            .await
+            .map_err(|_| "server stopped during repair".to_string())?
+    }
+}
+pub(crate) async fn execute_repair<T: MeshTransport, R: CryptoRngCore>(
+    server: &mut Server<T, R>,
+    ready: oneshot::Sender<Option<DurableRepairReady>>,
+) -> Option<Vec<u128>> {
+    if !server.sync.durable_chat_needs_repair() {
+        let _ = ready.send(None);
+        return None;
+    }
+    let (lease, rx) = oneshot::channel();
+    let (tx, result) = oneshot::channel();
+    if ready
+        .send(Some(DurableRepairReady { lease, result }))
+        .is_err()
+    {
+        return None;
+    }
+    let Ok(lease) = rx.await else {
+        return None;
+    };
+    let result = match lease.store.as_ref() {
+        Some(store) => server
+            .sync
+            .repair_durable_chat_with_effects(|bytes, rng| {
+                store
+                    .save_server(lease.server, bytes, rng)
+                    .map_err(save_error)
+            })
+            .map_err(|e| e.to_string()),
+        None => Err("vault is not mounted".into()),
+    };
+    let (reply, channels) = match result {
+        Ok(effects) => {
+            server.track_committed_chat_sends(&effects);
+            (Ok(()), Some(effects.affected_channels))
+        }
+        Err(error) => (Err(error), None),
+    };
+    drop(lease);
+    let _ = tx.send(reply);
+    channels
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,4 +867,596 @@ mod tests {
         task.await.unwrap();
         drain.await.unwrap();
     }
+
+    type Node = Server<catcoms_rt::MemNetwork, ChaCha20Rng>;
+    async fn mutation_node() -> Node {
+        let mut n = Server::found(
+            Hub::new().join(PeerId::from_u64(881)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(881),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        n.open_channel(5).await.unwrap();
+        n
+    }
+    fn send_request(n: &Node, token: u8, text: &str) -> DurableChatRequest {
+        DurableChatRequest::Send(DurableSendRequest {
+            token: [token; 16],
+            expected_context: n.sync.durable_send_context().unwrap(),
+            channel: 5,
+            text: text.into(),
+            reply_to: String::new(),
+        })
+    }
+    fn mutation_request(
+        n: &Node,
+        token: u8,
+        id: &str,
+        action: DurableMutationAction,
+    ) -> DurableChatRequest {
+        let target = n.durable_mutation_context(5, id).unwrap();
+        DurableChatRequest::Mutation(DurableMutationRequest {
+            token: [token; 16],
+            expected_context: target.context,
+            channel: 5,
+            message_id: id.into(),
+            target: target.target,
+            action,
+        })
+    }
+    fn restored(n: &ServerStore, id: u64) -> Node {
+        Server::restore(
+            &n.load_server(id).unwrap(),
+            Hub::new().join(PeerId::from_u64(882)),
+            ChaCha20Rng::seed_from_u64(882),
+            Box::new(ManualClock::new(2_000)),
+            "alice",
+        )
+        .unwrap()
+    }
+    fn ops(n: &Node) -> usize {
+        n.sync.doc(DocType::Channel, 5).unwrap().op_count()
+    }
+
+    #[tokio::test]
+    async fn durable_mutation_edit_delete_and_noop_reopen_exact_original_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(883)).unwrap();
+        let mut n = mutation_node().await;
+        let post = n
+            .commit_chat_request(&send_request(&n, 1, "original"), &store, 9)
+            .unwrap();
+        assert!(post.durable && !post.replayed);
+        let edit = mutation_request(
+            &n,
+            2,
+            &post.message_id,
+            DurableMutationAction::Edit {
+                text: "edited".into(),
+            },
+        );
+        let edited = n.commit_chat_request(&edit, &store, 9).unwrap();
+        assert!(edited.durable && !edited.replayed);
+        assert_eq!(ops(&n), 2);
+        let noop = mutation_request(
+            &n,
+            3,
+            &post.message_id,
+            DurableMutationAction::Edit {
+                text: "edited".into(),
+            },
+        );
+        let before = n.messages(5)[0].edited;
+        assert!(n.commit_chat_request(&noop, &store, 9).unwrap().durable);
+        assert_eq!(ops(&n), 2);
+        assert_eq!(n.messages(5)[0].edited, before);
+        let mut reopened = restored(&store, 9);
+        assert!(
+            reopened
+                .commit_chat_request(&edit, &store, 9)
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(ops(&reopened), 2);
+        let delete = mutation_request(
+            &reopened,
+            4,
+            &post.message_id,
+            DurableMutationAction::Delete,
+        );
+        assert!(
+            reopened
+                .commit_chat_request(&delete, &store, 9)
+                .unwrap()
+                .durable
+        );
+        assert!(reopened.messages(5).is_empty());
+        assert_eq!(ops(&reopened), 3);
+        let mut reopened = restored(&store, 9);
+        assert!(
+            reopened
+                .commit_chat_request(&delete, &store, 9)
+                .unwrap()
+                .replayed
+        );
+        assert!(
+            reopened
+                .commit_chat_request(&noop, &store, 9)
+                .unwrap()
+                .durable
+        );
+        assert_eq!(ops(&reopened), 3);
+        let DurableChatRequest::Mutation(mut foreign) = edit else {
+            unreachable!()
+        };
+        foreign.target = [99; 32];
+        assert!(reopened
+            .commit_chat_request(&DurableChatRequest::Mutation(foreign), &store, 9)
+            .unwrap_err()
+            .starts_with("CHAT_SEND_TOKEN_CONFLICT"));
+    }
+
+    #[tokio::test]
+    async fn durable_mutation_real_pre_rename_failure_keeps_private_exact_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(884)).unwrap();
+        let mut n = mutation_node().await;
+        let post = n
+            .commit_chat_request(&send_request(&n, 1, "original"), &store, 9)
+            .unwrap();
+        let edit = mutation_request(
+            &n,
+            2,
+            &post.message_id,
+            DurableMutationAction::Edit {
+                text: "private".into(),
+            },
+        );
+        let blocked = dir.path().join("servers/10.bin");
+        std::fs::create_dir(&blocked).unwrap();
+        let pending = n.commit_chat_request(&edit, &store, 10).unwrap();
+        assert!(!pending.durable);
+        assert_eq!(n.messages(5)[0].text, "original");
+        assert_eq!(ops(&n), 1);
+        assert!(!n.sync.durable_chat_needs_repair());
+        assert!(n.snapshot().is_ok());
+        std::fs::remove_dir(blocked).unwrap();
+        let committed = n.commit_chat_request(&edit, &store, 10).unwrap();
+        assert!(committed.durable && committed.replayed);
+        assert_eq!(ops(&n), 2);
+        let reopened = restored(&store, 10);
+        assert_eq!(reopened.messages(5)[0].text, "private");
+        assert_eq!(ops(&reopened), 2);
+    }
+
+    #[tokio::test]
+    async fn durable_mutation_actual_rename_uncertainty_blocks_snapshots_and_repairs_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(885)).unwrap();
+        let mut n = mutation_node().await;
+        let post = n
+            .commit_chat_request(&send_request(&n, 1, "original"), &store, 9)
+            .unwrap();
+        let edit = mutation_request(
+            &n,
+            2,
+            &post.message_id,
+            DurableMutationAction::Edit {
+                text: "renamed".into(),
+            },
+        );
+        store.fail_next_chat_parent_sync();
+        let pending = n.commit_chat_request(&edit, &store, 9).unwrap();
+        assert!(!pending.durable);
+        assert!(pending.storage_error.unwrap().contains("actual rename"));
+        assert_eq!(n.messages(5)[0].text, "original");
+        assert_eq!(ops(&n), 1);
+        assert!(
+            n.snapshot().is_err(),
+            "ordinary rollback snapshot must not overwrite possible saved history"
+        );
+        let on_disk = restored(&store, 9);
+        assert_eq!(on_disk.messages(5)[0].text, "renamed");
+        assert_eq!(ops(&on_disk), 2);
+        n.sync
+            .repair_durable_chat(|bytes, rng| store.save_server(9, bytes, rng).map_err(save_error))
+            .unwrap();
+        assert_eq!(n.messages(5)[0].text, "renamed");
+        assert_eq!(ops(&n), 2);
+        assert!(n.snapshot().is_ok());
+        assert!(n.commit_chat_request(&edit, &store, 9).unwrap().replayed);
+        assert_eq!(ops(&n), 2);
+        assert_eq!(ops(&restored(&store, 9)), 2);
+    }
+
+    #[tokio::test]
+    async fn durable_mutation_real_noop_and_unknown_stop_rename_failures_latch_whole_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(886)).unwrap();
+        let mut n = mutation_node().await;
+        let post = n
+            .commit_chat_request(&send_request(&n, 1, "same"), &store, 9)
+            .unwrap();
+        let noop = mutation_request(
+            &n,
+            2,
+            &post.message_id,
+            DurableMutationAction::Edit {
+                text: "same".into(),
+            },
+        );
+        store.fail_next_chat_parent_sync();
+        assert!(!n.commit_chat_request(&noop, &store, 9).unwrap().durable);
+        assert!(n.snapshot().is_err());
+        assert_eq!(ops(&restored(&store, 9)), 1);
+        n.sync
+            .repair_durable_chat(|bytes, rng| store.save_server(9, bytes, rng).map_err(save_error))
+            .unwrap();
+        assert!(n.commit_chat_request(&noop, &store, 9).unwrap().durable);
+        assert_eq!(ops(&n), 1);
+        let late = send_request(&n, 3, "must never be authored");
+        store.fail_next_chat_parent_sync();
+        let stopped = n
+            .stop_chat_request(
+                &DurableStopRequest {
+                    original: late.clone(),
+                },
+                &store,
+                9,
+            )
+            .unwrap();
+        assert!(!stopped.durable);
+        assert_eq!(stopped.disposition, ChatDisposition::StoppedBeforeCommit);
+        assert!(n.snapshot().is_err());
+        let mut disk = restored(&store, 9);
+        let saved = disk.commit_chat_request(&late, &store, 9).unwrap();
+        assert!(saved.durable);
+        assert_eq!(saved.disposition, ChatDisposition::StoppedBeforeCommit);
+        assert_eq!(ops(&disk), 1);
+        let saved = n.commit_chat_request(&late, &store, 9).unwrap();
+        assert!(saved.durable);
+        assert_eq!(saved.disposition, ChatDisposition::StoppedBeforeCommit);
+        assert_eq!(ops(&n), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_mutation_stop_after_commit_preserves_saved_history_and_exact_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(887)).unwrap();
+        let mut n = mutation_node().await;
+        let send = send_request(&n, 1, "retained history");
+        assert!(n.commit_chat_request(&send, &store, 9).unwrap().durable);
+        store.fail_next_chat_parent_sync();
+        let stopped = n
+            .stop_chat_request(
+                &DurableStopRequest {
+                    original: send.clone(),
+                },
+                &store,
+                9,
+            )
+            .unwrap();
+        assert!(!stopped.durable);
+        assert_eq!(stopped.disposition, ChatDisposition::StoppedAfterCommit);
+        assert_eq!(ops(&n), 1);
+        assert_eq!(ops(&restored(&store, 9)), 1);
+        assert!(n.snapshot().is_err());
+        let stopped = n
+            .stop_chat_request(
+                &DurableStopRequest {
+                    original: send.clone(),
+                },
+                &store,
+                9,
+            )
+            .unwrap();
+        assert!(stopped.durable);
+        assert_eq!(stopped.disposition, ChatDisposition::StoppedAfterCommit);
+        let replay = n.commit_chat_request(&send, &store, 9).unwrap();
+        assert!(replay.durable);
+        assert_eq!(replay.disposition, ChatDisposition::StoppedAfterCommit);
+        assert_eq!(ops(&n), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_mutation_target_ignores_text_but_rejects_substitution_and_duplicate_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(888)).unwrap();
+        let mut n = mutation_node().await;
+        let posted = n
+            .commit_chat_request(&send_request(&n, 1, "original"), &store, 9)
+            .unwrap();
+        let edit = mutation_request(
+            &n,
+            2,
+            &posted.message_id,
+            DurableMutationAction::Edit {
+                text: "retained intent".into(),
+            },
+        );
+        n.edit_message(5, &posted.message_id, "intervening edit")
+            .await
+            .unwrap();
+        assert!(
+            n.commit_chat_request(&edit, &store, 9).unwrap().durable,
+            "same object remains addressed across text edits"
+        );
+        let stale = mutation_request(&n, 3, &posted.message_id, DurableMutationAction::Delete);
+        let id = posted.message_id.clone();
+        let author = n.my_fingerprint();
+        n.sync
+            .post(DocType::Channel, 5, |doc| {
+                crate::delete_message_in_doc(doc, &id)?;
+                append_message(doc, &id, &author, "replacement", 2_000, "")
+            })
+            .await
+            .unwrap();
+        assert!(n
+            .commit_chat_request(&stale, &store, 9)
+            .unwrap_err()
+            .starts_with("CHAT_MUTATION_TARGET_CHANGED"));
+        let ambiguous = mutation_request(&n, 4, &posted.message_id, DurableMutationAction::Delete);
+        n.sync
+            .post(DocType::Channel, 5, |doc| {
+                append_message(doc, &id, &author, "duplicate", 2_001, "")
+            })
+            .await
+            .unwrap();
+        assert!(n
+            .commit_chat_request(&ambiguous, &store, 9)
+            .unwrap_err()
+            .contains("ambiguous"));
+        assert_eq!(n.messages(5).len(), 2);
+    }
+    #[tokio::test]
+    async fn durable_mutation_verified_creator_cannot_be_relabelled_by_author_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(889)).unwrap();
+        let mut n = mutation_node().await;
+        let post = n
+            .commit_chat_request(&send_request(&n, 1, "real author"), &store, 9)
+            .unwrap();
+        n.sync
+            .post(DocType::Channel, 5, |doc| {
+                let location = resolve_message(doc, &post.message_id)?.unwrap();
+                doc.put(&location.object, crate::AUTHOR, "another display author")
+            })
+            .await
+            .unwrap();
+        let request = mutation_request(&n, 2, &post.message_id, DurableMutationAction::Delete);
+        assert!(n
+            .commit_chat_request(&request, &store, 9)
+            .unwrap_err()
+            .starts_with("CHAT_MUTATION_AUTHOR_CONFLICT"));
+        assert_eq!(n.messages(5).len(), 1);
+    }
+    #[tokio::test]
+    async fn durable_mutation_uncommitted_delete_rechecks_same_epoch_demotion_but_saved_replay_does_not(
+    ) {
+        let hub = Hub::new();
+        let owner_peer = PeerId::from_u64(901);
+        let mut owner = Server::found(
+            hub.join(owner_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(901),
+            Box::new(ManualClock::new(1_000)),
+            "owner",
+        )
+        .unwrap();
+        owner.subscribe_control().await.unwrap();
+        owner.open_channel(5).await.unwrap();
+        owner.open_roles().await.unwrap();
+        owner.send_message(5, "moderated row").await.unwrap();
+        let id = owner.messages(5)[0].id.clone();
+        let invite = owner.mint_invite([90; 16], u64::MAX, vec![]).unwrap();
+        let (member, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(902)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(902),
+                Box::new(ManualClock::new(1_000)),
+                "member",
+                owner_peer,
+                &invite
+            ),
+            owner.sync_once()
+        );
+        let mut member = member.unwrap();
+        member.open_channel(5).await.unwrap();
+        member.open_roles().await.unwrap();
+        let (caught, _) = tokio::join!(
+            member.request_channel_catchup(owner_peer, 5),
+            owner.sync_once()
+        );
+        caught.unwrap();
+        owner.set_admin(&member.device_id, true).await.unwrap();
+        let (roles, _) = tokio::join!(member.request_roles_catchup(owner_peer), owner.sync_once());
+        roles.unwrap();
+        assert_eq!(member.my_role(), Role::Admin);
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(903)).unwrap();
+        let request = mutation_request(&member, 1, &id, DurableMutationAction::Delete);
+        let basis = member.sync.durable_send_context().unwrap();
+        let blocked = dir.path().join("servers/9.bin");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(
+            !member
+                .commit_chat_request(&request, &store, 9)
+                .unwrap()
+                .durable
+        );
+        owner.set_admin(&member.device_id, false).await.unwrap();
+        let (roles, _) = tokio::join!(member.request_roles_catchup(owner_peer), owner.sync_once());
+        roles.unwrap();
+        assert_eq!(member.my_role(), Role::Member);
+        assert_eq!(member.sync.durable_send_context().unwrap(), basis);
+        std::fs::remove_dir(blocked).unwrap();
+        assert!(member
+            .commit_chat_request(&request, &store, 9)
+            .unwrap_err()
+            .starts_with("CHAT_MUTATION_NOT_AUTHORIZED"));
+        assert_eq!(member.messages(5).len(), 1);
+        owner.set_admin(&member.device_id, true).await.unwrap();
+        let (roles, _) = tokio::join!(member.request_roles_catchup(owner_peer), owner.sync_once());
+        roles.unwrap();
+        assert!(
+            member
+                .commit_chat_request(&request, &store, 9)
+                .unwrap()
+                .durable
+        );
+        owner.set_admin(&member.device_id, false).await.unwrap();
+        let (roles, _) = tokio::join!(member.request_roles_catchup(owner_peer), owner.sync_once());
+        roles.unwrap();
+        let saved = member.commit_chat_request(&request, &store, 9).unwrap();
+        assert!(saved.durable && saved.replayed);
+        assert!(member.messages(5).is_empty());
+        assert_eq!(ops(&member), 2);
+    }
+    #[tokio::test]
+    async fn retired_chat_fence_restore_stops_original_publication_but_preserves_signed_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(194)).unwrap();
+        let mut n = mutation_node().await;
+        let request = send_request(&n, 1, "history may already have reached peers");
+        n.commit_chat_request(&request, &store, 9).unwrap();
+        let before = store.load_server(9).unwrap().to_vec();
+        store
+            .save_chat_stop_fence(
+                9,
+                &request.retired_identity(),
+                &mut ChaCha20Rng::seed_from_u64(195),
+            )
+            .unwrap();
+        assert_eq!(store.load_server(9).unwrap().as_slice(), before);
+        let mut disk = restored(&store, 9);
+        disk.apply_retired_chat_fences(&store, 9, |bytes, rng| {
+            store.save_server(9, bytes, rng).map_err(save_error)
+        })
+        .unwrap();
+        assert_eq!(ops(&disk), 1);
+        assert_eq!(disk.messages(5).len(), 1);
+        let (token, binding, context, channel, ..) = request.identity();
+        assert_eq!(
+            disk.sync
+                .durable_chat_lookup(token, binding, context, channel)
+                .unwrap()
+                .unwrap()
+                .disposition,
+            ChatDisposition::StoppedAfterCommit
+        );
+        let mut fresh = restored(&store, 9);
+        assert_eq!(
+            fresh
+                .commit_chat_request(&request, &store, 9)
+                .unwrap()
+                .disposition,
+            ChatDisposition::StoppedAfterCommit
+        );
+        assert_eq!(ops(&fresh), 1);
+        let mut unrelated = mutation_node().await;
+        unrelated
+            .apply_retired_chat_fences(&store, 9, |_, _| {
+                panic!("unrelated restore must not overwrite any snapshot")
+            })
+            .unwrap();
+        assert_eq!(ops(&unrelated), 0);
+    }
+    #[tokio::test]
+    async fn durable_chat_host_repair_emits_projection_once_only_after_real_covering_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Some(
+            ServerStore::open(dir.path(), b"test", &mut ChaCha20Rng::seed_from_u64(197)).unwrap(),
+        )));
+        let (actor, mut events, task) = spawn(mutation_node().await);
+        actor.open_channel(5).await;
+        let request = DurableSendRequest {
+            token: [1; 16],
+            expected_context: actor.durable_send_context().await.unwrap(),
+            channel: 5,
+            text: "host repaired".into(),
+            reply_to: String::new(),
+        };
+        store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .fail_next_chat_parent_sync();
+        let pending = actor
+            .prepare_durable_send(request)
+            .await
+            .unwrap()
+            .commit(DurableSendLease::new(
+                store.clone().lock_owned().await,
+                9,
+                (),
+            ))
+            .await
+            .unwrap();
+        assert!(!pending.durable);
+        store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .fail_next_chat_parent_sync();
+        let failed = actor
+            .prepare_durable_chat_repair()
+            .await
+            .unwrap()
+            .unwrap()
+            .commit(DurableSendLease::new(
+                store.clone().lock_owned().await,
+                9,
+                (),
+            ))
+            .await;
+        assert!(failed.is_err());
+        assert!(actor.messages(5).await.is_empty());
+        actor
+            .prepare_durable_chat_repair()
+            .await
+            .unwrap()
+            .unwrap()
+            .commit(DurableSendLease::new(
+                store.clone().lock_owned().await,
+                9,
+                (),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(actor.messages(5).await.len(), 1);
+        actor.stop_and_wait().await.unwrap();
+        task.await.unwrap();
+        let mut changes = 0;
+        while let Some(event) = events.recv().await {
+            if matches!(
+                event.event,
+                crate::AppEvent::ChannelUpdated { channel: 5, .. }
+            ) {
+                changes += 1;
+            }
+        }
+        assert_eq!(
+            changes, 1,
+            "only successful host repair projects the installed channel change"
+        );
+        assert_eq!(ops(&restored(store.lock().await.as_ref().unwrap(), 9)), 1);
+    }
 }
+
+#[cfg(test)]
+#[path = "durable_chat/repair_effects_tests.rs"]
+mod repair_effects_tests;

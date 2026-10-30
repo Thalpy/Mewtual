@@ -5,6 +5,7 @@ import {
   deliveryClass,
   deliveryGlyph,
   deliveryLabel,
+  deliveryTip,
   deliveryVerdict,
   mergeDelivery,
   replaceDeliverySnapshot,
@@ -23,7 +24,7 @@ const ev = (over: Partial<DeliveryEvidence> = {}): DeliveryEvidence => ({
 
 test("proof of arrival is never overridden by the state of the network", () => {
   // The regression: a peer confirmed, then its connection flapped, and the tick went red on a
-  // message that had demonstrably arrived. A holder does not stop holding it.
+  // message that had demonstrably arrived. Receipt remains a fact even if a later crash loses it.
   assert.equal(deliveryVerdict(ev({ delivered: 1, reachable: 0, others: 2 })), "partial");
   assert.equal(deliveryVerdict(ev({ delivered: 2, reachable: 0, others: 2 })), "everyone");
   assert.equal(deliveryVerdict(ev({ delivered: 1, reachable: 1, others: 2 })), "partial");
@@ -36,7 +37,7 @@ test("an offline holder cannot stand in for a different reachable member", () =>
   assert.equal(deliveryVerdict(ev({ others: 2, delivered: 1, reachable: 1 })), "partial");
   assert.equal(
     deliveryLabel("partial", ev({ others: 2, delivered: 1, reachable: 1 })),
-    "held by 1 peer",
+    "received by 1 peer",
   );
 });
 
@@ -88,9 +89,9 @@ test("every verdict has a glyph and a colour", () => {
 });
 
 test("labels never say 'of 0 reachable'", () => {
-  // Held by somebody while nothing is reachable is a real state, and it has to read as a sentence.
-  assert.equal(deliveryLabel("partial", ev({ delivered: 1, reachable: 0, others: 2 })), "held by 1 peer");
-  assert.equal(deliveryLabel("partial", ev({ delivered: 1, reachable: 3, others: 4 })), "held by 1 peer");
+  // A confirmed receipt while nothing is reachable must still read as a sentence.
+  assert.equal(deliveryLabel("partial", ev({ delivered: 1, reachable: 0, others: 2 })), "received by 1 peer");
+  assert.equal(deliveryLabel("partial", ev({ delivered: 1, reachable: 3, others: 4 })), "received by 1 peer");
   assert.equal(deliveryLabel("everyone", ev({ others: 1 })), "delivered · all 1 member");
 });
 
@@ -100,6 +101,19 @@ test("a locally accepted send is not labelled as still sending", () => {
     deliveryLabel("waiting", ev({ delivered: 0, reachable: 1 })),
     "sent · awaiting confirmation",
   );
+});
+
+test("receipt wording does not promise continuing storage after a recipient disconnects", () => {
+  for (const delivered of [1, 2]) {
+    const evidence = ev({ delivered, others: 2, reachable: 0, anyPeer: false });
+    const verdict = deliveryVerdict(evidence);
+    assert.ok(verdict === "partial" || verdict === "everyone");
+    const label = deliveryLabel(verdict, evidence);
+    const tip = deliveryTip(verdict, evidence);
+    assert.doesNotMatch(label, /held|saved|stored|read/i);
+    assert.match(tip, /receipt/i);
+    assert.match(tip, /not.*read or saved to disk/i);
+  }
 });
 
 test("a current-roster report can drop a removed member's receipt", () => {

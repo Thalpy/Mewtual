@@ -1,11 +1,11 @@
 import { sanitizeStatusCursor, type StatusCursors } from "./statusread.ts";
 import { MAX_LATE_PAST, type LatePast, type ReadMark } from "./unread.ts";
 import { sanitizeFileTrustPolicies, type FileTrustPolicies } from "./file-trust.ts";
-import { sanitizePendingSends, type PendingSends } from "./pending-sends.ts";
+import { pendingContinuityVersion, sanitizePendingSends, type PendingSends } from "./pending-sends.ts";
 import { decodeStudioDraft } from "./studio-draft.ts";
 
 export type UiContinuity = {
-  version: 1;
+  version: 1 | 2 | 3;
   pendingSends: PendingSends;
   /** Explicitly recovered text, independent of whether its original conversation still exists. */
   recoveredSendDrafts: PendingSends;
@@ -63,6 +63,12 @@ function record(value: unknown): Record<string, unknown> {
 /** Treat native continuity JSON as untrusted even though the bridge also validates its envelope. */
 export function sanitizeUiContinuity(value: unknown): UiContinuity {
   const root = record(value);
+  // Critical versions are sticky: v2 protects mutation/Stop custody from v1, while v3
+  // protects enlarged Send retention from the existing v2 reader's silent field drops.
+  if (root.version !== undefined && root.version !== 1 && root.version !== 2 && root.version !== 3) {
+    throw new Error("Saved UI continuity version is unsupported. The sealed copy has been kept.");
+  }
+  let version: 1 | 2 | 3 = root.version === 3 ? 3 : root.version === 2 ? 2 : 1;
   const drafts: Record<string, string> = {};
   const readMarks: Record<string, ReadMark> = {};
   for (const [key, item] of Object.entries(record(root.drafts)).slice(0, MAX_ENTRIES)) {
@@ -105,12 +111,13 @@ export function sanitizeUiContinuity(value: unknown): UiContinuity {
   // field, a truthy string a future build wrote, a corrupted record. The permissive direction of
   // this flag starts network requests, so it is the one that has to be asked for exactly.
   const embedAutoLoad = root.embedAutoLoad === true;
-  const pendingSends = sanitizePendingSends(root.pendingSends);
-  const recoveredSendDrafts = sanitizePendingSends(root.recoveredSendDrafts);
+  const pendingSends = sanitizePendingSends(root.pendingSends, version);
+  const recoveredSendDrafts = sanitizePendingSends(root.recoveredSendDrafts, version);
+  if ([...Object.values(pendingSends), ...Object.values(recoveredSendDrafts)].some(intent => pendingContinuityVersion(intent) === 3)) version = 3;
   if (root.studioDraft !== undefined && root.studioDraft !== null && typeof root.studioDraft !== "string") throw new Error("Saved Studio edits have an invalid format. The sealed copy has been kept.");
   const studioDraft = typeof root.studioDraft === "string" ? root.studioDraft : null;
   if (studioDraft !== null) decodeStudioDraft(studioDraft);
-  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts, studioDraft };
+  return { version, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts, studioDraft };
 }
 
 /**
@@ -158,6 +165,7 @@ export function planLegacyReadMarkMigration(
     // The legacy key only ever held chat read marks, so everything else in the sealed record is
     // carried across unchanged rather than being dropped by the migration that adopts them.
     const migrated = sanitizeUiContinuity({
+      version: current.version,
       drafts: current.drafts,
       readMarks: parsed,
       statusCursors: current.statusCursors,

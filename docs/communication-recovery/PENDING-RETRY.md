@@ -1,4 +1,16 @@
-# Quiet retry of unfinished UI sends
+# Quiet retry of unfinished UI chat requests
+
+The 29 October frontend extension covers posts, edits and deletes in one bounded
+queue. Edits bind the original server/channel, message id, immutable native target
+digest and exact text; deletes are a closed action with no recovered text. Composer
+matching never matches a mutation. Native edit/delete admission and exact-token Stop
+must ship with this frontend contract; the UI has no legacy void-command fallback.
+
+Post-only continuity retains the original v1 shape. Before the first mutation or
+Stop dispatch the UI seals sticky continuity v2, which remains v2 after its queue
+empties. Old native readers reject v2. The new reader rejects unknown versions and
+actions while preserving the sealed copy and blocking replacement saves. All other
+draft, read, trust, Studio and preference fields continue through the same envelope.
 
 The unlocked UI now schedules one retry pass for unresolved caller intents after five
 seconds, doubling the interval to at most sixty seconds. An empty eligible queue resets
@@ -27,24 +39,46 @@ the user must explicitly put it into a composer and send under the new context.
 Settings > Pending messages lists the whole vault's pending requests, including requests
 whose server or channel no longer exists. The founding screen also opens this manager when
 the vault has no servers. The manager pauses automatic retry while open; an invocation
-already dispatched may still finish. Every request offers **Recover to saved draft** and
-**Stop retrying**, each with an explicit confirmation. Stop retrying removes the stored
-request and its text; it cannot retract a message that may already have been accepted.
+already dispatched may still finish. Send/edit requests offer **Recover to saved draft**
+and **Stop retrying**, each with an explicit confirmation; deletes offer Stop without
+an empty saved draft. Stop cannot retract an operation that was already saved.
 
 Only a fresh never-dispatched intent can carry `acceptance: not_accepted`. Before every
-native invocation, the UI seals `acceptance: ambiguous` with the same token and payload.
+positive native invocation, the UI seals `acceptance: ambiguous` with the same token and payload.
 Missing legacy markers, rejected/conflicting tokens, changed contexts and lost responses
 remain ambiguous. Native error text is never evidence that a previous invocation failed
 to commit. The manager warns that sending recovered text later may create a duplicate.
 
-Explicit resolution prepares a replacement continuity snapshot, saves it through the
-ordinary serialized queue, and only then removes the pending entry or installs a recovered
-copy in memory. The entire pending collection stays occupied until that write succeeds.
+Explicit resolution first seals `resolution: cancel | recover` on the same complete
+original request. It then invokes `stop_durable_chat` with that exact token and binding.
+Lost replies, exceptions, Pending and Superseded retain the decision and its capacity;
+every later retry, including after lock/reload, dispatches only Stop. A durable native
+`committed`, `stopped-before-commit` or `stopped-after-commit` terminal permits a final
+serialized continuity save that removes the entry or installs its recovered text.
+The slot stays occupied until that final write succeeds. A cleanup failure safely
+replays Stop; it never remints a positive operation.
+For a permanently left server, only the distinct native `stopped-retired` terminal
+with `accepted: false` and durable persistence permits release. It confirms a
+vault-sealed fence against future retries/publication; historical acceptance remains
+unknown. The UI says the message may already have been sent, or the edit/deletion
+may already have been applied. Recovered text carries an ambiguous acceptance marker.
+Missing-server errors, lost replies, Pending and Superseded alone retain the same
+saved Stop and occupied slot. Frontend tests replace native I/O; actual vault-fence
+durability and pre-Actor restore fencing remain native integration responsibilities.
+A stale positive continuity copy can receive this same synced retired terminal
+after native rewrites its existing exact fence. Before releasing that copy, the
+UI first seals a negative resolution with its original identity: recover for send/edit
+text, cancel for a textless deletion. Cleanup then uses the already confirmed native
+terminal. Failed cleanup or lock leaves a sealed Stop; later retries cannot author
+positively. A failed negative seal retains the original request for exact native
+fence reconciliation. No error string alone triggers this conversion or removal.
 Queued ordinary saves construct their snapshots at execution time, after preceding
 decision commits, so an older captured snapshot cannot resurrect retired work. A resolution
 temporarily holds submission and completion mutations. Every submission also checks its
-original session and exact retained identity; late responses cannot recreate retired work
-or clear a newer composer. Lock invalidates completion callbacks. A failed write retains
+original session and exact retained identity, including action/target/resolution; late
+responses cannot recreate retired work or clear a newer composer/editor. Inline editors
+keep their draft until sealed intent admission and use revisions to preserve newer work.
+Lock invalidates completion callbacks. A failed write retains
 the original payload; an interrupted session asks the user to reopen the manager to check
 what reached the sealed record. Leaving a conversation does not erase pending requests.
 
@@ -54,7 +88,9 @@ decision's synchronous `afterSave` memory commit. Only after it settles does clo
 fresh continuity snapshot and invoke native close. Waiting only for native write ordering is
 insufficient: a final snapshot captured while the old token remains in memory could overwrite
 the successful decision. A failed decision write retains the original request in the final
-snapshot; it is not reported as a successful cancellation or recovery.
+snapshot; it is not reported as a successful cancellation or recovery. When close drains
+only the initial Stop seal, its final snapshot retains that negative intent for exact
+Stop retry after reopening. It does not claim the native terminal already exists.
 
 If the queue has not settled within ten seconds of browser timer time, this close attempt
 stops before native close and leaves the window open with a warning. It does not destroy or
@@ -64,11 +100,11 @@ from a replacement session from being used under the original close request.
 
 Ctrl+L still clears the view immediately. If it interrupts a decision before its memory
 commit, generation validation rejects that decision instead of claiming cancellation succeeded.
-The request remains unresolved and may retry on a later unlock if it was eligible beforehand;
-the user must revisit the manager to complete the decision. A fresh close while already locked
+The request remains unresolved; a sealed Stop retries only Stop on later unlock, while
+an interrupted, unsaved choice leaves the original request. A fresh close while already locked
 reuses the lock coordinator's exact immutable snapshot. This preserves immediate privacy
-redaction without adding a new stored retry state or promising that an interrupted decision
-completed. Hard process termination and unacknowledged filesystem writes remain outside the
+redaction without promising that an interrupted decision completed. Hard process termination
+and unacknowledged filesystem writes remain outside the
 orderly-close guarantee.
 
 Recovered drafts are a separate collection, never a retry queue, with the same independent
@@ -101,6 +137,10 @@ pre-dispatch and in-flight IPC races, newer composer text and no implicit public
 `pending-manager-surface.test.ts` mounts the compiled production component and drives its
 confirmation buttons through those App functions. These tests verify the frontend contract;
 the native sealed-store and generation checks remain responsible for filesystem durability.
+`pending-mutations.test.ts` adds action-aware hydration/matching/caps, sticky-v2 dispatch,
+lost mutation/Stop replies, exact original Stop replay, native-terminal validation,
+cleanup failure, editor revisions and late-positive/Stop races. It replaces native I/O;
+it does not establish native no-op receipt or filesystem crash durability.
 
 R3 validation (2026-09-27): the seven focused send/continuity/manager files passed 47 tests;
 the onboarding/file-trust file passed 15 tests, including the unchanged hydration-before-

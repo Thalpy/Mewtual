@@ -9,11 +9,11 @@ Object.assign(globalThis, { HTMLMediaElement: w.HTMLMediaElement, MouseEvent: w.
 const { default: Manager } = await import("./PendingSendManager.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 
-function surface(app: ReturnType<typeof pendingManagerApp>) {
+function surface(app: ReturnType<typeof pendingManagerApp>, activeLabel: string | null = null) {
   const target = document.createElement("div"); document.body.appendChild(target);
   const state = app.state();
   const mounted = mount(Manager, { target, props: {
-    pending: state.pendingSends, recovered: state.recoveredSendDrafts, ready: true,
+    pending: state.pendingSends, recovered: state.recoveredSendDrafts, ready: true, activeLabel,
     conversationName: (server, channel) => `Unavailable conversation ${server} / channel ${channel}`,
     onresolve: app.resolve, onuse: app.use, onremove: app.remove,
   } });
@@ -78,6 +78,24 @@ test("compiled manager reports a failed decision without hiding the original pen
   ui.done(); app.done();
 });
 
+test("compiled manager can retry a saved recovery Stop with the original token and decision", async () => {
+  const token = "4".repeat(32);
+  const item = { token, server: 1, channel: "3", expectedContext: "b".repeat(64),
+    text: "saved recovery text", replyTo: "", resolution: "recover" };
+  const app = pendingManagerApp({ version: 2, pendingSends: { [token]: item } });
+  await app.hydrate(); app.manager(true);
+  const ui = surface(app);
+  const retry = [...ui.target.querySelectorAll("button")].find(button => button.textContent === "Retry Stop");
+  assert.ok(retry); assert.equal(retry.disabled, false, "the open manager pauses automatic retry, so saved recovery needs a usable control");
+  await ui.click(token, "Retry Stop"); await ui.click(token, "Confirm recovery");
+  assert.equal(app.state().stops.length, 1);
+  assert.equal(app.state().stops[0].args.original.token, token);
+  assert.equal(app.state().stops[0].sealed.pendingSends[token].resolution, "recover");
+  assert.equal(app.state().recoveredSendDrafts[token].text, item.text);
+  assert.equal(app.state().submissions.length, 0);
+  ui.done(); app.done();
+});
+
 test("pending manager is a personal settings page with no mounted-server condition", () => {
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
   const pages = source.slice(source.indexOf("const USER_SET_PAGES"), source.indexOf("const SRV_SET_PAGES"));
@@ -88,4 +106,64 @@ test("pending manager is a personal settings page with no mounted-server conditi
   assert.match(source, /\{:else if \(servers\.length === 0 \|\| showAdd\) && !showSettings\}/);
   const founding = source.slice(source.indexOf('{:else if (servers.length === 0 || showAdd)'), source.indexOf('<div class="app">'));
   assert.match(founding, /onclick=\{\(\) => openSettings\("pending"\)\}/);
+});
+
+test("compiled quarantine recovery is distinct from Stop and full shelves keep lossless Copy available", async () => {
+  const token = "1".repeat(32);
+  const item: PendingSend = { token, server: 7, channel: "9", expectedContext: "a".repeat(64), kind: "edit",
+    messageId: "message", target: "b".repeat(64), text: "😀".repeat(16_385), replyTo: "",
+    resolution: "cancel", acceptance: "ambiguous", retryBlock: "invalid" };
+  const recovered = Object.fromEntries(Array.from({ length: 32 }, (_, n) => {
+    const saved = { ...item, token: (n + 2).toString(16).padStart(32, "0"), text: "saved" };
+    return [saved.token, saved];
+  }));
+  const app = pendingManagerApp({ version: 2, pendingSends: { [token]: item }, recoveredSendDrafts: recovered });
+  await app.hydrate(); app.manager(true);
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const copies: string[] = [];
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { async writeText(text: string) { copies.push(text); } } });
+  const ui = surface(app);
+  try {
+    const card = ui.target.querySelector(`[data-pending-token="${token}"]`)!;
+    assert.match(card.textContent!, /too long to retry/);
+    assert.doesNotMatch(card.textContent!, /Stop is awaiting|Retry Stop|Stop retrying/);
+    assert.equal(card.querySelector("textarea")?.value, item.text);
+    await ui.click(token, "Recover saved text");
+    assert.match(card.textContent!, /Keep the full text and request in Saved drafts\? This request will stay paused/);
+    await ui.click(token, "Confirm recovery");
+    assert.match(ui.target.querySelector('[role="alert"]')?.textContent ?? "", /Pending messages need attention/);
+    await ui.click(token, "Copy text"); assert.deepEqual(copies, [item.text]);
+    assert.deepEqual(app.state().pendingSends[token], item);
+    assert.deepEqual(app.state().recoveredSendDrafts, recovered);
+    assert.equal(app.state().submissions.length, 0); assert.equal(app.state().stops.length, 0);
+  } finally {
+    ui.done(); app.done();
+    if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+    else Reflect.deleteProperty(navigator, "clipboard");
+  }
+});
+
+test("compiled manager retains old invalid-ID deletion as a visible saved request without empty draft controls", async () => {
+  const token = "1".repeat(32), messageId = "x".repeat(150);
+  const item: PendingSend = { token, server: 7, channel: "9", expectedContext: "a".repeat(64), kind: "delete",
+    messageId, target: "b".repeat(64), text: "", replyTo: "", resolution: "cancel",
+    acceptance: "ambiguous", retryBlock: "invalid" };
+  const app = pendingManagerApp({ version: 2, pendingSends: { [token]: item } });
+  await app.hydrate(); app.manager(true);
+  let ui = surface(app, "general");
+  try {
+    const pending = ui.target.querySelector(`[data-pending-token="${token}"]`)!;
+    assert.match(pending.textContent!, /Delete message/); assert.ok(pending.textContent!.includes(messageId));
+    assert.doesNotMatch(pending.textContent!, /Retry Stop|Stop retrying|Copy text/);
+    assert.equal(pending.querySelector("textarea"), null);
+    await ui.click(token, "Recover saved request"); await ui.click(token, "Confirm recovery");
+    ui.done(); app.lock(); await app.unlock(); ui = surface(app, "general");
+    const recovered = ui.target.querySelector(`[data-recovered-token="${token}"]`)!;
+    assert.match(recovered.textContent!, /Delete message/); assert.ok(recovered.textContent!.includes(messageId));
+    assert.match(recovered.textContent!, /Earlier attempts remain unconfirmed/);
+    assert.equal(recovered.querySelector("textarea"), null);
+    assert.ok(![...recovered.querySelectorAll("button")].some(b => /Copy text|Use in/.test(b.textContent ?? "")));
+    assert.deepEqual(app.state().recoveredSendDrafts[token], item);
+    assert.equal(app.state().submissions.length, 0); assert.equal(app.state().stops.length, 0);
+  } finally { ui.done(); app.done(); }
 });

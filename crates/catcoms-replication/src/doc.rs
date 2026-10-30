@@ -43,6 +43,174 @@ pub struct AppliedOp {
     pub change: ChangeHash,
 }
 
+/// An exact original local chat operation retained by a storage preparation. Its private
+/// envelope is never a general inbound admission API: construction verifies the local device,
+/// document scope, signature and exact Automerge hash. Applying it repairs saved history only;
+/// it grants neither current membership nor publication authority.
+#[derive(Clone)]
+pub struct SavedLocalChatOp(SignedOp);
+const MAX_SAVED_LOCAL_CHAT_BYTES: usize = 256 * 1024;
+#[derive(Default)]
+struct CreatorEvidenceIndex {
+    indexed: usize,
+    // Append-only derived archive metadata. Queries parse each log entry at most once; the
+    // object actor narrows later range/signature checks without trusting it as authorship.
+    ranges: HashMap<ActorId, Vec<(u64, u64, usize)>>,
+}
+
+impl fmt::Debug for SavedLocalChatOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SavedLocalChatOp")
+            .field("doc_id", &self.0.doc_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SavedLocalChatOp {
+    /// Restore a bounded preparation after its containing encrypted snapshot was authenticated.
+    pub fn decode(
+        bytes: &[u8],
+        device: &MlsDevice,
+        channel: u128,
+        change: ChangeHash,
+    ) -> Result<Self, ReplError> {
+        if bytes.len() > MAX_SAVED_LOCAL_CHAT_BYTES {
+            return Err(ReplError::Malformed);
+        }
+        let op = SignedOp::decode(bytes)?;
+        // These preparations are emitted from Change::raw_bytes(). Reject compressed/document
+        // chunks before Automerge can allocate decompressed state. General legacy ingress keeps
+        // its existing compatibility grammar; this is only the saved-local proof constructor.
+        if op.delta.len() < 10 || op.delta[..4] != [0x85, 0x6f, 0x4a, 0x83] || op.delta[8] != 1 {
+            return Err(ReplError::Malformed);
+        }
+
+        if op.doc_type != DocType::Channel
+            || op.doc_id != channel
+            || op.author_device != device.device_id()
+            || !op.verify()
+            || op.domain_op.is_some()
+        {
+            return Err(ReplError::BadSignature);
+        }
+        let parsed = Change::from_bytes(op.delta.clone())
+            .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        if parsed.hash() != change || parsed.actor_id().to_bytes() != device.device_id().as_bytes()
+        {
+            return Err(ReplError::ActorMismatch);
+        }
+        Ok(Self(op))
+    }
+
+    /// Exact original bytes; no signature or encryption is regenerated on retry.
+    pub fn encode(&self) -> Vec<u8> {
+        self.0.encode()
+    }
+}
+
+#[cfg(test)]
+mod saved_local_chat_tests {
+    use super::*;
+    #[test]
+    fn encrypted_chat_document_and_saved_proof_remain_send_sync() {
+        fn require_send_sync<T: Send + Sync>() {}
+        require_send_sync::<EncryptedDoc>();
+        require_send_sync::<SavedLocalChatOp>();
+    }
+
+    #[test]
+    fn poisoned_creator_evidence_rebuilds_and_reverifies_original_signed_log() {
+        let device = MlsDevice::generate().unwrap();
+        let mut document = EncryptedDoc::new(DocType::Channel, 5, &device.device_id());
+        let mut graph =
+            AutoCommit::new().with_actor(ActorId::from(device.device_id().as_bytes().to_vec()));
+        let object = graph
+            .put_object(ROOT, "message", automerge::ObjType::Map)
+            .unwrap();
+        graph.put(&object, "text", "verified original").unwrap();
+        graph.commit();
+        let op = SignedOp::sign(
+            &device,
+            DocType::Channel,
+            5,
+            graph.get_last_local_change().unwrap().raw_bytes().to_vec(),
+        )
+        .unwrap();
+        document
+            .apply_signed_tracked_observed(op, |_, _| {})
+            .unwrap();
+        assert_eq!(
+            document.verified_object_creator(&object).unwrap(),
+            Some(device.device_id())
+        );
+        let poison = |document: &EncryptedDoc| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut cache = document.creator_evidence.lock().unwrap();
+                // A stale partial cursor/range would panic or skip the original evidence if
+                // the next query merely trusted the poisoned value.
+                cache.indexed = usize::MAX;
+                let automerge::ObjId::Id(_, actor, _) = &object else {
+                    unreachable!()
+                };
+                cache
+                    .ranges
+                    .insert(actor.clone(), vec![(0, u64::MAX, usize::MAX)]);
+                panic!("interrupt creator-index update");
+            }));
+            assert!(result.is_err());
+            assert!(document.creator_evidence.is_poisoned());
+        };
+        poison(&document);
+        assert_eq!(
+            document.verified_object_creator(&object).unwrap(),
+            Some(device.device_id())
+        );
+        assert!(!document.creator_evidence.is_poisoned());
+        assert_eq!(
+            document.creator_evidence.lock().unwrap().indexed,
+            document.log.len()
+        );
+        document.log[0].signature[0] ^= 1;
+        poison(&document);
+        assert!(matches!(
+            document.verified_object_creator(&object),
+            Err(ReplError::BadSignature)
+        ));
+        assert!(!document.creator_evidence.is_poisoned());
+    }
+
+    #[test]
+    fn saved_local_chat_proof_rejects_wrong_scope_device_hash_compression_and_size() {
+        let device = MlsDevice::generate().unwrap();
+        let mut graph = AutoCommit::new();
+        graph.set_actor(ActorId::from(device.device_id().as_bytes().to_vec()));
+        graph.put(ROOT, "text", "repeat".repeat(4_000)).unwrap();
+        graph.commit();
+        let mut change = graph.get_last_local_change().unwrap();
+        let hash = change.hash();
+        let raw =
+            SignedOp::sign(&device, DocType::Channel, 5, change.raw_bytes().to_vec()).unwrap();
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 5, hash).is_ok());
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 6, hash).is_err());
+        assert!(
+            SavedLocalChatOp::decode(&raw.encode(), &MlsDevice::generate().unwrap(), 5, hash)
+                .is_err()
+        );
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 5, ChangeHash([0; 32])).is_err());
+        let compressed = change.bytes().into_owned();
+        assert_eq!(compressed[8], 2);
+        let compressed = SignedOp::sign(&device, DocType::Channel, 5, compressed).unwrap();
+        assert!(SavedLocalChatOp::decode(&compressed.encode(), &device, 5, hash).is_err());
+        assert!(SavedLocalChatOp::decode(
+            &vec![0; MAX_SAVED_LOCAL_CHAT_BYTES + 1],
+            &device,
+            5,
+            hash
+        )
+        .is_err());
+    }
+}
+
 /// One encrypted, replicated CRDT document.
 pub struct EncryptedDoc {
     doc_type: DocType,
@@ -58,6 +226,9 @@ pub struct EncryptedDoc {
     change_authors: HashMap<ChangeHash, DeviceId>,
     /// How many entries of `log` are already reflected in `change_authors`.
     authors_indexed: usize,
+    // Disposable derived metadata must preserve EncryptedDoc's shared-read contract, which
+    // is also inherited by retained documents inside ServerStore.
+    creator_evidence: std::sync::Mutex<CreatorEvidenceIndex>,
     /// The last [`EncryptedDoc::snapshot`] and the exact document state it describes: the
     /// automerge heads plus the op-log length, which together are everything the serialization
     /// reads. Persistence re-serializes every open document of a server on every write, so an
@@ -105,6 +276,7 @@ impl EncryptedDoc {
             applied: HashSet::new(),
             change_authors: HashMap::new(),
             authors_indexed: 0,
+            creator_evidence: Default::default(),
             snapshot_cache: None,
             checkpoint: None,
             catchup_index: AncestryIndex::default(),
@@ -257,6 +429,86 @@ impl EncryptedDoc {
     /// Borrow the underlying automerge document (for reads/projection).
     pub fn doc(&self) -> &AutoCommit {
         &self.doc
+    }
+
+    /// Capture the exact original local preparation before the first storage attempt. Opening
+    /// the just-created packet proves its scope and signer without exposing raw SignedOp input.
+    pub fn capture_local_chat_op(
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        change: ChangeHash,
+    ) -> Result<SavedLocalChatOp, ReplError> {
+        if sealed.epoch != group.epoch() {
+            return Err(ReplError::EpochUnavailable(sealed.epoch));
+        }
+        let key = group.channel_secret(device, DocType::Channel, sealed.doc_id)?;
+        let op = sealed.open(&key)?;
+        SavedLocalChatOp::decode(&op.encode(), device, sealed.doc_id, change)
+    }
+
+    /// Additive historical repair from an opaque original local preparation. Current-epoch
+    /// sealing is deliberately absent, so membership churn cannot lose a possibly saved change.
+    pub fn repair_local_chat_op(&mut self, original: &SavedLocalChatOp) -> Result<(), ReplError> {
+        self.apply_signed_tracked_observed(original.0.clone(), |_, _| {})
+            .map(|_| ())
+    }
+
+    /// Verified signer of the change that created an object, where that signed history exists.
+    /// Actor bytes alone are not authorship. Contradictory envelopes refuse rather than choosing
+    /// one signer. Legacy missing evidence stays None; v1 does not prove historical MLS tenure.
+    pub fn verified_object_creator(
+        &self,
+        object: &automerge::ObjId,
+    ) -> Result<Option<DeviceId>, ReplError> {
+        let automerge::ObjId::Id(counter, actor, _) = object else {
+            return Err(ReplError::Malformed);
+        };
+        let mut evidence = self.creator_evidence.lock().unwrap_or_else(|poisoned| {
+            // A panic may leave the derived cursor/ranges partially updated. They are not
+            // authority: discard every cached entry, then reparse and reverify the original
+            // signed log below. Clearing poison is safe only after that complete reset.
+            let mut evidence = poisoned.into_inner();
+            *evidence = CreatorEvidenceIndex::default();
+            self.creator_evidence.clear_poison();
+            evidence
+        });
+        while evidence.indexed < self.log.len() {
+            let index = evidence.indexed;
+            let change = Change::from_bytes(self.log[index].delta.clone())
+                .map_err(|e| ReplError::Automerge(e.to_string()))?;
+            evidence
+                .ranges
+                .entry(change.actor_id().clone())
+                .or_default()
+                .push((change.start_op().get(), change.max_op(), index));
+            evidence.indexed += 1;
+        }
+        let mut found = None;
+        for &(start, end, index) in evidence.ranges.get(actor).into_iter().flatten() {
+            if *counter < start || *counter > end {
+                continue;
+            }
+            let op = &self.log[index];
+            if op.doc_type != self.doc_type
+                || op.doc_id != self.doc_id
+                || !op.verify()
+                || (actor.to_bytes().len() == op.author_device.as_bytes().len()
+                    && actor.to_bytes() != op.author_device.as_bytes())
+            {
+                return Err(ReplError::BadSignature);
+            }
+            if found.is_some_and(|signer| signer != op.author_device) {
+                return Err(ReplError::BadSignature);
+            }
+            found = Some(op.author_device);
+        }
+        if found.is_none() && actor.to_bytes().len() == 32 {
+            // Modern device actors require their actual signed creator. A peer-provided actor
+            // string cannot turn missing/contradictory evidence into legacy authorship.
+            return Err(ReplError::BadSignature);
+        }
+        Ok(found)
     }
 
     /// This document's type (for re-keying a restored doc in the sync layer's map).
@@ -443,17 +695,18 @@ impl EncryptedDoc {
         Ok(out)
     }
 
-    /// Which devices **provably hold** each of `targets` (automerge change hashes), from the
+    /// Which devices signed causal receipt evidence for `targets` (Automerge change hashes), from the
     /// document alone; the read-only half of the delivery-state query.
     ///
     /// A device `D` counts for target `C` when `D` authored some change whose causal history
-    /// contains `C`: `D` could not have built on `C` without holding it, and the change carrying
-    /// that proof is signed by `D`. This is the same predicate the design's `their_heads` route
+    /// contains `C`. An ordinary writer received `C` before building on it; a modified writer can
+    /// also name a known dependency hash without retaining its contents. The signature attributes
+    /// the claim, not continuing storage or a disk save. This is the predicate the `their_heads` route
     /// describes ("the peer's confirmed heads causally include the op"), evaluated against
     /// evidence already in the doc rather than against a sync session; Mewtual replicates by
     /// broadcasting sealed ops, so no per-peer automerge sync state exists to read.
     ///
-    /// The result is *sound but incomplete*: a device that received `C` and has not written since
+    /// The result is incomplete: a device that received `C` and has not written since
     /// leaves no evidence and is simply absent. Callers must render absence as "unknown", never
     /// as "not delivered". Returns one entry per element of `targets` (sorted, deduped); targets
     /// past [`MAX_DELIVERY_TARGETS`] always come back empty.
@@ -607,6 +860,7 @@ impl EncryptedDoc {
             applied,
             change_authors: HashMap::new(),
             authors_indexed: 0,
+            creator_evidence: Default::default(),
             snapshot_cache: None,
             checkpoint,
             catchup_index,

@@ -22,6 +22,7 @@
 pub mod authority;
 mod bounded_change;
 mod catchup_index;
+pub mod chat;
 pub mod checkpoint;
 pub mod doc;
 pub mod epoch;

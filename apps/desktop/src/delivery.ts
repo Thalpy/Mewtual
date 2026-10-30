@@ -3,7 +3,8 @@
  *
  * There is no server to acknowledge a message. "Delivered to X" means X sent an authenticated
  * receipt for the exact change or authored a causally-descending change. Both are sound positive
- * evidence within the current roster; counts may fall when that roster changes. This must never
+ * evidence of receipt within the current roster, not proof of a disk save or continuing custody;
+ * counts may fall when that roster changes. This must never
  * invent a negative: a red
  * "nobody is reachable" is a claim about the network, and silence is not that claim.
  *
@@ -13,20 +14,20 @@
 export type DeliveryVerdict =
   /** Still being written locally; it has not left this device. */
   | "pending"
-  /** Sent, with nobody having proved they hold it yet. */
+  /** Sent, with no receipt confirmation yet. */
   | "waiting"
-  /** At least one other member has proved it holds the message, but not the whole roster. */
+  /** At least one other member confirmed receipt, but not the whole roster. */
   | "partial"
-  /** Every other member of the roster has proved they hold it. */
+  /** Every other member of the roster confirmed receipt. */
   | "everyone"
-  /** Nothing to send to, and nobody has it: it waits in the local doc for a peer to appear. */
+  /** No receipt confirmation or measured live member path: it waits locally for a peer. */
   | "queued";
 
 export type DeliveryEvidence = {
   /** Members other than me on the roster. */
   others: number;
   /**
-   * Peers that have provably built on this message, or `null` when nothing has been reported for
+   * Peers that confirmed receipt or signed a causal descendant, or `null` when nothing was reported for
    * it at all. The two are different: zero is a measurement, null is a missing one.
    */
   delivered: number | null;
@@ -67,11 +68,11 @@ export function deliveryVerdict(e: DeliveryEvidence): DeliveryVerdict | null {
   if (e.delivered >= e.others) return "everyone";
   if (e.delivered > 0) {
     // Evidence of arrival can never be overridden by a reading of the live network. A peer that
-    // confirmed and then went offline still holds the message; this is what painted a delivered
-    // message red every time a connection flapped.
+    // confirmed and then went offline still received the message. It may later lose its local
+    // copy, so the UI describes that past receipt rather than promising continuing storage.
     return "partial";
   }
-  // Nobody holds it yet. Red needs a measurement saying the message cannot leave at all, and
+  // Nobody has confirmed receipt. Red needs a measured lack of a live member path, and
   // "no member resolved to a live connection" is not that measurement.
   if (e.anyPeer === false) return "queued";
   return "waiting";
@@ -124,7 +125,7 @@ export function deliveryLabel(v: DeliveryVerdict, e: DeliveryEvidence): string {
       // We have holder identities and a separate reachable count, but not their intersection.
       // Comparing the cardinalities would let an offline holder stand in for an unconfirmed live
       // peer, so this claim deliberately says only what the positive evidence proves.
-      return `held by ${plural(delivered, "peer")}`;
+      return `received by ${plural(delivered, "peer")}`;
     case "everyone":
       return `delivered · all ${plural(e.others, "member")}`;
     case "queued":
@@ -143,9 +144,9 @@ export function deliveryTip(v: DeliveryVerdict, e: DeliveryEvidence): string {
         ? "Sent. No authenticated delivery receipt or later causal proof has arrived yet."
         : `Sent: no confirmations yet from ${plural(e.reachable, "reachable member")}. Receipts are best-effort; confirmations can change when the current roster changes.`;
     case "partial":
-      return `Held by ${plural(delivered, "other member")}, of ${e.others}. Confirmation is an authenticated receipt or later causal proof; it does not identify whether those holders are connected now.`;
+      return `Received by ${plural(delivered, "other member")}, of ${e.others}. This confirms receipt, not that the message was read or saved to disk.`;
     case "everyone":
-      return `Delivered to everyone: all ${plural(e.others, "other member")} proved they hold this message.`;
+      return `All ${plural(e.others, "other member")} confirmed receipt. This does not confirm that the message was read or saved to disk.`;
     case "queued":
       return "No peers reachable: queued; it gossips automatically when members reconnect. Not lost.";
   }
@@ -154,7 +155,8 @@ export function deliveryTip(v: DeliveryVerdict, e: DeliveryEvidence): string {
 /**
  * Replace the previous delivery report with the actor's current-roster snapshot.
  *
- * Receipt evidence is durable inside one roster, but the backend deliberately filters holders
+ * Receipt evidence is retained for this process inside one roster; it is not a disk-save receipt.
+ * The backend deliberately filters holders
  * through the current roster. Keeping a numeric maximum here would let a removed member's count
  * stand in for a different current member and could falsely produce "everyone". Identity-keyed
  * evidence (or a roster revision) would be needed before this count could safely be monotonic.

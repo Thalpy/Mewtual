@@ -1,5 +1,233 @@
 # Mewtual; Handover
 
+## PR82 follow-up review corrections (30 October; local gates passed)
+
+The five findings against `6fc7ae6d` are corrected in the text-chat branch. Complete Send/Edit/Delete
+payloads are validated before queue admission or sealing, including UTF-8 byte limits and Unicode.
+Known invalid requests written by older builds retain their complete original payload and identity
+in bounded nonretry recovery storage. Critical UI continuity v3 prevents older lossy readers from
+rewriting those saved copies; its covering save must succeed before frontend readiness.
+
+Windows installers now explicitly bundle the dynamically linked VC runtime. The final native build
+at `a7035253` was packaged as a 17.73 MiB debug NSIS archive, tested and extracted into a fresh
+directory. Its executable matches the final built and started binary byte for byte; both imported
+VCRUNTIME DLLs and the other bundled MSVC runtime files are present. That packaging inspection is
+not a clean-Windows installation test.
+
+Durable repair returns every newly committed Send's exact change identity and all affected channels.
+The application installs delivery bookkeeping before publication, and the Actor refreshes channels
+repaired implicitly by another transaction. Permanent mutation refusals persist an automatic-retry
+pause without discarding an earlier ambiguous acceptance. Adjacent receipt-cap tests also cover
+uncertain Stops at the real 65,536-record limit, without evicting existing retry evidence.
+
+Actual-diff adversarial reviews are clear on these corrections and the integrated native/browser
+unlock-generation pair. Follow-up lifecycle tests prevent duplicate/stale unlock and startup replies
+from replacing a current editor. Every frontend authentication joins prior snapshot custody, then
+obtains a fresh native lock generation; an old cached barrier cannot strand the first unlock after
+a surviving failed/deferred close. Native checks that exact generation before its first await and
+at finalization.
+
+Current executed evidence: complete frontend **3,388 passed**, zero failed/skipped, including the
+post-lint refresh (78.77 seconds); Svelte check **zero errors/warnings**; production build passed
+(44.92 seconds; existing chunk-size warning);
+all **10 real Edge/App flows passed**. The recovery screen was inspected at 900 x 640 with the
+complete 69,649-byte original retained and Copy/Recover actions. Root/native formatting,
+deterministic-dependency check and both dependency audits passed.
+Five repair-effects tests passed, followed by the seven-test app effects/cap batch and the sync cap
+regression. The native known-continuity-version test passed. All **eight native authentication tests
+passed** (2.02 seconds after a 5m03 compile), including the entirely unpolled old-task schedules.
+Root strict all-target/all-feature Clippy passed (4m17), as did native strict all-target/all-feature
+Clippy (2m17), explicit native check (59.84 seconds) and pre-suite native build (3m36). Native Clippy's
+initial equivalent-pattern lint was corrected without suppression; the continuity regression also
+pins rejection of version 0 as well as the unknown successor. The complete Root run passes
+**3,991 tests**, zero failed and 25 existing ignored across 59 result groups, including doc tests.
+Its application group passed 1,327 tests and replication passed 432; the separate catch-up regression
+after 10,000 operations also passed. The complete native suite passes **1,028 tests**, zero failed
+or ignored across four result groups (1,022 library tests in 2,128.31 seconds plus six ACL tests).
+The final post-suite native rebuild passed (1m36), and the actual startup gate observed setup's
+completion marker. The final installer payload matches that exact executable. These are local
+results at runtime checkpoint `a7035253`; later documentation-only changes do not change runtime
+sources. Hosted CI and review remain separate evidence, and no clean-Windows or physical multi-device
+audio/network acceptance is claimed.
+Earlier sections below record historical checkpoints, not final evidence for this revised code.
+
+This correction does not activate typed chat. Historical authority/proof restoration, production
+dispatch, migration, the removed-member review workflow and the full admin ledger remain unfinished.
+The administrator must eventually see originals, all edits/deletions, conflicting branches and
+decisions, while ordinary conflicts resolve automatically. Voice V2 also remains disabled.
+
+## Native queued-unlock correction (30 October; author checkpoint)
+
+A follow-up review found that synchronous frontend dispatch does not order Tauri command futures'
+first polls. An old queued unlock could otherwise sample a newer lock generation and reopen native
+IPC. The native command now requires the actual completed lock barrier's canonical generation,
+checks it before its first await/authentication/KDF, and carries it unchanged through all final
+barriers. Lock outcomes expose their actual registered generation even on continuity failure;
+passphrase verification and persistence formats are unchanged. The frontend proof consumer is a
+separate coordinated commit; the pair must be integrated together.
+
+Eight focused regressions are authored, including entirely unpolled cold/mounted old authentication,
+actual generation response ownership, malformed tokens, genuine mounted secret checks, and both
+post-first-poll cancellation paths. These exercise the same production auth body used by the RPC;
+the controlled cold continuation opens a real Store but does not claim Wry/reload/sweep execution.
+Only scoped rustfmt/diff checks ran in the isolated author worktree. The primary's subsequent
+execution and current full-suite status are recorded above.
+
+## PR82 receipt-union capacity correction (30 October; author checkpoint)
+
+Review of the effects bound found an adjacent receipt-cap defect: a token-absent Stop whose
+rename succeeded but parent sync failed occupied hidden uncertainty without counting toward the
+65,536 live-record limit. Repeated such failures could overfill the next merged snapshot, whose
+old encoder accepted a count its own decoder rejected. New-token admission now counts the distinct
+live/uncertain union; the merge checks capacity before candidate cloning and the encoder checks its
+count before output allocation. Exact existing Stop/retry/repair remains admissible at the cap;
+no receipt or uncertainty is evicted. Authored regressions use the actual declared cap, a real sealed
+Store rename/parent-sync failure, byte-preserving extra-token refusal and exact at-cap repair/reopen.
+A separate real-effect regression pins refusal to retarget an existing message ID to a different
+change hash. The isolated author ran scoped formatting/diff checks only; primary execution and
+current complete-suite status are recorded above.
+
+## PR82 repair bookkeeping and channel effects (30 October; focused tests passed)
+
+The review found that automatic durable Send repair bypassed delivery tracking and implicit repair
+of A during a transaction in B omitted A's channel event. The repair-effects continuation returns
+exact newly committed Send metadata and the full installed channel set from the covering transaction,
+registers tracking before publication, and notifies all changed channels after success. Native result
+and persistence/signature formats stay unchanged; failures still schedule host repair with no false
+effect. The primary executed all five focused regressions successfully (1.66 seconds after a
+9m29 cold compile), covering real rename/parent-sync faults, implicit Stop/commit across quiet
+channels, stopped-signed history, and SnapshotNeeded-driven host repair followed by a real quiet
+peer receipt without frontend retry. Both non-author actual-diff reviews found no remaining
+blocker/high/medium in the effects boundary. No Rust commands ran in the implementing worktree;
+the primary owns complete backend/frontend suites for the final combined changes.
+
+## Integrated text-chat validation (29 October; local gates passed)
+
+The text branch now integrates the inactive typed ledger and the desktop durable post/edit/delete/
+Stop path. All findings from their actual-diff reviews have been corrected and re-reviewed. This
+includes server-scoped retired-token fences, restore cancellation custody, repair notifications,
+Send/Sync creator-evidence caches and a fast fence probe that avoids stalling unrelated live servers.
+The reviewed Tauri update is also integrated: native Tauri is 2.12.5, with its generated Windows
+manifest retained in test executables. No unfinished voice activation was imported with that update.
+
+At code checkpoint `e491a2a8`, the complete frontend suite passes **3,340 tests**, Svelte checks report
+zero errors/warnings and the production build passes. The real Edge flow gate passes all ten checks.
+Root strict all-target/all-feature Clippy, Root/native formatting and the deterministic-dependency
+gate pass. Native compilation including unit-test code passes at `08ca4cd2`, and the updated native
+dependency audit passes. Separate focused backend runs passed 12 durable app tests, eight sync tests
+and four fence-store tests at `05c8905c`; three creator-proof/Sync tests passed after the cache fix
+at `9e976e92`. The typed-core run passed 17 tests before integration, with a separate genuine
+signature-variant regression at `b58fb13d`. These are recorded focused results at their respective
+revisions, not complete backend-suite results or a claim that every test was rerun at `e491a2a8`.
+
+The complete Root workspace run at `e30c0bed` passes **3,983 tests**, with zero failures and 25
+existing ignored tests across 59 result groups, including doc tests. The native full run at that
+checkpoint finishes **978 passed, 34 failed**. Its independent causes are the Delete error-code
+mapping, an obsolete v2-continuity assertion, a reconnect fixture dropping real pre-registration
+Actor custody after registration, and a multi-peer confirmation oracle panicking on a retryable
+Capacity refusal. The latter closes the six-client fixture gate and causes 27 further failures.
+
+The reviewed corrections are `a5d42d06`, `1de41193`, `e5f4abe3` and `84590bab`. All **32 focused
+native tests** pass afterward: 11 error-contract tests, six durable-chat tests, the continuity
+assertion, a deterministic held-row oracle regression, all 12 reconnect regressions and the original
+multi-peer HTTP/TCP browser scenario. The complete native rerun at `4758801a` passes **1,020 tests**
+with zero failures/ignored across four result groups. Native strict all-target Clippy passes
+(3m17s), explicit native check passes (2m09s), build passes (10m47s), and the actual application
+startup gate observes its completion marker. Earlier notes describe their own checkpoints; the
+failed first run was repaired and rerun rather than treated as a pass. Hosted checks remain
+separate evidence; local results do not assert that every hosted job has finished.
+
+Production historical-authority issuance/archive, typed transport/encryption, migration and live
+dispatch remain absent; legacy R6 remains open. The reviewed inactive-core extension below
+separates reusable member authority from approval for one exact moderation action. Governance,
+owner succession and enforcement of removal decisions remain unimplemented; fixture witnesses do
+not establish those production guarantees.
+Voice V2 remains disabled and incomplete. External download resume is outside this continuation.
+
+The user reaffirmed that ordinary chat conflicts resolve automatically and non-destructively,
+without user repair. The admin panel must expose the full retained ledger: originals, every edit,
+deletion, concurrent branch and decision. The previously selected exception remains unproven late
+actions from removed members, held for review while verified history is preserved. A separate
+inactive frontend checkpoint implements held-case reads only; it is not the full ledger view and
+is not wired into App. Production archive/reads, migration and the complete admin view remain open.
+
+The user has now selected the late-post policy: retain verified history and hold unproven late
+posts from removed members for approval. They also requested held posts and approval/rejection
+decisions in the existing admin log. This is a production-integration requirement, not implemented
+behavior of the inactive core. It must use shared exact-action evidence rather than sender clocks
+or local first arrival, and the mutable moderation CRDT cannot authorize release. See
+[the policy and audit requirements](communication-recovery/CHAT-HISTORY-CONVERGENCE.md).
+
+## Exact typed moderation approval extension (29 October; full gates pending)
+
+The integrated replication-only continuation adds opaque exact positive Delete approvals and retryable
+missing-approval state. Reusable DELETE_ANY cannot authorize cross-author deletion; existing own
+Delete semantics remain. Ordinary member SELF_DELETE and causal coverage are still required.
+One normalized constant-size approval belongs to each imported entry's existing action-count quota;
+original action/snapshot bytes and restore API stay unchanged. The fixture verifier uses real action
+and pinned-issuer signatures, and fresh restore needs explicit approval resupply. No producer,
+authority archive, native/network integration or activation is added; production R6 remains open.
+Scoped formatting/diff checks pass. Design and actual-diff adversarial reviews have no remaining
+findings. All 26 typed-core tests pass at `37580408` (47.60s), including the eight new approval
+regressions and the 20/50-writer partition/restart corpus. The subsequent comment-only change does
+not alter runtime behavior. Complete backend gates are running serially; their results remain pending.
+
+
+## Inactive typed-chat core reviewed (29 October; combined gates pending)
+
+The new replication-only typed action DAG passes17 focused tests, including20/50
+writers in five independent activity bubbles, forks/reordering, exact signed union,
+two restarts, cross-author refusal and backward clocks. It is not connected to live
+traffic. Independent review found a restore coverage-union failure and malformed
+snapshot allocation hazard; both are fixed, regressions pass, and re-review has no
+remaining blocker/high. Primary also reproduced/fixed unrelated reply-history scans
+exhausting a small edit projection's work allowance.
+
+Production authority issuance/archive, governance policy, migration, encryption and
+Root/native/UI dispatch remain absent. Legacy R6 is still open. Durable edit/delete,
+exact-token Stop and host-owned uncertain-write repair are a separate implementation
+in progress. Full combined suites have not run. See
+[the exact core API, evidence and limits](communication-recovery/CHAT-TYPED-CORE.md).
+
+## Text-chat baseline traced before the mutation continuation (29 October)
+
+The user prioritised text-chat protocol completion ahead of voice V2. The new text branch starts
+from current main `613a7782`; unfinished voice work remains in its separate checkpoints.
+
+Source tracing confirms desktop new-message sends already save the exact original operation,
+retry receipt and publication obligation before acceptance/export. Received history and ordinary
+edits/deletes have separate background/save-later boundaries; current delivery receipts record
+historical receipt confirmation, not receiver durability. On baseline `613a7782`, native edit/delete paths ignored Pending/Superseded
+persistence outcomes while logging PERSISTED. The new mutation draft addresses those paths by extending the
+existing durable transaction, rather than adding an unrelated second send mechanism.
+
+Raw CRDT receive-time message authorization, full signer/target binding and cloned-writer fork
+convergence remain open in production. A separate typed ledger is being implemented and reviewed;
+its production historical-authorization issuer, migration and protocol activation remain absent.
+Historical authorization must be causal: an old certificate cannot prove physical creation before
+removal, and current-roster filtering must not erase legitimate older history.
+
+This documentation-only correction ran no suites; it records inspected current code, not a new
+test result. [Canonical flow](MESSAGE-FLOW.md) and
+[history/security limits](communication-recovery/CHAT-HISTORY-CONVERGENCE.md).
+
+## Durable local chat mutation implementation checkpoint (29 October)
+
+The isolated durable edit/delete branch now contains backend/native transactions, sticky v2 records,
+real no-op frontiers, exact-token Stop, whole-terminal post-rename uncertainty and automatic locked-UI
+negative repair. Focused regressions include actual encrypted-store rename/parent-sync faults and
+fresh reopen counts, unknown Stop/no-op/stopped-signed terminals, foreign receive union through epoch
+movement, unwind restoration, token conflicts and immutable target rejection. Scoped rustfmt passes;
+these newly added regressions are **not yet executed** in this checkpoint. The primary owns focused
+Cargo execution, complete root/native/frontend suites and final gates after integration. A read-only
+adversarial review remains required. The orphan Stop design review required and now has a historical-unknown `stopped-retired` terminal,
+canonical vault-level exact fences, positive final-lease checks and pre-spawn restored-publication
+fencing. Added regressions exercise real fence pre-rename and post-rename sync faults, global bounds,
+confirmed Actor retirement, retained old snapshot restore without chat publication and same-id reuse.
+These tests still await primary execution and actual-diff review. R6,
+historical authorization and a typed chat ledger are not claimed by this mutation slice.
+
+
 ## Corrected combined validation passed locally (28 October)
 
 The stacked Score candidate at `fa3107d2` passes the complete native command:

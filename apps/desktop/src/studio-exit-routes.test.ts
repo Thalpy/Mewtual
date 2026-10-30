@@ -137,13 +137,30 @@ test("forced edges are few, explicit and each carries its reason", () => {
   const forced = sites().filter(s => s.how === "forced");
   // Lock (group, clearServerView, unready, locked), a server's native session ending (serverGone,
   // for a leave or a closure: group, clearServerView), and the vault change restarting its own
-  // first step after a failed attempt (already off the Studio).
-  assert.equal(forced.length, 7, forced.map(s => `App.svelte:${s.line} ${s.text}`).join("\n"));
+  // first step after a failed attempt (already off the Studio), and continuity hydration before
+  // initial mount/completed unlock exposes the main pane, plus cancellation while already locked.
+  // The reader's only caller is pinned below; actual unlock/startup guards pin its entry ownership.
+  assert.equal(forced.length, 9, forced.map(s => `App.svelte:${s.line} ${s.text}`).join("\n"));
   for (const s of forced) {
     const lineStart = source.lastIndexOf("\n", s.at - 1) + 1;
     const marked = commentAbove(lineStart) + source.slice(lineStart, source.indexOf("\n", s.at));
     assert.match(marked, /studio-exit: forced edge(?:\. | \()\S/, `App.svelte:${s.line} needs a stated reason`);
   }
+});
+
+test("continuity hydration's forced edge is reachable only through initial/unlock restoration", () => {
+  const calls = [...source.matchAll(/(?<!function )\bloadUiContinuity\(/g)];
+  assert.equal(calls.length, 1, "a new caller must establish its own Studio exit/snapshot boundary");
+  assert.equal(enclosingFunction(calls[0].index!)?.name, "restoreReloaded");
+  const mountStart = source.indexOf("\n  onMount(() => {");
+  const mountEnd = source.indexOf("\n  });", mountStart);
+  assert.ok(mountStart >= 0 && mountEnd > mountStart);
+  const restores = [...source.matchAll(/(?<!function )\brestoreReloaded\(/g)].map(call => {
+    const at = call.index!;
+    return enclosingFunction(at)?.name ?? (at > mountStart && at < mountEnd ? "onMount" : "unowned");
+  });
+  assert.deepEqual(restores.sort(), ["onMount", "unlock"],
+    "new restoration callers must establish an initial/unlock lifecycle boundary");
 });
 
 test("the audit itself fails on a direct route assignment", () => {

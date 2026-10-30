@@ -1,5 +1,101 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Queued unlock versus a newer lock (30 October)
+
+Tauri schedules async command futures, so a dispatched older unlock may first run after a newer
+lock completes. Sampling the native generation inside that old task would adopt the cancellation
+instead of being invalidated by it. Native unlock now requires the exact canonical generation
+returned by the caller's actual completed native lock barrier. It compares that supplied value on
+its first poll, before awaits/authentication/KDF, and keeps the same expected generation through all
+finalization checks. A later lock therefore refuses the old authentication in either first-poll
+order. The generation is correlation metadata, never an authentication capability; the original
+passphrase, mount serialization, voice ownership and final commit checks remain mandatory.
+
+Each frontend authentication first joins existing snapshot custody, then obtains one fresh native
+lock barrier with a null snapshot. This prevents a surviving failed/deferred window close from leaving a stale
+cached generation that rejects the next legitimate unlock. It never resets a newer pending
+JavaScript snapshot merely because an older native close has completed. Rejected bridge results
+retain JavaScript custody; fulfilled valid snapshots remain native-owned across wrong secrets and
+cancellation until their exact bytes save successfully.
+
+The focused regressions hold the actual shared production authentication future entirely unpolled,
+complete a newer real lock, then verify immediate refusal for cold and mounted states. Real Store
+mounted success/wrong-secret and controlled cold Store-open/finalization tests cover the other
+ordering. They do not construct a Wry window or claim full WebView/reload/sweep execution. Production
+cold restore still uses the unchanged real AppHandle continuation under the same held mount guard.
+
+## Critical recovery-copy compatibility (30 October)
+
+Old UI readers could seal Send payloads they later silently dropped, while invalid mutation
+payloads could instead block the whole load. Recovery retains known original identities/payloads
+within existing bounded sealed storage; it does not turn malformed input into authoring authority.
+Native-invalid originals cannot enter positive or Stop IPC, and moving them to saved copies is
+not evidence of native rejection, nonacceptance or a durable Stop.
+
+The expanded retained Send grammar requires critical envelopev3. Existing v2 readers acceptv2
+and can silently discard those copies, so retaining them under merely stickyv2 would be unsafe.
+Older native/frontends must refusev3 rather than rewrite its contents. A real coveringv3 save,
+including on every already-v3 hydration after possible post-rename failure, precedes UI readiness.
+Normal later saves retain the higher version. This is local persistence compatibility; it neither
+activates typed chat nor changes membership, signatures, network admission or native mutation limits.
+The downgrade guarantee covers a fresh older reader and this frontend's ordered, monotone saves.
+Native still accepts supported lower envelopes: it does not persist an independent monotone version
+floor. A development-only mixed-bundle hot reload with an already admitted old writer is outside
+that guarantee; packaged application updates restart native rather than overlap old/new bundles.
+
+## Inactive exact moderation decision boundary (29 October; validation pending)
+
+An ordinary historical grant is not a reusable permission to delete another signer's typed Create.
+The inactive core now requires a separate exact positive approval bound to the complete semantic
+Delete ID, Create, realm, full signer, basis and grant, alongside ordinary SELF_DELETE and causal
+coverage. Missing approval remains pending; bad signatures, issuer pins and binding mismatches
+cannot poison a later good proof or withdraw an accepted tombstone. Equivalent positive proofs
+normalize to one fixed per-entry value, with no unknown-action cache. External governance must
+resolve conflicts before creating an opaque approval; denial/revocation/quarantine policy is absent.
+Snapshots never manufacture this permission and require explicit approval resupply after restart.
+These are library/fixture boundaries only: production issuance, durable archive, live dispatch and
+activation remain absent, and legacy R6 is unchanged.
+
+
+## Typed chat witness boundary (29 October; inactive)
+
+The separate `replication::chat` core verifies signatures before duplicate admission
+and scopes typed actions to a deterministic realm, full signer and exact Create target.
+Its opaque historical witness cannot be decoded from wire or a snapshot. Restore binds
+each witness to one action; missing proof remains pending. Malformed snapshot counts
+are checked before allocation. These are library boundaries, not a completed native
+membership or moderation proof: historical certificate durability, revocation/succession
+policy, migration and live dispatch remain absent. Legacy R6 is unchanged. Retaining
+deleted contents does not cryptographically restrict their visibility to moderators.
+[Evidence and unresolved boundaries](communication-recovery/CHAT-TYPED-CORE.md).
+
+## Local mutation durability boundary (29 October; validation in progress)
+
+A vault-level retired retry fence is an explicit historical-unknown terminal, never evidence that a
+removed request did or did not commit. It uses the same complete native request binding and global
+65,536-row/16 MiB plaintext limits, with no eviction. Store decode/authentication failures refuse all
+positive admission and fenced restore. Unknown numeric IDs use one global serializer rather than
+allocating per-id lock entries. A restored Actor retains that same serializer from fence read/apply
+through registry installation or confirmed teardown; it cannot publish before a new orphan Stop
+could race an unregistered incarnation. Applying a fence changes only exact matching saved/private
+receipts and preserves their signed history. Context mismatch alone is not retirement evidence.
+
+
+Desktop durable local edit/delete binds MLS group/channel, winning message id, containing list and
+exact map object using canonical `(actor bytes, operation counter)` identities. Mutable text and
+edited fields do not invalidate an original preparation. Duplicate/id-less/substituted targets
+refuse. Where original signed creator evidence exists, scope/signature/range/full signer must agree;
+modern missing or contradictory proof refuses, while genuinely unavailable legacy evidence remains
+the documented honest-client boundary. A legacy v1 creator signature does not establish historical
+MLS membership/group authority. This slice does **not** solve R6 or migrate raw chat history.
+
+A post-rename parent-sync failure is possible installed history, including a possible stopped token.
+It cannot be overwritten by an ordinary rollback snapshot, cleared by epoch change/lock, or turned
+into a new operation. Exact-token negative repair merges the original operation into the latest live
+receive graph and saves before installation. Stop never retracts already saved history and a no-op
+receipt records a sampled local decision, not a promise that concurrent edits preserve displayed text.
+
+
 ## Native settings versus Lock and Leave (28 October; candidate)
 
 Cache-limit and saved-file metadata commands carry the UI generation captured before

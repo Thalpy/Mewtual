@@ -283,7 +283,7 @@ mod member_reconnect_regressions {
         )
         .await
         .unwrap();
-        register(
+        let running = register(
             state,
             restored.actor,
             mesh,
@@ -292,7 +292,16 @@ mod member_reconnect_regressions {
             restored.group_id,
             restored.device_id,
         )
-        .await
+        .await;
+        // Match production reload_one: the actual Actor owns pre-registration custody
+        // until its registry entry is visible. Dropping this owner without installed()
+        // aborts that Actor and its network sink, even though MeshHandle is still cloned.
+        restored.chat_fence_commit.installed();
+        assert!(
+            running.actor.member_count().await > 0,
+            "registered restored Actor must survive its custody transfer"
+        );
+        running
     }
 
     #[tokio::test]
