@@ -27,10 +27,10 @@ fn leaves(first: u64, count: usize) -> Vec<AcceptanceLeaf> {
         })
         .collect()
 }
-fn append(frontier: &Frontier, count: usize) -> (AcceptanceAppend, PreparedAppend) {
+fn append(frontier: &Frontier, count: usize) -> (AppendBody, PreparedAppend) {
     let leaves = leaves(frontier.tip().count, count);
     let prepared = frontier.prepare_append(&leaves).unwrap();
-    let body = AcceptanceAppend::new(AppendSpec {
+    let body = AppendBody::new(AppendSpec {
         group: GROUP.to_vec(),
         previous_tip: OwnerHeaderId::from_bytes([4; 32]),
         old_tip: prepared.old_tip(),
@@ -202,7 +202,7 @@ fn private_node_page_refuses_vault_group_context_body_and_prepared_append_substi
     assert!(encode_node_page(&VAULT, &body, &wrong_prepared).is_err());
     let mut other_spec = body.spec().clone();
     other_spec.previous_tip = OwnerHeaderId::from_bytes([6; 32]);
-    let other = AcceptanceAppend::new(other_spec).unwrap();
+    let other = AppendBody::new(other_spec).unwrap();
     assert_eq!(
         page.verify_exact_append(&VAULT, &other, &frontier),
         Err(ChatError::Scope)
@@ -233,7 +233,7 @@ fn private_node_encoder_refuses_changed_leaf_list_with_identical_declared_counts
     let (body, prepared) = append(&frontier, 8);
     let mut spec = body.spec().clone();
     spec.leaves[0].acceptance = OwnerFactId::from_bytes([42; 32]);
-    let substituted = AcceptanceAppend::new(spec).unwrap();
+    let substituted = AppendBody::new(spec).unwrap();
     assert_eq!(substituted.spec().old_tip, prepared.old_tip());
     assert_eq!(substituted.spec().new_tip, prepared.new_tip());
     assert_ne!(substituted.id(), body.id());

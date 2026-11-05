@@ -70,3 +70,7 @@ same-count/same-claimed-root changed-leaf producer refusal; and complete truncat
 wrong-version/empty-group/count/packed-geometry rejection. Synthetic frontiers are math fixtures,
 not evidence of2^63 actual accepted actions. The signed-header test checks body binding, not
 genesis/root/Current provenance. Adversarial review corrected the producer leaf-binding gap.
+Later static integration also corrected an invalid `AcceptanceAppend` type reference to the
+actual `owner_bodies::AppendBody`; the distinct `HeaderKind::AcceptanceAppend` wire variant is
+unchanged. The earlier source review/formatting did not establish compile readiness. All six
+regressions and the final affected-crate compilation still await the user validation pause ending.

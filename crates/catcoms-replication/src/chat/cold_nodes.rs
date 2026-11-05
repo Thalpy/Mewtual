@@ -3,7 +3,7 @@
 //! The real Store must pay/read/unseal its original committed page, check the expected context
 //! and use the completed public proof verifier before any acceptance/effect can follow.
 use super::acceptance_tree::{append_nodes, Frontier, PreparedAppend, TreeContext, TreeHash};
-use super::owner_bodies::AcceptanceAppend;
+use super::owner_bodies::AppendBody;
 use super::owner_facts::OwnerFactId;
 use super::owner_header::OwnerBodyId;
 use super::{ChatError, MAX_GROUP_ID_BYTES};
@@ -165,7 +165,7 @@ impl<'a> NodePage<'a> {
     pub fn verify_exact_append(
         &self,
         vault: &[u8; 32],
-        body: &AcceptanceAppend,
+        body: &AppendBody,
         frontier: &Frontier,
     ) -> Result<(), ChatError> {
         let spec = body.spec();
@@ -199,7 +199,7 @@ impl<'a> NodePage<'a> {
 /// Its actual range/ordinal sequence and exact old/new tips are checked independently here.
 pub fn encode_node_page(
     vault: &[u8; 32],
-    body: &AcceptanceAppend,
+    body: &AppendBody,
     prepared: &PreparedAppend,
 ) -> Result<Zeroizing<Vec<u8>>, ChatError> {
     let spec = body.spec();
