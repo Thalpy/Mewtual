@@ -1,5 +1,36 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private canonical owner initialization (5 November; inactive checkpoint)
+
+The Store's founder, destination-member and restart APIs now consume actual private Server/MLS
+sources. A founder retains one original preparation and frozen secret snapshot across save errors;
+only the original durable Current scope, canonical saved head and registered writer can produce
+`OwnedOwnerServer`. There is no public bare-Server extraction or native activation adapter.
+The member path captures its expected immutable root before the real selected-KeyPackage join,
+then compares original owner facts against that actual completion before the same canonical save.
+The owner-side covering Add/save-before-Welcome path remains unfinished, so this client interface
+does not yet form a usable production join or prove that a remote device saved anything.
+
+`prepare_owner_evidence_restore` classifies before accepting a transport: Current, Initializing,
+Retired offline evidence, or an opaque UnexposedInitialization negative preparation. The last case
+requires an exact Fresh Initializing row with no registered writer or canonical/staged source.
+Its retry saves retirement under original admission, pool/head and Store custody. It cannot undo
+Current, adopt a replacement mount, invent missing history or make a Server. A private creator
+before writer registration can lose to that negative transition and must refuse its old source
+after acquiring the pool. Orphan stages are preserved and charged during startup inventory.
+Native automatic startup handling, closed-lineage reporting and exact stage-only repair remain open.
+
+The exact-pinned MLS storage patch exposes actual table backing under the existing provider guard.
+The bounded encoder separately admits output and retained Vec capacities; the bounded provider
+decoder preflights count, payload and a conservative pinned table layout before allocation. Legacy
+framing and the existing strict restored-device/group check are shared. These functions are not
+Current/save witnesses and do not bound OpenMLS's nested typed JSON/group heap expansion.
+The canonical budget covers private initialization/restore overlap only; active-server runtime
+admission is a separate gate. New checkpoint tests are authored but unexecuted during the user's
+compilation pause. [Kernel scope](communication-recovery/CHAT-OWNER-CANONICAL-KERNEL-CHECKPOINT.md)
+and [operation contract](communication-recovery/CHAT-OWNER-OPERATION-TAIL.md) retain the remaining
+membership, scalable public archive, compatibility and activation gates.
+
 ## Privileged retained-original reader (5 November; partial ledger)
 
 `get_admin_chat_ledger({server,cursor,limit})` and

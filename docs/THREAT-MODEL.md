@@ -1,5 +1,30 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Canonical owner checkpoint custody (5 November; inactive)
+
+Numeric aliases and authenticated raw tails cannot create a fresh owner context. Private founding
+and the destination member's actual selected-KP completion remain coupled to their original mounted
+Store/admission. Immutable group/root pins, actual covering file+directory barriers, saved-head CAS
+and original writer custody precede any ready transfer. A renamed but unsynced candidate retains
+its whole exact uncertainty; it cannot be called absent, replaced by an older alias snapshot or
+released as successful publication. A downloaded self-signed Profile cannot select its own root.
+
+Source-absent Fresh Initializing recovery is strictly negative: it observes and rechecks the exact
+original row, registered head and both canonical/staged paths under the real lock order. It retains
+all source bytes and non-evicting lineage. A later Current or replacement mount refuses. A private
+creator not yet registered may lose this race and must fail its post-pool observer check. Stage-only
+repair and native automatic startup are unfinished; missing bytes never prove complete empty history.
+
+The bounded provider paths admit actual table backing and copied/retained byte buffers, preserving
+the legacy format and strict restored-device/group check. They do not bound all SDK typed-deserialize
+heap expansion, and transient canonical fees do not pay an active Server forever. Those remain
+activation gates. Top-level critical vault framing must precede older stage cleaners when the new
+operation namespace is added. The reviewed contract requires v5; its implementation is still open.
+The current v4 checkpoint and finite owner-fact profile must not enable long-lived production V2.
+Owner-side covering membership, signed public root distribution, scalable history, decisions and
+the active host remain separate unfinished boundaries. Current focused evidence is in HANDOVER;
+none of these newly integrated checkpoint tests has executed during the compilation pause.
+
 ## Queued unlock versus a newer lock (30 October)
 
 Tauri schedules async command futures, so a dispatched older unlock may first run after a newer
