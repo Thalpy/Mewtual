@@ -24,6 +24,10 @@ pub(in crate::store) mod archive_bootstrap;
 // production namespace3 parser/opener/handler until actual physical fences and I/O land.
 #[cfg(test)]
 pub(in crate::store) mod archive_current_namespace_codec;
+// DRAFT metadata grammar only. Production declaration waits for the actual ID3 opener and
+// source/scope/head consumer; this test module cannot enable a Current handler or issuer.
+#[cfg(test)]
+pub(in crate::store) mod archive_current_codec;
 mod catalog_envelope;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,

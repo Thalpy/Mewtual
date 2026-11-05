@@ -13966,3 +13966,14 @@ focused crypto/framing/cap/debug tests are authored UNRUN. There is no productio
 physical handler, supported Current mount, group reservation or Current issuer in this packet.
 The actual opener, paid index/metadata inventory, all cross-signer group fences and source/pin/
 head/scope coupling remain separate. [Exact scope](communication-recovery/CHAT-V2-CURRENT-NAMESPACE-DATA.md).
+
+## Current genesis metadata test DATA (authored, UNRUN)
+
+The private pin/head/activation codec has eleven authored UNRUN tests and a complete shared
+test-only namespace DATA dependency. Static actual-diff review is clear, including raw caps,
+declared lengths, every strict prefix, genuine signatures, same-CID invalid representations,
+exact source/public-frame binding and the named metadata layout. Both modules remain cfg(test)
+only. They issue no supported mount, source, quota, Saved, Current or live chat authority.
+Root's actual group-wide/cross-signer fences, pin/head/seed/scope writes and owning Current
+consumer remain required. Compilation/tests/builds remain paused; direct format, whitespace
+and ambient/raw-FS static checks do not establish readiness. [Format and limits](communication-recovery/CHAT-OWNER-V2-GENESIS-ACTIVATION-FORMAT.md).

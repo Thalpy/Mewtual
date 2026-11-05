@@ -827,7 +827,11 @@ fn get_reason(d: &mut Decoder<'_>) -> Result<CloseReason, AppError> {
     }
 }
 
-fn encode_context(context: &BootstrapSourceContextData) -> Result<Zeroizing<Vec<u8>>, AppError> {
+// Shared canonical DATA bytes for the future genesis-head codec. Visibility does not select
+// an expected context or grant source authority; actual consumers supply their original one.
+pub(in crate::store) fn encode_context(
+    context: &BootstrapSourceContextData,
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
     let c = context.spec_data();
     let mut e = Encoder::with_capacity(MAX_CONTEXT_BYTES);
     for b in [

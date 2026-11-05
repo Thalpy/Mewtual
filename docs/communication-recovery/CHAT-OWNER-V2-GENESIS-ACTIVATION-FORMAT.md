@@ -1,10 +1,15 @@
 # V2 genesis Current: exact metadata format and invoice
 
-DESIGN ONLY against the integrated SourceSaved/SDK checkpoints. No format below is implemented
-or a Current issuer. Exact-format design review is CLEAR after the path-capacity, PRE-DEK and
-exact original-representation corrections; all actual consumers/invoices still need review.
-This refines `CHAT-OWNER-V2-GENESIS-CURRENT.md`; Root owns the connected
-physical opener/writer and Factory owns the unbound SDK seed. Compilation/tests/builds are paused.
+Exact-format design review is CLEAR after the path-capacity, PRE-DEK and original-representation
+corrections. A private, **test-only DRAFT** pin/head/activation DATA codec and eleven authored **UNRUN**
+regressions now follow this format. Its production module is deliberately not declared until
+the actual consuming opener/writer is connected. The shared namespace descriptor/marker/seed
+codec and physical opener are a separate Factory-owned dependency. No parser issues Current,
+Saved, source, quota or writer authority; actual consumer/invoice review remains required.
+Static actual-diff review of the metadata draft is CLEAR after the raw-cap/declared-length
+matrix was added; this does not establish compilation, test execution or namespace support.
+This refines `CHAT-OWNER-V2-GENESIS-CURRENT.md`; Root owns the connected physical writer and
+Factory owns the unbound SDK seed. Compilation/tests/builds remain paused.
 
 ## Mandatory handler before first exposure
 
