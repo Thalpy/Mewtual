@@ -549,6 +549,9 @@ mod persistence {
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
     mod bootstrap_source_work;
     pub(super) use bootstrap_source_work::{OriginalSourceWriteWork, SavedBootstrapSourceFiles};
+    pub(super) use bootstrap_source_work::{
+        PreparedBootstrapSourceTerminal, SavedBootstrapSourceTerminal,
+    };
 
     /// Closed flat control destinations under the SAME original declared root. In particular
     /// there is no unowned invocation directory whose mkdir/open gap could mint another SDK
@@ -931,11 +934,13 @@ mod persistence {
         saved: Option<std::sync::Arc<()>>,
         seed_file: Option<critical_namespaces::pending_join::CreatedStage>,
         stage_file: Option<critical_namespaces::pending_join::CreatedStage>,
-        // At most the initial SP plus the original allowance (<=8). Keeping the actual
+        // At most the initial SP plus the original allowance (<=8), then one terminal.
+        // Keeping the actual
         // saved parent, not just its digest, permits exact interrupted successor repair.
         // These are event receipts; an ancestor is NEVER accepted as the current head.
         parent: Option<Box<FounderSourcePreparedJournal>>,
         execution: Option<std::sync::Arc<bootstrap_source_work::FounderSourceRun>>,
+        terminal: Option<std::sync::Arc<bootstrap_source_work::OriginalSourceTerminal>>,
     }
     /// Exact actual small journal save, never a source-file save, large I/O arm or Current.
     /// Its complete source/cipher fee stays with the SAME cell through every retained handle.
@@ -1449,6 +1454,7 @@ mod persistence {
                         stage_file: None,
                         parent: None,
                         execution: None,
+                        terminal: None,
                     });
                 }
                 let journal = actual.prepared.as_mut().ok_or_else(refused)?;
@@ -1550,6 +1556,11 @@ mod persistence {
             }
             match &decoded.kind {
                 founder::IntentKind::SourcePrepared {
+                    context: c,
+                    source: s,
+                    marker,
+                }
+                | founder::IntentKind::SourceSaved {
                     context: c,
                     source: s,
                     marker,
@@ -1730,6 +1741,24 @@ mod persistence {
                 &founding,
                 Some(journal),
             )?;
+            // Pending selection may legitimately accept the actual old parent during
+            // interrupted repair. SAVED publication must instead prove this candidate is
+            // current after all final waits/hooks, never merely that either phase is valid.
+            verify_archive_held_name(
+                &current_path,
+                journal.stage_file.as_ref().ok_or_else(refused)?,
+            )?;
+            let (_, final_bytes) = read_archive_object(&current_path, founder::MAX_INTENT_FRAME)?
+                .ok_or_else(refused)?;
+            if final_bytes.as_slice() != candidate.as_slice() {
+                return Err(refused());
+            }
+            if let Some(terminal) = &journal.terminal {
+                terminal.validate_output_last()?;
+            }
+            if captured.observer().is_cancelled() || root.negative.is_cancelled() {
+                return Err(refused());
+            }
             journal.saved = Some(journal.operation.clone());
             let operation = journal.operation.clone();
             drop(actual);
@@ -3354,6 +3383,20 @@ mod persistence {
         // must not inherit a stale successful read. No full comparer follows this proof.
         validate_source_current_file_only(store, founding, journal)?;
         validate_founder_original_root(store, original, root)?;
+        if let Some(journal) = journal {
+            if matches!(&journal.data.kind, founder::IntentKind::SourceSaved { .. }) {
+                let terminal = journal
+                    .terminal
+                    .as_ref()
+                    .ok_or_else(critical_namespaces::refused)?;
+                terminal.validate_journal(journal)?;
+                // This LAST output proof follows every current/root/comparer/hook. A
+                // terminal candidate is valid only for its actual completed original run.
+                terminal.validate_output_last()?;
+            } else if journal.terminal.is_some() {
+                return Err(critical_namespaces::refused());
+            }
+        }
         if original.negative.is_cancelled() || root.negative.is_cancelled() {
             return Err(critical_namespaces::refused());
         }

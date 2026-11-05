@@ -1,19 +1,5 @@
 # Mewtual; Handover
 
-## Closed initial SDK graph admission (5 November; authored, UNRUN)
-
-An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical
-restores into the pinned13-row founder/first-Add decoder. The same original account reserves one
-actual non-Clone graph fee per overlapping child/parent before SDK entry. Whole-row borrowed
-shape/geometry preflight precedes SIGNER; every actual getter repeats under its values guard,
-with monotonic container-layout/copy/work counters. Same payment stays last in BOTH device/group
-through private decode and actual ready/OwnedOwnerServer handoff. Completed/cancelled policy has
-no legacy fallback, and later mutative SDK calls refuse before SDK entry. Default legacy paths
-keep their grammar. All25 tests are authored UNRUN; design/final actual static review are clear. No compiler/tests/build. Initialized/live
-ratchets, operation admission, public root2/native integration and whole-host/provider budgets
-remain open. [Exact consumer/remaining gates](communication-recovery/CHAT-OWNER-SDK-RESTORE-CONSUMER.md).
-
-
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
@@ -47,6 +33,46 @@ unexposed-negative recovery, independently durable exact repair seeds and unifie
 writer exclusion. Original bootstrap ciphertext and the namespace-only declaration below are now
 authored consuming prerequisites. Actual creation debit/FoundingIntent source is now reviewed;
 source persistence, canonical head/scope saves and cold/crash acceptance remain unfinished.
+
+## Actual source terminal closure (5 November; authored, UNRUN; static review clear)
+
+`ArchiveFounderSourcePreparation::save_source_terminal` now connects the completed original
+file pass to the exact SourceSaved small-record successor. The concrete prepared closure holds
+the actual completed run, saved arm and output objects BEFORE selecting the new RAM journal.
+Its retry/lookup uses that SAME closure before invoking any old arm-current-only SavedFiles
+API, so a lost return after promotion cannot strand it. Parsed SourceSaved is still DATA only.
+
+The terminal preserves the original io_spent/context/source/marker, has no outgoing transition,
+and spends no new large pass/SDK unit. The existing exact seed/stage/current and parent barriers
+produce a NEW private saved-terminal receipt. Final saved publication proves the actual
+candidate (rather than merely a valid pending parent), then output objects and cheap negatives
+after all full comparers/hooks. At most10 retained events and their actual paths/control/result
+layouts fit the separate512KiB metadata invoice alongside the four named source buffers.
+
+Seven codec and eight actual-writer regressions are authored UNRUN. Actual tests include all
+small fault points/lost prepared results/NeverRng retry, a successful exhausted final pass and
+terminal DATA across a new physical namespace open, foreign actual-run rejection, final close,
+foreign equal seed/unknown stage, restoration of the actual old parent object at publication
+and late byte-equal records/manifest replacement after completed-run proofs.
+The cold test does not implement a paid source/SDK/Current reader. The five-slot registry still
+holds unresolved creation jobs until the later actual owning Current handoff; it is not retired
+by this slice. Codec and connected writer design/actual static reviews are clear.
+No compilation/tests/build ran. Current activation, cold negative/read consumers, production
+governor/send/receive/admin and native integration remain required.
+
+## Closed initial SDK graph admission (5 November; authored, UNRUN)
+
+An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical
+restores into the pinned13-row founder/first-Add decoder. The same original account reserves one
+actual non-Clone graph fee per overlapping child/parent before SDK entry. Whole-row borrowed
+shape/geometry preflight precedes SIGNER; every actual getter repeats under its values guard,
+with monotonic container-layout/copy/work counters. Same payment stays last in BOTH device/group
+through private decode and actual ready/OwnedOwnerServer handoff. Completed/cancelled policy has
+no legacy fallback, and later mutative SDK calls refuse before SDK entry. Default legacy paths
+keep their grammar. All25 tests are authored UNRUN; design/final actual static review are clear. No compiler/tests/build. Initialized/live
+ratchets, operation admission, public root2/native integration and whole-host/provider budgets
+remain open. [Exact consumer/remaining gates](communication-recovery/CHAT-OWNER-SDK-RESTORE-CONSUMER.md).
+
 
 ## Warm bootstrap source execution (5 November; authored, UNRUN; static review clear)
 

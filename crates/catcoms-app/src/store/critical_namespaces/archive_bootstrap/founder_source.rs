@@ -3,7 +3,8 @@
 //! they can NEVER fall back into the old untouched Planning/Founding constructor.
 use super::*;
 use crate::store::persistence::{
-    RegisteredBootstrapSource, SavedBootstrapSourceFiles, SavedBootstrapSourcePrepared,
+    PreparedBootstrapSourceTerminal, RegisteredBootstrapSource, SavedBootstrapSourceFiles,
+    SavedBootstrapSourcePrepared, SavedBootstrapSourceTerminal,
 };
 use catcoms_sync::owner_v2::{
     BootstrapSourceContextData, BootstrapSourceId, FounderArchivePreparation,
@@ -13,6 +14,8 @@ use catcoms_sync::owner_v2::{
 const PHASE_METADATA_FEE: usize = 64 * 1024;
 #[path = "founder_source_prepared.rs"]
 mod prepared;
+#[path = "founder_source_terminal.rs"]
+mod terminal;
 #[path = "founder_source_write.rs"]
 mod write;
 
@@ -41,6 +44,8 @@ pub struct ArchiveFounderSourcePreparation<T: MeshTransport, R: CryptoRngCore> {
     registered: Option<RegisteredBootstrapSource>,
     prepared_journal: Option<SavedBootstrapSourcePrepared>,
     saved_files: Option<SavedBootstrapSourceFiles>,
+    prepared_terminal: Option<PreparedBootstrapSourceTerminal>,
+    saved_terminal: Option<SavedBootstrapSourceTerminal>,
     original: ArchiveFounderPlanning<T, R>,
     #[cfg(test)]
     before_freeze: Option<Box<dyn FnOnce() + Send>>,
@@ -78,6 +83,9 @@ pub enum ArchiveFounderSourceProgress {
     /// Exact source seed, destination and two genesis pages passed one durably debited
     /// physical pass and final original guards. Still no scope/head/Current/native success.
     SourceFilesSavedUnexposed,
+    /// The exact completed original pass also has its small durable terminal closure.
+    /// Cold readers still need a NEW paid source/SDK capture; this is not Current.
+    SourceSavedUnexposed,
 }
 pub struct ReturnedArchiveFounderPlanning<T: MeshTransport, R: CryptoRngCore> {
     original: ArchiveFounderPlanning<T, R>,
@@ -150,6 +158,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
                 registered: None,
                 prepared_journal: None,
                 saved_files: None,
+                prepared_terminal: None,
+                saved_terminal: None,
                 original: self,
                 #[cfg(test)]
                 before_freeze: None,

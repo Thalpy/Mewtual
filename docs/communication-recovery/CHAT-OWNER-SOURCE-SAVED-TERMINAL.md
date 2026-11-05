@@ -1,7 +1,8 @@
 # SourceSaved terminal: exact codec and writer contract
 
 Design reviewed against worker checkpoint `a3deac5f`. The terminal DATA codec and seven local
-regressions are authored UNRUN; Root's actual writer remains separate implementation work.
+regressions are authored UNRUN. Root's connected warm writer/closure/caller is also now authored
+with eight further UNRUN regressions; its final actual-diff static review is clear.
 Compiled tests/builds remain paused. The worker's actual `SavedBootstrapSourceFiles` is a
 historical original completed-run result, not a cold token. This small durable terminal closes
 the successful-last-pass crash window before a later V2 Current activation.
@@ -128,6 +129,8 @@ copies before allocating; merely changing the scalar event count is not proof of
 Design review is CLEAR for this codec and concrete producer contract. Direct rustfmt, whitespace
 and ambient/raw-filesystem static gates passed; no compiler, compiled test or build ran. Codec
 actual-diff review is CLEAR with no identified blocker/high/medium in this three-file packet;
-all seven new DATA regressions remain authored UNRUN. Existing SP-only production writers still
-reject the new kind. Root's connected writer/closure/consumer, its actual-diff review
-and all compiled validation remain required; DATA parsing alone supplies no SourceSaved result.
+all seven new DATA regressions remain authored UNRUN. The connected writer now requires the
+actual retained completed-run closure before accepting this kind; DATA parsing alone still
+supplies no SourceSaved result. Its eight real writer regressions remain UNRUN and final actual-
+diff static review is clear; cold paid source/SDK/Current consumers and all compiled validation
+remain required.

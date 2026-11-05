@@ -10,8 +10,9 @@ UNRUN. The smaller synchronous warm execution consumer is now authored with13 fu
 regressions; design and final actual-diff static review are clear. It saves/debits a real SP
 successor, then runs a non-Clone original Work outside every global writer, retaining the
 OS-only physical lease through I/O. Large files are `source.seed`, `source.bin`, `records.bin`
-and `manifest.bin` in the same original target. Cold negative repair, SourceSaved terminal
-closure, asynchronous native scheduling and Current remain implementation gates.
+and `manifest.bin` in the same original target. The actual warm SourceSaved terminal closure
+is also authored (eight UNRUN regressions, final static review clear). Cold negative/read consumers,
+asynchronous native scheduling and Current remain implementation gates.
 
 ## Actual source before journal effects
 
@@ -195,4 +196,6 @@ clear with the phase-separated invoice and distinct cold negative admission abov
 and physical actual-diff review plus all focused/full validation remain required. The smaller
 synchronous Work has design clearance, including ephemeral dbkey custody (the existing DATA
 opener also needs it for nested pages), already-paid allocation semantics and idle file handles
-without queued work/session/key. It has no cold positive SourceSaved or activation result.
+without queued work/session/key. The new actual warm terminal writer is described in
+[its contract](CHAT-OWNER-SOURCE-SAVED-TERMINAL.md); cold positive source/Current capture remains
+separate. Neither this worker nor terminal DATA is an activation result.

@@ -5,6 +5,10 @@ use super::*;
 use catcoms_storage::VaultPhysicalWorkLease;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
+mod terminal;
+pub(super) use terminal::{
+    OriginalSourceTerminal, PreparedBootstrapSourceTerminal, SavedBootstrapSourceTerminal,
+};
 
 const PREPARED: u8 = 0;
 const RUNNING: u8 = 1;
@@ -13,11 +17,12 @@ const ABANDONED: u8 = 3;
 const MAX_WORK_PATH_BYTES: usize = 32 * 1024;
 
 /// Requested fixed metadata separate from the four full-frame source/opener buffers. This
-/// includes all <=9 retained small journal events, bounded path-copy overlap, Arc/control
+/// includes all <=10 retained small journal events (initial,8 arms,terminal), bounded path-copy
+/// overlap, Arc/control
 /// holders and output objects. It is not an allocator, thread-stack or process RSS claim.
 pub(super) fn validate_metadata_invoice(store: &ServerStore) -> Result<(), AppError> {
-    let fixed = 4 * (MAX_WORK_PATH_BYTES + 256)
-        + 9 * (founder::MAX_INTENT_FRAME
+    let fixed = 6 * (MAX_WORK_PATH_BYTES + 256)
+        + 10 * (founder::MAX_INTENT_FRAME
             + founder::MAX_TRANSITION_FRAME
             + founder::MAX_TARGET_MARKER_FRAME
             + 512
@@ -27,6 +32,9 @@ pub(super) fn validate_metadata_invoice(store: &ServerStore) -> Result<(), AppEr
         + std::mem::size_of::<OriginalSourceWriteWork>()
         + std::mem::size_of::<FounderSourceOutput>()
         + 9 * (std::mem::size_of::<FounderSourceRun>() + 128)
+        + std::mem::size_of::<OriginalSourceTerminal>()
+        + std::mem::size_of::<PreparedBootstrapSourceTerminal>()
+        + std::mem::size_of::<SavedBootstrapSourceTerminal>()
         + 16 * 1024;
     if fixed > 512 * 1024 || store.dir.as_os_str().len() > MAX_WORK_PATH_BYTES {
         return Err(critical_namespaces::refused());
@@ -616,6 +624,7 @@ impl ServerStore {
             stage_file: None,
             parent: None,
             execution: Some(run.clone()),
+            terminal: None,
         });
         // All quota/metadata/output/path/session resources precede the irreversible small
         // debit. No quota is obtained by the worker. Already-paid crypto buffers still may

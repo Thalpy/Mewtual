@@ -8327,6 +8327,18 @@ replacement for the actual selected current. This is warm, unexposed source prog
 positive result, SourceSaved terminal record, head/scope Current or native creation is implied.
 Thirteen new regressions are authored UNRUN; final actual-diff static review is clear.
 
+`ArchiveFounderSourcePreparation::save_source_terminal` now creates the distinct actual
+SourceSaved closure. Its private prepared witness retains the SAME completed run/saved arm and
+named output objects before any top-journal change. It derives the exact tag5 terminal payload
+from that actual parent, preserving context/source/marker/io_spent. No request frame, parsed
+count, literal success flag or old saved event is accepted as completed work. The new opaque
+saved-terminal result requires actual seed/stage/current/parent barriers; old SavedFiles remains
+arm-current-only. Lost local handles first look up the exact actual prepared closure, before
+any call to that old API. All metadata/control/event layouts (at most10 events) are explicitly
+included in the same source-custody invoice. Registry handoff/retirement remains a later actual
+Current consumer. Eight actual writer regressions are authored UNRUN; final static review is clear.
+Cold terminal DATA is not a warm token, a write-budget refund or a paid typed SDK/Current read.
+
 ### Explicit original checkpoint retry continuation
 
 `CheckpointJoinNetwork::ensure_retry_grant` is a trusted local ACTIVE-source action. It retains

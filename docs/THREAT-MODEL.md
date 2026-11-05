@@ -5963,3 +5963,15 @@ non-hostile live private-directory/vault-lock assumption; hostile local mutation
 claimed to be prevented. Cold negative repair, terminal SourceSaved crash closure, Current and
 production chat dispatch remain separate open boundaries. Thirteen regressions are authored but
 unrun; final actual-diff static review is clear during the user's compilation pause.
+
+The actual warm SourceSaved terminal writer now retains a concrete completed-run/arm/output
+closure BEFORE changing its selected journal phase. An independent exact small-record save
+then produces a distinct saved-terminal receipt. It cannot be reconstructed from tag5 DATA,
+accept a foreign actual run, refund/restart an exhausted pass or stand in for Current. Old
+SavedFiles remains arm-current-only, and lost terminal returns first recover their SAME actual
+prepared closure. Final publication proves the actual candidate current and named outputs
+after all comparator/Root waits; a merely valid old pending parent is insufficient. At most10
+events plus actual closure/return/path overlap fit the explicit fixed metadata fee. Eight real
+writer regressions are authored UNRUN with final actual-diff static review clear. Cold reads must still
+obtain a NEW paid source/SDK capture; historical terminal evidence does not guarantee today's
+file availability or give an old SDK/write arm back.
