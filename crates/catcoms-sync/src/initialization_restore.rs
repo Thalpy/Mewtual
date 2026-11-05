@@ -103,7 +103,10 @@ fn bounded(bytes: &[u8], cap: usize) -> Result<(), SyncError> {
     }
 }
 
-fn preflight(snapshot: &[u8], limits: OwnerInitializationRestoreLimits) -> Result<(), SyncError> {
+pub(super) fn preflight(
+    snapshot: &[u8],
+    limits: OwnerInitializationRestoreLimits,
+) -> Result<(), SyncError> {
     let bad = || SyncError::Malformed;
     if limits.max_snapshot_bytes == 0
         || limits.max_mls_bytes == 0

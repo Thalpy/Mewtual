@@ -16,7 +16,7 @@ pub(super) const METADATA_FEE: usize = 64 * 1024;
 pub(super) const MAX_INITIAL_RENDEZVOUS: usize = 8;
 pub(super) const MAX_INITIAL_ADMINS: usize = 64;
 pub(super) const MAX_INITIAL_FINALIZATIONS: usize = 8;
-const MAX_INITIAL_FINALIZATION_CAPACITY: usize = 16;
+pub(super) const MAX_INITIAL_FINALIZATION_CAPACITY: usize = 16;
 
 #[cfg(test)]
 std::thread_local! {

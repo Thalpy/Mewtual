@@ -1,15 +1,50 @@
-//! Private owner-profile preparation from an ACTUAL unchanged founding operation.
-//!
-//! The returned object deliberately exposes no signed-record/export or successful-save API.
-//! A forthcoming mounted-store Ready/lease adapter must cover the profile/archive/MLS state
-//! before exposing certificates. This does not activate a protocol or install a trusted pin.
+//! Private founder preparation and the closed covering first-Add consumer. Candidates expose
+//! no pre-save response/facts or successful-save API: the real mounted App host must save the
+//! exact successor before governed install and original consuming reply. This finite checkpoint
+//! does not replace the scalable archive/general-history transaction or activate production.
 use super::*;
 use catcoms_replication::chat::{owner_facts::*, ChatError, Rights};
 mod initial_tail;
 mod joined;
+mod membership_candidate;
+mod membership_install;
+mod membership_request;
+mod membership_restore;
+mod membership_result;
+pub use membership_restore::{validate_owner_operation_snapshot, OwnerOperationSourceExpectation};
+mod membership_snapshot;
+mod operation_tail;
 pub(super) use initial_tail::InitialOwnerEvidence;
 pub use initial_tail::ManagedOwnerEvidenceBinding;
 pub use joined::VerifiedJoinedOwnerEvidence;
+pub use membership_candidate::PreparedOwnerMembership;
+pub use membership_install::ManagedOwnerOperationBinding;
+pub use membership_request::OwnerDirectRequest;
+pub(super) use membership_snapshot::OwnerMembershipSnapshot;
+pub use operation_tail::OwnerOperationPredecessor;
+pub(super) use operation_tail::OwnerOperationTail;
+
+/// Conservative outer metadata cap for the INACTIVE one-founder/one-Add checkpoint. It pays
+/// the commit repeated in the ordinary log and strict tail; it is not a public profile limit.
+pub const OWNER_FIRST_ADD_MAX_METADATA: usize =
+    operation_tail::MAX_BYTES + operation_tail::MAX_COMMIT + initialization_snapshot::METADATA_FEE;
+/// Extra simultaneous private candidate/result/tail/commit and bounded historical-KP scratch.
+/// The host additionally reserves its four whole-snapshot buffers and two provider invoices.
+pub const OWNER_FIRST_ADD_EXTRA_PRIVATE_BYTES: usize = 2 * operation_tail::MAX_BYTES
+    + operation_tail::MAX_COMMIT
+    + initialization_snapshot::METADATA_FEE
+    + 4 * operation_tail::MAX_PACKAGE;
+/// Cached response attempt custody, including original immutable outcome and serialized lower
+/// copies. Driver ResponseBudget remains independently required; this is no active-host quota.
+pub const OWNER_FIRST_ADD_RESPONSE_PRIVATE_BYTES: usize =
+    2 * operation_tail::MAX_BYTES + 4 * operation_tail::MAX_PACKAGE;
+
+pub(super) fn preflight_owner_operation(bytes: &[u8]) -> Result<(), SyncError> {
+    operation_tail::preflight(bytes).map(|_| ())
+}
+pub(super) fn preflight_owner_operation_record(record: &CommitRecord) -> Result<(), SyncError> {
+    operation_tail::bounded_record(record)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OwnerEvidencePrepareError {
@@ -179,7 +214,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Result<(), SyncError> {
         let state = self
             .initial_owner_evidence
-            .as_mut()
+            .as_ref()
             .ok_or(SyncError::ChatScopeUnavailable)?;
         if state.profile() != binding.profile_id()
             || binding.group() != self.group.group_id()
@@ -189,13 +224,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::ChatScopeUnavailable);
         }
-        state.verify_local_chain(
-            &self.group,
-            &self.device,
+        self.validate_owner_initialization_chain(
+            binding.profile_id(),
             binding.owner_founder(),
             binding.signer(),
         )?;
-        state.bind(binding.publication_authority())
+        self.initial_owner_evidence
+            .as_mut()
+            .ok_or(SyncError::ChatScopeUnavailable)?
+            .bind(binding.publication_authority())
     }
 
     /// Negative-only validation of a restored first checkpoint against the mounted host's
@@ -213,7 +250,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .as_ref()
             .filter(|state| state.profile() == profile)
             .ok_or(SyncError::ChatScopeUnavailable)?;
-        state.verify_local_chain(&self.group, &self.device, founder, subject)
+        state.verify_local_chain(&self.group, &self.device, founder, subject)?;
+        if let Some(operation) = self.owner_operation.as_deref() {
+            let label = self
+                .chat_scope_label()
+                .ok_or(SyncError::ChatScopeUnavailable)?;
+            if label.domain() != operation.predecessor.domain
+                || label.nonce() != operation.predecessor.nonce
+                || operation.topic.as_slice() != self.control_topic.as_bytes()
+            {
+                return Err(SyncError::ChatScopeUnavailable);
+            }
+            let record = self
+                .commit_log
+                .iter()
+                .find(|record| record.commit_id() == operation.commit)
+                .ok_or(SyncError::ChatScopeUnavailable)?;
+            state.verify_direct_operation(operation, record, &self.group, &self.device, founder)?;
+        } else if state.local_owner_requires_operation(subject) {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        Ok(())
     }
 
     /// Saved metadata only. A tail/profile label cannot construct canonical runtime authority.

@@ -717,7 +717,7 @@ mod persistence {
     fn atomic_write_with_hook(
         path: &Path,
         bytes: &[u8],
-        mut phase: impl FnMut(AtomicWritePhase, &Path),
+        mut phase: impl FnMut(AtomicWritePhase, &Path) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         atomic_write_with_hook_and_sync(path, bytes, &mut phase, sync_directory)
     }
@@ -823,10 +823,16 @@ mod persistence {
         file.sync_all()
             .map_err(|error| AppError::Io(error.to_string()))?;
         drop(file);
-        phase(AtomicWritePhase::TempSynced, stage);
+        if let Err(error) = phase(AtomicWritePhase::TempSynced, stage) {
+            // A controlled stop after the REAL file sync models retained crash-layout debt.
+            // Preserve the entire candidate; the opener must classify it before new work.
+            staging.remove_on_drop = false;
+            return Err(error);
+        }
         fs::rename(stage, path).map_err(|error| AppError::Io(error.to_string()))?;
         staging.remove_on_drop = false;
-        phase(AtomicWritePhase::Renamed, stage);
+        phase(AtomicWritePhase::Renamed, stage)
+            .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             sync_parent(parent)
                 .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
@@ -1558,6 +1564,7 @@ mod persistence {
                             .expect("remove actual synced owner-pin stage before rename");
                     }
                     let _ = (phase, stage);
+                    Ok(())
                 },
                 |parent| {
                     #[cfg(test)]
@@ -1639,6 +1646,20 @@ mod persistence {
             }
         }
 
+        /// Presence, not parse success. Any retained fixed stage (including a symlink or
+        /// nonfile) is possible state and must be classified, never treated as an empty slot.
+        pub(super) fn owner_canonical_stage_exists(
+            &self,
+            key: &[u8; 32],
+        ) -> Result<bool, AppError> {
+            let parent = self.owner_canonical_directory()?;
+            match fs::symlink_metadata(parent.join(format!("{}.replace.tmp", hex::encode(key)))) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(AppError::Io(error.to_string())),
+            }
+        }
+
         /// Both names are fixed by the authenticated logical key. The private source selects
         /// InitialStage only after the actual v4-only/first-initialization classification.
         pub(super) fn read_owner_restore_record(
@@ -1650,7 +1671,8 @@ mod persistence {
             let parent = self.owner_canonical_directory()?;
             let suffix = match location {
                 owner_evidence::canonical::OwnerSourceLocation::Canonical => "bin",
-                owner_evidence::canonical::OwnerSourceLocation::InitialStage => "replace.tmp",
+                owner_evidence::canonical::OwnerSourceLocation::InitialStage
+                | owner_evidence::canonical::OwnerSourceLocation::OperationStage => "replace.tmp",
             };
             let path = parent.join(format!("{}.{suffix}", hex::encode(key)));
             let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
@@ -1758,6 +1780,79 @@ mod persistence {
             Ok(())
         }
 
+        /// Exact successor-only stage settlement. The caller has authenticated/compared the
+        /// COMPLETE plaintext under original Current -> head custody. It must re-read and sync
+        /// the resulting canonical file before issuing Saved; this helper alone grants none.
+        pub(super) fn settle_opened_owner_operation_stage(
+            &self,
+            permit: &chat_admission::ChatAdmissionStoragePermit<'_>,
+            head: &owner_evidence::canonical::OwnerHeadWriteGuard<'_>,
+            file: File,
+            duplicate: bool,
+        ) -> Result<(), AppError> {
+            if permit.vault_format()? != catcoms_storage::VaultFormat::OwnerOperations
+                || permit.mode() != chat_admission::ChatAdmissionStorageMode::Current
+            {
+                return Err(AppError::Invalid(
+                    "unsupported owner operation recovery".into(),
+                ));
+            }
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            let key = head.identifier(permit)?;
+            let parent = self.owner_canonical_directory()?;
+            let stage = parent.join(format!("{}.replace.tmp", hex::encode(key)));
+            let path = parent.join(format!("{}.bin", hex::encode(key)));
+            file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
+            #[cfg(test)]
+            if self
+                .owner_evidence
+                .stage_sync_failure
+                .load(Ordering::SeqCst)
+            {
+                return Err(AppError::Io(
+                    "test-only operation stage sync refusal".into(),
+                ));
+            }
+            drop(file); // Windows rename/unlink must close the exact already-synced handle.
+            #[cfg(test)]
+            {
+                let hook = self
+                    .owner_evidence
+                    .before_owner_stage_admission
+                    .lock()
+                    .unwrap()
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            if duplicate {
+                fs::remove_file(stage)
+            } else {
+                fs::rename(stage, path)
+            }
+            .map_err(|e| AppError::Io(e.to_string()))?;
+            #[cfg(test)]
+            {
+                let hook = self
+                    .owner_evidence
+                    .after_owner_stage_admission
+                    .lock()
+                    .unwrap()
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            // Even duplicate unlink has durable directory debt. A failed sync is retried by
+            // validating and syncing the exact canonical candidate, never by reminting Add.
+            sync_owner_directory(&parent)
+                .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            Ok(())
+        }
+
         /// Actual file + leaf-parent barrier for the exact authenticated opened canonical source.
         /// Root entry debt is settled even on retry where owner-state was already visible.
         pub(super) fn sync_opened_owner_canonical_record(
@@ -1807,7 +1902,18 @@ mod persistence {
                 ));
             }
             let parent = self.owner_canonical_directory()?;
-            self.cleanup_owner_canonical_stage(&key)?;
+            if permit.vault_format()? == catcoms_storage::VaultFormat::OwnerOperations {
+                // A v5 stage may contain a different exact accepted/result candidate. The
+                // legacy cleaner cannot decide that it is disposable. Same-candidate/parent-
+                // aware recovery must settle it explicitly before this create-new writer.
+                if self.owner_canonical_stage_exists(&key)? {
+                    return Err(AppError::Invalid(
+                        "retained owner successor requires exact recovery".into(),
+                    ));
+                }
+            } else {
+                self.cleanup_owner_canonical_stage(&key)?;
+            }
             let path = parent.join(format!("{}.bin", hex::encode(key)));
             let stage = parent.join(format!("{}.replace.tmp", hex::encode(key)));
             #[cfg(test)]
@@ -1828,7 +1934,12 @@ mod persistence {
                         fs::remove_file(staged)
                             .expect("remove actual synced canonical stage before rename");
                     }
+                    #[cfg(test)]
+                    if fault == 3 && phase == AtomicWritePhase::TempSynced {
+                        return Err(AppError::Io("retained synced owner stage test stop".into()));
+                    }
                     let _ = (phase, staged);
+                    Ok(())
                 },
                 |directory| {
                     #[cfg(test)]

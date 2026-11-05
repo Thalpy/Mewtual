@@ -1,5 +1,23 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Closed owner Add source checkpoint (5 November; tests paused)
+
+`OwnedOwnerServer::run_owner_checkpoint_once` is a narrow trusted App host, not a renderer command
+or production rollout flag. Original Saved/current/head custody authorizes private first Add and
+the exact canonical v2 successor; `ManagedOwnerOperationBinding` is the host-only synchronous
+save/install seam, never implementable from decoded scalar labels. The exact local operation
+tail retains immutable request/result/commit metadata, no dead Responder or native observer.
+`validate_owner_operation_parent` is negative-only sealed-local recovery validation, returns no
+publisher/fresh admission and constructs no second transport-owning Sync.
+
+`RequestCancellation::retain_custody` composes original resource owners without replacing the
+original receiver or effect authority. Trusted callers prepay its fixed pair and call it once
+per bounded lower attempt; it is not permission to grow a recursive custody chain. The original
+reply driver and queued publication retain the accounting even after caller input/future drop.
+Local publish classification neither clears the durable commit/result nor proves remote receipt.
+Exact old v1 bytes and exact-v4 S1/negative recovery remain unchanged; gen2 uses a distinct strict
+snapshot tag and requires the supported mounted owner-operation format, full tail and parent CAS.
+
 ## Retained direct client source (5 November; authored, unexecuted)
 
 `OwnerCheckpointJoinAttempt::bind_direct_transport` now consumes into a typed bound attempt;

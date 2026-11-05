@@ -4189,6 +4189,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(Self::from_restored_sync(sync, display_name))
     }
 
+    /// The strict first-Add body, selected ONLY by the original authenticated v5 canonical v2
+    /// source. Complete borrowed framing precedes clones/SDK, then actual pin/Current/head
+    /// validation still gates any runtime. No generic legacy decode is an operation fallback.
+    pub(crate) fn restore_owner_operation_checkpoint(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_operation_checkpoint(
+            snapshot, transport, rng, clock, limits,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
     fn from_restored_sync(sync: ChannelSync<T, R>, display_name: impl Into<String>) -> Self {
         let device_id = sync.device_id();
         Self {

@@ -4359,6 +4359,12 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     durable_chat: durable_chat::DurableChatState,
     local_chat_scope: local_chat_scope::LocalChatScope,
     initial_owner_evidence: Option<owner_evidence::InitialOwnerEvidence>,
+    // Immutable original first-Add result; no serialized runtime or response observer.
+    owner_operation: Option<Arc<owner_evidence::OwnerOperationTail>>,
+    // Process-local local-driver suppression only. The immutable durable debt is NEVER
+    // cleared by this flag or inferred to have reached any remote member.
+    owner_commit_submitted: bool,
+    owner_direct_request: Option<owner_evidence::OwnerDirectRequest>,
     /// Managed raw-post retries retain their ORIGINAL observer. They never fall back into the
     /// unscoped generic outbox, and rebind/restart cannot authorize an old queued handoff.
     managed_chat_outbox: Vec<(Topic, Vec<u8>, catcoms_rt::RequestCancellation)>,
@@ -4904,6 +4910,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             durable_chat: durable_chat::DurableChatState::default(),
             local_chat_scope: local_chat_scope::LocalChatScope::default(),
             initial_owner_evidence: None,
+            owner_operation: None,
+            owner_commit_submitted: false,
+            owner_direct_request: None,
             managed_chat_outbox: Vec::new(),
             // Placeholder; set from `ns_secret_L` by `capture_routing_secret` below.
             control_topic: Topic::new(Vec::<u8>::new()),
@@ -5051,6 +5060,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         mls: &[u8],
         capacity: Option<usize>,
     ) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+        self.snapshot_with_governance(mls, capacity, None)
+    }
+
+    // The candidate path supplies explicit borrowed overrides. No live governing field is
+    // temporarily installed while encoding, and ordinary no-operation snapshot bytes use the
+    // exact same framing/order as before. The actual canonical host owns positive installation.
+    fn snapshot_with_governance(
+        &mut self,
+        mls: &[u8],
+        capacity: Option<usize>,
+        view: Option<&owner_evidence::OwnerMembershipSnapshot<'_>>,
+    ) -> Result<Zeroizing<Vec<u8>>, SyncError> {
         #[cfg(test)]
         initialization_snapshot::note_encoding();
         // `routing` carries the live routing secrets in the clear; zeroize the intermediate
@@ -5063,7 +5084,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .collect();
             Zeroizing::new(encode_routing_state(self.routing_label, &secrets))
         };
-        let ledger = self.ledger.snapshot();
+        let ledger = view.map_or(&self.ledger, |view| view.ledger).snapshot();
 
         let mut e = capacity.map_or_else(Encoder::new, Encoder::with_capacity);
         let oversize = || SyncError::Malformed;
@@ -5075,9 +5096,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             let snap = doc.snapshot()?;
             e.put_bytes(&snap).map_err(|_| oversize())?;
         }
-        e.put_u32(self.commit_log.len() as u32);
+        let commit_count = self
+            .commit_log
+            .len()
+            .checked_add(usize::from(view.is_some()))
+            .and_then(|count| u32::try_from(count).ok())
+            .ok_or_else(oversize)?;
+        e.put_u32(commit_count);
         for rec in &self.commit_log {
             e.put_bytes(&rec.encode()).map_err(|_| oversize())?;
+        }
+        if let Some(view) = view {
+            e.put_bytes(&view.commit.encode()).map_err(|_| oversize())?;
         }
         e.put_u32(self.peer_records.len() as u32);
         for desc in self.peer_records.values() {
@@ -5118,7 +5148,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // P1 observed tenure is an optional versioned tail for old-snapshot compatibility.
         // Persist it together with MLS: a separately saved counter could bless an old tenure
         // after a crash or A -> B -> A. Unknown is encoded explicitly on every new snapshot.
-        e.put_bytes(&self.owner_tenure.encode(&self.group)?)
+        let (tenure, group) = view.map_or((&self.owner_tenure, &self.group), |view| {
+            (view.tenure, view.group)
+        });
+        e.put_bytes(&tenure.encode(group)?)
             .map_err(|_| oversize())?;
         e.put_bytes(&group_policy::encode_pin(self.group_policy.as_ref()))
             .map_err(|_| oversize())?;
@@ -5144,8 +5177,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         )? {
             e.put_bytes(&scope).map_err(|_| oversize())?;
         }
-        if let Some(owner) = &self.initial_owner_evidence {
+        if let Some(owner) = view
+            .map(|view| view.evidence)
+            .or(self.initial_owner_evidence.as_ref())
+        {
             e.put_bytes(&owner.encode()?).map_err(|_| oversize())?;
+        }
+        if let Some(operation) = view
+            .map(|view| view.operation)
+            .or(self.owner_operation.as_deref())
+        {
+            let record = match view {
+                Some(view) => view.commit,
+                None => self
+                    .commit_log
+                    .iter()
+                    .find(|record| record.commit_id() == operation.commit)
+                    .ok_or(SyncError::Malformed)?,
+            };
+            e.put_bytes(&operation.encode(record)?)
+                .map_err(|_| oversize())?;
         }
         Ok(Zeroizing::new(e.finish()))
     }
@@ -5321,10 +5372,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             Some(d.get_bytes().map_err(|_| bad())?)
         };
-        if initial_owner_bytes.is_some() && local_scope_bytes.is_none() {
+        let owner_operation_bytes = if d.is_empty() {
+            None
+        } else {
+            let bytes = d.get_bytes().map_err(|_| bad())?;
+            owner_evidence::preflight_owner_operation(bytes)?;
+            Some(bytes)
+        };
+        if (initial_owner_bytes.is_some() && local_scope_bytes.is_none())
+            || (owner_operation_bytes.is_some() && initial_owner_bytes.is_none())
+        {
             return Err(bad());
         }
         d.finish().map_err(|_| bad())?;
+
+        if owner_operation_bytes.is_some() {
+            if commit_log.len() != 1 {
+                return Err(bad());
+            }
+            // Even the generic compatibility entry must not let a small new tail cause an
+            // unbounded separately decoded legacy record to enter SDK header parse/encoding.
+            owner_evidence::preflight_owner_operation_record(commit_log.front().ok_or_else(bad)?)?;
+        }
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
         // durable state. `new` re-derives an L=0 routing secret from the (post-restore) epoch;
@@ -5388,8 +5457,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // with. Drop those by header alone (nothing is decrypted), so this build never serves them.
         // A record whose header matches but would not apply cannot be told apart here; a
         // requester on this build refuses it when it tries (`apply_commit_in_order`).
+        if owner_operation_bytes.is_some()
+            && (commit_log.len() != 1 || !commit_log.iter().all(CommitRecord::header_matches_label))
+        {
+            return Err(bad());
+        }
         commit_log.retain(CommitRecord::header_matches_label);
         this.commit_log = commit_log;
+        this.owner_operation = owner_operation_bytes
+            .map(|bytes| {
+                let record = this.commit_log.front().ok_or_else(bad)?;
+                owner_evidence::OwnerOperationTail::decode(bytes, record).map(Arc::new)
+            })
+            .transpose()?;
         // A snapshot's documents are as old as the process that wrote them, and nothing else will
         // notice that. See `first_proof_sweep_owed`; discharged by the first member that proves
         // it can serve a document catch-up.
@@ -5497,6 +5577,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// copy by a malicious member cannot affect the gate. Errors `Unauthorized` if not the owner;
     /// `NoSuchDoc` if the roles doc isn't open.
     pub async fn set_admin(&mut self, device: &DeviceId, admin: bool) -> Result<(), SyncError> {
+        if self.initial_owner_evidence.is_some() {
+            // A closed owner checkpoint has no covering roster-operation producer. Do not
+            // mutate authoritative state through the old UI/legacy persistence path.
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
         if self.owner_evidence_unbound() {
             return Err(SyncError::ChatScopeUnavailable);
         }
@@ -6779,6 +6864,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     responder.respond(Bytes::new());
                     return Ok(true);
                 }
+                if data.first() == Some(&KIND_JOIN) && self.initial_owner_evidence.is_some() {
+                    // Owner-profile membership cannot use the legacy mutate→reply handler.
+                    // Retain this exact driver request for the actual canonical save/install
+                    // drain, which may expose its result only after the covering barrier.
+                    self.queue_owner_direct_request(from, data, responder);
+                    return Ok(true);
+                }
                 if data.first() == Some(&catcoms_rt::FILE_SOURCE_KIND) {
                     self.queue_file_source(from, &data, responder);
                     return Ok(true);
@@ -6835,6 +6927,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Ok(true)
             }
             Some(TransportEvent::PeerConnected(peer)) => {
+                self.owner_commit_submitted = false;
                 self.note_peer_connected(peer);
                 Ok(true)
             }
@@ -6843,6 +6936,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 active,
                 newly_established,
             }) => {
+                self.owner_commit_submitted = false;
                 self.note_peer_paths(peer, active, newly_established);
                 Ok(true)
             }
@@ -12082,6 +12176,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// config, remove via the local MLS path instead. Errors if a commit is
     /// already staged here (one pending commit at a time).
     pub async fn remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
+        if self.initial_owner_evidence.is_some() {
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
         if self.owner_evidence_unbound() {
             return Err(SyncError::ChatScopeUnavailable);
         }
@@ -12195,6 +12292,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// losing committer, after aborting its own) applies the winner. Returns whether
     /// a contest was resolved this call.
     fn resolve_pending_if_expired(&mut self) -> bool {
+        if self.initial_owner_evidence.is_some() {
+            // Preserve any unsupported original contest; never take/drop it behind a private
+            // canonical candidate. This checkpoint cannot activate concurrent committers.
+            return false;
+        }
         let (epoch, deadline) = match &self.pending {
             Some(p) => (p.epoch, p.deadline_ms),
             None => return false,
@@ -12493,6 +12595,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// window needed). If *this* node is already the designated committer, the
     /// removal is performed directly.
     pub async fn request_remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
+        if self.initial_owner_evidence.is_some() {
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
         if self.owner_evidence_unbound() {
             return Err(SyncError::ChatScopeUnavailable);
         }
@@ -12553,6 +12658,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// stage the Remove, capture the pre-advance keys, merge, and queue the signed
     /// commit for fan-out. Single-committer, so it cannot fork.
     fn commit_remove_now(&mut self, target: &DeviceId) {
+        if self.initial_owner_evidence.is_some() {
+            return;
+        }
         let before = self.group.member_device_ids();
         let staged = match self.group.stage_remove(&self.device, target) {
             Ok(s) => s,
@@ -14612,6 +14720,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// ([`ChannelSync::join_attempts`]) with its distinct cause; the bytes returned to the
     /// joiner are unchanged (an opaque `None` for every rejection).
     fn serve_join(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        if self.initial_owner_evidence.is_some() {
+            // Also refuse internal/helper callers that bypass run_once's direct interception.
+            // A canonical owner must never consume its invite before the covering successor.
+            return None;
+        }
         // The nonce is filled in as soon as the request decodes, so a rejection *after* that
         // point still tells the operator which invite it was about; which is the whole point.
         let mut nonce = None;
@@ -14810,6 +14923,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         kp_bytes: &[u8],
         now: u64,
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        if self.initial_owner_evidence.is_some() {
+            return None;
+        }
         // Recheck at the protected mutation, after queueing. This synchronous operation
         // cannot interleave a demotion or removal between authorization and MLS Add.
         if !self.is_designated_committer() || !self.inviter_is_authorized(&invite.inviter_device_id)
@@ -15398,6 +15514,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         cert: &DeviceCertificate,
         kp_bytes: &[u8],
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        if self.initial_owner_evidence.is_some() {
+            return None;
+        }
         self.policy_admission_ready().ok()?;
         let key_package = self
             .device

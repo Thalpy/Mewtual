@@ -22,10 +22,12 @@ mod restore;
 mod source;
 pub use budget::OwnerEvidenceBudget;
 pub(crate) use budget::{
-    OwnerInitializationReservation, OwnerInitializationSnapshotLimits, OwnerPendingCreation,
+    OwnerInitializationReservation, OwnerInitializationSnapshotLimits, OwnerOperationReservation,
+    OwnerPendingCreation,
 };
 pub(crate) use head::{
     OwnerHeadWriteGuard, OwnerWriterRegistration, SavedOwnerInitialization, SavedOwnerRestore,
+    SavedOwnerSuccessor,
 };
 pub use initialize::{OwnedOwnerServer, OwnerFounderInitialization};
 pub(in crate::store) use restore::UnexposedHeadAction;

@@ -9,12 +9,13 @@ use super::*;
 use crate::store::{ChatAdmissionKey, ChatAdmissionResolution};
 use std::ops::Range;
 
-/// Fixed ORIGINAL names only. The stage variant is admitted solely for v4, generation-one
-/// Fresh+Initializing recovery; it never selects an operation journal or a later successor.
+/// Fixed ORIGINAL names only. InitialStage remains exact-v4 S1; OperationStage has its own
+/// exact-parent/current/full-tail proof and can never fall through the S1 algorithm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum OwnerSourceLocation {
     Canonical,
     InitialStage,
+    OperationStage,
 }
 
 /// Non-Clone/nonserialized canonical source. Holds only original weak lifetime observations,
@@ -30,10 +31,16 @@ pub(crate) struct ValidatedOwnerSnapshot {
     snapshot: Range<usize>,
     pub(super) file_cap: usize,
     pub(super) location: OwnerSourceLocation,
+    pub(super) operation_parent: Option<OperationParent>,
+    pub(super) operation_canonical: Option<head::Meta>,
     // Captured with the SAME read-fee reservation, never selected by a later caller or reread
     // from a replacement mount. These are negative resource limits, not runtime authority.
     restore_limits: catcoms_sync::OwnerInitializationRestoreLimits,
     _fee: ReadFee,
+}
+pub(super) struct OperationParent {
+    pub(super) plain: Zeroizing<Vec<u8>>,
+    snapshot: Range<usize>,
 }
 impl std::fmt::Debug for ValidatedOwnerSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,6 +88,14 @@ impl ValidatedOwnerSnapshot {
     pub(crate) fn restore_limits(&self) -> catcoms_sync::OwnerInitializationRestoreLimits {
         self.restore_limits
     }
+    pub(crate) fn is_operation_checkpoint(&self) -> bool {
+        self.meta.generation == 2
+    }
+    pub(crate) fn operation_parent_snapshot(&self) -> Option<&[u8]> {
+        self.operation_parent
+            .as_ref()
+            .map(|parent| &parent.plain[parent.snapshot.clone()])
+    }
     pub(crate) fn validate_original(&self, store: &ServerStore) -> Result<(), AppError> {
         self.pin.validate_original(store, self.group())?;
         if self.labels.domain != store.chat_vault_domain()? {
@@ -92,6 +107,25 @@ impl ValidatedOwnerSnapshot {
 struct ReadFee {
     pool: Weak<Mutex<Runtime>>,
     bytes: usize,
+}
+impl ReadFee {
+    /// Charge the SAME original pool before SDK/result decode. Base four buffers alone do
+    /// not cover retained parent + raw/cipher/plain rereads alongside the decoded outcome.
+    fn reserve_operation_overlap(&mut self) -> Result<(), AppError> {
+        let pool = self.pool.upgrade().ok_or_else(refused)?;
+        let mut runtime = pool.lock().map_err(|_| refused())?;
+        let extra = catcoms_sync::owner_evidence::OWNER_FIRST_ADD_EXTRA_PRIVATE_BYTES;
+        let budget = runtime.budget.ok_or_else(refused)?;
+        let bytes = self.bytes.checked_add(extra).ok_or_else(refused)?;
+        let hot = runtime
+            .hot_bytes
+            .checked_add(extra)
+            .filter(|n| *n <= budget.hot_bytes)
+            .ok_or_else(refused)?;
+        runtime.hot_bytes = hot;
+        self.bytes = bytes;
+        Ok(())
+    }
 }
 impl Drop for ReadFee {
     fn drop(&mut self) {
@@ -119,7 +153,7 @@ impl ServerStore {
             return Err(refused());
         }
         let identifier = key(pin.group(), &signer);
-        let (cell, cap, restore_limits, fee) = {
+        let (cell, cap, restore_limits, mut fee) = {
             let mut pool = self
                 .owner_evidence
                 .canonical
@@ -148,10 +182,16 @@ impl ServerStore {
                 },
             )
         };
-        let original = cell.read_stamp()?;
+        let operation_stage = format == catcoms_storage::VaultFormat::OwnerOperations
+            && self.owner_canonical_stage_exists(&identifier)?;
+        let (original, pending) = if format == catcoms_storage::VaultFormat::OwnerOperations {
+            cell.read_operation_stamp(operation_stage)?
+        } else {
+            (cell.read_stamp()?, None)
+        };
         // A present canonical source always wins, including when it is malformed. Falling
         // back after a failed canonical parse could reinstall a stale first-stage candidate.
-        let location = if self.owner_canonical_record_exists(&identifier)? {
+        let mut location = if self.owner_canonical_record_exists(&identifier)? {
             OwnerSourceLocation::Canonical
         } else {
             // Keep this exact v4 check even when the positive canonical format guard above
@@ -161,16 +201,131 @@ impl ServerStore {
             }
             OwnerSourceLocation::InitialStage
         };
-        let plain = {
+        let mut plain = {
             let (_file, raw) = self.read_owner_restore_record(&identifier, cap, location)?;
             Zeroizing::new(unseal(&self.keys.db_key()?, &crate::store::unframe(&raw)?)?)
         };
-        let (labels, meta, snapshot) = decode(&plain, &pin, &signer)?;
-        if original.as_ref().is_some_and(|known| known != &meta) {
+        let mut decoded = decode(&plain, &pin, &signer, format)?;
+        let mut operation_parent = None;
+        let mut operation_canonical = None;
+        if operation_stage {
+            // Missing canonical, corrupt stage, foreign/unknown parent and differing gen2
+            // candidates are all preservation/refusal. No old-source fallback occurs.
+            if location != OwnerSourceLocation::Canonical {
+                return Err(refused());
+            }
+            let stage_plain = {
+                let (_file, raw) = self.read_owner_restore_record(
+                    &identifier,
+                    cap,
+                    OwnerSourceLocation::OperationStage,
+                )?;
+                Zeroizing::new(unseal(&self.keys.db_key()?, &crate::store::unframe(&raw)?)?)
+            };
+            let stage = decode(&stage_plain, &pin, &signer, format)?;
+            let parent = stage.parent.ok_or_else(refused)?;
+            if decoded.labels.domain != stage.labels.domain
+                || decoded.labels.nonce != stage.labels.nonce
+                || decoded.labels.revision != stage.labels.revision
+            {
+                return Err(refused());
+            }
+            if decoded.meta.generation == 1 {
+                if parent.head != decoded.meta.head
+                    || parent.snapshot != decoded.meta.snapshot
+                    || parent.generation != decoded.meta.generation
+                    || plain[decoded.snapshot.clone()].len()
+                        > restore_limits
+                            .max_mls_bytes
+                            .checked_add(64 * 1024)
+                            .ok_or_else(refused)?
+                {
+                    return Err(refused());
+                }
+                operation_parent = Some(OperationParent {
+                    plain,
+                    snapshot: decoded.snapshot.clone(),
+                });
+            } else if decoded.meta != stage.meta || plain.as_slice() != stage_plain.as_slice() {
+                return Err(refused());
+            } // Duplicate layout drops canonical plaintext here; never retain two full gen2.
+            let original_matches_parent = |known: &head::Meta| {
+                known.generation == parent.generation
+                    && known.head == parent.head
+                    && known.snapshot == parent.snapshot
+                    && known.profile == pin.profile()
+            };
+            if original.as_ref().is_some_and(|known| {
+                known != &decoded.meta && known != &stage.meta && !original_matches_parent(known)
+            }) || pending.as_ref().is_some_and(|known| known != &stage.meta)
+            {
+                return Err(refused());
+            }
+            // After a rename/failed parent sync the live head may still name the original
+            // parent even though BOTH fixed names contain the candidate. Preserve that exact
+            // original stamp; final CAS must not invent or silently discard pending state.
+            operation_canonical = Some(original.clone().unwrap_or_else(|| decoded.meta.clone()));
+            plain = stage_plain;
+            decoded = stage;
+            location = OwnerSourceLocation::OperationStage;
+        }
+        if !operation_stage && pending.is_some() {
+            // An exact earlier rename may already have consumed the stage, while its writer
+            // dropped before a successful directory barrier/install. Only the actual gen2
+            // candidate and its exact original pending stamp may settle this debt.
+            let predecessor = decoded.parent.ok_or_else(refused)?;
+            if pending.as_ref() != Some(&decoded.meta)
+                || original.as_ref().is_some_and(|known| {
+                    known != &decoded.meta
+                        && (known.generation != predecessor.generation
+                            || known.head != predecessor.head
+                            || known.snapshot != predecessor.snapshot
+                            || known.profile != pin.profile())
+                })
+            {
+                return Err(refused());
+            }
+            operation_canonical = Some(original.clone().unwrap_or_else(|| decoded.meta.clone()));
+            location = OwnerSourceLocation::OperationStage;
+        }
+        let DecodedOwnerFrame {
+            labels,
+            meta,
+            snapshot,
+            parent,
+        } = decoded;
+        if let Some(predecessor) = parent {
+            if location == OwnerSourceLocation::InitialStage {
+                // S1 only repairs actual v4 generation1. A possible successor stage must not
+                // be promoted by that first-initialization algorithm.
+                return Err(refused());
+            }
+            catcoms_sync::owner_evidence::validate_owner_operation_snapshot(
+                &plain[snapshot.clone()],
+                restore_limits,
+                catcoms_sync::owner_evidence::OwnerOperationSourceExpectation {
+                    group: pin.group(),
+                    signer: &signer,
+                    profile: pin.profile(),
+                    predecessor,
+                    request: meta.attempt,
+                },
+            )
+            .map_err(|_| refused())?;
+            fee.reserve_operation_overlap()?;
+        }
+        if location != OwnerSourceLocation::OperationStage
+            && original.as_ref().is_some_and(|known| known != &meta)
+        {
             return Err(refused());
         }
         let identity = ChatAdmissionKey::new(pin.group(), signer)?;
         let admission = self.resolve_chat_admission(&identity, labels.nonce)?;
+        if location == OwnerSourceLocation::OperationStage
+            && matches!(&admission, ChatAdmissionResolution::Initializing(_))
+        {
+            return Err(refused());
+        }
         if location == OwnerSourceLocation::InitialStage {
             // Known Retired bytes can remain an offline capsule. Current plus a missing .bin
             // is never permission to reinstall a possibly stale stage. v5 is excluded by the
@@ -193,6 +348,8 @@ impl ServerStore {
             snapshot,
             file_cap: cap,
             location,
+            operation_parent,
+            operation_canonical,
             restore_limits,
             _fee: fee,
         };
@@ -200,14 +357,29 @@ impl ServerStore {
         Ok(source)
     }
 }
+struct DecodedOwnerFrame {
+    labels: Labels,
+    meta: head::Meta,
+    snapshot: Range<usize>,
+    parent: Option<catcoms_sync::owner_evidence::OwnerOperationPredecessor>,
+}
 fn decode(
     bytes: &[u8],
     pin: &CapturedOwnerProfilePin,
     signer: &[u8; 32],
-) -> Result<(Labels, head::Meta, Range<usize>), AppError> {
+    format: catcoms_storage::VaultFormat,
+) -> Result<DecodedOwnerFrame, AppError> {
     let mut decoder = Decoder::new(bytes);
-    if decoder.get_str().map_err(|_| refused())? != "catcoms/owner-canonical-snapshot/v1"
-        || decoder.get_bytes().map_err(|_| refused())? != pin.group()
+    let is_operation = match decoder.get_str().map_err(|_| refused())? {
+        "catcoms/owner-canonical-snapshot/v1" => false,
+        "catcoms/owner-canonical-snapshot/v2"
+            if format == catcoms_storage::VaultFormat::OwnerOperations =>
+        {
+            true
+        }
+        _ => return Err(refused()),
+    };
+    if decoder.get_bytes().map_err(|_| refused())? != pin.group()
         || decoder.get_bytes().map_err(|_| refused())? != signer
         || decoder.get_bytes().map_err(|_| refused())? != pin.profile().as_bytes()
     {
@@ -225,12 +397,34 @@ fn decode(
         .map_err(|_| refused())?;
     let revision = decoder.get_u64().map_err(|_| refused())?;
     let generation = decoder.get_u64().map_err(|_| refused())?;
-    let parent = decoder.get_bytes().map_err(|_| refused())?;
-    // First initialization is the ONLY implemented writer. General successor grammar/head CAS
-    // must be added with its actual covering producer, not accepted here speculatively.
-    if generation != 1 || !parent.is_empty() {
-        return Err(refused());
-    }
+    let parent_head = decoder.get_bytes().map_err(|_| refused())?;
+    let parent = if is_operation {
+        if generation != 2 {
+            return Err(refused());
+        }
+        let head = parent_head.try_into().map_err(|_| refused())?;
+        let parent_generation = decoder.get_u64().map_err(|_| refused())?;
+        if parent_generation != 1 {
+            return Err(refused());
+        }
+        let snapshot = decoder
+            .get_bytes()
+            .map_err(|_| refused())?
+            .try_into()
+            .map_err(|_| refused())?;
+        Some(catcoms_sync::owner_evidence::OwnerOperationPredecessor {
+            domain,
+            nonce,
+            head,
+            generation: parent_generation,
+            snapshot,
+        })
+    } else {
+        if generation != 1 || !parent_head.is_empty() {
+            return Err(refused());
+        }
+        None
+    };
     let attempt = decoder
         .get_bytes()
         .map_err(|_| refused())?
@@ -250,14 +444,15 @@ fn decode(
         attempt,
         profile: pin.profile(),
     };
-    Ok((
-        Labels {
+    Ok(DecodedOwnerFrame {
+        labels: Labels {
             signer: *signer,
             domain,
             nonce,
             revision,
         },
         meta,
-        range,
-    ))
+        snapshot: range,
+        parent,
+    })
 }

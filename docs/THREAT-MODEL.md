@@ -1,5 +1,28 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Closed covering first Add and recovery (5 November; source only)
+
+The new closed owner host orders actual original Current admission -> canonical head -> file
+barrier -> private governed install -> consuming original response/publication. An uncertain
+candidate blocks new host ticks and preserves its complete exact result; a later exact request
+captures its own original writer/Responder, never adopts a dead previous wait. Local retirement
+or mount/writer revocation preempts positive effects. This closed no-history host does not claim
+the general receive-union/governing transaction or production activation.
+
+Cold retained gen2 recovery authenticates both fixed sources, strict original parent/full tail,
+actual bounded parent group/own signer/four retained facts and stable state before promotion.
+Complete byte equality is required to unlink a duplicate. Every retry re-establishes actual
+file/directory barriers; malformed/foreign stages refuse and stay intact. This relies on locally
+sealed ORIGINAL trusted producer provenance, not cryptographic reapplication of the encrypted
+own MLS commit, a portable public transition proof, or remote finality. Same-user disk rollback
+and the previously documented authentic older vault-wrapper rollback boundary are unchanged.
+
+Private-phase fees pay provider table/payload/serialization overlap and retained parent/outcome
+scratch; they do not bound arbitrary SDK typed heaps or active Server/cache lifetimes. Fee phase
+reduction occurs only after private payload Drop and unique original accounting ownership; it
+never grants authority. Lower reply/publication custody preserves both original cancellation
+and accounting. New regressions are authored/unrun while validation is explicitly paused.
+
 ## Private client retries (5 November; authored, unexecuted)
 
 The private canonical join retains its original invite/KP/request and immutable secret source.

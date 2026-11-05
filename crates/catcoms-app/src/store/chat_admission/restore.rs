@@ -129,14 +129,25 @@ impl PrivateManagedRestoreAttempt {
             _ => return Err(refused()),
         }
         let limits = self.restore_limits();
-        let mut server = Server::restore_owner_initialization(
-            self.source.snapshot(),
-            transport,
-            rng,
-            clock,
-            display_name,
-            limits,
-        )?;
+        let mut server = if self.source.is_operation_checkpoint() {
+            Server::restore_owner_operation_checkpoint(
+                self.source.snapshot(),
+                transport,
+                rng,
+                clock,
+                display_name,
+                limits,
+            )?
+        } else {
+            Server::restore_owner_initialization(
+                self.source.snapshot(),
+                transport,
+                rng,
+                clock,
+                display_name,
+                limits,
+            )?
+        };
         // No await, callback, network entry or Server borrow occurs before mandatory managed
         // classification, including if future decoders encounter a captured legacy no-tail.
         server.sync.require_managed_chat_scope();
@@ -173,6 +184,11 @@ impl PrivateManagedRestoreAttempt {
             self.source.founder(),
             self.source.signer(),
         )?;
+        if let Some(parent) = self.source.operation_parent_snapshot() {
+            server
+                .sync
+                .validate_owner_operation_parent(parent, limits, self.source.founder())?;
+        }
         self.source.validate_original(original_store)?;
         Ok(PrivateManagedRestoredServer {
             server: Some(server),

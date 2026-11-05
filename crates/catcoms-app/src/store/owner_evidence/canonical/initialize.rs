@@ -7,6 +7,8 @@ use catcoms_rt::{Clock, MeshTransport};
 use catcoms_sync::local_chat_scope::{ManagedChatScopeBinding, ManagedChatScopeRevocation};
 use catcoms_sync::owner_evidence::{ManagedOwnerEvidenceBinding, PreparedOwnerEvidence};
 
+mod operation;
+
 /// Owns the whole original creation and exact retry custody. The Private field is FIRST so its
 /// frozen plaintext is zeroized BEFORE the following reservation releases its buffer fee.
 /// Never add a consuming convenience retry returning only Error: an error must retain this
@@ -31,6 +33,7 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for OwnerFounderInitial
 /// writer/admission cancellation. Dropping it retires the writer BEFORE dropping the Server.
 pub struct OwnedOwnerServer<T: MeshTransport, R: CryptoRngCore> {
     writer: OwnerWriterRegistration,
+    pending_add: Option<operation::PendingOwnerAdd>,
     server: Server<T, R>,
     profile: OwnerFactId,
     founder: [u8; 32],
@@ -54,6 +57,7 @@ impl<T: MeshTransport, R: CryptoRngCore> OwnedOwnerServer<T, R> {
     ) -> Self {
         Self {
             writer,
+            pending_add: None,
             server,
             profile,
             founder,
@@ -258,6 +262,7 @@ impl<T: MeshTransport, R: CryptoRngCore> OwnerFounderInitialization<T, R> {
         self.reservation = None;
         Ok(OwnedOwnerServer {
             writer,
+            pending_add: None,
             server,
             profile,
             founder,

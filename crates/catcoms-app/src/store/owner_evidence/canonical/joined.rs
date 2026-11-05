@@ -97,6 +97,41 @@ impl<T: MeshTransport> OwnerDirectCheckpointJoinAttempt<T> {
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> OwnerJoinedInitialization<T, R> {
+    /// Consume the real current owner's original eight-fact result without a raw signed-byte
+    /// getter. The expected root stays the SAME destination pin captured before its actual
+    /// selected-KP handshake. Destination validation releases its locks before source custody.
+    pub fn supply_current_owner_checkpoint<U: MeshTransport + 'static, S: CryptoRngCore>(
+        &mut self,
+        destination: &ServerStore,
+        source_store: &ServerStore,
+        source: &OwnedOwnerServer<U, S>,
+        channel: u128,
+    ) -> Result<(), AppError> {
+        let pin = self.private.captured_profile().ok_or_else(refused)?;
+        pin.validate_original(destination, pin.group())?;
+        let expected =
+            catcoms_replication::chat::owner_facts::OwnerProfileExpectation::from_trusted_host(
+                pin.group(),
+                *pin.founder(),
+                pin.profile(),
+            )
+            .map_err(|_| refused())?;
+        let verified = source.verify_checkpoint_member(
+            source_store,
+            &self.private.server()?.sync,
+            &expected,
+            channel,
+        )?;
+        if let Some(existing) = &self.evidence {
+            if !existing.equivalent_proof(&verified) {
+                return Err(refused());
+            }
+        } else {
+            self.evidence = Some(verified);
+        }
+        Ok(())
+    }
+
     /// Supply original bounded owner-signed facts. Expected root comes ONLY from the same
     /// pre-await capture INSIDE private join custody. Later caller expectations/rosters cannot
     /// substitute. Bad/foreign proof never mutates or clears already retained good evidence.

@@ -1,6 +1,9 @@
 //! Explicit persistent replacement and hot-buffer capacity, acquired BEFORE private freeze.
 use super::*;
 
+mod operation;
+pub(crate) use operation::OwnerOperationReservation;
+
 /// Host configuration for the inactive whole-state checkpoint. These are local resource limits,
 /// not a signed public profile or authority. Finite retention is honest: no proof/history is
 /// evicted to fit. Production uses the separately reviewed scalable cold-page successor.

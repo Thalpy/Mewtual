@@ -2,6 +2,8 @@
 use super::*;
 use catcoms_rt::RequestCancellation;
 
+mod operation;
+
 const TAG: &str = "catcoms/owner-evidence-initial/v1";
 const MAX_FACTS: usize = 8;
 const MAX_BYTES: usize = 512 + MAX_FACTS * (4 + MAX_SMALL_FACT_BYTES);
@@ -20,6 +22,132 @@ pub(crate) struct InitialOwnerEvidence {
     runtime: Option<RequestCancellation>,
 }
 impl InitialOwnerEvidence {
+    pub(super) fn founder_channel(&self, signer: &[u8]) -> Result<u128, SyncError> {
+        let profile = self
+            .original_profile()
+            .ok_or(SyncError::ChatScopeUnavailable)?;
+        if profile.issuer().as_slice() != signer {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        let mut channels = self
+            .facts
+            .values()
+            .filter_map(|fact| match fact.spec().body {
+                OwnerFactBody::RealmGrant {
+                    channel,
+                    subject,
+                    rights,
+                    ..
+                } if &subject == profile.issuer() && rights == Rights::MEMBER => Some(channel),
+                _ => None,
+            });
+        let channel = channels.next().ok_or(SyncError::ChatScopeUnavailable)?;
+        if channels.next().is_some() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        Ok(channel)
+    }
+    /// Small original signed frames for the actual post-save in-process member verifier only.
+    /// The caller is the bounded Current/head consumer; this is not a public certificate getter.
+    pub(super) fn operation_proof_frames(&self) -> Result<Vec<Vec<u8>>, OwnerEvidencePrepareError> {
+        if self.facts.len() != MAX_FACTS || !self.live() {
+            return Err(OwnerEvidencePrepareError::Context);
+        }
+        Ok(self.facts.values().map(SignedOwnerFact::encode).collect())
+    }
+    /// Internal original-fact borrow. This does not choose a trusted root or export a Saved
+    /// witness; the caller must already own the actual canonical binding before preparation.
+    pub(super) fn original_profile(&self) -> Option<&SignedOwnerFact> {
+        self.facts
+            .get(&self.profile)
+            .filter(|fact| matches!(fact.spec().body, OwnerFactBody::Profile { .. }))
+    }
+
+    /// Duplicate only the exact bounded four-fact original founder chain for the first Add.
+    /// A joined member, a later multi-operation owner archive or another realm must use the
+    /// appropriate complete transaction; they cannot be trimmed into this closed checkpoint.
+    pub(super) fn founder_chain(
+        &self,
+        channel: u128,
+        founder: &[u8; 32],
+    ) -> Result<BTreeMap<OwnerFactId, SignedOwnerFact>, SyncError> {
+        let bad = || SyncError::ChatScopeUnavailable;
+        if self.facts.len() != 4 || !self.live() {
+            return Err(bad());
+        }
+        let profile = self.original_profile().ok_or_else(bad)?;
+        if profile.issuer() != founder {
+            return Err(bad());
+        }
+        let admission = self
+            .facts
+            .values()
+            .find(|fact| {
+                matches!(fact.spec().body,
+                OwnerFactBody::Admission { subject, origin: AdmissionOrigin::Founder { .. }, .. }
+                    if &subject == founder)
+            })
+            .ok_or_else(bad)?;
+        let grant = self
+            .facts
+            .values()
+            .find(|fact| {
+                matches!(fact.spec().body,
+            OwnerFactBody::RealmGrant { channel: realm, admission: exact, subject, rights }
+                if realm == channel && exact == admission.id() && &subject == founder
+                    && rights == Rights::MEMBER)
+            })
+            .ok_or_else(bad)?;
+        let basis = self.facts.values().find(|fact| matches!(&fact.spec().body,
+            OwnerFactBody::Basis { channel: realm, admission: exact, subject, grant: label, covered }
+                if *realm == channel && *exact == admission.id() && subject == founder
+                    && Some(*label) == grant.grant_id() && covered.is_empty()))
+            .ok_or_else(bad)?;
+        let expected = OwnerProfileExpectation::from_trusted_host(
+            &profile.spec().group,
+            *founder,
+            self.profile,
+        )
+        .map_err(|_| bad())?;
+        expected
+            .verify_basis(
+                profile,
+                OwnerBasisFacts {
+                    admission,
+                    grant,
+                    basis,
+                },
+                &[],
+            )
+            .map_err(|_| bad())?;
+        // The count plus verified distinct kinds means no hidden/unsupported fact is dropped.
+        // SignedOwnerFact is a fixed-small bounded frame; the host prepays this four-row copy.
+        Ok(self.facts.clone())
+    }
+
+    /// Candidate replacement preserves every exact original signed frame and the SAME
+    /// process-local observing authority. It does not bind a decoded tail or renew a writer.
+    pub(super) fn after_first_add(
+        &self,
+        facts: BTreeMap<OwnerFactId, SignedOwnerFact>,
+    ) -> Result<Self, SyncError> {
+        if self.facts.len() != 4
+            || facts.len() != MAX_FACTS
+            || !self.live()
+            || self
+                .facts
+                .iter()
+                .any(|(id, old)| facts.get(id) != Some(old))
+        {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        Ok(Self {
+            profile: self.profile,
+            facts,
+            runtime: self.runtime.clone(),
+        })
+    }
+
     pub(crate) fn profile(&self) -> OwnerFactId {
         self.profile
     }
@@ -154,6 +282,18 @@ impl InitialOwnerEvidence {
             }
         }
         Ok(())
+    }
+
+    /// A sealed successor cannot replace any of its original four signed founder facts.
+    /// This negative equality check grants no new root or admission authority.
+    pub(super) fn retains_initial_parent(&self, parent: &Self) -> bool {
+        parent.facts.len() == 4
+            && self.facts.len() == 8
+            && self.profile == parent.profile
+            && parent
+                .facts
+                .iter()
+                .all(|(id, fact)| self.facts.get(id) == Some(fact))
     }
 
     pub(crate) fn bind(&mut self, authority: RequestCancellation) -> Result<(), SyncError> {

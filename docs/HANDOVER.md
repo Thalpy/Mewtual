@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Closed covering owner Add (5 November; source checkpoint, validation paused)
+
+The actual App `OwnedOwnerServer` now consumes the bounded direct request through an isolated
+real MLS Add, mandatory exact outcome/log/facts tail, explicit borrowed governed snapshot,
+generation-two canonical save, synchronous original Current/head install and original consuming
+reply. It preserves whole frozen uncertainty on I/O refusal. Exact accepted retries compare the
+original invite/KP/channel before new policy/lifetime checks; retained raw KP labels are checked
+against the independently pinned signed owner chain, never used for a new admission.
+
+Parent-aware automatic recovery handles actual gen1 canonical + retained gen2 stage and exact
+full-plaintext gen2 duplicates. It validates actual parent provider/own signer/original facts,
+before-authenticator/stable keys/scope and pure tenure before fixed-name promotion; actual file
+and directory barriers precede Saved and fresh writer registration. No second ChannelSync,
+fresh Add/RNG or new acceptance is inferred. Unknown/corrupt/mismatched debt stays preserved.
+The same read reservation charges the extra private overlap before SDK/outcome decoding. The
+response phase only shrinks its original unique fee after private payloads actually drop; lower
+reply/publication copies retain original cancellation/authority and resource custody.
+
+All new tests remain **UNRUN** by explicit user pause. Direct rustfmt parsing and diff checks are
+the only local checks; independent read-only actual-diff review is required before integration.
+Primary owns serial focused tests first and mandatory full gates last. In particular, defer the
+478s 10,000-operation catch-up regression and other heavy matrix cases until final validation.
+Later explicit feature checks must cover patched MemoryStorage `test-utils` and `persistence`.
+
+This does **not** complete or enable production Chat V2: the source remains one founder/one Add,
+zero history/eight facts, with finite CHECKPOINT limits. General latest receive/key union while
+membership is uncertain, long-lived/rejoin/scalable archive/public-state/accepted-index consumers,
+durable client selected-KP attempt custody, active-host/SDK typed heaps, native actor/typed/UI
+rollout and physical multi-computer acceptance remain separate gates. The genuinely dated
+expired-after-success accepted-KP fixture is still missing; ManualClock invite-expiry coverage
+does not simulate OpenMLS wall-clock lifetime expiry. See the concrete
+[first Add](communication-recovery/CHAT-OWNER-FIRST-ADD-CODEC.md) and
+[retained-stage recovery](communication-recovery/CHAT-OWNER-STAGED-OPERATION-RECOVERY.md) boundaries.
+
 ## Retained client keys/request (5 November; authored, unexecuted)
 
 The private destination checkpoint now prepares one exact invite/KP request and immutable secret

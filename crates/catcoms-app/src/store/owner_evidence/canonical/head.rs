@@ -2,7 +2,10 @@
 use super::*;
 use catcoms_rt::RequestAuthority;
 
+mod operation_recovery;
 mod staged_restore;
+mod successor;
+pub(crate) use successor::{OwnerSuccessorInput, SavedOwnerSuccessor};
 
 pub(super) struct HeadCell {
     pub(super) key: [u8; 32],
@@ -37,6 +40,22 @@ impl HeadCell {
             return Err(refused());
         }
         Ok(head.state.current.clone())
+    }
+
+    /// A retained operation may have left exact pending debt after its writer dropped. This
+    /// observation grants no writer and does not clear debt; source parsing must match BOTH
+    /// labels and final admission/head custody repeats the no-live-writer check.
+    pub(super) fn read_operation_stamp(
+        &self,
+        require_unowned: bool,
+    ) -> Result<(Option<Meta>, Option<Meta>), AppError> {
+        let head = self.lock()?;
+        if (require_unowned || head.state.pending.is_some())
+            && head.state.owner.as_ref().and_then(Weak::upgrade).is_some()
+        {
+            return Err(refused());
+        }
+        Ok((head.state.current.clone(), head.state.pending.clone()))
     }
 
     // A disk entry may reserve a namespace, but cannot manufacture a verified head/writer.
@@ -491,6 +510,17 @@ impl OwnerHeadWriteGuard<'_> {
         }
         if source.location == source::OwnerSourceLocation::InitialStage {
             return self.establish_initial_stage_barrier(permit, source);
+        }
+        if source.location == source::OwnerSourceLocation::OperationStage {
+            return self.establish_operation_stage_barrier(permit, source);
+        }
+        // A preparation made before a successor appeared cannot publish the old parent.
+        if permit.vault_format()? == catcoms_storage::VaultFormat::OwnerOperations
+            && permit
+                .store()
+                .owner_canonical_stage_exists(&self.cell.key)?
+        {
+            return Err(refused());
         }
         if self.state.pending.is_some()
             || self
