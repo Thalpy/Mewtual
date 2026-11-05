@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 
 mod activation;
 mod archive;
+mod execution;
 
 const SECRET: &[u8] = b"actual Pending-only destination source fixture";
 type Owner = OwnedOwnerServer<MemNetwork, ChaCha20Rng>;

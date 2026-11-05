@@ -1,13 +1,18 @@
-//! Actual finite-checkpoint source producer. The opaque result has NO network/old initializer/
-//! ready conversion. Original durable resume and ScopeIntent/FrozenCandidate remain next gates.
+//! Actual finite-checkpoint source producer. Only the explicit network consumer adds saved
+//! arms and signed INPUT DATA; SDK/old initializer/ScopeIntent/Frozen/ready remain next gates.
 use super::*;
 use crate::store::chat_admission::journal_basis::JournalBasis;
 use crate::store::owner_evidence::canonical::OwnerPendingCreation;
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_sync::{DirectJoinLimits, PreparedDirectJoin, RecoveredDirectJoinSource};
 
-mod activation;
-pub use activation::{ActivatedCheckpointJoin, ReturnedCheckpointJoinActivation};
+pub(super) mod activation;
+pub(super) use activation::network::Shared as NetworkShared;
+mod execution_write;
+pub use activation::{
+    ActivatedCheckpointJoin, CheckpointJoinNetwork, CheckpointJoinSubmissionStatus,
+    ReturnedCheckpointJoinActivation,
+};
 
 const MASTER: usize = 512 * 1024;
 const REQUEST: usize = 9 + 64 * 1024 + 32 * 1024;
@@ -25,17 +30,31 @@ const SOURCE_FEE: usize = MASTER
     + 2048
     + 2 * 256
     + std::mem::size_of::<JournalledCheckpointJoinPreparation>();
-const WRITE_FEE: usize = codec::MAX_CATALOG_PLAIN + U + codec::MAX_CATALOG_FRAMED + 8192;
+// In addition to the named byte owners, the retained candidate holds TWO complete fixed
+// summaries. Version2 input/arm metadata enlarges them; charge their real Rust layout rather
+// than assuming the old fixed8KiB metadata allowance still covers that container. READ_FEE
+// pays the original Parsed; the candidate Parsed coexists through summary/seal and is paid
+// separately here. The remaining8KiB covers fixed encoder/hash/AEAD/Arc/file scratch only.
+const WRITE_FEE: usize = codec::MAX_CATALOG_PLAIN
+    + U
+    + codec::MAX_CATALOG_FRAMED
+    + std::mem::size_of::<PendingCandidate>()
+    + std::mem::size_of::<codec::Parsed<'static>>()
+    + 8192;
 
 enum Source {
     Local(PreparedDirectJoin),
     Recovered(RecoveredDirectJoinSource),
+    // Only an actual registered network cell owns the moved immutable secret source. The
+    // remaining preparation is control DATA; it cannot return an old initializer or master.
+    Taken,
 }
 
 /// Secret source DATA retained under actual fees and original mounted custody. Public effects
 /// save/schedule its exact Pending record or move it into one original negative transport/task
-/// owner. No existing `OwnerJoinedInitialization`, generic source extraction, network request
-/// or ready-owner conversion is exposed; execution/receipt/intent consumers remain absent.
+/// owner. The explicit configured network consumer can save arms and signed INPUT DATA.
+/// No `OwnerJoinedInitialization`, generic source extraction, SDK receipt/intent or ready-owner
+/// conversion is exposed by this source.
 pub struct JournalledCheckpointJoinPreparation {
     source: Source,
     original: Arc<Original>,
@@ -195,6 +214,11 @@ impl ServerStore {
             basis,
             binding,
             ciphertext: *hash.finalize().as_bytes(),
+            execution: if expected.join_version == Some(super::execution_payload::VERSION) {
+                Some(super::execution_state::State::not_granted())
+            } else {
+                None
+            },
         };
         Ok(JournalledCheckpointJoinPreparation {
             source: Source::Local(source),
@@ -416,6 +440,8 @@ impl JournalledCheckpointJoinPreparation {
             expected: current,
             original: self.original.clone(),
             created: None,
+            execution_task: None,
+            received_input: None,
             _fee: write_fee,
         };
         // Parsed views own no buffers; their borrows end at the last use above. Drop only the
@@ -506,40 +532,62 @@ impl ServerStore {
     /// Retry only the SAME original per-mount output. No input labels, replacement source,
     /// keys or RNG choose a different candidate. This does not start or authorize a join.
     pub fn retry_pending_join_catalog(&self) -> Result<(), AppError> {
+        use crate::store::chat_admission::journal_basis::JoinCatalogWritePermit;
         let original = {
             let mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
             let mounted = mounted.as_ref().ok_or_else(refused)?;
             mounted
                 .pending
                 .as_ref()
-                .map(|pending| pending.original.clone())
+                .map(|pending| (pending.original.clone(), pending.received_input.is_some()))
         };
-        let Some(original) = original else {
+        let Some((original, received)) = original else {
             return Ok(());
         };
-        let finished = self.with_original_join_catalog_capture(&original.capture, |permit| {
-            let mut mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
-            let mounted = mounted.as_mut().ok_or_else(refused)?;
-            permit.validate_original()?; // AFTER the catalog wait, before final admission
-            original.pin.validate_original(self, original.pin.group())?;
-            let Some(pending) = mounted.pending.as_mut() else {
-                return Ok(None);
-            };
-            if !Arc::ptr_eq(&pending.original, &original)
-                || mounted.current.digest != pending.expected.digest
-                || mounted.current.framed != pending.expected.framed
-            {
-                return Err(refused());
-            }
-            // All effects below were fixed before the final original validation. Cancellation
-            // cannot turn this source into Empty, remove keys or adopt another row afterward.
-            self.write_pending_join_catalog_candidate(permit, pending)?;
-            mounted.current = pending.next.clone();
-            Ok(mounted.pending.take())
-        })?;
-        // Candidate bytes/original/fee may be last owners. Drop only after BOTH writers drain.
-        drop(finished);
+        // The branch comes only from Store's original retained candidate, not a decoded flag.
+        // Each physical permit validates its distinct candidate shape again under both owners.
+        let finished = if received {
+            self.with_received_join_input_capture(&original.capture, |permit| {
+                self.settle_pending_join_candidate(
+                    JoinCatalogWritePermit::Received(permit),
+                    &original,
+                )
+            })?
+        } else {
+            self.with_original_join_catalog_capture(&original.capture, |permit| {
+                self.settle_pending_join_candidate(
+                    JoinCatalogWritePermit::Original(permit),
+                    &original,
+                )
+            })?
+        };
+        drop(finished); // Last byte/source/fee owners drain outside BOTH writers.
         Ok(())
+    }
+
+    fn settle_pending_join_candidate(
+        &self,
+        permit: crate::store::chat_admission::journal_basis::JoinCatalogWritePermit<'_, '_>,
+        original: &Arc<Original>,
+    ) -> Result<Option<PendingCandidate>, AppError> {
+        let mut mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
+        let mounted = mounted.as_mut().ok_or_else(refused)?;
+        original.pin.validate_original(self, original.pin.group())?;
+        let Some(pending) = mounted.pending.as_mut() else {
+            return Ok(None);
+        };
+        permit.validate_candidate(pending)?;
+        if !Arc::ptr_eq(&pending.original, original)
+            || mounted.current.digest != pending.expected.digest
+            || mounted.current.framed != pending.expected.framed
+        {
+            return Err(refused());
+        }
+        // No negative reclassification after this point. SAME already-admitted DATA repairs
+        // byte-for-byte, never creates a ticket, and cannot turn cancellation into source loss.
+        self.write_pending_join_catalog_candidate(permit, pending)?;
+        mounted.current = pending.next.clone();
+        Ok(mounted.pending.take())
     }
 
     fn retry_or_install_pending(
@@ -611,6 +659,8 @@ impl ServerStore {
             expected: preparation.expected.clone(),
             original: preparation.original.clone(),
             created: None,
+            execution_task: None,
+            received_input: None,
             _fee: write_fee,
         };
         // Release ALL large parsing/encoding scratch before taking original writers. The
@@ -628,39 +678,74 @@ impl ServerStore {
     }
 
     fn install_pending_join_candidate(&self, candidate: PendingCandidate) -> Result<(), AppError> {
+        use crate::store::chat_admission::journal_basis::JoinCatalogWritePermit;
         let original = candidate.original.clone();
-        let expected = candidate.expected.clone();
+        let received = candidate.received_input.is_some();
         let mut candidate = Some(candidate);
-        self.with_original_join_catalog_capture(&original.capture, |permit| {
-            #[cfg(test)]
-            {
-                let hook = self
-                    .pending_join_before_catalog_writer
-                    .lock()
-                    .map_err(|_| refused())?
-                    .take();
-                // Release the small seam mutex before arbitrary test scheduling code.
-                if let Some(hook) = hook {
-                    hook();
-                }
-            }
-            let mut mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
-            let mounted = mounted.as_mut().ok_or_else(refused)?;
-            permit.validate_original()?;
-            original.pin.validate_original(self, original.pin.group())?;
-            if mounted.pending.is_some()
-                || mounted.current.digest != expected.digest
-                || mounted.current.framed != expected.framed
-            {
-                return Err(refused());
-            }
-            permit.validate_original()?;
-            mounted.pending = candidate.take();
-            Ok(())
-        })?;
-        // This original admission serializes actual I/O separately, using the exact retained
-        // candidate now owned by Store. Caller Drop cannot erase it between these operations.
+        let mut retired_observation = None;
+        if received {
+            self.with_received_join_input_capture(&original.capture, |permit| {
+                self.admit_pending_join_candidate(
+                    JoinCatalogWritePermit::Received(permit),
+                    &original,
+                    &mut candidate,
+                    &mut retired_observation,
+                )
+            })?;
+        } else {
+            self.with_original_join_catalog_capture(&original.capture, |permit| {
+                self.admit_pending_join_candidate(
+                    JoinCatalogWritePermit::Original(permit),
+                    &original,
+                    &mut candidate,
+                    &mut retired_observation,
+                )
+            })?;
+        }
+        drop(retired_observation); // Never refund metadata/drop callbacks inside either writer.
+                                   // Store already owns the exact immutable DATA candidate before fallible I/O/return.
         self.retry_pending_join_catalog()
+    }
+
+    fn admit_pending_join_candidate(
+        &self,
+        permit: crate::store::chat_admission::journal_basis::JoinCatalogWritePermit<'_, '_>,
+        original: &Arc<Original>,
+        candidate: &mut Option<PendingCandidate>,
+        retired_observation: &mut Option<
+            crate::store::chat_admission::predecessor::OriginalJoinExecutionObservation,
+        >,
+    ) -> Result<(), AppError> {
+        #[cfg(test)]
+        {
+            let hook = self
+                .pending_join_before_catalog_writer
+                .lock()
+                .map_err(|_| refused())?
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
+        let mounted = mounted.as_mut().ok_or_else(refused)?;
+        let pending = candidate.as_mut().ok_or_else(refused)?;
+        permit.validate_candidate(pending)?; // Final same-held Runtime check AFTER catalog wait.
+        original.pin.validate_original(self, original.pin.group())?;
+        if mounted.pending.is_some()
+            || mounted.current.digest != pending.expected.digest
+            || mounted.current.framed != pending.expected.framed
+        {
+            return Err(refused());
+        }
+        if let Some(observation) = pending.execution_task.as_ref() {
+            permit.require_original_join_execution(observation)?;
+        }
+        // Consuming the original observation and Store admission are one no-await transition.
+        // Already-admitted repair needs no task liveness; first admission always checked it.
+        *retired_observation = pending.execution_task.take();
+        mounted.pending = candidate.take();
+        Ok(())
     }
 }
 
@@ -672,10 +757,17 @@ fn encode_schedule(
     target: &codec::Metadata,
     domain: &[u8; 32],
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    let mut payload = 4 + codec::JOIN_TAG.len() + 4usize;
+    let mut payload = 4 + join_payload_tag(current)?.len() + 4usize;
     for row in current.rows.iter().flatten() {
         payload = payload
-            .checked_add(4 + encoded_row_len(row.immutable, row.encrypted)?)
+            .checked_add(
+                4 + encoded_row_len(
+                    &row.metadata,
+                    row.immutable,
+                    row.encrypted,
+                    row.execution_input.as_ref(),
+                )?,
+            )
             .ok_or_else(refused)?;
     }
     let total = (4 + codec::TAG_V2.len() + 36 + 8 + 36 + 4 + 12usize)
@@ -692,15 +784,29 @@ fn encode_schedule(
     output.put_bytes(&current.digest).map_err(|_| refused())?;
     output.put_u32(1 + u32::from(current.archive.is_some()));
     encode_join_entry_header(&mut output, current, payload)?;
-    output.put_str(codec::JOIN_TAG).map_err(|_| refused())?;
+    output
+        .put_str(join_payload_tag(current)?)
+        .map_err(|_| refused())?;
     output.put_u32(current.count as u32);
     let mut changed = false;
     for row in current.rows.iter().flatten() {
         if row.metadata.source == target.source {
-            encode_row(&mut output, target, row.immutable, row.encrypted)?;
+            encode_row(
+                &mut output,
+                target,
+                row.immutable,
+                row.encrypted,
+                row.execution_input.as_ref(),
+            )?;
             changed = true;
         } else {
-            encode_row(&mut output, &row.metadata, row.immutable, row.encrypted)?;
+            encode_row(
+                &mut output,
+                &row.metadata,
+                row.immutable,
+                row.encrypted,
+                row.execution_input.as_ref(),
+            )?;
         }
     }
     append_original_archive(&mut output, current)?;
@@ -710,11 +816,27 @@ fn encode_schedule(
     Ok(Zeroizing::new(output.finish()))
 }
 
-fn encoded_row_len(immutable: &[u8], encrypted: &[u8]) -> Result<usize, AppError> {
-    (36 + 8 + 1 + 1 + 4 + 4usize)
-        .checked_add(immutable.len())
-        .and_then(|bytes| bytes.checked_add(encrypted.len()))
-        .ok_or_else(refused)
+fn join_payload_tag(current: &codec::Parsed<'_>) -> Result<&'static str, AppError> {
+    match current.join_version {
+        None | Some(codec::JOIN_VERSION) => Ok(codec::JOIN_TAG),
+        Some(super::execution_payload::VERSION) => Ok(super::execution_payload::TAG),
+        _ => Err(refused()),
+    }
+}
+fn encoded_row_len(
+    metadata: &codec::Metadata,
+    immutable: &[u8],
+    encrypted: &[u8],
+    input: Option<&super::execution_state::Input<'_>>,
+) -> Result<usize, AppError> {
+    if metadata.execution.is_some() {
+        super::execution_payload::encoded_row_len(metadata, immutable, encrypted, input)
+    } else {
+        if input.is_some() {
+            return Err(refused());
+        }
+        codec::original_row_len(immutable, encrypted)
+    }
 }
 
 /// Exact borrowed descriptor bytes, not a re-created layout or an ignored second namespace.
@@ -760,18 +882,16 @@ fn encode_row(
     metadata: &codec::Metadata,
     immutable: &[u8],
     encrypted: &[u8],
+    input: Option<&super::execution_state::Input<'_>>,
 ) -> Result<(), AppError> {
-    output.put_u32(encoded_row_len(immutable, encrypted)? as u32);
-    output.put_bytes(&metadata.source).map_err(|_| refused())?;
-    output.put_u64(metadata.revision);
-    output.put_u8(match metadata.scheduling {
-        codec::Scheduling::Active => 0,
-        codec::Scheduling::Paused => 1,
-    });
-    output.put_u8(1); // Pending progress, independent of Active/Paused scheduling
-    output.put_bytes(immutable).map_err(|_| refused())?;
-    output.put_bytes(encrypted).map_err(|_| refused())?;
-    Ok(())
+    if metadata.execution.is_some() {
+        super::execution_payload::encode_row(output, metadata, immutable, encrypted, input)
+    } else {
+        if input.is_some() {
+            return Err(refused());
+        }
+        codec::encode_original_row(output, metadata, immutable, encrypted)
+    }
 }
 
 fn encode_added(
@@ -784,12 +904,19 @@ fn encode_added(
     if current.count >= codec::MAX_ROWS {
         return Err(refused());
     }
-    let mut payload = (4 + codec::JOIN_TAG.len() + 4usize)
-        .checked_add(4 + encoded_row_len(immutable, encrypted)?)
+    let mut payload = (4 + join_payload_tag(current)?.len() + 4usize)
+        .checked_add(4 + encoded_row_len(metadata, immutable, encrypted, None)?)
         .ok_or_else(refused)?;
     for row in current.rows.iter().flatten() {
         payload = payload
-            .checked_add(4 + encoded_row_len(row.immutable, row.encrypted)?)
+            .checked_add(
+                4 + encoded_row_len(
+                    &row.metadata,
+                    row.immutable,
+                    row.encrypted,
+                    row.execution_input.as_ref(),
+                )?,
+            )
             .ok_or_else(refused)?;
     }
     let total = (4 + codec::TAG_V2.len() + 36 + 8 + 36 + 4 + 12usize)
@@ -806,18 +933,26 @@ fn encode_added(
     output.put_bytes(&current.digest).map_err(|_| refused())?;
     output.put_u32(1 + u32::from(current.archive.is_some()));
     encode_join_entry_header(&mut output, current, payload)?;
-    output.put_str(codec::JOIN_TAG).map_err(|_| refused())?;
+    output
+        .put_str(join_payload_tag(current)?)
+        .map_err(|_| refused())?;
     output.put_u32((current.count + 1) as u32);
     let mut added = false;
     for row in current.rows.iter().flatten() {
         if !added && metadata.source < row.metadata.source {
-            encode_row(&mut output, metadata, immutable, encrypted)?;
+            encode_row(&mut output, metadata, immutable, encrypted, None)?;
             added = true;
         }
-        encode_row(&mut output, &row.metadata, row.immutable, row.encrypted)?;
+        encode_row(
+            &mut output,
+            &row.metadata,
+            row.immutable,
+            row.encrypted,
+            row.execution_input.as_ref(),
+        )?;
     }
     if !added {
-        encode_row(&mut output, metadata, immutable, encrypted)?;
+        encode_row(&mut output, metadata, immutable, encrypted, None)?;
     }
     append_original_archive(&mut output, current)?;
     if output.len() != total {

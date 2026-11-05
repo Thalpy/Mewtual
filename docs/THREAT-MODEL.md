@@ -5851,3 +5851,18 @@ non-hostile live private-vault-directory assumption, not an exclusive/no-hardlin
 export atomic-path guarantee. Source/worker/native activation and ScopeIntent/Frozen/terminal
 publication remain separate; no earlier exact-v4 negative/S1 gate is widened. Full SDK/global
 resource admission and physical cold-crash acceptance remain open.
+
+
+### Private checkpoint execution custody (static implementation; not activated)
+
+Saved arms are always possibly spent after restart. A new mount/task/connection/configuration
+cannot reset a saved grant or deserialize a runtime submission ticket. One bound transport and
+its exact connection lease carry the no-redial cancellable request; the lower completion retains
+its original capacity after caller cancellation. Sync holds signed input in the actual registered
+cell before persistence or return. Signed DATA is deliberately weaker than selected-KP/SDK or
+membership acceptance. A separate physical-mount-only input permit may preserve that DATA after
+row retirement, but proves exactly one Input change under both serializers and cannot mutate
+counters, source, scope, schedule or descriptors. Unknown/cold partial stages remain preserved.
+The live non-hostile-vault-directory assumption, logical-only pool invoice, full typed SDK heap,
+public-owner-v2 root distribution, cold accepted completion and native activation remain open.
+Compilation/tests/build are paused; authored adversarial regressions are UNRUN.

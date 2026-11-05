@@ -26,6 +26,7 @@ const METADATA_FEE: usize =
 pub struct PendingJoinCatalogPolicy {
     pub(in crate::store) pool: CriticalCatalogReadPool,
     persistent_capacity: usize,
+    pub(super) execution: Option<execution_policy::Settings>,
 }
 impl std::fmt::Debug for PendingJoinCatalogPolicy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -48,6 +49,7 @@ impl PendingJoinCatalogPolicy {
         Ok(Self {
             pool,
             persistent_capacity,
+            execution: None,
         })
     }
 }
@@ -88,6 +90,14 @@ pub(in crate::store) struct PendingCandidate {
     // Actual process-owned handle, never reconstructed from a decoded "owned" status. Keeping
     // the object alive prevents its in-session file number being recycled after a short write.
     pub(in crate::store) created: Option<CreatedStage>,
+    // Present only BEFORE first actual counter admission. Consumed under original writers
+    // immediately before Store takes the exact candidate; subsequent repair is DATA only.
+    pub(in crate::store) execution_task:
+        Option<crate::store::chat_admission::predecessor::OriginalJoinExecutionObservation>,
+    // Genuine Sync retained signed DATA, never reconstructed from an on-disk input summary.
+    // Presence selects the separate physical DATA permit; the full exact Input-only transition
+    // is rechecked under both serializers on first admission AND every admitted repair.
+    pub(in crate::store) received_input: Option<Arc<catcoms_sync::SealedOriginalJoinInput>>,
     pub(in crate::store) _fee: CatalogReadReservation,
 }
 pub(in crate::store) struct CreatedStage {
@@ -97,12 +107,18 @@ pub(in crate::store) struct CreatedStage {
 pub(in crate::store) struct Mounted {
     pub(in crate::store) current: codec::Summary,
     pub(in crate::store) pending: Option<PendingCandidate>,
+    pub(in crate::store) networks: [Option<Arc<producer::NetworkShared>>; codec::MAX_ROWS],
     _metadata_fee: CatalogReadReservation,
 }
 pub(in crate::store) type SharedMounted = Mutex<Option<Mounted>>;
+pub(super) mod execution_payload;
+pub(super) mod execution_policy;
+pub(super) mod execution_state;
+pub use execution_policy::CheckpointJoinExecutionPolicy;
 mod producer;
 pub use producer::{
-    ActivatedCheckpointJoin, JournalledCheckpointJoinPreparation, ReturnedCheckpointJoinActivation,
+    ActivatedCheckpointJoin, CheckpointJoinNetwork, CheckpointJoinSubmissionStatus,
+    JournalledCheckpointJoinPreparation, ReturnedCheckpointJoinActivation,
 };
 
 #[derive(Clone, Copy)]
@@ -164,6 +180,7 @@ impl ServerStore {
         let mut next = Some(Mounted {
             current: opened.selected.clone(),
             pending: None,
+            networks: std::array::from_fn(|_| None),
             _metadata_fee: metadata_fee,
         });
         let installed = {

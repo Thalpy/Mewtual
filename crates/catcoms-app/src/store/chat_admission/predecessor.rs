@@ -9,6 +9,8 @@ use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::CriticalCatalogReadPool;
 
 const MAX_PREDECESSORS: usize = 5;
+mod join_execution;
+pub(in crate::store) use join_execution::OriginalJoinExecutionObservation;
 // Fixed logical metadata debit, not a physical allocator/RSS measurement. Unlike the typed
 // task fee it survives in the inert unresolved slot after the sender and caller disappear.
 const REGISTRY_METADATA: usize = 4096;

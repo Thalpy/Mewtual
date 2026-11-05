@@ -51,7 +51,8 @@ mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
 pub use critical_namespaces::{
-    ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, CriticalCatalogReadPool,
+    ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, CheckpointJoinExecutionPolicy,
+    CheckpointJoinNetwork, CheckpointJoinSubmissionStatus, CriticalCatalogReadPool,
     JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
     ReturnedCheckpointJoinActivation,
 };
@@ -1066,12 +1067,12 @@ mod persistence {
         /// remain preserved rather than being truncated as an availability shortcut.
         pub(super) fn write_pending_join_catalog_candidate(
             &self,
-            permit: &chat_admission::journal_basis::JournalAdmissionPermit<'_>,
+            permit: chat_admission::journal_basis::JoinCatalogWritePermit<'_, '_>,
             candidate: &mut critical_namespaces::pending_join::PendingCandidate,
         ) -> Result<(), AppError> {
             use critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED;
             use critical_namespaces::{refused, Slot};
-            permit.validate_capture(&candidate.original.capture)?;
+            permit.validate_candidate(candidate)?;
             if candidate.bytes.len() > MAX_CATALOG_FRAMED
                 || *blake3::hash(&candidate.bytes).as_bytes() != candidate.next.framed
             {

@@ -1,3 +1,17 @@
+<!-- JOIN execution source checkpoint; primary must retain current global gate status. -->
+### Private checkpoint arm/input source checkpoint (all new tests UNRUN)
+
+Factory work adds an explicit physical JOIN1/v2 execution policy, actual first-grant/debit writes,
+a unique once-bound connected network/DATA cell, and exact signed-input persistence after caller
+Drop/pause/row retirement. Default/Pending/archive-only parsers stay strict; every original source,
+whole-parent, descriptor and real file/root barrier remains. Lower tickets retain actual completion
+capacity; cold arms remain spent and configuration never resets a saved allowance. The distinct
+ReceivedInput permit cannot admit counters or membership. New source counts: 15 DATA + 13 App +
+3 Sync regressions, UNRUN under the user's compiler/test/build pause. Direct formatting is not
+compilation evidence. Executable RetryGrant/same-T continuation, cold INPUT/SDK/Accepted,
+ScopeIntent/Frozen/Current/ready, production root-kind2/native/global heap remain OPEN. See
+[execution contract](communication-recovery/CHAT-DESTINATION-JOIN-EXECUTION-SCHEMA.md).
+
 # Mewtual; Handover
 
 ## Before-SDK founder input resource gate (5 November; authored, unexecuted)

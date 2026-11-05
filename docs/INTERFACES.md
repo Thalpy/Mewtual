@@ -8192,3 +8192,27 @@ and source-basis CAS precede fixed I/O; no callback declares unknown namespaces 
 ARCHIVE2/root-kind2 and non-Pending phases remain closed. See
 [Pending contract](communication-recovery/CHAT-PENDING-JOIN-CATALOG-CHECKPOINT.md). All13 new
 regressions remain UNRUN; native/SDK/global/activation and full cold-partial recovery stay open.
+
+
+## Private checkpoint join arm and signed-input DATA boundary
+
+The explicit Rust `CheckpointJoinExecutionPolicy` (or explicit composition with the actual
+archive-bootstrap physical opener) selects JOIN1 descriptor-version2 before cleaners. Default,
+Pending and archive-only readers still reject that version. This is finite OwnerFact-v1 root
+kind1; it is not the production public-owner-v2 invite path.
+
+A saved source moves through `ActivatedCheckpointJoin<T>::into_network_execution` to one actual
+`CheckpointJoinNetwork<T>`. Initial grants and exact submission ordinals are saved before Sync
+accepts a unique runtime ticket; `ensure_submission_armed` retries one genuine warm invocation
+and `next_submission` explicitly spends another unit. Cold restore never mints an unstarted
+ticket and exhaustion never renews a grant. All connected requests use original cancellation,
+connection-lease/no-redial checks and lower-completion keepalive.
+
+Sync's retained cell keeps inviter-signed INPUT DATA before any fallible journal save/return.
+`persist_received_input` or Store's fixed-five `persist_retained_checkpoint_join_inputs` writes
+that same encrypted DATA after caller Drop. The distinct ReceivedJoinInputPermit has only same-
+physical-mount DATA authority: under final original serializers it admits exactly one Input
+change with source/counters/schedule/other rows/descriptors unchanged. It never grants membership
+or a writer. The host traits are trusted Rust boundaries; arbitrary implementations are trusted
+code, not authenticated disk evidence. See CHAT-DESTINATION-JOIN-EXECUTION-SCHEMA.md for the
+explicit remaining RetryGrant/SDK/Intent/Current/native/heap gates. All new tests remain UNRUN.

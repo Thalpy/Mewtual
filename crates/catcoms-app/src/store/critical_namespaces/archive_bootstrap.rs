@@ -30,6 +30,21 @@ impl std::fmt::Debug for ArchiveBootstrapCatalogPolicy {
     }
 }
 impl ArchiveBootstrapCatalogPolicy {
+    /// Explicitly compose the concrete original JOIN execution consumer with this physical
+    /// archive opener. This is trusted Rust configuration, not a parsed permission; it grants
+    /// no units/task, and default/Pending/archive-only opening remains descriptor-v1 strict.
+    pub fn with_checkpoint_join_execution(
+        mut self,
+        initial_limit: u32,
+        timeout_ms: u64,
+    ) -> Result<Self, AppError> {
+        self.pending.execution = Some(super::pending_join::execution_policy::Settings::new(
+            initial_limit,
+            timeout_ms,
+        )?);
+        Ok(self)
+    }
+
     pub fn new(
         pool: CriticalCatalogReadPool,
         persistent_capacity: usize,
@@ -106,10 +121,17 @@ impl ServerStore {
         plain: &'a [u8],
     ) -> Result<super::pending_join_codec::Parsed<'a>, AppError> {
         let domain = self.chat_vault_domain()?;
-        if self.archive_bootstrap_policy.is_some() {
-            super::pending_join_codec::parse_bootstrap(plain, &domain)
-        } else {
-            super::pending_join_codec::parse(plain, &domain)
+        let execution = self
+            .pending_join_policy
+            .as_ref()
+            .and_then(|policy| policy.execution.as_ref());
+        match (self.archive_bootstrap_policy.as_ref(), execution) {
+            (None, None) => super::pending_join_codec::parse(plain, &domain),
+            (Some(_), None) => super::pending_join_codec::parse_bootstrap(plain, &domain),
+            (None, Some(_)) => super::pending_join_codec::parse_executing(plain, &domain),
+            (Some(_), Some(_)) => {
+                super::pending_join_codec::parse_bootstrap_executing(plain, &domain)
+            }
         }
     }
 

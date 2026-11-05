@@ -36,6 +36,9 @@ impl fmt::Debug for SealedDirectJoinSource {
     }
 }
 impl SealedDirectJoinSource {
+    pub(super) fn original_local_binding(&self) -> Option<[u8; 32]> {
+        self.local.map(|(binding, _)| binding)
+    }
     /// Copy only a bounded encrypted frame. Caller must reserve this ciphertext copy BEFORE
     /// invoking this API and hold that reservation through the object. No plaintext is decoded.
     pub fn from_encrypted_parts(nonce: [u8; 24], ciphertext: &[u8]) -> Result<Self, SyncError> {
@@ -75,6 +78,11 @@ impl fmt::Debug for RecoveredDirectJoinSource {
     }
 }
 impl RecoveredDirectJoinSource {
+    // Only the actual trusted-host NETWORK/DATA bridge can consume this private source. This
+    // is deliberately not a public recovered→Prepared/SDK completion adapter.
+    pub(super) fn into_original_network_data(self) -> PreparedDirectJoin {
+        self.original
+    }
     /// Authenticate with the vault key and EXACT expected immutable source binding. Supplied
     /// limits are negative resource metadata from the caller's actual reservation, not limits
     /// trusted from saved bytes. The whole outer/request/invite borrowed preflight finishes

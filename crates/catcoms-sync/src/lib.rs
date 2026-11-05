@@ -81,8 +81,11 @@ mod initialization_snapshot;
 mod prepared_direct_join;
 pub use initialization_restore::OwnerInitializationRestoreLimits;
 pub use prepared_direct_join::{
-    CompletedDirectJoin, DirectJoinLimits, DirectJoinRequestIdentity, PreparedDirectJoin,
-    RecoveredDirectJoinSource, SealedDirectJoinSource,
+    BoundOriginalJoinNetwork, CompletedDirectJoin, DirectJoinLimits, DirectJoinRequestIdentity,
+    OriginalJoinArmData, OriginalJoinNetworkContext, OriginalJoinNetworkStatus,
+    OriginalJoinNetworkSubmission, OriginalJoinSavedArm, PreparedDirectJoin,
+    RecoveredDirectJoinSource, RetainedOriginalJoinNetwork, ReturnedOriginalJoinBinding,
+    ReturnedOriginalJoinSubmission, SealedDirectJoinSource, SealedOriginalJoinInput,
 };
 pub mod local_chat_scope;
 pub mod owner_evidence;

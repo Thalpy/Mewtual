@@ -64,12 +64,16 @@ pub(super) struct Metadata {
     pub(super) basis: JournalBasis,
     pub(super) binding: [u8; 32],
     pub(super) ciphertext: [u8; 32],
+    // Version1 source rows have no execution record. Parsed version2 DATA is separate from
+    // immutable source identity and never provides a resource grant/submission ticket by itself.
+    pub(super) execution: Option<super::pending_join::execution_state::State>,
 }
 
 pub(super) struct Row<'a> {
     pub(super) metadata: Metadata,
     pub(super) immutable: &'a [u8],
     pub(super) encrypted: &'a [u8],
+    pub(super) execution_input: Option<super::pending_join::execution_state::Input<'a>>,
 }
 pub(super) struct Parsed<'a> {
     pub(super) generation: u64,
@@ -140,6 +144,21 @@ pub(super) fn parse_bootstrap<'a>(
 enum SupportedLayout {
     PendingOnly,
     ArchiveBootstrap,
+    Executing,
+    ArchiveBootstrapExecuting,
+}
+
+pub(super) fn parse_executing<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(plain, domain, SupportedLayout::Executing)
+}
+pub(super) fn parse_bootstrap_executing<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(plain, domain, SupportedLayout::ArchiveBootstrapExecuting)
 }
 
 fn parse_known<'a>(
@@ -170,12 +189,20 @@ fn parse_known<'a>(
         let entry = envelope.entry(index)?;
         match entry.id {
             JOIN_ID => {
-                (rows, count) = parse_join_entry(entry, domain)?;
+                (rows, count) = match (&layout, entry.version) {
+                    (
+                        SupportedLayout::Executing | SupportedLayout::ArchiveBootstrapExecuting,
+                        super::pending_join::execution_payload::VERSION,
+                    ) => super::pending_join::execution_payload::parse(entry.payload, domain)?,
+                    _ => parse_join_entry(entry, domain)?,
+                };
                 join_version = Some(entry.version);
             }
             super::archive_bootstrap::ARCHIVE_ID
-                if matches!(layout, SupportedLayout::ArchiveBootstrap)
-                    && entry.version == super::archive_bootstrap::ARCHIVE_VERSION =>
+                if matches!(
+                    layout,
+                    SupportedLayout::ArchiveBootstrap | SupportedLayout::ArchiveBootstrapExecuting
+                ) && entry.version == super::archive_bootstrap::ARCHIVE_VERSION =>
             {
                 archive = Some(super::archive_bootstrap::Descriptor::parse(
                     entry.payload,
@@ -228,7 +255,7 @@ fn parse_rows<'a>(
     let mut rows: [Option<Row<'a>>; MAX_ROWS] = std::array::from_fn(|_| None);
     let mut active = 0;
     for index in 0..count {
-        let row = parse_row(input.get_bytes().map_err(|_| refused())?, domain)?;
+        let row = parse_original_row(input.get_bytes().map_err(|_| refused())?, domain)?;
         if row.metadata.scheduling == Scheduling::Active {
             active += 1;
         }
@@ -259,7 +286,10 @@ fn array<const N: usize>(input: &mut Decoder<'_>) -> Result<[u8; N], AppError> {
         .map_err(|_| refused())
 }
 
-fn parse_row<'a>(bytes: &'a [u8], domain: &[u8; 32]) -> Result<Row<'a>, AppError> {
+pub(super) fn parse_original_row<'a>(
+    bytes: &'a [u8],
+    domain: &[u8; 32],
+) -> Result<Row<'a>, AppError> {
     let mut input = Decoder::new(bytes);
     let source = array(&mut input)?;
     let revision = input.get_u64().map_err(|_| refused())?;
@@ -323,10 +353,53 @@ fn parse_row<'a>(bytes: &'a [u8], domain: &[u8; 32]) -> Result<Row<'a>, AppError
             basis,
             binding: binding_digest(immutable),
             ciphertext: *blake3::hash(encrypted).as_bytes(),
+            execution: None,
         },
         immutable,
         encrypted,
+        execution_input: None,
     })
+}
+
+/// Exact original source-row framing shared by descriptor-v1 and the nested source in v2.
+/// This never emits an execution grant; execution DATA remains a separate frame.
+pub(super) fn original_row_len(immutable: &[u8], encrypted: &[u8]) -> Result<usize, AppError> {
+    if immutable.len() > 2048 || encrypted.len() < 40 || encrypted.len() > MAX_SOURCE {
+        return Err(refused());
+    }
+    (36 + 8 + 1 + 1 + 4 + 4usize)
+        .checked_add(immutable.len())
+        .and_then(|length| length.checked_add(encrypted.len()))
+        .ok_or_else(refused)
+}
+
+/// Writes the framed original source directly into prepaid whole-catalog output. The actual
+/// producer validates its complete candidate before admission; hashes are negative identity
+/// checks, never membership/root/Current authority or a substitute for opening the source.
+pub(super) fn encode_original_row(
+    output: &mut Encoder,
+    metadata: &Metadata,
+    immutable: &[u8],
+    encrypted: &[u8],
+) -> Result<(), AppError> {
+    let length = original_row_len(immutable, encrypted)?;
+    if metadata.revision == 0
+        || metadata.binding != binding_digest(immutable)
+        || metadata.ciphertext != *blake3::hash(encrypted).as_bytes()
+    {
+        return Err(refused());
+    }
+    output.put_u32(length as u32);
+    output.put_bytes(&metadata.source).map_err(|_| refused())?;
+    output.put_u64(metadata.revision);
+    output.put_u8(match metadata.scheduling {
+        Scheduling::Active => 0,
+        Scheduling::Paused => 1,
+    });
+    output.put_u8(1);
+    output.put_bytes(immutable).map_err(|_| refused())?;
+    output.put_bytes(encrypted).map_err(|_| refused())?;
+    Ok(())
 }
 
 /// Validate a COMPLETE known successor, not merely a matching JOIN subpayload. Old rows keep
@@ -363,6 +436,17 @@ pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppErro
 /// A future execution consumer owns its concrete version/state transition here; this v1
 /// implementation permits no downgrade, arm/grant migration or unknown payload version.
 fn join_payload_successor(current: &Summary, next: &Summary) -> Result<(), AppError> {
+    use super::pending_join::execution_payload;
+    if current.join_version == Some(JOIN_VERSION)
+        && next.join_version == Some(execution_payload::VERSION)
+    {
+        return execution_payload::migration(current, next);
+    }
+    if current.join_version == Some(execution_payload::VERSION)
+        && next.join_version == Some(execution_payload::VERSION)
+    {
+        return execution_payload::successor(current, next);
+    }
     if next.join_version != Some(JOIN_VERSION)
         || current
             .join_version
@@ -382,6 +466,9 @@ fn join_payload_successor(current: &Summary, next: &Summary) -> Result<(), AppEr
         // row. Keeping fixed metadata lets the actual reader drop current plaintext before
         // allocating/decrypting stage; no unknown field can be silently omitted by this codec.
         if new.binding != old.binding || new.ciphertext != old.ciphertext {
+            return Err(refused());
+        }
+        if old.execution.is_some() || new.execution.is_some() {
             return Err(refused());
         }
         if new.revision != old.revision || new.scheduling != old.scheduling {
@@ -412,7 +499,10 @@ fn join_payload_successor(current: &Summary, next: &Summary) -> Result<(), AppEr
                     .any(|old| old.source == new.source)
             })
             .ok_or_else(refused)?;
-        if added.revision != 1 || added.scheduling != Scheduling::Active {
+        if added.revision != 1
+            || added.scheduling != Scheduling::Active
+            || added.execution.is_some()
+        {
             return Err(refused());
         }
     }

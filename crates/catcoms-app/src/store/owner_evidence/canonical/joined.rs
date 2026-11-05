@@ -47,10 +47,11 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for OwnerJoinedInitiali
     }
 }
 impl ServerStore {
-    /// Inactive Pending-only durable checkpoint producer. Its opaque result deliberately has
-    /// no network/old initializer/ready adapter until original mounted resume, ScopeIntent and
-    /// exact FrozenCandidate/terminal saving are connected. This is the only join preparation
-    /// admitted on an explicitly configured Pending mount; normal mounts retain their old API.
+    /// Private durable checkpoint producer. Pending-only configuration returns inert source
+    /// DATA; explicit execution configuration additionally permits actual saved arms/network
+    /// and signed INPUT DATA. SDK/old initializer/ScopeIntent/Frozen/Current/ready remain absent.
+    /// This is the only join preparation admitted on a configured journal mount; ordinary
+    /// mounts retain the old unjournalled API.
     pub fn prepare_journalled_owner_checkpoint_join<T: MeshTransport, R: CryptoRngCore>(
         &self,
         source_store: &ServerStore,

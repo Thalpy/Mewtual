@@ -1,5 +1,5 @@
-//! Actual saved-source → original typed transport/task custody. No network is exposed yet.
-//! The schema2 saved arm/counters/retained-success consumers must land before this can submit.
+//! Actual saved-source to original typed transport/task custody.
+//! Explicit execution adds saved arms and signed INPUT DATA; SDK/Intent/ready remain next.
 use super::*;
 use crate::store::chat_admission::predecessor::{
     OriginalPredecessorTask, PreparedOriginalPredecessor,
@@ -11,16 +11,20 @@ use catcoms_sync::PreOwnerConnectionHandoff;
 // Arc/wakeup bookkeeping and caller wrapper. This is deliberately NOT a physical heap/RSS
 // measurement; provider/source buffers retain their separate original paid owners below.
 const ACTIVATION_METADATA: usize = 4096;
+pub(super) mod network;
+pub use network::{CheckpointJoinNetwork, CheckpointJoinSubmissionStatus};
 
 /// One actual saved finite-checkpoint source, original T/target and negative task lifetime.
 /// Its only public operations are negative close/cancellation and local route eligibility.
-/// It has NO request/finish/old-initializer/ready/source-extraction API. The future execution
-/// consumer must preserve the SAME T/prefix and add actual saved arms/receipt custody first.
+/// It has no direct request/finish/old-initializer/ready/source-extraction API. Explicit
+/// into_network_execution preserves SAME T and adds only saved arms plus signed input DATA.
 pub struct ActivatedCheckpointJoin<T> {
+    // First field: negative sender drops BEFORE source/transport, without a custom Drop which
+    // would prevent an exact consuming handoff of the same owned fields to the network owner.
+    task: OriginalPredecessorTask,
     preparation: JournalledCheckpointJoinPreparation,
     transport: T,
     target: PeerId,
-    task: OriginalPredecessorTask,
     // Initialized once, outside any eventual request future. Never seed from a snapshot or
     // move an old prefix to a different T. Network is intentionally still unavailable here.
     _prefix: PreOwnerConnectionHandoff,
@@ -31,13 +35,6 @@ impl<T> std::fmt::Debug for ActivatedCheckpointJoin<T> {
         formatter
             .debug_struct("ActivatedCheckpointJoin")
             .finish_non_exhaustive()
-    }
-}
-impl<T> Drop for ActivatedCheckpointJoin<T> {
-    fn drop(&mut self) {
-        // Revoke before transport, original secret source and fee fields drop. This never
-        // locks admission/catalog or waits for a future retained exchange/result cell.
-        self.task.close();
     }
 }
 impl<T> ActivatedCheckpointJoin<T> {

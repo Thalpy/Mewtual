@@ -114,6 +114,19 @@ pub(in crate::store) struct JournalAdmissionPermit<'writer> {
     runtime: &'writer Runtime,
 }
 impl JournalAdmissionPermit<'_> {
+    /// Negative original JOIN-task check while this SAME admission writer is held. Call after
+    /// the catalog wait immediately before FIRST counter candidate admission. It grants no
+    /// resource/unit/scope or permission to recreate a ticket from an already-admitted repair.
+    pub(in crate::store) fn require_original_join_execution(
+        &self,
+        observation: &super::predecessor::OriginalJoinExecutionObservation,
+    ) -> Result<(), AppError> {
+        self.validate_original()?;
+        self.runtime
+            .predecessors
+            .validate_join_execution(self.capture, observation)
+    }
+
     pub(in crate::store) fn validate_capture(
         &self,
         capture: &ChatAdmissionCapture,
@@ -168,7 +181,91 @@ impl<'writer> JournalAdmissionPermit<'writer> {
     }
 }
 
+/// Restrictive physical-mount permit for retaining one already authenticated received INPUT.
+/// Unlike JournalAdmissionPermit this deliberately has NO original-row or task authority.
+/// The catalog owner must separately prove exactly one Input DATA change before admission;
+/// no caller can use this type to admit counters, scopes, scheduling or namespace changes.
+pub(in crate::store) struct ReceivedJoinInputPermit<'writer> {
+    store: &'writer ServerStore,
+    capture: &'writer ChatAdmissionCapture,
+    runtime: &'writer Runtime,
+}
+impl ReceivedJoinInputPermit<'_> {
+    pub(in crate::store) fn validate_capture(
+        &self,
+        capture: &ChatAdmissionCapture,
+    ) -> Result<(), AppError> {
+        if !std::ptr::eq(self.capture, capture)
+            || !self.runtime.managed
+            || self.runtime.dirty
+            || self.runtime.format != Some(catcoms_storage::VaultFormat::CriticalNamespaces)
+            || self.runtime.table.is_none()
+            || capture.mount.is_cancelled()
+            || !Arc::ptr_eq(&capture.mount_identity, &self.store.chat_mount.identity)
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+}
+
+/// Closed physical-writer dispatch. Received DATA never masquerades as an original task/row
+/// permit; only the exact retained input candidate may use its distinct branch.
+#[derive(Clone, Copy)]
+pub(in crate::store) enum JoinCatalogWritePermit<'permit, 'writer> {
+    Original(&'permit JournalAdmissionPermit<'writer>),
+    Received(&'permit ReceivedJoinInputPermit<'writer>),
+}
+impl JoinCatalogWritePermit<'_, '_> {
+    pub(in crate::store) fn require_original_join_execution(
+        &self,
+        observation: &super::predecessor::OriginalJoinExecutionObservation,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Original(permit) => permit.require_original_join_execution(observation),
+            Self::Received(_) => Err(refused()),
+        }
+    }
+
+    pub(in crate::store) fn validate_candidate(
+        &self,
+        candidate: &crate::store::critical_namespaces::pending_join::PendingCandidate,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Original(permit) if candidate.received_input.is_none() => {
+                permit.validate_capture(&candidate.original.capture)
+            }
+            Self::Received(permit)
+                if candidate.received_input.is_some() && candidate.execution_task.is_none() =>
+            {
+                permit.validate_capture(&candidate.original.capture)?;
+                candidate.validate_received_input_change()
+            }
+            _ => Err(refused()),
+        }
+    }
+}
+
 impl ServerStore {
+    /// Retain only genuine received INPUT DATA on the SAME physical live mount, including
+    /// after its original admission row has been retired. This never returns a task permission.
+    pub(in crate::store) fn with_received_join_input_capture<T>(
+        &self,
+        capture: &ChatAdmissionCapture,
+        effect: impl FnOnce(&ReceivedJoinInputPermit<'_>) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let runtime = self.chat_mount.locked()?;
+        let permit = ReceivedJoinInputPermit {
+            store: self,
+            capture,
+            runtime: &runtime,
+        };
+        permit.validate_capture(capture)?;
+        let result = effect(&permit);
+        drop(runtime);
+        result
+    }
+
     /// Serialize a Pending-source write against the ORIGINAL admission capture. This callback
     /// may acquire only the catalog owner after admission; it must not call a Store admission/
     /// format getter, encode/perform large allocations, await, or drop quota owners while this

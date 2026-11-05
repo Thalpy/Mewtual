@@ -9,7 +9,14 @@ use catcoms_mls::persist::{restore_join_device_provider_bounded, snapshot_join_d
 const MAX_INVITE_BYTES: usize = 64 * 1024;
 const MAX_KEY_PACKAGE_BYTES: usize = 32 * 1024;
 
+mod network_exchange;
 mod sealed_source;
+pub use network_exchange::{
+    BoundOriginalJoinNetwork, OriginalJoinArmData, OriginalJoinNetworkContext,
+    OriginalJoinNetworkStatus, OriginalJoinNetworkSubmission, OriginalJoinSavedArm,
+    RetainedOriginalJoinNetwork, ReturnedOriginalJoinBinding, ReturnedOriginalJoinSubmission,
+    SealedOriginalJoinInput,
+};
 pub use sealed_source::{RecoveredDirectJoinSource, SealedDirectJoinSource};
 
 /// Exact inert request labels for a local sealed-journal binding. No field can admit a device,
@@ -267,7 +274,26 @@ impl PreparedDirectJoin {
         inviter: PeerId,
         response: Bytes,
     ) -> Result<Vec<u8>, SyncError> {
-        let mut response = own_response(response, self.limits.exchange)?;
+        self.receive_original_ready_body_limit(
+            transport,
+            connection_handoff,
+            inviter,
+            response,
+            self.limits.exchange,
+        )
+        .await
+    }
+
+    async fn receive_original_ready_body_limit<T: MeshTransport>(
+        &self,
+        transport: &T,
+        connection_handoff: &mut PreOwnerConnectionHandoff,
+        inviter: PeerId,
+        response: Bytes,
+        frame_limit: usize,
+    ) -> Result<Vec<u8>, SyncError> {
+        let limit = self.limits.exchange.min(frame_limit);
+        let mut response = own_response(response, limit)?;
         match response.split_first() {
             Some((&JOIN_READY, _)) => {
                 response.remove(0);
@@ -290,7 +316,7 @@ impl PreparedDirectJoin {
                             ..
                         }) if from == inviter && data.first() == Some(&KIND_WELCOME) => {
                             responder.respond(Bytes::new());
-                            let mut data = own_response(data, self.limits.exchange)?;
+                            let mut data = own_response(data, limit)?;
                             match data[1..].split_first() {
                                 Some((&JOIN_READY, _)) => {
                                     // Remove only transport discriminants in-place. This

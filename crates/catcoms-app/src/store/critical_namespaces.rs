@@ -28,7 +28,8 @@ use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
 pub(in crate::store) mod pending_join;
 pub(in crate::store) mod pending_join_codec;
 pub use pending_join::{
-    ActivatedCheckpointJoin, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,
+    ActivatedCheckpointJoin, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
+    CheckpointJoinSubmissionStatus, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,
     ReturnedCheckpointJoinActivation,
 };
 
