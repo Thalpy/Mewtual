@@ -948,6 +948,19 @@ pub trait MeshTransport: Send + Sync {
         false
     }
 
+    /// Whether this implementation actually forwards the connected, cancellable request seam.
+    ///
+    /// A caller which must durably spend an execution allowance before submission needs this
+    /// local capability BEFORE spending it. Connection leases alone do not imply that a wrapper
+    /// implements [`MeshTransport::request_connected_cancellable`]; its default refuses. Return
+    /// true only when that exact method preserves cancellation, actual-completion keepalive and
+    /// no-redial admission. This is trusted implementation metadata, never remote membership,
+    /// route liveness or proof that a particular request will succeed. Recheck the actual lease
+    /// and authority at submission. Wrappers must forward both this flag and the method.
+    fn supports_connected_cancellable_requests(&self) -> bool {
+        false
+    }
+
     /// Start receiving gossip on `topic`.
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError>;
 
@@ -1786,6 +1799,7 @@ mod publication_tests {
         let (_sender, receiver) = watch::channel(false);
         let peer = PeerId::from_u64(1);
         assert!(!transport.supports_connection_leases());
+        assert!(!transport.supports_connected_cancellable_requests());
         assert!(transport.connection_lease(peer).is_none());
         assert!(matches!(
             transport.request_connected_cancellable(peer, ProtocolId("test"), Bytes::new(),

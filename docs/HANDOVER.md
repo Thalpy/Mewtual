@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+## Join submission transport prerequisite (5 November; unexecuted)
+
+`MeshTransport::supports_connected_cancellable_requests` now defaults to false independently
+of connection leases. MeshService/MemNetwork advertise their actual no-redial, cancellable,
+lower-custody implementations, and the real six-client adapter forwards both method and flag.
+This lets the next durable join consumer refuse unsupported adapters before spending a unit;
+it does not itself implement execution grants or activate a retained source. The new in-memory
+delivery/retirement regression and expanded real-driver/default regressions are authored UNRUN.
+Static adversarial review and direct formatting are clear; no compiler/tests/build ran under
+the user pause. Actual arm/counter/accepted-reply consumers remain outstanding.
+
 ## Pending-only join catalog (5 November; authored, unexecuted)
 
 An explicit private configured v6 opener now supports sealed Pending JOIN1 DATA while ordinary

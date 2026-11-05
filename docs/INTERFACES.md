@@ -3730,6 +3730,11 @@ Two notes on the trailing methods, because their defaults carry the contract:
   `request_connected_cancellable` fails closed for the same reason plus the connected one: a
   provider fallback must neither redial an old route nor recycle concurrency while a cancelled
   stream is still owned below the caller.
+  `supports_connected_cancellable_requests()` defaults to false independently of connection
+  leases. MeshService and MemNetwork advertise their actual implementations; wrappers must
+  forward both flag and method. A future durable caller checks this trusted local capability
+  before spending an execution unit, then still checks the actual route and original authority.
+  The flag grants no remote trust, success, network allowance, or journal activation by itself.
 - **`evict_peer`/`unevict_peer` default to inert rather than to an error.** A transport with no
   notion of a connection (the in-memory test network) cannot honour them, and a failure here must
   never abort a removal already committed to the MLS group. Eviction is defence in depth on top of

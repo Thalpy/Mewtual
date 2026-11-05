@@ -6384,6 +6384,9 @@ impl MeshTransport for MeshService {
     fn supports_connection_leases(&self) -> bool {
         true
     }
+    fn supports_connected_cancellable_requests(&self) -> bool {
+        true
+    }
 
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
         self.cmd_tx
@@ -8880,6 +8883,8 @@ mod tests {
         let server_peer = server.local_peer();
         let client_peer = client.local_peer();
 
+        assert!(client.supports_connected_cancellable_requests());
+
         let bound: Multiaddr = format!("{listen}/p2p/{server_id}").parse().unwrap();
         client.dial(bound).await.unwrap();
         for node in [&client, &server] {
@@ -8942,6 +8947,38 @@ mod tests {
         .await
         .expect("the connected-only request should reach the live peer");
         assert_eq!(&request.await.unwrap().unwrap()[..], b"ok");
+
+        // Exercise the EXACT advertised trait seam, not only the handle's ordinary connected
+        // method. Future durable callers inspect this capability before spending an allowance.
+        let (_signal, receiver) = watch::channel(false);
+        let (answer, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                client.request_connected_cancellable(
+                    server_peer,
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(b"accounted-proof"),
+                    RequestCancellation::new(receiver, None),
+                ),
+                async {
+                    loop {
+                        match server.next_event().await {
+                            Some(TransportEvent::Request {
+                                data, responder, ..
+                            }) => {
+                                assert_eq!(&data[..], b"accounted-proof");
+                                responder.respond(Bytes::from_static(b"accounted-ok"));
+                                break;
+                            }
+                            Some(_) => {}
+                            None => panic!("real driver closed before the accounted request"),
+                        }
+                    }
+                }
+            )
+        })
+        .await
+        .expect("advertised connected+cancellable request must reach the real driver");
+        assert_eq!(&answer.unwrap()[..], b"accounted-ok");
 
         // Populate the client's recent-peer cache by severing the established connection. The
         // server lifts its deny immediately afterwards so any accidental redial would be visible.

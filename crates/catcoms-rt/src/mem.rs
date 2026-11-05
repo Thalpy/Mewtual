@@ -179,6 +179,9 @@ impl MeshTransport for MemNetwork {
     fn supports_connection_leases(&self) -> bool {
         true
     }
+    fn supports_connected_cancellable_requests(&self) -> bool {
+        true
+    }
 
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
         if !self.registration.lease.is_live() {
@@ -435,6 +438,56 @@ mod tests {
     fn bytes(s: &'static str) -> Bytes {
         Bytes::from_static(s.as_bytes())
     }
+
+    #[tokio::test]
+    async fn advertised_connected_cancellable_seam_delivers_and_refuses_retired_custody() {
+        use std::future::Future;
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(0x611));
+        let b = hub.join(PeerId::from_u64(0x612));
+        assert!(a.supports_connected_cancellable_requests());
+        assert!(a.connection_lease(b.local_peer()).unwrap().is_live());
+        let (owner, signal) = tokio::sync::watch::channel(false);
+        let mut request = Box::pin(a.request_connected_cancellable(
+            b.local_peer(),
+            ProtocolId("connected-capability"),
+            bytes("original"),
+            RequestCancellation::new(signal.clone(), None),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let TransportEvent::Request {
+                data, responder, ..
+            } = b.next_event().await.unwrap()
+            else {
+                panic!("the accounted request must reach the connected endpoint");
+            };
+            assert_eq!(data, bytes("original"));
+            responder.respond(bytes("accepted"));
+            assert_eq!(request.await.unwrap(), bytes("accepted"));
+        })
+        .await
+        .expect("the advertised in-memory exchange must complete within the harness bound");
+        owner.send_replace(true);
+        assert!(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                a.request_connected_cancellable(
+                    b.local_peer(),
+                    ProtocolId("connected-capability"),
+                    bytes("retired"),
+                    RequestCancellation::new(signal, None),
+                )
+            )
+            .await
+            .unwrap(),
+            Err(TransportError::Cancelled)
+        ));
+    }
     #[derive(Debug)]
     struct ResponseEffect(tokio::sync::watch::Receiver<bool>);
     #[async_trait]
@@ -511,6 +564,7 @@ mod tests {
     async fn connection_lease_local_retirement_refuses_old_worker_without_revoking_other_members() {
         let hub = Hub::new();
         let a = hub.join(PeerId::from_u64(1));
+        assert!(a.supports_connected_cancellable_requests());
         let b = hub.join(PeerId::from_u64(2));
         let c = hub.join(PeerId::from_u64(3));
         let ab = a.connection_lease(b.local_peer()).unwrap();
