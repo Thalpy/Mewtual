@@ -83,6 +83,8 @@ impl Original {
 /// its preparation. It cannot be overtaken or replaced by a freshly sealed source. Byte owners
 /// precede their actual strong fee, so quota cannot be refunded while those bytes survive.
 pub(in crate::store) struct PendingCandidate {
+    // Original runtime identity, never encoded or reconstructed by a cold stage parser.
+    identity: Arc<()>,
     pub(in crate::store) bytes: Zeroizing<Vec<u8>>,
     pub(in crate::store) next: codec::Summary,
     pub(in crate::store) expected: codec::Summary,
@@ -99,6 +101,48 @@ pub(in crate::store) struct PendingCandidate {
     // is rechecked under both serializers on first admission AND every admitted repair.
     pub(in crate::store) received_input: Option<Arc<catcoms_sync::SealedOriginalJoinInput>>,
     pub(in crate::store) _fee: CatalogReadReservation,
+}
+/// Inert snapshot from the ACTUAL Store-owned pending object. A final private repair permit
+/// must match this same identity AND byte commitments under admission->catalog; parsed labels
+/// cannot reconstruct it. It contains no task sender, source/master, scope or live authority.
+pub(in crate::store) struct RetainedJoinCandidateIdentity {
+    identity: Arc<()>,
+    expected_frame: [u8; 32],
+    next_frame: [u8; 32],
+    expected_digest: [u8; 32],
+    next_digest: [u8; 32],
+}
+impl PendingCandidate {
+    pub(in crate::store) fn retained_identity(&self) -> RetainedJoinCandidateIdentity {
+        RetainedJoinCandidateIdentity {
+            identity: self.identity.clone(),
+            expected_frame: self.expected.framed,
+            next_frame: self.next.framed,
+            expected_digest: self.expected.digest,
+            next_digest: self.next.digest,
+        }
+    }
+}
+impl RetainedJoinCandidateIdentity {
+    pub(in crate::store) fn validate_candidate(
+        &self,
+        candidate: &PendingCandidate,
+    ) -> Result<(), AppError> {
+        if !Arc::ptr_eq(&self.identity, &candidate.identity)
+            || self.expected_frame != candidate.expected.framed
+            || self.next_frame != candidate.next.framed
+            || self.expected_digest != candidate.expected.digest
+            || self.next_digest != candidate.next.digest
+            || candidate.execution_task.is_some()
+        {
+            return Err(refused());
+        }
+        codec::successor(&candidate.expected, &candidate.next)?;
+        if candidate.received_input.is_some() {
+            candidate.validate_received_input_change()?;
+        }
+        Ok(())
+    }
 }
 pub(in crate::store) struct CreatedStage {
     pub(in crate::store) file: File,

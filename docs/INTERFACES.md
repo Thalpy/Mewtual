@@ -8249,3 +8249,14 @@ that exact transient exclusion; the original creator still owns the sole revocat
 Completed metadata drains outside writers. The only public outcome is unexposed intent progress.
 Scope attachment, source preparation/execution/save, closed-result recovery, Current and native
 activation are separate unfinished consumers. All new compiled regressions remain UNRUN.
+
+### Store-admitted JOIN catalog DATA repair
+
+A separate private RetainedJoinDataRepairPermit matches the same actual mounted.pending runtime
+identity plus original expected/next frame and plaintext commitments after admission->catalog.
+It repairs only that previously admitted immutable output, even after its admission row retires;
+clean loaded inventory, actual format/policy/mount/pin and whole-file/stage/root checks remain.
+First admission still uses the original full row/task or restrictive genuine-input permit.
+Repair cannot first-admit a source/counter, issue a ticket, renew a task, grant Current or refund
+units. Cold parsed bytes cannot reconstruct the opaque runtime identity. Dirty negative inventory
+must be repaired independently. Four additional regressions are authored UNRUN.

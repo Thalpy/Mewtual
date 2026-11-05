@@ -52,6 +52,14 @@ SourcePrepared/source execution/save, negative closure, typed SDK restore, canon
 and native Chat V2 remain open. See the
 [factory contract](communication-recovery/CHAT-OWNER-FOUNDING-INTENT-FACTORY.md).
 
+### Exact already-admitted JOIN DATA repair after row retirement (UNRUN)
+
+Known Store-retained catalog output now uses a separate opaque-runtime-identity repair permit.
+After a clean actual row retirement it can finish the SAME bytes/file/root barrier without
+renewing a task/ticket/Current or first-admitting anything. Original first-admission gates stay
+strict; foreign pending identity/stage/policy/mount refuses. Four more regressions are authored
+UNRUN; no compiler/tests/build. This is not RetryGrant activation or SDK/ScopeIntent completion.
+
 ### Retained JOIN source cannot be overwritten by generic admission (UNRUN)
 
 The actual catalog source/debt fence now covers cold/paused/no-worker rows and Store-admitted

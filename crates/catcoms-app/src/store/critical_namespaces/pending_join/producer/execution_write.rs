@@ -80,6 +80,7 @@ impl JournalledCheckpointJoinPreparation {
         let encoded = Zeroizing::new(frame(&seal(&key, &candidate_plain, rng)?));
         next.framed = *blake3::hash(&encoded).as_bytes();
         let candidate = PendingCandidate {
+            identity: Arc::new(()),
             bytes: encoded,
             next: next.clone(),
             expected: current,
@@ -380,6 +381,7 @@ impl JournalledCheckpointJoinPreparation {
         let encoded = Zeroizing::new(frame(&seal(&key, &candidate_plain, rng)?));
         next.framed = *blake3::hash(&encoded).as_bytes();
         let candidate = PendingCandidate {
+            identity: Arc::new(()),
             bytes: encoded,
             next,
             expected: current,

@@ -628,3 +628,256 @@ async fn dropping_network_owner_after_verified_reply_cannot_drop_only_input_or_p
         "Store recovery never repeats the request or re-seals an already saved input"
     );
 }
+
+#[test]
+fn actual_row_retirement_after_counter_admission_repairs_only_same_data_without_a_ticket() {
+    let mut f = fixture(2);
+    let invite = f.invite(86);
+    let device = MlsDevice::generate().unwrap();
+    let signer = device.public_key_bytes().try_into().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(17);
+    let capture = f
+        .member()
+        .capture_chat_admission(
+            crate::store::ChatAdmissionKey::new(&invite.group_id, signer).unwrap(),
+        )
+        .unwrap();
+    let old = f
+        .member()
+        .prepare_legacy_chat_admission(&capture, b"real row before journal source", &mut rng)
+        .unwrap();
+    let binding = f
+        .member()
+        .finish_chat_admission(&old, &mut rng, |_, _| Ok(()))
+        .unwrap()
+        .into_binding();
+    let mut source = f
+        .member
+        .as_deref()
+        .unwrap()
+        .prepare_journalled_owner_checkpoint_join(
+            &f.source,
+            &f.owner,
+            device,
+            invite,
+            &mut f.member_rng,
+        )
+        .unwrap();
+    source.save_pending(f.member(), &mut rng).unwrap();
+    let mut network = source
+        .activate_original_transport(
+            f.member(),
+            f.hub.join(PeerId::from_u64(0xe025)),
+            PeerId::from_u64(0x8101),
+        )
+        .unwrap()
+        .into_network_execution(f.member())
+        .unwrap();
+    network.ensure_initial_grant(f.member(), &mut rng).unwrap();
+    f.member()
+        .critical_namespace_fault
+        .store(1, Ordering::SeqCst);
+    assert!(network
+        .ensure_submission_armed(f.member(), &mut rng, Arc::new(ManualClock::new(1_000)))
+        .is_err());
+    let candidate = {
+        let mounted = f.member().pending_join_catalog.lock().unwrap();
+        mounted
+            .as_ref()
+            .unwrap()
+            .pending
+            .as_ref()
+            .unwrap()
+            .bytes
+            .to_vec()
+    };
+    f.member()
+        .retire_chat_admission(&binding, &mut rng)
+        .unwrap();
+    f.member()
+        .critical_namespace_fault
+        .store(0, Ordering::SeqCst);
+    f.member().retry_pending_join_catalog().unwrap();
+    assert_eq!(f.current_bytes(), candidate);
+    assert_eq!(row(f.member()).execution.unwrap().spent, 1);
+    assert_eq!(network.status(), Status::Closed);
+    assert_eq!(arm(&mut network, f.member()), Status::Closed);
+    assert!(network.next_submission().is_err());
+    // Repair did not revive the old row or invoke any positive old storage callback.
+    assert!(f
+        .member()
+        .with_chat_admission_storage(&binding, |_| -> Result<(), AppError> {
+            panic!("repair cannot renew Current")
+        })
+        .is_err());
+    let other = f
+        .member()
+        .capture_chat_admission(crate::store::ChatAdmissionKey::new(&[0xee], [0xee; 32]).unwrap())
+        .unwrap();
+    let preparation = f
+        .member()
+        .prepare_legacy_chat_admission(&other, b"independent key progresses after repair", &mut rng)
+        .unwrap();
+    assert!(f
+        .member()
+        .finish_chat_admission(&preparation, &mut rng, |_, _| Ok(()))
+        .is_ok());
+}
+
+#[test]
+fn retired_repair_identity_cannot_repair_a_later_actual_pending_object_for_the_same_source() {
+    use crate::store::chat_admission::journal_basis::JoinCatalogWritePermit;
+    let mut f = fixture(2);
+    let invite = f.invite(87);
+    let mut source = f.begin(invite);
+    f.member()
+        .critical_namespace_fault
+        .store(3, Ordering::SeqCst);
+    assert!(source
+        .save_pending(f.member(), &mut ChaCha20Rng::seed_from_u64(18))
+        .is_err());
+    let (original, identity) = {
+        let mounted = f.member().pending_join_catalog.lock().unwrap();
+        let pending = mounted.as_ref().unwrap().pending.as_ref().unwrap();
+        (pending.original.clone(), pending.retained_identity())
+    };
+    f.member()
+        .critical_namespace_fault
+        .store(0, Ordering::SeqCst);
+    f.member().retry_pending_join_catalog().unwrap();
+    f.member()
+        .critical_namespace_fault
+        .store(3, Ordering::SeqCst);
+    assert!(source
+        .pause_pending(f.member(), &mut ChaCha20Rng::seed_from_u64(19))
+        .is_err());
+    let bytes = f.current_bytes();
+    assert!(f
+        .member()
+        .with_retained_join_catalog_repair(&original.capture, &identity, |permit| f
+            .member()
+            .settle_pending_join_candidate(JoinCatalogWritePermit::Retained(permit), &original))
+        .is_err());
+    assert_eq!(f.current_bytes(), bytes);
+    assert!(f
+        .member()
+        .pending_join_catalog
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .pending
+        .is_some());
+    f.member()
+        .critical_namespace_fault
+        .store(0, Ordering::SeqCst);
+    f.member().retry_pending_join_catalog().unwrap();
+}
+
+#[test]
+fn actual_retained_repair_refuses_foreign_stage_and_old_physical_mount_without_touching_bytes() {
+    let mut f = fixture(2);
+    let invite = f.invite(88);
+    let mut source = f.begin(invite);
+    f.member()
+        .critical_namespace_fault
+        .store(3, Ordering::SeqCst);
+    assert!(source
+        .save_pending(f.member(), &mut ChaCha20Rng::seed_from_u64(20))
+        .is_err());
+    let (original, identity) = {
+        let mounted = f.member().pending_join_catalog.lock().unwrap();
+        let pending = mounted.as_ref().unwrap().pending.as_ref().unwrap();
+        (pending.original.clone(), pending.retained_identity())
+    };
+    let old = f.current_bytes();
+    let stage = f.member_dir.path().join(Slot::Stage.name());
+    fs::write(&stage, b"foreign complete or partial stage").unwrap();
+    f.member()
+        .critical_namespace_fault
+        .store(0, Ordering::SeqCst);
+    assert!(f.member().retry_pending_join_catalog().is_err());
+    assert_eq!(f.current_bytes(), old);
+    assert_eq!(
+        fs::read(&stage).unwrap(),
+        b"foreign complete or partial stage"
+    );
+    fs::remove_file(&stage).unwrap();
+    f.member().retry_pending_join_catalog().unwrap();
+    drop(source);
+    drop(f.member.take());
+    f.member = Some(Arc::new(execution_store(
+        f.member_dir.path(),
+        &mut f.member_rng,
+        &f.pool,
+        2,
+    )));
+    let current = f.current_bytes();
+    assert!(f
+        .member()
+        .with_retained_join_catalog_repair(
+            &original.capture,
+            &identity,
+            |_| -> Result<(), AppError> { panic!("old-mount repair must not enter callback") }
+        )
+        .is_err());
+    assert_eq!(f.current_bytes(), current);
+}
+
+#[test]
+fn valid_bytes_on_an_unadmitted_candidate_identity_cannot_enter_the_repair_callback() {
+    let mut f = fixture(2);
+    let invite = f.invite(89);
+    let mut source = f.begin(invite);
+    f.member()
+        .critical_namespace_fault
+        .store(3, Ordering::SeqCst);
+    assert!(source
+        .save_pending(f.member(), &mut ChaCha20Rng::seed_from_u64(21))
+        .is_err());
+    let fee = f.pool.try_reserve(WRITE_FEE).unwrap();
+    let counterfeit = {
+        let mounted = f.member().pending_join_catalog.lock().unwrap();
+        let original = mounted.as_ref().unwrap().pending.as_ref().unwrap();
+        // Same genuine byte commitments/root/capture, but this fresh runtime identity was
+        // NEVER installed. Only the original Store-owned object may issue a repair callback.
+        PendingCandidate {
+            identity: Arc::new(()),
+            bytes: Zeroizing::new(original.bytes.to_vec()),
+            next: original.next.clone(),
+            expected: original.expected.clone(),
+            original: original.original.clone(),
+            created: None,
+            execution_task: None,
+            received_input: None,
+            _fee: fee,
+        }
+    };
+    let identity = counterfeit.retained_identity();
+    let before = f.current_bytes();
+    assert!(f
+        .member()
+        .with_retained_join_catalog_repair(
+            &counterfeit.original.capture,
+            &identity,
+            |_| -> Result<(), AppError> {
+                panic!("unadmitted runtime identity cannot enter repair callback")
+            }
+        )
+        .is_err());
+    assert_eq!(f.current_bytes(), before);
+    assert!(f
+        .member()
+        .pending_join_catalog
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .pending
+        .is_some());
+    drop(counterfeit);
+    f.member()
+        .critical_namespace_fault
+        .store(0, Ordering::SeqCst);
+    f.member().retry_pending_join_catalog().unwrap();
+}

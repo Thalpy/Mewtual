@@ -435,6 +435,7 @@ impl JournalledCheckpointJoinPreparation {
         let encoded = Zeroizing::new(frame(&seal(&key, &candidate_plain, rng)?));
         next.framed = *blake3::hash(&encoded).as_bytes();
         let candidate = PendingCandidate {
+            identity: Arc::new(()),
             bytes: encoded,
             next: next.clone(),
             expected: current,
@@ -539,28 +540,20 @@ impl ServerStore {
             mounted
                 .pending
                 .as_ref()
-                .map(|pending| (pending.original.clone(), pending.received_input.is_some()))
+                .map(|pending| (pending.original.clone(), pending.retained_identity()))
         };
-        let Some((original, received)) = original else {
+        let Some((original, identity)) = original else {
             return Ok(());
         };
-        // The branch comes only from Store's original retained candidate, not a decoded flag.
-        // Each physical permit validates its distinct candidate shape again under both owners.
-        let finished = if received {
-            self.with_received_join_input_capture(&original.capture, |permit| {
+        // This opaque identity comes from mounted.pending, never decoded status/labels. Final
+        // matching under BOTH owners proves the same previously admitted immutable object.
+        let finished =
+            self.with_retained_join_catalog_repair(&original.capture, &identity, |permit| {
                 self.settle_pending_join_candidate(
-                    JoinCatalogWritePermit::Received(permit),
+                    JoinCatalogWritePermit::Retained(permit),
                     &original,
                 )
-            })?
-        } else {
-            self.with_original_join_catalog_capture(&original.capture, |permit| {
-                self.settle_pending_join_candidate(
-                    JoinCatalogWritePermit::Original(permit),
-                    &original,
-                )
-            })?
-        };
+            })?;
         drop(finished); // Last byte/source/fee owners drain outside BOTH writers.
         Ok(())
     }
@@ -654,6 +647,7 @@ impl ServerStore {
         let encoded = Zeroizing::new(frame(&seal(&key, &candidate_plain, rng)?));
         next.framed = *blake3::hash(&encoded).as_bytes();
         let candidate = PendingCandidate {
+            identity: Arc::new(()),
             bytes: encoded,
             next,
             expected: preparation.expected.clone(),

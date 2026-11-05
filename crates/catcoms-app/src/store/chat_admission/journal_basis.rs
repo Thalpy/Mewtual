@@ -209,12 +209,32 @@ impl ReceivedJoinInputPermit<'_> {
     }
 }
 
+/// Repair-only original physical mount + actual Store pending identity. This ignores an old
+/// admission row only AFTER its immutable catalog output was admitted into Store custody. It
+/// cannot first-admit a candidate, activate/renew a task, issue a ticket or advance a scope.
+pub(in crate::store) struct RetainedJoinDataRepairPermit<'writer> {
+    physical: ReceivedJoinInputPermit<'writer>,
+    identity:
+        &'writer crate::store::critical_namespaces::pending_join::RetainedJoinCandidateIdentity,
+}
+impl RetainedJoinDataRepairPermit<'_> {
+    fn validate_candidate(
+        &self,
+        candidate: &crate::store::critical_namespaces::pending_join::PendingCandidate,
+    ) -> Result<(), AppError> {
+        self.physical
+            .validate_capture(&candidate.original.capture)?;
+        self.identity.validate_candidate(candidate)
+    }
+}
+
 /// Closed physical-writer dispatch. Received DATA never masquerades as an original task/row
 /// permit; only the exact retained input candidate may use its distinct branch.
 #[derive(Clone, Copy)]
 pub(in crate::store) enum JoinCatalogWritePermit<'permit, 'writer> {
     Original(&'permit JournalAdmissionPermit<'writer>),
     Received(&'permit ReceivedJoinInputPermit<'writer>),
+    Retained(&'permit RetainedJoinDataRepairPermit<'writer>),
 }
 impl JoinCatalogWritePermit<'_, '_> {
     pub(in crate::store) fn require_original_join_execution(
@@ -223,7 +243,7 @@ impl JoinCatalogWritePermit<'_, '_> {
     ) -> Result<(), AppError> {
         match self {
             Self::Original(permit) => permit.require_original_join_execution(observation),
-            Self::Received(_) => Err(refused()),
+            Self::Received(_) | Self::Retained(_) => Err(refused()),
         }
     }
 
@@ -241,12 +261,50 @@ impl JoinCatalogWritePermit<'_, '_> {
                 permit.validate_capture(&candidate.original.capture)?;
                 candidate.validate_received_input_change()
             }
+            Self::Retained(permit) => permit.validate_candidate(candidate),
             _ => Err(refused()),
         }
     }
 }
 
 impl ServerStore {
+    /// Retry ONLY the same Store-owned admitted DATA. Caller captured its opaque identity from
+    /// mounted.pending and must compare that SAME object again after catalog wait. A clean
+    /// actual retired/later row is allowed; dirty negative inventory must repair independently.
+    pub(in crate::store) fn with_retained_join_catalog_repair<T>(
+        &self,
+        capture: &ChatAdmissionCapture,
+        identity: &crate::store::critical_namespaces::pending_join::RetainedJoinCandidateIdentity,
+        effect: impl FnOnce(&RetainedJoinDataRepairPermit<'_>) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let runtime = self.chat_mount.locked()?;
+        if self.pending_join_policy.is_none() {
+            return Err(refused());
+        }
+        let physical = ReceivedJoinInputPermit {
+            store: self,
+            capture,
+            runtime: &runtime,
+        };
+        physical.validate_capture(capture)?;
+        let permit = RetainedJoinDataRepairPermit { physical, identity };
+        {
+            // Establish actual admitted custody here, not just at the final physical writer.
+            // An identity minted on an uninstalled candidate cannot enter even this callback.
+            // Release this subordinate owner before callback/head work; SAME admission still
+            // orders all candidate installs, and final settle repeats the exact object check.
+            let mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
+            let pending = mounted
+                .as_ref()
+                .and_then(|mounted| mounted.pending.as_ref())
+                .ok_or_else(refused)?;
+            permit.validate_candidate(pending)?;
+        }
+        let result = effect(&permit);
+        drop(runtime);
+        result
+    }
+
     /// Retain only genuine received INPUT DATA on the SAME physical live mount, including
     /// after its original admission row has been retired. This never returns a task permission.
     pub(in crate::store) fn with_received_join_input_capture<T>(
