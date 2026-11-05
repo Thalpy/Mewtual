@@ -20,6 +20,10 @@ use catcoms_rt::RequestCancellation;
 use catcoms_storage::VaultFormat;
 use std::sync::Arc;
 pub(in crate::store) mod archive_bootstrap;
+// Shared DATA dependency for the reviewed Current metadata tests. There is deliberately no
+// production namespace3 parser/opener/handler until actual physical fences and I/O land.
+#[cfg(test)]
+pub(in crate::store) mod archive_current_namespace_codec;
 mod catalog_envelope;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,

@@ -13956,3 +13956,13 @@ The node is DATA/resource ownership, not Current or publication. Root's actual S
 pin/head/row/mount and original negative checks, all non-SDK lifetime fees, governor/live SDK
 operations and native integration remain separate. All13 regressions are authored UNRUN;
 compilation, tests and builds remain paused. [Boundary and invoice](communication-recovery/CHAT-V2-GENESIS-DATA-SEED.md).
+
+
+## Current namespace test DATA prerequisite (authored, UNRUN)
+
+The shared namespace3 DATA descriptor/marker/declaration/group-name codec is declared only
+under cfg(test), giving the pending pin/head metadata tests a real sibling dependency. Seven
+focused crypto/framing/cap/debug tests are authored UNRUN. There is no production3 parser,
+physical handler, supported Current mount, group reservation or Current issuer in this packet.
+The actual opener, paid index/metadata inventory, all cross-signer group fences and source/pin/
+head/scope coupling remain separate. [Exact scope](communication-recovery/CHAT-V2-CURRENT-NAMESPACE-DATA.md).
