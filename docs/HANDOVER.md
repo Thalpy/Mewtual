@@ -1,5 +1,31 @@
 # Mewtual; Handover
 
+## Current Chat V2 status (5 November; incomplete, compilation paused)
+
+Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
+The new v2 Profile/Admission, successor headers, acceptance/append/removal records and tree proofs
+are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The actual
+Sync-only v2 founder producer now derives its genesis from original real creation/scope custody;
+its covering App/archive save and live governing/dispatch consumers are still absent. The real
+canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
+Add/save/install/reply and exact retained-successor recovery source is integrated, with regressions
+authored but unrun; it remains one founder/one Add/zero history, not the production v2 consumer.
+The default-closed projection guard core is
+integrated with42 authored/unrun tests; its production issuer and native/UI adapter remain absent.
+Scalable cold persistence, governing/review state, actual v2 creation/join/root distribution,
+typed durable send/receive, full admin actions/decisions and native/UI integration remain required.
+
+Compilation, compiled tests and builds are paused at the user's request. New regressions below
+are authored but unrun. Source reviews, rustfmt and whitespace checks do not establish readiness.
+After implementation and once compilation is permitted, focused checks precede the complete required
+suites; the exceptionally slow10,000-operation test and other heavy acceptance run at the end.
+
+
+Current source checkpoint: all new compiled regressions remain UNRUN. Direct rustfmt checks over
+changed Rust files, whitespace checks and both ambient-dependency/raw-filesystem static gates
+passed at the preceding integrated checkpoint. New source changes need the same narrow checks;
+none of these substitute for compilation or the required full suites when the pause is lifted.
+
 ## Actual private V2 founder source (5 November; authored, unexecuted)
 
 The Sync-only actual creation witness now produces typed V2 Profile, exact Founder Admission,
@@ -199,24 +225,6 @@ Deleted has certainty and no history text. Forty-two regressions are authored/un
 tests and builds remain paused; formatting/static review is not runtime evidence. Real governance,
 critical durable negative closure, complete host memory fees and native/UI lease consumers remain
 open. See [the guarded projection contract](communication-recovery/CHAT-V2-PROJECTION-ADMISSION.md).
-
-## Current Chat V2 status (5 November; incomplete, compilation paused)
-
-Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
-The new v2 Profile/Admission, successor headers, acceptance/append/removal records and tree proofs
-are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The real
-canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
-Add/save/install/reply and exact retained-successor recovery source is integrated, with regressions
-authored but unrun; it remains one founder/one Add/zero history, not the production v2 consumer.
-The default-closed projection guard core is
-integrated with42 authored/unrun tests; its production issuer and native/UI adapter remain absent.
-Scalable cold persistence, governing/review state, actual v2 creation/join/root distribution,
-typed durable send/receive, full admin actions/decisions and native/UI integration remain required.
-
-Compilation, compiled tests and builds are paused at the user's request. New regressions below
-are authored but unrun. Source reviews, rustfmt and whitespace checks do not establish readiness.
-After implementation and once compilation is permitted, focused checks precede the complete required
-suites; the exceptionally slow10,000-operation test and other heavy acceptance run at the end.
 
 ## Historical package data prerequisite (5 November; static review clear, tests paused)
 
