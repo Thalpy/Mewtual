@@ -296,3 +296,76 @@ fn store_admitted_unwritten_source_candidate_reserves_key_before_current_file_co
     f.member().retry_pending_join_catalog().unwrap();
     assert_eq!(f.current_bytes(), candidate);
 }
+
+#[test]
+fn cold_paused_join_reserves_group_across_signers_before_any_row_pin_or_active_task() {
+    let mut f = Fixture::new();
+    let invite = f.invite(101);
+    let mut source = f.begin(invite);
+    source
+        .save_pending(f.member(), &mut ChaCha20Rng::seed_from_u64(0xfa11))
+        .unwrap();
+    source
+        .pause_pending(f.member(), &mut ChaCha20Rng::seed_from_u64(0xfa12))
+        .unwrap();
+    let metadata = source.metadata.clone();
+    let before = f.current_bytes();
+    drop(source);
+    f.reopen();
+    let other_signer = metadata.signer.map(|byte| byte ^ 0xff);
+    assert_eq!(
+        f.member()
+            .check_join_group_exclusion_for_test(metadata.group.as_slice(), &other_signer)
+            .unwrap(),
+        (true, false)
+    );
+    assert_eq!(
+        f.member()
+            .check_join_group_exclusion_for_test(b"another actual group", &other_signer)
+            .unwrap(),
+        (true, true)
+    );
+    assert_eq!(f.current_bytes(), before);
+    other_control(f.member(), 102);
+}
+
+#[test]
+fn admitted_unwritten_join_candidate_reserves_group_for_every_signer_without_a_worker() {
+    let mut f = Fixture::new();
+    let invite = f.invite(103);
+    let mut source = f.begin(invite);
+    let metadata = source.metadata.clone();
+    let before = f.current_bytes();
+    f.member()
+        .critical_namespace_fault
+        .store(3, Ordering::SeqCst);
+    assert!(source
+        .save_pending(f.member(), &mut ChaCha20Rng::seed_from_u64(0xfa13))
+        .is_err());
+    drop(source);
+    assert_eq!(f.current_bytes(), before);
+    let other_signer = metadata.signer.map(|byte| byte ^ 0xff);
+    assert_eq!(
+        f.member()
+            .check_join_group_exclusion_for_test(metadata.group.as_slice(), &other_signer)
+            .unwrap(),
+        (true, false)
+    );
+    assert_eq!(
+        f.member()
+            .check_join_group_exclusion_for_test(b"independent group", &other_signer)
+            .unwrap(),
+        (true, true)
+    );
+    other_control(f.member(), 104);
+    f.member()
+        .critical_namespace_fault
+        .store(0, Ordering::SeqCst);
+    f.member().retry_pending_join_catalog().unwrap();
+    assert_eq!(
+        f.member()
+            .check_join_group_exclusion_for_test(metadata.group.as_slice(), &other_signer)
+            .unwrap(),
+        (true, false)
+    );
+}

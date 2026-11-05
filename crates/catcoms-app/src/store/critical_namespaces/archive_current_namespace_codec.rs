@@ -22,7 +22,6 @@ const LAYOUT_TAG: &[u8] = b"catcoms/private-chat-v2-current-layout/v1\0";
 const MARKER_TAG: &[u8] = b"catcoms/private-chat-v2-current-marker/v1\0";
 const DECLARATION_TAG: &[u8] = b"catcoms/private-chat-v2-current-declaration/v1\0";
 const VERSION: u16 = 1;
-const MAX_GROUP: usize = 256;
 const _: () = assert!(122 <= MAX_LAYOUT_PLAIN && 174 <= MAX_MARKER_PLAIN);
 const _: () = assert!(MAX_CATALOG_FRAME + 1233 <= MAX_DECLARATION_PLAIN);
 
@@ -139,22 +138,7 @@ pub(in crate::store) fn group_name_data(
     layout: CurrentLayoutData,
     group: &[u8],
 ) -> Result<[u8; 64], AppError> {
-    if group.is_empty() || group.len() > MAX_GROUP {
-        return Err(refused());
-    }
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"catcoms/private-chat-v2-group-root/v1\0");
-    hash.update(&layout.vault);
-    hash.update(&layout.root);
-    hash.update(&(group.len() as u32).to_be_bytes());
-    hash.update(group);
-    let mut name = [0; 64];
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for (index, byte) in hash.finalize().as_bytes().iter().copied().enumerate() {
-        name[2 * index] = HEX[(byte >> 4) as usize];
-        name[2 * index + 1] = HEX[(byte & 15) as usize];
-    }
-    Ok(name)
+    super::current_group::group_suffix(&layout.vault, &layout.root, group)
 }
 
 pub(in crate::store) fn seal_marker_data(

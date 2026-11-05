@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 mod custody;
 pub(crate) mod fresh;
 pub(in crate::store) mod journal_basis;
+mod old_owner_group;
 mod owner_writer;
 pub(in crate::store) mod predecessor;
 mod recovery;
@@ -734,6 +735,9 @@ impl ServerStore {
         if !runtime.managed || runtime.dirty {
             return Err(refused());
         }
+        // Capturing a legacy lineage is already too late once a group-wide V2 reservation
+        // exists. Never mint an inert old capture that a later path could mistake for vacancy.
+        self.require_no_v2_group_directory(key.group())?;
         let original = runtime
             .table
             .as_ref()

@@ -382,6 +382,9 @@ fn archive_target_notfound_requires_the_same_held_root_and_marker_objects() {
         assert!(store
             .require_no_archive_bootstrap_target(b"vacant", &[4; 32])
             .is_ok());
+        let capture = store
+            .capture_chat_admission(ChatAdmissionKey::new(b"vacant", [4; 32]).unwrap())
+            .unwrap();
         let root = directory.path().join(ARCHIVE_BOOTSTRAP_ROOT);
         let marker = fs::read(root.join(ROOT_MARKER)).unwrap();
         if replacement == 1 {
@@ -412,9 +415,9 @@ fn archive_target_notfound_requires_the_same_held_root_and_marker_objects() {
         assert!(store
             .require_no_archive_bootstrap_target(b"vacant", &[4; 32])
             .is_err());
-        let capture = store
+        assert!(store
             .capture_chat_admission(ChatAdmissionKey::new(b"vacant", [4; 32]).unwrap())
-            .unwrap();
+            .is_err());
         let mut unchanged = rng.clone();
         assert!(store
             .prepare_legacy_chat_admission(&capture, b"old candidate", &mut rng)

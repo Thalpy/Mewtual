@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Group reservation cannot be bypassed by another old signer (5 November; authored, UNRUN)
+
+The original ID2 root now checks fixed group-wide `g-` presence before old per-signer target
+lookup, including captures, pin/numeric readers and precaptured positive owners. Any unknown
+presence is preserved/refused. New founder pre-row work also rejects any-signer retained JOIN
+source/debt for that group before effects. This closes negative namespace omissions; it does
+not yet supply the strong pending-mkdir registry, ID3 handler or Current issuer. Actual original
+Root/marker identities are rechecked; whole-component rollback and non-hostile private-directory
+assumptions remain unchanged. Eleven authored tests are UNRUN during the compilation pause.
+[Enforcement paths and limits](communication-recovery/CHAT-V2-GROUP-EXCLUSION.md).
+
 ## Closed initial SDK graph admission (5 November; authored, UNRUN)
 
 An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical

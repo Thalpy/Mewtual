@@ -253,10 +253,7 @@ impl ServerStore {
         let runtime = self.chat_mount.locked()?;
         // SAME admission -> bounded catalog, before any pin/head/Root subordinate. Cold JOIN
         // sources remain exclusions even before they activate a process-local predecessor.
-        self.require_no_pending_checkpoint_join_source(
-            plan.capture.key.group(),
-            plan.capture.key.signer(),
-        )?;
+        self.require_no_pending_checkpoint_join_group(plan.capture.key.group())?;
         validate_plan_source(self, source, &plan, &runtime)?;
         drop(runtime);
         Ok(plan)
@@ -278,10 +275,7 @@ impl ServerStore {
         // Both cloned keys and custody are bounded/paid and prepared outside all writers.
         let entry = (!plan.registered).then(|| plan.prepared_entry());
         let mut runtime = self.chat_mount.locked()?;
-        self.require_no_pending_checkpoint_join_source(
-            plan.capture.key.group(),
-            plan.capture.key.signer(),
-        )?;
+        self.require_no_pending_checkpoint_join_group(plan.capture.key.group())?;
         validate_plan_source(self, source, plan, &runtime)?;
         if plan.registered {
             let permit = ArchiveFounderAdmission {
@@ -353,10 +347,7 @@ impl ServerStore {
         effect: impl FnOnce(&ArchiveFounderAdmission<'_, T, R>) -> Result<O, AppError>,
     ) -> Result<O, AppError> {
         let runtime = self.chat_mount.locked()?;
-        self.require_no_pending_checkpoint_join_source(
-            plan.capture.key.group(),
-            plan.capture.key.signer(),
-        )?;
+        self.require_no_pending_checkpoint_join_group(plan.capture.key.group())?;
         if !plan.registered && plan.saved_foundation.is_none() {
             return Err(refused());
         }
@@ -386,10 +377,7 @@ impl ServerStore {
         saved: Arc<SavedFoundingIntent>,
     ) -> Result<(), AppError> {
         let mut runtime = self.chat_mount.locked()?;
-        self.require_no_pending_checkpoint_join_source(
-            plan.capture.key.group(),
-            plan.capture.key.signer(),
-        )?;
+        self.require_no_pending_checkpoint_join_group(plan.capture.key.group())?;
         validate_plan_source(self, source, plan, &runtime)?;
         if let Some(original) = &plan.saved_foundation {
             if !Arc::ptr_eq(original, &saved) {

@@ -72,6 +72,70 @@ fn begin(store: &ServerStore, peer: u64) -> Attempt {
         )
         .unwrap()
 }
+
+#[test]
+fn same_initializer_repairs_current_scope_barrier_before_rechecking_its_immutable_pin() {
+    use std::sync::atomic::Ordering;
+    let (directory, store, mut rng) = store();
+    let mut attempt = begin(&store, 0xc071);
+    let scope = attempt.private.reserve_scope(&store, &mut rng).unwrap();
+    // Initializing is already saved. This real fault is consumed only by the later Current
+    // admission flush, after actual pin and canonical head saves, not a mocked covering result.
+    store.chat_parent_sync_failure.store(true, Ordering::SeqCst);
+    assert!(attempt.retry(&store, &mut rng).is_err());
+    assert!(attempt.saved.is_some());
+    assert_eq!(
+        attempt.private.preparation().unwrap().nonce(),
+        scope.nonce()
+    );
+    let canonical_path = canonical_path(directory.path(), &attempt);
+    let canonical = fs::read(&canonical_path).unwrap();
+    let pins = fs::read(directory.path().join("chat-owner-pins.bin")).unwrap();
+    let owned = attempt.retry(&store, &mut rng).unwrap();
+    assert!(owned.is_live());
+    assert!(owned.server.sync.durable_send_context().is_ok());
+    assert_eq!(
+        fs::read(directory.path().join("chat-owner-pins.bin")).unwrap(),
+        pins
+    );
+    assert_eq!(
+        fs::read(canonical_path).unwrap(),
+        canonical,
+        "exact saved head is not re-encoded during scope retry"
+    );
+}
+
+#[test]
+fn revoked_original_initializer_cannot_flush_dirty_scope_as_a_pin_retry() {
+    use rand_core::RngCore;
+    use std::sync::atomic::Ordering;
+    let (directory, store, mut rng) = store();
+    let mut attempt = begin(&store, 0xc072);
+    let scope = attempt.private.reserve_scope(&store, &mut rng).unwrap();
+    store.chat_parent_sync_failure.store(true, Ordering::SeqCst);
+    assert!(attempt.retry(&store, &mut rng).is_err());
+    assert!(attempt.saved.is_some());
+    let admissions = fs::read(directory.path().join("chat-admissions.bin")).unwrap();
+    let pins = fs::read(directory.path().join("chat-owner-pins.bin")).unwrap();
+    scope.revoker().revoke();
+    let mut unchanged = rng.clone();
+    assert!(store
+        .lock_old_owner_pin_admission(&scope, &mut rng)
+        .is_err());
+    assert_eq!(
+        rng.next_u64(),
+        unchanged.next_u64(),
+        "revoked original must refuse before repair encryption"
+    );
+    assert_eq!(
+        fs::read(directory.path().join("chat-admissions.bin")).unwrap(),
+        admissions
+    );
+    assert_eq!(
+        fs::read(directory.path().join("chat-owner-pins.bin")).unwrap(),
+        pins
+    );
+}
 fn canonical_path(directory: &std::path::Path, attempt: &Attempt) -> std::path::PathBuf {
     let prepared = attempt.prepared.as_ref().unwrap();
     directory.join("owner-state").join(format!(

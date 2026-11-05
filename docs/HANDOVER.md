@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Group-wide negative V2 exclusion (5 November; authored, UNRUN)
+
+Existing ID2 mounts now check the fixed signer-independent `g-` group reservation before old
+per-signer target lookup. Generic captures, old positive save/resolve/storage, pin/numeric reads
+and unexposed recovery preserve that fence; retirement/exact negative repair and unrelated
+groups remain available. Old pin writes hold admission before pins/Root. The old ID2 opener
+also rejects Current seed/marker artifacts before older cleaners. New founder pre-row work
+checks retained JOIN sources across ALL signers, including cold Paused and admitted unwritten
+candidates. Eleven new regressions are authored UNRUN; final actual static review is clear after
+the stale-pin wait race fix. No compiler/tests/build ran. This supplies
+no ID3 handler, group writer/registry, Current or live protocol activation.
+[Boundary and remaining work](communication-recovery/CHAT-V2-GROUP-EXCLUSION.md).
+
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.

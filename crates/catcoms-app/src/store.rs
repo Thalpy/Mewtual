@@ -553,6 +553,7 @@ mod persistence {
     use super::*;
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
     mod cold_source_read;
+    mod current_group;
     pub use cold_source_read::RetainedBootstrapSourceData;
     pub use cold_source_read::{
         GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
@@ -2773,6 +2774,11 @@ mod persistence {
         ) -> Result<bool, AppError> {
             use critical_namespaces::archive_bootstrap as archive;
             use critical_namespaces::refused;
+            // A permanent V2 GROUP reservation excludes every old signer, even if a catalog
+            // rollback left only ID2 visible and this particular per-signer target is absent.
+            if !self.archive_group_absent_under_original_root(mounted, group)? {
+                return Ok(false);
+            }
             if mounted.negative.is_cancelled()
                 || !std::sync::Arc::ptr_eq(&mounted.mount, &self.registry_mount())
             {

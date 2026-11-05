@@ -38,6 +38,10 @@ pub(super) struct StoreOwnerState {
     #[cfg(test)]
     pub(super) before_owner_initialization_pool: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
+    pub(super) before_old_owner_pin_lock: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    pub(super) before_old_owner_pin_admission: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     pub(super) operations_marker_fault: std::sync::atomic::AtomicU8,
 }
 

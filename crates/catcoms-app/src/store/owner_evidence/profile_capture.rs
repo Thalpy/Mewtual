@@ -61,6 +61,10 @@ impl CapturedOwnerProfilePin {
         if roots.dirty {
             return Err(pins::refused());
         }
+        // Keep pins held through Root: actual new-group registration/mkdir takes the same
+        // admission->pins->canonical->Root order. This helper itself never relocks admission,
+        // because initialization also invokes it while that original writer is already held.
+        store.require_no_v2_group_directory(group)?;
         if roots
             .table
             .as_ref()
@@ -157,6 +161,11 @@ impl ServerStore {
         {
             return Err(pins::refused());
         }
+        #[cfg(test)]
+        self.run_before_old_owner_pin_admission()?;
+        let admission = self.lock_old_owner_pin_admission(original, rng)?;
+        #[cfg(test)]
+        self.run_before_old_owner_pin_lock()?;
         let negative = self.chat_mount.observer();
         let mut roots = self
             .owner_evidence
@@ -166,6 +175,7 @@ impl ServerStore {
         if !roots.managed {
             return Err(pins::refused());
         }
+        admission.validate_original()?;
         let table = roots.table.as_mut().ok_or_else(pins::refused)?;
         if let Some(pin) = table.get(prepared.group()) {
             if pin.profile != prepared.profile_id() || &pin.founder != prepared.founder() {
@@ -190,6 +200,7 @@ impl ServerStore {
             roots.dirty = true;
         }
         if roots.dirty {
+            admission.validate_original()?;
             self.flush_owner_pins(&mut roots, &negative, rng)?;
         }
         if negative.is_cancelled() || original.reservation_observer().is_cancelled() {
@@ -259,6 +270,11 @@ impl ServerStore {
         {
             return Err(pins::refused());
         }
+        #[cfg(test)]
+        self.run_before_old_owner_pin_admission()?;
+        let admission = self.lock_old_owner_pin_admission(original, rng)?;
+        #[cfg(test)]
+        self.run_before_old_owner_pin_lock()?;
         let negative = self.chat_mount.observer();
         let mut roots = self
             .owner_evidence
@@ -268,6 +284,7 @@ impl ServerStore {
         if !roots.managed {
             return Err(pins::refused());
         }
+        admission.validate_original()?;
         let table = roots.table.as_mut().ok_or_else(pins::refused)?;
         if let Some(pin) = table.get(verified.group()) {
             if pin.profile != captured.profile() || &pin.founder != captured.founder() {
@@ -292,10 +309,44 @@ impl ServerStore {
             roots.dirty = true;
         }
         if roots.dirty {
+            admission.validate_original()?;
             self.flush_owner_pins(&mut roots, &negative, rng)?;
         }
         if negative.is_cancelled() || original.reservation_observer().is_cancelled() {
             return Err(pins::refused());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl ServerStore {
+    /// Precisely AFTER the actual private-source precheck, before the admission acquisition.
+    /// The earlier format getter must not consume this seam and hide the race.
+    fn run_before_old_owner_pin_admission(&self) -> Result<(), AppError> {
+        let hook = self
+            .owner_evidence
+            .before_old_owner_pin_admission
+            .lock()
+            .map_err(|_| pins::refused())?
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(())
+    }
+
+    /// Test-only negative seam after the actual admission acquisition and before pins. Release
+    /// the seam mutex before the callback; no fake successful storage/root permit is supplied.
+    fn run_before_old_owner_pin_lock(&self) -> Result<(), AppError> {
+        let hook = self
+            .owner_evidence
+            .before_old_owner_pin_lock
+            .lock()
+            .map_err(|_| pins::refused())?
+            .take();
+        if let Some(hook) = hook {
+            hook();
         }
         Ok(())
     }

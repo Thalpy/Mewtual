@@ -29,6 +29,7 @@ pub(in crate::store) mod archive_current_namespace_codec;
 #[cfg(test)]
 pub(in crate::store) mod archive_current_codec;
 mod catalog_envelope;
+pub(in crate::store) mod current_group;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
     ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -64,7 +65,11 @@ pub(in crate::store) const ARCHIVE_DECLARATION_SEED: &str = "chat-critical-names
 /// every kind of presence, including an empty directory, a dangling link or an unreadable
 /// object. In particular, `Path::exists` would turn a dangling link into false absence.
 fn refuse_unimplemented_archive_storage(dir: &Path) -> Result<(), AppError> {
-    for name in [ARCHIVE_BOOTSTRAP_ROOT, ARCHIVE_DECLARATION_SEED] {
+    for name in [
+        ARCHIVE_BOOTSTRAP_ROOT,
+        ARCHIVE_DECLARATION_SEED,
+        current_group::DECLARATION_SEED,
+    ] {
         match fs::symlink_metadata(dir.join(name)) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             _ => return Err(refused()),

@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Fixed negative Current destinations (5 November; authored, UNRUN)
+
+The old ID2 physical inspector refuses `chat-critical-namespaces.current.seed` or
+`chat-owner-v2/current-layout.bin` before older cleaners. It does not support ID3. A group path
+is literal `g-` plus the complete signer-independent vault/root/group hash; any presence fences
+old captures/readers/positive savers for every signer. New founder source preparation also checks
+the actual fixed-five retained JOIN catalog by group. No public Current or group-write API is
+added. Eleven regressions are authored UNRUN; no execution readiness is claimed.
+[Exact negative-only boundary](communication-recovery/CHAT-V2-GROUP-EXCLUSION.md).
+
 ## Closed initial SDK graph admission (5 November; authored, UNRUN)
 
 An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical

@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Group-wide V2 negative fence (5 November; authored, UNRUN)
+
+ID2 mounted-root checks now include the signer-independent fixed `g-` reservation. Existing old
+positive/read/capture and unexposed-negative paths refuse any presence, while deliberate
+retirement and exact negative repair remain separate. Actual old pin writes retain admission
+before pins/Root. New founder pre-row work checks all fixed-five retained JOIN source summaries
+by group, not only its signer. The ID3 constructor/registry/Current writer remain unimplemented.
+[Actual negative consumers and limitations](communication-recovery/CHAT-V2-GROUP-EXCLUSION.md).
+
 ## Closed initial SDK graph admission (5 November; authored, UNRUN)
 
 An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical

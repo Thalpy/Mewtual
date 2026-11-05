@@ -358,6 +358,7 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        super::current_group::refuse_unsupported_layout(&self.dir)?;
         if actual_format != VaultFormat::CriticalNamespaces {
             return Err(refused());
         }
