@@ -198,6 +198,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         state.bind(binding.publication_authority())
     }
 
+    /// Negative-only validation of a restored first checkpoint against the mounted host's
+    /// independently captured immutable root. It creates no runtime binding or publication
+    /// authority. A staged source must pass this BEFORE its file/Current promotion; the actual
+    /// saved/current/writer transfer repeats the check through `bind_managed_owner_evidence`.
+    pub fn validate_owner_initialization_chain(
+        &self,
+        profile: OwnerFactId,
+        founder: &[u8; 32],
+        subject: &[u8; 32],
+    ) -> Result<(), SyncError> {
+        let state = self
+            .initial_owner_evidence
+            .as_ref()
+            .filter(|state| state.profile() == profile)
+            .ok_or(SyncError::ChatScopeUnavailable)?;
+        state.verify_local_chain(&self.group, &self.device, founder, subject)
+    }
+
     /// Saved metadata only. A tail/profile label cannot construct canonical runtime authority.
     pub fn owner_evidence_profile_id(&self) -> Option<OwnerFactId> {
         self.initial_owner_evidence

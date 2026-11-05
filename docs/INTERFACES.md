@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Exact initial owner stage restore (5 November; authored, unexecuted)
+
+The same opaque `prepare_owner_evidence_restore` entry first uses canonical bytes and only falls
+back to its fixed original stage under exact v4/Fresh+Initializing custody. Its source captures a
+private Canonical/InitialStage location; no public path, saved boolean or raw restore constructor
+exists. `validate_owner_initialization_chain(profile, founder, subject)` is negative-only Sync
+validation against the actual captured immutable pin, before stage/Current promotion. It installs
+no runtime; the Saved+Current+writer bind repeats verification. Subordinate format checks use the
+already-held permit's format instead of recursively locking the Store. Retained exact pending
+candidate plus original plaintext governs every retry, including canonical visible after a failed
+move/parent barrier. Current alone cannot issue Saved. Unknown, foreign, retired and v5 source
+cannot authorize this S1 promotion. Seventeen new regressions are authored/unexecuted. Actual member
+App-stage acceptance still needs its genuine owner-side producer; host/SDK activation remains open.
+See [the narrow stage contract](communication-recovery/CHAT-OWNER-STAGED-INITIALIZATION-RECOVERY.md).
+
 ## Private canonical owner initialization (5 November; inactive checkpoint)
 
 The Store's founder, destination-member and restart APIs now consume actual private Server/MLS
@@ -18,7 +33,8 @@ Its retry saves retirement under original admission, pool/head and Store custody
 Current, adopt a replacement mount, invent missing history or make a Server. A private creator
 before writer registration can lose to that negative transition and must refuse its old source
 after acquiring the pool. Orphan stages are preserved and charged during startup inventory.
-Native automatic startup handling, closed-lineage reporting and exact stage-only repair remain open.
+Exact v4 first-stage repair is integrated as described above. Native automatic startup handling
+and closed-lineage reporting remain open.
 
 The exact-pinned MLS storage patch exposes actual table backing under the existing provider guard.
 The bounded encoder separately admits output and retained Vec capacities; the bounded provider

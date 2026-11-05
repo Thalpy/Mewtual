@@ -146,6 +146,24 @@ impl ChatAdmissionFinish {
     }
 }
 impl ChatAdmissionPreparation {
+    /// Negative-only check for the original first-initialization source. A decoded attempt
+    /// digest cannot create fresh custody: this preparation already came from the mounted
+    /// independent lineage table, and final storage still requires its actual held permit.
+    pub(crate) fn validate_initialization_attempt(
+        &self,
+        attempt: &[u8; 32],
+    ) -> Result<(), AppError> {
+        if self.record.phase != Phase::Initializing
+            || self.record.origin != Origin::Fresh
+            || &self.record.provenance != attempt
+            || self.mount.is_cancelled()
+            || self.admission.is_cancelled()
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     pub fn nonce(&self) -> [u8; 32] {
         self.record.nonce
     }
@@ -326,6 +344,21 @@ impl MountOwner {
     }
     pub(super) fn revoke(&self) {
         self.life.revoke();
+    }
+    /// Test-only observation immediately before the next actual admission lock. Expose only
+    /// contention, never the private Runtime or a fake permit, so races can assert that a real
+    /// retirement is waiting behind admitted subordinate filesystem work without sleeps.
+    #[cfg(test)]
+    pub(in crate::store) fn observe_next_writer_contention(
+        &self,
+        observer: impl FnOnce(bool) + Send + 'static,
+    ) {
+        *self.before_writer.lock().unwrap() = Some(Box::new(move |runtime| {
+            observer(matches!(
+                runtime.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+        }));
     }
     fn locked(&self) -> Result<std::sync::MutexGuard<'_, Runtime>, AppError> {
         if !self.life.live() {

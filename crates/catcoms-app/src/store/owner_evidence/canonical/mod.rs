@@ -31,6 +31,7 @@ pub use restore::{
     OfflineOwnerEvidence, OwnerRestoreClassification, OwnerRestoreInitialization,
     OwnerRestorePreparation, OwnerUnexposedInitialization, OwnerUnexposedRetirement,
 };
+pub(in crate::store) use source::OwnerSourceLocation;
 pub(crate) use source::ValidatedOwnerSnapshot;
 
 const MAX_SNAPSHOT_BYTES: usize = 144 * 1024 * 1024;

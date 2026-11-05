@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive exact first-owner stage recovery (5 November; validation paused)
+
+An authenticated stage is still untrusted saved evidence, not fresh provenance or runtime custody.
+The S1 fallback accepts only the actual mounted v4 namespace, canonical absence, exact independent
+Fresh+Initializing lineage and captured immutable root. The closed decoder/actual local credential
+and original pinned chain must pass before stage promotion or Current inventory. All fixed-name
+I/O stays under original admission -> head; same pending metadata plus complete plaintext preserves
+uncertain writes. Actual file/root/parent and Current covering barriers precede the sole new writer.
+Negative revocation is checked at the actual move edge, and durable retirement waits behind an
+already admitted saver. Same-vault reopening cannot renew old observers. Canonical presence blocks
+stage fallback even when canonical parsing fails; foreign/unknown/v5 source is preserved/refused.
+
+This is local state recovery only. A missing local stage does not establish that a remote owner
+never performed an Add, and local reservation closure is not MLS removal or permission to remint
+an invite. Genuine owner save-before-Welcome, original private join/KP custody, complete SDK heap
+bounds, automatic native host admission and physical failure tests remain separate open gates.
+The seventeen App-stage regressions are authored, not executed; actual-diff review is not runtime
+evidence. See [the contract](communication-recovery/CHAT-OWNER-STAGED-INITIALIZATION-RECOVERY.md).
 ## Canonical owner checkpoint custody (5 November; inactive)
 
 Numeric aliases and authenticated raw tails cannot create a fresh owner context. Private founding
@@ -13,7 +31,8 @@ Source-absent Fresh Initializing recovery is strictly negative: it observes and 
 original row, registered head and both canonical/staged paths under the real lock order. It retains
 all source bytes and non-evicting lineage. A later Current or replacement mount refuses. A private
 creator not yet registered may lose this race and must fail its post-pool observer check. Stage-only
-repair and native automatic startup are unfinished; missing bytes never prove complete empty history.
+repair is now limited to the exact v4 first-stage path above. Native automatic startup is
+unfinished; missing bytes never prove complete empty history.
 
 The bounded provider paths admit actual table backing and copied/retained byte buffers, preserving
 the legacy format and strict restored-device/group check. They do not bound all SDK typed-deserialize

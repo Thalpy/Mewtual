@@ -165,6 +165,14 @@ impl PrivateManagedRestoreAttempt {
             }
             ChatAdmissionResolution::Retired => return Err(refused()),
         }
+        // This check has no positive runtime side effect. In particular, a stage must not be
+        // promoted or turn its independent row Current before its original externally pinned
+        // chain and actual own credential have been verified. Final bind checks them again.
+        server.sync.validate_owner_initialization_chain(
+            self.source.profile(),
+            self.source.founder(),
+            self.source.signer(),
+        )?;
         self.source.validate_original(original_store)?;
         Ok(PrivateManagedRestoredServer {
             server: Some(server),

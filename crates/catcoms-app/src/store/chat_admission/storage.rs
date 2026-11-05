@@ -100,6 +100,13 @@ impl<'writer> ChatAdmissionStoragePermit<'writer> {
         self.mode
     }
 
+    /// Negative format classification from the SAME already-held admission writer. Subordinate
+    /// savers must not call `ServerStore::chat_vault_format`: it would re-enter this mutex and
+    /// deadlock. The copied enum grants no custody independently of this borrowed permit.
+    pub(crate) fn vault_format(&self) -> Result<catcoms_storage::VaultFormat, AppError> {
+        self.runtime.format.ok_or_else(refused)
+    }
+
     /// Recheck AFTER taking a subordinate head writer and immediately before synchronous I/O.
     /// This checks the actual physical Store and the exact group/full signer/source owner. A
     /// negative revoker takes neither writer, so the original observer must also be reread.

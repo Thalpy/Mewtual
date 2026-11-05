@@ -44,6 +44,35 @@ fn actual_selected_kp_member_initialization_restores_through_closed_provider_str
         restored.owner_evidence_profile_id(),
         Some(verified.profile_id())
     );
+    // The actual stage consumer invokes this negative check before any file/Current move.
+    // Original selected-KP chain succeeds; neither a different pin nor a different subject can
+    // choose authority, and success still supplies no live runtime or publication context.
+    restored
+        .validate_owner_initialization_chain(
+            verified.profile_id(),
+            f.facts[0].issuer(),
+            verified.subject(),
+        )
+        .unwrap();
+    let mut wrong_founder = *f.facts[0].issuer();
+    wrong_founder[0] ^= 1;
+    assert!(restored
+        .validate_owner_initialization_chain(
+            verified.profile_id(),
+            &wrong_founder,
+            verified.subject()
+        )
+        .is_err());
+    assert!(restored
+        .validate_owner_initialization_chain(
+            f.facts[1].id(),
+            f.facts[0].issuer(),
+            verified.subject()
+        )
+        .is_err());
+    assert!(restored
+        .validate_owner_initialization_chain(verified.profile_id(), f.facts[0].issuer(), &[0; 32])
+        .is_err());
     assert!(restored.fresh_chat_admission().is_none());
     assert!(restored.durable_send_context().is_err());
     // This proves exact-KP/codec restoration only; no remote fsync, local Current or native

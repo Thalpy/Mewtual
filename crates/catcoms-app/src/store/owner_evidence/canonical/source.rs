@@ -9,6 +9,14 @@ use super::*;
 use crate::store::{ChatAdmissionKey, ChatAdmissionResolution};
 use std::ops::Range;
 
+/// Fixed ORIGINAL names only. The stage variant is admitted solely for v4, generation-one
+/// Fresh+Initializing recovery; it never selects an operation journal or a later successor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::store) enum OwnerSourceLocation {
+    Canonical,
+    InitialStage,
+}
+
 /// Non-Clone/nonserialized canonical source. Holds only original weak lifetime observations,
 /// charged plaintext and the exact external scope classification; numeric mirrors/raw bytes
 /// cannot construct it. Retired classification creates an OfflineRetired capsule BEFORE T.
@@ -21,6 +29,7 @@ pub(crate) struct ValidatedOwnerSnapshot {
     pub(super) plain: Zeroizing<Vec<u8>>,
     snapshot: Range<usize>,
     pub(super) file_cap: usize,
+    pub(super) location: OwnerSourceLocation,
     // Captured with the SAME read-fee reservation, never selected by a later caller or reread
     // from a replacement mount. These are negative resource limits, not runtime authority.
     restore_limits: catcoms_sync::OwnerInitializationRestoreLimits,
@@ -105,7 +114,8 @@ impl ServerStore {
         signer: [u8; 32],
     ) -> Result<ValidatedOwnerSnapshot, AppError> {
         pin.validate_original(self, pin.group())?;
-        if !self.chat_vault_format()?.requires_owner_evidence() {
+        let format = self.chat_vault_format()?;
+        if !format.requires_owner_evidence() {
             return Err(refused());
         }
         let identifier = key(pin.group(), &signer);
@@ -139,8 +149,20 @@ impl ServerStore {
             )
         };
         let original = cell.read_stamp()?;
+        // A present canonical source always wins, including when it is malformed. Falling
+        // back after a failed canonical parse could reinstall a stale first-stage candidate.
+        let location = if self.owner_canonical_record_exists(&identifier)? {
+            OwnerSourceLocation::Canonical
+        } else {
+            // Keep this exact v4 check even when the positive canonical format guard above
+            // grows to support v5. A v5 stage can cover operation/debt state, not this S1 path.
+            if format != catcoms_storage::VaultFormat::OwnerEvidence {
+                return Err(refused());
+            }
+            OwnerSourceLocation::InitialStage
+        };
         let plain = {
-            let (_file, raw) = self.read_owner_canonical_record(&identifier, cap)?;
+            let (_file, raw) = self.read_owner_restore_record(&identifier, cap, location)?;
             Zeroizing::new(unseal(&self.keys.db_key()?, &crate::store::unframe(&raw)?)?)
         };
         let (labels, meta, snapshot) = decode(&plain, &pin, &signer)?;
@@ -149,6 +171,18 @@ impl ServerStore {
         }
         let identity = ChatAdmissionKey::new(pin.group(), signer)?;
         let admission = self.resolve_chat_admission(&identity, labels.nonce)?;
+        if location == OwnerSourceLocation::InitialStage {
+            // Known Retired bytes can remain an offline capsule. Current plus a missing .bin
+            // is never permission to reinstall a possibly stale stage. v5 is excluded by the
+            // actual mounted-format gate above, independently of any saved source labels.
+            match &admission {
+                ChatAdmissionResolution::Initializing(preparation) => {
+                    preparation.validate_initialization_attempt(&meta.attempt)?;
+                }
+                ChatAdmissionResolution::Retired => {}
+                ChatAdmissionResolution::Current(_) => return Err(refused()),
+            }
+        }
         let source = ValidatedOwnerSnapshot {
             pin,
             cell,
@@ -158,6 +192,7 @@ impl ServerStore {
             plain,
             snapshot,
             file_cap: cap,
+            location,
             restore_limits,
             _fee: fee,
         };

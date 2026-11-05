@@ -2,6 +2,8 @@
 use super::*;
 use catcoms_rt::RequestAuthority;
 
+mod staged_restore;
+
 pub(super) struct HeadCell {
     pub(super) key: [u8; 32],
     identity: Arc<()>,
@@ -484,7 +486,13 @@ impl OwnerHeadWriteGuard<'_> {
             || permit.domain() != source.domain()
             || permit.nonce() != source.nonce()
             || permit.revision() != source.revision()
-            || self.state.pending.is_some()
+        {
+            return Err(refused());
+        }
+        if source.location == source::OwnerSourceLocation::InitialStage {
+            return self.establish_initial_stage_barrier(permit, source);
+        }
+        if self.state.pending.is_some()
             || self
                 .state
                 .current

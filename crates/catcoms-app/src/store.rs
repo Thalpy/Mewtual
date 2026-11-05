@@ -1506,8 +1506,41 @@ mod persistence {
             key: &[u8; 32],
             cap: usize,
         ) -> Result<(File, Vec<u8>), AppError> {
+            self.read_owner_restore_record(
+                key,
+                cap,
+                owner_evidence::canonical::OwnerSourceLocation::Canonical,
+            )
+        }
+
+        /// Presence is deliberately independent of parsing. A malformed canonical name must
+        /// prevent fallback to an older stage, rather than looking like a missing head.
+        pub(super) fn owner_canonical_record_exists(
+            &self,
+            key: &[u8; 32],
+        ) -> Result<bool, AppError> {
             let parent = self.owner_canonical_directory()?;
-            let path = parent.join(format!("{}.bin", hex::encode(key)));
+            match fs::symlink_metadata(parent.join(format!("{}.bin", hex::encode(key)))) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(AppError::Io(error.to_string())),
+            }
+        }
+
+        /// Both names are fixed by the authenticated logical key. The private source selects
+        /// InitialStage only after the actual v4-only/first-initialization classification.
+        pub(super) fn read_owner_restore_record(
+            &self,
+            key: &[u8; 32],
+            cap: usize,
+            location: owner_evidence::canonical::OwnerSourceLocation,
+        ) -> Result<(File, Vec<u8>), AppError> {
+            let parent = self.owner_canonical_directory()?;
+            let suffix = match location {
+                owner_evidence::canonical::OwnerSourceLocation::Canonical => "bin",
+                owner_evidence::canonical::OwnerSourceLocation::InitialStage => "replace.tmp",
+            };
+            let path = parent.join(format!("{}.{suffix}", hex::encode(key)));
             let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
             if !metadata.file_type().is_file() || metadata.len() > cap as u64 {
                 return Err(AppError::Invalid(
@@ -1539,6 +1572,78 @@ mod persistence {
                 ));
             }
             Ok((file, raw))
+        }
+
+        /// Promote ONLY the same authenticated original first-stage candidate while its
+        /// original admission/head writers are held. The caller has compared all plaintext;
+        /// no re-sealing, generic stage cleanup, replacement or inferred success occurs here.
+        /// Its following canonical opened-file/parent barrier must still finish before Saved.
+        pub(super) fn promote_opened_owner_initial_stage(
+            &self,
+            permit: &chat_admission::ChatAdmissionStoragePermit<'_>,
+            head: &owner_evidence::canonical::OwnerHeadWriteGuard<'_>,
+            file: File,
+        ) -> Result<(), AppError> {
+            if permit.vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence
+                || permit.mode() != chat_admission::ChatAdmissionStorageMode::Initializing
+            {
+                return Err(AppError::Invalid(
+                    "unsupported staged owner admission".into(),
+                ));
+            }
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            let key = head.identifier(permit)?;
+            let parent = self.owner_canonical_directory()?;
+            let path = parent.join(format!("{}.bin", hex::encode(key)));
+            let stage = parent.join(format!("{}.replace.tmp", hex::encode(key)));
+            file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
+            #[cfg(test)]
+            if self
+                .owner_evidence
+                .stage_sync_failure
+                .load(Ordering::SeqCst)
+            {
+                return Err(AppError::Io("test-only stage sync refusal".into()));
+            }
+            // Close the exact synchronized stage handle before rename on Windows. Cooperative
+            // writers cannot change this name while the same admission/head are held; the
+            // vault's process guard excludes another mounted writer. Raw same-user disk
+            // tampering is outside that guarantee and is never treated as new authority.
+            drop(file);
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(AppError::Invalid("canonical owner source appeared".into())),
+                Err(error) => return Err(AppError::Io(error.to_string())),
+            }
+            // Negative revocation is sampled at the actual admission edge. Once admitted,
+            // the held admission writer orders this write before durable retirement completes.
+            #[cfg(test)]
+            {
+                let hook = self
+                    .owner_evidence
+                    .before_owner_stage_admission
+                    .lock()
+                    .unwrap()
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            permit.validate_original(self, permit.group(), permit.signer())?;
+            fs::rename(stage, path).map_err(|error| AppError::Io(error.to_string()))?;
+            #[cfg(test)]
+            {
+                let hook = self
+                    .owner_evidence
+                    .after_owner_stage_admission
+                    .lock()
+                    .unwrap()
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            Ok(())
         }
 
         /// Actual file + leaf-parent barrier for the exact authenticated opened canonical source.

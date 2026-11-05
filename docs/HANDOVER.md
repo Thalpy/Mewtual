@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Exact first-owner stage recovery (5 November; authored, unexecuted)
+
+The inactive canonical restore now admits an original v4 stage only when its canonical name is
+absent and the independently saved Fresh+Initializing row, immutable pin and original attempt
+match. Closed private restore verifies the pinned chain/actual local credential before moving any
+file or making Current. Original admission -> head custody retains exact pending state through
+stage sync, move/parent and inventory faults; retry compares complete original plaintext and crosses
+the actual file/parent barrier again. A present malformed canonical never falls back to a stage;
+Retired is offline and Current with a missing canonical cannot reinstall one. v5 operation debt is
+outside this fallback. Review corrected a recursive format-getter deadlock using the already-held
+permit; seventeen regressions, including real retirement contention at the move boundary, are
+authored and UNRUN. Actual selected-KP App-stage acceptance awaits the genuine owner covering
+Add/certificate/Welcome producer; native automatic startup and complete SDK heap bounds remain open.
+See [the stage recovery contract](communication-recovery/CHAT-OWNER-STAGED-INITIALIZATION-RECOVERY.md).
+
 ## Critical owner-operation wrapper (5 November; implementation review, validation paused)
 
 The next inactive source slice adds vault v5 with a distinct KDF domain while preserving the DEK,
@@ -85,7 +100,8 @@ uncompiled and unexecuted. Their destination-member verifier checks the actual s
 Welcome, credential and incarnation; a generic downloaded fact chain cannot replace that source.
 Safe negative retirement of a never-exposed, source-absent initialization is now integrated, with
 12 authored regressions still unexecuted. It preserves/charges orphan stages rather than deleting
-possible source bytes; native automatic restart and exact stage-only repair remain open.
+possible source bytes. Exact v4 first-stage recovery is now integrated as described above;
+native automatic restart remains open.
 The bounded MLS encoder now checks actual provider-table backing and retained Vec capacities under
 the same guard, through a narrow exact-pinned storage patch shared by both workspaces. Its new
 regressions are also unexecuted; SDK restore expansion and active-host admission remain open.
@@ -259,7 +275,7 @@ canonical stages. Twelve authored regressions cover actual factory/reopen, both 
 negative faults, stage-before-startup, stale creator and Current orderings, exhausted revision,
 cross-mount scope and full canonical slots. Compilation/tests/builds remain paused by user request;
 none of this revision's regressions have executed. Native automatic closed-lineage startup and
-exact stage-only repair remain open. See
+automatic host consumption remain open. The subsequent S1 stage slice above is separate. See
 [the negative recovery contract](communication-recovery/CHAT-UNEXPOSED-INITIALIZATION-RECOVERY.md).
 
 
