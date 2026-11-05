@@ -44,13 +44,18 @@ row changes close only the invalidated basis; old Retired/AlreadyCurrent no-ops 
 same-basis tasks. Pausing closes the old task before an uncertain schedule write. Retained weak
 registry metadata keeps its own shared fee after task Drop and never owns the sender/session.
 
-Fourteen regressions are authored UNRUN; compilation/tests/build remain paused. This is neither
+Thirteen regressions are authored UNRUN; compilation/tests/build remain paused. This is neither
 a five-groups lifetime quota nor a completed journal execution path. Durable arm/allowance,
 retained reply, ScopeIntent/Frozen/canonical terminal consumers and production root-kind2 joining
 remain open. The eventual actual intent-backed scope installer must preserve the SAME original
 sender through its own Current handoff and release the scarce slot only after an exact durable
 terminal/debt handoff; no scalar bypass/release API exists here. Existing saved-group control
 needs no new slot. [Contract](communication-recovery/CHAT-ORIGINAL-PREDECESSOR-NEGATIVE.md).
+
+The unused proposed ArchiveFounder constructor/identity accessor and its helper-only test were
+deliberately deferred until the concrete archive consumer lands. This narrows the runtime API;
+no current JOIN regression was removed or loosened. The contract retains that future negative
+test requirement. No warning suppression or placeholder caller stands in for the consumer.
 
 ## Join submission transport prerequisite (5 November; unexecuted)
 

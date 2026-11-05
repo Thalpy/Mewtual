@@ -18,7 +18,6 @@ const REGISTRY_METADATA: usize = 4096;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     JoinCheckpoint,
-    ArchiveFounder,
 }
 
 struct Entry {
@@ -122,11 +121,6 @@ pub(in crate::store) struct OriginalPredecessorTask {
     observer: RequestCancellation,
 }
 impl OriginalPredecessorTask {
-    /// Inert physical identity for a later exact-original consumer. It cannot keep the sender
-    /// alive or mint a scope, and no deserializer can construct the corresponding task owner.
-    pub(in crate::store) fn identity(&self) -> Arc<()> {
-        self.owner.identity()
-    }
     pub(in crate::store) fn close(&self) {
         self.owner.revoke();
     }
@@ -162,18 +156,6 @@ impl PreparedOriginalPredecessor {
         pool: &CriticalCatalogReadPool,
     ) -> Result<Self, AppError> {
         Self::prepare(capture, source, revision, Kind::JoinCheckpoint, pool)
-    }
-
-    /// Negative RAM-plan preparation for the concrete archive founder consumer. This does not
-    /// support catalog ID2, bless a source/disk event, or permit any row advance. The actual
-    /// caller must verify its durable source/debt exclusion before registering this task.
-    pub(in crate::store) fn archive_founder(
-        capture: &ChatAdmissionCapture,
-        source: [u8; 32],
-        revision: u64,
-        pool: &CriticalCatalogReadPool,
-    ) -> Result<Self, AppError> {
-        Self::prepare(capture, source, revision, Kind::ArchiveFounder, pool)
     }
 
     fn prepare(
@@ -258,9 +240,9 @@ impl RequestAuthority for OriginalBasisAuthority {
 }
 
 impl ServerStore {
-    /// Original closed-consumer registration, not a general namespace support callback. JOIN
-    /// validates its exact saved catalog source/file/root; the actual archive RAM-plan consumer
-    /// must instead confirm its own original source/debt exclusion. Catalog comes AFTER admission.
+    /// Original JOIN registration, not a general namespace support callback. The concrete
+    /// consumer validates its exact saved catalog source/file/root, with catalog AFTER admission.
+    /// A future archive kind must add its actual source/debt consumer together with that kind.
     /// That callback cannot allocate/drop large data/fees, await or re-enter admission getters.
     /// We retain admission after it returns, so another original catalog mutation cannot race
     /// the final recheck/registration even though the callback has released its catalog guard.

@@ -15,10 +15,10 @@ Observers may retain identity/Notify but never that sender. Registry expiry is N
 persisted source/debt is absent: the slot remains an exclusion until an exact supported source
 transition/terminal consumer resolves it. No opportunistic expiry eviction.
 
-Closed kinds are `JoinCheckpoint` and `ArchiveFounder`. The actual JOIN consumer is connected
-here; the archive constructor supplies negative RAM-plan lifetime only for its separate concrete
-consumer. It does not declare an archive handler or prove a disk event. Existing JOIN/ARCHIVE
-catalog support is unchanged; ID2 remains unsupported by the Pending opener.
+The only current runtime kind is `JoinCheckpoint`, with its actual JOIN consumer connected.
+The planned `ArchiveFounder` kind/constructor is deliberately deferred until its concrete
+source/debt consumer exists. No placeholder caller or warning suppression stands in for it.
+Existing catalog support is unchanged; ID2 remains unsupported by the Pending opener.
 
 Source scheduling and lifetime are distinct. One original scheduling revision can register
 once per physical mount, even after task Drop. A later SAME-source scheduling revision may
@@ -38,8 +38,6 @@ source fees. These are named logical inventories, not full allocator/RSS or SDK 
 
 ```
 PreparedOriginalPredecessor::join_checkpoint(capture, exact_source, scheduling_revision, shared_pool)
-    -> PreparedOriginalPredecessor
-PreparedOriginalPredecessor::archive_founder(capture, exact_source, revision, shared_pool)
     -> PreparedOriginalPredecessor
 ServerStore::register_original_predecessor(
     capture, &mut PreparedOriginalPredecessor,
@@ -111,7 +109,17 @@ Only an exact actual persistent terminal/debt handoff may remove the scarce regi
 the original sender stays owned by the active consumer until eventual Drop. This needs its real
 source/canonical/Current/head consumer, not a kind/status/saved boolean or success callback.
 
-Seven actual JOIN custody regressions and seven admission-family negative regressions are
+Seven actual JOIN custody regressions and six admission-family negative regressions are
 authored UNRUN. Direct source formatting/whitespace checks do not replace production compilation
 or the primary-owned required final suites. The separate Sync retained-exchange draft remains
 undeclared; persistent grants/arms/receipts and runnable recovery have not landed in this slice.
+
+## Deferred archive consumer contract
+
+The reviewed proposed `PreparedOriginalPredecessor::archive_founder(capture,source,revision,pool)`
+and `OriginalPredecessorTask::identity()` will be restored only with an actual non-test consumer.
+The archive-only draft test was intentionally removed with that unsupported runtime API, not to
+weaken a current JOIN assertion. That future actual packet must test archive exclusion before
+old generic issuance, no automatic renewal even at a larger revision after creator close,
+zero row mutation from negative registration, and exact source/debt/terminal handoff. Current
+JOIN tests remain unchanged apart from direct test-private identity inspection.

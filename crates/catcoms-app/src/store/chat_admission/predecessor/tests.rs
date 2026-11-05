@@ -189,7 +189,7 @@ fn weak_exclusion_never_keeps_task_alive_or_rebinds_same_revision_and_stale_iden
     let capture = store.capture_chat_admission(key(8)).unwrap();
     let old = register(&store, &capture, 8, 1);
     let negative = old.observer();
-    let identity = old.identity();
+    let identity = old.owner.identity();
     drop(old);
     assert!(negative.is_cancelled());
     let mut same =
@@ -198,7 +198,7 @@ fn weak_exclusion_never_keeps_task_alive_or_rebinds_same_revision_and_stale_iden
         .register_original_predecessor(&capture, &mut same, |p| p.validate_original())
         .is_err());
     let new = register(&store, &capture, 8, 3);
-    assert!(!Arc::ptr_eq(&identity, &new.identity()));
+    assert!(!Arc::ptr_eq(&identity, &new.owner.identity()));
     store
         .close_original_join_predecessor(&capture, &[8; 32], 1)
         .unwrap();
@@ -233,39 +233,4 @@ fn five_unresolved_slots_are_bounded_and_existing_saved_group_needs_no_new_slot(
     assert!(store
         .with_chat_admission_storage(&saved, |_| Ok(()))
         .is_ok());
-}
-
-#[test]
-fn archive_kind_is_negative_exclusion_without_join_schedule_renewal_or_scope_permission() {
-    let (_dir, store, _) = fixture();
-    let capture = store.capture_chat_admission(key(21)).unwrap();
-    let pool = pool();
-    let mut prepared =
-        PreparedOriginalPredecessor::archive_founder(&capture, [21; 32], 1, &pool).unwrap();
-    store
-        .register_original_predecessor(&capture, &mut prepared, |p| p.validate_original())
-        .unwrap();
-    let task = prepared.into_task();
-    assert!(store
-        .prepare_legacy_chat_admission(&capture, b"no scope permission from kind", &mut NeverRng)
-        .is_err());
-    task.close();
-    let mut later =
-        PreparedOriginalPredecessor::archive_founder(&capture, [21; 32], 2, &pool).unwrap();
-    assert!(
-        store
-            .register_original_predecessor(&capture, &mut later, |p| p.validate_original())
-            .is_err(),
-        "archive source/debt handoff requires its actual future consumer"
-    );
-    assert!(store
-        .chat_mount
-        .runtime
-        .lock()
-        .unwrap()
-        .table
-        .as_ref()
-        .unwrap()
-        .get(&key(21))
-        .is_none());
 }

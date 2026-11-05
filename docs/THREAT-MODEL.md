@@ -20,7 +20,7 @@ IO. Retained metadata keeps its actual pool fee independently of the worker. Thi
 exclusion only: no network, scope advance or ready handoff is supplied. The eventual concrete
 intent/terminal consumer must preserve its original live sender through its own Current
 transition and reclaim only exact durably handed-off debt, never by status/timeout/expiry.
-The fourteen authored regressions remain UNRUN and native/global admission is not established.
+The thirteen current regressions remain UNRUN and native/global admission is not established.
 
 ## Outer catalog data is not namespace support (5 November; authored, unexecuted)
 
