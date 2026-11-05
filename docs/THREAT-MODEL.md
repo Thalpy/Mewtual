@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Default-closed current chat effects (5 November; validation paused)
+
+Historical Valid/ordinary rights are not current projection authority. The guarded ledger requires
+an opaque exact action/context/original-view token; provisional effects also observe their original
+admission lifetime. Closing A1 cannot renew it through A2 labels, while Proven A2 support survives
+an unrelated A1 close after old publications drain. Scope cancellation/Drop never waits on its own
+reader; explicit nonblocking completion cannot acknowledge drain ahead of an admitted callback.
+Nested replacement views share the original barrier and remain pending until earlier replies end.
+
+Each previously eligible Proven Delete keeps separate exact negative custody even if its Create
+was still Provisional and no replica rendered it. Missing current proof suppresses body text;
+runtime custody is not an accepted tombstone or a replica-local grandfathered branch. Clearing it
+requires an opaque complete-current closure for the exact capsule and view. No production issuer,
+critical durable negative journal or active native/UI gate exists yet. Raw semantic snapshots are
+unchanged and restore guarded projection closed. Twenty-eight authored regressions remain unexecuted;
+shared control/output memory and complete governing-inventory/native admission are separate gates.
+
 ## Historical package labels (5 November; inactive consumer prerequisite)
 
 Raw historical KP extraction authenticates nothing and cannot construct a runnable/validated KP.

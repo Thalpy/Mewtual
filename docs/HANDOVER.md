@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Default-closed chat projection core (5 November; authored, unexecuted)
+
+The typed semantic ledger now has a separate guarded current-view API. Snapshot/historical Valid
+does not open it, and no production positive token/resolution issuer exists. Original negative
+view/admission owners cancel without waiting; explicit must-use completion polls the actual shared
+publication barrier, and replacements remain pending until earlier admitted replies drain. Each
+Delete has fixed prior-Proven-effect custody independent of rendering; proof loss suppresses bodies
+until exact complete-current resolution. Visible exposes only chosen text/original creation time;
+Deleted has certainty and no history text. Twenty-eight regressions are authored/unrun. Compilation,
+tests and builds remain paused; formatting/static review is not runtime evidence. Real governance,
+critical durable negative closure, complete host memory fees and native/UI lease consumers remain
+open. See [the guarded projection contract](communication-recovery/CHAT-V2-PROJECTION-ADMISSION.md).
+
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.

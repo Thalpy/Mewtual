@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// Explicit caller storage allowance. Limits refuse new evidence; they NEVER evict an
 /// accepted/pending action or required proof. Each retained-entry slot also covers its one
 /// optional normalized Delete approval (`DELETE_APPROVAL_ENTRY_BYTES`), so approval metadata
-/// cannot outgrow max_actions or allocate a separate unknown-action cache. The byte allowance
+/// cannot outgrow max_actions or allocate a separate unknown-action cache. The fixed projection
+/// token and per-Delete prior-effect slots (`PROJECTION_ADMISSION_ENTRY_BYTES`) are likewise
+/// structurally bounded by those retained entries, with no unknown-action admission cache.
+/// Shared lifetime/control allocations still require their own future host invoice. The byte allowance
 /// counts canonical action envelopes only, not this entry metadata, allocator/RSS or a complete
 /// production payer invoice (activation is absent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +49,8 @@ pub(super) struct Entry {
     // At most one constant-size normalized approval for this already imported action. There
     // is no unknown-action cache or unbounded collection of equivalent proof representations.
     delete_approval: Option<VerifiedDeleteApproval>,
+    pub(super) projection: Option<ProjectionAdmissionToken>,
+    pub(super) prior_delete: Option<projection_admission::PriorDeleteCapsule>,
 }
 #[derive(Clone, Copy)]
 enum Task {
@@ -59,6 +64,9 @@ enum Task {
 /// Additive semantic evidence. There is no Automerge actor/sequence slot to occupy first.
 /// Unknown authority/dependencies stay pending; invalid semantic evidence stays retained.
 pub struct ChatLedger {
+    // Drop this original negative owner before dropping evidence. It takes no publication
+    // writer and cannot deadlock when a publication callback owns/drops the whole ledger.
+    pub(super) projection: projection_admission::ProjectionState,
     pub(super) realm: Realm,
     pub(super) limits: LedgerLimits,
     pub(super) entries: BTreeMap<ActionId, Entry>,
@@ -81,6 +89,7 @@ impl ChatLedger {
             return Err(ChatError::Bound);
         }
         Ok(Self {
+            projection: projection_admission::ProjectionState::new(realm.id()),
             realm,
             limits,
             entries: BTreeMap::new(),
@@ -145,6 +154,8 @@ impl ChatLedger {
                 state: ActionState::Pending(PendingReason::Authority),
                 authority: None,
                 delete_approval: None,
+                projection: None,
+                prior_delete: None,
             },
         );
         self.bytes = total;

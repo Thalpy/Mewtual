@@ -15,12 +15,18 @@ pub mod owner_facts;
 pub mod owner_header;
 pub mod owner_profile;
 mod projection;
+mod projection_admission;
 mod storage;
 
 pub use action::{ActionSpec, Body, Realm, SignedAction};
 pub use authority::{Rights, VerifiedAuthorityBasis, VerifiedDeleteApproval};
 pub use ledger::{ActionState, Advance, ChatLedger, ImportOutcome, LedgerLimits, PendingReason};
 pub use projection::{EditAlternative, MessageProjection};
+pub use projection_admission::{
+    CompleteProjectionResolution, GuardedCausalHeads, GuardedMessageProjection, GuardedProjection,
+    ProjectionAdmissionRevoker, ProjectionAdmissionToken, ProjectionCertainty,
+    ProjectionCloseCompletion, ProjectionOpenAdmission, ProjectionView, ProjectionViewRevoker,
+};
 pub use storage::{ChatSnapshot, Page, PageCursor, MAX_PAGE_BYTES, MAX_PAGE_RECORDS};
 
 /// Fixed grammar bounds, not a new MLS membership/group-size limit. Total retained
@@ -35,6 +41,12 @@ pub const MAX_GROUP_ID_BYTES: usize = 256;
 /// It is not encoded or included in canonical action-envelope byte accounting.
 pub const DELETE_APPROVAL_ENTRY_BYTES: usize =
     std::mem::size_of::<Option<VerifiedDeleteApproval>>();
+/// Fixed logical metadata prepaid by every action slot, including a separate negative capsule
+/// for EACH Delete. Shared scope/control allocations and output overlap need real host fees.
+/// This is neither snapshot byte accounting nor a complete physical-memory invoice.
+pub const PROJECTION_ADMISSION_ENTRY_BYTES: usize =
+    std::mem::size_of::<Option<ProjectionAdmissionToken>>()
+        + std::mem::size_of::<Option<projection_admission::PriorDeleteCapsule>>();
 pub const PROFILE: u16 = 1;
 
 macro_rules! digest {

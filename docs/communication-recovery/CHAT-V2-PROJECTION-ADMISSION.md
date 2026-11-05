@@ -1,6 +1,6 @@
 # Default-closed v2 projection admission
 
-Implementation proposal after the actual semantic-core audit. Review precedes code. This is not
+Core implementation authored after design review; compilation/execution remain paused. This is not
 a production verifier, mounted owner host, durable negative journal or native/UI adapter. All
 compilation remains paused. Keep existing semantic history and its tests unchanged.
 
@@ -105,3 +105,51 @@ must check real signed data and remain clearly distinct from the actual producti
 No public token constructor, wire decoder or positive status setter is added. The later active
 governing/Profile/delegation verifier is the only production issuer. No cold store, durable proof
 closure, native command, frontend result or live dispatch is claimed by this proposal.
+
+## Implemented core checkpoint; tests not executed
+
+`ChatLedger::begin_projection_view` returns only a negative owner and default-closed view. Its
+original revoker, admission owners/revokers and must-use `ProjectionCloseCompletion` never wait in
+Drop. Explicit completion uses only `try_write`; a pending admission count prevents new body
+publication while old readers drain. All views share the actual ledger's barrier, so nested
+replacement cannot skip an older publication through an intermediate pending view. Replacement
+owners retain one original close completion rather than a recursively growing parent chain.
+Preparing-close unwind publishes an original retryable negative phase and releases its unreturned
+handle count before cancelling the view. Arithmetic exhaustion never wraps. Poisoned barriers
+remain closed for positive work; an exclusive poisoned guard can still prove negative drain.
+An old admission may also reuse its SAME original view's completed barrier witness. It cannot
+adopt another view's status or wait indefinitely on unrelated later-view readers after its own
+view has already proved drain. Pending registration/completion still occurs exactly once.
+
+The new `guarded_projection` / `projectable_causal_heads` results expose their output only through
+`with_publication` under the original view/revision and contributing provisional scope observers.
+Visible contains the selected current text and original Create timestamp, with no alternatives.
+Deleted has explicit certainty and no text. Held/IncompleteSuppressed contain no text; a default-
+closed Held/empty-heads result carries no positive lease or certainty. The real native adapter
+still needs UI/registry reply ordering for negative results as well as the body publication gate.
+
+`admit_projection` accepts only an opaque token for already Valid semantic evidence and takes the
+actual nonblocking writer before output-revision changes. Busy/work refusal leaves entries and
+leases unchanged. Equivalent current proof retries preserve original support/revision. There is
+no production token constructor or complete-resolution issuer. Historical authorization/import
+revisions are deliberately distinct from this output revision: future governing verification must
+fence its actual complete dependency inventory before issuing/caching current support.
+
+Every Delete has its OWN already-paid fixed capsule slot. A Proven Delete with an admitted Create
+is eligible even if that Create is Provisional; displayed certainty still reflects both actions.
+Capsules mint atomically on positive installation, never from a rendered flag. Admitting a Create
+preflights the bounded scan for all newly eligible Deletes before mutation. Pending/Invalid tokens
+refuse, so later semantic advance cannot activate an uncapsuled cached token. Exact complete-
+current resolution addresses each original capsule separately; eligible current Proven support is
+re-capsuled rather than exposing a future proof-loss gap. No capsule/status is added to raw
+ChatSnapshot bytes. Critical durable negative closure and the actual governing producer remain open.
+
+Twenty-eight regressions are authored in `chat::projection_admission::tests`; none have run. They
+cover signed exact fixtures, restored default closure, held effects/Join traversal, A1/A2 and
+Provisional/Proven separation, independent Delete obligations, complete-resolution binding,
+timestamp/work limits, actual admitted-reader drain, concurrent duplicate close, nested replacement,
+callback self-close and captured-owner Drop/unwind, preparing unwind, full entry quota, genuine
+signature variants, retry idempotency, common-evidence convergence, original-barrier reuse, poison
+and arithmetic exhaustion. Test-only signed current-
+effect/complete-closure assertions exercise capability binding; they do not implement the absent
+production governance verifier. Primary owns all deferred focused/full/native validation.

@@ -28,6 +28,9 @@ impl Work {
     }
 }
 impl ChatLedger {
+    /// SEMANTIC/AUDIT-ONLY history projection. This is NOT active-v2 UI admission: Valid,
+    /// restored historical witnesses and Delete approval cannot open the guarded projection.
+    /// Use `guarded_projection` and its original publication lease for the future active view.
     /// Complete projection or explicit work refusal; never a partial view presented as
     /// complete. Missing authority/dependencies yield None. The caller owns this scan's
     /// explicit work/storage allowance; no network hot-path boundedness is claimed here.
@@ -117,6 +120,8 @@ impl ChatLedger {
             deleted_by,
         }))
     }
+    /// SEMANTIC/AUDIT-ONLY heads, including held current effects. The guarded head API has a
+    /// distinct original-view lease and must not be substituted with this historical scan.
     /// ALL valid per-message causal heads. More than MAX_PARENTS is legal: compose bounded
     /// Join actions over these heads. Do not silently truncate this set to fit a new edit.
     pub fn causal_heads(

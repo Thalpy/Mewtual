@@ -1,5 +1,18 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Guarded current chat projection core (5 November; authored, unexecuted)
+
+`ChatLedger::projection` / `causal_heads` remain semantic/audit-only with unchanged raw snapshots.
+The new default-closed view, `guarded_projection` and `projectable_causal_heads` use opaque original
+current-effect tokens and expose results only inside `with_publication`. The original lease must
+remain held through final synchronous native resolution after UI/registry guards. View/admission
+revokers are negative-only; Drop never waits, while must-use close completion uses nonblocking
+writer probes and must be retained/polled before acknowledging drain. Nested replacements share
+the actual ledger barrier. Each Delete's fixed negative capsule survives runtime proof loss and
+clears only through an opaque exact complete-current resolution. No positive issuer/decoder,
+durable capsule format or native/UI adapter is implemented. Twenty-eight new tests are authored and
+unexecuted; see [the exact core contract](communication-recovery/CHAT-V2-PROJECTION-ADMISSION.md).
+
 ## V2 Profile and ordinary Admission labels (5 November; inactive)
 
 `chat::owner_profile` now implements closed signed v2 Profile framing (379/494-byte semantic/
