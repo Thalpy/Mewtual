@@ -58,7 +58,8 @@ pub use chat_admission::{
 pub use owner_evidence::canonical::{
     OfflineOwnerEvidence, OwnedOwnerServer, OwnerCheckpointJoinAttempt, OwnerEvidenceBudget,
     OwnerFounderInitialization, OwnerJoinedInitialization, OwnerRestoreClassification,
-    OwnerRestoreInitialization, OwnerRestorePreparation,
+    OwnerRestoreInitialization, OwnerRestorePreparation, OwnerUnexposedInitialization,
+    OwnerUnexposedRetirement,
 };
 mod creative_references;
 mod epoch_draft_archive;

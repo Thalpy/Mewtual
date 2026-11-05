@@ -327,3 +327,6 @@ pub(super) fn bind_saved_runtime<T: MeshTransport, R: CryptoRngCore>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod unexposed_tests;

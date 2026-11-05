@@ -4,8 +4,12 @@ use crate::store::chat_admission::restore::{
     CanonicalOwnerRestore, PrivateManagedRestoreAttempt, PrivateManagedRestoredServer,
 };
 use crate::store::chat_admission::retired::OfflineRetired;
+pub use crate::store::chat_admission::{OwnerUnexposedInitialization, OwnerUnexposedRetirement};
 use crate::store::ChatAdmissionResolution;
 use catcoms_rt::{Clock, MeshTransport};
+
+mod recovery;
+pub(in crate::store) use recovery::UnexposedHeadAction;
 
 /// Classify external lineage BEFORE accepting/constructing any transport. Removed/old nonce
 /// source remains an offline evidence capsule, never an inactive runnable MLS actor.
@@ -14,6 +18,9 @@ pub enum OwnerRestoreClassification {
     Current(OwnerRestorePreparation),
     Initializing(OwnerRestorePreparation),
     Retired(OfflineOwnerEvidence),
+    /// No canonical or staged source exists and no live creator owns this first reservation.
+    /// Host recovery retries this negative closure automatically; it cannot construct transport.
+    UnexposedInitialization(OwnerUnexposedInitialization),
 }
 #[derive(Debug)]
 pub struct OwnerRestorePreparation {
@@ -50,13 +57,20 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for OwnerRestoreInitial
     }
 }
 impl ServerStore {
-    /// Load ONLY this mounted immutable group's canonical source. Known pin/no canonical file
-    /// refuses instead of bootstrapping captured no-tail numeric history or choosing an alias.
+    /// Load ONLY this mounted immutable group's canonical source. An exact never-exposed first
+    /// Initializing reservation with no source has a separate negative recovery classification;
+    /// no missing file can bootstrap captured no-tail numeric history or choose an alias.
     pub fn prepare_owner_evidence_restore(
         &self,
         group: &[u8],
         signer: [u8; 32],
     ) -> Result<OwnerRestoreClassification, AppError> {
+        let identity = crate::store::ChatAdmissionKey::new(group, signer)?;
+        if let Some(unexposed) = self.try_prepare_unexposed_owner_initialization(&identity)? {
+            return Ok(OwnerRestoreClassification::UnexposedInitialization(
+                unexposed,
+            ));
+        }
         let pin = self.capture_mounted_owner_profile(group)?;
         let source = self.prepare_owner_canonical_restore(pin, signer)?;
         Ok(match self.classify_owner_canonical_restore(source)? {

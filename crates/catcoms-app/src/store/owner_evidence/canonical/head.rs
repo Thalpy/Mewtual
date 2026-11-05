@@ -53,6 +53,14 @@ pub(crate) struct OwnerHeadWriteGuard<'writer> {
     state: MutexGuard<'writer, HeadState>,
 }
 impl OwnerHeadWriteGuard<'_> {
+    /// Negative-only first-initialization classification. A live private creator, possible
+    /// terminal or installed head must be preserved even if no canonical file is visible yet.
+    pub(super) fn is_unexposed_and_unowned(&self) -> bool {
+        self.state.current.is_none()
+            && self.state.pending.is_none()
+            && self.state.owner.as_ref().and_then(Weak::upgrade).is_none()
+    }
+
     pub(in crate::store) fn identifier(
         &self,
         permit: &ChatAdmissionStoragePermit<'_>,

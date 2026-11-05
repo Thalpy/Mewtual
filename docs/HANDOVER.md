@@ -22,7 +22,7 @@ global slots without waiting for an unrelated durable-send Ready; the cached obs
 strong Actor sender. Current locally verified owner/admin policy is required on every Actor read.
 This is not a proof of globally fresh role revocation under partition; the R7 limitation remains.
 
-Executed focused evidence for this continuation: signed-prefix **7**, bounded MLS snapshot **3**,
+Executed focused evidence at the earlier reader/prerequisite checkpoints: signed-prefix **7**, bounded MLS snapshot **3**,
 Sync initialization **4**, Sync durable **18**, related App durable **19**, Server/Actor reader
 **12**, bounded roster **3**, native reader/DTO **18**, latest frontend integration **52**: all
 passed. Four affected crates passed strict all-target/all-feature Clippy. The byte-verified isolated
@@ -48,9 +48,13 @@ Canonical founder/member initialization and private restore from the isolated
 `chat-admission-admin-audit-worktree` (checkpoint `72c790d5`) are now integrated locally but remain
 uncompiled and unexecuted. Their destination-member verifier checks the actual selected fresh KP,
 Welcome, credential and incarnation; a generic downloaded fact chain cannot replace that source.
-Membership candidate/strict operation persistence and safe automatic retirement of never-exposed
-initialization are in progress. The provider's physical allocation invoice and bounded restore need
-correction before claiming an end-to-end resource bound. The old bounded checkpoint profile remains
+Safe negative retirement of a never-exposed, source-absent initialization is now integrated, with
+12 authored regressions still unexecuted. It preserves/charges orphan stages rather than deleting
+possible source bytes; native automatic restart and exact stage-only repair remain open.
+The bounded MLS encoder now checks actual provider-table backing and retained Vec capacities under
+the same guard, through a narrow exact-pinned storage patch shared by both workspaces. Its new
+regressions are also unexecuted; SDK restore expansion and active-host admission remain open.
+Membership candidate/strict operation persistence is still in progress. The old bounded checkpoint profile remains
 nonactivatable for long-lived 20/50-member groups; scalable public headers/cold archive, genuine
 root-distribution invites and actual production consumers are open gates.
 
@@ -181,6 +185,19 @@ DTO conversion, original-session authorization and actual App/admin-panel integr
 These helpers are not an implemented full ledger view or activation of typed chat.
 
 ## Integrated text-chat validation (29 October; local gates passed)
+## Unexposed owner initialization recovery (5 November; authored, unexecuted)
+
+The real canonical restore entry now classifies a Fresh Initializing reservation with no registered
+writer or canonical/staged source as opaque negative recovery before requiring a root pin. Exact
+original retirement saves under admission -> pool/head -> original Store custody and cannot undo a
+later Current promotion or adopt another mount. Startup inventory now preserves/charges orphan
+canonical stages. Twelve authored regressions cover actual factory/reopen, both write outcomes,
+negative faults, stage-before-startup, stale creator and Current orderings, exhausted revision,
+cross-mount scope and full canonical slots. Compilation/tests/builds remain paused by user request;
+none of this revision's regressions have executed. Native automatic closed-lineage startup and
+exact stage-only repair remain open. See
+[the negative recovery contract](communication-recovery/CHAT-UNEXPOSED-INITIALIZATION-RECOVERY.md).
+
 
 ## Private canonical owner kernel (30 October; new tests uncompiled)
 

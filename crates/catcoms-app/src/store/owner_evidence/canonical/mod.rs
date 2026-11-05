@@ -26,9 +26,10 @@ pub(crate) use head::{
     OwnerHeadWriteGuard, OwnerWriterRegistration, SavedOwnerInitialization, SavedOwnerRestore,
 };
 pub use initialize::{OwnedOwnerServer, OwnerFounderInitialization};
+pub(in crate::store) use restore::UnexposedHeadAction;
 pub use restore::{
     OfflineOwnerEvidence, OwnerRestoreClassification, OwnerRestoreInitialization,
-    OwnerRestorePreparation,
+    OwnerRestorePreparation, OwnerUnexposedInitialization, OwnerUnexposedRetirement,
 };
 pub(crate) use source::ValidatedOwnerSnapshot;
 

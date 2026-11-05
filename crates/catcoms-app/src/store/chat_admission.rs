@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 mod custody;
 pub(crate) mod fresh;
 mod owner_writer;
+mod recovery;
+pub use recovery::{OwnerUnexposedInitialization, OwnerUnexposedRetirement};
 pub(crate) mod restore;
 pub(crate) mod retired;
 mod revocation;

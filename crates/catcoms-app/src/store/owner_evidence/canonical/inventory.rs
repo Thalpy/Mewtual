@@ -18,10 +18,10 @@ impl ServerStore {
             let entry = entry.map_err(|e| AppError::Io(e.to_string()))?;
             let name = entry.file_name();
             let name = name.to_str().ok_or_else(refused)?;
-            let (identifier, stage) = if let Some(key) = name.strip_suffix(".bin") {
-                (decode_key(key)?, false)
+            let identifier = if let Some(key) = name.strip_suffix(".bin") {
+                decode_key(key)?
             } else if let Some(key) = name.strip_suffix(".replace.tmp") {
-                (decode_key(key)?, true)
+                decode_key(key)?
             } else {
                 return Err(refused());
             };
@@ -32,13 +32,13 @@ impl ServerStore {
             {
                 return Err(refused());
             }
-            if stage {
-                // Exact current/debt filenames are never cleanup targets. This exclusive
-                // startup inventory runs before any per-head writer or candidate can exist.
-                self.cleanup_owner_canonical_stage(&identifier)?;
-            } else {
-                inventory.insert(identifier, Arc::new(head::HeadCell::new(identifier)));
-            }
+            // A stage can be the only retained bytes after interrupted first initialization.
+            // Do not erase it before the later negative-recovery classifier checks absence.
+            // It reserves the same full current+replacement allowance as a canonical file;
+            // exact staged-candidate recovery is separate from ordinary canonical restore.
+            inventory
+                .entry(identifier)
+                .or_insert_with(|| Arc::new(head::HeadCell::new(identifier)));
             if inventory.len() > budget.max_heads
                 || (inventory.len() as u64)
                     .checked_mul(budget.head_fee()?)
