@@ -2,6 +2,8 @@
 //! decoded snapshot capability. The vault host must still couple it to its ORIGINAL pre-await
 //! mount/lineage capture before it can renew a local authoring scope.
 use super::*;
+mod founder_origin;
+pub(crate) use founder_origin::OriginalFounderObservation;
 
 #[derive(Clone, Copy)]
 enum FreshKind {
@@ -25,6 +27,9 @@ pub struct VerifiedFreshChatAdmission {
     admission_state: [u8; 32],
     kind: FreshKind,
     attempt: [u8; 32],
+    // Process-local original source lifetime only. Neither identity nor watch is serialized;
+    // an equal restored MLS state cannot acquire them. Observers never retain this owner.
+    origin: founder_origin::FreshOriginLife,
 }
 impl std::fmt::Debug for VerifiedFreshChatAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,6 +39,16 @@ impl std::fmt::Debug for VerifiedFreshChatAdmission {
     }
 }
 impl VerifiedFreshChatAdmission {
+    /// Observe this actual original creation, not a label reconstructed from current state.
+    /// Keeping the original token PRESENT in the same Sync remains mandatory at later checks.
+    pub(super) fn observe_original_founder(
+        &self,
+        group: &ServerGroup,
+        device: &MlsDevice,
+    ) -> Option<OriginalFounderObservation> {
+        self.is_original_founder_state(group, device)
+            .then(|| self.origin.observe())
+    }
     /// Narrow genesis-producer predicate. Generic local authoring provenance can survive
     /// unrelated epochs, but installing CHECKPOINT-1 cannot reconstruct past Adds from a
     /// current roster. Require this actual creation's ORIGINAL authenticated state instead.
@@ -146,6 +161,7 @@ impl VerifiedFreshChatAdmission {
             admission_state: group_state,
             kind,
             attempt: *hash.finalize().as_bytes(),
+            origin: founder_origin::FreshOriginLife::new(),
         })
     }
 }

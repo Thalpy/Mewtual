@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private V2 genesis DATA source (5 November; authored, unexecuted)
+
+`ChannelSync::prepare_owner_v2_founder` accepts only its actual original opaque fresh creation,
+not a Profile/raw snapshot/roster or save boolean. `PreparedFounder::freeze` consumes that private
+preparation; `FrozenFounder::borrow_for_covering_save` repeats original source/scope checks and
+returns bounded public DATA only. The future actual host must prepay, retain original native
+admission and cover the exact records before protocol/UI export. No App/native command, Saved or
+publication grant exists here. V1 profiles/tails are never reinterpreted; public replay is separate.
+
 ## Private signed-action chunk data (5 November; authored, unexecuted)
 
 `cold_actions` prepares exact signature-checked originals and exposes borrowed chunk parsing plus

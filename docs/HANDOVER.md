@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Actual private V2 founder source (5 November; authored, unexecuted)
+
+The Sync-only actual creation witness now produces typed V2 Profile, exact Founder Admission,
+canonical public genesis state, signed sequence1 Admission header and its empty acceptance
+frontier. A non-Clone preparation/frozen DATA object retains original physical fresh-source and
+local initialization observations. Source take/drop, restored identical MLS bytes, changed
+membership/full signer/history, retired/replaced scope or reservation, v1 tail and changed public
+signature/state representation refuse checked freeze/host DATA borrowing. The original private
+reservation must be staged before preparation; there is no rebind to a later source.
+
+Eight real MLS/source regressions are authored and UNRUN; only direct rustfmt parsing and diff
+checks ran under the user pause. Read-only design and actual-diff reviews are clear for this DATA
+source. The64KiB logical producer invoice is not an actual pool debit, SDK heap
+or active-host admission. No App facade, archive/head saver, Current/Saved, root invitation,
+body-transition governor, positive issuer or protocol/UI activation is added. Recipient public
+replay still relies on the independently pinned non-equivocating finalizer's authenticated
+attestation; local actual creation is a different producer boundary. See the
+[source contract](communication-recovery/CHAT-OWNER-V2-FOUNDER-PRODUCER.md).
+
 ## Private original-action chunks (5 November; authored, unexecuted)
 
 `cold_actions` now prepares exact real-signed action envelopes and borrowed chunks (61440-byte

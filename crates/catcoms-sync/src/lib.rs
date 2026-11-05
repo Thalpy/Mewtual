@@ -84,6 +84,7 @@ pub use prepared_direct_join::{CompletedDirectJoin, DirectJoinLimits, PreparedDi
 pub mod local_chat_scope;
 pub mod owner_evidence;
 mod owner_tenure;
+pub mod owner_v2;
 mod voice_endpoint;
 mod voice_runtime;
 mod voice_schedule;

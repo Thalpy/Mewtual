@@ -8,6 +8,8 @@ use super::*;
 use catcoms_replication::doc::{SavedLocalChatOp, SavedLocalChatRecovery};
 use catcoms_rt::{RequestAuthority, RequestCancellation};
 use tokio::sync::watch;
+mod initialization_origin;
+pub(crate) use initialization_origin::OriginalInitializationObservation;
 
 const TAG: &str = "catcoms/local-chat-scope/v1";
 const MAX_ORIGINAL_BYTES: usize = 256 * 1024;

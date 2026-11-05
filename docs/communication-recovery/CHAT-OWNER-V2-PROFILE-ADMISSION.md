@@ -95,5 +95,7 @@ founder/genesis binding and exact stable ordinary labels/action matching. Twelve
 authored/unrun. The alternate-nonce Profile fixture was independently prepared offline and both
 signatures checked by installed Python cryptography; the actual Rust strict-verifier regression
 is still unrun. The130-origin test is synthetic codec data, not130 actual MLS admissions. Source
-formatting/whitespace checks pass. No actual private v2 founder/Add producer, root-distribution
-invite, known governing parent, semantic witness or projection-admission token is created here.
+formatting/whitespace checks pass. The separate Sync-only
+[actual founder source](CHAT-OWNER-V2-FOUNDER-PRODUCER.md) now produces genesis DATA from original
+creation; it is not an App covering save/activation. Actual Add producer, root-distribution
+invite, known governing parent, semantic witness and projection-admission token remain open.

@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Actual V2 founder producer observation (5 November; source only)
+
+The new Sync producer uses actual `found` completion plus private physical identity/receiver-only
+negative lifetime and exact original private scope/reservation observation. Equal restored MLS
+state or signed public Profile data cannot mint/adopt it; no sender/revoker/runtime is retained by
+prepared output. Absent/nonoriginal/advanced source rejection precedes actual SDK roster checks;
+inventory emptiness checks are O(1) before public signing/encoding. SDK roster work/heap are outside
+the private-record invoice. Source and representation checks repeat before freeze/DATA borrow.
+Those are observations, not atomic
+publication admission. The actual host still needs original native creation fee/commit custody,
+covering archive/head/current saves, contradiction/control handling and positive issuance before
+export. No such App/production path is enabled. This proves local producer provenance only;
+recipient historical public replay relies on the pinned finalizer's authenticated attestation,
+not independent proof of private MLS execution or global freshness. Regressions remain UNRUN.
+
 ## Catalog read ownership (5 November; authored, unexecuted)
 
 Configured App catalog reads reserve from one caller-owned shared hardcap before buffer entry.
