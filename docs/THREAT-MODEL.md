@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Unsupported private archive files cannot imply absence (5 November; unexecuted)
+
+The default and Pending-only openers reject the reserved private archive root and declaration
+seed before old format gates or cleaners. Missing-vault opening checks them before creating a
+new DEK. `symlink_metadata` preserves dangling/nonregular presence rather than interpreting it
+as absence. No ARCHIVE2 consumer, repair, deletion or source authority is granted by this fence.
+Two new constructor regressions remain UNRUN under the compilation pause.
+
 ## Outer catalog data is not namespace support (5 November; authored, unexecuted)
 
 Shared outer framing/hash parsing borrows up to16 bounded declarations. Specific authenticated

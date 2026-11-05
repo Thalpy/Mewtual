@@ -32,6 +32,27 @@ pub(super) const MAX_PLAIN: usize = 512;
 pub(super) const MAX_FRAMED: usize = MAX_PLAIN + 40;
 const MAX_ENTRIES: usize = 16;
 
+// Reserved physical destinations for the reviewed bootstrap transaction. Neither current
+// reader implements ARCHIVE2 yet. Checking these names is therefore a NEGATIVE fence only:
+// an absent/old/Empty catalog cannot hide a possibly newer private source from old cleaners.
+// The eventual concrete archive opener must classify the seed AND both catalog candidates
+// before replacing this refusal; it must not simply skip the check when a flag is enabled.
+pub(in crate::store) const ARCHIVE_BOOTSTRAP_ROOT: &str = "chat-owner-v2";
+pub(in crate::store) const ARCHIVE_DECLARATION_SEED: &str = "chat-critical-namespaces.archive.seed";
+
+/// No currently supported handler can interpret these private namespace objects. Preserve
+/// every kind of presence, including an empty directory, a dangling link or an unreadable
+/// object. In particular, `Path::exists` would turn a dangling link into false absence.
+fn refuse_unimplemented_archive_storage(dir: &Path) -> Result<(), AppError> {
+    for name in [ARCHIVE_BOOTSTRAP_ROOT, ARCHIVE_DECLARATION_SEED] {
+        match fs::symlink_metadata(dir.join(name)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(refused()),
+        }
+    }
+    Ok(())
+}
+
 /// Fixed, nonredirectable metadata destinations. Persistence derives paths from the original
 /// Store and this closed enum; no caller may supply a catalog filename or directory.
 #[derive(Clone, Copy)]
@@ -86,6 +107,7 @@ pub(super) fn refuse_orphan_before_vault_creation(dir: &Path) -> Result<(), AppE
             _ => return Err(refused()),
         }
     }
+    refuse_unimplemented_archive_storage(dir)?;
     Ok(())
 }
 
@@ -146,6 +168,11 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        // Both the default and explicit Pending-only constructor still reject ARCHIVE2.
+        // Refuse its physical artifacts even if a replayed Empty/old catalog omits ID2;
+        // no lower-format gate may clean or infer absence first. This is not an archive
+        // inspector, supported declaration, repair action or permission to create its root.
+        refuse_unimplemented_archive_storage(&self.dir)?;
         if self.pending_join_policy_enabled() {
             return self.open_pending_join_catalog_gate(actual_format, passphrase, rng);
         }

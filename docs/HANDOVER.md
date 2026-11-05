@@ -1,30 +1,5 @@
 # Mewtual; Handover
 
-## Join submission transport prerequisite (5 November; unexecuted)
-
-`MeshTransport::supports_connected_cancellable_requests` now defaults to false independently
-of connection leases. MeshService/MemNetwork advertise their actual no-redial, cancellable,
-lower-custody implementations, and the real six-client adapter forwards both method and flag.
-This lets the next durable join consumer refuse unsupported adapters before spending a unit;
-it does not itself implement execution grants or activate a retained source. The new in-memory
-delivery/retirement regression and expanded real-driver/default regressions are authored UNRUN.
-Static adversarial review and direct formatting are clear; no compiler/tests/build ran under
-the user pause. Actual arm/counter/accepted-reply consumers remain outstanding.
-
-## Pending-only join catalog (5 November; authored, unexecuted)
-
-An explicit private configured v6 opener now supports sealed Pending JOIN1 DATA while ordinary
-open stays Empty-only. A genuine ready-root producer retains/coalesces the exact original keys/
-request, blocks the old unjournalled join path, and saves through original admission/catalog CAS.
-Five sources total may all pause; only one may be Active. Store keeps an uncertain exact output/
-original/fee after caller Drop and repairs its own held-file short write without resealing.
-Foreign/cold partial sources preserve/refuse. Thirteen tests are authored/UNRUN; no compiler or
-suite ran. Read-only design and actual-diff reviews are clear. There is NO network/old-initializer/ready adapter,
-production root-kind2 invitation, ARCHIVE2 support, or full SDK/native/global admission claim.
-ScopeIntent/FrozenCandidate/terminal/native activation and cold partial recovery remain open.
-[Contract](communication-recovery/CHAT-PENDING-JOIN-CATALOG-CHECKPOINT.md).
-
-
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
@@ -56,6 +31,42 @@ has passed design review, including original FoundingIntent before scope mutatio
 unexposed-negative recovery, independently durable exact repair seeds and unified protocol-aware
 writer exclusion. It remains unimplemented: namespace mounting, fees, exact grants/seed/source
 codecs, actual head/scope saves and cold/crash acceptance cannot be inferred from that design.
+
+## Archive physical-orphan refusal (5 November; authored, unexecuted)
+
+Both currently supported openers now refuse any `chat-owner-v2` root or
+`chat-critical-namespaces.archive.seed` before lower gates/cleaners; these reserved objects are
+also checked before generating a new vault DEK when the vault is absent. Presence includes
+nonregular objects, empty directories and dangling links. This is a negative safety fence,
+not support for ARCHIVE2 or a declaration/source saver. The eventual concrete handler must
+inspect the seed plus both complete catalog candidates and preserve the exact transaction;
+it cannot bypass the fence using a feature flag. Two constructor regressions are authored
+UNRUN (including a Unix-only dangling-link case); no compiler/test/build ran under the pause.
+
+## Join submission transport prerequisite (5 November; unexecuted)
+
+`MeshTransport::supports_connected_cancellable_requests` now defaults to false independently
+of connection leases. MeshService/MemNetwork advertise their actual no-redial, cancellable,
+lower-custody implementations, and the real six-client adapter forwards both method and flag.
+This lets the next durable join consumer refuse unsupported adapters before spending a unit;
+it does not itself implement execution grants or activate a retained source. The new in-memory
+delivery/retirement regression and expanded real-driver/default regressions are authored UNRUN.
+Static adversarial review and direct formatting are clear; no compiler/tests/build ran under
+the user pause. Actual arm/counter/accepted-reply consumers remain outstanding.
+
+## Pending-only join catalog (5 November; authored, unexecuted)
+
+An explicit private configured v6 opener now supports sealed Pending JOIN1 DATA while ordinary
+open stays Empty-only. A genuine ready-root producer retains/coalesces the exact original keys/
+request, blocks the old unjournalled join path, and saves through original admission/catalog CAS.
+Five sources total may all pause; only one may be Active. Store keeps an uncertain exact output/
+original/fee after caller Drop and repairs its own held-file short write without resealing.
+Foreign/cold partial sources preserve/refuse. Thirteen tests are authored/UNRUN; no compiler or
+suite ran. Read-only design and actual-diff reviews are clear. There is NO network/old-initializer/ready adapter,
+production root-kind2 invitation, ARCHIVE2 support, or full SDK/native/global admission claim.
+ScopeIntent/FrozenCandidate/terminal/native activation and cold partial recovery remain open.
+[Contract](communication-recovery/CHAT-PENDING-JOIN-CATALOG-CHECKPOINT.md).
+
 
 ## Shared outer catalog parser (5 November; authored, unexecuted)
 

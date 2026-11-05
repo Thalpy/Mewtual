@@ -1,5 +1,12 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Reserved private archive destinations (5 November; unexecuted)
+
+`chat-owner-v2` and `chat-critical-namespaces.archive.seed` are reserved fixed Store names.
+The currently supported default/Pending-only constructors reject their presence before old
+gates/cleaners, including orphan objects before new-vault creation. This adds no public path,
+configured archive opener, namespace declaration or source-save API. Two regressions are UNRUN.
+
 ## Shared outer catalog DATA (5 November; authored, unexecuted)
 
 The private `catalog_envelope` parser returns fixed borrowed descriptor DATA after full bounded

@@ -371,6 +371,111 @@ fn catalog_orphan_names_refuse_before_rng_or_new_dek() {
 }
 
 #[test]
+fn undeclared_archive_objects_refuse_before_new_vault_or_old_cleaner() {
+    // A private namespace may have reached disk while its catalog transaction was interrupted.
+    // Neither the default nor Pending-only handler can turn its absence from an Empty catalog
+    // into permission to clean it or initialize another identity. These are real constructors,
+    // not a codec-only assertion that an unknown descriptor fails to parse.
+    for name in [ARCHIVE_BOOTSTRAP_ROOT, ARCHIVE_DECLARATION_SEED] {
+        for directory_object in [false, true] {
+            let fresh = tempfile::tempdir().unwrap();
+            let object = fresh.path().join(name);
+            if directory_object {
+                fs::create_dir(&object).unwrap();
+            } else {
+                fs::write(&object, b"unknown archive source").unwrap();
+            }
+            let mut rng = ChaCha20Rng::seed_from_u64(0x6ca1_0020);
+            let mut unchanged = rng.clone();
+            assert!(ServerStore::open(fresh.path(), SECRET, &mut rng).is_err());
+            assert!(!fresh.path().join("vault.bin").exists());
+            assert_eq!(rng.next_u64(), unchanged.next_u64());
+            assert_eq!(
+                fs::symlink_metadata(&object).unwrap().is_dir(),
+                directory_object
+            );
+
+            for pending_only in [false, true] {
+                let old = tempfile::tempdir().unwrap();
+                let store = ServerStore::open(old.path(), SECRET, &mut rng)
+                    .unwrap()
+                    .into_owner_evidence_store(SECRET, &mut rng)
+                    .unwrap();
+                let vault = fs::read(old.path().join("vault.bin")).unwrap();
+                let store = store
+                    .into_critical_namespace_store(SECRET, &mut rng)
+                    .unwrap();
+                let catalog = fs::read(path(old.path(), Slot::Current)).unwrap();
+                let pin_stage = old.path().join("chat-owner-pins.replace.tmp");
+                fs::write(&pin_stage, b"older cleaner must not run").unwrap();
+                // With this authentic v4 wrapper and no operations intent, the lower gate
+                // WOULD clean the pin stage. An unchanged v6 wrapper would also refuse it,
+                // so that weaker fixture would not establish the archive preflight order.
+                fs::write(old.path().join("vault.bin"), &vault).unwrap();
+                fs::remove_file(old.path().join("chat-owner-operations.bin")).unwrap();
+                let object = old.path().join(name);
+                if directory_object {
+                    fs::create_dir(&object).unwrap();
+                    fs::write(object.join("retained"), b"private history").unwrap();
+                } else {
+                    fs::write(&object, b"unknown archive source").unwrap();
+                }
+                drop(store);
+                let mut unchanged = rng.clone();
+                let opened = if pending_only {
+                    let pool = CriticalCatalogReadPool::new(256 * 1024 * 1024).unwrap();
+                    let policy = PendingJoinCatalogPolicy::new(
+                        pool,
+                        2 * pending_join_codec::MAX_CATALOG_FRAMED,
+                    )
+                    .unwrap();
+                    ServerStore::open_with_pending_join_catalog(
+                        old.path(),
+                        SECRET,
+                        &mut rng,
+                        policy,
+                    )
+                } else {
+                    ServerStore::open(old.path(), SECRET, &mut rng)
+                };
+                assert!(opened.is_err());
+                assert_eq!(rng.next_u64(), unchanged.next_u64());
+                assert_eq!(fs::read(&pin_stage).unwrap(), b"older cleaner must not run");
+                assert_eq!(fs::read(path(old.path(), Slot::Current)).unwrap(), catalog);
+                assert_eq!(fs::read(old.path().join("vault.bin")).unwrap(), vault);
+                if directory_object {
+                    assert_eq!(
+                        fs::read(object.join("retained")).unwrap(),
+                        b"private history"
+                    );
+                } else {
+                    assert_eq!(fs::read(object).unwrap(), b"unknown archive source");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_archive_objects_are_present_and_never_new_vault_authority() {
+    for name in [ARCHIVE_BOOTSTRAP_ROOT, ARCHIVE_DECLARATION_SEED] {
+        let directory = tempfile::tempdir().unwrap();
+        let object = directory.path().join(name);
+        std::os::unix::fs::symlink(directory.path().join("missing-target"), &object).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x6ca1_0021);
+        let mut unchanged = rng.clone();
+        assert!(ServerStore::open(directory.path(), SECRET, &mut rng).is_err());
+        assert_eq!(rng.next_u64(), unchanged.next_u64());
+        assert!(!directory.path().join("vault.bin").exists());
+        assert!(fs::symlink_metadata(object)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+}
+
+#[test]
 fn catalog_nonregular_fixed_source_refuses_and_never_removes_it() {
     let directory = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0x6ca1_000d);

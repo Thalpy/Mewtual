@@ -69,6 +69,22 @@ metadata destinations. Its actual file/root barriers precede dependent source fi
 activation and its orphan check are part of the pre-cleaner constructor. Both current AND stage
 catalog sources authenticate and classify completely before any old cleanup or source fallback.
 
+Reserved fixed names are `chat-owner-v2` and `chat-critical-namespaces.archive.seed`. Until the
+actual inspector/transaction below exists, both default and Pending-only readers refuse any
+presence of either, including a nonregular object or dangling link. That negative guard is
+implemented; its two new constructor regressions are authored UNRUN. It enables no archive.
+
+The namespace declaration itself needs exact cold recovery. Persist the original declaration
+seed and grant, then write/sync the COMPLETE stage adding ID2 under the exact old-current parent.
+Only then create/sync the closed empty root; only after that root barrier promote stage to current
+and sync the parent. No dependent source is written before this transaction completes. A complete
+known stage/seed over its actual old current may finish the SAME first root creation. An already-
+current ID2 declaration with a missing root must NEVER recreate it as empty: the archive is
+unavailable/unknown. A root without ID2 in any recognized complete current/stage/seed is an orphan,
+not an adoptable empty archive. The first seed's own partial failure cannot authorize cold repair.
+The eventual known handler must preserve independently proved other work when only the archive
+is unavailable, while unknown critical catalog/layout still prevents old cleaners.
+
 The first inspector supports only the explicitly unexposed bootstrap state. It must recognize
 and refuse a later Current/unknown state, not claim general archive/owner support or interpret
 it as empty. Adding Current requires its actual SDK/source/head/scope/fee consumer, with a strict
