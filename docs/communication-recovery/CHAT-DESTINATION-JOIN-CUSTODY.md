@@ -3,8 +3,9 @@
 This is the narrow CLIENT companion to the covering owner first-Add checkpoint. It is not
 production v2 invite/root distribution, a general helper/grant admission protocol, complete SDK
 heap admission, or evidence that a remote owner saved anything. Compilation, tests and builds
-remain paused. The existing consuming join still loses its private key-package material on an
-error or cancelled future; this document describes the required correction, not shipped recovery.
+remain paused. The separately connected [retained direct source](CHAT-RETAINED-DIRECT-JOIN.md)
+corrects in-process retry/cancellation. This document describes the still-required durable
+extension, not shipped crash recovery.
 
 The separately implemented [EMPTY-only v6 prerequisite](CHAT-CRITICAL-NAMESPACE-CATALOG-V6.md)
 supersedes catalog implementation claims here: it supports NO nonempty namespace. Join1 and its
@@ -12,12 +13,15 @@ complete journal/client handler below are still design work. No compiler or test
 
 ## Existing failure and ownership
 
-`PrivateManagedJoinAttempt::finish_direct` currently consumes its device and calls `Server::join`.
-`request_join_tracking` makes a new key package on every invocation. `finish_join` authenticates
+Before the retained direct slice, `PrivateManagedJoinAttempt::finish_direct` consumed its device
+and called `Server::join`. The unchanged legacy `request_join_tracking` makes a new key package
+on every invocation. `finish_join` authenticates
 the inviter signature, then OpenMLS consumes the selected private key-package/init material before
 the group, routing transfer and policy checks have all finished. An authenticated but invalid
 Welcome can therefore consume keys without constructing a usable local Server. After a lost reply,
 a new key package is a different request; the owner must not redeem the single-use invite again.
+The private checkpoint now retains the exact request and master in process; those keys still
+need authenticated durable custody before any request if a restart is to recover them.
 
 The owner-side cache matches complete original invite and canonical TLS key-package bytes. It may
 return the original accepted ciphertext before checking new-admission expiry policy. That cache

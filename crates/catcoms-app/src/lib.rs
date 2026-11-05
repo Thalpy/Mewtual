@@ -3815,6 +3815,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
+    /// Fixed private managed-client consumer of the actual completed handshake and SAME owned
+    /// transport/event prefix. There is no raw group/proof constructor or await here. The Store's later
+    /// original admission/canonical/Current barriers remain necessary before any exposure.
+    pub(crate) fn from_completed_direct(
+        transport: T,
+        completed: catcoms_sync::CompletedDirectJoin,
+        connection_handoff: PreOwnerConnectionHandoff,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        contact: (PeerId, DeviceId),
+    ) -> Self {
+        let (inviter, inviter_device) = contact;
+        let (device, group, routing) = completed.into_parts();
+        let device_id = device.device_id();
+        let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
+        sync.note_candidate_peer(inviter);
+        sync.note_member_finalization_candidate(inviter, inviter_device);
+        Self {
+            sync,
+            display_name: display_name.into(),
+            device_id,
+            own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
+            delivery_snapshot_revision: 0,
+            devices_sig: None,
+            cache: Default::default(),
+        }
+    }
+
     /// Join through a reachable existing member when the inviter could not accept a direct dial.
     /// The helper carries only the admission handshake; the inviter named by the signed invite
     /// remains the sole Welcome authority.

@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Private client retries (5 November; authored, unexecuted)
+
+The private canonical join retains its original invite/KP/request and immutable secret source.
+Only bounded, fully framed, pinned-signature replies reach a separately restored candidate; a
+signed-invalid Welcome/routing/policy cannot consume the original keys. Real selected-KP/group/
+policy checks still mint completion, with original mounted capture and later covering save gates.
+No decoded source can construct Prepared/fresh custody, and another Store's fee cannot pay for
+the source. This is in-process recovery only, with no durable journal or new-mount recovery issuer.
+ONE typed transport and its consumed event prefix survive future cancellation; no new transport
+can inherit that prefix by PeerId. Final raw provider postflight bounds retained output; sixteen-
+event yields let timeout/cancellation poll under a flood. SDK transient heaps/work and lower
+transport backing still require separate admission before activation. Twelve regressions are
+authored/UNRUN. [Boundary](communication-recovery/CHAT-RETAINED-DIRECT-JOIN.md).
+
 ## Critical namespace fence prerequisite (5 November; authored, unexecuted)
 
 Vault v6 binds its distinct KDF domain to a mandatory sealed critical catalog. The mounted host

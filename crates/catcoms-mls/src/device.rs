@@ -22,6 +22,26 @@ pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsErr
         .map_err(proto)
 }
 
+/// Bound the canonical encoded size BEFORE cloning/serializing this already constructed SDK
+/// object. This does not meter the SDK's typed heap or admit a received KeyPackage.
+pub fn serialize_key_package_bounded(
+    key_package: &KeyPackage,
+    max_bytes: usize,
+) -> Result<Vec<u8>, MlsError> {
+    use tls_codec::Size;
+    // MLSMessage's version/wire-format prefix is four bytes; the KP contains its own version.
+    if key_package
+        .tls_serialized_len()
+        .checked_add(4)
+        .is_none_or(|length| length > max_bytes)
+    {
+        return Err(MlsError::Internal(
+            "KeyPackage encoding exceeds explicit budget",
+        ));
+    }
+    serialize_key_package(key_package)
+}
+
 /// The shortest time a joiner's KeyPackage must remain valid after it is admitted: 30 days.
 ///
 /// openmls checks an added KeyPackage's lifetime against the wall clock on **every** member that

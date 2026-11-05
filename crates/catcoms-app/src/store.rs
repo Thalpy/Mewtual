@@ -57,10 +57,10 @@ pub use chat_admission::{
     MAX_CHAT_ADMISSION_IDENTITIES,
 };
 pub use owner_evidence::canonical::{
-    OfflineOwnerEvidence, OwnedOwnerServer, OwnerCheckpointJoinAttempt, OwnerEvidenceBudget,
-    OwnerFounderInitialization, OwnerJoinedInitialization, OwnerRestoreClassification,
-    OwnerRestoreInitialization, OwnerRestorePreparation, OwnerUnexposedInitialization,
-    OwnerUnexposedRetirement,
+    OfflineOwnerEvidence, OwnedOwnerServer, OwnerCheckpointJoinAttempt,
+    OwnerDirectCheckpointJoinAttempt, OwnerEvidenceBudget, OwnerFounderInitialization,
+    OwnerJoinedInitialization, OwnerRestoreClassification, OwnerRestoreInitialization,
+    OwnerRestorePreparation, OwnerUnexposedInitialization, OwnerUnexposedRetirement,
 };
 mod creative_references;
 mod epoch_draft_archive;

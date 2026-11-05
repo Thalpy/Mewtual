@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Retained client keys/request (5 November; authored, unexecuted)
+
+The private destination checkpoint now prepares one exact invite/KP request and immutable secret
+master before network work. Synchronous bind consumes into one typed transport/ordered-event
+owner; mutable finish keeps the SAME source/actual creation fee and consumed lifecycle prefix
+on error/cancellation and processes each authenticated reply on a private candidate. Original
+capture/pin checks and canonical Saved/Current/head/writer barriers remain required. Success drops
+the master before fee transfer; stale queued attempts cannot adopt reopened mounts. Final raw
+provider postflight bounds retained SDK output, while transient SDK heap remains open. Two MLS,
+seven Sync and three App regressions are authored/UNRUN under the compilation pause; existing App
+factory assertions are preserved with real fee custody. Native first-Add fixtures must bind actual
+transport once. Read-only design and actual-diff reviews are clear for this in-process slice.
+Durable journal/paused slots, complete simultaneous scratch/SDK/lower
+memory ownership and production invite/governor/native activation remain open; v6 stays Empty-only.
+[Contract](communication-recovery/CHAT-RETAINED-DIRECT-JOIN.md).
+
 ## Private node-page prerequisite (5 November; authored, unexecuted)
 
 The pending archive has a separate borrowed complete-node DATA page:6578-byte conservative cap,

@@ -4,7 +4,9 @@
 //! must cover its MLS/ledger/public facts/exact Welcome before response; this client cannot
 //! prove remote fsync. Production v2 uses the separately signed invite/public-header closure.
 use super::*;
-use crate::store::chat_admission::fresh::{PrivateManagedJoinAttempt, PrivateManagedServer};
+use crate::store::chat_admission::fresh::{
+    BoundPrivateManagedJoinAttempt, PrivateManagedJoinAttempt, PrivateManagedServer,
+};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_rt::{Clock, MeshTransport, PeerId};
 use catcoms_sync::owner_evidence::VerifiedJoinedOwnerEvidence;
@@ -13,11 +15,21 @@ use catcoms_sync::owner_evidence::VerifiedJoinedOwnerEvidence;
 /// No raw group/profile/founder tuple or downloaded self-signed Profile constructs this object.
 pub struct OwnerCheckpointJoinAttempt {
     attempt: PrivateManagedJoinAttempt,
-    creation: OwnerPendingCreation,
 }
 impl std::fmt::Debug for OwnerCheckpointJoinAttempt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OwnerCheckpointJoinAttempt")
+            .finish_non_exhaustive()
+    }
+}
+/// Inactive checkpoint Rust API: one original transport/event stream belongs to this attempt
+/// across errors/cancel. No replacement-T retry or snapshot-based lifecycle adoption exists.
+pub struct OwnerDirectCheckpointJoinAttempt<T: MeshTransport> {
+    attempt: BoundPrivateManagedJoinAttempt<T>,
+}
+impl<T: MeshTransport> std::fmt::Debug for OwnerDirectCheckpointJoinAttempt<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerDirectCheckpointJoinAttempt")
             .finish_non_exhaustive()
     }
 }
@@ -47,29 +59,37 @@ impl ServerStore {
     ) -> Result<OwnerCheckpointJoinAttempt, AppError> {
         let creation = self.reserve_pending_owner_creation()?;
         let pin = self.capture_ready_owner_profile(source_store, source)?;
-        let attempt = self.private_managed_join_attempt(device, invite, pin)?;
-        Ok(OwnerCheckpointJoinAttempt { attempt, creation })
+        let attempt = self.private_managed_join_attempt(device, invite, pin, creation)?;
+        Ok(OwnerCheckpointJoinAttempt { attempt })
     }
 }
 impl OwnerCheckpointJoinAttempt {
-    /// Actual exact-KP join. Successful completion keeps its private source; a failed initial
-    /// handshake changes no local canonical head. Joiner crash/reply-loss recovery additionally
-    /// needs retained private KP/init-material custody and is NOT claimed by this checkpoint.
-    pub async fn finish_direct<T: MeshTransport, R: CryptoRngCore>(
+    /// Bind once, synchronously, after bootstrap. Original root/capture/KP material was already
+    /// prepared before network work; this object will own the actual stream until handoff/drop.
+    pub fn bind_direct_transport<T: MeshTransport>(
         self,
         transport: T,
+        inviter: PeerId,
+    ) -> OwnerDirectCheckpointJoinAttempt<T> {
+        OwnerDirectCheckpointJoinAttempt {
+            attempt: self.attempt.bind_direct(transport, inviter),
+        }
+    }
+}
+impl<T: MeshTransport> OwnerDirectCheckpointJoinAttempt<T> {
+    /// Actual exact-KP join. Successful completion keeps its private source; a failed initial
+    /// handshake/cancel retains its exact private KP/init source and request for another call.
+    /// Crash/reopen custody still requires the separate authenticated durable join journal.
+    pub async fn finish_direct<R: CryptoRngCore>(
+        &mut self,
         rng: R,
         clock: Box<dyn Clock + Send>,
         name: impl Into<String>,
-        inviter: PeerId,
     ) -> Result<OwnerJoinedInitialization<T, R>, AppError> {
-        let private = self
-            .attempt
-            .finish_direct(transport, rng, clock, name, inviter)
-            .await?;
+        let (private, creation) = self.attempt.finish_direct(rng, clock, name).await?;
         Ok(OwnerJoinedInitialization {
             private,
-            creation: self.creation,
+            creation,
             evidence: None,
             reservation: None,
             saved: None,

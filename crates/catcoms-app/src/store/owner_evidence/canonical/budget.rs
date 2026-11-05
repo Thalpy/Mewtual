@@ -89,8 +89,29 @@ pub(crate) struct OwnerPendingCreation {
     runtime: Weak<Mutex<Runtime>>,
     mount: Arc<()>,
     negative: RequestCancellation,
+    limits: OwnerInitializationSnapshotLimits,
     hot_fee: usize,
     active: bool,
+}
+impl OwnerPendingCreation {
+    /// Actual original paid limits; the private join retains this SAME owner through master,
+    /// request/candidate overlap and later canonical initialization. Metadata is not payment.
+    pub(crate) fn snapshot_limits(
+        &self,
+        store: &ServerStore,
+    ) -> Result<OwnerInitializationSnapshotLimits, AppError> {
+        if !self.active
+            || self.negative.is_cancelled()
+            || !Arc::ptr_eq(&self.mount, &store.registry_mount())
+            || self
+                .runtime
+                .upgrade()
+                .is_none_or(|runtime| !Arc::ptr_eq(&runtime, &store.owner_evidence.canonical))
+        {
+            return Err(refused());
+        }
+        Ok(self.limits)
+    }
 }
 impl Drop for OwnerPendingCreation {
     fn drop(&mut self) {
@@ -190,6 +211,15 @@ impl Drop for OwnerInitializationReservation {
 }
 
 impl ServerStore {
+    /// Factory-module regressions use the SAME real configured pool reservation; no literal
+    /// paid flag/scalar limit or fabricated source is accepted. No extra production issuer.
+    #[cfg(test)]
+    pub(crate) fn reserve_private_join_creation_for_test(
+        &self,
+    ) -> Result<OwnerPendingCreation, AppError> {
+        self.reserve_pending_owner_creation()
+    }
+
     /// Configure the whole-state checkpoint once per physical mount, BEFORE allocating any
     /// head/candidate. Repeating identical configuration is harmless; changing limits while
     /// obligations exist refuses. Startup disk inventory must complete before reservation.
@@ -253,6 +283,11 @@ impl ServerStore {
             runtime: Arc::downgrade(&self.owner_evidence.canonical),
             mount: self.registry_mount(),
             negative: self.chat_mount.observer(),
+            limits: OwnerInitializationSnapshotLimits {
+                max_snapshot_bytes: budget.snapshot,
+                max_mls_bytes: budget.mls,
+                max_mls_backing_bytes: budget.mls_backing,
+            },
             hot_fee: fee,
             active: true,
         })

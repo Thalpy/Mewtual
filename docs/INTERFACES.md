@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Retained direct client source (5 November; authored, unexecuted)
+
+`OwnerCheckpointJoinAttempt::bind_direct_transport` now consumes into a typed bound attempt;
+its mutable `finish_direct(rng, clock, name)` keeps ONE actual transport/lifecycle prefix and exact
+request/private pre-join source on error or dropped future. Its real original creation fee remains
+attached. Replies authenticate and frame before a new candidate provider; invalid SDK/routing
+processing cannot consume the master. The actual selected-KP completion and original capture
+still precede private handoff, then canonical Current/Saved/writer barriers remain unchanged.
+No raw recovered-source constructor or durable join namespace exists. Final retained provider
+postflight and sixteen-event cooperative turns precede handoff. Twelve regressions are authored/
+UNRUN; native fixtures must bind transport once. [Exact scope](communication-recovery/CHAT-RETAINED-DIRECT-JOIN.md).
+
 ## Private node-page data (5 November; authored, unexecuted)
 
 `chat::cold_nodes::{NodePage, encode_node_page}` is a bounded borrowed codec, not a file service

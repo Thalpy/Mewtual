@@ -65,7 +65,7 @@ fn restore_backing_upper_bound(count: usize) -> Option<usize> {
         .filter(|bytes| *bytes <= isize::MAX as usize)
 }
 
-fn deserialize_map_bounded(
+pub(super) fn deserialize_map_bounded(
     bytes: &[u8],
     max_backing_bytes: usize,
     max_payload_bytes: usize,

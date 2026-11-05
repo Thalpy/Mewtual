@@ -15,7 +15,9 @@ mod head;
 mod initialize;
 mod inventory;
 mod joined;
-pub use joined::{OwnerCheckpointJoinAttempt, OwnerJoinedInitialization};
+pub use joined::{
+    OwnerCheckpointJoinAttempt, OwnerDirectCheckpointJoinAttempt, OwnerJoinedInitialization,
+};
 mod restore;
 mod source;
 pub use budget::OwnerEvidenceBudget;

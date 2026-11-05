@@ -1,6 +1,7 @@
 //! Factory/capture regressions, alongside the separately required actual canonical owner-save
 //! vertical. Storage-only records below make no historical membership/owner-authority claim.
 use super::*;
+use bytes::Bytes;
 use catcoms_rt::{Hub, ManualClock};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
@@ -10,9 +11,22 @@ const SECRET: &[u8] = b"private fresh factory fixture";
 fn managed() -> (tempfile::TempDir, ServerStore, ChaCha20Rng) {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xf2e5_0001);
-    let store = ServerStore::open(dir.path(), SECRET, &mut rng).unwrap();
+    let store = ServerStore::open(dir.path(), SECRET, &mut rng)
+        .unwrap()
+        .into_owner_evidence_store(SECRET, &mut rng)
+        .unwrap();
     store
-        .enable_chat_scope_management(SECRET, &mut rng)
+        .configure_owner_evidence_budget(
+            crate::store::OwnerEvidenceBudget::checkpoint(
+                4,
+                32 * 1024 * 1024,
+                32 * 1024 * 1024,
+                1024 * 1024,
+                512 * 1024,
+                512 * 1024,
+            )
+            .unwrap(),
+        )
         .unwrap();
     (dir, store, rng)
 }
@@ -166,21 +180,25 @@ async fn actual_direct_join_keeps_exact_fresh_completion_private_until_the_cover
     let invite = owner.mint_invite([9; 16], 10_000, vec![]).unwrap();
     let device = MlsDevice::generate().unwrap();
     let full_signer = device.public_key_bytes();
-    let attempt = store
-        .private_managed_join_attempt(device, invite, expected_profile)
-        .unwrap();
+    let mut attempt = store
+        .private_managed_join_attempt(
+            device,
+            invite,
+            expected_profile,
+            store.reserve_private_join_creation_for_test().unwrap(),
+        )
+        .unwrap()
+        .bind_direct(hub.join(PeerId::from_u64(810)), owner_peer);
     let (joined, tick) = tokio::join!(
         attempt.finish_direct(
-            hub.join(PeerId::from_u64(810)),
             ChaCha20Rng::seed_from_u64(810),
             Box::new(ManualClock::new(1_000)),
             "never registered joined member",
-            owner_peer,
         ),
         owner.sync_once(),
     );
     tick.unwrap();
-    let mut joined = joined.unwrap();
+    let (mut joined, _creation) = joined.unwrap();
     assert_eq!(
         joined.captured_profile().unwrap().profile(),
         profile.profile_id(),
@@ -253,25 +271,25 @@ async fn actual_same_key_remove_and_fresh_welcome_cannot_reuse_the_old_private_s
     let rejoining_device = first_device.duplicate().unwrap();
     let full_signer = first_device.public_key_bytes();
     let invite = owner.mint_invite([11; 16], 10_000, vec![]).unwrap();
-    let first_attempt = store
+    let mut first_attempt = store
         .private_managed_join_attempt(
             first_device,
             invite,
             store.capture_trusted_owner_profile(&profile).unwrap(),
+            store.reserve_private_join_creation_for_test().unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .bind_direct(hub.join(PeerId::from_u64(812)), owner_peer);
     let (first, tick) = tokio::join!(
         first_attempt.finish_direct(
-            hub.join(PeerId::from_u64(812)),
             ChaCha20Rng::seed_from_u64(812),
             Box::new(ManualClock::new(1_000)),
             "A1 remains private",
-            owner_peer,
         ),
         owner.sync_once(),
     );
     tick.unwrap();
-    let mut first = first.unwrap();
+    let (mut first, _first_creation) = first.unwrap();
     let first_kp = first
         .server()
         .unwrap()
@@ -296,25 +314,25 @@ async fn actual_same_key_remove_and_fresh_welcome_cannot_reuse_the_old_private_s
     assert_eq!(owner.member_count(), 1, "a real MLS Remove completed");
 
     let invite = owner.mint_invite([12; 16], 10_000, vec![]).unwrap();
-    let second_attempt = store
+    let mut second_attempt = store
         .private_managed_join_attempt(
             rejoining_device,
             invite,
             store.capture_trusted_owner_profile(&profile).unwrap(),
+            store.reserve_private_join_creation_for_test().unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .bind_direct(hub.join(PeerId::from_u64(813)), owner_peer);
     let (second, tick) = tokio::join!(
         second_attempt.finish_direct(
-            hub.join(PeerId::from_u64(813)),
             ChaCha20Rng::seed_from_u64(813),
             Box::new(ManualClock::new(1_000)),
             "A2 remains private",
-            owner_peer,
         ),
         owner.sync_once(),
     );
     tick.unwrap();
-    let mut second = second.unwrap();
+    let (mut second, _second_creation) = second.unwrap();
     assert_eq!(second.server().unwrap().sync.my_public_key(), full_signer);
     assert_ne!(second.attempt, old_attempt);
     assert_ne!(
@@ -378,29 +396,37 @@ async fn original_join_attempt_refuses_revocation_and_mount_drop_before_any_hand
         .finish_chat_admission(&prepared, &mut rng, |_, _| Ok(()))
         .unwrap()
         .into_binding();
-    let attempt = store
+    let mut attempt = store
         .private_managed_join_attempt(
             member,
             invite.clone(),
             store.capture_trusted_owner_profile(&profile).unwrap(),
+            store.reserve_private_join_creation_for_test().unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .bind_direct(
+            Hub::new().join(PeerId::from_u64(807)),
+            PeerId::from_u64(806),
+        );
     // This separate still-unissued identity observes only the physical mount lifetime.
-    let mount_attempt = store
+    let mut mount_attempt = store
         .private_managed_join_attempt(
             MlsDevice::generate().unwrap(),
             invite,
             store.capture_trusted_owner_profile(&profile).unwrap(),
+            store.reserve_private_join_creation_for_test().unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .bind_direct(
+            Hub::new().join(PeerId::from_u64(808)),
+            PeerId::from_u64(806),
+        );
     binding.revoker().revoke();
     let result = attempt
         .finish_direct(
-            Hub::new().join(PeerId::from_u64(807)),
             ChaCha20Rng::seed_from_u64(807),
             Box::new(ManualClock::new(1_000)),
             "revoked attempt",
-            PeerId::from_u64(806),
         )
         .await;
     assert!(matches!(result, Err(AppError::Invalid(_))));
@@ -409,11 +435,9 @@ async fn original_join_attempt_refuses_revocation_and_mount_drop_before_any_hand
     let reopened = ServerStore::open(dir.path(), SECRET, &mut rng).unwrap();
     let result = mount_attempt
         .finish_direct(
-            Hub::new().join(PeerId::from_u64(808)),
             ChaCha20Rng::seed_from_u64(808),
             Box::new(ManualClock::new(1_000)),
             "original mount is gone",
-            PeerId::from_u64(806),
         )
         .await;
     assert!(matches!(result, Err(AppError::Invalid(_))));
@@ -447,4 +471,269 @@ fn actual_removed_own_leaf_snapshot_remains_refused_by_positive_mls_restore() {
     // OfflineRetired with its actual validated source/archive instead of weakening this check
     // or exposing an inactive Server to ordinary subscription/discovery/Actor entry points.
     assert!(!retired.is_empty());
+}
+
+#[test]
+fn private_join_cannot_use_another_mounted_stores_creation_fee() {
+    let (_dir, store, _rng) = managed();
+    let (_other_dir, other, _other_rng) = managed();
+    let mut owner = founder(&store, 0x5b01);
+    let profile = owner
+        .server_mut_for_owner_initialization()
+        .unwrap()
+        .sync
+        .prepare_owner_evidence_checkpoint(1)
+        .unwrap();
+    let invite = owner
+        .server_mut_for_owner_initialization()
+        .unwrap()
+        .mint_invite([0x5b; 16], 10_000, vec![])
+        .unwrap();
+    let pin = store.capture_trusted_owner_profile(&profile).unwrap();
+    let foreign_fee = other.reserve_private_join_creation_for_test().unwrap();
+    assert!(store
+        .private_managed_join_attempt(MlsDevice::generate().unwrap(), invite, pin, foreign_fee)
+        .is_err());
+}
+
+#[tokio::test]
+async fn cancelled_join_keeps_original_paid_source_and_cannot_adopt_reopened_mount() {
+    let (dir, store, mut rng) = managed();
+    let hub = Hub::new();
+    let owner_peer = PeerId::from_u64(0x5b02);
+    let mut owner = Server::found(
+        hub.join(owner_peer),
+        MlsDevice::generate().unwrap(),
+        ChaCha20Rng::seed_from_u64(0x5b02),
+        Box::new(ManualClock::new(1_000)),
+        "original join authority",
+    )
+    .unwrap();
+    let profile = owner.sync.prepare_owner_evidence_checkpoint(1).unwrap();
+    let invite = owner.mint_invite([0x5b; 16], 10_000, vec![]).unwrap();
+    let pin = store.capture_trusted_owner_profile(&profile).unwrap();
+    let mut attempt = store
+        .private_managed_join_attempt(
+            MlsDevice::generate().unwrap(),
+            invite,
+            pin,
+            store.reserve_private_join_creation_for_test().unwrap(),
+        )
+        .unwrap()
+        .bind_direct(hub.join(PeerId::from_u64(0x5b03)), owner_peer);
+    let signer = *attempt.attempt.source.as_ref().unwrap().signer();
+    {
+        let mut future = Box::pin(attempt.finish_direct(
+            ChaCha20Rng::seed_from_u64(0x5b03),
+            Box::new(ManualClock::new(1_000)),
+            "cancel before response",
+        ));
+        assert!(futures::poll!(&mut future).is_pending());
+        drop(future);
+    }
+    assert_eq!(attempt.attempt.source.as_ref().unwrap().signer(), &signer);
+    assert!(attempt.attempt.creation.is_some());
+    assert!(attempt.attempt.capture.is_some());
+    drop(store);
+    let reopened = ServerStore::open(dir.path(), SECRET, &mut rng).unwrap();
+    let result = attempt
+        .finish_direct(
+            ChaCha20Rng::seed_from_u64(0x5b04),
+            Box::new(ManualClock::new(1_000)),
+            "old task cannot adopt reopened store",
+        )
+        .await;
+    assert!(matches!(result, Err(AppError::Invalid(_))));
+    assert_eq!(attempt.attempt.source.as_ref().unwrap().signer(), &signer);
+    assert!(reopened.chat_vault_format().is_ok());
+}
+
+/// Real MemNetwork requests, with a deterministic lifecycle prefix and one deliberately lost
+/// inline result converted into JOIN_PENDING. The SAME actual wrapper is owned across retries.
+struct PrefixJoinTransport {
+    inner: catcoms_rt::MemNetwork,
+    prefix: std::sync::Mutex<std::collections::VecDeque<catcoms_rt::TransportEvent>>,
+    first_pending: std::sync::atomic::AtomicBool,
+    requests: Arc<std::sync::Mutex<Vec<Bytes>>>,
+}
+#[async_trait::async_trait]
+impl MeshTransport for PrefixJoinTransport {
+    fn local_peer(&self) -> PeerId {
+        self.inner.local_peer()
+    }
+    fn connection_snapshot(&self) -> Vec<catcoms_rt::PeerConnectionSnapshot> {
+        self.inner.connection_snapshot()
+    }
+    fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
+        self.inner.connection_lease(peer)
+    }
+    fn supports_connection_leases(&self) -> bool {
+        true
+    }
+    async fn subscribe(&self, topic: catcoms_rt::Topic) -> Result<(), catcoms_rt::TransportError> {
+        self.inner.subscribe(topic).await
+    }
+    async fn unsubscribe(
+        &self,
+        topic: catcoms_rt::Topic,
+    ) -> Result<(), catcoms_rt::TransportError> {
+        self.inner.unsubscribe(topic).await
+    }
+    async fn publish(
+        &self,
+        topic: catcoms_rt::Topic,
+        data: Bytes,
+    ) -> Result<(), catcoms_rt::TransportError> {
+        self.inner.publish(topic, data).await
+    }
+    async fn request(
+        &self,
+        peer: PeerId,
+        protocol: catcoms_rt::ProtocolId,
+        data: Bytes,
+    ) -> Result<Bytes, catcoms_rt::TransportError> {
+        self.requests.lock().unwrap().push(data.clone());
+        let response = self.inner.request(peer, protocol, data).await?;
+        if self.first_pending.swap(false, Ordering::SeqCst) {
+            assert_eq!(
+                response.first(),
+                Some(&1),
+                "actual inviter returned existing JOIN_READY"
+            );
+            return Ok(Bytes::from_static(&[0])); // existing JOIN_PENDING wire tag
+        }
+        Ok(response)
+    }
+    async fn request_cancellable(
+        &self,
+        peer: PeerId,
+        protocol: catcoms_rt::ProtocolId,
+        data: Bytes,
+        cancellation: RequestCancellation,
+    ) -> Result<Bytes, catcoms_rt::TransportError> {
+        self.inner
+            .request_cancellable(peer, protocol, data, cancellation)
+            .await
+    }
+    async fn next_event(&self) -> Option<catcoms_rt::TransportEvent> {
+        let prefix = self.prefix.lock().unwrap().pop_front();
+        if prefix.is_some() {
+            return prefix;
+        }
+        self.inner.next_event().await
+    }
+}
+
+#[tokio::test]
+async fn actual_app_retry_preserves_same_transport_lifecycle_prefix_and_never_adopts_it_into_new_transport(
+) {
+    let (_dir, store, _rng) = managed();
+    let hub = Hub::new();
+    let owner_peer = PeerId::from_u64(0x5b05);
+    let member_peer = PeerId::from_u64(0x5b06);
+    let mut owner = Server::found(
+        hub.join(owner_peer),
+        MlsDevice::generate().unwrap(),
+        ChaCha20Rng::seed_from_u64(0x5b05),
+        Box::new(ManualClock::new(1_000)),
+        "lifecycle owner",
+    )
+    .unwrap();
+    owner.subscribe_control().await.unwrap();
+    let profile = owner.sync.prepare_owner_evidence_checkpoint(1).unwrap();
+    let invite = owner.mint_invite([0x5c; 16], 10_000, vec![]).unwrap();
+    let network = hub.join(member_peer);
+    let path = catcoms_rt::ConnectionPath {
+        family: catcoms_rt::ConnectionFamily::Ipv4,
+        transport: catcoms_rt::ConnectionTransport::QuicV1,
+        direction: catcoms_rt::ConnectionDirection::Dialer,
+    };
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let transport = PrefixJoinTransport {
+        inner: network.clone(),
+        first_pending: std::sync::atomic::AtomicBool::new(true),
+        requests: requests.clone(),
+        prefix: std::sync::Mutex::new(std::collections::VecDeque::from([
+            catcoms_rt::TransportEvent::PeerConnected(owner_peer),
+            catcoms_rt::TransportEvent::PeerPathsChanged {
+                peer: owner_peer,
+                active: vec![path],
+                newly_established: Some(path),
+            },
+        ])),
+    };
+    let mut attempt = store
+        .private_managed_join_attempt(
+            MlsDevice::generate().unwrap(),
+            invite,
+            store.capture_trusted_owner_profile(&profile).unwrap(),
+            store.reserve_private_join_creation_for_test().unwrap(),
+        )
+        .unwrap()
+        .bind_direct(transport, owner_peer);
+    {
+        let mut future = Box::pin(attempt.finish_direct(
+            ChaCha20Rng::seed_from_u64(0x5b06),
+            Box::new(ManualClock::new(1_000)),
+            "pending member",
+        ));
+        assert!(futures::poll!(&mut future).is_pending());
+        owner.sync_once().await.unwrap();
+        assert!(futures::poll!(&mut future).is_pending()); // actual prefix consumed before cancel
+        drop(future);
+    }
+    assert!(format!("{:?}", attempt.handoff).contains("QuicV1"));
+    let (joined, tick) = tokio::join!(
+        attempt.finish_direct(
+            ChaCha20Rng::seed_from_u64(0x5b06),
+            Box::new(ManualClock::new(1_000)),
+            "same stream retry"
+        ),
+        owner.sync_once()
+    );
+    tick.unwrap();
+    let (joined, _creation) = joined.unwrap();
+    assert!(joined.server().unwrap().sync.has_connected_peer());
+    {
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0], recorded[1]);
+    }
+    assert!(
+        attempt.transport.is_none(),
+        "only success moved the same original T"
+    );
+
+    // A new registration under the SAME local peer has its OWN typed bound attempt and no
+    // inherited prefix. There is no API accepting replacement T on the earlier bound finish.
+    let invite = owner.mint_invite([0x5d; 16], 10_000, vec![]).unwrap();
+    let transport = PrefixJoinTransport {
+        inner: network.rejoin(),
+        first_pending: std::sync::atomic::AtomicBool::new(false),
+        requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        prefix: Default::default(),
+    };
+    let mut other = store
+        .private_managed_join_attempt(
+            MlsDevice::generate().unwrap(),
+            invite,
+            store.capture_trusted_owner_profile(&profile).unwrap(),
+            store.reserve_private_join_creation_for_test().unwrap(),
+        )
+        .unwrap()
+        .bind_direct(transport, owner_peer);
+    let (other, tick) = tokio::join!(
+        other.finish_direct(
+            ChaCha20Rng::seed_from_u64(0x5b07),
+            Box::new(ManualClock::new(1_000)),
+            "new independent stream"
+        ),
+        owner.sync_once()
+    );
+    tick.unwrap();
+    let (other, _other_creation) = other.unwrap();
+    assert!(
+        !other.server().unwrap().sync.has_connected_peer(),
+        "a new stream must not inherit old peer/path events by local PeerId"
+    );
 }

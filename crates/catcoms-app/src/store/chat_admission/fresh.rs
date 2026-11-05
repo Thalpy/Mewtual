@@ -6,6 +6,7 @@
 //! No caller can extract a runnable Server before the exact canonical head and durable Current
 //! barriers succeed under the same original writer/admission custody.
 use super::*;
+use crate::store::owner_evidence::canonical::OwnerPendingCreation;
 use crate::store::owner_evidence::canonical::{
     OwnerHeadWriteGuard, OwnerInitializationReservation, SavedOwnerInitialization,
 };
@@ -67,14 +68,32 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for PrivateManagedServe
 /// only weak mounted-vault custody: no Store, vault session owner, vault keys or writer guard.
 /// Only its fixed actual handshake can produce a private completed Server.
 pub(crate) struct PrivateManagedJoinAttempt {
-    capture: ChatAdmissionCapture,
-    device: MlsDevice,
-    invite: InviteToken,
-    expected_profile: CapturedOwnerProfilePin,
+    // Secret master drops BEFORE its actual creation fee. A successful transfer drops this
+    // source before moving the fee into canonical initialization; an error keeps both here.
+    source: Option<catcoms_sync::PreparedDirectJoin>,
+    creation: Option<OwnerPendingCreation>,
+    capture: Option<ChatAdmissionCapture>,
+    expected_profile: Option<CapturedOwnerProfilePin>,
 }
 impl std::fmt::Debug for PrivateManagedJoinAttempt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrivateManagedJoinAttempt")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Owns one actual transport/event stream and its consumed lifecycle prefix OUTSIDE each
+/// future. Neither same PeerId nor a new snapshot/connection lease can substitute another T.
+/// Errors/cancellation preserve this state; only successful private handoff moves it once.
+pub(crate) struct BoundPrivateManagedJoinAttempt<T: MeshTransport> {
+    attempt: PrivateManagedJoinAttempt,
+    transport: Option<T>,
+    inviter: PeerId,
+    handoff: catcoms_sync::PreOwnerConnectionHandoff,
+}
+impl<T: MeshTransport> std::fmt::Debug for BoundPrivateManagedJoinAttempt<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundPrivateManagedJoinAttempt")
             .finish_non_exhaustive()
     }
 }
@@ -122,6 +141,7 @@ impl ServerStore {
         device: MlsDevice,
         invite: InviteToken,
         expected_profile: CapturedOwnerProfilePin,
+        creation: OwnerPendingCreation,
     ) -> Result<PrivateManagedJoinAttempt, AppError> {
         // Choosing a root is an explicit trusted invitation/configuration decision. A Profile
         // downloaded after Welcome, roster entry or self-signed body cannot replace this input.
@@ -134,50 +154,117 @@ impl ServerStore {
                 .map_err(|_| refused())?,
         )?;
         let capture = self.capture_chat_admission(identity)?;
+        let limits = creation.snapshot_limits(self)?;
+        let direct_limits = catcoms_sync::DirectJoinLimits::new(
+            limits.max_mls_bytes,
+            limits.max_mls_backing_bytes,
+            limits.max_snapshot_bytes.min(16 * 1024 * 1024),
+        )?;
+        let source = catcoms_sync::PreparedDirectJoin::prepare(device, invite, direct_limits)?;
+        if source.group() != capture.key.group() || source.signer() != capture.key.signer() {
+            return Err(refused());
+        }
         Ok(PrivateManagedJoinAttempt {
-            capture,
-            device,
-            invite,
-            expected_profile,
+            source: Some(source),
+            creation: Some(creation),
+            capture: Some(capture),
+            expected_profile: Some(expected_profile),
         })
     }
 }
 
 impl PrivateManagedJoinAttempt {
+    pub(crate) fn bind_direct<T: MeshTransport>(
+        self,
+        transport: T,
+        inviter: PeerId,
+    ) -> BoundPrivateManagedJoinAttempt<T> {
+        BoundPrivateManagedJoinAttempt {
+            attempt: self,
+            transport: Some(transport),
+            inviter,
+            handoff: Default::default(),
+        }
+    }
+}
+
+impl<T: MeshTransport> BoundPrivateManagedJoinAttempt<T> {
     /// Only necessary authenticated admission traffic is allowed here. The existing real join
-    /// mints its fresh KeyPackage and validates the ACTUALLY selected Welcome package/signature
+    /// prepared its fresh KeyPackage ONCE before network work and validates the ACTUALLY selected Welcome package/signature
     /// before new_joined attaches opaque completion. No subscribe, self advertisement or owner
     /// run is performed. Other helper/reply/grant funnels need their own fixed attempt methods;
     /// they must not fall back to a generic old-proof/new-capture completion API.
-    pub(crate) async fn finish_direct<T: MeshTransport, R: CryptoRngCore>(
-        self,
-        transport: T,
+    pub(crate) async fn finish_direct<R: CryptoRngCore>(
+        &mut self,
         rng: R,
         clock: Box<dyn Clock + Send>,
         display_name: impl Into<String>,
-        inviter: PeerId,
-    ) -> Result<PrivateManagedServer<T, R>, AppError> {
-        if self.capture.mount.is_cancelled()
-            || self.expected_profile.is_revoked()
-            || self
-                .capture
+    ) -> Result<(PrivateManagedServer<T, R>, OwnerPendingCreation), AppError> {
+        let capture = self.attempt.capture.as_ref().ok_or_else(refused)?;
+        let pin = self.attempt.expected_profile.as_ref().ok_or_else(refused)?;
+        if capture.mount.is_cancelled()
+            || pin.is_revoked()
+            || capture
                 .admission
                 .as_ref()
                 .is_some_and(RequestCancellation::is_cancelled)
         {
             return Err(refused());
         }
-        let server = Server::join(
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(crate::JOIN_TIMEOUT_SECS),
+            self.attempt
+                .source
+                .as_mut()
+                .ok_or_else(refused)?
+                .finish_tracking(
+                    self.transport.as_ref().ok_or_else(refused)?,
+                    &mut self.handoff,
+                    self.inviter,
+                ),
+        )
+        .await
+        .map_err(|_| AppError::JoinTimeout)??;
+        // Negative custody is checked again AFTER the actual network/SDK work. A cancelled old
+        // task cannot borrow a reopened mount. No await follows this borrowed check/one consume.
+        let capture = self.attempt.capture.as_ref().ok_or_else(refused)?;
+        let pin = self.attempt.expected_profile.as_ref().ok_or_else(refused)?;
+        let source = self.attempt.source.as_ref().ok_or_else(refused)?;
+        let attempt = completed.validate_source(capture.key.group(), capture.key.signer())?;
+        if capture.mount.is_cancelled()
+            || pin.is_revoked()
+            || pin.group() != capture.key.group()
+            || source.group() != capture.key.group()
+            || source.signer() != capture.key.signer()
+            || capture
+                .admission
+                .as_ref()
+                .is_some_and(RequestCancellation::is_cancelled)
+        {
+            return Err(refused());
+        }
+        if self.attempt.creation.is_none() {
+            return Err(refused());
+        }
+        // All protocol/lifecycle checks precede field movement. Remaining Option takes follow
+        // the checked private ownership invariant; no await or replacement transport exists.
+        let transport = self.transport.take().ok_or_else(refused)?;
+        let server = Server::from_completed_direct(
             transport,
-            self.device,
+            completed,
+            std::mem::take(&mut self.handoff),
             rng,
             clock,
             display_name,
-            inviter,
-            &self.invite,
-        )
-        .await?;
-        PrivateManagedServer::complete(server, self.capture, Some(self.expected_profile))
+            (self.inviter, source.inviter_device_id()),
+        );
+        let capture = self.attempt.capture.take().ok_or_else(refused)?;
+        let pin = self.attempt.expected_profile.take().ok_or_else(refused)?;
+        let private =
+            PrivateManagedServer::from_checked_completion(server, capture, Some(pin), attempt);
+        self.attempt.source = None; // zeroize master BEFORE transferring its real fee
+        let creation = self.attempt.creation.take().ok_or_else(refused)?;
+        Ok((private, creation))
     }
 }
 
@@ -185,10 +272,24 @@ impl<T: MeshTransport, R: CryptoRngCore> PrivateManagedServer<T, R> {
     // ONLY fixed actual factories in this module call this private constructor. A raw restored
     // server has no completion; even a genuine old completion may not borrow a later capture.
     fn complete(
-        mut server: Server<T, R>,
+        server: Server<T, R>,
         capture: ChatAdmissionCapture,
         expected_profile: Option<CapturedOwnerProfilePin>,
     ) -> Result<Self, AppError> {
+        let attempt = Self::completion_attempt(&server, &capture, expected_profile.as_ref())?;
+        Ok(Self::from_checked_completion(
+            server,
+            capture,
+            expected_profile,
+            attempt,
+        ))
+    }
+
+    fn completion_attempt(
+        server: &Server<T, R>,
+        capture: &ChatAdmissionCapture,
+        expected_profile: Option<&CapturedOwnerProfilePin>,
+    ) -> Result<[u8; 32], AppError> {
         let source = server.sync.fresh_chat_admission().ok_or_else(refused)?;
         if source.group() != capture.key.group()
             || source.signer() != capture.key.signer()
@@ -201,25 +302,31 @@ impl<T: MeshTransport, R: CryptoRngCore> PrivateManagedServer<T, R> {
                 .is_some_and(RequestCancellation::is_cancelled)
             || source.key_package_reference().is_some() != expected_profile.is_some()
             || expected_profile
-                .as_ref()
                 .is_some_and(|pin| pin.group() != capture.key.group() || pin.is_revoked())
         {
             return Err(refused());
         }
+        Ok(source.attempt_id())
+    }
+
+    // Only immediate fixed actual factories call this after the SAME borrowed source check.
+    // Keep this no-await/no-fallible-mutation interval; all final save/ready gates independently
+    // recheck original negative custody, including revocation after this private handoff.
+    fn from_checked_completion(
+        mut server: Server<T, R>,
+        capture: ChatAdmissionCapture,
+        expected_profile: Option<CapturedOwnerProfilePin>,
+        attempt: [u8; 32],
+    ) -> Self {
         server.sync.require_managed_chat_scope();
-        let attempt = server
-            .sync
-            .fresh_chat_admission()
-            .ok_or_else(refused)?
-            .attempt_id();
-        Ok(Self {
+        Self {
             server: Some(server),
             capture,
             attempt,
             preparation: None,
             frozen: None,
             expected_profile,
-        })
+        }
     }
 
     /// Borrow the actual private source for original-founder profile preparation. Its opaque
