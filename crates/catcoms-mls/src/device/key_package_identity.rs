@@ -52,12 +52,81 @@ pub(crate) fn credential_digest(bytes: &[u8]) -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
+/// Reconstruct the SDK's typed reference DATA through its public canonical TLS codec. The
+/// tempting `HashReference::from_slice` constructor is test-utils-only in pinned OpenMLS0.9.2;
+/// enabling dependency test-utils in production would be an incorrect compatibility shortcut.
+/// This fixed32-byte value incurs only one tiny framing/typed decode, never package validation.
+fn retained_package_ref(expected: &[u8; 32]) -> Result<KeyPackageRef, MlsError> {
+    let encoded = tls_codec::VLByteSlice(expected)
+        .tls_serialize_detached()
+        .map_err(proto)?;
+    let mut remaining = encoded.as_slice();
+    let reference = KeyPackageRef::tls_deserialize(&mut remaining).map_err(proto)?;
+    if !remaining.is_empty() || reference.as_slice() != expected {
+        return Err(MlsError::Internal(
+            "retained package reference codec mismatch",
+        ));
+    }
+    Ok(reference)
+}
+
 #[cfg(test)]
 std::thread_local! {
     static RETAINED_SDK_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl MlsDevice {
+    /// Check that retained request DATA names this provider's exact original private bundle.
+    ///
+    /// This is a negative historical consistency check, not package admission or membership.
+    /// It deliberately applies no current lifetime/expiry policy and changes no provider rows.
+    /// The caller must first bound and pay for the provider restore. Loading the stored bundle
+    /// still performs SDK JSON decoding; this helper does not close typed SDK heap/work limits.
+    /// A real authenticated Welcome must subsequently select/use these keys before any fresh
+    /// completion can exist. No private key, KeyPackage or capability is returned here.
+    pub fn validate_retained_join_package(
+        &self,
+        bytes: &[u8],
+        expected: &[u8; 32],
+        group: &[u8],
+        nonce: &[u8; 16],
+    ) -> Result<(), MlsError> {
+        use openmls_traits::storage::StorageProvider;
+        const MAX_BYTES: usize = 32 * 1024;
+        if bytes.is_empty() || bytes.len() > MAX_BYTES || group.is_empty() || group.len() > 256 {
+            return Err(MlsError::Internal("unsupported retained join package"));
+        }
+        let bundle: KeyPackageBundle = self
+            .provider
+            .storage()
+            .key_package(&retained_package_ref(expected)?)
+            .map_err(proto)?
+            .ok_or(MlsError::Internal("retained join private bundle missing"))?;
+        let package = bundle.key_package();
+        // SDK RefHash serializes the package too. Bound canonical size before either that
+        // hidden serialization or our explicit comparison copy; provider JSON limits alone do
+        // not prove that a decoded stored object has a small canonical package encoding.
+        let canonical = serialize_key_package_bounded(package, MAX_BYTES)?;
+        if self.key_package_reference(package)? != *expected
+            || package.leaf_node().signature_key().as_slice() != self.public_key_ref()
+            || canonical != bytes
+        {
+            return Err(MlsError::Internal(
+                "retained join package does not match source",
+            ));
+        }
+        let membership = crate::invite::membership_from_key_package(package)?;
+        if membership.device_id != self.device_id()
+            || membership.group_id != group
+            || membership.invite_nonce != *nonce
+        {
+            return Err(MlsError::Internal(
+                "retained join credential binding differs",
+            ));
+        }
+        Ok(())
+    }
+
     /// Extract metadata from an ALREADY validated KeyPackage using this same crypto provider.
     /// The caller must still apply current invite/lifetime policy before any new Add. No Add
     /// observation or fresh completion can be reconstructed from these plain data labels.

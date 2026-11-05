@@ -8024,3 +8024,15 @@ the retained plaintext commitment. A mismatch retains the same original Action, 
 and refuses SDK exposure. Known unstarted work may retire through Root's negative-only gate;
 unknown handed-off work cannot. Actual workers/observers/IO/engine/ACK still gate compaction.
 These Rust-only primitives do not dispatch opcodes15..27 or expose browser Input/RTC grants.
+
+### Sealed inactive checkpoint join-source DATA
+
+`PreparedDirectJoin::seal_source` binds the exact actual never-started client source once to its
+immutable journal context; same key/binding retries reuse identical encrypted bytes. First request
+poll, completed or recovered state closes sealing. `SealedDirectJoinSource` imports bounded
+ciphertext only; `RecoveredDirectJoinSource::open` authenticates and checks complete framing,
+original canonical invite and actual stored selected private bundle. The recovered object exposes
+inert labels only and NO finish/into-Prepared/plaintext adapter. It is not mounted journal/Fresh/
+Current/Saved authority. Actual fees and mounted-source resume admission remain caller/next-stage
+gates; legacy join bytes and expiry policy for new admission are unchanged. See
+[sealed source contract](communication-recovery/CHAT-SEALED-DIRECT-JOIN-SOURCE.md).

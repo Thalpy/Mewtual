@@ -1,12 +1,16 @@
 //! Exact retained CLIENT request and immutable private pre-join provider. This is in-process
 //! custody only; there is deliberately NO raw snapshot decoder -> Prepared/fresh constructor.
-//! The later durable journal needs its own original mounted-source consumer. Legacy join APIs
+//! Sealed-source reading returns opaque DATA without a finish API; the durable journal still
+//! needs its own original mounted-source consumer. Legacy join APIs
 //! retain their bytes/behavior. SDK typed heap/work admission remains an explicit separate gate.
 use super::*;
 use catcoms_mls::persist::{restore_join_device_provider_bounded, snapshot_join_device_bounded};
 
 const MAX_INVITE_BYTES: usize = 64 * 1024;
 const MAX_KEY_PACKAGE_BYTES: usize = 32 * 1024;
+
+mod sealed_source;
+pub use sealed_source::{RecoveredDirectJoinSource, SealedDirectJoinSource};
 
 /// Resource metadata, not proof of payment, Fresh membership or a saved result. The actual App
 /// client derives these limits from its retained original creation fee and keeps that owner.
@@ -41,6 +45,13 @@ pub struct PreparedDirectJoin {
     expected: [u8; 32],
     limits: DirectJoinLimits,
     completed: bool,
+    // Latch BEFORE the request call/first await. Even an immediately failed/cancelled send can
+    // be ambiguous and must not become a newly sealed original under another source identity.
+    request_started: bool,
+    // This is private process history, never decoded authority. A recovered DATA source has no
+    // public finish/Prepared adapter and can never be resealed/retargeted by a later bridge.
+    recovered: bool,
+    sealed: Option<SealedDirectJoinSource>,
 }
 impl fmt::Debug for PreparedDirectJoin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -140,6 +151,9 @@ impl PreparedDirectJoin {
             expected,
             limits,
             completed: false,
+            request_started: false,
+            recovered: false,
+            sealed: None,
         })
     }
 
@@ -165,6 +179,7 @@ impl PreparedDirectJoin {
         if self.completed {
             return Err(SyncError::JoinRejected);
         }
+        self.request_started = true;
         let response = transport
             .request(inviter, ProtocolId(RR_PROTOCOL), self.request.clone())
             .await?;

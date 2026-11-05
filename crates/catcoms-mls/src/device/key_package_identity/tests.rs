@@ -2,6 +2,94 @@ use super::*;
 use crate::{restore_server, serialize_key_package, snapshot_server, ServerGroup};
 
 #[test]
+fn retained_fixed_package_reference_uses_public_production_tls_shape() {
+    for digest in [[0; 32], [1; 32], [255; 32]] {
+        let typed = retained_package_ref(&digest).unwrap();
+        assert_eq!(typed.as_slice(), &digest);
+        assert_eq!(
+            typed.tls_serialize_detached().unwrap(),
+            tls_codec::VLByteSlice(&digest)
+                .tls_serialize_detached()
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn retained_private_bundle_check_binds_exact_package_device_group_and_nonce_without_mutation() {
+    let device = MlsDevice::generate().unwrap();
+    let group = b"retained-source-group";
+    let nonce = [0x72; 16];
+    let first = device.key_package_for_invite(group, nonce).unwrap();
+    let first_ref = device.key_package_reference(&first).unwrap();
+    let second = device.key_package_for_invite(group, nonce).unwrap();
+    let second_ref = device.key_package_reference(&second).unwrap();
+    let first_wire = serialize_key_package(&first).unwrap();
+    let second_wire = serialize_key_package(&second).unwrap();
+    for _ in 0..2 {
+        assert!(device
+            .validate_retained_join_package(&first_wire, &first_ref, group, &nonce)
+            .is_ok());
+    }
+    assert!(device
+        .validate_retained_join_package(&second_wire, &first_ref, group, &nonce)
+        .is_err());
+    assert!(device
+        .validate_retained_join_package(&first_wire, &second_ref, group, &nonce)
+        .is_err());
+    assert!(device
+        .validate_retained_join_package(&first_wire, &first_ref, b"other", &nonce)
+        .is_err());
+    assert!(device
+        .validate_retained_join_package(&first_wire, &first_ref, group, &[0x73; 16])
+        .is_err());
+    assert!(MlsDevice::generate()
+        .unwrap()
+        .validate_retained_join_package(&first_wire, &first_ref, group, &nonce)
+        .is_err());
+    let mut trailing = first_wire.clone();
+    trailing.push(0);
+    assert!(device
+        .validate_retained_join_package(&trailing, &first_ref, group, &nonce)
+        .is_err());
+    assert!(device
+        .validate_retained_join_package(&first_wire, &first_ref, group, &nonce)
+        .is_ok());
+}
+
+#[test]
+fn retained_private_expired_bundle_is_consistent_data_but_not_new_admission() {
+    let device = MlsDevice::generate().unwrap();
+    let group = b"expired-retained-source";
+    let nonce = [0x74; 16];
+    let credential = crate::MembershipCredential {
+        device_id: device.device_id(),
+        group_id: group.to_vec(),
+        invite_nonce: nonce,
+    };
+    let bundle = KeyPackage::builder()
+        .key_package_lifetime(Lifetime::init(1, 2))
+        .leaf_node_capabilities(capabilities())
+        .build(
+            CIPHERSUITE,
+            device.provider(),
+            device.signer(),
+            CredentialWithKey {
+                credential: BasicCredential::new(credential.encode()).into(),
+                signature_key: device.public_key_ref().into(),
+            },
+        )
+        .unwrap();
+    let package = bundle.key_package();
+    let reference = device.key_package_reference(package).unwrap();
+    let wire = serialize_key_package(package).unwrap();
+    assert!(device.parse_admitted_key_package(&wire, 0).is_err());
+    assert!(device
+        .validate_retained_join_package(&wire, &reference, group, &nonce)
+        .is_ok());
+}
+
+#[test]
 fn retained_key_package_labels_match_actual_add_selected_member_and_restore() {
     let owner = MlsDevice::generate().unwrap();
     let mut group = ServerGroup::create(&owner).unwrap();

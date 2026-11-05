@@ -5653,3 +5653,14 @@ until genuine settlement/ACK. Unknown handed-off Pending remains unresolved unti
 original recovery/negative witness exists. This is deliberately not production activation:
 all staged SDP service operations still refuse before admission. No claim of functioning
 browser SDP/ICE/RTC, media relay or independent physical audio acceptance follows.
+
+### Retained checkpoint join-source envelope boundary
+
+The inactive checkpoint source may now be sealed once before any request and read as authenticated
+opaque secret DATA. Its immutable binding covers the original source context, exact request,
+selected package reference, full signer and private master. Opening checks the actual retained
+private bundle and historical credential binding without treating current expiry as a reason to
+remint keys. It creates no public runnable/recovered join adapter: actual mounted catalog/source,
+original row/intent, pin and negative worker lease remain mandatory future enforcement. Same-key
+component replay and a caller holding the vault key are not resolved by encrypted data alone.
+This slice enables neither JOIN1 nor native Chat V2 and makes no complete SDK/global memory claim.

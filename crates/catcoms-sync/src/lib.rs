@@ -80,7 +80,10 @@ mod initialization_restore;
 mod initialization_snapshot;
 mod prepared_direct_join;
 pub use initialization_restore::OwnerInitializationRestoreLimits;
-pub use prepared_direct_join::{CompletedDirectJoin, DirectJoinLimits, PreparedDirectJoin};
+pub use prepared_direct_join::{
+    CompletedDirectJoin, DirectJoinLimits, PreparedDirectJoin, RecoveredDirectJoinSource,
+    SealedDirectJoinSource,
+};
 pub mod local_chat_scope;
 pub mod owner_evidence;
 mod owner_tenure;

@@ -56,6 +56,16 @@ authority/current effect or native permission is added. Full overlapping encode/
 page invoices and actual archive integration remain required.
 [Exact contract](communication-recovery/CHAT-OWNER-COLD-ACTION-PAGES.md).
 
+## Sealed original client source DATA (5 November; authored, unexecuted)
+
+The inactive checkpoint client now seals an actual never-started Prepared source once and can
+strictly authenticate/read it into an opaque DATA object. Exact original invite/KP/private bundle
+and source-context bindings are checked; historical expiry is not new-admission policy. The
+recovered DATA exposes NO finish/into-Prepared adapter. Nine regressions are authored/UNRUN;
+durable JOIN1 catalog mounting, actual recovered admission/resume, ScopeIntent/FrozenCandidate
+and terminal publication remain open. Native/global/SDK invoices are not closed by this codec.
+[Contract](communication-recovery/CHAT-SEALED-DIRECT-JOIN-SOURCE.md).
+
 ## Configured catalog read ownership (5 November; authored, unexecuted)
 
 The App now offers an explicit configured catalog opener using one shared caller-provided
