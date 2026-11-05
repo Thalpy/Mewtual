@@ -1,12 +1,24 @@
 # Mewtual; Architecture
 
+## Private physical Current layout (5 November; authored, UNRUN)
+
+The explicit ID3 opener declares the fixed layout over the same original ID2 root and exposes
+only its existing paid historical SourceSaved DATA reader. Both catalog sources and any
+independent declaration seed classify before older cleaners; exact files/barriers precede
+physical completion. A separately paid authenticated-row key index and read-only old filename
+walk preserve negative association without creating checkpoint HeadCells. Fifteen regressions
+are authored UNRUN; primary owns serial compiled validation. Group tasks/strong pending registry,
+typed role guards and actual pin/head/scope/Current activation remain separate unfinished work.
+[Physical interface and limits](communication-recovery/CHAT-V2-CURRENT-LAYOUT-OPENER.md).
+
 ## Group-wide V2 negative fence (5 November; authored, UNRUN)
 
 ID2 mounted-root checks now include the signer-independent fixed `g-` reservation. Existing old
 positive/read/capture and unexposed-negative paths refuse any presence, while deliberate
 retirement and exact negative repair remain separate. Actual old pin writes retain admission
 before pins/Root. New founder pre-row work checks all fixed-five retained JOIN source summaries
-by group, not only its signer. The ID3 constructor/registry/Current writer remain unimplemented.
+by group, not only its signer. The separate opt-in ID3 constructor now supports physical
+declaration/historical DATA only; its group registry and Current writer remain unimplemented.
 [Actual negative consumers and limitations](communication-recovery/CHAT-V2-GROUP-EXCLUSION.md).
 
 ## Closed initial SDK graph admission (5 November; authored, UNRUN)

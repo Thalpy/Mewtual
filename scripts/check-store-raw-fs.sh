@@ -54,6 +54,21 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|held.file.sync_all().map_err(io)?;']=1
+  # Current namespace3 pre-exposure transaction. Only its original fixed declaration seed,
+  # whole catalog current/stage and marker under SAME held ID2 Root are reachable; these are
+  # non-epoch metadata. Keep exact sites rather than exempting the child directory or module.
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|install_current_layout_marker|file.sync_all().map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|install_current_layout_marker|root.directory.sync_all().map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|actual.sync_all().map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|stage_file.sync_all().map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|fs::rename(&stage_path, &current_path).map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|stage.sync_all().map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|fs::remove_file(&stage_path).map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|current.sync_all().map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|saved.sync_all().map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|fs::remove_file(&seed_path).map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|read_verified_current_seed|file.sync_all().map_err(current_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/current_layout.rs|sync_current_namespace_root|root.directory.sync_all().map_err(current_io)']=1
 )
 
 # Print `file<TAB>line<TAB>enclosing fn<TAB>trimmed text` for every match in non-test code. The

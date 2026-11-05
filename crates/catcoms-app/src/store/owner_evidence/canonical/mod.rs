@@ -62,11 +62,19 @@ fn refused() -> AppError {
     AppError::Invalid("canonical owner state is unavailable or unsupported".into())
 }
 
-fn key(group: &[u8], signer: &[u8; 32]) -> [u8; 32] {
+/// Fixed DATA filename identifier. It supplies no pin/head/inventory completeness or authority.
+pub(in crate::store) fn key(group: &[u8], signer: &[u8; 32]) -> [u8; 32] {
     let mut hash = blake3::Hasher::new();
     hash.update(b"catcoms/owner-canonical-key/v1\0");
     hash.update(&(group.len() as u32).to_be_bytes());
     hash.update(group);
     hash.update(signer);
     *hash.finalize().as_bytes()
+}
+
+/// Read-only negative evidence for constructor tests. This never configures an inventory,
+/// allocates a HeadCell or returns a canonical/saved-state capability.
+#[cfg(test)]
+pub(in crate::store) fn head_count_for_test(store: &ServerStore) -> usize {
+    store.owner_evidence.canonical.lock().unwrap().heads.len()
 }

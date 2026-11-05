@@ -786,7 +786,9 @@ fn encode_schedule(
     output.put_bytes(domain).map_err(|_| refused())?;
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
-    output.put_u32(1 + u32::from(current.archive.is_some()));
+    output.put_u32(
+        1 + u32::from(current.archive.is_some()) + u32::from(current.current_layout.is_some()),
+    );
     encode_join_entry_header(&mut output, current, payload)?;
     output
         .put_str(join_payload_tag(current)?)
@@ -846,11 +848,17 @@ fn encoded_row_len(
 /// Exact borrowed descriptor bytes, not a re-created layout or an ignored second namespace.
 /// All payload/framing bytes are included in the writer's existing bounded catalog invoice.
 fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError> {
-    match (&current.archive, current.archive_payload) {
+    let archive = match (&current.archive, current.archive_payload) {
         (None, None) => Ok(0),
         (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused),
         _ => Err(refused()),
-    }
+    }?;
+    let current_layout = match (current.current_layout, current.current_payload) {
+        (None, None) => 0,
+        (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
+        _ => return Err(refused()),
+    };
+    archive.checked_add(current_layout).ok_or_else(refused)
 }
 
 /// Outer header only; payload version/tag/rows remain the actual JOIN consumer's contract.
@@ -877,6 +885,11 @@ fn append_original_archive(
     if let Some(payload) = current.archive_payload {
         output.put_u32(super::super::archive_bootstrap::ARCHIVE_ID);
         output.put_u32(super::super::archive_bootstrap::ARCHIVE_VERSION);
+        output.put_bytes(payload).map_err(|_| refused())?;
+    }
+    if let Some(payload) = current.current_payload {
+        output.put_u32(super::super::archive_current_namespace_codec::NAMESPACE_ID);
+        output.put_u32(super::super::archive_current_namespace_codec::NAMESPACE_VERSION);
         output.put_bytes(payload).map_err(|_| refused())?;
     }
     Ok(())
@@ -935,7 +948,9 @@ fn encode_added(
     output.put_bytes(domain).map_err(|_| refused())?;
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
-    output.put_u32(1 + u32::from(current.archive.is_some()));
+    output.put_u32(
+        1 + u32::from(current.archive.is_some()) + u32::from(current.current_layout.is_some()),
+    );
     encode_join_entry_header(&mut output, current, payload)?;
     output
         .put_str(join_payload_tag(current)?)

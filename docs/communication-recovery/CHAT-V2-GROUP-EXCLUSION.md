@@ -2,7 +2,8 @@
 
 This packet adds actual negative old-protocol consumers. It does not support ID3, create group
 directories, issue Current, or implement the later activation/metadata/scope/node transaction.
-The namespace and metadata DATA codecs remain test-only. Eleven new regressions are authored
+The separate namespace codec now has the opaque physical opener/historical DATA reader;
+pin/head/activation metadata remains test-only. Eleven new negative-fence regressions are authored
 UNRUN under the user's compilation/test/build pause; source review is not execution evidence.
 Design and final actual-diff adversarial static review are clear after the stale-pin race and
 regression-reach corrections. Direct rustfmt, whitespace, ambient and raw-filesystem checks pass.

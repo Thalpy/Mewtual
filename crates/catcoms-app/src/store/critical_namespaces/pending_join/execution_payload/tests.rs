@@ -176,6 +176,8 @@ fn summary(
         count: metadata.len(),
         archive: None,
         join_version: Some(version),
+        current_layout: None,
+        current_payload_digest: None,
     }
 }
 fn original_metadata(n: u8, active: bool) -> codec::Metadata {

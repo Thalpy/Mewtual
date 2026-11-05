@@ -1,6 +1,13 @@
-# Current namespace DATA codec prerequisite
+# Current namespace DATA codec prerequisite (historical checkpoint)
 
-The shared `critical_namespaces/archive_current_namespace_codec.rs` module is declared
+The separate [physical opener](CHAT-V2-CURRENT-LAYOUT-OPENER.md) now consumes the descriptor,
+marker and declaration-seed codec in production code, with fifteen further authored UNRUN
+regressions. Only the unused group-name DATA wrapper remains cfg(test). It exposes a private
+physical declaration/historical DATA reader, not a group task or Current issuer. Default,
+Pending and ID2-only readers still reject ID3. The original narrower checkpoint below records
+the seven-test prerequisite and its evidence at that time.
+
+At that initial checkpoint the shared `critical_namespaces/archive_current_namespace_codec.rs` module was declared
 **only under cfg(test)**. It supplies the sibling Current metadata tests with the reviewed
 `CurrentLayoutData {vault,root}` and the exact ID3 descriptor, separately sealed marker,
 group-wide deterministic directory-name data and independent declaration-seed framing.

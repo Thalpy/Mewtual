@@ -1,5 +1,18 @@
 # Threat model; client integrity & enforcement boundaries
 
+## ID3 declaration is physical custody, not Current authority (5 November; authored, UNRUN)
+
+The opt-in opener fully classifies current/stage/independent seed before cleaners and preserves
+unknown sources. It repeats complete marker, catalog stage and original seed object identity
+after large waits before promotion/seed removal. Cold partial first seed remains held/refused;
+complete authenticated original seed permits only byte-exact physical repair. The completed
+opaque wrapper exposes paid historical DATA only. Constructor key/index attribution comes from
+actual authenticated non-evicting rows and a paid complete bounded walk; unknown files close new
+vacancy, with no cleanup/absence inference. Same-DEK whole-component rollback and cooperative
+private-directory assumptions remain. No group task/strong pending registry/typed guard/Current
+issuer is supplied. Fifteen authored regressions remain UNRUN here; primary owns compiled checks.
+[Exact assumptions and remaining work](communication-recovery/CHAT-V2-CURRENT-LAYOUT-OPENER.md).
+
 ## First genesis cannot ignore another signer's old group row (5 November; authored, UNRUN)
 
 The archive pre-row path now checks ANY same-group loaded admission row/runtime owner before
@@ -14,7 +27,8 @@ The original ID2 root now checks fixed group-wide `g-` presence before old per-s
 lookup, including captures, pin/numeric readers and precaptured positive owners. Any unknown
 presence is preserved/refused. New founder pre-row work also rejects any-signer retained JOIN
 source/debt for that group before effects. This closes negative namespace omissions; it does
-not yet supply the strong pending-mkdir registry, ID3 handler or Current issuer. Actual original
+not yet supply the strong pending-mkdir registry or Current issuer. The separate physical ID3
+opener supports declaration/historical DATA only. Actual original
 Root/marker identities are rechecked; whole-component rollback and non-hostile private-directory
 assumptions remain unchanged. Eleven authored tests are UNRUN during the compilation pause.
 [Enforcement paths and limits](communication-recovery/CHAT-V2-GROUP-EXCLUSION.md).

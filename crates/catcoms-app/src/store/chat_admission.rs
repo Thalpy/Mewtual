@@ -8,6 +8,7 @@ use super::*;
 use catcoms_rt::{RequestAuthority, RequestCancellation};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+pub(in crate::store) mod current_lineage;
 mod custody;
 pub(crate) mod fresh;
 pub(in crate::store) mod group_lineage;
@@ -325,6 +326,7 @@ struct Runtime {
     // Weak original-task exclusions, including tasks captured against absent/Retired rows.
     // The sole typed creator owns its sender; no Store/debt can keep it running after Drop.
     predecessors: predecessor::Registry,
+    current_lineage: Option<current_lineage::LineageIndex>,
 }
 #[cfg(test)]
 type BeforeWriterHook = Box<dyn FnOnce(&Mutex<Runtime>) + Send>;
@@ -550,6 +552,7 @@ impl ServerStore {
         if !managed && !table.is_empty() {
             return Err(refused());
         }
+        runtime.invalidate_current_lineage();
         runtime.table = Some(table);
         runtime.managed = managed;
         runtime.format = Some(format);
@@ -640,6 +643,7 @@ impl ServerStore {
             | catcoms_storage::VaultFormat::CriticalNamespaces => true,
         };
         if runtime.table.is_none() {
+            runtime.invalidate_current_lineage();
             runtime.table = Some(self.read_chat_admissions(managed)?);
         }
         if !managed && !runtime.table.as_ref().ok_or_else(refused)?.is_empty() {
@@ -679,6 +683,7 @@ impl ServerStore {
         if runtime.table.is_some() || runtime.format.is_some() {
             return Err(refused());
         }
+        runtime.invalidate_current_lineage();
         runtime.table = Some(self.read_chat_admissions(true)?);
         runtime.managed = true;
         runtime.format = Some(actual_format);
@@ -905,6 +910,11 @@ impl ServerStore {
         // exactly this candidate, even though issuing it already invalidated the old observer.
         *capture.issued.lock().map_err(|_| refused())? = Some(preparation.clone());
         if let Some(owner) = new_owner {
+            // Original loaded rows are non-evicting. Only a genuinely new full key extends the
+            // prepaid negative filename index, BEFORE its first possible head side effect.
+            if current.is_none() {
+                runtime.observe_new_current_lineage_key(&capture.key);
+            }
             runtime
                 .predecessors
                 .before_row_change(&capture.key, current.as_ref());

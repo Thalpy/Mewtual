@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Opaque ID3 physical declaration and historical reader (5 November; authored, UNRUN)
+
+The explicit private Current-layout opener now classifies/repairs its complete fixed namespace
+before older cleaners, retains the same original ID2 root and exposes the actual paid SourceSaved
+DATA reader. Whole-catalog JOIN versions/counters and descriptors are preserved. An independent
+paid row-key index/read-only filename pass tracks known old canonical effects without activating
+checkpoint storage. Full actual-diff static review is CLEAR after the reported corrections.
+Fifteen regressions are authored UNRUN; primary owns resumed serial compiled
+validation and the full required suites. No group mkdir task, strong pending-group registry,
+typed vacancy/Initializing/Current guard or application Current is implemented by this slice.
+[Contract and unfinished boundary](communication-recovery/CHAT-V2-CURRENT-LAYOUT-OPENER.md).
+
 ## Namespace compilation corrections (5 November; focused validation owned by primary)
 
 The first resumed App compilation identified missing internal paths/visibility and the omitted
@@ -14030,20 +14042,21 @@ compilation, tests and builds remain paused. [Boundary and invoice](communicatio
 
 ## Current namespace test DATA prerequisite (authored, UNRUN)
 
-The shared namespace3 DATA descriptor/marker/declaration/group-name codec is declared only
-under cfg(test), giving the pending pin/head metadata tests a real sibling dependency. Seven
-focused crypto/framing/cap/debug tests are authored UNRUN. There is no production3 parser,
-physical handler, supported Current mount, group reservation or Current issuer in this packet.
-The actual opener, paid index/metadata inventory, all cross-signer group fences and source/pin/
-head/scope coupling remain separate. [Exact scope](communication-recovery/CHAT-V2-CURRENT-NAMESPACE-DATA.md).
+The initial seven crypto/framing/cap/debug tests remain authored UNRUN. Their shared descriptor/
+marker/declaration codec is now consumed by the separate opaque physical opener described at
+the top of this handover; only the unused group-name DATA wrapper remains cfg(test). The
+initial test-DATA packet itself issued no supported mount or Current authority. Actual group
+task/registry and source/pin/head/scope coupling remain separate.
+[Initial scope](communication-recovery/CHAT-V2-CURRENT-NAMESPACE-DATA.md).
 
 ## Current genesis metadata test DATA (authored, UNRUN)
 
 The private pin/head/activation codec has eleven authored UNRUN tests and a complete shared
-test-only namespace DATA dependency. Static actual-diff review is clear, including raw caps,
+namespace DATA dependency. Static actual-diff review is clear, including raw caps,
 declared lengths, every strict prefix, genuine signatures, same-CID invalid representations,
-exact source/public-frame binding and the named metadata layout. Both modules remain cfg(test)
-only. They issue no supported mount, source, quota, Saved, Current or live chat authority.
+exact source/public-frame binding and the named metadata layout. Pin/head/activation metadata
+remains cfg(test) until its actual consumer; the namespace codec has the separate physical
+opener above. These DATA codecs issue no source, quota, Saved, Current or live chat authority.
 Root's actual group-wide/cross-signer fences, pin/head/seed/scope writes and owning Current
 consumer remain required. Compilation/tests/builds remain paused; direct format, whitespace
 and ambient/raw-FS static checks do not establish readiness. [Format and limits](communication-recovery/CHAT-OWNER-V2-GENESIS-ACTIVATION-FORMAT.md).

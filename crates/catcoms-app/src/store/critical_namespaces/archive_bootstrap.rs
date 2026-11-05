@@ -143,7 +143,7 @@ pub use founder::{
 impl ServerStore {
     /// Select only the actual physical opener's concrete grammar. A caller-supplied payload
     /// cannot opt into a namespace/consumer. Strict Pending-only parsing remains unchanged.
-    pub(in crate::store) fn parse_configured_join_catalog<'a>(
+    pub(in crate::store::critical_namespaces) fn parse_configured_join_catalog<'a>(
         &self,
         plain: &'a [u8],
     ) -> Result<super::pending_join_codec::Parsed<'a>, AppError> {
@@ -152,6 +152,13 @@ impl ServerStore {
             .pending_join_policy
             .as_ref()
             .and_then(|policy| policy.execution.as_ref());
+        if self.current_layout_policy.is_some() {
+            return super::pending_join_codec::parse_current_layout(
+                plain,
+                &domain,
+                execution.is_some(),
+            );
+        }
         match (self.archive_bootstrap_policy.as_ref(), execution) {
             (None, None) => super::pending_join_codec::parse(plain, &domain),
             (Some(_), None) => super::pending_join_codec::parse_bootstrap(plain, &domain),
@@ -248,6 +255,36 @@ impl ServerStore {
 }
 
 impl PreparedArchiveBootstrapStore {
+    /// Same original still-private common open, used ONLY by the Current wrapper's serial
+    /// ID2-then-ID3 transaction. This is not a conversion of an exposed Store or decoded status.
+    pub(in crate::store) fn from_private_current_open(
+        store: Box<ServerStore>,
+        fee: CatalogReadReservation,
+    ) -> Result<Self, AppError> {
+        let policy = store.current_layout_policy.as_ref().ok_or_else(refused)?;
+        fee.validate(&policy.archive.pending.pool, DECLARATION_FEE)?;
+        if store.chat_mount.observer().is_cancelled()
+            || store
+                .archive_bootstrap_root
+                .lock()
+                .map_err(|_| refused())?
+                .is_some()
+            || store
+                .current_layout
+                .lock()
+                .map_err(|_| refused())?
+                .is_some()
+        {
+            return Err(refused());
+        }
+        Ok(Self {
+            declaration: None,
+            store: Some(store),
+            complete: false,
+            _fee: fee,
+        })
+    }
+
     /// Open an ALREADY activated v6 vault privately. Namespace bootstrap never creates an SDK
     /// group/device, performs networking, or converts an already exposed mount. No Store
     /// reference escapes before the declaration and its actual root barriers complete.
@@ -283,6 +320,7 @@ impl PreparedArchiveBootstrapStore {
             Some(policy.pending.pool.clone()),
             Some(policy.pending.clone()),
             Some(policy),
+            None,
         )?);
         let complete = store
             .archive_bootstrap_root
@@ -358,7 +396,9 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        super::current_group::refuse_unsupported_layout(&self.dir)?;
+        if self.current_layout_policy.is_none() {
+            super::current_group::refuse_unsupported_layout(&self.dir)?;
+        }
         if actual_format != VaultFormat::CriticalNamespaces {
             return Err(refused());
         }

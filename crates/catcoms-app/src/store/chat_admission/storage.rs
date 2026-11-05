@@ -100,6 +100,15 @@ impl<'writer> ChatAdmissionStoragePermit<'writer> {
         self.mode
     }
 
+    /// Negative-only index maintenance for this actual known-key file effect. Called after
+    /// original admission checks and before physical head work. Missing/failed association
+    /// closes future V2 vacancy, never this already-proven unrelated legacy communication.
+    pub(in crate::store) fn note_current_canonical_effect(&self, directory: &Path) {
+        if let Some(index) = &self.runtime.current_lineage {
+            index.observe_known_effect(self.store, self.key, directory);
+        }
+    }
+
     /// Negative format classification from the SAME already-held admission writer. Subordinate
     /// savers must not call `ServerStore::chat_vault_format`: it would re-enter this mutex and
     /// deadlock. The copied enum grants no custody independently of this borrowed permit.

@@ -54,11 +54,12 @@ pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
     ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
-    ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress, CheckpointJoinExecutionPolicy,
-    CheckpointJoinNetwork, CheckpointJoinSubmissionStatus, CriticalCatalogReadPool,
-    JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress,
+    CanonicalFilenameInventoryPolicy, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
+    CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, JournalledCheckpointJoinPreparation,
+    PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore, PreparedV2CurrentLayoutStore,
     ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
-    ReturnedCheckpointJoinActivation,
+    ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy, V2CurrentLayoutStore,
 };
 mod owner_evidence;
 pub use chat_admission::{
@@ -554,6 +555,7 @@ mod persistence {
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
     mod cold_source_read;
     mod current_group;
+    mod current_layout;
     pub use cold_source_read::RetainedBootstrapSourceData;
     pub use cold_source_read::{
         GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
@@ -561,6 +563,9 @@ mod persistence {
     };
     pub(super) use cold_source_read::{
         OriginalBootstrapReadObservation, ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
+    };
+    pub(in crate::store) use current_layout::{
+        CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,
     };
     mod bootstrap_source_work;
     pub(super) use bootstrap_source_work::{OriginalSourceWriteWork, SavedBootstrapSourceFiles};
@@ -5047,6 +5052,7 @@ mod persistence {
             permit.validate_original(self, permit.group(), permit.signer())?;
             let key = head.identifier(permit)?;
             let parent = self.owner_canonical_directory()?;
+            permit.note_current_canonical_effect(&parent);
             let path = parent.join(format!("{}.bin", hex::encode(key)));
             let stage = parent.join(format!("{}.replace.tmp", hex::encode(key)));
             file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
@@ -5119,6 +5125,7 @@ mod persistence {
             permit.validate_original(self, permit.group(), permit.signer())?;
             let key = head.identifier(permit)?;
             let parent = self.owner_canonical_directory()?;
+            permit.note_current_canonical_effect(&parent);
             let stage = parent.join(format!("{}.replace.tmp", hex::encode(key)));
             let path = parent.join(format!("{}.bin", hex::encode(key)));
             file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
@@ -5183,6 +5190,7 @@ mod persistence {
             permit.validate_original(self, permit.group(), permit.signer())?;
             let _ = head.identifier(permit)?;
             let parent = self.owner_canonical_directory()?;
+            permit.note_current_canonical_effect(&parent);
             file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
             #[cfg(test)]
             if self
@@ -5221,6 +5229,7 @@ mod persistence {
                 ));
             }
             let parent = self.owner_canonical_directory()?;
+            permit.note_current_canonical_effect(&parent);
             if permit.vault_format()?.requires_owner_operations() {
                 // A known v5/v6 stage may contain a different exact accepted/result candidate. The
                 // legacy cleaner cannot decide that it is disposable. Same-candidate/parent-
@@ -5569,6 +5578,9 @@ pub struct ServerStore {
     // Only the private new-physical-open wrapper supplies this concrete handler. Ordinary
     // constructors continue rejecting its descriptor, seed and root before old cleaners.
     archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
+    current_layout_policy: Option<critical_namespaces::current_layout::V2CurrentLayoutPolicy>,
+    current_layout:
+        std::sync::Mutex<Option<critical_namespaces::current_layout::MountedCurrentLayout>>,
     archive_bootstrap_root: critical_namespaces::archive_bootstrap::SharedRoot,
     founder_invocations: std::sync::Mutex<persistence::FounderInvocationRegistry>,
     founder_sources: std::sync::Mutex<persistence::FounderSourceRegistry>,
@@ -5663,7 +5675,7 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, AppError> {
-        Self::open_with_catalog_policy(dir, passphrase, rng, None, None, None)
+        Self::open_with_catalog_policy(dir, passphrase, rng, None, None, None, None)
     }
 
     /// Explicit configured catalog reader. Clones of the SAME provided pool share its hardcap;
@@ -5677,7 +5689,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         pool: CriticalCatalogReadPool,
     ) -> Result<Self, AppError> {
-        Self::open_with_catalog_policy(dir, passphrase, rng, Some(pool), None, None)
+        Self::open_with_catalog_policy(dir, passphrase, rng, Some(pool), None, None, None)
     }
 
     /// Open an ALREADY activated v6 vault with the explicitly configured, private Pending-only
@@ -5697,6 +5709,7 @@ impl ServerStore {
             Some(policy.pool.clone()),
             Some(policy),
             None,
+            None,
         )
     }
 
@@ -5707,6 +5720,7 @@ impl ServerStore {
         catalog_read_pool: Option<CriticalCatalogReadPool>,
         pending_join_policy: Option<PendingJoinCatalogPolicy>,
         archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
+        current_layout_policy: Option<critical_namespaces::current_layout::V2CurrentLayoutPolicy>,
     ) -> Result<Self, AppError> {
         let dir = dir.as_ref().to_path_buf();
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
@@ -5720,6 +5734,8 @@ impl ServerStore {
             catalog_read_pool,
             pending_join_policy,
             archive_bootstrap_policy,
+            current_layout_policy,
+            current_layout: Default::default(),
             archive_bootstrap_root: Default::default(),
             founder_invocations: Default::default(),
             founder_sources: Default::default(),

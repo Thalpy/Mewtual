@@ -71,6 +71,7 @@ impl ServerStore {
             Some(pending.pool.clone()),
             Some(pending),
             None,
+            None,
         )
     }
 }

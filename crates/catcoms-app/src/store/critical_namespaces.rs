@@ -20,9 +20,8 @@ use catcoms_rt::RequestCancellation;
 use catcoms_storage::VaultFormat;
 use std::sync::Arc;
 pub(in crate::store) mod archive_bootstrap;
-// Shared DATA dependency for the reviewed Current metadata tests. There is deliberately no
-// production namespace3 parser/opener/handler until actual physical fences and I/O land.
-#[cfg(test)]
+// The concrete physical Current handler consumes this closed DATA codec. Other constructors
+// retain their own strict parsers and refuse current/stage/seed/marker3 before older cleaners.
 pub(in crate::store) mod archive_current_namespace_codec;
 // DRAFT metadata grammar only. Production declaration waits for the actual ID3 opener and
 // source/scope/head consumer; this test module cannot enable a Current handler or issuer.
@@ -30,12 +29,17 @@ pub(in crate::store) mod archive_current_namespace_codec;
 pub(in crate::store) mod archive_current_codec;
 mod catalog_envelope;
 pub(in crate::store) mod current_group;
+pub(in crate::store) mod current_layout;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
     ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
     ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
     ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress, PreparedArchiveBootstrapStore,
     ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
+};
+pub use current_layout::{
+    CanonicalFilenameInventoryPolicy, PreparedV2CurrentLayoutStore, V2CurrentLayoutPolicy,
+    V2CurrentLayoutStore,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
@@ -193,6 +197,9 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        if self.current_layout_policy.is_some() {
+            return self.open_current_layout_catalog_gate(actual_format, passphrase, rng);
+        }
         if self.archive_bootstrap_policy.is_some() {
             return self.open_archive_bootstrap_catalog_gate(actual_format, passphrase, rng);
         }

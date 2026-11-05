@@ -87,6 +87,8 @@ pub(super) struct Parsed<'a> {
     pub(super) archive: Option<super::archive_bootstrap::Descriptor>,
     pub(super) archive_payload: Option<&'a [u8]>,
     pub(super) join_version: Option<u32>,
+    pub(super) current_layout: Option<super::archive_current_namespace_codec::CurrentLayoutData>,
+    pub(super) current_payload: Option<&'a [u8]>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -101,6 +103,8 @@ pub(in crate::store) struct Summary {
     pub(super) count: usize,
     pub(in crate::store) archive: Option<super::archive_bootstrap::Descriptor>,
     pub(super) join_version: Option<u32>,
+    pub(super) current_layout: Option<super::archive_current_namespace_codec::CurrentLayoutData>,
+    pub(super) current_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -115,6 +119,10 @@ impl Parsed<'_> {
             count: self.count,
             archive: self.archive.clone(),
             join_version: self.join_version,
+            current_layout: self.current_layout,
+            current_payload_digest: self
+                .current_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
 }
@@ -146,6 +154,27 @@ enum SupportedLayout {
     ArchiveBootstrap,
     Executing,
     ArchiveBootstrapExecuting,
+    CurrentLayout,
+    CurrentLayoutExecuting,
+}
+
+/// Only the concrete Current-layout physical inspector may select this grammar. The default,
+/// Pending and ID2-only inspectors still reject namespace3 in EITHER fixed source before old
+/// cleanup. No parsed label or external flag can install this actual constructor policy.
+pub(super) fn parse_current_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        if executing {
+            SupportedLayout::CurrentLayoutExecuting
+        } else {
+            SupportedLayout::CurrentLayout
+        },
+    )
 }
 
 pub(super) fn parse_executing<'a>(
@@ -178,6 +207,8 @@ fn parse_known<'a>(
             archive: None,
             archive_payload: None,
             join_version: None,
+            current_layout: None,
+            current_payload: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -185,13 +216,17 @@ fn parse_known<'a>(
     let mut archive = None;
     let mut archive_payload = None;
     let mut join_version = None;
+    let mut current_layout = None;
+    let mut current_payload = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
             JOIN_ID => {
                 (rows, count) = match (&layout, entry.version) {
                     (
-                        SupportedLayout::Executing | SupportedLayout::ArchiveBootstrapExecuting,
+                        SupportedLayout::Executing
+                        | SupportedLayout::ArchiveBootstrapExecuting
+                        | SupportedLayout::CurrentLayoutExecuting,
                         super::pending_join::execution_payload::VERSION,
                     ) => super::pending_join::execution_payload::parse(entry.payload, domain)?,
                     _ => parse_join_entry(entry, domain)?,
@@ -201,7 +236,10 @@ fn parse_known<'a>(
             super::archive_bootstrap::ARCHIVE_ID
                 if matches!(
                     layout,
-                    SupportedLayout::ArchiveBootstrap | SupportedLayout::ArchiveBootstrapExecuting
+                    SupportedLayout::ArchiveBootstrap
+                        | SupportedLayout::ArchiveBootstrapExecuting
+                        | SupportedLayout::CurrentLayout
+                        | SupportedLayout::CurrentLayoutExecuting
                 ) && entry.version == super::archive_bootstrap::ARCHIVE_VERSION =>
             {
                 archive = Some(super::archive_bootstrap::Descriptor::parse(
@@ -209,6 +247,28 @@ fn parse_known<'a>(
                     domain,
                 )?);
                 archive_payload = Some(entry.payload);
+            }
+            super::archive_current_namespace_codec::NAMESPACE_ID
+                if matches!(
+                    layout,
+                    SupportedLayout::CurrentLayout | SupportedLayout::CurrentLayoutExecuting
+                ) && entry.version
+                    == super::archive_current_namespace_codec::NAMESPACE_VERSION =>
+            {
+                // Sorted outer IDs guarantee the original ID2 descriptor has been consumed.
+                // Namespace3 can never make a new root or accompany ID2's first declaration.
+                let archive = archive.as_ref().ok_or_else(refused)?;
+                let expected = super::archive_current_namespace_codec::CurrentLayoutData {
+                    vault: archive.vault,
+                    root: archive.root,
+                };
+                current_layout = Some(
+                    super::archive_current_namespace_codec::CurrentLayoutData::decode_data(
+                        entry.payload,
+                        expected,
+                    )?,
+                );
+                current_payload = Some(entry.payload);
             }
             _ => return Err(refused()),
         }
@@ -222,6 +282,8 @@ fn parse_known<'a>(
         archive,
         archive_payload,
         join_version,
+        current_layout,
+        current_payload,
     })
 }
 
@@ -412,6 +474,27 @@ pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppErro
         || next.count > current.count + 1
     {
         return Err(refused());
+    }
+    match (current.current_layout, next.current_layout) {
+        (None, Some(_)) => {
+            // Exactly namespace3 is added over the COMPLETE unchanged current catalog. It
+            // cannot hide a JOIN arm/grant/pause/add, alter ID2 or synthesize an earlier parent.
+            return if current.archive.is_some()
+                && current.archive == next.archive
+                && current.rows == next.rows
+                && current.count == next.count
+                && current.join_version == next.join_version
+                && current.current_payload_digest.is_none()
+                && next.current_payload_digest.is_some()
+            {
+                Ok(())
+            } else {
+                Err(refused())
+            };
+        }
+        (old, new)
+            if old == new && current.current_payload_digest == next.current_payload_digest => {}
+        _ => return Err(refused()),
     }
     match (&current.archive, &next.archive) {
         // The only namespace-set change is a concrete archive declaration over the exact

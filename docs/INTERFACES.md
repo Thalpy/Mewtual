@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Opaque physical ID3 opener (5 November; authored, UNRUN)
+
+`PreparedV2CurrentLayoutStore` owns the original private physical declaration and returns
+`V2CurrentLayoutStore` only after its actual barriers. The completed wrapper exposes historical
+`read_saved_bootstrap_source_data`; it has no public raw Store conversion, callback, group write,
+SDK/server or Current API. Explicit shared-pool, canonical-filename and fixed-file policies are
+installed before common opening. Default/Pending/ID2-only openers still reject ID3 before older
+cleaners. Fifteen regressions are authored UNRUN, with compiled validation owned by primary.
+[Exact contract](communication-recovery/CHAT-V2-CURRENT-LAYOUT-OPENER.md).
+
 ## Negative group-lineage bounds (5 November; authored, UNRUN)
 
 `chat_admission::group_lineage::ChatAdmissionGroupBounds` owns separately prepaid complete
@@ -11,7 +21,8 @@ cannot grant an own scope or a durability result. [Seven UNRUN regressions/contr
 ## Fixed negative Current destinations (5 November; authored, UNRUN)
 
 The old ID2 physical inspector refuses `chat-critical-namespaces.current.seed` or
-`chat-owner-v2/current-layout.bin` before older cleaners. It does not support ID3. A group path
+`chat-owner-v2/current-layout.bin` before older cleaners. Only the separate opaque physical
+opener supports ID3 declaration/historical DATA. A group path
 is literal `g-` plus the complete signer-independent vault/root/group hash; any presence fences
 old captures/readers/positive savers for every signer. New founder source preparation also checks
 the actual fixed-five retained JOIN catalog by group. No public Current or group-write API is

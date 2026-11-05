@@ -1,5 +1,5 @@
-//! Test-only namespace DATA dependency for the reviewed pending Current metadata codecs.
-//! No production module/handler recognizes ID3. A parsed layout, marker, group name or
+//! Closed namespace DATA shared by the actual opt-in physical reader and Current metadata.
+//! Only the concrete opt-in physical reader recognizes ID3. A parsed layout, marker, group name or
 //! declaration seed never proves an actual supported mount, SourceSaved or Current effect.
 use crate::store::{frame, unframe};
 use crate::AppError;
@@ -134,6 +134,7 @@ impl CurrentLayoutData {
 /// Fixed GROUP hash suffix only; the actual closed path selector must prepend the literal
 /// `g-` to obtain the reviewed physical directory name. Local signer is deliberately not an
 /// input. Caller cannot choose a filename or infer directory absence/ownership/Current.
+#[cfg(test)] // actual group-directory producer remains a separate typed consumer
 pub(in crate::store) fn group_name_data(
     layout: CurrentLayoutData,
     group: &[u8],
