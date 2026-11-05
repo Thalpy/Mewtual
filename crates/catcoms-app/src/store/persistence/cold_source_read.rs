@@ -8,6 +8,11 @@ use catcoms_sync::owner_v2::{
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+mod genesis_seed;
+pub use genesis_seed::{
+    GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
+    ReturnedBootstrapSourceData,
+};
 
 const MAX_PATH: usize = 32 * 1024;
 const FIXED_FEE: usize = 1024 * 1024;

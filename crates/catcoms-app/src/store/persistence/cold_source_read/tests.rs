@@ -15,14 +15,14 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 const SECRET: &[u8] = b"actual cold source reader";
-struct Fixture {
-    path: tempfile::TempDir,
-    store: ServerStore,
-    rng: ChaCha20Rng,
-    pool: CriticalCatalogReadPool,
-    group: Vec<u8>,
-    signer: [u8; 32],
-    source_id: [u8; 32],
+pub(super) struct Fixture {
+    pub(super) path: tempfile::TempDir,
+    pub(super) store: ServerStore,
+    pub(super) rng: ChaCha20Rng,
+    pub(super) pool: CriticalCatalogReadPool,
+    pub(super) group: Vec<u8>,
+    pub(super) signer: [u8; 32],
+    pub(super) source_id: [u8; 32],
 }
 fn open(
     path: &Path,
@@ -45,7 +45,7 @@ fn open(
         Err(_) => panic!("namespace barriers"),
     }
 }
-fn fixture(seed: u64) -> Fixture {
+pub(super) fn fixture(seed: u64) -> Fixture {
     let path = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     drop(

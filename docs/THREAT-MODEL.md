@@ -5990,6 +5990,17 @@ consumer must independently require namespace3, exact group pin/head/scope and s
 SDK/non-SDK lifetime fees. Nine reader+one locator regressions are authored UNRUN; actual static
 code review is clear, all compilation/tests/builds remain paused.
 
+The actual App source-to-SDK capsule now pays separate provider/backing/payload/metadata and
+SDK graph debits from the original source's account. Graph reservations contain only the actual
+resource fee plus immutable limits, no Store/key/source cycle. Both actual SDK halves retain
+their shared SDK fee, and capsule field order retains non-SDK payments through graph/source
+teardown. Source/mount/control checks surround resource waits and decode; no paid DATA graph
+alone certifies Current or authorizes native disclosure. Fixed-reason owning refusals preserve
+the original opened source without rereading or refunding source-write budget. Borrow-only
+access prevents raw-seed extraction with premature metadata-fee release. Runtime attachment,
+actual group pin/head/scope/native admission and live operation accounting remain separate.
+Six regressions are authored UNRUN; final actual static review is clear during the pause.
+
 ## Closed V2 genesis DATA seed (5 November; authored, UNRUN)
 
 The actual sealed bootstrap opener retains its verified exact public genesis and whole source

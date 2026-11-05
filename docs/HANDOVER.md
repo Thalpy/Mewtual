@@ -34,6 +34,25 @@ writer exclusion. Original bootstrap ciphertext and the namespace-only declarati
 authored consuming prerequisites. Actual creation debit/FoundingIntent source is now reviewed;
 source persistence, canonical head/scope saves and cold/crash acceptance remain unfinished.
 
+## Actual retained source-to-SDK capsule (5 November; authored, UNRUN; static review clear)
+
+`ServerStore::prepare_genesis_seed` consumes the real paid source DATA and acquires SEPARATE
+same-account SDK plus provider/backing/payload/metadata payments before the actual Sync/MLS
+loader. All decode and partial cleanup occur outside host writers. Actual source checks run
+before fees, after any fee wait before SDK, and after decode. Success stores seed first, source
+next, non-SDK fee last; both real SDK halves keep their own SDK lease. No owned raw-seed getter
+can silently discard those supporting payments. Owning fixed-reason refusals return the SAME
+source/read fee for a new SDK attempt, without rereading source or refunding old write units.
+
+Six genuine-source regressions are authored UNRUN. They cover independent payment/drop
+lifetimes, one-byte-short combined pressure before SDK, provider/setup refusal cleanup,
+cancellation after fee waits, control replacement after real decode and foreign account/mount.
+The work1 test exercises setup/provider cleanup, not a partially decoded typed graph. Design
+and final actual source static reviews are clear. No compiler/tests/build ran. Runtime
+attachment must still preserve the entire resource capsule and pay generic parts/refusal layouts
+BEFORE allocation; actual Current, governor/member/live SDK/send/receive/admin/native remain open.
+[Capsule contract](communication-recovery/CHAT-OWNER-GENESIS-SEED-CUSTODY.md).
+
 ## Paid cold source DATA reader (5 November; authored, UNRUN; static review clear)
 
 The new-physical-opener policy may explicitly enable `with_bootstrap_source_data_read`.

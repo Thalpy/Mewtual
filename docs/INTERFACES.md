@@ -8353,6 +8353,16 @@ its borrower/validate_original do not issue Current, SDK payment or an IPC/nativ
 Downstream copied seed/node metadata needs its own actual retained payments. Nine reader tests
 plus one locator regression remain authored UNRUN; actual code static review is clear.
 
+`ServerStore::prepare_genesis_seed(source, GenesisSeedBudget)` is now the actual owning
+read→SDK DATA consumer. It reserves independent SAME-pool provider/backing/payload/metadata
+and SDK graph payments outside writers; the loader keeps its SDK fee last in both device/group.
+Original source checks surround fee waits and decode. `RetainedBootstrapGenesisSeed` owns seed,
+source and last non-SDK fee; accessors borrow only. `ReturnedBootstrapSourceData::into_parts`
+returns that SAME source/read fee with a fixed `GenesisSeedRefusal`, not a growing SDK error.
+No runtime/Current/native authority or owned raw-seed extractor exists. Later runtime methods
+must acquire actual generic parts/refusal layouts before allocation and preserve all fees.
+Six tests are authored UNRUN; final actual source static review is clear.
+
 ### Explicit original checkpoint retry continuation
 
 `CheckpointJoinNetwork::ensure_retry_grant` is a trusted local ACTIVE-source action. It retains

@@ -545,11 +545,19 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// `scripts/check-store-raw-fs.sh` in CI, which refuses raw filesystem mutation in non-test store
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 pub use persistence::RetainedBootstrapSourceData;
+pub use persistence::{
+    GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
+    ReturnedBootstrapSourceData,
+};
 mod persistence {
     use super::*;
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
     mod cold_source_read;
     pub use cold_source_read::RetainedBootstrapSourceData;
+    pub use cold_source_read::{
+        GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
+        ReturnedBootstrapSourceData,
+    };
     mod bootstrap_source_work;
     pub(super) use bootstrap_source_work::{OriginalSourceWriteWork, SavedBootstrapSourceFiles};
     pub(super) use bootstrap_source_work::{
@@ -5563,6 +5571,10 @@ pub struct ServerStore {
     founder_before_source_prepared_saved: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     founder_before_source_files_saved: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    genesis_before_sdk: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    genesis_after_sdk: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pending_join_catalog: critical_namespaces::pending_join::SharedMounted,
     #[cfg(test)]
     pending_join_before_catalog_writer: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -5710,6 +5722,10 @@ impl ServerStore {
             founder_before_source_prepared_saved: Default::default(),
             #[cfg(test)]
             founder_before_source_files_saved: Default::default(),
+            #[cfg(test)]
+            genesis_before_sdk: Default::default(),
+            #[cfg(test)]
+            genesis_after_sdk: Default::default(),
             pending_join_catalog: Default::default(),
             #[cfg(test)]
             pending_join_before_catalog_writer: Default::default(),
