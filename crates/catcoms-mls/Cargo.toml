@@ -18,6 +18,8 @@ thiserror.workspace = true
 # RUSTSEC-2026-0387: openmls_rust_crypto 0.6 and basic_credential 0.6 still use p256 0.13.
 openmls = "0.9.2"
 openmls_rust_crypto = "0.6"
+# Same locally patched storage type as the provider, including its guarded allocation observer.
+openmls_memory_storage = "=0.6.0"
 blake3 = "1"
 openmls_basic_credential = "0.6"
 openmls_traits = "0.6"

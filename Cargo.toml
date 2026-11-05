@@ -23,6 +23,7 @@ exclude = [
     "apps/desktop/src-tauri",
     # Temporary pinned upstream observer patch; not a Mewtual workspace member.
     "vendor/automerge",
+    "vendor/openmls_memory_storage",
 ]
 
 [workspace.package]
@@ -53,3 +54,5 @@ all = { level = "warn", priority = -1 }
 # See vendor/automerge/MEWTUAL-PATCH.md for provenance and the narrow readonly API patch.
 [patch.crates-io]
 automerge = { path = "vendor/automerge" }
+# Both workspaces also use the same reviewed provider backing-map observation.
+openmls_memory_storage = { path = "vendor/openmls_memory_storage" }

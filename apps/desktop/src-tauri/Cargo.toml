@@ -119,3 +119,4 @@ rand_core = "0.6"
 # Cargo patches belong to each workspace root, including this separate native workspace.
 [patch.crates-io]
 automerge = { path = "../../../vendor/automerge" }
+openmls_memory_storage = { path = "../../../vendor/openmls_memory_storage" }

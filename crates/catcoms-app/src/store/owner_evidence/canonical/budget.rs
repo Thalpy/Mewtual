@@ -11,22 +11,28 @@ pub struct OwnerEvidenceBudget {
     pub(super) hot_bytes: usize,
     pub(super) snapshot: usize,
     pub(super) mls: usize,
+    pub(super) mls_backing: usize,
 }
 impl OwnerEvidenceBudget {
     /// Require an explicit whole-current + replacement allowance for EACH admitted head and
-    /// four simultaneous initialization buffers. Zero, overflow and unsupported maxima refuse.
+    /// four simultaneous initialization buffers, plus two explicit provider backing/payload fees.
+    /// Vec payload capacities are independently checked against twice max_mls_bytes. Zero,
+    /// overflow and unsupported maxima refuse; this does not close the separate SDK-heap gate.
     pub fn checkpoint(
         max_heads: usize,
         persistent_bytes: u64,
         hot_bytes: usize,
         max_snapshot_bytes: usize,
         max_mls_bytes: usize,
+        max_mls_backing_bytes: usize,
     ) -> Result<Self, AppError> {
         if max_heads == 0
             || max_heads > MAX_HEADS
             || max_snapshot_bytes > MAX_SNAPSHOT_BYTES
             || max_mls_bytes == 0
             || max_mls_bytes > MAX_MLS_BYTES
+            || max_mls_backing_bytes == 0
+            || max_mls_backing_bytes > MAX_MLS_BACKING_BYTES
             || max_mls_bytes
                 .checked_add(64 * 1024)
                 .is_none_or(|fee| fee > max_snapshot_bytes)
@@ -39,6 +45,7 @@ impl OwnerEvidenceBudget {
             hot_bytes,
             snapshot: max_snapshot_bytes,
             mls: max_mls_bytes,
+            mls_backing: max_mls_backing_bytes,
         };
         if value.head_fee()? > persistent_bytes || value.buffer_fee()? > hot_bytes {
             return Err(refused());
@@ -53,10 +60,26 @@ impl OwnerEvidenceBudget {
             .ok_or_else(refused)
     }
     pub(super) fn buffer_fee(&self) -> Result<usize, AppError> {
-        self.snapshot
+        let buffers = self
+            .snapshot
             .checked_add(WRAPPER_FEE + SEALED_FEE + 1)
             .and_then(|fee| fee.checked_mul(4))
-            .ok_or_else(refused)
+            .ok_or_else(refused)?;
+        // Provider table backing is independent of encoded payload/output. Retain capacity for
+        // the original private provider and one validation/candidate provider at the same time;
+        // key/value Vec capacities are separately capped and paid at TWICE the encoded allowance
+        // for each. This is a checked local policy, not an SDK allocation-size assumption. These
+        // fees do not assert that arbitrary SDK JSON/group heaps are bounded by byte framing:
+        // that restore preflight remains an explicit activation gate until its consumer exists.
+        // They cover private initialization/restore overlap only. Transfer releases this fee;
+        // active OwnedOwnerServer memory needs independent host admission before activation.
+        let providers = self
+            .mls
+            .checked_mul(2)
+            .and_then(|payload| payload.checked_add(self.mls_backing))
+            .and_then(|fee| fee.checked_mul(2))
+            .ok_or_else(refused)?;
+        buffers.checked_add(providers).ok_or_else(refused)
     }
 }
 
@@ -94,6 +117,7 @@ impl Drop for OwnerPendingCreation {
 pub(crate) struct OwnerInitializationSnapshotLimits {
     pub(crate) max_snapshot_bytes: usize,
     pub(crate) max_mls_bytes: usize,
+    pub(crate) max_mls_backing_bytes: usize,
 }
 
 /// One paid original initialization. Non-Clone/nonserialized; retaining it keeps its exact
@@ -255,6 +279,21 @@ impl ServerStore {
         {
             return Err(refused());
         }
+        #[cfg(test)]
+        {
+            // Scheduling seam only: the actual original admission/creation was already checked.
+            // Release the seam mutex before the callback; the test races real negative recovery
+            // against the SAME subsequent pool admission, not a mocked successful authority.
+            let before_pool = self
+                .owner_evidence
+                .before_owner_initialization_pool
+                .lock()
+                .map_err(|_| refused())?
+                .take();
+            if let Some(before_pool) = before_pool {
+                before_pool();
+            }
+        }
         let mut runtime = self
             .owner_evidence
             .canonical
@@ -262,6 +301,12 @@ impl ServerStore {
             .map_err(|_| refused())?;
         let budget = runtime.budget.ok_or_else(refused)?;
         let identifier = key(preparation.group(), preparation.signer());
+        // Negative recovery can retire this exact Initializing row while this reservation waits
+        // for the pool mutex. Never allocate/install a head from a source sampled before that
+        // retirement; the observer is irreversible and must be checked under this actual guard.
+        if preparation.reservation_observer().is_cancelled() || creation.negative.is_cancelled() {
+            return Err(refused());
+        }
         // No caller-controlled numeric IDs can grow an unbounded mutex map. Existing source
         // refuses first initialization; supported restore/rejoin must use its exact known head.
         if runtime.heads.contains_key(&identifier)
@@ -288,6 +333,7 @@ impl ServerStore {
             limits: OwnerInitializationSnapshotLimits {
                 max_snapshot_bytes: budget.snapshot,
                 max_mls_bytes: budget.mls,
+                max_mls_backing_bytes: budget.mls_backing,
             },
             hot_fee,
             attempt,

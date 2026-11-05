@@ -28,6 +28,8 @@ pub(super) struct StoreOwnerState {
     pub(super) directory_sync_failure: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub(super) restore_sync_failure: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(super) before_owner_initialization_pool: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl ServerStore {

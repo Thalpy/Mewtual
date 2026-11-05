@@ -34,6 +34,7 @@ pub(crate) use source::ValidatedOwnerSnapshot;
 
 const MAX_SNAPSHOT_BYTES: usize = 144 * 1024 * 1024;
 const MAX_MLS_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MLS_BACKING_BYTES: usize = 16 * 1024 * 1024;
 const WRAPPER_FEE: usize = 1024;
 const SEALED_FEE: usize = 40;
 const MAX_HEADS: usize = 65_536;

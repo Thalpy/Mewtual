@@ -351,13 +351,17 @@ impl<T: MeshTransport, R: CryptoRngCore> PrivateManagedServer<T, R> {
             if limits.max_snapshot_bytes == 0
                 || limits.max_mls_bytes == 0
                 || limits.max_mls_bytes > limits.max_snapshot_bytes
+                || limits.max_mls_backing_bytes == 0
             {
                 return Err(refused());
             }
             // The sync/MLS path preflights its closed private-candidate fields and SAME-guard
             // provider map before allocation. A post-encoding len check alone is not that cap.
-            let bytes = server
-                .snapshot_owner_initialization(limits.max_snapshot_bytes, limits.max_mls_bytes)?;
+            let bytes = server.snapshot_owner_initialization(
+                limits.max_snapshot_bytes,
+                limits.max_mls_bytes,
+                limits.max_mls_backing_bytes,
+            )?;
             reservation.validate_private_source(
                 preparation.key.group(),
                 preparation.key.signer(),

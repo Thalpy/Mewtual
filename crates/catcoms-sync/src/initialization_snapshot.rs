@@ -36,16 +36,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// covers both its checked lengths and actual output. The canonical reservation additionally
     /// pays four max-snapshot buffers, covering this output, bounded MLS output, SDK roster
     /// scratch (whose original credential/key material is in the checked provider snapshot),
-    /// and fixed metadata. The 64KiB metadata invoice is output framing, not the whole-memory fee.
-    /// The underlying provider's reported-capacity test is not yet a raw-bucket work proof
-    /// after tombstone-heavy deletion; activation remains blocked on that independently reviewed
-    /// storage/work fix. The checked output allocations and exact framing are still bounded.
+    /// and fixed metadata. The reservation independently pays the provider's actual table backing
+    /// and encoded payload allowance. The 64KiB metadata invoice is output framing, not the
+    /// whole-memory fee. The exactly pinned provider exposes actual backing under the SAME guard;
+    /// reported HashMap capacity is deliberately not used as the tombstone/iteration bound.
     /// The returned bytes confer no save,
     /// Current scope, trusted root or publication authority.
     pub fn snapshot_owner_initialization(
         &mut self,
         max_snapshot_bytes: usize,
         max_mls_bytes: usize,
+        max_mls_backing_bytes: usize,
     ) -> Result<Zeroizing<Vec<u8>>, SyncError> {
         let bad = || SyncError::Malformed;
         let source = self.fresh_chat_admission().ok_or_else(bad)?;
@@ -92,6 +93,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &self.device,
             &self.group,
             max_mls_bytes,
+            max_mls_backing_bytes,
         )?;
         let capacity = mls.len().checked_add(METADATA_FEE).ok_or_else(bad)?;
         let bytes = self.snapshot_with_mls(&mls, Some(capacity))?;
@@ -131,7 +133,7 @@ mod tests {
         let legacy = node.snapshot().unwrap();
         let mls = snapshot_server(&node.device, &node.group).unwrap();
         let bounded = node
-            .snapshot_owner_initialization(mls.len() + METADATA_FEE, mls.len())
+            .snapshot_owner_initialization(mls.len() + METADATA_FEE, mls.len(), 512 * 1024)
             .unwrap();
         assert_eq!(bounded.as_slice(), legacy.as_slice());
         let restored = ChannelSync::restore(
@@ -152,10 +154,10 @@ mod tests {
     fn owner_initialization_refuses_tiny_budget_and_existing_history_before_encoding() {
         let mut node = private();
         let before = ENCODING_ENTRIES.with(std::cell::Cell::get);
-        assert!(node.snapshot_owner_initialization(1, 1).is_err());
+        assert!(node.snapshot_owner_initialization(1, 1, 1).is_err());
         node.ledger.consume([3; 16]).unwrap();
         assert!(node
-            .snapshot_owner_initialization(1024 * 1024, 512 * 1024)
+            .snapshot_owner_initialization(1024 * 1024, 512 * 1024, 512 * 1024)
             .is_err());
         assert_eq!(ENCODING_ENTRIES.with(std::cell::Cell::get), before);
         assert!(
@@ -170,14 +172,14 @@ mod tests {
         node.open_channel(DocType::Channel, 9).await.unwrap();
         let before = ENCODING_ENTRIES.with(std::cell::Cell::get);
         assert!(node
-            .snapshot_owner_initialization(1024 * 1024, 512 * 1024)
+            .snapshot_owner_initialization(1024 * 1024, 512 * 1024, 512 * 1024)
             .is_err());
         assert_eq!(ENCODING_ENTRIES.with(std::cell::Cell::get), before);
         assert!(node.docs.contains_key(&(DocType::Channel, 9)));
         let mut empty = private();
         empty.rendezvous_nodes.push(("a".repeat(1025), vec![1]));
         assert!(empty
-            .snapshot_owner_initialization(1024 * 1024, 512 * 1024)
+            .snapshot_owner_initialization(1024 * 1024, 512 * 1024, 512 * 1024)
             .is_err());
         assert_eq!(empty.rendezvous_nodes[0].0.len(), 1025);
     }
@@ -222,7 +224,7 @@ mod tests {
         node.stage_managed_chat_scope([4; 32], [5; 32]).unwrap();
         let legacy = node.snapshot().unwrap();
         let bytes = node
-            .snapshot_owner_initialization(1024 * 1024, 512 * 1024)
+            .snapshot_owner_initialization(1024 * 1024, 512 * 1024, 512 * 1024)
             .unwrap();
         assert_eq!(bytes.as_slice(), legacy.as_slice());
         let restored = ChannelSync::restore(

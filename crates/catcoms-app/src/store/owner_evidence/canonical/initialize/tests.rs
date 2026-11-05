@@ -6,6 +6,38 @@ use rand_core::SeedableRng;
 
 const SECRET: &[u8] = b"canonical owner actual store fixture";
 type Attempt = OwnerFounderInitialization<catcoms_rt::MemNetwork, ChaCha20Rng>;
+
+#[test]
+fn canonical_initialization_prepays_independent_backing_and_payload_capacity() {
+    let output = 1024 * 1024usize;
+    let mls = 512 * 1024usize;
+    let backing = 512 * 1024usize;
+    let expected = 4 * (output + WRAPPER_FEE + SEALED_FEE + 1) + 2 * (backing + 2 * mls);
+    let budget =
+        OwnerEvidenceBudget::checkpoint(1, 4 * 1024 * 1024, expected, output, mls, backing)
+            .unwrap();
+    assert_eq!(budget.buffer_fee().unwrap(), expected);
+    assert!(OwnerEvidenceBudget::checkpoint(
+        1,
+        4 * 1024 * 1024,
+        expected - 1,
+        output,
+        mls,
+        backing
+    )
+    .is_err());
+    assert!(OwnerEvidenceBudget::checkpoint(1, 4 * 1024 * 1024, expected, output, mls, 0).is_err());
+    assert!(OwnerEvidenceBudget::checkpoint(
+        1,
+        4 * 1024 * 1024,
+        expected,
+        output,
+        mls,
+        MAX_MLS_BACKING_BYTES + 1
+    )
+    .is_err());
+}
+
 fn store() -> (tempfile::TempDir, ServerStore, ChaCha20Rng) {
     let directory = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc001);
@@ -20,6 +52,7 @@ fn store() -> (tempfile::TempDir, ServerStore, ChaCha20Rng) {
                 16 * 1024 * 1024,
                 8 * 1024 * 1024,
                 1024 * 1024,
+                512 * 1024,
                 512 * 1024,
             )
             .unwrap(),
@@ -286,8 +319,9 @@ fn pending_creation_is_prepaid_before_founder_profile_and_transfers_fee_once() {
     let budget = OwnerEvidenceBudget::checkpoint(
         1,
         4 * 1024 * 1024,
-        5 * 1024 * 1024,
+        8 * 1024 * 1024,
         1024 * 1024,
+        512 * 1024,
         512 * 1024,
     )
     .unwrap();

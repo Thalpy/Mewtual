@@ -5355,9 +5355,8 @@ dependencies = [
 [[package]]
 name = "openmls_memory_storage"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce927945a16eaa19302ed5ccef052f01ba68f2ba7ae67e4ac4ff2fc661445364"
 dependencies = [
+ "hashbrown 0.16.1",
  "log",
  "openmls_traits",
  "serde",

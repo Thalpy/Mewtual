@@ -4115,10 +4115,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         &mut self,
         max_snapshot_bytes: usize,
         max_mls_bytes: usize,
+        max_mls_backing_bytes: usize,
     ) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
-        Ok(self
-            .sync
-            .snapshot_owner_initialization(max_snapshot_bytes, max_mls_bytes)?)
+        Ok(self.sync.snapshot_owner_initialization(
+            max_snapshot_bytes,
+            max_mls_bytes,
+            max_mls_backing_bytes,
+        )?)
     }
 
     /// Reconstruct a server from a [`Server::snapshot`] blob plus a **fresh** transport (the
