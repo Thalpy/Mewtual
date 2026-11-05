@@ -544,9 +544,12 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// beside them (I-4 audit M-1). That gap is closed mechanically instead, by
 /// `scripts/check-store-raw-fs.sh` in CI, which refuses raw filesystem mutation in non-test store
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
+pub use persistence::RetainedBootstrapSourceData;
 mod persistence {
     use super::*;
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
+    mod cold_source_read;
+    pub use cold_source_read::RetainedBootstrapSourceData;
     mod bootstrap_source_work;
     pub(super) use bootstrap_source_work::{OriginalSourceWriteWork, SavedBootstrapSourceFiles};
     pub(super) use bootstrap_source_work::{

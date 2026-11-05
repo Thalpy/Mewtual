@@ -992,6 +992,43 @@ pub(in crate::store) fn open_target_marker_data(
     )?;
     TargetMarkerData::decode(&plain, debit, id)
 }
+/// Authenticated bounded LOCATOR DATA only, before the caller knows the flat debit name.
+/// Complete framing/EOF and actual root/request context precede the returned labels. The
+/// caller MUST then independently open that fixed debit and use the full marker decoder
+/// above. This cannot prove saved work, source authority, Fresh, a read payment or Current.
+pub(in crate::store) fn open_target_marker_locator_data(
+    key: &[u8; 32],
+    raw: &[u8],
+    vault: [u8; 32],
+    root: [u8; 32],
+    group: &[u8],
+    signer: [u8; 32],
+) -> Result<(InvocationData, DebitId), AppError> {
+    if group.is_empty() || group.len() > 256 {
+        return Err(refused());
+    }
+    let plain = open_small(
+        key,
+        "catcoms/private-chat-founder-link-key/v1",
+        raw,
+        MAX_MARKER_PLAIN,
+    )?;
+    let mut d = input(&plain, MAX_MARKER_PLAIN, MARKER_TAG)?;
+    let invocation = get_invocation(&mut d)?;
+    let debit = DebitId::from_bytes(digest(&mut d)?);
+    let founding = get_founding(&mut d)?;
+    d.finish().map_err(|_| refused())?;
+    if invocation.vault != vault
+        || invocation.root != root
+        || founding.group != group
+        || founding.signer != signer
+        || founding.scope_domain != vault
+        || founding.revision != 1
+    {
+        return Err(refused());
+    }
+    Ok((invocation, debit))
+}
 pub(in crate::store) fn seal_intent_data(
     key: &[u8; 32],
     data: &IntentData,

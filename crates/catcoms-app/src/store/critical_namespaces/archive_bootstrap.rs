@@ -27,6 +27,13 @@ pub(in crate::store) const BOOTSTRAP_SOURCE_CUSTODY_FEE: usize =
 pub struct ArchiveBootstrapCatalogPolicy {
     pub(in crate::store) pending: PendingJoinCatalogPolicy,
     persistent_capacity: usize,
+    pub(in crate::store) source_read: Option<SourceDataReadPolicy>,
+}
+/// Trusted negative opt-in to the fixed paid DATA reader. No read/work/source result follows
+/// from this configuration alone; actual original root/terminal/files and fees still govern.
+#[derive(Clone)]
+pub(in crate::store) struct SourceDataReadPolicy {
+    _private: (),
 }
 impl std::fmt::Debug for ArchiveBootstrapCatalogPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,6 +42,12 @@ impl std::fmt::Debug for ArchiveBootstrapCatalogPolicy {
     }
 }
 impl ArchiveBootstrapCatalogPolicy {
+    /// Configure before NEW physical opening only. This never upgrades an exposed Store,
+    /// changes namespace grammar, reconstructs warm work or enables a Current/native host.
+    pub fn with_bootstrap_source_data_read(mut self) -> Self {
+        self.source_read = Some(SourceDataReadPolicy { _private: () });
+        self
+    }
     /// Explicitly compose the concrete original JOIN execution consumer with this physical
     /// archive opener. This is trusted Rust configuration, not a parsed permission; it grants
     /// no units/task, and default/Pending/archive-only opening remains descriptor-v1 strict.
@@ -65,6 +78,7 @@ impl ArchiveBootstrapCatalogPolicy {
                 2 * super::pending_join_codec::MAX_CATALOG_FRAMED,
             )?,
             persistent_capacity,
+            source_read: None,
         })
     }
 }

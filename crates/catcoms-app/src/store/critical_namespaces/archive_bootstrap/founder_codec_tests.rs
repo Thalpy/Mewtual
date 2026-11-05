@@ -92,6 +92,62 @@ fn source(debit: &DebitData, id: DebitId, marker: TargetMarkerId, parent: Intent
 }
 
 #[test]
+fn authenticated_marker_locator_is_complete_context_bound_data_not_a_saved_result() {
+    let debit = debit();
+    let frame = seal_debit_data(&KEY, &debit, &mut rng()).unwrap();
+    let id = DebitId::of(&frame);
+    let marker = marker(&debit, id);
+    let sealed = seal_target_marker_data(&KEY, &marker, &debit, id, &mut rng()).unwrap();
+    let found = open_target_marker_locator_data(
+        &KEY,
+        &sealed,
+        debit.invocation.vault,
+        debit.invocation.root,
+        &marker.founding.group,
+        debit.signer,
+    )
+    .unwrap();
+    assert!(found.0 == debit.invocation && found.1 == id);
+    assert!(open_target_marker_data(&KEY, &debit, found.1, &sealed).unwrap() == marker);
+    for changed in 0..5 {
+        let mut vault = debit.invocation.vault;
+        let mut root = debit.invocation.root;
+        let mut group = marker.founding.group.clone();
+        let mut signer = debit.signer;
+        let mut key = KEY;
+        match changed {
+            0 => vault[0] ^= 1,
+            1 => root[0] ^= 1,
+            2 => group[255] ^= 1,
+            3 => signer[31] ^= 1,
+            _ => key[0] ^= 1,
+        }
+        assert!(
+            open_target_marker_locator_data(&key, &sealed, vault, root, &group, signer).is_err()
+        );
+    }
+    let mut plain = marker.encode(&debit, id).unwrap();
+    plain.push(0);
+    let trailing = seal_small(
+        &KEY,
+        "catcoms/private-chat-founder-link-key/v1",
+        &plain,
+        MAX_MARKER_PLAIN,
+        &mut rng(),
+    )
+    .unwrap();
+    assert!(open_target_marker_locator_data(
+        &KEY,
+        &trailing,
+        debit.invocation.vault,
+        debit.invocation.root,
+        &marker.founding.group,
+        debit.signer
+    )
+    .is_err());
+}
+
+#[test]
 fn maximum_data_grammar_reaches_exact_debit_marker_context_intent_and_seed_sizes() {
     let d = debit();
     assert_eq!(d.encode().unwrap().len(), 488);

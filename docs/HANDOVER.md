@@ -6,8 +6,8 @@ Work continues on `communication-chat-v2-production`. Chat V2 remains disabled a
 The new v2 Profile/Admission, successor headers, acceptance/append/removal records, public transition
 math and tree proofs are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The actual
 Sync-only v2 founder producer now derives its genesis from original real creation/scope custody.
-Its App creation debit and FoundingIntent consumer are now authored; covering source/head saves
-and live governing/dispatch consumers remain unfinished. The real
+Its App creation debit, FoundingIntent, warm source save/terminal and paid cold DATA reader are
+now authored below. Head/scope Current and live governing/dispatch consumers remain unfinished. The real
 canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
 Add/save/install/reply and exact retained-successor recovery source is integrated, with regressions
 authored but unrun; it remains one founder/one Add/zero history, not the production v2 consumer.
@@ -34,6 +34,32 @@ writer exclusion. Original bootstrap ciphertext and the namespace-only declarati
 authored consuming prerequisites. Actual creation debit/FoundingIntent source is now reviewed;
 source persistence, canonical head/scope saves and cold/crash acceptance remain unfinished.
 
+## Paid cold source DATA reader (5 November; authored, UNRUN; static review clear)
+
+The new-physical-opener policy may explicitly enable `with_bootstrap_source_data_read`.
+`read_saved_bootstrap_source_data` selects only the fixed group/full-signer target. A complete
+authenticated bounded marker locator derives flat invocation names, then the independently
+opened actual debit and full marker/SourceSaved/current validate all four controls. Any stage,
+seed, unknown or partial control remains preserved/refused. This never reconstructs warm work.
+
+One actual shared fee,3MAX source frames plus1MiB fixed, precedes EVERY small/large buffer. Its
+once-only read Work runs full source AEAD/public-genesis validation and separate records/manifest
+byte comparisons outside Root. Exact-capacity buffers include the EOF probe without Vec growth.
+Named accounting includes nested codecs, serial pages and doubled PathBuf capacity, plus actual
+control/layout copies. The existing warm worker's path invoice was corrected within its same
+512KiB payment. Read-only Work holds no OS lease: a new mount can open while an old read drains,
+but original negatives prevent old-result adoption. Files/opened DATA drain before the last fee.
+
+`RetainedBootstrapSourceData` is pure historical DATA/resource ownership, not a latest-host
+selector, warm SourceSaved token, SDK payment, Fresh, Current or native/UI disclosure lease.
+Nine reader tests plus one locator test are authored UNRUN, including real cold reopen, all
+three artifact checks, identity/control/corruption/refusal, one-byte-short pressure before buffers,
+once-only/shared fee lifetime, remount/replacement and actual other-group source-write progress.
+Design and final source/documentation static reviews are clear. No compiler/tests/build
+ran. Cold control repair, mandatory ID3/latest-host selection, actual paid SDK/metadata/current
+coupling, governor/send/receive/admin/native and scope-I/O fairness remain unfinished.
+[Reader contract and limits](communication-recovery/CHAT-OWNER-COLD-SOURCE-READ.md).
+
 ## Actual source terminal closure (5 November; authored, UNRUN; static review clear)
 
 `ArchiveFounderSourcePreparation::save_source_terminal` now connects the completed original
@@ -57,7 +83,8 @@ and late byte-equal records/manifest replacement after completed-run proofs.
 The cold test does not implement a paid source/SDK/Current reader. The five-slot registry still
 holds unresolved creation jobs until the later actual owning Current handoff; it is not retired
 by this slice. Codec and connected writer design/actual static reviews are clear.
-No compilation/tests/build ran. Current activation, cold negative/read consumers, production
+No compilation/tests/build ran. The paid DATA reader above is now authored; Current activation,
+cold negative control repair, production
 governor/send/receive/admin and native integration remain required.
 
 ## Closed initial SDK graph admission (5 November; authored, UNRUN)
@@ -104,8 +131,9 @@ parent rollback, cancellation after source opening, final-boundary named-output 
 actual other-group progress during source I/O and actual Store
 Drop/new-open exclusion until work drains. Design and final actual-diff reviews are clear after
 two ordering fixes.
-No compilation/tests/build ran. Cold negative repair, durable SourceSaved terminal closure,
-head/scope Current, governing/send/receive/admin and native activation remain unfinished.
+No compilation/tests/build ran. The terminal closure and paid DATA reader are authored above.
+Cold negative repair, head/scope Current, governing/send/receive/admin and native activation
+remain unfinished.
 
 Seven genuine live-MLS SDK shape regressions were separately integrated at `0d7eb0a4` (UNRUN).
 They cover actual ratchet/reopen/interoperation, skip/replay/authentication, exact1000/1001

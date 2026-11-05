@@ -21,7 +21,9 @@ const MAX_WORK_PATH_BYTES: usize = 32 * 1024;
 /// overlap, Arc/control
 /// holders and output objects. It is not an allocator, thread-stack or process RSS claim.
 pub(super) fn validate_metadata_invoice(store: &ServerStore) -> Result<(), AppError> {
-    let fixed = 6 * (MAX_WORK_PATH_BYTES + 256)
+    // Two stored paths plus two simultaneous marker/control paths. join/push may double
+    // each cloned byte capacity; byte length alone is not a path allocation invoice.
+    let fixed = 2 * 4 * (MAX_WORK_PATH_BYTES + 256)
         + 10 * (founder::MAX_INTENT_FRAME
             + founder::MAX_TRANSITION_FRAME
             + founder::MAX_TARGET_MARKER_FRAME

@@ -11,8 +11,9 @@ regressions; design and final actual-diff static review are clear. It saves/debi
 successor, then runs a non-Clone original Work outside every global writer, retaining the
 OS-only physical lease through I/O. Large files are `source.seed`, `source.bin`, `records.bin`
 and `manifest.bin` in the same original target. The actual warm SourceSaved terminal closure
-is also authored (eight UNRUN regressions, final static review clear). Cold negative/read consumers,
-asynchronous native scheduling and Current remain implementation gates.
+is also authored (eight UNRUN regressions, final static review clear). The paid cold historical
+DATA reader is now authored with10 UNRUN regressions and static review clear. Cold negative
+control repair, asynchronous native scheduling and Current remain implementation gates.
 
 ## Actual source before journal effects
 

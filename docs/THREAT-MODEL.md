@@ -5976,6 +5976,20 @@ writer regressions are authored UNRUN with final actual-diff static review clear
 obtain a NEW paid source/SDK capture; historical terminal evidence does not guarantee today's
 file availability or give an old SDK/write arm back.
 
+The paid cold DATA reader now performs a complete authenticated marker locator, then actual
+independent debit/full-marker/SourceSaved checks and all four control classifications before
+large work. Unknown stage/seed/control is held, never a reason to clean or infer absent history.
+Its actual one-shot read payment3MAX_SOURCE_FRAME+1MiB precedes every buffer, including doubled
+path capacities, exact EOF-probe buffers and separate page comparisons. Full source/public
+verification and both separate genesis artifacts run outside Root; the final original mount,
+small controls and named-object proof follows all full reads. Read-only Work cannot mutate or
+hold the physical session; an old read refuses after Store Drop even if a new mount already
+opened identical files. Retained opened DATA precedes its last fee and contains no Store/key/
+session/sender. It is neither a latest host nor native disclosure authority. The actual Current
+consumer must independently require namespace3, exact group pin/head/scope and separate actual
+SDK/non-SDK lifetime fees. Nine reader+one locator regressions are authored UNRUN; actual static
+code review is clear, all compilation/tests/builds remain paused.
+
 ## Closed V2 genesis DATA seed (5 November; authored, UNRUN)
 
 The actual sealed bootstrap opener retains its verified exact public genesis and whole source

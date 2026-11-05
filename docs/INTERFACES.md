@@ -8339,6 +8339,20 @@ included in the same source-custody invoice. Registry handoff/retirement remains
 Current consumer. Eight actual writer regressions are authored UNRUN; final static review is clear.
 Cold terminal DATA is not a warm token, a write-budget refund or a paid typed SDK/Current read.
 
+The explicit new-physical `ArchiveBootstrapCatalogPolicy::with_bootstrap_source_data_read`
+enables `ServerStore::read_saved_bootstrap_source_data(group, full_signer)`. It uses actual
+Root/target/control custody and a complete authenticated locator followed by independent
+debit/full-marker/terminal validation. All four controls are classified; any stage/seed refuses.
+One actual READ_FEE (3MAX_SOURCE_FRAME+1MiB fixed) precedes all small/large buffers. A shared
+once-state is consumed before full read; failure does not revive it. A later trusted local call
+is a NEW paid read, never a source-write refund. Source and both separate genesis pages are
+verified outside Root with explicit capacities/EOF probe, then original controls/objects and
+negatives are rechecked. Read-only Work has no Store/session; its ephemeral dbkey never enters
+the retained capture. `RetainedBootstrapSourceData` owns opened DATA and the SAME last fee;
+its borrower/validate_original do not issue Current, SDK payment or an IPC/native lease.
+Downstream copied seed/node metadata needs its own actual retained payments. Nine reader tests
+plus one locator regression remain authored UNRUN; actual code static review is clear.
+
 ### Explicit original checkpoint retry continuation
 
 `CheckpointJoinNetwork::ensure_retry_grant` is a trusted local ACTIVE-source action. It retains
