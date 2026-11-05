@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+## Stored SDK read failures (5 November; authored, unexecuted)
+
+The pinned MemoryStorage read adapter now propagates its existing serialization error for present
+malformed typed JSON/list rows and dangling queued-proposal references. Valid stored bytes and
+missing optional-row behavior remain unchanged; no source is repaired, truncated or removed. Three
+new MLS regressions call both actual legacy and provider-bounded restore paths without catch-unwind.
+They are authored/unexecuted under the compilation pause; optional-feature getter checks and full
+validation remain pending. This addresses an SDK read panic, not typed heap admission. Actual JSON
+typed/group heaps, signer temporary copies, secret-tree/ratchet arrays and pending-commit graphs
+still need their own bounded consumer/invoice before production Chat V2 activation.
+
 ## Exact first-owner stage recovery (5 November; authored, unexecuted)
 
 The inactive canonical restore now admits an original v4 stage only when its canonical name is

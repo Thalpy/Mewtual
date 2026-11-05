@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Stored SDK read error boundary (5 November; validation paused)
+
+The local pinned MemoryStorage patch returns the existing serialization error for malformed
+present typed/list JSON and for a queued-proposal reference without its companion row. Authentic
+sealed source is still saved input, not evidence that every nested SDK shape is usable. A bad
+read must refuse without a panic or silent omission; valid legacy encoding and missing optional
+row behavior are preserved. No catch-unwind or allocation-limit claim follows from this change.
+Generic typed JSON, secret-tree/ratchet and pending-commit heap/work admission remain separate
+open Chat V2 gates. Three actual-restore regressions are authored and have not executed.
+
 ## Inactive exact first-owner stage recovery (5 November; validation paused)
 
 An authenticated stage is still untrusted saved evidence, not fresh provenance or runtime custody.

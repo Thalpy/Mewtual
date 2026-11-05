@@ -1,4 +1,4 @@
-# Mewtual provider backing observation
+# Mewtual provider backing observation and stored-read errors
 
 This directory starts from the exact crates.io `openmls_memory_storage` **0.6.0** archive selected
 by both workspaces. Archive SHA-256:
@@ -25,9 +25,15 @@ The deliberate local changes are:
   same map with `StorageMap::default()`. The generic parameter permits deterministic private
   preflight tests; the production provider always uses randomized `RandomState`.
 - This provenance file and the missing upstream licence notice are added.
+- Present malformed JSON in typed read getters and the outer stored-list reader now propagates
+  the existing `MemoryStorageError::SerializationError` instead of panicking on `unwrap`. Missing
+  optional rows still return `None`/an empty list. A queued-proposal reference whose companion
+  row is missing returns that same error rather than crashing or silently omitting the proposal.
+  The optional extension/virtual-client typed read getters use the same error propagation.
 
-Every upstream StorageProvider operation, label, JSON serializer, lock and error behavior is
-otherwise byte-for-byte retained. `persistence.rs` intentionally keeps its separate
+Every upstream successful StorageProvider operation, label, JSON serializer and lock is otherwise
+byte-for-byte retained. The deliberate malformed-read error change above is not a new persistence
+format or a repair that discards data. `persistence.rs` intentionally keeps its separate
 `HashMap<String, String>` JSON container. Existing storage keys/values and MLS signing/wire formats
 are unchanged. Iteration order was never canonical across different HashMap instances. The bounded
 and ordinary encoders must produce identical bytes from the **same guarded live map**; old snapshots
@@ -53,3 +59,10 @@ scalable public archive. No tests or compilation are implied by this source/prov
 The canonical provider allowance covers private initialization/restore overlap only. Successful
 handoff releases that transient reservation; active `OwnedOwnerServer` memory needs separate host
 runtime admission before production activation. This patch does not create that active host.
+
+The malformed-read regressions call the actual legacy and provider-bounded MLS restorers with
+one altered typed row, malformed outer/inner lists and a valid SDK proposal reference missing its
+companion row. They do not use `catch_unwind`, and changing panic into a returned storage error is
+not heap containment: typed JSON/SDK group allocation still needs its separately paid bounded
+consumer. Source/optional-feature checks and complete validation remain owned by the primary;
+these new tests are authored and unexecuted under the user compilation pause.

@@ -7,6 +7,9 @@ std::thread_local! {
     static RESTORE_MAP_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+mod malformed_tests;
+
 /// Restore the same legacy MLS frame while bounding the provider map BEFORE allocating it.
 ///
 /// This is not a covering-save, Current or fresh-admission witness. The caller must own the

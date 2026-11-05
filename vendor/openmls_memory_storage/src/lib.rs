@@ -209,8 +209,10 @@ impl MemoryStorage {
         log::debug!("  read list key: {}", hex::encode(&storage_key));
         log::trace!("{}", std::backtrace::Backtrace::capture());
 
+        // Mewtual: a restored present row can be malformed. Preserve the ordinary missing
+        // list behavior below, but return the existing storage error instead of panicking.
         let value: Vec<Vec<u8>> = match values.get(&storage_key) {
-            Some(list_bytes) => serde_json::from_slice(list_bytes).unwrap(),
+            Some(list_bytes) => serde_json::from_slice(list_bytes)?,
             None => vec![],
         };
 
@@ -424,7 +426,11 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
                 let key = (group_id, &proposal_ref);
                 let key = serde_json::to_vec(&key)?;
 
-                let proposal = self.read(QUEUED_PROPOSAL_LABEL, &key)?.unwrap();
+                // A retained reference is not proof that its companion row survived. Do not
+                // omit a missing proposal or crash: the whole inconsistent read must refuse.
+                let proposal = self
+                    .read(QUEUED_PROPOSAL_LABEL, &key)?
+                    .ok_or(MemoryStorageError::SerializationError)?;
                 Ok((proposal_ref, proposal))
             })
             .collect::<Result<Vec<_>, _>>()
@@ -443,7 +449,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(value).unwrap();
+        let value = serde_json::from_slice(value)?;
 
         Ok(value)
     }
@@ -461,7 +467,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(value).unwrap();
+        let value = serde_json::from_slice(value)?;
 
         Ok(value)
     }
@@ -479,7 +485,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(value).unwrap();
+        let value = serde_json::from_slice(value)?;
 
         Ok(value)
     }
@@ -497,7 +503,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(value).unwrap();
+        let value = serde_json::from_slice(value)?;
 
         Ok(value)
     }
@@ -517,7 +523,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(value).unwrap();
+        let value = serde_json::from_slice(value)?;
 
         Ok(value)
     }
@@ -848,7 +854,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         if let Some(value) = value {
             #[cfg(feature = "test-utils")]
             log::debug!("  value: {}", hex::encode(value));
-            return Ok(serde_json::from_slice(value).unwrap());
+            return Ok(serde_json::from_slice(value)?);
         }
 
         Ok(vec![])
@@ -1033,7 +1039,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(value).unwrap();
+        let value = serde_json::from_slice(value)?;
 
         Ok(value)
     }
@@ -1081,7 +1087,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        Ok(serde_json::from_slice(value).unwrap())
+        Ok(serde_json::from_slice(value)?)
     }
 
     #[cfg(feature = "virtual-clients-draft")]
@@ -1139,7 +1145,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        Ok(serde_json::from_slice(value).unwrap())
+        Ok(serde_json::from_slice(value)?)
     }
 
     #[cfg(feature = "virtual-clients-draft")]
@@ -1183,7 +1189,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        Ok(serde_json::from_slice(value).unwrap())
+        Ok(serde_json::from_slice(value)?)
     }
 
     #[cfg(feature = "virtual-clients-draft")]
@@ -1226,7 +1232,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        Ok(serde_json::from_slice(value).unwrap())
+        Ok(serde_json::from_slice(value)?)
     }
 
     #[cfg(feature = "virtual-clients-draft")]
@@ -1283,7 +1289,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        Ok(serde_json::from_slice(value).unwrap())
+        Ok(serde_json::from_slice(value)?)
     }
 
     #[cfg(feature = "virtual-clients-draft")]
