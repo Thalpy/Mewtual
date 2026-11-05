@@ -148,6 +148,13 @@ alternate-signing-nonce fixture independently prepared offline. It is not a Prof
 state codec, trusted-root verifier, fork cache or live producer. Its actual-diff review is clear;
 no test/compiler/build ran. [Header contract](communication-recovery/CHAT-OWNER-V2-HEADER-FORMAT.md).
 
+The separate v2 acceptance/append/removal data codecs now have exact567/3572/528-byte encoded caps.
+V2 unsigned acceptance records need exact inclusion under an independently selected signed tip;
+matching an action does not establish membership incarnation or acceptance. Constant-size removal
+binds a frozen labelled tip rather than materializing the historical accepted-ID set. Thirteen
+regressions are authored/unrun; actual-diff review is clear. These codecs add no governing state,
+Profile/genesis, cold archive, covering producer or live dispatch. [Exact body contract](communication-recovery/CHAT-OWNER-V2-ACCEPTANCE-BODIES.md).
+
 ## PR82 follow-up review corrections (30 October; local gates passed)
 
 The five findings against `6fc7ae6d` are corrected in the text-chat branch. Complete Send/Edit/Delete

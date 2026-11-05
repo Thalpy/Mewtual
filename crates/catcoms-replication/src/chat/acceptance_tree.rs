@@ -58,8 +58,9 @@ impl TreeContext {
     }
 }
 
-/// Fixed leaf semantics. The separate signed Acceptance fact binds the actual action/signer/
-/// grant/basis/Create. Sorting this tuple is canonical batch encoding, not a policy decision.
+/// Fixed leaf semantics. A separately authenticated acceptance record binds the actual action/
+/// signer/grant/basis/Create. In v2 its exact CID needs inclusion under an independently selected
+/// signed tip; a raw record is not accepted. Sorting is canonical encoding, not a policy decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AcceptanceLeaf {
     pub channel: u128,

@@ -101,14 +101,19 @@ For each cryptographic Admission incarnation retain an append-only accepted-acti
 same-key rejoin creates a distinct owner-certified Admission from its actual fresh selected KP/Add;
 GrantID/BasisID commit that Admission. Old A1 actions cannot borrow A2's current evidence.
 
-A log leaf commits profile, Admission, channel and the exact semantic Acceptance fact CID, whose
-body binds ActionID/full signer/Grant/Basis/Create as applicable. Equivalent valid action signature
-representations therefore share acceptance; changing nonce/body/realm/target cannot borrow it.
+A log leaf commits profile, Admission, channel and the exact semantic v2 AcceptanceRecordCID.
+The record binds ActionID/full signer/Grant/Basis/Create as applicable. Its v2 proof rule authenticates
+the unsigned record transitively by exact inclusion under the independently selected signed tip;
+neither a raw record nor its matching action signature establishes acceptance. No v1 signed fact is
+reinterpreted. Equivalent valid action signatures share acceptance; changing nonce/body/realm/target
+cannot borrow it. Profile/Admission labels still need the separate delegated Grant/Basis verifier.
 Append bodies commit old tip CID/count/root, at most64 sorted unique exact acceptance leaves,
 and new count/root. The signed body does NOT embed the old64-hash frontier: retaining that on every
 append would reintroduce O(N log N) retained proof bytes. This sorting is canonical encoding, not an
-authority tie-break. An Append body has its own measured bound (at most8KiB proposed, not the4KiB
-header/removal bound). The global header chain orders actual accepted transitions under the pinned
+authority tie-break. The implemented [v2 body prerequisite](CHAT-OWNER-V2-ACCEPTANCE-BODIES.md)
+has exact encoded maxima567(record),3572(append),528(removal) bytes; its tests remain unexecuted.
+These per-buffer caps do not replace the complete pending host/persistence invoice. The global
+header chain orders actual accepted transitions under the pinned
 non-equivocating-finalizer assumption. Exact canonical request/action acceptance is idempotent across
 batches, retries and restart: an already accepted leaf returns its retained original result, never a
 second index, and a changed binding cannot borrow that result. The bounded derived lookup index

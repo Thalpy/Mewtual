@@ -9,8 +9,10 @@ are unchanged. Compilation and compiled tests remain paused by the user.
 ## Exact semantics
 
 All hashes are BLAKE3-256. The immutable context is exactly `ProfileCID32 || AdmissionCID32`.
-The leaf record is exactly `channel_u128_big_endian || AcceptanceFactCID32`; an Acceptance fact,
-not this record alone, binds the exact action/signer/grant/basis/Create. Hash inputs have fixed
+The leaf record is exactly `channel_u128_big_endian || AcceptanceRecordCID32`; the separately
+authenticated v2 acceptance record binds the exact action/signer/grant/basis/Create. Its exact
+inclusion under an independently selected signed tip is mandatory; raw records are not accepted.
+This does not reinterpret v1 SignedOwnerFact proofs. Hash inputs have fixed
 lengths after their domain, with no implicit native integer encoding:
 
 - Empty: `"mewtual/chat/acceptance-empty/v2\0" || context`.
@@ -28,7 +30,7 @@ extra/missing slot is accepted. Folding from low to high uses `node(higher_subtr
 this is the required right-associated shape for an incomplete tree. A loaded frontier must fold
 to its supplied expected tip before append; matching a caller's tip is not tip authentication.
 
-Each batch has 1..64 leaves, strictly sorted by `(channel, AcceptanceFactCID)` with no duplicate
+Each batch has 1..64 leaves, strictly sorted by `(channel, AcceptanceRecordCID)` with no duplicate
 within the batch. Cross-batch idempotency/absence remains the real owner's independently verified
 retained lookup, not a claim this primitive can make. Count addition is checked before mutation.
 The primitive prepares a new frontier/result without changing the supplied original on refusal.

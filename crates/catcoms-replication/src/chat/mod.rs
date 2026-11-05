@@ -10,6 +10,7 @@ pub mod acceptance_tree;
 mod action;
 mod authority;
 mod ledger;
+pub mod owner_bodies;
 pub mod owner_facts;
 pub mod owner_header;
 mod projection;
