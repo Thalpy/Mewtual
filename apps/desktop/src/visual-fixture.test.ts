@@ -5,6 +5,7 @@ import { VISUAL_SAVED_FILES, VISUAL_TRANSFER_ROWS } from "./visual-transfers-fix
 import { checkedPrivateDownloads, checkedSavedCheck, type SavedCheck } from "./private-downloads.ts";
 import { savedRowView } from "./transfer-rows.ts";
 import { sanitizeUiContinuity } from "./ui-continuity.ts";
+import { parseLedgerDetail, parseLedgerPage } from "./chat-admin-ledger.ts";
 import {
   checkedSavedFileChecks, checkedSavedFiles, checkedSavedFilesLimit, checkedSavedLimitChange, savedListRowView,
 } from "./saved-files.ts";
@@ -30,6 +31,24 @@ test("recovery screenshot opt-in leaves ordinary chat fixture continuity unchang
 
 test("fixture models the existing native lock barrier generation explicitly", () => {
   assert.deepEqual(visualFixtureResponse("lock_session", { uiStateJson: null }), { continuity_error: null, generation: "7" });
+});
+
+test("history fixture exposes exact closed original reads and refuses an unprivileged server", () => {
+  const page = parseLedgerPage(visualFixtureResponse("get_admin_chat_ledger", { server: 1, cursor: null, limit: 32 }));
+  assert.equal(page.status, "page"); if (page.status !== "page") return;
+  assert.equal(page.availability, "incomplete"); assert.equal(page.rows.length, 3);
+  const text: Array<string | null> = [];
+  for (const row of page.rows) {
+    const detail = parseLedgerDetail(visualFixtureResponse("get_admin_chat_ledger_detail",
+      { server: 1, rowId: row.rowId, expectedRevision: page.revision, frameOffset: 0 }));
+    assert.equal(detail.status, "detail"); if (detail.status !== "detail") continue;
+    text.push(detail.legacyChange?.mutations[0].value?.text ?? null);
+  }
+  assert.deepEqual(text, ["A first draft, before the edit.", "The revised message.", null]);
+  assert.deepEqual(visualFixtureResponse("get_admin_chat_ledger", { server: 2, cursor: null, limit: 32 }),
+    { status: "unavailable", code: "not-authorized" });
+  assert.equal(parseLedgerDetail(visualFixtureResponse("get_admin_chat_ledger_detail",
+    { server: 1, rowId: page.rows[0].rowId, expectedRevision: "older", frameOffset: 0 })).status, "stale");
 });
 
 test("the Transfers fixture shows every row state, closed and path free", () => {

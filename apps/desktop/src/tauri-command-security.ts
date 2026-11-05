@@ -14,6 +14,12 @@
  * ledger is written from whatever the extractor saw.
  */
 export const TAURI_COMMAND_GROUPS = {
+  privileged_chat_history: {
+    boundary: "Retained originals can contain deleted content. Main-window ACL, original native UI/registry scope and current Actor moderation authority gate bounded reads; legacy signatures do not prove group membership.",
+    // These two commands use the synchronous router so custody is captured before Tauri
+    // schedules an async task. The companion audit explicitly includes that router inventory.
+    commands: ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"],
+  },
   local_session_and_vault: {
     boundary: "Local vault/session state; secrets and filesystem paths must remain native-side.",
     commands: [
