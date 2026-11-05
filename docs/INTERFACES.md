@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Negative founder input preflight (5 November; authored, unexecuted)
+
+`MlsDevice::preflight_fresh_founder_input` bounds the CURRENT signature-only device/provider shape
+before a new App factory can clone its signer or let group SDK work grow an old provider. One actual
+provider guard covers physical backing/row-capacity admission and comparison to the exact SDK's
+canonical one-signature row. Pinned Ed25519/Basic credential, bounded private/public32 TLS and a
+fixed challenge check precede the tiny expected-store comparison. A signature-only restored device
+may pass; this is no device-history/Fresh/Current witness. Its32KiB named scratch allowance must
+be paid by the real caller. Seven SDK regressions remain UNRUN; design and static actual review
+are clear. The actual App grant/intent/source save and its fees remain separate unfinished work.
+
 ## Reserved private archive destinations (5 November; unexecuted)
 
 `chat-owner-v2` and `chat-critical-namespaces.archive.seed` are reserved fixed Store names.

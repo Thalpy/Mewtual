@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Supplied founder device cannot smuggle an old provider into creation (5 November)
+
+The new opt-in negative MLS input preflight refuses old group/KP/foreign rows, oversized actual
+table backing (including tombstones) and spare Vec capacity before group creation or probe work.
+Scheme/public length precedes generic tls_codec0.5 sizing; bounded canonical private/public32 and
+a challenge signature check precede SDK row serialization. Owned temporary TLS/probe values are
+wiped, including poison/early error; opaque SDK/serializer/allocator intermediates remain outside
+that guarantee. A current canonical signature-only restored device may pass: actual fresh GROUP
+provenance still requires the real creation event and original host grant/scope/save. No source
+authority, memory lease, whole-SDK heap bound or native activation follows from the unit result.
+Seven authored tests are UNRUN under the compilation pause; read-only design/actual review clear.
+
 ## Original archive namespace transaction (5 November; authored, unexecuted)
 
 The explicit new-physical-open wrapper owns the actual Store and exact ciphertext/fee until

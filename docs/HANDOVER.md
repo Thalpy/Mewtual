@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Before-SDK founder input resource gate (5 November; authored, unexecuted)
+
+The MLS opt-in `preflight_fresh_founder_input` now rejects a restored old/tombstone-heavy provider
+before App can grow it with new group SDK rows. Actual physical allocation/one-row/capacity checks
+share the same guard through exact SDK signature-row comparison. Pinned credential/key shape and
+pair validation are bounded before encoders; temporary private probe values wipe on every exit.
+The result is negative-only current input shape, never Fresh, grant payment or Current. Associated
+32KiB invoice is logical caller funding; all SDK-intermediate/active heaps remain open. Seven tests
+are authored UNRUN; read-only design and actual-diff reviews CLEAR. Direct formatting/whitespace
+passed; no compiler/tests/build ran. Pending focused selector: `cargo test -p catcoms-mls founder_input::tests`.
+The App consuming grant/intent/source factory is still in progress and is not activated here.
+
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
