@@ -111,6 +111,52 @@ fn complete_private_id2_then_id3_handoff_keeps_same_root_and_is_not_public_store
 }
 
 #[test]
+fn actual_held_root_validation_keeps_the_original_marker_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x3380);
+    initialize(directory.path(), &mut rng);
+    let mut opening = open(directory.path(), &shared, &mut rng);
+    opening.retry(&mut rng).unwrap();
+    let ready = opening.into_current_layout_store().unwrap();
+    // Setup is outside this bound: it measures only the already-opened Root proof. If a
+    // future implementation recursively locks Root, timeout detaches a worker containing
+    // ONLY its private fixture instead of hanging the entire suite in join().
+    let (done, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let directory = directory;
+        let ready = ready; // drain Store/files before its private directory
+        let store = ready.checked_store().unwrap();
+        let held_root = store.archive_bootstrap_root.lock().unwrap();
+        let root = held_root.as_ref().unwrap();
+        // Use the actual original Root and mounted namespace with its mutex still held.
+        store
+            .validate_mounted_current_layout_under_archive_root(root)
+            .unwrap();
+        let marker = directory
+            .path()
+            .join(ARCHIVE_BOOTSTRAP_ROOT)
+            .join(CURRENT_MARKER);
+        let original = fs::read(&marker).unwrap();
+        fs::rename(
+            &marker,
+            directory.path().join("held-original-current-marker"),
+        )
+        .unwrap();
+        fs::write(&marker, &original).unwrap();
+        assert!(store
+            .validate_mounted_current_layout_under_archive_root(root)
+            .is_err());
+        assert_eq!(fs::read(marker).unwrap(), original);
+        done.send(()).unwrap();
+    });
+    completed
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("original held-Root proof must finish without recursively locking Root");
+    worker.join().unwrap();
+}
+
+#[test]
 fn declaration_one_byte_short_refuses_before_rng_buffers_or_namespace_effects() {
     let directory = tempfile::tempdir().unwrap();
     let shared = pool();

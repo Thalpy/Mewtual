@@ -202,6 +202,20 @@ impl ServerStore {
         let root = root_guard
             .as_ref()
             .ok_or_else(critical_namespaces::refused)?;
+        self.validate_mounted_current_layout_under_archive_root(root)
+    }
+
+    /// Repeat the actual mounted namespace proof while the caller ALREADY owns archive
+    /// Root. Activation/read consumers acquire admission -> pins -> canonical -> Root;
+    /// calling the outer validator here would recursively lock Root. This shares the same
+    /// Current-marker/account/file checks as the ordinary opener and grants no row/writer.
+    ///
+    /// The current-layout mutex is strictly inside Root in both callers. Pool/marker reads
+    /// can wait, so consumers must repeat their final original source/name checks afterward.
+    pub(in crate::store) fn validate_mounted_current_layout_under_archive_root(
+        &self,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+    ) -> Result<(), AppError> {
         let current = self
             .current_layout
             .lock()
@@ -599,20 +613,14 @@ impl CurrentCanonicalFilenameAssociation {
                 .map_err(|_| critical_namespaces::refused())?;
             if let Some((file, id)) = held.as_ref() {
                 if catcoms_storage::kept::session_id(file).map_err(current_io)? != *id
-                    || !matches!(
-                        catcoms_storage::kept::session_at(path, *id),
-                        catcoms_storage::kept::SessionAt::Ours
-                    )
+                    || !current_directory_at(path, *id)?
                 {
                     return Err(critical_namespaces::refused());
                 }
             } else {
                 let file = open_archive_directory(path)?;
                 let id = catcoms_storage::kept::session_id(&file).map_err(current_io)?;
-                if !matches!(
-                    catcoms_storage::kept::session_at(path, id),
-                    catcoms_storage::kept::SessionAt::Ours
-                ) {
+                if !current_directory_at(path, id)? {
                     return Err(critical_namespaces::refused());
                 }
                 *held = Some((file, id));
@@ -670,6 +678,51 @@ fn real_current_directory(metadata: &fs::Metadata) -> bool {
     #[cfg(not(windows))]
     {
         true
+    }
+}
+
+/// `kept::session_at` deliberately answers only for regular files and returns Other for
+/// directories. Prove a directory name with the actual directory opener instead; it rejects
+/// links/reparse points and compares the original in-session object number, never contents.
+fn current_directory_at(
+    path: &Path,
+    expected: catcoms_storage::kept::SessionId,
+) -> Result<bool, AppError> {
+    let named = open_archive_directory(path)?;
+    Ok(catcoms_storage::kept::session_id(&named).map_err(current_io)? == expected)
+}
+
+#[cfg(test)]
+mod directory_identity_tests {
+    use super::*;
+
+    #[test]
+    fn named_directory_proof_accepts_original_and_refuses_identical_empty_replacement() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("original-directory");
+        fs::create_dir(&path).unwrap();
+        let held = open_archive_directory(&path).unwrap();
+        let id = catcoms_storage::kept::session_id(&held).unwrap();
+        assert!(current_directory_at(&path, id).unwrap());
+        // Contents/absence of contents prove nothing: retain the original handle so its
+        // object number cannot be reused, then create another equally empty directory.
+        fs::rename(&path, fixture.path().join("displaced-original")).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(!current_directory_at(&path, id).unwrap());
+        assert_eq!(catcoms_storage::kept::session_id(&held).unwrap(), id);
+    }
+
+    #[test]
+    fn missing_or_regular_file_name_never_proves_a_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("original-directory");
+        fs::create_dir(&path).unwrap();
+        let held = open_archive_directory(&path).unwrap();
+        let id = catcoms_storage::kept::session_id(&held).unwrap();
+        fs::rename(&path, fixture.path().join("displaced-original")).unwrap();
+        assert!(current_directory_at(&path, id).is_err());
+        fs::write(&path, b"not a directory").unwrap();
+        assert!(current_directory_at(&path, id).is_err());
     }
 }
 fn real_current_file(metadata: &fs::Metadata) -> bool {
@@ -837,11 +890,7 @@ impl ServerStore {
                 }
             }
         }
-        if !matches!(
-            catcoms_storage::kept::session_at(&parent, id),
-            catcoms_storage::kept::SessionAt::Ours
-        ) || !index.same_original(self)
-        {
+        if !current_directory_at(&parent, id).unwrap_or(false) || !index.same_original(self) {
             known = false;
         }
         Ok(association(

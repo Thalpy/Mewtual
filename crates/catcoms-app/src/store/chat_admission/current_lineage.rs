@@ -13,7 +13,7 @@ pub(in crate::store) const INDEX_FEE: usize = KEY_BYTES
     + std::mem::size_of::<blake3::Hasher>()
     + 2 * std::mem::size_of::<usize>() // actual empty identity Arc header
     + 2*(32*1024+256)+2*std::mem::size_of::<std::fs::Metadata>()
-    +std::mem::size_of::<std::fs::File>(); // serialized known-directory mutation scratch
+    +2*std::mem::size_of::<std::fs::File>(); // held and freshly named directory handles
 
 /// Constructor-only temporary allocation. Keep outside the admission guard so error cleanup
 /// returns the actual strong pool fee only after partial vectors/guards have drained.
