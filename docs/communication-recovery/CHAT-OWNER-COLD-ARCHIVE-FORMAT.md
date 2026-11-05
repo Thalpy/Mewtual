@@ -103,6 +103,10 @@ children; a digest of missing private bytes cannot repair that effect. The archi
 reference that exact candidate but cannot replace it with an old provider, replay public facts
 as an MLS mutation or pretend the whole private candidate fits512KiB. The SDK heap/provider page
 format and complete compound-operation memory/disk/control invoice remain prerequisite gates.
+Exact Welcome/retry results and queued publication/receipt bytes also need their OWN retained
+private candidate and fee. They can exceed the archive journal cap and cannot borrow ordinary
+action-page capacity or be regenerated from public facts. The compound head/journal references
+them and crosses their actual child barriers before any corresponding reply/export.
 Private SDK replacement references belong to the CURRENT canonical head and its pending debt,
 not every historical archive manifest. Otherwise ordinary ledger retention would also force
 permanent retention of every complete secret provider snapshot. Reclaiming superseded private

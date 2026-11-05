@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+## Private original-action chunks (5 November; authored, unexecuted)
+
+`cold_actions` now prepares exact real-signed action envelopes and borrowed chunks (61440-byte
+payload,61899-byte page cap, at most3 conservatively). Assembly checks external source metadata,
+complete ordered geometry and incremental original digest BEFORE allocating, then actual strict
+signature/CID/group. Genuine signature variants agree semantically but cannot masquerade as one
+selected original representation. Six regressions are authored and UNRUN; no file/namespace,
+authority/current effect or native permission is added. Full overlapping encode/decode/typed/raw/
+page invoices and actual archive integration remain required.
+[Exact contract](communication-recovery/CHAT-OWNER-COLD-ACTION-PAGES.md).
+
 ## Configured catalog read ownership (5 November; authored, unexecuted)
 
 The App now offers an explicit configured catalog opener using one shared caller-provided

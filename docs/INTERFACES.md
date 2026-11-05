@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private signed-action chunk data (5 November; authored, unexecuted)
+
+`cold_actions` prepares exact signature-checked originals and exposes borrowed chunk parsing plus
+complete assembly against external expected vault/group/Profile/ActionCID/original digest. Digest
+and geometry checks precede assembled allocation; actual signature/semantic CID follows. This
+grants no historical/current authority or privileged read. Six regressions remain UNRUN.
+[Format and complete caller-resource obligations](communication-recovery/CHAT-OWNER-COLD-ACTION-PAGES.md).
+
 ## Explicit catalog read account (5 November; authored, unexecuted)
 
 `CriticalCatalogReadPool` clones share one caller-configured hardcap. The actual configured

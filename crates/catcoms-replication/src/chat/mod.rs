@@ -9,6 +9,7 @@
 pub mod acceptance_tree;
 mod action;
 mod authority;
+pub mod cold_actions;
 pub mod cold_nodes;
 mod ledger;
 pub mod owner_bodies;
