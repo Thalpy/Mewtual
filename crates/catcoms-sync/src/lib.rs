@@ -13592,14 +13592,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .map(|(key, doc)| (*key, doc.op_count() as u64))
     }
 
-    /// Borrow installed documents only if the actual HashMap scan is bounded. Iteration
-    /// visits capacity, not merely live length; an old large allocation must not bypass a
-    /// reader's scan allowance. No document, graph or original envelope is cloned here.
+    /// Borrow installed documents under a declared-capacity work threshold, without cloning
+    /// graphs or original envelopes. The document table is insert-only: replacement swaps a
+    /// value, and deleting a channel changes its index projection rather than removing a key.
+    /// That invariant excludes deletion-tombstone churn. Std capacity is not an exact physical
+    /// bucket/allocation count; this is a logical threshold, not an allocator byte invoice.
+    /// Future key removal/compaction must revisit this guard before relying on it for reads.
     pub fn bounded_documents(
         &self,
-        max_scan_buckets: usize,
+        max_declared_capacity: usize,
     ) -> Option<impl Iterator<Item = ((DocType, u128), &EncryptedDoc)> + '_> {
-        (self.docs.capacity() <= max_scan_buckets)
+        (self.docs.capacity() <= max_declared_capacity)
             .then(|| self.docs.iter().map(|(key, doc)| (*key, doc)))
     }
 

@@ -17,8 +17,9 @@ use catcoms_wire::DocType;
 
 use crate::Server;
 
-/// Bounded setup scan, including empty HashMap buckets. This is a reader work limit, not a
-/// channel/history retention limit: refusal never removes documents or requests user repair.
+/// Logical setup-work threshold on the insert-only document table's declared capacity.
+/// This is not an exact physical bucket/allocator bound or a channel/history retention limit:
+/// refusal never removes documents or requests user repair. See bounded_documents' invariant.
 const MAX_DOCUMENT_BUCKETS: usize = 4096;
 const MAX_READER_MEMBERS: usize = 256;
 const MAX_READER_ADMINS: usize = 64;
