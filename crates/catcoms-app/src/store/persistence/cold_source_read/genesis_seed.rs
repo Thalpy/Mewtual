@@ -54,6 +54,9 @@ impl GenesisSeedBudget {
             .and_then(|n| n.checked_add(V2_GENESIS_SEED_METADATA_BYTES))
             .and_then(|n| n.checked_add(std::mem::size_of::<RetainedBootstrapGenesisSeed>()))
             .and_then(|n| n.checked_add(std::mem::size_of::<ReturnedBootstrapSourceData>()))
+            .and_then(|n| {
+                n.checked_add(crate::store::persistence::ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES)
+            })
             .and_then(|n| n.checked_add(16 * 1024)) // bounded wrapper/verification/return scratch
             .ok_or_else(critical_namespaces::refused)
     }
@@ -111,6 +114,7 @@ impl OwnerSdkGraphReservation for GraphReservation {
 /// transition, with separately prepaid generic runtime layouts before creating those parts.
 pub struct RetainedBootstrapGenesisSeed {
     seed: UnboundV2GenesisSeed,
+    original_read: crate::store::persistence::OriginalBootstrapReadObservation,
     source: RetainedBootstrapSourceData,
     // LAST: graph/raw provider and seed metadata/source copies drain before this refund.
     _metadata_fee: critical_namespaces::read_pool::CatalogReadReservation,
@@ -134,6 +138,7 @@ impl RetainedBootstrapGenesisSeed {
         &self.source
     }
     pub fn validate_original(&self, store: &ServerStore) -> Result<(), AppError> {
+        self.original_read.require_same_original(&self.source)?;
         self.source.validate_original(store)
     }
 }
@@ -215,6 +220,7 @@ impl ServerStore {
         match result {
             Ok((seed, metadata)) => Ok(RetainedBootstrapGenesisSeed {
                 seed,
+                original_read: source.observe_original(),
                 source,
                 _metadata_fee: metadata,
             }),

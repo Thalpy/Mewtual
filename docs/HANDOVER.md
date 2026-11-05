@@ -44,6 +44,11 @@ next, non-SDK fee last; both real SDK halves keep their own SDK lease. No owned 
 can silently discard those supporting payments. Owning fixed-reason refusals return the SAME
 source/read fee for a new SDK attempt, without rereading source or refunding old write units.
 
+The seed wrapper also retains a weak exact original-read observation. Retry cannot substitute
+another genuine paid read of identical source bytes/paths for the original held-object set.
+The observer retains neither DATA nor the read fee and supplies no positive permission; normal
+original mount/control/object checks still apply. Two observation regressions are authored UNRUN.
+
 Six genuine-source regressions are authored UNRUN. They cover independent payment/drop
 lifetimes, one-byte-short combined pressure before SDK, provider/setup refusal cleanup,
 cancellation after fee waits, control replacement after real decode and foreign account/mount.

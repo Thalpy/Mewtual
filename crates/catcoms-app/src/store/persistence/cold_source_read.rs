@@ -8,6 +8,7 @@ use catcoms_sync::owner_v2::{
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::Weak;
 mod genesis_seed;
 pub use genesis_seed::{
     GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
@@ -34,6 +35,7 @@ struct ReadControl {
 /// Paths have a checked bound; all other names derive from these two original paths and
 /// the authenticated invocation. No caller path, scan, key, session or sender is retained.
 struct ReadCapture {
+    identity: Arc<()>,
     root: PathBuf,
     target: PathBuf,
     root_directory: File,
@@ -65,6 +67,33 @@ pub struct RetainedBootstrapSourceData {
     opened: OpenedBootstrapSourceData,
     capture: Arc<ReadCapture>,
 }
+/// Weak original READ identity for a retained group task. Matching whole ciphertext alone
+/// cannot swap that task to a different paid capture/held-object set. This observation keeps
+/// no DATA, fee, sender, key, Store or session alive and grants no positive permission.
+#[derive(Clone)]
+pub(in crate::store) struct OriginalBootstrapReadObservation {
+    identity: Weak<()>,
+}
+/// Conservative named control-block/observer allowance, not a physical RSS promise. Any
+/// owning task which can outlive the actual read must pay this separately: a Weak keeps its
+/// tiny identity allocation alive after the source fee drains, never the ReadCapture itself.
+pub(in crate::store) const ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES: usize =
+    std::mem::size_of::<OriginalBootstrapReadObservation>() + 64;
+impl OriginalBootstrapReadObservation {
+    pub(in crate::store) fn require_same_original(
+        &self,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
+        let original = self
+            .identity
+            .upgrade()
+            .ok_or_else(critical_namespaces::refused)?;
+        if !Arc::ptr_eq(&original, &source.capture.identity) {
+            return Err(critical_namespaces::refused());
+        }
+        Ok(())
+    }
+}
 impl std::fmt::Debug for RetainedBootstrapSourceData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RetainedBootstrapSourceData")
@@ -72,6 +101,11 @@ impl std::fmt::Debug for RetainedBootstrapSourceData {
     }
 }
 impl RetainedBootstrapSourceData {
+    pub(in crate::store) fn observe_original(&self) -> OriginalBootstrapReadObservation {
+        OriginalBootstrapReadObservation {
+            identity: Arc::downgrade(&self.capture.identity),
+        }
+    }
     /// Borrow only while the SAME actual source-read fee remains retained. A downstream
     /// seed/SDK builder must separately pay/retain its own graph and dependent metadata copies.
     /// This DATA accessor cannot authorize a host, write or IPC disclosure after UI lock.
@@ -457,6 +491,7 @@ impl ServerStore {
             return Err(refused());
         }
         let capture = Arc::new(ReadCapture {
+            identity: Arc::new(()),
             root: root_path,
             target,
             root_directory: root.directory.try_clone().map_err(io)?,
@@ -510,6 +545,7 @@ fn validate_fixed_invoice() -> Result<(), AppError> {
         + std::mem::size_of::<ReadCapture>()
         + std::mem::size_of::<ReadWork>()
         + std::mem::size_of::<RetainedBootstrapSourceData>()
+        + ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES
         + 8 * 1024;
     if named > FIXED_FEE {
         return Err(critical_namespaces::refused());

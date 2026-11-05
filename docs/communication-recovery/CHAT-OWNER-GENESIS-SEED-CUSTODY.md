@@ -36,6 +36,16 @@ SDK getter, Server, run method or Current setter. A caller cannot move the seed 
 drop its independent non-SDK fees. Root's later actual Current factory may consume this entire
 resource capsule while preserving those fees through node/graph teardown.
 
+The wrapper also caches a weak observation of the EXACT original paid read capture. A retained
+group task uses that same observation on retry; matching ciphertext, full context or unchanged
+files do not allow substitution of a separately paid read with a different held-object set.
+This comparison is negative only. It does not replace original mount/control/file validation,
+retain plaintext or its payment, or revive a task after the original capture drains. It uses
+`Weak<()>`, not `Weak<ReadCapture>`: only a tiny identity control block can survive the source,
+and every outliving task must separately pay the named observer/control-block allowance.
+The actual read and seed metadata invoices include that allowance. Two additional
+read-observation regressions are authored UNRUN.
+
 ## Runtime attachment without losing payments
 
 This section remains the contract for a future consuming runtime method. The current capsule

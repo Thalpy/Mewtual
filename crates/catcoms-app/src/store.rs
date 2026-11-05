@@ -558,6 +558,9 @@ mod persistence {
         GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
         ReturnedBootstrapSourceData,
     };
+    pub(super) use cold_source_read::{
+        OriginalBootstrapReadObservation, ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
+    };
     mod bootstrap_source_work;
     pub(super) use bootstrap_source_work::{OriginalSourceWriteWork, SavedBootstrapSourceFiles};
     pub(super) use bootstrap_source_work::{

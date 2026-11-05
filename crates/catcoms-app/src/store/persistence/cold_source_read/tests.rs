@@ -158,6 +158,68 @@ fn actual_cold_read_retains_original_source_and_both_separate_genesis_artifacts_
 }
 
 #[test]
+fn observation_binds_one_actual_paid_read_not_another_capture_of_identical_files() {
+    let f = fixture(0xc00a);
+    let first = f
+        .store
+        .read_saved_bootstrap_source_data(&f.group, f.signer)
+        .unwrap();
+    let observation = first.observe_original();
+    observation.require_same_original(&first).unwrap();
+    let second = f
+        .store
+        .read_saved_bootstrap_source_data(&f.group, f.signer)
+        .unwrap();
+    assert_eq!(
+        first.data().source_id_data(),
+        second.data().source_id_data()
+    );
+    assert_eq!(
+        first.data().view_data().snapshot,
+        second.data().view_data().snapshot
+    );
+    first.validate_original(&f.store).unwrap();
+    second.validate_original(&f.store).unwrap();
+    assert!(observation.require_same_original(&second).is_err());
+    observation.require_same_original(&first).unwrap();
+}
+
+#[test]
+fn weak_read_observation_keeps_neither_plaintext_nor_payment_alive() {
+    let f = fixture(0xc00b);
+    let baseline = f.pool.charged_for_test();
+    let first = f
+        .store
+        .read_saved_bootstrap_source_data(&f.group, f.signer)
+        .unwrap();
+    let observation = first.observe_original();
+    let copied_observation = observation.clone();
+    let capture = Arc::downgrade(&first.capture);
+    assert_eq!(Arc::strong_count(&first.capture.identity), 1);
+    assert_eq!(
+        std::mem::size_of_val(&observation),
+        std::mem::size_of::<Weak<()>>()
+    );
+    assert!(ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES >= std::mem::size_of_val(&observation) + 64);
+    assert_eq!(f.pool.charged_for_test(), baseline + READ_FEE);
+    drop(first);
+    assert_eq!(f.pool.charged_for_test(), baseline);
+    assert!(capture.upgrade().is_none());
+    // A live Weak<ReadCapture> here is test instrumentation only; production observers keep
+    // only Weak<()> and cannot retain that much larger allocation after the fee drains.
+    drop(capture);
+    assert!(observation.identity.upgrade().is_none());
+    assert!(copied_observation.identity.upgrade().is_none());
+    let later = f
+        .store
+        .read_saved_bootstrap_source_data(&f.group, f.signer)
+        .unwrap();
+    // Even the same unchanged on-disk source cannot revive an expired original task.
+    assert!(observation.require_same_original(&later).is_err());
+    assert!(copied_observation.require_same_original(&later).is_err());
+}
+
+#[test]
 fn whole_marker_locator_and_actual_debit_bind_the_complete_group_and_signer() {
     let f = fixture(0xc002);
     let mut wrong = f.signer;
