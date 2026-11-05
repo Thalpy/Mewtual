@@ -362,3 +362,6 @@ fn native_parent_indices_are_checked_before_signer_even_when_tree_fields_arrive_
         "genuine first-Add still passes"
     );
 }
+
+#[path = "resumption_tests.rs"]
+mod resumption_tests;

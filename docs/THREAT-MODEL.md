@@ -19,7 +19,7 @@ Root/marker identities are rechecked; whole-component rollback and non-hostile p
 assumptions remain unchanged. Eleven authored tests are UNRUN during the compilation pause.
 [Enforcement paths and limits](communication-recovery/CHAT-V2-GROUP-EXCLUSION.md).
 
-## Closed initial SDK graph admission (5 November; authored, UNRUN)
+## Closed initial SDK graph admission (5 November; focused validation in progress)
 
 An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical
 restores into the pinned13-row founder/first-Add decoder. The same original account reserves one
@@ -28,9 +28,19 @@ shape/geometry preflight precedes SIGNER; every actual getter repeats under its 
 with monotonic container-layout/copy/work counters. Same payment stays last in BOTH device/group
 through private decode and actual ready/OwnedOwnerServer handoff. Completed/cancelled policy has
 no legacy fallback, and later mutative SDK calls refuse before SDK entry. Default legacy paths
-keep their grammar. All25 tests are authored UNRUN; no compiler/tests/build. Initialized/live
+keep their grammar. The primary now owns resumed serial compiled validation; the four new
+resumption-store regressions are authored UNRUN. Initialized/live
 ratchets, operation admission, public root2/native integration and whole-host/provider budgets
 remain open. [Exact consumer/remaining gates](communication-recovery/CHAT-OWNER-SDK-RESTORE-CONSUMER.md).
+
+The pinned SDK's zero resumption join-config scalar does not mean the founder's actual store
+is empty. Its genuine epoch0/max32 store retains one original32-byte secret; the first-Add
+owner retains epochs0,1, while the selected Welcome/max0 store is empty. The closed scanner
+preserves those bytes and cross-checks exact ordered prefix, count, cursor and wrapper shape
+against the actual current epoch before SIGNER, resetting fixed per-row facts on every getter.
+Unsupported or malformed histories refuse without source mutation or SDK entry. This does not
+trim secrets, reserve32 tuple slots, raise the128KiB graph cap, admit later live histories, or
+turn shape/resource acceptance into original-source/Current authority.
 
 
 ## Admitted physical work must retain the OS session (5 November; authored, unexecuted)

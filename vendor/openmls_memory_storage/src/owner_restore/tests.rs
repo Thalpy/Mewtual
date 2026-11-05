@@ -278,3 +278,6 @@ fn a_legacy_writer_waiting_for_values_cannot_cross_new_policy_installation() {
         "no legacy write overtakes installation"
     );
 }
+
+#[path = "resumption_tests.rs"]
+mod resumption_tests;

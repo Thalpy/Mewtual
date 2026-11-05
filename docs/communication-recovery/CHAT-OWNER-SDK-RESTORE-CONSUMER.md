@@ -1,7 +1,9 @@
 # Closed initial SDK restore consumer
 
-The opt-in consumer is authored; design and final actual-diff static review are clear. All25 regressions (9vendor,7MLS,9App) are UNRUN under the user's compilation pause.
-Direct formatting/source review is not production-config compilation or runtime evidence.
+The opt-in consumer is authored; design and final actual-diff static review are clear.
+The initial checkpoint introduced25 regressions (9vendor,7MLS,9App). The four additional
+resumption-store regressions below are authored UNRUN; the primary now owns resumed serial
+compiled validation. Direct formatting/source review is not compilation or runtime evidence.
 This narrows the larger SDK admission draft to the pinned OpenMLS0.9.2 founder/first-Add graph.
 Ordinary legacy decoding, serialized bytes and unsupported retained sources stay unchanged.
 It does not complete live text Chat V2 or native activation.
@@ -24,7 +26,7 @@ runs first. Thirteen logical rows are therefore required/observed:
 | EpochSecrets | five exact secret wrappers32 | generic read |
 | OwnLeafNodeIndex | index within actual leaf dimension | generic read |
 | MessageSecrets | zero past epochs, bounded serialized context, exact secrets, matching tree dimensions, all sender slots null | generic read |
-| ResumptionPsk | max0/empty/cursor0 | generic read |
+| ResumptionPsk | max0/empty/cursor0 OR max32 with exact epoch0..current prefix and cursor=count, at most2 entries | generic read |
 | MlsGroupJoinConfig | ciphertext-only/padding0/past0/resumption0/tree-extension=true/ratchet5 and1000 | generic read |
 | OwnLeafNodes | absent or empty JSON list | generic read_list |
 | GroupState | Operational only | generic read |
@@ -40,6 +42,21 @@ slots (the SDK intentionally allocates leaf_count parent slots). Its size is 2*N
 own index must equal the independently loaded OwnLeafNodeIndex and fall within N. The actual
 SDK structs, not the0.8.1 fixture, define fields. MessageSecrets may contain added_at null or
 an exact secs_since_epoch/nanos_since_epoch pair; no ambient time is read.
+
+The actual OpenMLS0.9.2 founder builder creates `ResumptionPskStore::new(32)` and adds the
+original epoch0 secret even though `MlsGroupJoinConfig.number_of_resumption_psks` is0. The
+owner's first Add retains epoch0 and adds epoch1; the selected Welcome member's configured0
+store is actually empty. A zero join-config scalar must therefore never justify an empty-only
+restore policy or deleting the original founder secrets. The closed nonempty case requires
+maximum32, count=current epoch+1, cursor=count, and ordered tuples for exactly epochs0 then1
+when present. Each tuple contains one exact `SecretWrap.secret.value.vec` of32 bytes. Count is
+bounded before reading a third tuple; every repeated row check resets its fixed two epoch
+slots, count, maximum and cursor before recomputing them. Duplicate/out-of-order/gap/future
+epochs, missing entries, mismatched cursor, unknown maximum and malformed tuple/wrapper/byte
+shapes refuse before SIGNER. This narrow correction preserves the genuine original bytes;
+it does not admit later epochs or initialized sender ratchets. The maximum32 scalar does not
+reserve32 tuple slots: the ordinary typed Vec has at most2 entries, its actual growth and
+secret-vector copies remain charged by the counted decoder, and the graph cap stays128KiB.
 
 The closed scanner refuses duplicate/unknown/missing fields, escapes/non-ASCII identifiers,
 negative/floating numbers, unsupported variants, trailing input, excessive depth/count/length
@@ -167,19 +184,36 @@ exists. This is a negative limit, not a general claim that arbitrary calls/signi
 are bounded by the decoder invoice. Operation admission, initialized ratchet/live text extension, public root2,
 whole-host/provider retention/native activation and physical acceptance remain OPEN.
 
-## Authored regressions (all25 UNRUN; compiled execution paused)
+## Regressions and current validation
+
+The initial25-test checkpoint is supplemented by four focused resumption tests. These four
+remain UNRUN in this packet; the primary alone runs the resumed serial compiled validation.
+Their final actual-diff static review is clear against the paired corrected production shape
+scanner. The regression commit depends on that runtime correction, including its fixed two
+epoch-fact slots; the tests alone do not supply it or establish compile coherence.
 
 - All thirteen row routes reach actual guarded decoder; malformed late row refuses BEFORE
   signer entry, generic/direct getter escapes and optional draft getters refuse.
 - Sequence bomb/duplicate/unknown/escaped identifiers, null private ratchet slot layouts,
   exact-cap/one-byte-short/overflow Vec/Deque growth, empty/ZST/inline tuple controls.
 - Actual fresh founder, actual selected-KP/first Add valid roundtrip; unsupported pending,
-  nonempty proposals/past/resumption/ratchets remains byte-identical and legacy restore works.
+  nonempty proposals/past/ratchets and resumption histories outside the exact initial shapes
+  remain byte-identical on refusal and legacy restore works.
+- Real founder/max32/epoch0, first-Add owner/max32/epochs0,1 and selected Welcome/max0/empty
+  rows survive the bounded loader with exact secret/epoch/cursor bytes. All three real join
+  configs still say0; this is asserted separately from the actual row contents. The cap remains
+  128KiB, and either real graph half retains the SAME fee until its final Drop.
+- The malformed resumption matrix covers maximum/count/cursor, duplicate/out-of-order/gap/
+  missing/future epochs, tuple arity, scalar/null/unknown/duplicate/missing fields, exact secret
+  lengths31/32/33, byte types/ranges and framing. Every case preserves source, observes zero
+  actual SDK entries and refunds its graph fee. Separate borrowed-row DATA tests cross-check
+  epoch geometry and repeat the getter with shorter/empty rows to exclude stale Facts carry.
 - Same values guard prevents preflight/decode replacement; Complete/Cancelled never fallback;
   partial decoder failure releases graph then fee; malicious raw map changes are re-preflighted.
 - Actual App original pool refusal before SDK, one-vs-two graph debit, child/parent overlap,
   device-first/group-first Drop and take_ready transfer do not free payment prematurely.
-- Production cfg/type/feature checks and full primary suites remain deferred until user resumes.
+- Production cfg/type/feature checks and required full suites remain primary-owned validation;
+  the exceptionally slow10,000-operation test stays until the end.
 
 
 The real App parent-overlap regression constructs a genuine owner/direct selected-KP request,
@@ -200,7 +234,7 @@ Deferred verification selectors: root `catcoms-mls persist::owner_restore`, App
 `cargo test --manifest-path vendor/openmls_memory_storage/Cargo.toml owner_restore` (dependency
 unit tests are not automatically root-workspace tests). Production-config root/native checks,
 optional-feature refusal paths, clippy, dependency audit and required whole suites remain for
-the primary after the user resumes compilation. No new ignored/skipped/loosened tests.
+the primary's resumed serial pipeline. No new ignored/skipped/loosened tests.
 
 
 The first-Add candidate bridge itself now checks the ORIGINAL closed group/device before any
@@ -211,6 +245,7 @@ without changing its canonical file or retiring Current. A graph fee never stand
 SDK operation admission. Optional V_TEST and CLI-import wrappers also refuse installed policies
 before serializer/logger/import work; their legacy None behavior is unchanged.
 
-Source-only checks at this checkpoint: direct rustfmt over29 changed Rust files, whitespace,
+Source-only checks at the original checkpoint: direct rustfmt over29 changed Rust files, whitespace,
 ambient-dependency and raw-filesystem gates. The default Windows WSL bash launcher denied startup;
-the same two scripts passed using installed Git Bash. No compiled suite/test/build/clippy ran.
+the same two scripts passed using installed Git Bash. No compiled suite/test/build/clippy ran
+at that checkpoint. The resumption test addition has not independently run any compiled check.
