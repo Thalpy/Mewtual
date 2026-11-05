@@ -15,8 +15,10 @@ The upstream copyright and MIT licence remain in force; this is not relicensed a
 The deliberate local changes are:
 
 - Normalized `Cargo.toml` adds exact `hashbrown = 0.16.1`, with default features disabled. That
-  version is already in both existing workspace locks. The final locks and resolved feature graph
-  still require primary validation. No hashing implementation is selected through hashbrown's
+  version is already in both existing workspace locks. Offline dependency metadata now resolves
+  this exact local provider and the shared Automerge patch in both workspaces, with no package
+  version update. This is manifest/lock validation, not compilation or feature-path execution.
+  No hashing implementation is selected through hashbrown's
   optional default hasher.
 - `src/lib.rs` exposes `StorageMap<S = std::collections::hash_map::RandomState>` and substitutes
   that alias only for `MemoryStorage.values`. The optional test-utils decoder initializes the

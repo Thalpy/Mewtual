@@ -54,6 +54,8 @@ possible source bytes; native automatic restart and exact stage-only repair rema
 The bounded MLS encoder now checks actual provider-table backing and retained Vec capacities under
 the same guard, through a narrow exact-pinned storage patch shared by both workspaces. Its new
 regressions are also unexecuted; SDK restore expansion and active-host admission remain open.
+Offline dependency metadata resolves both local patches in both workspaces without compilation
+or package-version updates. The direct MLS-to-storage dependency is retained in both lockfiles.
 Membership candidate/strict operation persistence is still in progress. The old bounded checkpoint profile remains
 nonactivatable for long-lived 20/50-member groups; scalable public headers/cold archive, genuine
 root-distribution invites and actual production consumers are open gates.
