@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Configured catalog read ownership (5 November; authored, unexecuted)
+
+The App now offers an explicit configured catalog opener using one shared caller-provided
+read pool. Non-Clone fees hold their original strong account before any raw/unframe/plain
+allocation and through both sources/files/barriers; copies of a pool share credits. Poison,
+overflow, underflow, exhaustion and unknown sources refuse without treating them as absence.
+Default open remains Empty512 only and no nonempty handler is supported. The common private
+constructor preserves the existing session/orphan/wrapper order; its raw-fs gate exception was
+renamed with that exact constructor. Five new tests are authored/UNRUN; direct rustfmt and diff
+checks only. Read-only design and actual-diff reviews are clear. Larger JOIN1/ARCHIVE2 grammar/invoices and the
+actual single native/global/UI pool remain separate open integration gates.
+[Contract](communication-recovery/CHAT-CRITICAL-CATALOG-READ-POOL.md).
+
 ## Owner-operation marker persistence boundary (5 November; static gate passed)
 
 The fixed owner-operation intent's bounded open/read, create-new write and actual sync/move/unlink

@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Explicit catalog read account (5 November; authored, unexecuted)
+
+`CriticalCatalogReadPool` clones share one caller-configured hardcap. The actual configured
+`ServerStore::open_with_catalog_read_pool` acquires a non-Clone original debit before catalog
+buffer allocation and retains it with both classified sources/files through their barriers.
+The Store's pool handle is not itself prepaid credit; subsequent reads reserve again. Ordinary
+open keeps the prior Empty512 policy, and both openers still refuse every nonempty namespace.
+This adds neither native/global/UI admission nor a join/archive handler. Five regressions are
+authored/UNRUN during the pause. [Exact resource boundary](communication-recovery/CHAT-CRITICAL-CATALOG-READ-POOL.md).
+
 ## Public v2 result-state data (5 November; authored, unexecuted)
 
 `chat::owner_state` adds a bounded public image and data/crypto genesis/successor/header binding.

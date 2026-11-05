@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Catalog read ownership (5 November; authored, unexecuted)
+
+Configured App catalog reads reserve from one caller-owned shared hardcap before buffer entry.
+The non-Clone fee holds the same strong account until both source files/copies/barriers drain;
+pool cloning and Store replacement cannot mint those credits. Accounting loss latches closed,
+and resource refusal never means absent journal or permission to initialize Empty. This logical
+resource owner grants no namespace, owner or publication authority and is no process/global/
+SDK/native/UI admission claim. The current handler remains Empty-only. Five regressions are
+authored/UNRUN. [Contract](communication-recovery/CHAT-CRITICAL-CATALOG-READ-POOL.md).
+
 ## Public state commitment prerequisite (5 November; authored, unexecuted)
 
 The v2 header's state digest now has a bounded public image: canonical current slots plus the

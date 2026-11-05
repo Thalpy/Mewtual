@@ -17,6 +17,9 @@ use super::*;
 use catcoms_rt::RequestCancellation;
 use catcoms_storage::VaultFormat;
 use std::sync::Arc;
+pub(super) mod read_pool;
+pub use read_pool::CriticalCatalogReadPool;
+use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
 
 const TAG: &str = "catcoms/critical-vault-namespaces/v1";
 pub(super) const MAX_PLAIN: usize = 512;
@@ -50,6 +53,8 @@ pub(super) struct ValidatedEmptyCatalog {
     original: RequestCancellation,
     pub(super) current: Option<File>,
     pub(super) stage: Option<File>,
+    // Files and every dependent copy drop BEFORE this original prepaid read allowance.
+    _read: Option<CatalogReadReservation>,
 }
 impl ValidatedEmptyCatalog {
     pub(super) fn validate_original(&self, store: &ServerStore) -> Result<(), AppError> {
@@ -198,11 +203,27 @@ impl ServerStore {
     }
 
     fn inspect_empty_critical_catalog(&self) -> Result<Option<ValidatedEmptyCatalog>, AppError> {
+        let read = if let Some(pool) = &self.catalog_read_pool {
+            let mut possible_source = false;
+            for slot in [Slot::Current, Slot::Stage] {
+                match fs::symlink_metadata(self.dir.join(slot.name())) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => possible_source = true,
+                }
+            }
+            if possible_source {
+                Some(pool.try_reserve(EMPTY_READ_FEE)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // Read/authenticate sequentially under exclusive physical custody. Each bounded raw
         // frame/plaintext is dropped before the next, while actual file handles stay open. Both
         // valid Empty parses imply IDENTICAL canonical plaintext; ciphertext nonces may differ.
-        let current = self.read_empty_critical_catalog_slot(Slot::Current)?;
-        let stage = self.read_empty_critical_catalog_slot(Slot::Stage)?;
+        let current = self.read_empty_critical_catalog_slot(Slot::Current, read.as_ref())?;
+        let stage = self.read_empty_critical_catalog_slot(Slot::Stage, read.as_ref())?;
         if current.is_none() && stage.is_none() {
             return Ok(None);
         }
@@ -211,11 +232,16 @@ impl ServerStore {
             original: self.chat_mount.observer(),
             current,
             stage,
+            _read: read,
         }))
     }
 
-    fn read_empty_critical_catalog_slot(&self, slot: Slot) -> Result<Option<File>, AppError> {
-        let Some((file, raw)) = self.open_critical_catalog_slot(slot)? else {
+    fn read_empty_critical_catalog_slot(
+        &self,
+        slot: Slot,
+        read: Option<&CatalogReadReservation>,
+    ) -> Result<Option<File>, AppError> {
+        let Some((file, raw)) = self.open_critical_catalog_slot(slot, read)? else {
             return Ok(None);
         };
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&raw)?)?);

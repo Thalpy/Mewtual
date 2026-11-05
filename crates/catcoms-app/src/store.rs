@@ -50,6 +50,7 @@ pub(crate) fn studio_refused(
 mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
+pub use critical_namespaces::CriticalCatalogReadPool;
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
@@ -544,6 +545,7 @@ mod persistence {
         pub(super) fn open_critical_catalog_slot(
             &self,
             slot: critical_namespaces::Slot,
+            read: Option<&critical_namespaces::read_pool::CatalogReadReservation>,
         ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
             use critical_namespaces::{refused, MAX_FRAMED};
             let path = self.dir.join(slot.name());
@@ -558,6 +560,12 @@ mod persistence {
                 .write(true)
                 .open(path)
                 .map_err(|error| AppError::Io(error.to_string()))?;
+            if let Some(pool) = &self.catalog_read_pool {
+                let read = read.ok_or_else(refused)?;
+                read.validate(pool, critical_namespaces::read_pool::EMPTY_READ_FEE)?;
+                #[cfg(test)]
+                read.before_read_buffer();
+            }
             let mut raw = Zeroizing::new(Vec::with_capacity(MAX_FRAMED + 1));
             (&mut file)
                 .take((MAX_FRAMED + 1) as u64)
@@ -2356,6 +2364,9 @@ impl SavedLimitLoad {
 
 /// A passphrase-gated, on-disk store for a member's servers.
 pub struct ServerStore {
+    // Caller handle only, NEVER an outstanding prepaid fee. Every actual configured catalog
+    // read acquires its own original debit before buffer allocation, then retains it with data.
+    catalog_read_pool: Option<CriticalCatalogReadPool>,
     dir: PathBuf,
     keys: KeyHierarchy,
     // Actual physical-mount custody and serialized admission lineage, never restored from bytes.
@@ -2429,6 +2440,29 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, AppError> {
+        Self::open_with_catalog_policy(dir, passphrase, rng, None)
+    }
+
+    /// Explicit configured catalog reader. Clones of the SAME provided pool share its hardcap;
+    /// stored limits never issue credits. The current handler still accepts Empty512 only.
+    /// Fresh-vault creation/KDF precedes catalog quota checking when no catalog exists. Existing
+    /// catalog quota refusal occurs before any frame allocation/old cleaner, never as absence.
+    /// This is not a process-global native or UI-session admission API.
+    pub fn open_with_catalog_read_pool(
+        dir: impl AsRef<Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        pool: CriticalCatalogReadPool,
+    ) -> Result<Self, AppError> {
+        Self::open_with_catalog_policy(dir, passphrase, rng, Some(pool))
+    }
+
+    fn open_with_catalog_policy(
+        dir: impl AsRef<Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        catalog_read_pool: Option<CriticalCatalogReadPool>,
+    ) -> Result<Self, AppError> {
         let dir = dir.as_ref().to_path_buf();
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
         // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
@@ -2438,6 +2472,7 @@ impl ServerStore {
         let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
         let store = Self {
+            catalog_read_pool,
             creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,
