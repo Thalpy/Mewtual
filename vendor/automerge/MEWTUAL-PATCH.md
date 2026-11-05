@@ -39,6 +39,11 @@ Only these upstream source files differ from the archive:
   makes a document clone/fork a fresh instance without changing copied document content.
 - `src/change_graph.rs`: a private borrowed slice over the existing applied hash vector.
 - `src/change_queue.rs`: a private borrowed slice over the existing queued Change vector.
+- `src/columnar/column_range/value.rs`: an allow annotation scoped only to the existing
+  `try_splice`'s four unused counter assignments. The existing `log!` import in `src/lib.rs`
+  has a similarly scoped unused-import annotation. Registry builds previously capped these
+  pinned upstream warnings; local path builds must also work with CI's unchanged `-D warnings`.
+  No codec or log-macro behavior is changed and no crate-wide warning suppression is added.
 - `src/autocommit.rs`: readonly ROOT-value metadata forwarding with explicit isolation refusal.
 - `src/op_set2/op_set.rs`: declare the private metadata-only ROOT lookup module.
 
@@ -99,10 +104,12 @@ transition on the missing parent, fresh new/clone/fork/load identity, and stable
 and ordinary edits. Incremental load also pins upstream's existing distinction between replacing
 an empty document and merging into a populated one. The primary integration agent owns compilation
 and all required suites.
-The vendor is not a workspace member. Run its focused upstream-style unit tests with
-`cargo test --manifest-path vendor/automerge/Cargo.toml --locked --lib history::tests`, then the
-affected replication tests and both full Mewtual workspaces before handoff. No execution is implied
-by the presence of these tests.
+The vendor is not a workspace member. Run `node scripts/test-automerge-observer.mjs`, then the
+affected replication tests and both full Mewtual workspaces before handoff. The cross-platform
+runner verifies a source copy, adds only `[workspace]` to its copied manifest, preserves the
+published lockfile, and runs just the two observer selectors with nonzero-count assertions. This
+also works inside nested worktrees, where Cargo's ancestor workspace search otherwise refuses
+direct excluded-package tests. Root CI runs this extra gate; workspace tests alone do not.
 
 Nine metadata/borrow regressions in `src/op_set2/op_set/value_metadata.rs` cover huge Bytes and wrong-type
 String without any raw-value-column access (the test removes that private column), normal get kind
@@ -111,5 +118,6 @@ rollbackable pending operations plus explicit isolation refusal. Exact borrowed 
 identity is pinned with a retained huge losing String and huge winning actor, plus unchanged saved
 history. Benign get equivalence, missing raw storage, zero-length Bytes and physical padding slabs
 have explicit cases, including a one-operation huge-key refusal.
-The focused selector is
-`cargo test --manifest-path vendor/automerge/Cargo.toml --locked --lib value_metadata::tests`.
+The runner also executes the `value_metadata::tests` selector. Its source hash inventory is retained
+under `target/automerge-observer-source-sha256.json`; only its exact marked source directory can
+be replaced on retry. It does not copy/delete Cargo artifacts or alter either shipping lockfile.

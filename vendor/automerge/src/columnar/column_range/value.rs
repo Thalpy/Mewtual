@@ -81,6 +81,9 @@ impl ValueRange {
             .unwrap()
     }
 
+    // Preserve the pinned upstream codec verbatim: its four unused loop-counter writes are
+    // harmless but registry lint capping no longer applies to our local observer patch.
+    #[allow(unused_assignments)]
     pub(crate) fn try_splice<'b, I, E>(
         &self,
         data: &[u8],

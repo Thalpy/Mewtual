@@ -235,6 +235,9 @@
 macro_rules! log {
      ( $( $t:tt )* ) => {
           {
+            // Published registry builds cap these upstream macro-import warnings. Keep this
+            // exact existing expansion compatible with Mewtual's strict path-dependency build.
+            #[allow(unused_imports)]
             use $crate::__log;
             __log!( $( $t )* );
           }
