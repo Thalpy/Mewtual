@@ -106,6 +106,20 @@ impl std::fmt::Debug for RetainedBootstrapSourceData {
     }
 }
 impl RetainedBootstrapSourceData {
+    /// Original physical lifetime observation ONLY. Safe while an actual writer already
+    /// holds Root: no host writer, fee/pool access, filesystem, codec/SDK or new owner is involved.
+    /// Full original control/name/resource validation remains separately mandatory before I/O.
+    pub(in crate::store) fn require_original_negative(
+        &self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        self.capture.require_open()?;
+        if !Arc::ptr_eq(&self.capture.mount, &store.registry_mount()) {
+            return Err(critical_namespaces::refused());
+        }
+        Ok(())
+    }
+
     pub(in crate::store) fn observe_original(&self) -> OriginalBootstrapReadObservation {
         OriginalBootstrapReadObservation {
             identity: Arc::downgrade(&self.capture.identity),

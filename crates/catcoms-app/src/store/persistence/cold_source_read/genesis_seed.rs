@@ -141,8 +141,17 @@ impl RetainedBootstrapGenesisSeed {
         &self.source
     }
     pub fn validate_original(&self, store: &ServerStore) -> Result<(), AppError> {
-        self.original_read.require_same_original(&self.source)?;
+        self.require_original_negative(store)?;
         self.source.validate_original(store)
+    }
+    /// Closed original-read lifetime checks for an ALREADY-held host writer. This grants no
+    /// Saved/Current authority and never acquires Root/pool/SDK locks or touches the filesystem.
+    pub(in crate::store) fn require_original_negative(
+        &self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        self.original_read.require_same_original(&self.source)?;
+        self.source.require_original_negative(store)
     }
 }
 

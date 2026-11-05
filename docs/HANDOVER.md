@@ -49,9 +49,12 @@ another genuine paid read of identical source bytes/paths for the original held-
 The observer retains neither DATA nor the read fee and supplies no positive permission; normal
 original mount/control/object checks still apply. Two observation regressions are authored UNRUN.
 
-Six genuine-source regressions are authored UNRUN. They cover independent payment/drop
+Seven genuine-source regressions are authored UNRUN. They cover independent payment/drop
 lifetimes, one-byte-short combined pressure before SDK, provider/setup refusal cleanup,
 cancellation after fee waits, control replacement after real decode and foreign account/mount.
+The additional closed `require_original_negative` check reuses exact read identity and original
+mount/root negatives under an already-held Root, with no host writer/pool/I/O/SDK acquisition.
+Its bounded regression checks that held-Root path, foreign Store refusal and mount cancellation.
 The work1 test exercises setup/provider cleanup, not a partially decoded typed graph. Design
 and final actual source static reviews are clear. No compiler/tests/build ran. Runtime
 attachment must still preserve the entire resource capsule and pay generic parts/refusal layouts

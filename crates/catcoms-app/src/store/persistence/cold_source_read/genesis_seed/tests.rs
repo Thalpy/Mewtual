@@ -181,3 +181,35 @@ fn another_physical_store_cannot_use_the_original_sources_payment_or_mount() {
     assert_eq!(b.pool.charged_for_test(), baseline_b);
     read.validate_original(&a.store).unwrap();
 }
+
+#[test]
+fn original_negative_check_works_under_actual_root_and_refuses_foreign_or_closed_mount() {
+    let a = fixture(0xd008);
+    let b = fixture(0xd009);
+    let read = a
+        .store
+        .read_saved_bootstrap_source_data(&a.group, a.signer)
+        .unwrap();
+    let seed = a.store.prepare_genesis_seed(read, budget()).unwrap();
+    // A bounded thread harness detects an accidental Root re-lock without leaving a hung
+    // worker: release the real guard before joining, including the timeout/refusal path.
+    let root = a.store.archive_bootstrap_root.lock().unwrap();
+    let result = std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let source_ref = &seed;
+        let store_ref = &a.store;
+        let worker = scope.spawn(move || {
+            sender
+                .send(source_ref.require_original_negative(store_ref).is_ok())
+                .unwrap();
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        drop(root);
+        worker.join().unwrap();
+        result
+    });
+    assert!(result.unwrap());
+    assert!(seed.require_original_negative(&b.store).is_err());
+    a.store.chat_mount_revoker().revoke();
+    assert!(seed.require_original_negative(&a.store).is_err());
+}

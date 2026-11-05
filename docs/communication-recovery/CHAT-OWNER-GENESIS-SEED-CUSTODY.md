@@ -93,8 +93,14 @@ before returning DATA. Owning SDK refusals therefore move the SAME existing sour
 small fixed envelope, without allocating an error after a quota refusal. Compile-time size
 assertions pin both the retained source and refusal envelope; the pressure regression also
 checks that the opened DATA address is unchanged across refusal.
-Six genuine cold-source tests cover independent charge/drop lifetime, one-byte-short combined
+Seven genuine cold-source tests cover independent charge/drop lifetime, one-byte-short combined
 pressure before SDK, provider/setup refusal cleanup, cancellation after fee wait, actual final
 control replacement and foreign Store/account rejection. The work1 test refuses SDK setup
 before typed getters; partial typed graph cleanup is covered by the prior MLS loader tests.
 Only formatting/whitespace/static safety gates have run, not compilation or test execution.
+
+The private `require_original_negative` helper checks the SAME cached read identity and actual
+original read mount/root negatives without acquiring a host writer, pool, filesystem or SDK.
+This supports a concrete caller ALREADY holding Root; it does not replace full control/name
+or resource validation. Its bounded held-Root regression releases that guard before joining
+even on timeout, and also checks foreign Store and cancelled-mount refusal.
