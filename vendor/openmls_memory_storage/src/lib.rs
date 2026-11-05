@@ -1,12 +1,18 @@
 use openmls_traits::storage::*;
 use serde::Serialize;
-use std::{collections::hash_map::RandomState, sync::RwLock};
+use std::{
+    collections::hash_map::RandomState,
+    sync::{Arc, Mutex, RwLock},
+};
 
 /// Mewtual's narrow backing map substitution. StorageProvider labels, JSON and lock behavior
-/// below remain upstream. The exact hashbrown version exposes allocation_size under the SAME
+/// retain their legacy defaults; the opt-in closed owner decoder is a separate local patch.
+/// The exact hashbrown version exposes allocation_size under the SAME
 /// guard as reads; std HashMap::capacity is not a raw-bucket work bound after tombstone erasure.
 /// Vec payloads are separately charged by the caller. RandomState is intentional: the optional
 /// hashbrown default hasher is not this provider's hash-flood boundary.
+pub mod owner_restore;
+
 pub type StorageMap<S = RandomState> = hashbrown::HashMap<Vec<u8>, Vec<u8>, S>;
 
 #[cfg(feature = "test-utils")]
@@ -22,6 +28,8 @@ pub mod persistence;
 #[derive(Debug, Default)]
 pub struct MemoryStorage {
     pub values: RwLock<StorageMap>,
+    // None is legacy. Once installed, Complete/Cancelled never become None again.
+    owner_restore: Mutex<Option<Arc<owner_restore::Attempt>>>,
 }
 
 // For testing we want to clone.
@@ -31,6 +39,7 @@ impl Clone for MemoryStorage {
         let values = self.values.read().unwrap();
         Self {
             values: RwLock::new(values.clone()),
+            owner_restore: Mutex::new(self.owner_restore.lock().unwrap().clone()),
         }
     }
 }
@@ -87,6 +96,7 @@ impl MemoryStorage {
 
         Ok(Self {
             values: RwLock::new(map),
+            owner_restore: Mutex::new(None),
         })
     }
 }
@@ -100,7 +110,13 @@ impl MemoryStorage {
         key: &[u8],
         value: Vec<u8>,
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
+        self.require_unrestricted()?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
 
         #[cfg(feature = "test-utils")]
@@ -117,7 +133,13 @@ impl MemoryStorage {
         key: &[u8],
         value: Vec<u8>,
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
+        self.require_unrestricted()?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
 
         #[cfg(feature = "test-utils")]
@@ -144,7 +166,13 @@ impl MemoryStorage {
         key: &[u8],
         value: Vec<u8>,
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
+        self.require_unrestricted()?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
 
         #[cfg(feature = "test-utils")]
@@ -174,22 +202,18 @@ impl MemoryStorage {
         label: &[u8],
         key: &[u8],
     ) -> Result<Option<V>, <Self as StorageProvider<CURRENT_VERSION>>::Error> {
+        self.require_owner_read_label(label)?;
         let values = self.values.read().unwrap();
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
 
-        #[cfg(feature = "test-utils")]
-        log::debug!("  read key: {}", hex::encode(&storage_key));
-        log::trace!("{}", std::backtrace::Backtrace::capture());
-
-        let value = values.get(&storage_key);
-
-        if let Some(value) = value {
-            serde_json::from_slice(value)
-                .map_err(|_| MemoryStorageError::SerializationError)
-                .map(|v| Some(v))
-        } else {
-            Ok(None)
+        // Installed owner policies cannot invoke unmetered host diagnostics/backtraces.
+        if self.legacy_read_diagnostics()? {
+            #[cfg(feature = "test-utils")]
+            log::debug!("  read key: {}", hex::encode(&storage_key));
+            log::trace!("{}", std::backtrace::Backtrace::capture());
         }
+
+        self.decode_row(&values, label, &storage_key)
     }
 
     /// Internal helper to abstract read operations.
@@ -199,22 +223,27 @@ impl MemoryStorage {
         label: &[u8],
         key: &[u8],
     ) -> Result<Vec<V>, <Self as StorageProvider<CURRENT_VERSION>>::Error> {
+        self.require_owner_read_label(label)?;
         let values = self.values.read().unwrap();
 
         let mut storage_key = label.to_vec();
         storage_key.extend_from_slice(key);
         storage_key.extend_from_slice(&u16::to_be_bytes(VERSION));
 
-        #[cfg(feature = "test-utils")]
-        log::debug!("  read list key: {}", hex::encode(&storage_key));
-        log::trace!("{}", std::backtrace::Backtrace::capture());
+        // Installed owner policies cannot invoke unmetered host diagnostics/backtraces.
+        if self.legacy_read_diagnostics()? {
+            #[cfg(feature = "test-utils")]
+            log::debug!("  read list key: {}", hex::encode(&storage_key));
+            log::trace!("{}", std::backtrace::Backtrace::capture());
+        }
 
         // Mewtual: a restored present row can be malformed. Preserve the ordinary missing
         // list behavior below, but return the existing storage error instead of panicking.
-        let value: Vec<Vec<u8>> = match values.get(&storage_key) {
-            Some(list_bytes) => serde_json::from_slice(list_bytes)?,
-            None => vec![],
-        };
+        // The closed profile observes absent lists as empty under this SAME guard and refuses
+        // nonempty lists before any Vec<Vec<u8>> or inner SDK value can allocate.
+        let value: Vec<Vec<u8>> = self
+            .decode_row(&values, label, &storage_key)?
+            .unwrap_or_default();
 
         value
             .iter()
@@ -230,7 +259,13 @@ impl MemoryStorage {
         label: &[u8],
         key: &[u8],
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
+        self.require_unrestricted()?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
 
         let mut storage_key = label.to_vec();
         storage_key.extend_from_slice(key);
@@ -307,6 +342,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         proposal_ref: &ProposalRef,
         proposal: &QueuedProposal,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         // write proposal to key (group_id, proposal_ref)
         let key = serde_json::to_vec(&(group_id, proposal_ref))?;
         let value = serde_json::to_vec(proposal)?;
@@ -328,6 +364,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         tree: &TreeSync,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             TREE_LABEL,
             &serde_json::to_vec(&group_id).unwrap(),
@@ -343,7 +380,13 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         interim_transcript_hash: &InterimTranscriptHash,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let key = build_key::<CURRENT_VERSION, &GroupId>(INTERIM_TRANSCRIPT_HASH_LABEL, group_id);
         let value = serde_json::to_vec(&interim_transcript_hash).unwrap();
 
@@ -359,7 +402,13 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         group_context: &GroupContext,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let key = build_key::<CURRENT_VERSION, &GroupId>(GROUP_CONTEXT_LABEL, group_id);
         let value = serde_json::to_vec(&group_context).unwrap();
 
@@ -375,7 +424,13 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         confirmation_tag: &ConfirmationTag,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let key = build_key::<CURRENT_VERSION, &GroupId>(CONFIRMATION_TAG_LABEL, group_id);
         let value = serde_json::to_vec(&confirmation_tag).unwrap();
 
@@ -391,7 +446,13 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         public_key: &SignaturePublicKey,
         signature_key_pair: &SignatureKeyPair,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let key =
             build_key::<CURRENT_VERSION, &SignaturePublicKey>(SIGNATURE_KEY_PAIR_LABEL, public_key);
         let value = serde_json::to_vec(&signature_key_pair).unwrap();
@@ -407,6 +468,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Vec<ProposalRef>, Self::Error> {
+        self.require_owner_read_label(PROPOSAL_QUEUE_REFS_LABEL)?;
         self.read_list(PROPOSAL_QUEUE_REFS_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -418,6 +480,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Vec<(ProposalRef, QueuedProposal)>, Self::Error> {
+        self.require_owner_read_label(PROPOSAL_QUEUE_REFS_LABEL)?;
         let refs: Vec<ProposalRef> =
             self.read_list(PROPOSAL_QUEUE_REFS_LABEL, &serde_json::to_vec(group_id)?)?;
 
@@ -443,15 +506,15 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<TreeSync>, Self::Error> {
+        self.require_owner_read_label(TREE_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(TREE_LABEL, group_id);
 
-        let Some(value) = values.get(&key) else {
-            return Ok(None);
-        };
-        let value = serde_json::from_slice(value)?;
-
-        Ok(value)
+        // Preserve legacy Option<T> JSON semantics, but route the actual closed getter through
+        // the policy BEFORE a missing/default result or any typed decode.
+        Ok(self
+            .decode_row::<Option<TreeSync>>(&values, TREE_LABEL, &key)?
+            .flatten())
     }
 
     fn group_context<
@@ -461,15 +524,15 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<GroupContext>, Self::Error> {
+        self.require_owner_read_label(GROUP_CONTEXT_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(GROUP_CONTEXT_LABEL, group_id);
 
-        let Some(value) = values.get(&key) else {
-            return Ok(None);
-        };
-        let value = serde_json::from_slice(value)?;
-
-        Ok(value)
+        // Preserve legacy Option<T> JSON semantics, but route the actual closed getter through
+        // the policy BEFORE a missing/default result or any typed decode.
+        Ok(self
+            .decode_row::<Option<GroupContext>>(&values, GROUP_CONTEXT_LABEL, &key)?
+            .flatten())
     }
 
     fn interim_transcript_hash<
@@ -479,15 +542,19 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<InterimTranscriptHash>, Self::Error> {
+        self.require_owner_read_label(INTERIM_TRANSCRIPT_HASH_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(INTERIM_TRANSCRIPT_HASH_LABEL, group_id);
 
-        let Some(value) = values.get(&key) else {
-            return Ok(None);
-        };
-        let value = serde_json::from_slice(value)?;
-
-        Ok(value)
+        // Preserve legacy Option<T> JSON semantics, but route the actual closed getter through
+        // the policy BEFORE a missing/default result or any typed decode.
+        Ok(self
+            .decode_row::<Option<InterimTranscriptHash>>(
+                &values,
+                INTERIM_TRANSCRIPT_HASH_LABEL,
+                &key,
+            )?
+            .flatten())
     }
 
     fn confirmation_tag<
@@ -497,15 +564,15 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<ConfirmationTag>, Self::Error> {
+        self.require_owner_read_label(CONFIRMATION_TAG_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(CONFIRMATION_TAG_LABEL, group_id);
 
-        let Some(value) = values.get(&key) else {
-            return Ok(None);
-        };
-        let value = serde_json::from_slice(value)?;
-
-        Ok(value)
+        // Preserve legacy Option<T> JSON semantics, but route the actual closed getter through
+        // the policy BEFORE a missing/default result or any typed decode.
+        Ok(self
+            .decode_row::<Option<ConfirmationTag>>(&values, CONFIRMATION_TAG_LABEL, &key)?
+            .flatten())
     }
 
     fn signature_key_pair<
@@ -515,17 +582,17 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         public_key: &SignaturePublicKey,
     ) -> Result<Option<SignatureKeyPair>, Self::Error> {
+        self.require_owner_read_label(SIGNATURE_KEY_PAIR_LABEL)?;
         let values = self.values.read().unwrap();
 
         let key =
             build_key::<CURRENT_VERSION, &SignaturePublicKey>(SIGNATURE_KEY_PAIR_LABEL, public_key);
 
-        let Some(value) = values.get(&key) else {
-            return Ok(None);
-        };
-        let value = serde_json::from_slice(value)?;
-
-        Ok(value)
+        // Preserve legacy Option<T> JSON semantics, but route the actual closed getter through
+        // the policy BEFORE a missing/default result or any typed decode.
+        Ok(self
+            .decode_row::<Option<SignatureKeyPair>>(&values, SIGNATURE_KEY_PAIR_LABEL, &key)?
+            .flatten())
     }
 
     fn write_key_package<
@@ -536,6 +603,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         hash_ref: &HashReference,
         key_package: &KeyPackage,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         let key = serde_json::to_vec(&hash_ref).unwrap();
         let value = serde_json::to_vec(&key_package).unwrap();
 
@@ -553,6 +621,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         psk_id: &PskId,
         psk: &PskBundle,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             PSK_LABEL,
             &serde_json::to_vec(&psk_id).unwrap(),
@@ -568,6 +637,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         public_key: &EncryptionKey,
         key_pair: &HpkeKeyPair,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             ENCRYPTION_KEY_PAIR_LABEL,
             &serde_json::to_vec(public_key).unwrap(),
@@ -582,6 +652,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<Option<KeyPackage>, Self::Error> {
+        self.require_owner_read_label(KEY_PACKAGE_LABEL)?;
         let key = serde_json::to_vec(&hash_ref).unwrap();
         self.read(KEY_PACKAGE_LABEL, &key)
     }
@@ -590,6 +661,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         psk_id: &PskId,
     ) -> Result<Option<PskBundle>, Self::Error> {
+        self.require_owner_read_label(PSK_LABEL)?;
         self.read(PSK_LABEL, &serde_json::to_vec(&psk_id).unwrap())
     }
 
@@ -600,6 +672,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         public_key: &EncryptionKey,
     ) -> Result<Option<HpkeKeyPair>, Self::Error> {
+        self.require_owner_read_label(ENCRYPTION_KEY_PAIR_LABEL)?;
         self.read(
             ENCRYPTION_KEY_PAIR_LABEL,
             &serde_json::to_vec(public_key).unwrap(),
@@ -612,6 +685,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         public_key: &SignaturePublicKeuy,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(
             SIGNATURE_KEY_PAIR_LABEL,
             &serde_json::to_vec(public_key).unwrap(),
@@ -622,6 +696,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         public_key: &EncryptionKey,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(
             ENCRYPTION_KEY_PAIR_LABEL,
             &serde_json::to_vec(&public_key).unwrap(),
@@ -632,6 +707,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         #[cfg(feature = "virtual-clients-draft")]
         {
             let serialized_ref = serde_json::to_vec(&hash_ref)?;
@@ -645,6 +721,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         psk_id: &PskKey,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(PSK_LABEL, &serde_json::to_vec(&psk_id)?)
     }
 
@@ -655,6 +732,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<GroupState>, Self::Error> {
+        self.require_owner_read_label(GROUP_STATE_LABEL)?;
         self.read(GROUP_STATE_LABEL, &serde_json::to_vec(&group_id)?)
     }
 
@@ -666,6 +744,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         group_state: &GroupState,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             GROUP_STATE_LABEL,
             &serde_json::to_vec(group_id)?,
@@ -677,6 +756,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(GROUP_STATE_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -687,6 +767,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<MessageSecrets>, Self::Error> {
+        self.require_owner_read_label(MESSAGE_SECRETS_LABEL)?;
         self.read(MESSAGE_SECRETS_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -698,6 +779,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         message_secrets: &MessageSecrets,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             MESSAGE_SECRETS_LABEL,
             &serde_json::to_vec(group_id)?,
@@ -709,6 +791,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(MESSAGE_SECRETS_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -719,6 +802,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<ResumptionPskStore>, Self::Error> {
+        self.require_owner_read_label(RESUMPTION_PSK_STORE_LABEL)?;
         self.read(RESUMPTION_PSK_STORE_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -730,6 +814,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         resumption_psk_store: &ResumptionPskStore,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             RESUMPTION_PSK_STORE_LABEL,
             &serde_json::to_vec(group_id)?,
@@ -741,6 +826,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(RESUMPTION_PSK_STORE_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -751,6 +837,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<LeafNodeIndex>, Self::Error> {
+        self.require_owner_read_label(OWN_LEAF_NODE_INDEX_LABEL)?;
         self.read(OWN_LEAF_NODE_INDEX_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -762,6 +849,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         own_leaf_index: &LeafNodeIndex,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             OWN_LEAF_NODE_INDEX_LABEL,
             &serde_json::to_vec(group_id)?,
@@ -773,6 +861,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(OWN_LEAF_NODE_INDEX_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -783,6 +872,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<GroupEpochSecrets>, Self::Error> {
+        self.require_owner_read_label(EPOCH_SECRETS_LABEL)?;
         self.read(EPOCH_SECRETS_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -794,6 +884,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         group_epoch_secrets: &GroupEpochSecrets,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             EPOCH_SECRETS_LABEL,
             &serde_json::to_vec(group_id)?,
@@ -805,6 +896,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(EPOCH_SECRETS_LABEL, &serde_json::to_vec(group_id)?)
     }
 
@@ -819,6 +911,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         leaf_index: u32,
         key_pairs: &[HpkeKeyPair],
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         let key = epoch_key_pairs_id(group_id, epoch, leaf_index)?;
         let value = serde_json::to_vec(key_pairs)?;
         log::debug!("Writing encryption epoch key pairs");
@@ -841,6 +934,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         epoch: &EpochKey,
         leaf_index: u32,
     ) -> Result<Vec<HpkeKeyPair>, Self::Error> {
+        self.require_owner_read_label(EPOCH_KEY_PAIRS_LABEL)?;
         let key = epoch_key_pairs_id(group_id, epoch, leaf_index)?;
         let storage_key = build_key_from_vec::<CURRENT_VERSION>(EPOCH_KEY_PAIRS_LABEL, key);
         log::debug!("Reading encryption epoch key pairs");
@@ -869,6 +963,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         epoch: &EpochKey,
         leaf_index: u32,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         let key = epoch_key_pairs_id(group_id, epoch, leaf_index)?;
         self.delete::<CURRENT_VERSION>(EPOCH_KEY_PAIRS_LABEL, &key)
     }
@@ -880,10 +975,16 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         // Get all proposal refs for this group.
         let proposal_refs: Vec<ProposalRef> =
             self.read_list(PROPOSAL_QUEUE_REFS_LABEL, &serde_json::to_vec(group_id)?)?;
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         for proposal_ref in proposal_refs {
             // Delete all proposals.
             let key = serde_json::to_vec(&(group_id, proposal_ref))?;
@@ -904,6 +1005,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<MlsGroupJoinConfig>, Self::Error> {
+        self.require_owner_read_label(JOIN_CONFIG_LABEL)?;
         self.read(JOIN_CONFIG_LABEL, &serde_json::to_vec(group_id).unwrap())
     }
 
@@ -915,6 +1017,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         config: &MlsGroupJoinConfig,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         let key = serde_json::to_vec(group_id).unwrap();
         let value = serde_json::to_vec(config).unwrap();
 
@@ -928,6 +1031,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Vec<LeafNode>, Self::Error> {
+        self.require_owner_read_label(OWN_LEAF_NODES_LABEL)?;
         self.read_list(OWN_LEAF_NODES_LABEL, &serde_json::to_vec(group_id).unwrap())
     }
 
@@ -939,6 +1043,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         leaf_node: &LeafNode,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         let key = serde_json::to_vec(group_id)?;
         let value = serde_json::to_vec(leaf_node)?;
         self.append::<CURRENT_VERSION>(OWN_LEAF_NODES_LABEL, &key, value)
@@ -948,6 +1053,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(OWN_LEAF_NODES_LABEL, &serde_json::to_vec(group_id).unwrap())
     }
 
@@ -955,6 +1061,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(JOIN_CONFIG_LABEL, &serde_json::to_vec(group_id).unwrap())
     }
 
@@ -962,6 +1069,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(TREE_LABEL, &serde_json::to_vec(group_id).unwrap())
     }
 
@@ -969,6 +1077,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(
             CONFIRMATION_TAG_LABEL,
             &serde_json::to_vec(group_id).unwrap(),
@@ -979,6 +1088,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(GROUP_CONTEXT_LABEL, &serde_json::to_vec(group_id).unwrap())
     }
 
@@ -986,6 +1096,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(
             INTERIM_TRANSCRIPT_HASH_LABEL,
             &serde_json::to_vec(group_id).unwrap(),
@@ -1000,6 +1111,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         proposal_ref: &ProposalRef,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         let key = serde_json::to_vec(group_id).unwrap();
         let value = serde_json::to_vec(proposal_ref).unwrap();
 
@@ -1018,6 +1130,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         application_export_tree: &ApplicationExportTree,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             APPLICATION_EXPORT_TREE_LABEL,
             &serde_json::to_vec(&group_id).unwrap(),
@@ -1033,6 +1146,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<ApplicationExportTree>, Self::Error> {
+        self.require_owner_read_label(APPLICATION_EXPORT_TREE_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(APPLICATION_EXPORT_TREE_LABEL, group_id);
 
@@ -1052,6 +1166,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(
             APPLICATION_EXPORT_TREE_LABEL,
             &serde_json::to_vec(group_id).unwrap(),
@@ -1067,6 +1182,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         epoch_id: &EpochId,
         vc_emulation_epoch_state: &VcEmulationEpochState,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             VC_EMULATION_EPOCH_STATE_LABEL,
             &serde_json::to_vec(epoch_id).unwrap(),
@@ -1082,6 +1198,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         epoch_id: &EpochId,
     ) -> Result<Option<VcEmulationEpochState>, Self::Error> {
+        self.require_owner_read_label(VC_EMULATION_EPOCH_STATE_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &EpochId>(VC_EMULATION_EPOCH_STATE_LABEL, epoch_id);
         let Some(value) = values.get(&key) else {
@@ -1095,10 +1212,16 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         epoch_id: &EpochId,
     ) -> Result<bool, Self::Error> {
+        self.require_unrestricted()?;
         let serialized_epoch_id = serde_json::to_vec(epoch_id)?;
         // Hold the write lock across the liveness check and the deletion so a
         // material stored concurrently cannot be orphaned.
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let referenced = values
             .iter()
             .any(|(key, value)| is_epoch_tag(key) && value == &serialized_epoch_id);
@@ -1125,6 +1248,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         bindings: &VcEmulationBindings,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             VC_EMULATION_BINDING_LABEL,
             &serde_json::to_vec(group_id).unwrap(),
@@ -1140,6 +1264,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<VcEmulationBindings>, Self::Error> {
+        self.require_owner_read_label(VC_EMULATION_BINDING_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(VC_EMULATION_BINDING_LABEL, group_id);
         let Some(value) = values.get(&key) else {
@@ -1153,6 +1278,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(
             VC_EMULATION_BINDING_LABEL,
             &serde_json::to_vec(group_id).unwrap(),
@@ -1168,6 +1294,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         registered: &RegisteredVcEmulationEpoch,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             REGISTERED_VC_EMULATION_EPOCH_LABEL,
             &serde_json::to_vec(group_id).unwrap(),
@@ -1183,6 +1310,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<RegisteredVcEmulationEpoch>, Self::Error> {
+        self.require_owner_read_label(REGISTERED_VC_EMULATION_EPOCH_LABEL)?;
         let values = self.values.read().unwrap();
         let key =
             build_key::<CURRENT_VERSION, &GroupId>(REGISTERED_VC_EMULATION_EPOCH_LABEL, group_id);
@@ -1197,6 +1325,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(
             REGISTERED_VC_EMULATION_EPOCH_LABEL,
             &serde_json::to_vec(group_id).unwrap(),
@@ -1212,6 +1341,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         epoch_id: &EpochId,
         vc_operation_tree: &VcOperationTree,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             VC_OPERATION_TREE_LABEL,
             &serde_json::to_vec(epoch_id).unwrap(),
@@ -1227,6 +1357,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         epoch_id: &EpochId,
     ) -> Result<Option<VcOperationTree>, Self::Error> {
+        self.require_owner_read_label(VC_OPERATION_TREE_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &EpochId>(VC_OPERATION_TREE_LABEL, epoch_id);
         let Some(value) = values.get(&key) else {
@@ -1247,11 +1378,17 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         operation_tree: &VcOperationTree,
         materials: &[(KeyPackageRef, RetainedKeyPackageMaterial)],
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         let serialized_epoch_id = serde_json::to_vec(epoch_id)?;
         // Take the write lock once so the advanced tree and all materials are
         // written together. A reader cannot observe an advanced tree without
         // the materials it produced.
+        #[cfg(test)]
+        owner_restore::before_values_writer();
         let mut values = self.values.write().unwrap();
+        // A legacy writer may have waited while the closed installer won. Repeat under
+        // the actual writer, preserving install's values -> policy lock order.
+        self.require_unrestricted()?;
         let tree_key = build_key_from_vec::<CURRENT_VERSION>(
             VC_OPERATION_TREE_LABEL,
             serialized_epoch_id.clone(),
@@ -1281,6 +1418,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<Option<RetainedKeyPackageMaterial>, Self::Error> {
+        self.require_owner_read_label(RETAINED_KEY_PACKAGE_MATERIAL_LABEL)?;
         let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &KeyPackageRef>(
             RETAINED_KEY_PACKAGE_MATERIAL_LABEL,
@@ -1297,6 +1435,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         epoch_id: &EpochId,
     ) -> Result<bool, Self::Error> {
+        self.require_owner_read_label(RETAINED_KEY_PACKAGE_EPOCH_LABEL)?;
         let serialized_epoch_id = serde_json::to_vec(epoch_id)?;
         let values = self.values.read().unwrap();
         let referenced = values
@@ -1312,6 +1451,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<(), Self::Error> {
+        self.require_unrestricted()?;
         let serialized_ref = serde_json::to_vec(hash_ref)?;
         self.delete::<CURRENT_VERSION>(RETAINED_KEY_PACKAGE_MATERIAL_LABEL, &serialized_ref)?;
         self.delete::<CURRENT_VERSION>(RETAINED_KEY_PACKAGE_EPOCH_LABEL, &serialized_ref)

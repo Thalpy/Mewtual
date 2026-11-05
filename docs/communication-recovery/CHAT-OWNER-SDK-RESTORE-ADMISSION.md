@@ -1,8 +1,11 @@
 # Private SDK restore admission: exact closed profile
 
-Design for review, not an implemented heap bound. Compilation/tests/builds are paused. The
-independent malformed-read patch returns storage errors; it does not implement this proposal.
-Nothing here activates typed Chat V2, changes legacy restore grammar, or grants owner authority.
+The narrower [initial thirteen-row consumer](CHAT-OWNER-SDK-RESTORE-CONSUMER.md) is now authored
+under explicit App resource opt-in, with25 regressions UNRUN and final actual-diff static review clear.
+This broader document still describes unfinished live/initialized-ratchet and operation work;
+it is not whole-SDK/host accounting or compiled acceptance. Compilation/tests/builds remain paused.
+The older malformed-read patch alone does not implement this admission. No typed Chat V2/native
+activation, legacy grammar change or owner authority follows from either resource prerequisite.
 
 ## Actual resolved source
 
@@ -225,4 +228,5 @@ generic graph restore, no new private-key export and no SDK source vendoring is 
 - Actual complete private consumer with tight original caps; no helper-only or literal-paid test.
 - Read-only design + actual-diff review and the primary's deferred focused/full/native gates.
 
-Until those paths and checks exist, the SDK heap/work gate remains OPEN.
+The initial consumer now implements its narrow closed path, subject to all deferred execution after clear design/actual static review. Full live SDK heap/work, mutative operation and active-host admission
+remain OPEN; unsupported graphs are preserved/refused rather than compacted or downgraded.

@@ -21,15 +21,26 @@ pub struct OwnerInitializationRestoreLimits {
 
 /// Private decode strategy only. The public legacy path retains its exact decoder/grammar, and
 /// the private checkpoint selects this mode only AFTER the complete borrowed preflight succeeds.
-#[derive(Clone, Copy)]
 pub(super) enum MlsDecode {
     Legacy,
     OwnerCheckpoint(OwnerInitializationRestoreLimits),
+    OwnerCheckpointSdk(
+        OwnerInitializationRestoreLimits,
+        catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ),
 }
 impl MlsDecode {
     pub(super) fn restore(self, bytes: &[u8]) -> Result<(MlsDevice, ServerGroup), SyncError> {
         Ok(match self {
             Self::Legacy => restore_server(bytes)?,
+            Self::OwnerCheckpointSdk(limits, admission) => {
+                catcoms_mls::persist::restore_server_owner_checkpoint_bounded(
+                    bytes,
+                    limits.max_mls_bytes,
+                    limits.max_mls_backing_bytes,
+                    admission,
+                )?
+            }
             Self::OwnerCheckpoint(limits) => catcoms_mls::persist::restore_server_provider_bounded(
                 bytes,
                 limits.max_mls_bytes,
@@ -51,6 +62,27 @@ pub(super) fn note_decoder_entry() {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Explicit actual host-paid SDK path. Closed whole-Sync preflight still precedes common
+    /// cloning; the provider installs its own row/type policy before SIGNER. No source/current
+    /// authority follows from this resource admission, and later SDK operations remain refused.
+    pub fn restore_owner_initialization_with_sdk(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        limits: OwnerInitializationRestoreLimits,
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<Self, SyncError> {
+        preflight(snapshot, limits)?;
+        Self::restore_with_mls(
+            snapshot,
+            transport,
+            rng,
+            clock,
+            MlsDecode::OwnerCheckpointSdk(limits, admission),
+        )
+    }
+
     /// Decode the exact narrow grammar emitted by the private first-owner initializer.
     ///
     /// Unsupported history/obligations are never truncated into an empty node. Complete outer

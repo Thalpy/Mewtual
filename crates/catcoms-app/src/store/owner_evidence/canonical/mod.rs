@@ -53,6 +53,8 @@ pub(super) struct Runtime {
     // Includes the ONE retained frozen candidate and every transient encoding/sealing buffer.
     // A reservation owns this fee until successful transfer or explicit attempt drop.
     hot_bytes: usize,
+    // An inconsistent typed graph refund permanently closes future SDK admissions.
+    sdk_unavailable: bool,
     pending_creations: usize,
 }
 

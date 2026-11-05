@@ -51,6 +51,10 @@ impl super::MemoryStorage {
     }
 
     pub fn load_from_file(&mut self, input_file: &File) -> Result<(), String> {
+        // Optional CLI import is not a closed SDK decoder or operation admission. Refuse before
+        // JSON allocation; default legacy None keeps the existing import format unchanged.
+        self.require_unrestricted()
+            .map_err(|_| "closed owner storage refuses file import".to_owned())?;
         // Prepare file reader.
         let reader = BufReader::new(input_file);
 
@@ -71,6 +75,8 @@ impl super::MemoryStorage {
     }
 
     pub fn load(&mut self, user_name: String) -> Result<(), String> {
+        self.require_unrestricted()
+            .map_err(|_| "closed owner storage refuses file import".to_owned())?;
         let ks_input_path = Self::get_file_path(&user_name);
 
         match File::open(ks_input_path) {

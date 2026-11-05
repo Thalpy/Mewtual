@@ -83,6 +83,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         max_mls_bytes: usize,
         max_mls_backing_bytes: usize,
     ) -> Result<PreparedOwnerMembership, SyncError> {
+        // This method later restores a NEW legacy candidate before Add. Fence the ORIGINAL
+        // graph first: otherwise copying would erase its completed-load resource restriction.
+        // An SDK graph lease is not a new operation fee, even beside a paid snapshot allowance.
+        self.group.require_sdk_operation_admission(&self.device)?;
         // Shared final-freeze guard also bounds metadata that a source may have accumulated
         // before this request. Unsupported retained work is preserved, never truncated to fit.
         let original_governance = membership_snapshot::governing_fingerprint(self)?;

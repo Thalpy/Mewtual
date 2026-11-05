@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Closed initial SDK graph admission (5 November; authored, UNRUN)
+
+An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical
+restores into the pinned13-row founder/first-Add decoder. The same original account reserves one
+actual non-Clone graph fee per overlapping child/parent before SDK entry. Whole-row borrowed
+shape/geometry preflight precedes SIGNER; every actual getter repeats under its values guard,
+with monotonic container-layout/copy/work counters. Same payment stays last in BOTH device/group
+through private decode and actual ready/OwnedOwnerServer handoff. Completed/cancelled policy has
+no legacy fallback, and later mutative SDK calls refuse before SDK entry. Default legacy paths
+keep their grammar. All25 tests are authored UNRUN; no compiler/tests/build. Initialized/live
+ratchets, operation admission, public root2/native integration and whole-host/provider budgets
+remain open. [Exact consumer/remaining gates](communication-recovery/CHAT-OWNER-SDK-RESTORE-CONSUMER.md).
+
+
 ## Admitted physical work must retain the OS session (5 November; authored, unexecuted)
 
 The session guard can now lend a non-Clone resource-only `VaultPhysicalWorkLease` retaining the
@@ -2235,7 +2249,7 @@ actual Session until fixed Row custody exists; bootstrap/Row collection retains 
 physical identity provenance. A prior foreign witness is cleared when new intent is installed.
 
 The unchanged12KiB Control and2,304B native Row guards now include actual adapter futures,
-Admission, retirement ticket, replies and identity. All241 focused native handoff and724 complete native tests pass, including the new guards. Mode1 wire vectors remain unchanged; mode2 requires explicit browser expectation and
+Admission, retirement ticket, replies and identity. All251 focused native handoff and724 complete native tests pass, including the new guards. Mode1 wire vectors remain unchanged; mode2 requires explicit browser expectation and
 a separate proof domain. The public listener still rejects effect opcodes before Data admission.
 This draft grants no production V2, browser/RTC, multi-peer or physical acceptance claim.
 

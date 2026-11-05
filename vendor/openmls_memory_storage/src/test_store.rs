@@ -12,6 +12,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         public_key: &EncryptionKey,
         key_pair: &HpkeKeyPair,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         self.write::<V_TEST>(
             ENCRYPTION_KEY_PAIR_LABEL,
             &serde_json::to_vec(&public_key).unwrap(),
@@ -29,6 +31,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         epoch: &EpochKey,
         leaf_index: u32,
     ) -> Result<Vec<HpkeKeyPair>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         let mut key = vec![];
         write!(
             &mut key,
@@ -47,6 +51,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<Option<KeyPackage>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         let key = serde_json::to_vec(&hash_ref).unwrap();
 
         println!("getting key package at {key:?} for version {V_TEST}");
@@ -65,6 +71,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         hash_ref: &HashReference,
         key_package: &KeyPackage,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         let key = serde_json::to_vec(&hash_ref).unwrap();
         println!("setting key package at {key:?} for version {V_TEST}");
         let value = serde_json::to_vec(&key_package).unwrap();
@@ -88,6 +96,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _proposal_ref: &ProposalRef,
         _proposal: &QueuedProposal,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -96,6 +106,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _tree: &TreeSync,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -107,6 +119,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _interim_transcript_hash: &InterimTranscriptHash,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -118,6 +132,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _group_context: &GroupContext,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -129,6 +145,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _confirmation_tag: &ConfirmationTag,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -140,6 +158,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _public_key: &SignaturePublicKey,
         _signature_key_pair: &SignatureKeyPair,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -154,6 +174,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _leaf_index: u32,
         _key_pairs: &[HpkeKeyPair],
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -162,6 +184,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _psk_id: &PskId,
         _psk: &PskBundle,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -172,6 +196,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Vec<ProposalRef>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -179,6 +205,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<TreeSync>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -189,6 +217,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<GroupContext>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -199,6 +229,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<InterimTranscriptHash>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -209,6 +241,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<ConfirmationTag>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -219,6 +253,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _public_key: &SignaturePublicKey,
     ) -> Result<Option<SignatureKeyPair>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -229,6 +265,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _public_key: &EncryptionKey,
     ) -> Result<Option<HpkeKeyPair>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -236,6 +274,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _psk_id: &PskId,
     ) -> Result<Option<PskBundle>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -243,6 +283,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _public_key: &SignaturePublicKeuy,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -250,6 +292,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _public_key: &EncryptionKey,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -262,6 +306,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _epoch: &EpochKey,
         _leaf_index: u32,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -269,6 +315,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _hash_ref: &KeyPackageRef,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -276,6 +324,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _psk_id: &PskKey,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -283,6 +333,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<GroupState>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -294,6 +346,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _group_state: &GroupState,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -301,6 +355,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -311,6 +367,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<MessageSecrets>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -322,6 +380,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _message_secrets: &MessageSecrets,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -329,6 +389,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -339,6 +401,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<ResumptionPskStore>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -350,6 +414,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _resumption_psk_store: &ResumptionPskStore,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -357,6 +423,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -367,6 +435,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<LeafNodeIndex>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -378,6 +448,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _own_leaf_index: &LeafNodeIndex,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -385,6 +457,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -395,6 +469,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<GroupEpochSecrets>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -406,6 +482,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _group_epoch_secrets: &GroupEpochSecrets,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -413,6 +491,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -423,6 +503,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -433,6 +515,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<MlsGroupJoinConfig>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -444,6 +528,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _config: &MlsGroupJoinConfig,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -451,6 +537,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Vec<LeafNode>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -462,6 +550,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _leaf_node: &LeafNode,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -473,6 +563,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Vec<(ProposalRef, QueuedProposal)>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -484,6 +576,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _proposal_ref: &ProposalRef,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -491,6 +585,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -498,6 +594,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -505,6 +603,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -512,6 +612,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -519,6 +621,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -526,6 +630,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -538,6 +644,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _application_export_tree: &ApplicationExportTree,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -549,6 +657,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<ApplicationExportTree>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -560,6 +670,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -572,6 +684,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _epoch_id: &EpochId,
         _vc_emulation_epoch_state: &VcEmulationEpochState,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -583,6 +697,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _epoch_id: &EpochId,
     ) -> Result<Option<VcEmulationEpochState>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -591,6 +707,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _epoch_id: &EpochId,
     ) -> Result<bool, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -603,6 +721,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _bindings: &VcEmulationBindings,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -614,6 +734,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<VcEmulationBindings>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -622,6 +744,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -634,6 +758,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _group_id: &GroupId,
         _registered: &RegisteredVcEmulationEpoch,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -645,6 +771,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<Option<RegisteredVcEmulationEpoch>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -653,6 +781,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -665,6 +795,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _epoch_id: &EpochId,
         _vc_operation_tree: &VcOperationTree,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -676,6 +808,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _epoch_id: &EpochId,
     ) -> Result<Option<VcOperationTree>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -691,6 +825,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         _operation_tree: &VcOperationTree,
         _materials: &[(KeyPackageRef, RetainedKeyPackageMaterial)],
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -702,6 +838,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _hash_ref: &KeyPackageRef,
     ) -> Result<Option<RetainedKeyPackageMaterial>, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -710,6 +848,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _epoch_id: &EpochId,
     ) -> Result<bool, Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 
@@ -718,6 +858,8 @@ impl StorageProvider<V_TEST> for MemoryStorage {
         &self,
         _hash_ref: &KeyPackageRef,
     ) -> Result<(), Self::Error> {
+        // V_TEST is never an admitted row namespace for the closed CURRENT_VERSION loader.
+        self.require_unrestricted()?;
         todo!()
     }
 }

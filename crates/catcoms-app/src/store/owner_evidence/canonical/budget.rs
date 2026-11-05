@@ -2,6 +2,7 @@
 use super::*;
 
 mod operation;
+mod sdk;
 pub(crate) use operation::OwnerOperationReservation;
 
 /// Host configuration for the inactive whole-state checkpoint. These are local resource limits,
@@ -15,6 +16,7 @@ pub struct OwnerEvidenceBudget {
     pub(super) snapshot: usize,
     pub(super) mls: usize,
     pub(super) mls_backing: usize,
+    pub(super) sdk: Option<catcoms_mls::persist::OwnerSdkRestoreLimits>,
 }
 impl OwnerEvidenceBudget {
     /// Require an explicit whole-current + replacement allowance for EACH admitted head and
@@ -49,6 +51,7 @@ impl OwnerEvidenceBudget {
             snapshot: max_snapshot_bytes,
             mls: max_mls_bytes,
             mls_backing: max_mls_backing_bytes,
+            sdk: None,
         };
         if value.head_fee()? > persistent_bytes || value.buffer_fee()? > hot_bytes {
             return Err(refused());

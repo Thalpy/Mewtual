@@ -31,8 +31,11 @@ The deliberate local changes are:
   row is missing returns that same error rather than crashing or silently omitting the proposal.
   The optional extension/virtual-client typed read getters use the same error propagation.
 
-Every upstream successful StorageProvider operation, label, JSON serializer and lock is otherwise
-byte-for-byte retained. The deliberate malformed-read error change above is not a new persistence
+The ordinary legacy successful key/value serializer and labels remain unchanged. The separate
+opt-in initial owner restore policy adds a local shared counter/closed decoder and extra negative
+checks; it changes neither serialized bytes nor the normal legacy decoder. Existing lock behavior
+is extended by its private policy mutex, with values-before-policy ordering and no host resource
+callback under either. Once installed, complete/cancelled state never returns to legacy None. The deliberate malformed-read error change above is not a new persistence
 format or a repair that discards data. `persistence.rs` intentionally keeps its separate
 `HashMap<String, String>` JSON container. Existing storage keys/values and MLS signing/wire formats
 are unchanged. Iteration order was never canonical across different HashMap instances. The bounded
@@ -66,3 +69,24 @@ companion row. They do not use `catch_unwind`, and changing panic into a returne
 not heap containment: typed JSON/SDK group allocation still needs its separately paid bounded
 consumer. Source/optional-feature checks and complete validation remain owned by the primary;
 these new tests are authored and unexecuted under the user compilation pause.
+
+
+## Opt-in closed initial SDK policy
+
+`src/owner_restore.rs` plus its cursor/shape/decode children implement the exact pinned initial
+one/two-member SDK profile for the actual MLS consumer. Thirteen fixed expected keys and complete
+borrowed row/geometry validation precede SIGNER. Every actual generic/direct/list read uses its
+same values guard for key/shape/count-budget/decode; unsupported feature rows and later reads
+refuse. Named fixed copies, actual private element layouts, spare Vec/Deque growth requests,
+nullable slots and every lexical rescan/probe are charged before their work. This is a coupled
+closed SDK visitor audit, not a generic Deserialize allocator or JSON-byte multiplier.
+
+Legacy None keeps its existing default/persistence bytes. Installed policies skip legacy
+backtrace/logger/hex callbacks, all writes check before serialization and again under the values
+writer, and incomplete guard Drop cancels. No host fee/source/key is held by the provider policy;
+App's independent real fee follows BOTH actual MlsDevice and ServerGroup. The old read-error
+patch and raw allocation observer remain distinct prerequisites. Root/native optional features,
+production compilation and all25 new regressions are still UNRUN under the user pause. Full
+initialized ratchets, operation admission and whole-host/native accounting are not supplied here.
+See `docs/communication-recovery/CHAT-OWNER-SDK-RESTORE-CONSUMER.md` for exact source versions,
+resource lifetime, authored evidence and deferred selectors.

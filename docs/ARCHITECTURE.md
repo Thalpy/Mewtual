@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Closed initial SDK graph admission (5 November; authored, UNRUN)
+
+An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical
+restores into the pinned13-row founder/first-Add decoder. The same original account reserves one
+actual non-Clone graph fee per overlapping child/parent before SDK entry. Whole-row borrowed
+shape/geometry preflight precedes SIGNER; every actual getter repeats under its values guard,
+with monotonic container-layout/copy/work counters. Same payment stays last in BOTH device/group
+through private decode and actual ready/OwnedOwnerServer handoff. Completed/cancelled policy has
+no legacy fallback, and later mutative SDK calls refuse before SDK entry. Default legacy paths
+keep their grammar. All25 tests are authored UNRUN; no compiler/tests/build. Initialized/live
+ratchets, operation admission, public root2/native integration and whole-host/provider budgets
+remain open. [Exact consumer/remaining gates](communication-recovery/CHAT-OWNER-SDK-RESTORE-CONSUMER.md).
+
+
 ## Running physical work and vault mount exclusion (5 November; authored, unexecuted)
 
 The vault session's private OS-locked File can now be retained by a distinct non-Clone physical

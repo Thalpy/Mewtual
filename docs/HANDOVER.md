@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Closed initial SDK graph admission (5 November; authored, UNRUN)
+
+An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical
+restores into the pinned13-row founder/first-Add decoder. The same original account reserves one
+actual non-Clone graph fee per overlapping child/parent before SDK entry. Whole-row borrowed
+shape/geometry preflight precedes SIGNER; every actual getter repeats under its values guard,
+with monotonic container-layout/copy/work counters. Same payment stays last in BOTH device/group
+through private decode and actual ready/OwnedOwnerServer handoff. Completed/cancelled policy has
+no legacy fallback, and later mutative SDK calls refuse before SDK entry. Default legacy paths
+keep their grammar. All25 tests are authored UNRUN; design/final actual static review are clear. No compiler/tests/build. Initialized/live
+ratchets, operation admission, public root2/native integration and whole-host/provider budgets
+remain open. [Exact consumer/remaining gates](communication-recovery/CHAT-OWNER-SDK-RESTORE-CONSUMER.md).
+
+
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
@@ -2850,7 +2864,7 @@ there is no early-ICE queue. Application buffers, known description/conversion c
 fixed RTC callbacks fit serial stages of the unchanged64KiB payment. This accounts for
 application-reachable data and outstanding SDK work, not opaque browser/OS heap or GC timing.
 
-All245 focused tests pass. The new reentrant-status regression failed before the fix with
+All255 focused tests pass. The new reentrant-status regression failed before the fix with
 Begin0; original SDK output now reaches Begin once. Registration advancing the Clock before
 or beyond expiry, fresh14/26 held across End, actual held remote SDK, capacity and lost
 Applied replies are covered. RTC/native authority are controlled providers in these browser
@@ -5344,7 +5358,7 @@ download resume and the other signalling checkout remain untouched.
 
 Combined runtime `f1f2e48c` in `target/communication-native-continuation-worktree` passes
 complete native724 (719 library plus5 ACL), frontend2,538, Svelte zero errors/warnings and
-production build. All241 focused handoff tests pass, including the11 Plan-final regressions.
+production build. All251 focused handoff tests pass, including the11 Plan-final regressions.
 Root3,310 (24 existing ignored) and strict Root Clippy passed on the identical Root source at
 `534b641e`; no Root runtime, bins, Cargo manifest/lock or scripts changed afterward. The native
 full result also covers its reviewed lint follow-up. Current native check and strict all-target/
@@ -5370,7 +5384,7 @@ Review requested complete Control-future/Admission accounting, forced-shutdown/l
 coverage and shared native/browser Plan vectors. Those checks are now written, retaining the
 12KiB Control and2,304B Row ceilings. The67 focused TypeScript reply/grammar tests and151
 browser cleanup/derivation/final tests pass; the updated full frontend passes2,538 with zero
-Svelte errors/warnings and a successful production build. All241 native handoff tests pass,
+Svelte errors/warnings and a successful production build. All251 native handoff tests pass,
 including all11 Plan-final regressions. Actual encrypted-request tests cover cancellation while waiting for the
 original commit, wrong bindings, lost issuance/ACK, End/lock cleanup and old-handler rejection.
 The retained browser now selects separate Plan cleanup only after an authenticated definite
@@ -6462,7 +6476,7 @@ The existing30-second barrier now observes both exact catalogs before the unchan
 private-storage, restart and byte oracles. All seven file scenarios pass44.56s; reviewed final
 native rerun passes as above. The failed514/1 run is retained, not accepted evidence.
 
-All24 final source hashes are frozen. A fresh complete Root run is now executing serially after
+All25 final source hashes are frozen. A fresh complete Root run is now executing serially after
 native, with separate logs under target/voice-frame-root-*. Only three disposable construction-
 test fingerprint result markers were invalidated so that source-reading gate scans this checkout;
 no artifacts/worktrees were cleaned. Root formatting, ambient and all four dependency categories
@@ -7441,7 +7455,7 @@ cursors and unstarted proposals remain separate from actual transport admission 
 spend. The requester is not connected to downloads yet. MLS catalog review has no blocker/high/
 medium; the revision ledger records focused evidence and remaining requester design constraints.
 
-Final local follow-up verification: the fresh root suite passes2949 cases with24 unchanged
+Final local follow-up verification: the fresh root suite passes2949 cases with25 unchanged
 existing ignored cases; the complete native suite passes420 and frontend suite1851. All ten
 browser flows, static/frontend build, strict root Clippy, formatting, ambient-dependency and
 dependency-audit gates pass. Native voice acceptance now injects one lost heartbeat per helper

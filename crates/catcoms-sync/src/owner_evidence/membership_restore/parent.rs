@@ -70,6 +70,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         limits: OwnerInitializationRestoreLimits,
         founder: &[u8; 32],
     ) -> Result<(), SyncError> {
+        self.validate_owner_operation_parent_with_strategy(parent, limits, founder, None)
+    }
+    /// Actual parent/child overlap requires an independently acquired original resource fee.
+    pub fn validate_owner_operation_parent_with_sdk(
+        &self,
+        parent: &[u8],
+        limits: OwnerInitializationRestoreLimits,
+        founder: &[u8; 32],
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<(), SyncError> {
+        self.validate_owner_operation_parent_with_strategy(parent, limits, founder, Some(admission))
+    }
+    fn validate_owner_operation_parent_with_strategy(
+        &self,
+        parent: &[u8],
+        limits: OwnerInitializationRestoreLimits,
+        founder: &[u8; 32],
+        admission: Option<catcoms_mls::persist::OwnerSdkRestoreAdmission>,
+    ) -> Result<(), SyncError> {
         let p = fields(parent, limits)?;
         let op = self.owner_operation.as_ref().ok_or_else(bad)?;
         // The closed producer itself only accepts <=8MiB provider frames; enforce that same
@@ -77,11 +96,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if p.mls.len() > 8 * 1024 * 1024 {
             return Err(SyncError::OwnerInitializationUnsupported);
         }
-        let (device, group) = catcoms_mls::persist::restore_server_provider_bounded(
-            p.mls,
-            limits.max_mls_bytes,
-            limits.max_mls_backing_bytes,
-        )?;
+        let (device, group) = match admission {
+            Some(admission) => catcoms_mls::persist::restore_server_owner_checkpoint_bounded(
+                p.mls,
+                limits.max_mls_bytes,
+                limits.max_mls_backing_bytes,
+                admission,
+            )?,
+            None => catcoms_mls::persist::restore_server_provider_bounded(
+                p.mls,
+                limits.max_mls_bytes,
+                limits.max_mls_backing_bytes,
+            )?,
+        };
         if group.group_id() != self.group.group_id()
             || device.public_key_bytes() != self.device.public_key_bytes()
             || device.public_key_bytes().as_slice() != founder

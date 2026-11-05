@@ -127,6 +127,7 @@ impl ServerGroup {
         device: &MlsDevice,
         key_package: KeyPackage,
     ) -> Result<(AddOutcome, LocalMembershipChange), MlsError> {
+        self.require_sdk_operation_admission(device)?;
         require_local_device(self, device)?;
         // SAME metadata/digest implementation as historical owner-certificate comparison.
         // This path still performs the actual Add below; the plain identity cannot manufacture
@@ -170,6 +171,7 @@ impl ServerGroup {
         device: &MlsDevice,
         target: &catcoms_crypto::DeviceId,
     ) -> Result<LocalMembershipChange, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         require_local_device(self, device)?;
         if target == &device.device_id() {
             return Err(MlsError::Internal(

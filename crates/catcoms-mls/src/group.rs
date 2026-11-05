@@ -80,11 +80,28 @@ pub struct ServerGroup {
     // Native observation only: fresh for every create/join/load, never serialized. Catalog
     // pages cannot accidentally reuse a summary from a same-epoch replacement group instance.
     catalog: catalog::CatalogCache,
+    // LAST and shared with the actual device: either half may outlive the public tuple's other.
+    pub(crate) sdk_graph_lease: Option<crate::persist::OwnerSdkGraphLease>,
 }
 
 impl ServerGroup {
+    /// Negative fence for a closed restored graph BEFORE making a candidate/legacy copy or
+    /// entering a mutative SDK call. Ok preserves the ordinary unrestricted legacy path; it
+    /// is NOT payment, source provenance or permission to run an SDK operation. A closed graph
+    /// has no later operation admission in this initial slice and always refuses here.
+    pub fn require_sdk_operation_admission(&self, device: &MlsDevice) -> Result<(), MlsError> {
+        device.require_sdk_operation_admission()?;
+        if self.sdk_graph_lease.is_some() {
+            return Err(MlsError::Internal(
+                "closed SDK graph needs explicit operation admission",
+            ));
+        }
+        Ok(())
+    }
+
     /// Found a new group with `device` as the only member.
     pub fn create(device: &MlsDevice) -> Result<Self, MlsError> {
+        device.require_sdk_operation_admission()?;
         let group = MlsGroup::new(
             device.provider(),
             device.signer(),
@@ -95,6 +112,7 @@ impl ServerGroup {
         Ok(Self {
             group,
             catalog: Default::default(),
+            sdk_graph_lease: None,
         })
     }
 
@@ -104,6 +122,7 @@ impl ServerGroup {
         device: &MlsDevice,
         lifetime: Lifetime,
     ) -> Result<Self, MlsError> {
+        device.require_sdk_operation_admission()?;
         let group = MlsGroup::new(
             device.provider(),
             device.signer(),
@@ -114,6 +133,7 @@ impl ServerGroup {
         Ok(Self {
             group,
             catalog: Default::default(),
+            sdk_graph_lease: None,
         })
     }
 
@@ -136,6 +156,7 @@ impl ServerGroup {
     /// Join an existing group from a serialized Welcome (as produced by
     /// [`ServerGroup::add_member`]).
     pub fn join(device: &MlsDevice, welcome_bytes: &[u8]) -> Result<Self, MlsError> {
+        device.require_sdk_operation_admission()?;
         Self::join_inner(device, welcome_bytes, None)
     }
 
@@ -148,6 +169,7 @@ impl ServerGroup {
         welcome_bytes: &[u8],
         expected: &[u8; 32],
     ) -> Result<Self, MlsError> {
+        device.require_sdk_operation_admission()?;
         Self::join_inner(device, welcome_bytes, Some(expected))
     }
 
@@ -219,6 +241,7 @@ impl ServerGroup {
         Ok(Self {
             group,
             catalog: Default::default(),
+            sdk_graph_lease: None,
         })
     }
 
@@ -233,6 +256,25 @@ impl ServerGroup {
         Ok(Self {
             group,
             catalog: Default::default(),
+            sdk_graph_lease: None,
+        })
+    }
+
+    /// The CLOSED resource consumer uses fixed errors: formatting a storage error under an
+    /// exhausted graph account would allocate a diagnostic String outside its invoice. Legacy
+    /// load keeps its original error contract. GroupId16 is prepaid before entering this path.
+    pub(crate) fn load_owner_checkpoint(
+        device: &MlsDevice,
+        group_id: &[u8],
+    ) -> Result<Self, MlsError> {
+        let gid = GroupId::from_slice(group_id);
+        let group = MlsGroup::load(device.provider().storage(), &gid)
+            .map_err(|_| MlsError::Internal("closed SDK group restore refused"))?
+            .ok_or(MlsError::Internal("closed SDK group is missing"))?;
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+            sdk_graph_lease: None,
         })
     }
 
@@ -246,6 +288,7 @@ impl ServerGroup {
         device: &MlsDevice,
         key_package: KeyPackage,
     ) -> Result<AddOutcome, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let (commit, welcome, _group_info) = self
             .group
             .add_members(device.provider(), device.signer(), &[key_package])
@@ -409,6 +452,7 @@ impl ServerGroup {
         ledger: &mut InviteLedger,
         now_ms: u64,
     ) -> Result<AddOutcome, MlsError> {
+        self.require_sdk_operation_admission(inviter)?;
         let group_id = self.group_id();
         if token.group_id != group_id {
             return Err(InviteError::WrongGroup.into());
@@ -502,6 +546,7 @@ impl ServerGroup {
     /// Remove the member with `target` device id and merge the commit (this
     /// advances the epoch, healing forward secrecy / post-compromise security).
     pub fn remove_member(&mut self, device: &MlsDevice, target: &DeviceId) -> Result<(), MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let index = self
             .group
             .members()
@@ -528,6 +573,7 @@ impl ServerGroup {
         device: &MlsDevice,
         key_package: KeyPackage,
     ) -> Result<StagedOutcome, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let base_authenticator = self.epoch_authenticator_id();
         let commit_epoch = self.epoch();
         let (commit, welcome, _group_info) = self
@@ -548,6 +594,7 @@ impl ServerGroup {
         device: &MlsDevice,
         target: &DeviceId,
     ) -> Result<StagedOutcome, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let index = self
             .group
             .members()
@@ -574,6 +621,7 @@ impl ServerGroup {
     /// Adopt this group's own staged commit (advances the epoch). The inverse of
     /// [`ServerGroup::abort_staged`].
     pub fn merge_staged_self(&mut self, device: &MlsDevice) -> Result<(), MlsError> {
+        self.require_sdk_operation_admission(device)?;
         self.group
             .merge_pending_commit(device.provider())
             .map_err(proto)
@@ -583,6 +631,7 @@ impl ServerGroup {
     /// epoch secrets intact (openmls `clear_pending_commit` only flips the group
     /// state back to Operational). The fork **loser**'s primitive.
     pub fn abort_staged(&mut self, device: &MlsDevice) -> Result<(), MlsError> {
+        self.require_sdk_operation_admission(device)?;
         self.group
             .clear_pending_commit(device.provider().storage())
             .map_err(proto)
@@ -594,6 +643,7 @@ impl ServerGroup {
         device: &MlsDevice,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let out = self
             .group
             .create_message(device.provider(), device.signer(), plaintext)
@@ -611,6 +661,7 @@ impl ServerGroup {
         device: &MlsDevice,
         bytes: &[u8],
     ) -> Result<Incoming, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let msg_in = MlsMessageIn::tls_deserialize(&mut &bytes[..]).map_err(proto)?;
         let protocol = msg_in
             .try_into_protocol_message()

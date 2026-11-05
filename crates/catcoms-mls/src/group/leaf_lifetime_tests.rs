@@ -47,6 +47,7 @@ fn found_with_lifetime(device: &MlsDevice, lifetime: Lifetime) -> ServerGroup {
     ServerGroup {
         group,
         catalog: Default::default(),
+        sdk_graph_lease: None,
     }
 }
 

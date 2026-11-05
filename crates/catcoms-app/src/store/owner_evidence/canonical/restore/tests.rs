@@ -5,6 +5,7 @@ use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 const SECRET: &[u8] = b"canonical restore actual barrier fixture";
+mod sdk;
 mod staged;
 fn budget() -> OwnerEvidenceBudget {
     OwnerEvidenceBudget::checkpoint(

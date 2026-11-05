@@ -4206,6 +4206,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(Self::from_restored_sync(sync, display_name))
     }
 
+    /// Actual private original-source caller supplies this non-Clone host graph reservation.
+    /// SDK row/type admission precedes SIGNER; original pin/head/Current still gate take_ready.
+    pub(crate) fn restore_owner_initialization_with_sdk(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_initialization_with_sdk(
+            snapshot, transport, rng, clock, limits, admission,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+    /// The matching first-Add closed grammar, with independent parent graph admission later.
+    pub(crate) fn restore_owner_operation_checkpoint_with_sdk(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_operation_checkpoint_with_sdk(
+            snapshot, transport, rng, clock, limits, admission,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
     fn from_restored_sync(sync: ChannelSync<T, R>, display_name: impl Into<String>) -> Self {
         let device_id = sync.device_id();
         Self {

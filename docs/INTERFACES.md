@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Closed initial SDK graph admission (5 November; authored, UNRUN)
+
+An explicit local `OwnerEvidenceBudget::with_closed_sdk_restore` opts original private canonical
+restores into the pinned13-row founder/first-Add decoder. The same original account reserves one
+actual non-Clone graph fee per overlapping child/parent before SDK entry. Whole-row borrowed
+shape/geometry preflight precedes SIGNER; every actual getter repeats under its values guard,
+with monotonic container-layout/copy/work counters. Same payment stays last in BOTH device/group
+through private decode and actual ready/OwnedOwnerServer handoff. Completed/cancelled policy has
+no legacy fallback, and later mutative SDK calls refuse before SDK entry. Default legacy paths
+keep their grammar. All25 tests are authored UNRUN; no compiler/tests/build. Initialized/live
+ratchets, operation admission, public root2/native integration and whole-host/provider budgets
+remain open. [Exact consumer/remaining gates](communication-recovery/CHAT-OWNER-SDK-RESTORE-CONSUMER.md).
+
+
 ## Negative founder input preflight (5 November; authored, unexecuted)
 
 `MlsDevice::preflight_fresh_founder_input` bounds the CURRENT signature-only device/provider shape
@@ -2076,7 +2090,7 @@ needed. It remains valid cleanup after End/lock, but cannot install intent after
 Plan final receipts use kind2 in the existing100B layout, with a distinct proof domain. Generic
 FinalAck7 accepts only the stored issuance, original Session and exact proof. Browser decoding
 must explicitly expect `retire-plan`; default Phase decoding still rejects kind2. Shared Rust/TS
-vectors cover Pending/Issued/ACK. All241 focused native handoff and724 complete native tests pass; HANDOVER records the
+vectors cover Pending/Issued/ACK. All251 focused native handoff and724 complete native tests pass; HANDOVER records the
 complete validation scope. Production loopback admission still permits only Status9/existing-history Begin8(false).
 Child framing/results, browser key/Phase transfer and live RTC integration remain incomplete.
 

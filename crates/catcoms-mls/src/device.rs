@@ -103,9 +103,22 @@ pub struct MlsDevice {
     signer: SignatureKeyPair,
     credential: CredentialWithKey,
     device_id: DeviceId,
+    // LAST: provider, signer and credential drop before the SAME graph lease shared with group.
+    pub(crate) sdk_graph_lease: Option<crate::persist::OwnerSdkGraphLease>,
 }
 
 impl MlsDevice {
+    /// A completed initial load pays its graph, not a later mutative SDK operation. Refuse
+    /// BEFORE SDK/key-builder/duplication work; a storage-write refusal would be too late.
+    pub(crate) fn require_sdk_operation_admission(&self) -> Result<(), MlsError> {
+        if self.sdk_graph_lease.is_some() {
+            return Err(MlsError::Internal(
+                "closed SDK graph needs explicit operation admission",
+            ));
+        }
+        Ok(())
+    }
+
     /// Generate a fresh device identity.
     pub fn generate() -> Result<Self, MlsError> {
         let provider = OpenMlsRustCrypto::default();
@@ -122,6 +135,7 @@ impl MlsDevice {
             signer,
             credential,
             device_id,
+            sdk_graph_lease: None,
         })
     }
 
@@ -149,6 +163,7 @@ impl MlsDevice {
             signer,
             credential,
             device_id,
+            sdk_graph_lease: None,
         })
     }
 
@@ -171,6 +186,7 @@ impl MlsDevice {
     /// serializes a key to disk or to the wire (the design's hard "no device key is ever
     /// exported" rule is about crossing the process boundary, which this does not).
     pub fn duplicate(&self) -> Result<Self, MlsError> {
+        self.require_sdk_operation_admission()?;
         let provider = OpenMlsRustCrypto::default();
         {
             let src = self
@@ -193,6 +209,7 @@ impl MlsDevice {
     /// The private bundle is stored in this device's provider so it can later
     /// process the resulting Welcome.
     pub fn key_package(&self) -> Result<KeyPackage, MlsError> {
+        self.require_sdk_operation_admission()?;
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(capabilities())
             .build(
@@ -213,6 +230,7 @@ impl MlsDevice {
         group_id: &[u8],
         invite_nonce: [u8; 16],
     ) -> Result<KeyPackage, MlsError> {
+        self.require_sdk_operation_admission()?;
         let membership = MembershipCredential {
             device_id: self.device_id,
             group_id: group_id.to_vec(),

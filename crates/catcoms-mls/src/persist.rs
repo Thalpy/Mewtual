@@ -22,6 +22,12 @@ use catcoms_wire::{Decoder, Encoder};
 
 use crate::{MlsDevice, MlsError, ServerGroup};
 
+mod owner_restore;
+pub(crate) use owner_restore::OwnerSdkGraphLease;
+pub use owner_restore::{
+    restore_server_owner_checkpoint_bounded, OwnerSdkGraphReservation, OwnerSdkRestoreAdmission,
+    OwnerSdkRestoreLimits,
+};
 mod provider_restore;
 pub use provider_restore::restore_server_provider_bounded;
 mod join_device;

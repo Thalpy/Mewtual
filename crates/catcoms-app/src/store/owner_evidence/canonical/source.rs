@@ -88,6 +88,25 @@ impl ValidatedOwnerSnapshot {
     pub(crate) fn restore_limits(&self) -> catcoms_sync::OwnerInitializationRestoreLimits {
         self.restore_limits
     }
+    /// Real resource admissions are issued by the SAME original account, never reconstructed
+    /// from serialized numeric limits. No canonical/admission writer is held during decode.
+    pub(crate) fn reserve_sdk_graphs(
+        &self,
+        store: &ServerStore,
+    ) -> Result<
+        (
+            Option<catcoms_mls::persist::OwnerSdkRestoreAdmission>,
+            Option<catcoms_mls::persist::OwnerSdkRestoreAdmission>,
+        ),
+        AppError,
+    > {
+        self.validate_original(store)?;
+        let pool = self._fee.pool.upgrade().ok_or_else(refused)?;
+        if !Arc::ptr_eq(&pool, &store.owner_evidence.canonical) {
+            return Err(refused());
+        }
+        store.reserve_owner_sdk_graphs(self.operation_parent.is_some())
+    }
     pub(crate) fn is_operation_checkpoint(&self) -> bool {
         self.meta.generation == 2
     }

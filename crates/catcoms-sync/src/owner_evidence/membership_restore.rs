@@ -184,6 +184,26 @@ pub fn validate_owner_operation_snapshot(
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Strict first-Add grammar with a separately held actual typed graph admission. Parent
+    /// validation needs ANOTHER independent admission while this decoded child remains alive.
+    pub fn restore_owner_operation_checkpoint_with_sdk(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        limits: OwnerInitializationRestoreLimits,
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<Self, SyncError> {
+        preflight(snapshot, limits)?;
+        Self::restore_with_mls(
+            snapshot,
+            transport,
+            rng,
+            clock,
+            initialization_restore::MlsDecode::OwnerCheckpointSdk(limits, admission),
+        )
+    }
+
     /// Restore ONLY the strict first covering Add grammar under original host-supplied limits.
     /// No generic restore, root selection or signature/lifetime bypass is a fallback. The node
     /// stays unbound until actual canonical file/parent+Current/head and fact validation succeed.
