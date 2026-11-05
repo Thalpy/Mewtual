@@ -68,10 +68,12 @@ Order for first creation:
 1. Prepay; perform actual private founding; capture its exact RAM scope plan; durably persist
    the typed original FoundingIntent BEFORE installing its exact Fresh Initializing scope.
 2. Stage that same private scope/reservation; prepare/freeze actual V2 public genesis once.
-3. Prepare the private genesis record batch, exact encrypted page and immutable manifest once.
-4. Freeze actual bounded SDK/server S0 under a V2-specific original-source validator. The old
-   checkpoint snapshot method cannot stand in for this. No incoming run/subscription is allowed
-   while constructing this private candidate. Retain actual provider bytes and their own fee.
+3. Freeze actual bounded SDK/server S0 under a V2-specific original-source validator. The old
+   App checkpoint wrapper cannot authorize V2; its bounded lower never-run encoder can be reused
+   only inside the exact V2 source checks. No incoming run/subscription is allowed while building
+   the private candidate. Retain actual provider bytes and their own fee.
+4. Consume that same frozen source with cached S0 into one original genesis archive preparation;
+   prepare the private record batch, exact encrypted page and immutable manifest once.
 5. Under original scope -> unified logical head custody, prove exact initial absence, durably
    install the immutable V2 profile pin and complete pending source, then write/sync all children.
 6. Save the new canonical head with its exact manifest and private SDK source references, cross

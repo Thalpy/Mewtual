@@ -3,6 +3,7 @@
 //! enabled here. Public codec frames remain DATA until the actual host covers their originals.
 mod founder;
 pub use founder::{
-    FounderDataView, FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits,
-    FrozenFounder, PreparedFounder, FOUNDER_PRIVATE_INVOICE,
+    ArchiveSourceRefusal, FounderArchivePreparation, FounderDataView, FounderPrivateSnapshotView,
+    FounderSnapshotDigest, FounderSnapshotLimits, FrozenFounder, GenesisArchiveView,
+    PreparedFounder, FOUNDER_PRIVATE_INVOICE, GENESIS_ARCHIVE_PRIVATE_INVOICE,
 };

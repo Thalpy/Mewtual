@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original-source genesis page preparation (5 November; authored, unexecuted)
+
+Actual founder/private-S0 preparation now consumes the bounded record/page/manifest codecs.
+It requires the SAME opaque scope observation with captured managed label AND live reservation;
+a matching scalar label, public Profile or equal restored node cannot mint it. Ciphertext is
+cached once and cannot be retargeted by mutable source or domain/key replacement. Every checked
+view repeats original lifetime and complete CURRENT source equality. Those observations do not
+authorize I/O or remain atomic across a later host commit. The actual App still supplies original
+mount/key/fee/scope/head/native custody and covering child barriers. Six regressions remain UNRUN.
+[Exact contract](communication-recovery/CHAT-OWNER-V2-GENESIS-ARCHIVE-PREPARATION.md).
+
 ## Original private founder snapshot equality (5 November; authored, unexecuted)
 
 A cached V2 founder S0 is private DATA, not an epoch-zero/Fresh/current import. Every public or

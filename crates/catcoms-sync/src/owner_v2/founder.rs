@@ -12,6 +12,11 @@ use catcoms_replication::chat::{
 };
 mod snapshot;
 pub use snapshot::{FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits};
+mod archive_candidate;
+pub use archive_candidate::{
+    ArchiveSourceRefusal, FounderArchivePreparation, GenesisArchiveView,
+    GENESIS_ARCHIVE_PRIVATE_INVOICE,
+};
 
 /// Conservative logical invoice for the named private public-record/scope/watch/signature
 /// buffers in this producer, NOT a quota debit, SDK/provider heap or active Server bound.

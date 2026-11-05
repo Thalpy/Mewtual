@@ -46,6 +46,18 @@ unexposed-negative recovery, independently durable exact repair seeds and unifie
 writer exclusion. It remains unimplemented: namespace mounting, fees, exact grants/seed/source
 codecs, actual head/scope saves and cold/crash acceptance cannot be inferred from that design.
 
+## Actual founder to genesis archive package (5 November; authored, unexecuted)
+
+The Sync-only `FounderArchivePreparation` now consumes the SAME actual frozen founder with a
+checked private S0 and original managed reservation. It constructs the real Genesis3 composite
+batch, encrypted record page and manifest1 once, then retries identical frames/IDs under a fixed
+domain/key binding. A pre-candidate refusal returns the original source; no mutable source setter
+or Server escape exists. Current source/S0 and original negatives are rechecked before key/RNG,
+after construction and at checked borrows. Six regressions are authored/UNRUN. The512KiB logical
+invoice supplies no paid fee, namespace, file/head save, Current or publication permission.
+The actual App archive host remains required and Chat V2 stays disabled/incomplete.
+[Source package contract](communication-recovery/CHAT-OWNER-V2-GENESIS-ARCHIVE-PREPARATION.md).
+
 ## One cached private founder S0 (5 November; authored, unexecuted)
 
 The same original `FrozenFounder` can now retain ONE bounded zeroizing private SDK/Sync S0 and

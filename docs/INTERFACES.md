@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Actual original genesis archive DATA (5 November; authored, unexecuted)
+
+`FounderArchivePreparation::from_cached_source` consumes a real cached-S0 `FrozenFounder` with
+its original required managed reservation, returning the same source on pre-candidate refusal.
+Preparation caches exact Genesis3 record/manifest ciphertext under one original domain/key
+binding. Checked views repeat complete source/S0/negative observations; they are not an atomic
+host admission, mounted-key proof, fee, Saved/Current or native command. Six tests are UNRUN.
+[Exact API, package and remaining host boundary](communication-recovery/CHAT-OWNER-V2-GENESIS-ARCHIVE-PREPARATION.md).
+
 ## One original founder private S0 DATA (5 November; authored, unexecuted)
 
 `FounderSnapshotLimits` provides checked closed initial-source bounds, never payment or Current.
