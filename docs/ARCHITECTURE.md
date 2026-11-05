@@ -19,7 +19,7 @@ detached ciphertext once, retaining no source observer in that output. Its stric
 uses external expected full context/SourceId and checks borrowed S0 framing plus actual signed
 genesis/page consistency without loading an SDK or creating Fresh. This supplies source DATA
 for the later physical Store; actual intent/seed/source I/O, fee/atomic admission, Current and
-production/native integration remain separate. [Contract and eleven UNRUN regressions](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-CONTAINER.md).
+production/native integration remain separate. [Contract and twelve UNRUN regressions](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-CONTAINER.md).
 
 ## Privileged legacy originals alongside ordinary chat (5 November)
 

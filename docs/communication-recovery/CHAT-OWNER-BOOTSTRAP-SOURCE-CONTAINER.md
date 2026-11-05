@@ -45,6 +45,16 @@ seam still does not authenticate arbitrary implementations; the actual App facto
 the exact fields to the future typed intent codec. A caller-constructed expected context never
 constructs a live producer. The actual `from_archive` derives every field internally.
 
+After the one-time take, `validate_transferred_source(node,key,&expected_context,expected_id)`
+returns only unit/refusal. The owner must actually be Transferred to that privately retained ID,
+have no remaining prepared output, and retain the exact original context/key binding. It repeats
+complete original archive/S0/node/negative checks; no bytes/token/second preparation or take is
+enabled. This lets the actual host move complete ciphertext into prepaid inert custody BEFORE
+SourcePrepared mutation, then repeat original source observations after writer waits. It is not
+an atomic admission or a replacement for real Store debt/fee/root/writer evidence. Offline repair
+after creator Drop still needs no live source getter. This narrow addition has CLEAR read-only
+design and actual-diff reviews with no remaining findings; its twelfth regression is authored UNRUN.
+
 ## Exact body and frame
 
 Body domain `catcoms/private-chat-bootstrap-source/v1\0`, u16 version1, followed by framed vault32,
@@ -131,7 +141,7 @@ by decrypted limits. Typed SDK/active-host heaps remain unbounded/unclaimed by t
 
 ## Authored evidence and current status
 
-Eleven regressions use real founder/cached S0/archive frames and an original reservation carrying
+Twelve regressions use real founder/cached S0/archive frames and an original reservation carrying
 planned revision DATA. They pin pre-constructor owner recovery, exact context provenance, no RNG on invalid source/key/retry,
 same frame/ID on retry, single take and ciphertext accessible offline after creator Drop; original
 cancellation before/during sealing prevents positive view/take without resealing. None/changed
@@ -140,7 +150,7 @@ all framing/length/version/domain/limit/digest/raw-S0/scope/page/manifest/Profil
 and cross-key-domain rejection are covered as authored regressions. A newly encrypted same-CID
 invalid Header signature with a corrected row digest and newly bound manifest/source IDs reaches
 the actual signature check; a validly encrypted manifest with the wrong record length also refuses.
-No live-source getter is required for debt repair. All eleven remain UNRUN while tests/compiler/builds are paused. The concrete
+No live-source getter is required for debt repair. All twelve remain UNRUN while tests/compiler/builds are paused. The concrete
 read-only design and final actual-diff adversarial reviews are CLEAR, with no remaining findings.
 Direct rustfmt and
 whitespace checks do not establish compilation or physical source I/O acceptance. The actual

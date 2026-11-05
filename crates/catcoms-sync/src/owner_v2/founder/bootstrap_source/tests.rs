@@ -594,6 +594,74 @@ fn source_and_plaintext_debug_omit_private_context_and_ciphertext() {
 }
 
 #[test]
+fn transferred_source_observation_checks_original_and_never_reopens_output_or_rng() {
+    let mut node = found(0x5f14);
+    let reservation = reserve(&mut node, Some(53));
+    let mut source = prepared(&mut node);
+    let mut rng = CountingRng::new();
+    let output = source.prepare(&node, &KEY, &mut rng).unwrap();
+    let context = output.context_data().clone();
+    let id = output.id();
+    assert!(source
+        .validate_transferred_source(&node, &KEY, &context, id)
+        .is_err());
+    let detached = source.take_prepared_for_handoff(&node, &KEY).unwrap();
+    source
+        .validate_transferred_source(&node, &KEY, detached.context_data(), detached.id())
+        .unwrap();
+    assert!(source
+        .validate_transferred_source(&node, &[99; 32], &context, id)
+        .is_err());
+    assert!(source
+        .validate_transferred_source(
+            &node,
+            &KEY,
+            &context,
+            BootstrapSourceId::from_bytes([0; 32])
+        )
+        .is_err());
+    let mut spec = context.spec_data();
+    spec.scope_nonce[0] ^= 1;
+    let foreign = BootstrapSourceContextData::from_data(spec).unwrap();
+    assert!(source
+        .validate_transferred_source(&node, &KEY, &foreign, id)
+        .is_err());
+    let raw = source
+        .original
+        .borrow_private_snapshot_for_covering_save(&node)
+        .unwrap()
+        .snapshot;
+    let restored = Node::restore(
+        raw,
+        Hub::new().join(PeerId::from_u64(0x5f15)),
+        ChaCha20Rng::seed_from_u64(0x5f15),
+        Box::new(ManualClock::new(1_000)),
+    )
+    .unwrap();
+    assert!(source
+        .validate_transferred_source(&restored, &KEY, &context, id)
+        .is_err());
+    let old = node.routing_label;
+    node.routing_label = old.wrapping_add(1);
+    assert!(source
+        .validate_transferred_source(&node, &KEY, &context, id)
+        .is_err());
+    node.routing_label = old;
+    source
+        .validate_transferred_source(&node, &KEY, &context, id)
+        .unwrap();
+    assert!(source.prepare(&node, &KEY, &mut rng).is_err());
+    assert!(source.borrow_prepared_for_handoff(&node, &KEY).is_err());
+    assert!(source.take_prepared_for_handoff(&node, &KEY).is_err());
+    assert_eq!(rng.bytes, 24);
+    reservation.owner.send_replace(true);
+    assert!(source
+        .validate_transferred_source(&node, &KEY, &context, id)
+        .is_err());
+    open_bootstrap_source_data(&KEY, &context, id, detached.as_bytes()).unwrap();
+}
+
+#[test]
 fn freshly_encrypted_nested_frames_still_require_real_header_signature_and_manifest_semantics() {
     let mut node = found(0x5f13);
     let _reservation = reserve(&mut node, Some(47));

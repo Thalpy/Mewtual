@@ -21,7 +21,9 @@ access needs no live creator and supplies no write permission. The cold DATA rea
 independently retained full context+SourceId, checks framing/AEAD/raw S0 digest and borrowed schema,
 then real original Profile/genesis record/manifest consistency, without SDK/serde restoration.
 No App/native command, actual source saver, namespace handler, fee, Saved/Current or activation
-is added. Eleven regressions remain UNRUN. [Grammar, APIs and separate buffer inventories](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-CONTAINER.md).
+is added. A separate unit/refusal-only `validate_transferred_source` repeats original context/ID/
+key/source checks after ciphertext moves into host custody; it enables no second output or I/O.
+Twelve regressions remain UNRUN. [Grammar, APIs and separate buffer inventories](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-CONTAINER.md).
 
 ## Shared outer catalog DATA (5 November; authored, unexecuted)
 

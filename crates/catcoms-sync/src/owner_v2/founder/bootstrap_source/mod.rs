@@ -189,7 +189,9 @@ pub struct FounderBootstrapPreparation {
     context: BootstrapSourceContextData,
     prepared: Option<PreparedBootstrapSource>,
     key_binding: Option<Zeroizing<[u8; 32]>>,
-    transferred: bool,
+    // Assigned ONLY by the successful one-time take. This inert ID permits a final original
+    // source observation after ciphertext moved into prepaid Store custody.
+    transferred: Option<BootstrapSourceId>,
 }
 impl std::fmt::Debug for FounderBootstrapPreparation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -246,7 +248,7 @@ impl FounderBootstrapPreparation {
                 context,
                 prepared: None,
                 key_binding: None,
-                transferred: false,
+                transferred: None,
             }),
             Err(_) => Err(BootstrapSourceRefusal {
                 original: Box::new(original),
@@ -259,7 +261,18 @@ impl FounderBootstrapPreparation {
         node: &ChannelSync<T, R>,
         key: &[u8; 32],
     ) -> Result<(), SyncError> {
-        if self.transferred || actual_spec(&self.original, node)? != self.context.spec_data() {
+        if self.transferred.is_some() {
+            return Err(unavailable());
+        }
+        self.check_original(node, key)
+    }
+
+    fn check_original<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        node: &ChannelSync<T, R>,
+        key: &[u8; 32],
+    ) -> Result<(), SyncError> {
+        if actual_spec(&self.original, node)? != self.context.spec_data() {
             return Err(unavailable());
         }
         // The package was prepared FIRST. Refuse a replacement key even on the first source
@@ -315,8 +328,30 @@ impl FounderBootstrapPreparation {
     ) -> Result<PreparedBootstrapSource, SyncError> {
         self.check(node, key)?;
         let prepared = self.prepared.take().ok_or_else(unavailable)?;
-        self.transferred = true;
+        self.transferred = Some(prepared.id());
         Ok(prepared)
+    }
+
+    /// Negative-only original-source observation AFTER the complete ciphertext moved into
+    /// the host's prepaid inert debt, before SourcePrepared mutation. This returns no bytes,
+    /// token or permit and never reopens prepare/borrow/take. The host STILL holds original
+    /// admission/head/root/debt/fee custody and repeats this after each actual writer wait.
+    /// Exact offline repair after creator Drop instead uses the independently retained bytes.
+    pub fn validate_transferred_source<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        node: &ChannelSync<T, R>,
+        key: &[u8; 32],
+        expected_context: &BootstrapSourceContextData,
+        expected_id: BootstrapSourceId,
+    ) -> Result<(), SyncError> {
+        if self.transferred != Some(expected_id)
+            || self.prepared.is_some()
+            || self.key_binding.is_none()
+            || &self.context != expected_context
+        {
+            return Err(unavailable());
+        }
+        self.check_original(node, key)
     }
 }
 

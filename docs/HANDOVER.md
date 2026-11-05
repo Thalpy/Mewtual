@@ -69,9 +69,14 @@ context+SourceId and validates bounded framing, raw S0 digest/schema/labels and 
 signed genesis record/manifest frames without SDK restore. Existing default-None reservations
 stay unchanged and cannot bootstrap. This is an authored consuming crypto/source checkpoint;
 actual App seed/source I/O, typed SourcePrepared intent, grants/fees/atomic save/Current/native
-activation remain open. Eleven regressions are UNRUN under the user compilation pause; read-only
+activation remain open. Twelve regressions are UNRUN under the user compilation pause; read-only
 design and final actual-diff adversarial reviews are CLEAR with no remaining findings. Direct
 formatting and whitespace checks passed; no compiler/tests/builds ran. [Exact contract and pending focused selector](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-CONTAINER.md).
+
+The follow-on transferred-source observation returns only unit/refusal against the SAME original
+source/context/ID/key after the one-time ciphertext move. It lets host custody precede SourcePrepared
+I/O; it grants no bytes/permit/new preparation. Read-only design and final narrow actual re-review
+are CLEAR with no remaining findings. The actual App grant/intent/physical consumer remains unfinished.
 
 ## Join submission transport prerequisite (5 November; unexecuted)
 
