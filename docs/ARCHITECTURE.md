@@ -3153,3 +3153,10 @@ No node/key/publisher is retained by that debt, and all final storage-root check
 source comparisons. This is source preparation/registration only: source journals, execution
 arms/files, SDK restore, canonical activation and native dispatch are still unfinished. See the
 [source consumer](communication-recovery/CHAT-OWNER-FOUNDING-SOURCE-CONSUMER.md).
+
+Its actual initial SourcePrepared journal now caches and saves the first exact FI successor
+against the same registered source. Private cached/admitted/saved operation identities separate
+proposal retention from effect authority and barrier evidence. Registered reads select that
+exact SP current; they do not weaken the old FI reader. Final current-file proof follows all
+full source comparisons. This small journal adds no large file write, execution arm or Current;
+eight regressions are authored UNRUN, with adversarial static review clear after fixes.

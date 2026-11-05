@@ -5,7 +5,8 @@ another Server/snapshot adopter. The actual source-owner/reservation/registratio
 reaches complete private S0/bootstrap ciphertext held in the same original owner or inert Store
 custody. Combined actual-diff adversarial static review is clear after fixes. It supplies no Current, SDK restore, native
 activation or live chat. All compilation, tests and builds remain paused. Root owns physical
-source/SP/arm I/O; SP, source arm and large-source persistence consumers remain unfinished.
+source/SP/arm I/O. The initial small SP consumer is now authored in the linked persistence
+contract; execution arms and large-source persistence remain unfinished.
 
 Read-only design review is CLEAR after the pending-stage/terminal-freeze corrections. Eleven new
 actual-source tests are authored UNRUN: original saved-intent-only entry, real signed S0/genesis

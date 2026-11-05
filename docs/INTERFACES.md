@@ -8277,3 +8277,14 @@ Refusal preserves both Options; lost-handle recovery requires the same original 
 No production cipher getter, cold source adopter or positive saved-source token is exposed.
 SP/arms/source-file persistence, SDK restore, Current and native activation remain separate.
 All eleven new compiled regressions remain UNRUN; static review is clear, not build validation.
+
+`ArchiveFounderSourcePreparation::save_source_prepared` now caches an actual
+`SavedBootstrapSourcePrepared` from the concrete Root small-journal writer. Complete source
+ciphertext must already be in the same registered cell. Root caches immutable SP/seed frames,
+admits their exact operation before first file mutation and records saved evidence only after
+current/file/parent barriers. No external saved object points back from the cell into itself.
+Lost local results use the same source/operation; neither parsed counters nor equal cold bytes
+construct a result. Registered validation uses the exact admitted/saved SP file, while the FI
+read API remains exact-FI-only. All full comparisons precede final current bytes/identity and
+Root/negative proofs. This interface admits no large pass/source file, SDK restore or Current.
+Eight additional regressions remain authored UNRUN; combined adversarial static review is clear.

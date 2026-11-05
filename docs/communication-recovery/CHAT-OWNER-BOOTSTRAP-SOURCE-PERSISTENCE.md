@@ -1,8 +1,13 @@
 # Original bootstrap source custody and write execution (design for review)
 
-The reviewed creation chain ends at actual saved FoundingIntent. This document specifies its
-next physical consumer. It is not implemented by this document and activates no Chat V2 path.
+The reviewed creation chain now reaches private source registration and its initial small SP
+journal. This document also specifies the remaining physical consumers; those planned sections
+are not implementations and activate no Chat V2 path.
 Compilation/tests/builds remain paused; source and design review are not execution evidence.
+The warm initial small SP journal described below is now authored and has passed combined
+adversarial static review after a final-current ordering fix. Eight regressions are authored
+UNRUN. Large execution arms/files, cold negative repair and the asynchronous worker are still
+design/implementation gates; this document does not imply they have been delivered.
 
 ## Actual source before journal effects
 
@@ -77,13 +82,23 @@ original writers, save/debit the exact arm and install its unique running-work i
 release. The admitted worker receives an immutable shared original source payload plus its
 actual fee, fixed target/root identities, original negatives and a retained output/file cell.
 Source/frame and fee move together into that immutable payload before initial registration;
-workers clone only the small Arc, never the frame or creator/sender/Server/Store/session.
+workers clone only the small Arc, never the frame or creator/sender/Server/Store. Inert retained
+debt owns no session. Actual running physical work additionally needs a minimal non-authorizing
+lease on the SAME OS vault lock, acquired before irreversible arm admission. It contains no
+Store/keys/source publisher and releases only after actual mutating syscalls drain. Dropping the
+old Store must not let a new mount/cold repair race an already-blocked write. Cancellation or
+final positive rejection cannot recall that syscall. The real constructor still reports Busy
+while that physical lease exists. This is physical exclusion, not permission to expose source.
 
 The per-source output cell retains newly created file handles BEFORE identity/write can fail.
 Root keeps that cell and immutable payload even if the caller disappears. Only that actual
 admitted work may mutate its file state; another arm/repair cannot race it merely because a
-global writer was released. No code may acquire Root/admission while holding this per-source
-I/O mutex. Release the file/output guard before final short admission→pins→canonical→Root
+global writer was released. Immutable payload and SHORT run/metadata state are separate from
+the LONG file/output mutex. Global writers may inspect an immutable completed outcome or use
+nonblocking try_lock/Busy; they must NEVER wait for that long mutex. Preventing only the reverse
+I/O→Root acquisition would still let Root wait on8MiB I/O and block other groups. No code may
+acquire Root/admission while holding this per-source I/O mutex. Release the file/output guard
+before final short admission→pins→canonical→Root
 validation and saved-result installation. An output-cell handle does not confer Current.
 
 After admission, cancellation may stop new large work but cannot pretend in-flight writes did
@@ -91,8 +106,9 @@ not happen. Retain exact data/file outcomes under a distinct narrow preservation
 positive saved-source/native results still need the original final guards. Every worker keeps
 its original payload/control fees through actual file work and result collection. Counter,
 running identity and file-result transfer must be reviewed/tested before this asynchronous
-admission is implemented. Add a barrier regression proving groupB's ordinary admission can
-progress while groupA's source worker is held in real I/O; a queued job alone is not that proof.
+admission is implemented. Add barrier regressions proving groupB's ordinary admission can
+progress while groupA actually holds the file-I/O mutex, and that old Store Drop cannot enable
+new-open/cold repair until that physical work drains. A queued job alone proves neither property.
 
 Keep the one group-creation SDK unit distinct from the original source-write allowance1..8.
 Each large pass durably writes the exact next SourcePrepared successor with io_spent incremented

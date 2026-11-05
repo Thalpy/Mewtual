@@ -805,19 +805,20 @@ mod persistence {
             R: rand_core::CryptoRngCore,
         {
             use critical_namespaces::refused;
-            if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
-                return Err(refused());
-            }
-            guard.validate_source_only(captured)?;
+            self.validate_origin_under_root(store, captured, guard, root)?;
+            self.validate_current_file_only(store)?;
             validate_founder_original_root(store, &self.original, root)?;
-            let debt = self.debt.lock().map_err(|_| refused())?;
-            if !std::sync::Arc::ptr_eq(&debt.original, &self.original)
-                || debt.id != self.id
-                || debt.marker_data.founding != *guard.plan_data()
-                || debt.data.debit != guard.debit_id()
-            {
+            if self.original.negative.is_cancelled() || root.negative.is_cancelled() {
                 return Err(refused());
             }
+            Ok(())
+        }
+
+        // A bounded final file proof, with NO source/S0 comparer or Root acquisition. A
+        // caller must first validate the actual origin/source and hold its original writers.
+        fn validate_current_file_only(&self, store: &ServerStore) -> Result<(), AppError> {
+            use critical_namespaces::refused;
+            let debt = self.debt.lock().map_err(|_| refused())?;
             let path = founder_control_path(
                 store,
                 &self.original.data.invocation,
@@ -828,6 +829,37 @@ mod persistence {
                 read_archive_object(&path, founder::MAX_INTENT_FRAME)?.ok_or_else(refused)?;
             if founder::IntentId::of(&bytes) != self.id
                 || bytes.as_slice() != debt.candidate.as_slice()
+            {
+                return Err(refused());
+            }
+            Ok(())
+        }
+
+        /// Immutable saved FI origin only. SourcePrepared uses this in addition to its OWN
+        /// exact admitted/saved current journal proof. The original FI read API above still
+        /// requires its actual FI file; this helper never interprets a descendant as that file.
+        fn validate_origin_under_root<T, R>(
+            &self,
+            store: &ServerStore,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+            root: &critical_namespaces::archive_bootstrap::MountedRoot,
+        ) -> Result<(), AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::refused;
+            if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
+                return Err(refused());
+            }
+            guard.validate_source_only(captured)?;
+            validate_founder_original_root(store, &self.original, root)?;
+            let debt = self.debt.lock().map_err(|_| refused())?;
+            if !std::sync::Arc::ptr_eq(&debt.original, &self.original)
+                || debt.id != self.id
+                || debt.marker_data.founding != *guard.plan_data()
+                || debt.data.debit != guard.debit_id()
             {
                 return Err(refused());
             }
@@ -870,8 +902,84 @@ mod persistence {
         // and validate THAT exact current/pending successor. Never weaken SavedFI to accept
         // arbitrary descendants or keep using its old held-file identity after replacement.
         original: std::sync::Arc<OriginalFounderInvocation>,
+        prepared: Option<FounderSourcePreparedJournal>,
         // This reservation is LAST: complete cipher/context/file metadata drains first.
         custody: Option<critical_namespaces::read_pool::CatalogReadReservation>,
+    }
+    /// Small SP successor retained before any effect. Cached bytes alone are not admission;
+    /// only the original Root writer installs `admitted` before first file mutation. Only its
+    /// completed file/current/parent barriers install `saved`. Neither field points to the
+    /// external SavedBootstrapSourcePrepared, so retaining a result cannot create a cycle.
+    struct FounderSourcePreparedJournal {
+        candidate: Option<Zeroizing<Vec<u8>>>,
+        seed: Option<Zeroizing<Vec<u8>>>,
+        marker: Zeroizing<Vec<u8>>,
+        data: founder::IntentData,
+        operation: std::sync::Arc<()>,
+        admitted: Option<std::sync::Arc<()>>,
+        saved: Option<std::sync::Arc<()>>,
+        seed_file: Option<critical_namespaces::pending_join::CreatedStage>,
+        stage_file: Option<critical_namespaces::pending_join::CreatedStage>,
+    }
+    /// Exact actual small journal save, never a source-file save, large I/O arm or Current.
+    /// Its complete source/cipher fee stays with the SAME cell through every retained handle.
+    pub(super) struct SavedBootstrapSourcePrepared {
+        cell: std::sync::Arc<std::sync::Mutex<FounderSourceDebt>>,
+        operation: std::sync::Arc<()>,
+    }
+    impl std::fmt::Debug for SavedBootstrapSourcePrepared {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SavedBootstrapSourcePrepared")
+                .finish_non_exhaustive()
+        }
+    }
+    impl SavedBootstrapSourcePrepared {
+        /// Observe the exact actual saved operation against the SAME registered source.
+        /// Source/frame/counter DATA cannot manufacture this result, and it authorizes no
+        /// large pass. Do not call a locking Registered validator while its cell is held.
+        pub(super) fn validate_original<T, R>(
+            &self,
+            store: &ServerStore,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+            registered: &RegisteredBootstrapSource,
+        ) -> Result<(), AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::refused;
+            if !std::sync::Arc::ptr_eq(&self.cell, &registered.cell) {
+                return Err(refused());
+            }
+            let root_guard = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(store, &captured.original, root)?;
+            let registry = store.founder_sources.lock().map_err(|_| refused())?;
+            if !registry
+                .slots
+                .iter()
+                .flatten()
+                .any(|entry| std::sync::Arc::ptr_eq(entry, &self.cell))
+            {
+                return Err(refused());
+            }
+            let actual = self.cell.lock().map_err(|_| refused())?;
+            let journal = actual.prepared.as_ref().ok_or_else(refused)?;
+            if !std::sync::Arc::ptr_eq(&journal.operation, &self.operation)
+                || !journal
+                    .admitted
+                    .as_ref()
+                    .is_some_and(|original| std::sync::Arc::ptr_eq(original, &self.operation))
+                || !journal
+                    .saved
+                    .as_ref()
+                    .is_some_and(|saved| std::sync::Arc::ptr_eq(saved, &self.operation))
+            {
+                return Err(refused());
+            }
+            validate_registered_source_under_root(store, captured, guard, &actual, root)
+        }
     }
     pub(super) struct FounderSourceRegistry {
         slots: [Option<std::sync::Arc<std::sync::Mutex<FounderSourceDebt>>>; 5],
@@ -908,7 +1016,7 @@ mod persistence {
             T: catcoms_rt::MeshTransport,
             R: rand_core::CryptoRngCore,
         {
-            use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
+            use critical_namespaces::refused;
             let root_guard = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
             let root = root_guard.as_ref().ok_or_else(refused)?;
             validate_founder_original_root(store, &captured.original, root)?;
@@ -922,27 +1030,7 @@ mod persistence {
                 return Err(refused());
             }
             let actual = self.cell.lock().map_err(|_| refused())?;
-            if !std::sync::Arc::ptr_eq(&actual.original, &captured.original) {
-                return Err(refused());
-            }
-            let policy = store
-                .archive_bootstrap_policy
-                .as_ref()
-                .ok_or_else(refused)?;
-            actual
-                .custody
-                .as_ref()
-                .ok_or_else(refused)?
-                .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
-            let source = actual.source.as_ref().ok_or_else(refused)?;
-            if source.id() != actual.source_id || source.context_data() != &actual.context {
-                return Err(refused());
-            }
-            actual
-                .founding
-                .validate_under_root(store, captured, guard, root)?;
-            guard.validate_transferred_source(captured, &actual.context, actual.source_id)?;
-            recheck_source_capture_after_waits(store, &captured.original, root)
+            validate_registered_source_under_root(store, captured, guard, &actual, root)
         }
     }
     impl Default for FounderInvocationRegistry {
@@ -1168,6 +1256,7 @@ mod persistence {
                 source_id,
                 founding,
                 original: captured.original.clone(),
+                prepared: None,
                 custody: None,
             }));
             let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
@@ -1199,7 +1288,13 @@ mod persistence {
                 .as_ref()
                 .ok_or_else(refused)?
                 .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
-            recheck_source_capture_after_waits(self, &captured.original, root)?;
+            recheck_source_capture_after_waits(
+                self,
+                &captured.original,
+                root,
+                &owned.founding,
+                owned.prepared.as_ref(),
+            )?;
             // Test hooks/future operations must precede ownership moves. In particular no
             // `?`, callback, allocation, I/O or cancellation check may be appended between
             // taking these values and installing their complete cell into Store custody.
@@ -1232,7 +1327,7 @@ mod persistence {
             T: catcoms_rt::MeshTransport,
             R: rand_core::CryptoRngCore,
         {
-            use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
+            use critical_namespaces::refused;
             guard.validate_transferred_source(captured, context, source_id)?;
             let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
             let root = root_guard.as_ref().ok_or_else(refused)?;
@@ -1249,24 +1344,356 @@ mod persistence {
                 {
                     return Err(refused());
                 }
-                let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
-                actual
-                    .custody
-                    .as_ref()
-                    .ok_or_else(refused)?
-                    .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
                 let cipher = actual.source.as_ref().ok_or_else(refused)?;
                 if cipher.context_data() != context || cipher.id() != source_id {
                     return Err(refused());
                 }
-                actual
-                    .founding
-                    .validate_under_root(self, captured, guard, root)?;
-                guard.validate_transferred_source(captured, context, source_id)?;
-                recheck_source_capture_after_waits(self, &captured.original, root)?;
+                validate_registered_source_under_root(self, captured, guard, &actual, root)?;
                 return Ok(RegisteredBootstrapSource { cell: cell.clone() });
             }
             Err(refused())
+        }
+
+        /// Cache the one exact small successor before Root mutation. All large ciphertext is
+        /// already Store-owned. Randomness/AEAD run outside Root/registry writers; the existing
+        /// source-cell/control funding pays bounded candidate/seed/context metadata. A post-
+        /// work refusal keeps every successfully produced frame in this SAME cell.
+        fn cache_original_source_prepared<T, R>(
+            &self,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+            registered: &RegisteredBootstrapSource,
+            rng: &mut dyn CryptoRngCore,
+        ) -> Result<(), AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::refused;
+            registered.validate_original(self, captured, guard)?;
+            let key = Zeroizing::new(self.keys.db_key()?);
+            {
+                // Never acquire Root while this guard is held. The caller's original
+                // admission/pins/canonical guards still exclude competing journal writers.
+                let mut actual = registered.cell.lock().map_err(|_| refused())?;
+                if !std::sync::Arc::ptr_eq(&actual.original, &captured.original) {
+                    return Err(refused());
+                }
+                if actual.prepared.is_none() {
+                    let (marker, parent) = {
+                        let founding = actual.founding.debt.lock().map_err(|_| refused())?;
+                        (
+                            Zeroizing::new(founding.marker.to_vec()),
+                            founding.data.clone(),
+                        )
+                    };
+                    let data = founder::IntentData {
+                        invocation: captured.data().invocation,
+                        debit: guard.debit_id(),
+                        sequence: 2,
+                        parent: Some(actual.founding.id),
+                        io_spent: 0,
+                        kind: founder::IntentKind::SourcePrepared {
+                            context: actual.context.clone(),
+                            source: actual.source_id,
+                            marker: founder::TargetMarkerId::of(&marker),
+                        },
+                    };
+                    data.successor(
+                        Some((&parent, actual.founding.id)),
+                        captured.data(),
+                        guard.debit_id(),
+                    )?;
+                    actual.prepared = Some(FounderSourcePreparedJournal {
+                        candidate: None,
+                        seed: None,
+                        marker,
+                        data,
+                        operation: std::sync::Arc::new(()),
+                        admitted: None,
+                        saved: None,
+                        seed_file: None,
+                        stage_file: None,
+                    });
+                }
+                let journal = actual.prepared.as_mut().ok_or_else(refused)?;
+                if journal.candidate.is_none() {
+                    journal.candidate = Some(founder::seal_intent_data(
+                        &key,
+                        &journal.data,
+                        captured.data(),
+                        guard.debit_id(),
+                        rng,
+                    )?);
+                    if captured.observer().is_cancelled() {
+                        return Err(refused());
+                    }
+                }
+                if journal.seed.is_none() {
+                    let plain = founder::encode_transition_seed(
+                        &key,
+                        captured.data(),
+                        guard.debit_id(),
+                        journal.data.parent,
+                        Some(&journal.marker),
+                        journal.candidate.as_ref().ok_or_else(refused)?,
+                    )?;
+                    journal.seed = Some(founder::seal_transition_seed(&key, &plain, rng)?);
+                    if captured.observer().is_cancelled() {
+                        return Err(refused());
+                    }
+                }
+            }
+            // Final source/root observations happen only AFTER the cell guard drains; no
+            // cell→Root acquisition is allowed, even on cancellation or crypto failure.
+            registered.validate_original(self, captured, guard)
+        }
+
+        /// Save the initial exact FI→SP successor. This admits no large file I/O. The actual
+        /// registered cipher remains retained throughout every partial small-journal effect.
+        pub(super) fn save_original_source_prepared<T, R>(
+            &self,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+            registered: &RegisteredBootstrapSource,
+            rng: &mut dyn CryptoRngCore,
+        ) -> Result<SavedBootstrapSourcePrepared, AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::{refused, ARCHIVE_BOOTSTRAP_ROOT};
+            self.cache_original_source_prepared(captured, guard, registered, rng)?;
+            #[cfg(test)]
+            self.archive_declaration_fault(150)?;
+            let key = Zeroizing::new(self.keys.db_key()?);
+            let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(self, &captured.original, root)?;
+            let registry = self.founder_sources.lock().map_err(|_| refused())?;
+            if !registry
+                .slots
+                .iter()
+                .flatten()
+                .any(|entry| std::sync::Arc::ptr_eq(entry, &registered.cell))
+            {
+                return Err(refused());
+            }
+            let mut actual = registered.cell.lock().map_err(|_| refused())?;
+            if !std::sync::Arc::ptr_eq(&actual.original, &captured.original) {
+                return Err(refused());
+            }
+            validate_source_journal_under_root(self, captured, guard, &actual, root)?;
+            let founding = actual.founding.clone();
+            let context = actual.context.clone();
+            let source_id = actual.source_id;
+            let journal = actual.prepared.as_mut().ok_or_else(refused)?;
+            let candidate = journal.candidate.as_ref().ok_or_else(refused)?;
+            let seed = journal.seed.as_ref().ok_or_else(refused)?;
+            let decoded =
+                founder::open_intent_data(&key, captured.data(), guard.debit_id(), candidate)?;
+            if decoded != journal.data {
+                return Err(refused());
+            }
+            {
+                let parent = founding.debt.lock().map_err(|_| refused())?;
+                decoded.successor(
+                    Some((&parent.data, founding.id)),
+                    captured.data(),
+                    guard.debit_id(),
+                )?;
+            }
+            match &decoded.kind {
+                founder::IntentKind::SourcePrepared {
+                    context: c,
+                    source: s,
+                    marker,
+                } if c == &context
+                    && *s == source_id
+                    && *marker == founder::TargetMarkerId::of(&journal.marker) => {}
+                _ => return Err(refused()),
+            }
+            let plain = founder::open_transition_seed(&key, seed)?;
+            let parsed = founder::parse_transition_seed_data(
+                &key,
+                &plain,
+                captured.data(),
+                guard.debit_id(),
+            )?;
+            if parsed.expected_parent != Some(founding.id)
+                || parsed.marker_frame != Some(journal.marker.as_slice())
+                || parsed.candidate_frame != candidate.as_slice()
+                || parsed.candidate != decoded
+            {
+                return Err(refused());
+            }
+            drop(parsed);
+            drop(plain);
+            let current_path = founder_control_path(
+                self,
+                &captured.data().invocation,
+                FounderControlSlot::Intent,
+            )?;
+            let stage_path =
+                founder_control_path(self, &captured.data().invocation, FounderControlSlot::Stage)?;
+            let seed_path =
+                founder_control_path(self, &captured.data().invocation, FounderControlSlot::Seed)?;
+            let parent_path = self.dir.join(ARCHIVE_BOOTSTRAP_ROOT);
+            let current = read_archive_object(&current_path, founder::MAX_INTENT_FRAME)?
+                .ok_or_else(refused)?;
+            let promoted = current.1.as_slice() == candidate.as_slice();
+            if promoted {
+                if journal.admitted.is_none() {
+                    return Err(refused());
+                }
+                verify_archive_held_name(
+                    &current_path,
+                    journal.stage_file.as_ref().ok_or_else(refused)?,
+                )?;
+            } else {
+                if journal.saved.is_some() {
+                    return Err(refused());
+                }
+                // Actual full FI/held-name validation, not merely the parent's scalar ID.
+                founding.validate_under_root(self, captured, guard, root)?;
+            }
+            guard.validate_transferred_source(captured, &context, source_id)?;
+            recheck_source_capture_after_waits(
+                self,
+                &captured.original,
+                root,
+                &founding,
+                Some(journal),
+            )?;
+            if journal.admitted.is_none() {
+                // This private original marker, installed before FIRST filesystem mutation,
+                // distinguishes actual admitted DATA from a cached but never-admitted proposal.
+                journal.admitted = Some(journal.operation.clone());
+            }
+            if !promoted {
+                ensure_new_founder_control(
+                    self,
+                    &seed_path,
+                    seed,
+                    &mut journal.seed_file,
+                    151,
+                    152,
+                )?;
+                sync_directory(&parent_path).map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(153)?;
+                ensure_archive_output(
+                    &stage_path,
+                    candidate,
+                    &mut journal.stage_file,
+                    ArchiveOutputMode::SeedRepair,
+                    #[cfg(test)]
+                    self.critical_namespace_fault.load(Ordering::SeqCst),
+                    #[cfg(test)]
+                    154,
+                )?;
+                sync_directory(&parent_path).map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(155)?;
+                founding.validate_under_root(self, captured, guard, root)?;
+                verify_archive_held_name(
+                    &stage_path,
+                    journal.stage_file.as_ref().ok_or_else(refused)?,
+                )?;
+                guard.validate_transferred_source(captured, &context, source_id)?;
+                recheck_source_capture_after_waits(
+                    self,
+                    &captured.original,
+                    root,
+                    &founding,
+                    Some(journal),
+                )?;
+                // The full comparer can wait after the earlier stage verification. Recheck
+                // its exact held object AND full candidate bytes immediately before rename.
+                verify_archive_held_name(
+                    &stage_path,
+                    journal.stage_file.as_ref().ok_or_else(refused)?,
+                )?;
+                let (_, staged) = read_archive_object(&stage_path, founder::MAX_INTENT_FRAME)?
+                    .ok_or_else(refused)?;
+                if staged.as_slice() != candidate.as_slice() {
+                    return Err(refused());
+                }
+                validate_founder_original_root(self, &captured.original, root)?;
+                if captured.observer().is_cancelled() || root.negative.is_cancelled() {
+                    return Err(refused());
+                }
+                fs::rename(&stage_path, &current_path)
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(156)
+                    .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            }
+            let (saved_file, bytes) =
+                read_archive_object(&current_path, founder::MAX_INTENT_FRAME)?
+                    .ok_or_else(refused)?;
+            if bytes.as_slice() != candidate.as_slice() {
+                return Err(refused());
+            }
+            verify_archive_held_name(
+                &current_path,
+                journal.stage_file.as_ref().ok_or_else(refused)?,
+            )?;
+            saved_file
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            sync_directory(&parent_path)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            if let Some((file, bytes)) =
+                read_archive_object(&seed_path, founder::MAX_TRANSITION_FRAME)?
+            {
+                if bytes.as_slice() != seed.as_slice() {
+                    return Err(refused());
+                }
+                verify_archive_held_name(
+                    &seed_path,
+                    journal.seed_file.as_ref().ok_or_else(refused)?,
+                )?;
+                file.sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                fs::remove_file(&seed_path).map_err(|error| AppError::Io(error.to_string()))?;
+                drop(file);
+                journal.seed_file = None;
+            }
+            sync_directory(&parent_path)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            #[cfg(test)]
+            self.archive_declaration_fault(157)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            founding.validate_origin_under_root(self, captured, guard, root)?;
+            guard.validate_transferred_source(captured, &context, source_id)?;
+            #[cfg(test)]
+            {
+                let hook = self
+                    .founder_before_source_prepared_saved
+                    .lock()
+                    .map_err(|_| refused())?
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            recheck_source_capture_after_waits(
+                self,
+                &captured.original,
+                root,
+                &founding,
+                Some(journal),
+            )?;
+            journal.saved = Some(journal.operation.clone());
+            let operation = journal.operation.clone();
+            drop(actual);
+            drop(registry);
+            drop(root_guard);
+            Ok(SavedBootstrapSourcePrepared {
+                cell: registered.cell.clone(),
+                operation,
+            })
         }
 
         /// Capture one LOCAL original request. ALL four fixed control slots are classified;
@@ -1907,6 +2334,12 @@ mod persistence {
                 seed.sync_all()
                     .map_err(|error| AppError::Io(error.to_string()))?;
                 fs::remove_file(&seed_path).map_err(|error| AppError::Io(error.to_string()))?;
+                // The next SourcePrepared/arm transaction reuses this SAME closed seed name.
+                // Release both transaction-only handles at the completed unlink boundary,
+                // before a later phase creates the next seed. Current/marker remain held; a saved
+                // retry needs neither this removed seed object nor a newly generated nonce.
+                drop(seed);
+                debt.seed_file = None;
             }
             sync_directory(&parent)
                 .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
@@ -2709,6 +3142,110 @@ mod persistence {
             .join(leaf))
     }
 
+    /// Shared borrowed validator; callers already hold Root→registry→this cell. No caller
+    /// may invoke a public Registered validator recursively while its cell guard is held.
+    fn validate_registered_source_under_root<T, R>(
+        store: &ServerStore,
+        captured: &CapturedFounderInvocation,
+        guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+        actual: &FounderSourceDebt,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+    ) -> Result<(), AppError>
+    where
+        T: catcoms_rt::MeshTransport,
+        R: rand_core::CryptoRngCore,
+    {
+        use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
+        if !std::sync::Arc::ptr_eq(&actual.original, &captured.original) {
+            return Err(refused());
+        }
+        let policy = store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?;
+        actual
+            .custody
+            .as_ref()
+            .ok_or_else(refused)?
+            .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
+        let source = actual.source.as_ref().ok_or_else(refused)?;
+        if source.id() != actual.source_id || source.context_data() != &actual.context {
+            return Err(refused());
+        }
+        guard.validate_transferred_source(captured, &actual.context, actual.source_id)?;
+        validate_source_journal_under_root(store, captured, guard, actual, root)?;
+        recheck_source_capture_after_waits(
+            store,
+            &captured.original,
+            root,
+            &actual.founding,
+            actual.prepared.as_ref(),
+        )
+    }
+
+    /// Interpret only this actual admitted journal. Before admission, even matching cached
+    /// candidate bytes cannot replace the real FI current. After admission, the SAME held
+    /// stage/file may be the exact pending SP, but only actual saved evidence forbids the old
+    /// parent permanently. This returns RAM-custody validity, NEVER a SavedSP/large-I/O result.
+    fn validate_source_journal_under_root<T, R>(
+        store: &ServerStore,
+        captured: &CapturedFounderInvocation,
+        guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+        actual: &FounderSourceDebt,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+    ) -> Result<(), AppError>
+    where
+        T: catcoms_rt::MeshTransport,
+        R: rand_core::CryptoRngCore,
+    {
+        actual
+            .founding
+            .validate_origin_under_root(store, captured, guard, root)?;
+        validate_source_current_file_only(store, &actual.founding, actual.prepared.as_ref())
+    }
+
+    /// Final bounded physical current proof. No Root lock, live-source/S0 matcher or quota
+    /// callback belongs here: the caller deliberately runs it AFTER every such wait.
+    fn validate_source_current_file_only(
+        store: &ServerStore,
+        founding: &SavedFoundingIntent,
+        journal: Option<&FounderSourcePreparedJournal>,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        let Some(journal) = journal.filter(|journal| journal.admitted.is_some()) else {
+            return founding.validate_current_file_only(store);
+        };
+        if !journal
+            .admitted
+            .as_ref()
+            .is_some_and(|admitted| std::sync::Arc::ptr_eq(admitted, &journal.operation))
+            || journal
+                .saved
+                .as_ref()
+                .is_some_and(|saved| !std::sync::Arc::ptr_eq(saved, &journal.operation))
+        {
+            return Err(refused());
+        }
+        let candidate = journal.candidate.as_ref().ok_or_else(refused)?;
+        let path = founder_control_path(
+            store,
+            &founding.original.data.invocation,
+            FounderControlSlot::Intent,
+        )?;
+        let (_, bytes) =
+            read_archive_object(&path, founder::MAX_INTENT_FRAME)?.ok_or_else(refused)?;
+        if bytes.as_slice() == candidate.as_slice() {
+            verify_archive_held_name(&path, journal.stage_file.as_ref().ok_or_else(refused)?)?;
+        } else if journal.saved.is_none() {
+            // An admitted first seed/stage may still be pending under its exact real parent.
+            // Its old FI must satisfy the original held-object/full-byte check, not just ID.
+            founding.validate_current_file_only(store)?;
+        } else {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     // Full source/S0 and fee validation can block after an earlier Root check. Revalidate the
     // actual root/marker after those waits, then sample negatives WITHOUT another full source
     // comparer or quota wait. This is the final gate before ownership moves/result exposure.
@@ -2716,6 +3253,8 @@ mod persistence {
         store: &ServerStore,
         original: &OriginalFounderInvocation,
         root: &critical_namespaces::archive_bootstrap::MountedRoot,
+        founding: &SavedFoundingIntent,
+        journal: Option<&FounderSourcePreparedJournal>,
     ) -> Result<(), AppError> {
         #[cfg(test)]
         {
@@ -2728,6 +3267,10 @@ mod persistence {
                 hook();
             }
         }
+        // The hook models source/S0/fee work finishing after a storage mutation. Prove the
+        // actual journal AFTER it, not merely the directory/marker: same-object content edits
+        // must not inherit a stale successful read. No full comparer follows this proof.
+        validate_source_current_file_only(store, founding, journal)?;
         validate_founder_original_root(store, original, root)?;
         if original.negative.is_cancelled() || root.negative.is_cancelled() {
             return Err(critical_namespaces::refused());
@@ -4888,6 +5431,8 @@ pub struct ServerStore {
     founder_before_sdk_consume: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     founder_before_source_admission: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    founder_before_source_prepared_saved: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pending_join_catalog: critical_namespaces::pending_join::SharedMounted,
     #[cfg(test)]
     pending_join_before_catalog_writer: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -5030,6 +5575,8 @@ impl ServerStore {
             founder_before_sdk_consume: Default::default(),
             #[cfg(test)]
             founder_before_source_admission: Default::default(),
+            #[cfg(test)]
+            founder_before_source_prepared_saved: Default::default(),
             pending_join_catalog: Default::default(),
             #[cfg(test)]
             pending_join_before_catalog_writer: Default::default(),

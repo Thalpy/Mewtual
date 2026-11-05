@@ -5898,3 +5898,13 @@ node fees stay with the node. Final actual Root/session/marker checks follow ful
 and quota waits, then cheap negatives precede admission/return. This provides no durable source,
 cold repair, execution arm, SDK restore, Current or native activation. Eleven new regressions
 are authored UNRUN; combined static review is clear but no compiler or test has run.
+
+The small SourcePrepared writer distinguishes cached proposals from actual original admitted
+operations and completed saves. Its first successor is validated against the actual saved FI
+parent and immutable full source context/ID. Strict own-file first-seed custody and independently
+selected stage repair never accept equal foreign file identities as saved results. Actual SP
+current proof replaces the old FI proof only for that same retained source operation; saved
+rollback to FI refuses. All full source/S0 comparisons precede final exact current-byte/held-file
+verification and Root/negative checks. The old FI read contract remains unchanged. There is no
+new large-I/O, cold restore, scope Current or native authority. Eight regressions are authored
+UNRUN; static source review is clear, not compiled validation.
