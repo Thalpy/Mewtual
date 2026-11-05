@@ -12,6 +12,7 @@ primary root `Cargo.lock:4055`, native `apps/desktop/src-tauri/Cargo.lock:5323` 
 The membership/factory locks resolve the same version. `catcoms-mls/Cargo.toml` requires0.9.2;
 the checked-in0.8.1 snapshots are compatibility inputs, not the resolved SDK. Related pinned
 implementations inspected are memory_storage0.6.0, basic_credential0.6.0, tls_codec0.5.0,
+openmls_serialization_helpers0.1.0,
 serde/serde_core1.0.228, serde_json1.0.150 and repository toolchain1.94.0.
 
 Actual narrow path:
@@ -38,6 +39,7 @@ boxes would underpay the real load.
 | --- | --- | --- |
 | Signer private/public Vec; private Vec -> SecretVLBytes copy | Provider raw bytes do not pay the decoded key or overlapping copy | Exact Ed25519 lengths32/32, prepay32-byte extra private copy before getter |
 | Device Basic credential and SignaturePublicKey | Constructed after signer decode | Fixed32-byte copies, separate retained debit |
+| SDK custom enum names | `openmls_serialization_helpers::VariantId` copies borrowed identifiers with `to_string()` | Precharge every accepted identifier before its variant seed/visitor; borrowing the JSON string alone does not prevent this copy |
 | Typed provider-key generation | GroupId/signature StorageId JSON and prefixed key Vecs coexist | Audit actual fixed-key builders; prepaid checked key scratch before SDK entry |
 | Tree leaf/parent vectors | Private inline element sizes, including empty slots, exceed byte-token size | Count bounded slots; debit actual generic element layout before first Vec element |
 | Leaf/parent keys, signatures, credentials, capabilities, unmerged lists | Many nested vectors and spare growth capacity | Closed field-specific shape/count/length validation and per-container debit |
@@ -106,6 +108,13 @@ whole-process physical-memory limit.
 
 Every accepted custom Deserialize path needs an explicit entry in the audit before it is enabled.
 The basic credential secret helper creates a second byte allocation and needs its separate debit.
+The pinned serialization helper's `VariantId::visit_str` also calls `to_string()` even when
+the outer deserializer supplies borrowed data. CredentialType uses that helper for Basic
+credentials and capability entries. Charge the actual accepted enum identifier before entering
+the seed/visitor; conservatively charging every admitted enum identifier is acceptable. Audit
+ExtensionType and ProposalType before accepting those shapes. A one-byte-short identifier-copy
+allowance must refuse BEFORE the custom helper executes, including a genuine Basic leaf and
+capability entry. Ordinary borrowed keys do not pay for this distinct custom allocation.
 PastEpochDeletionPolicy's untagged parser is admitted only for its bounded integer spelling, whose
 Serde Content is scalar. SenderRatchet's conversion and draft PPRF/byte-copy paths are avoided by
 the initial all-empty-ratchet policy. A new custom visitor/Box/map or dependency change reopens
@@ -134,6 +143,14 @@ Do not derive work credit from a deadline or ambient clock. The closed depth and
 cap bound rescans; signature/own-leaf checks have separately bounded counts/scratch. Input byte
 limits alone do not establish this work bound.
 
+Genuine initial groups can contain `added_at: Some(SystemTime)`. Admit only the audited
+`secs_since_epoch`/`nanos_since_epoch` scalar pair, with exact fields, range and checked overflow;
+do not accidentally reject real founders by assuming every timestamp is null. Fixed tuple/array
+fields such as the12-byte AEAD nonce are inline and do not receive an outer Vec charge. The
+preflight must cover all13 logical rows reachable by the pinned load before the first typed
+getter. Both generic `read`/`read_list` and direct tree/context/hash/tag/signer getters must use
+the same guarded closed decoder; routing only generic reads leaves actual SDK entry unprotected.
+
 ## Custody, overlap and integration
 
 The new typed cap must be acquired from the SAME original resource pool before SDK entry and
@@ -141,6 +158,9 @@ remain retained while the decoded private SDK graph exists. `PrivateManagedResto
 its Server before releasing that fee. On success the retained SDK fee moves with the actual
 OwnedOwnerServer; it cannot disappear with the source's transient read fee at take_ready. A later
 active host must convert/retain it under its own global admission before any Actor/run handoff.
+Membership parent verification can load another private SDK group while the child graph is
+still alive. Reserve TWO simultaneously retained graph caps before entering that path; reusing
+one transient read fee for sequential calls undercounts their actual overlapping lifetime.
 
 The existing provider allowance still covers raw backing/payload during private overlap only.
 Keeping one typed reservation does not solve active provider/whole-Server memory, multiple
@@ -152,6 +172,37 @@ owned shared attempt state can carry Active/Complete/Cancelled; dropping an unco
 must cancel its policy rather than resume legacy reads. Finishing the restore does not authorize
 future mutative SDK work; that needs its own operation/resource admission. No async callbacks or
 new Store lock order belong in this synchronous private decode.
+Install that policy BEFORE `MlsDevice::restore` and its SignatureKeyPair getter, not merely
+before `MlsGroup::load`. Completion/cancellation never falls back to unrestricted legacy reads.
+The existing membership-candidate path performs an Add after restore: it needs a NEW explicit
+operation admission, not permission inferred from a completed load.
+
+## Required live-text extension after the initial profile
+
+The initial no-history profile is not a complete text-chat restore gate. The first send or
+receive initializes both handshake and application sender slots and persists MessageSecrets.
+The subsequent cold reader must admit genuine bounded EncryptionRatchet/DecryptionRatchet
+graphs, including the `VecDeque<Option<(AeadKey, AeadNonce)>>` past-secret queue. Null queue
+entries still allocate inline slots. Bound the queue by the actual configured out-of-order
+tolerance and validate roles, generations and dimensions. The default tolerance is5; the
+default maximum forward distance1000 bounds operation work separately. Decryption may clone
+the queue/head temporarily, which needs its own overlap debit. Audit SenderRatchet's custom
+Serde conversion and explicitly refuse unsupported DualUse compatibility states rather than
+silently accepting an unaudited branch.
+
+Epoch Add/remove can persist new tree/context/secrets and epoch-keypair rows. Pending commits,
+proposals and own-leaf state require either a complete bounded compound transition journal or
+an enforced producer boundary that saves only Operational states. Never erase unfinished
+state to fit the profile. Current Mewtual configuration uses max_past_epochs0 and zero resumption
+PSKs; do not claim that ordinary completed epochs inevitably require retained old trees. If
+that configuration is increased, audit every old-epoch queue/member/ratchet/timestamp graph.
+Key-package, PSK, encryption and epoch-keypair getters used by live operations also need their
+specific visitors. Raw provider backing fees do not authorize their later typed expansion.
+
+Before enabling this extension, exercise first-send and first-receive persistence, reordered
+messages within/outside tolerance, cold reopen, epoch Add/remove and parent/child overlap.
+Unsupported sources stay retained and incomplete; no truncation, downgrade or history reset is
+an acceptable substitute for implementing the needed shape/operation path.
 
 Expected affected implementation: memory_storage policy/cursor/Serde adapter modules; a new MLS
 owner-only restore entry; Sync's narrow strategy/negative limits; App's actual original-source
