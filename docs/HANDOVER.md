@@ -1,47 +1,13 @@
-### Retained JOIN source cannot be overwritten by generic admission (UNRUN)
-
-The actual catalog source/debt fence now covers cold/paused/no-worker rows and Store-admitted
-unwritten candidates. It runs under admission->catalog before generic issued retry/dirty flush/
-RNG, old captured finish/AlreadyCurrent, positive resolve and positive storage. It matches only
-full group/signer; retirement, negative repair and unrelated group work remain available. Four
-real sealed-source regressions are authored UNRUN. No scope/Current or typed journal bypass is
-added; actual ScopeIntent/terminal joining still remains open. No compiler/tests/build ran.
-
-<!-- JOIN execution source checkpoint; primary must retain current global gate status. -->
-### Private checkpoint arm/input source checkpoint (all new tests UNRUN)
-
-Factory work adds an explicit physical JOIN1/v2 execution policy, actual first-grant/debit writes,
-a unique once-bound connected network/DATA cell, and exact signed-input persistence after caller
-Drop/pause/row retirement. Default/Pending/archive-only parsers stay strict; every original source,
-whole-parent, descriptor and real file/root barrier remains. Lower tickets retain actual completion
-capacity; cold arms remain spent and configuration never resets a saved allowance. The distinct
-ReceivedInput permit cannot admit counters or membership. New source counts: 15 DATA + 13 App +
-3 Sync regressions, UNRUN under the user's compiler/test/build pause. Direct formatting is not
-compilation evidence. Executable RetryGrant/same-T continuation, cold INPUT/SDK/Accepted,
-ScopeIntent/Frozen/Current/ready, production root-kind2/native/global heap remain OPEN. See
-[execution contract](communication-recovery/CHAT-DESTINATION-JOIN-EXECUTION-SCHEMA.md).
-
 # Mewtual; Handover
-
-## Before-SDK founder input resource gate (5 November; authored, unexecuted)
-
-The MLS opt-in `preflight_fresh_founder_input` now rejects a restored old/tombstone-heavy provider
-before App can grow it with new group SDK rows. Actual physical allocation/one-row/capacity checks
-share the same guard through exact SDK signature-row comparison. Pinned credential/key shape and
-pair validation are bounded before encoders; temporary private probe values wipe on every exit.
-The result is negative-only current input shape, never Fresh, grant payment or Current. Associated
-32KiB invoice is logical caller funding; all SDK-intermediate/active heaps remain open. Seven tests
-are authored UNRUN; read-only design and actual-diff reviews CLEAR. Direct formatting/whitespace
-passed; no compiler/tests/build ran. Pending focused selector: `cargo test -p catcoms-mls founder_input::tests`.
-The App consuming grant/intent/source factory is still in progress and is not activated here.
 
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
 The new v2 Profile/Admission, successor headers, acceptance/append/removal records, public transition
 math and tree proofs are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The actual
-Sync-only v2 founder producer now derives its genesis from original real creation/scope custody;
-its covering App/archive save and live governing/dispatch consumers are still absent. The real
+Sync-only v2 founder producer now derives its genesis from original real creation/scope custody.
+Its App creation debit and FoundingIntent consumer are now authored; covering source/head saves
+and live governing/dispatch consumers remain unfinished. The real
 canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
 Add/save/install/reply and exact retained-successor recovery source is integrated, with regressions
 authored but unrun; it remains one founder/one Add/zero history, not the production v2 consumer.
@@ -65,8 +31,61 @@ The next actual consuming [archive-host vertical](communication-recovery/CHAT-OW
 has passed design review, including original FoundingIntent before scope mutation, a NEW exact
 unexposed-negative recovery, independently durable exact repair seeds and unified protocol-aware
 writer exclusion. Original bootstrap ciphertext and the namespace-only declaration below are now
-authored consuming prerequisites; actual creation grants/FoundingIntent/source persistence,
-canonical head/scope saves and cold/crash acceptance remain unfinished.
+authored consuming prerequisites. Actual creation debit/FoundingIntent source is now reviewed;
+source persistence, canonical head/scope saves and cold/crash acceptance remain unfinished.
+
+## Original founder debit and FoundingIntent (5 November; authored, UNRUN)
+
+The private archive opener now has an actual original creation consumer: supplied fresh-device
+preflight, immutable spent debit with real file/parent barriers, one-shot actual `Server::found`,
+RAM-only admission exclusion, then target/link/seed/stage/FoundingIntent persistence. Cached
+ciphertexts and original held files survive warm interruptions. Matching cold bytes never mint
+another SDK ticket. Exact saved intent results retire both transient registries without renewing
+the original creator's life; unknown debt remains retained. This is private progress, not Current.
+
+Eleven debit/creation tests, eleven plan/intent tests and eight local-codec tests are authored
+UNRUN. The plan tests include thirteen retry barriers, the separate unknown-directory case and
+seven saved intents crossing five temporary slots. An empty directory whose original handle was
+never obtained stays held; automatic repair of that uncertainty is not implemented. Final combined
+adversarial static review is clear after fixes. No compiler, compiled tests or build ran. Scope/S0 preparation,
+SourcePrepared/source execution/save, negative closure, typed SDK restore, canonical activation
+and native Chat V2 remain open. See the
+[factory contract](communication-recovery/CHAT-OWNER-FOUNDING-INTENT-FACTORY.md).
+
+### Retained JOIN source cannot be overwritten by generic admission (UNRUN)
+
+The actual catalog source/debt fence now covers cold/paused/no-worker rows and Store-admitted
+unwritten candidates. It runs under admission->catalog before generic issued retry/dirty flush/
+RNG, old captured finish/AlreadyCurrent, positive resolve and positive storage. It matches only
+full group/signer; retirement, negative repair and unrelated group work remain available. Four
+real sealed-source regressions are authored UNRUN. No scope/Current or typed journal bypass is
+added; actual ScopeIntent/terminal joining still remains open. No compiler/tests/build ran.
+
+<!-- JOIN execution source checkpoint; primary must retain current global gate status. -->
+### Private checkpoint arm/input source checkpoint (all new tests UNRUN)
+
+Factory work adds an explicit physical JOIN1/v2 execution policy, actual first-grant/debit writes,
+a unique once-bound connected network/DATA cell, and exact signed-input persistence after caller
+Drop/pause/row retirement. Default/Pending/archive-only parsers stay strict; every original source,
+whole-parent, descriptor and real file/root barrier remains. Lower tickets retain actual completion
+capacity; cold arms remain spent and configuration never resets a saved allowance. The distinct
+ReceivedInput permit cannot admit counters or membership. New source counts: 15 DATA + 13 App +
+3 Sync regressions, UNRUN under the user's compiler/test/build pause. Direct formatting is not
+compilation evidence. Executable RetryGrant/same-T continuation, cold INPUT/SDK/Accepted,
+ScopeIntent/Frozen/Current/ready, production root-kind2/native/global heap remain OPEN. See
+[execution contract](communication-recovery/CHAT-DESTINATION-JOIN-EXECUTION-SCHEMA.md).
+
+## Before-SDK founder input resource gate (5 November; authored, unexecuted)
+
+The MLS opt-in `preflight_fresh_founder_input` now rejects a restored old/tombstone-heavy provider
+before App can grow it with new group SDK rows. Actual physical allocation/one-row/capacity checks
+share the same guard through exact SDK signature-row comparison. Pinned credential/key shape and
+pair validation are bounded before encoders; temporary private probe values wipe on every exit.
+The result is negative-only current input shape, never Fresh, grant payment or Current. Associated
+32KiB invoice is logical caller funding; all SDK-intermediate/active heaps remain open. Seven tests
+are authored UNRUN; read-only design and actual-diff reviews CLEAR. Direct formatting/whitespace
+passed; no compiler/tests/build ran. Pending focused selector: `cargo test -p catcoms-mls founder_input::tests`.
+The App consuming grant/intent/source factory is still in progress and is not activated here.
 
 ## Private join input separation (5 November; unexecuted)
 

@@ -7,6 +7,7 @@ use super::journal_basis::JournalAdmissionPermit;
 use super::*;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::CriticalCatalogReadPool;
+pub(in crate::store) mod archive_founder;
 
 const MAX_PREDECESSORS: usize = 5;
 mod join_execution;
@@ -20,6 +21,28 @@ const REGISTRY_METADATA: usize = 4096;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     JoinCheckpoint,
+    ArchiveBootstrap,
+}
+
+/// Closed original owners. Archive plans share the creator's weak revoker, never another
+/// watch sender which could outlive the actual private node and manufacture renewed life.
+enum PredecessorRevoker {
+    Join(revocation::Handle),
+    Archive(crate::store::persistence::FounderCreationRevoker),
+}
+impl PredecessorRevoker {
+    fn revoke(&self) {
+        match self {
+            Self::Join(original) => original.revoke(),
+            Self::Archive(original) => {
+                catcoms_sync::local_chat_scope::ManagedChatScopeRevocation::revoke(original)
+            }
+        }
+    }
+}
+enum MetadataCustody {
+    Join { _fee: CatalogReadReservation },
+    Archive { _fee: Arc<CatalogReadReservation> },
 }
 
 struct Entry {
@@ -30,9 +53,9 @@ struct Entry {
     revision: u64,
     kind: Kind,
     identity: Arc<()>,
-    revoker: revocation::Handle,
+    revoker: PredecessorRevoker,
     negative: RequestCancellation,
-    _metadata_fee: CatalogReadReservation,
+    _metadata_fee: MetadataCustody,
 }
 
 /// Independently charged fixed metadata only: no source key/candidate, transport, Store,
@@ -191,9 +214,9 @@ impl PreparedOriginalPredecessor {
                 revision,
                 kind,
                 identity: owner.identity(),
-                revoker: owner.handle(),
+                revoker: PredecessorRevoker::Join(owner.handle()),
                 negative: observer.clone(),
-                _metadata_fee: metadata_fee,
+                _metadata_fee: MetadataCustody::Join { _fee: metadata_fee },
             }),
             task: OriginalPredecessorTask { owner, observer },
         })

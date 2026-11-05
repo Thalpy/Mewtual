@@ -21,7 +21,12 @@ use catcoms_storage::VaultFormat;
 use std::sync::Arc;
 pub(in crate::store) mod archive_bootstrap;
 mod catalog_envelope;
-pub use archive_bootstrap::{ArchiveBootstrapCatalogPolicy, PreparedArchiveBootstrapStore};
+pub use archive_bootstrap::{
+    ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
+    ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
+    ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
+    PreparedArchiveBootstrapStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+};
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};

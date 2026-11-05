@@ -5866,3 +5866,24 @@ counters, source, scope, schedule or descriptors. Unknown/cold partial stages re
 The live non-hostile-vault-directory assumption, logical-only pool invoice, full typed SDK heap,
 public-owner-v2 root distribution, cold accepted completion and native activation remain open.
 Compilation/tests/build are paused; authored adversarial regressions are UNRUN.
+
+### Original archive founder debit and intent custody (inactive)
+
+The private archive consumer requires the actual supplied fresh-device preflight before debit
+or group SDK work. Original input ownership is retained on pre-SDK refusal. A complete immutable
+spent debit is written/synced before the same creator can consume its one actual SDK admission;
+lost local replies can replay only that still-unconsumed original result. Shared consumption,
+same held object/full bytes, root directory/marker and original cancellation are checked after
+waits. No cold count, equal ciphertext or replacement mount can mint a new SDK entry.
+
+Actual source and admission→pins→canonical→Root custody order the target reservation, immutable
+authenticated link, exact small seed/stage and promoted FoundingIntent. Store debt contains
+ciphertext, inert original metadata/weak negatives and the original fee, never the creator's
+sender/device/T/Server. Closing the creator fences positives while unknown debt survives. Exact
+saved-result retirement frees only its own temporary slots; durable target presence keeps older
+paths fenced. A created directory without its original handle remains unknown and is not adopted.
+This uses the existing non-hostile live private-vault-directory assumption, not a new OS-level
+exclusive-path/hardlink guarantee. Named logical fees do not bound all SDK/allocator/native heaps.
+No scope row, saved source, Current, protocol rollout or native Chat V2 follows from this slice.
+SourcePrepared/source writes, negative closure and complete SDK admission remain unfinished;
+compiled regressions are authored UNRUN during the explicit pause.

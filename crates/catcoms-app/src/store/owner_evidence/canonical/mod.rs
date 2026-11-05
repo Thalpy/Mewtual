@@ -10,6 +10,7 @@ use catcoms_sync::local_chat_scope::{ManagedChatScopeBinding, ManagedChatScopeRe
 use std::sync::{Arc, MutexGuard, Weak};
 use tokio::sync::watch;
 
+pub(in crate::store) mod archive_vacancy;
 mod budget;
 mod head;
 mod initialize;

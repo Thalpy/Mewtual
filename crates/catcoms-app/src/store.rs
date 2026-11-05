@@ -51,9 +51,12 @@ mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
 pub use critical_namespaces::{
-    ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, CheckpointJoinExecutionPolicy,
-    CheckpointJoinNetwork, CheckpointJoinSubmissionStatus, CriticalCatalogReadPool,
-    JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
+    ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
+    ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
+    CheckpointJoinExecutionPolicy, CheckpointJoinNetwork, CheckpointJoinSubmissionStatus,
+    CriticalCatalogReadPool, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,
+    PreparedArchiveBootstrapStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
     ReturnedCheckpointJoinActivation,
 };
 mod owner_evidence;
@@ -542,8 +545,1107 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 mod persistence {
     use super::*;
+    use critical_namespaces::archive_bootstrap::founder_codec as founder;
+
+    /// Closed flat control destinations under the SAME original declared root. In particular
+    /// there is no unowned invocation directory whose mkdir/open gap could mint another SDK
+    /// ticket. Group target directories retain their separate original ownership transaction.
+    #[derive(Clone, Copy)]
+    enum FounderControlSlot {
+        Debit,
+        Intent,
+        Stage,
+        Seed,
+    }
+    impl FounderControlSlot {
+        fn suffix(self) -> &'static str {
+            match self {
+                Self::Debit => ".debit",
+                Self::Intent => ".intent",
+                Self::Stage => ".intent-stage",
+                Self::Seed => ".intent-seed",
+            }
+        }
+        fn limit(self) -> usize {
+            match self {
+                Self::Debit => founder::MAX_DEBIT_FRAME,
+                Self::Intent | Self::Stage => founder::MAX_INTENT_FRAME,
+                Self::Seed => founder::MAX_TRANSITION_FRAME,
+            }
+        }
+    }
+
+    struct FounderLife {
+        identity: std::sync::Arc<()>,
+        signal: tokio::sync::watch::Sender<bool>,
+    }
+    impl Drop for FounderLife {
+        fn drop(&mut self) {
+            self.signal.send_replace(true);
+        }
+    }
+    /// Negative-only weak target; an observer/plan/debt cannot retain its creator sender.
+    #[derive(Clone)]
+    pub(super) struct FounderCreationRevoker(std::sync::Weak<FounderLife>);
+    impl std::fmt::Debug for FounderCreationRevoker {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("FounderCreationRevoker")
+                .finish_non_exhaustive()
+        }
+    }
+    impl catcoms_sync::local_chat_scope::ManagedChatScopeRevocation for FounderCreationRevoker {
+        fn revoke(&self) {
+            if let Some(original) = self.0.upgrade() {
+                original.signal.send_replace(true);
+            }
+        }
+    }
+    struct FounderInvocationAuthority {
+        creator: std::sync::Weak<FounderLife>,
+        signal: tokio::sync::watch::Receiver<bool>,
+        mount: catcoms_rt::RequestCancellation,
+    }
+    impl std::fmt::Debug for FounderInvocationAuthority {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("OriginalFounderInvocationAuthority")
+                .finish_non_exhaustive()
+        }
+    }
+    #[async_trait::async_trait]
+    impl catcoms_rt::RequestAuthority for FounderInvocationAuthority {
+        fn authorized(&self) -> bool {
+            self.creator.upgrade().is_some()
+                && !*self.signal.borrow()
+                && self.signal.has_changed().is_ok()
+                && !self.mount.is_cancelled()
+        }
+        async fn revoked(&self) {
+            let mut signal = self.signal.clone();
+            let mut mount = self.mount.clone();
+            while self.authorized() {
+                tokio::select! {
+                    changed=signal.changed()=>if changed.is_err() {return;},
+                    _=mount.cancelled()=>return,
+                }
+            }
+        }
+    }
+
+    struct OriginalFounderInvocation {
+        data: founder::DebitData,
+        key: [u8; 64],
+        root_directory: catcoms_storage::kept::SessionId,
+        root_marker: catcoms_storage::kept::SessionId,
+        root_marker_digest: [u8; 32],
+        mount: std::sync::Arc<()>,
+        negative: catcoms_rt::RequestCancellation,
+        creator: std::sync::Weak<FounderLife>,
+        sdk_issued: std::sync::atomic::AtomicBool,
+        sdk_consumed: std::sync::atomic::AtomicBool,
+        // Shared actual fee is BOUND to this one original invocation. No second capture can
+        // use it for another request; debt/control copies retain it after creator Drop.
+        control: std::sync::Arc<critical_namespaces::read_pool::CatalogReadReservation>,
+    }
+
+    /// The actual live creator alone owns this sender. No Clone, decoded constructor, Store
+    /// getter, positive scope or extraction of SDK inputs is supplied by this physical capture.
+    pub(super) struct CapturedFounderInvocation {
+        // Close the sole publisher BEFORE the last metadata/control owner can disappear.
+        life: std::sync::Arc<FounderLife>,
+        original: std::sync::Arc<OriginalFounderInvocation>,
+    }
+    impl std::fmt::Debug for CapturedFounderInvocation {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("CapturedFounderInvocation")
+                .finish_non_exhaustive()
+        }
+    }
+    impl CapturedFounderInvocation {
+        pub(super) fn data(&self) -> &founder::DebitData {
+            &self.original.data
+        }
+        pub(super) fn observer(&self) -> catcoms_rt::RequestCancellation {
+            self.original.negative.clone()
+        }
+        pub(super) fn owner_identity(&self) -> std::sync::Arc<()> {
+            self.life.identity.clone()
+        }
+        pub(super) fn revoker(&self) -> FounderCreationRevoker {
+            FounderCreationRevoker(std::sync::Arc::downgrade(&self.life))
+        }
+        pub(super) fn control_custody(
+            &self,
+        ) -> std::sync::Arc<critical_namespaces::read_pool::CatalogReadReservation> {
+            self.original.control.clone()
+        }
+        pub(super) fn validate_original(&self, store: &ServerStore) -> Result<(), AppError> {
+            store.validate_original_founder_invocation(&self.original)
+        }
+    }
+
+    struct FounderDebitDebt {
+        created: Option<critical_namespaces::pending_join::CreatedStage>,
+        bytes: Zeroizing<Vec<u8>>,
+        id: founder::DebitId,
+        // Actual files and bytes drop before this possibly-last shared fee owner, including
+        // when a dead creator's registry slot and its serialized debt are reclaimed together.
+        original: std::sync::Arc<OriginalFounderInvocation>,
+    }
+    struct FounderInvocationSlot {
+        original: std::sync::Arc<OriginalFounderInvocation>,
+        debit: Option<std::sync::Arc<std::sync::Mutex<FounderDebitDebt>>>,
+        intent: Option<std::sync::Arc<std::sync::Mutex<FounderIntentDebt>>>,
+    }
+
+    /// A directory creation can succeed before opening/querying its object fails. Retain that
+    /// uncertainty instead of treating an empty path as vacant on retry. Only an actual held
+    /// directory may subsequently receive this creator's marker; cold bytes remain DATA.
+    struct FounderTargetReservation {
+        directory: Option<File>,
+        identity: Option<catcoms_storage::kept::SessionId>,
+    }
+    struct FounderIntentDebt {
+        target: Option<FounderTargetReservation>,
+        marker_file: Option<critical_namespaces::pending_join::CreatedStage>,
+        seed_file: Option<critical_namespaces::pending_join::CreatedStage>,
+        stage_file: Option<critical_namespaces::pending_join::CreatedStage>,
+        marker: Zeroizing<Vec<u8>>,
+        candidate: Zeroizing<Vec<u8>>,
+        seed: Zeroizing<Vec<u8>>,
+        data: founder::IntentData,
+        marker_data: founder::TargetMarkerData,
+        saved_facts: std::sync::Arc<founder::FoundingData>,
+        id: founder::IntentId,
+        debit: Option<std::sync::Arc<std::sync::Mutex<FounderDebitDebt>>>,
+        // Inert original metadata/control fee LAST. No Server/T/device or creator sender is
+        // reachable through this Store-retained debt after its caller disappears.
+        original: std::sync::Arc<OriginalFounderInvocation>,
+    }
+    pub(super) struct PreparedFoundingIntent {
+        original: std::sync::Arc<OriginalFounderInvocation>,
+        debt: std::sync::Arc<std::sync::Mutex<FounderIntentDebt>>,
+    }
+    impl std::fmt::Debug for PreparedFoundingIntent {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("PreparedFoundingIntent")
+                .finish_non_exhaustive()
+        }
+    }
+    /// Only the actual target/link/seed/stage/promoted-file and parent-barrier writer below
+    /// constructs this result. It is unexposed source progress, never Current/owner authority.
+    pub(super) struct SavedFoundingIntent {
+        original: std::sync::Arc<OriginalFounderInvocation>,
+        debt: std::sync::Arc<std::sync::Mutex<FounderIntentDebt>>,
+        id: founder::IntentId,
+        // Preallocated bounded immutable facts handed off ONLY after actual save barriers. They allow exact
+        // original-predecessor retirement without reacquiring Root/debt beneath admission.
+        facts: std::sync::Arc<founder::FoundingData>,
+        debit: founder::DebitId,
+    }
+    impl std::fmt::Debug for SavedFoundingIntent {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SavedFoundingIntent")
+                .finish_non_exhaustive()
+        }
+    }
+    impl SavedFoundingIntent {
+        /// Identity of this actual writer's saved result, not a disk observation, Current or
+        /// source-validity proof. Its only consumer retires this SAME weak RAM exclusion after
+        /// first validating the real saved files under the original writers.
+        pub(super) fn retains_original(
+            &self,
+            captured: &CapturedFounderInvocation,
+            facts: &founder::FoundingData,
+            debit: founder::DebitId,
+        ) -> Result<(), AppError> {
+            if !std::sync::Arc::ptr_eq(&self.original, &captured.original)
+                || self.original.negative.is_cancelled()
+                || self.facts.as_ref() != facts
+                || self.debit != debit
+            {
+                return Err(critical_namespaces::refused());
+            }
+            Ok(())
+        }
+        /// Reobserve the SAME saved intent and actual creator while its original admission
+        /// and old-owner namespace guards remain borrowed. This supplies no bytes, scope row,
+        /// replacement owner or decoded-positive ticket to an unrelated caller.
+        pub(super) fn validate_original<T, R>(
+            &self,
+            store: &ServerStore,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+        ) -> Result<(), AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::refused;
+            if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
+                return Err(refused());
+            }
+            guard.validate_source_only(captured)?;
+            let root_guard = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(store, &self.original, root)?;
+            let debt = self.debt.lock().map_err(|_| refused())?;
+            if !std::sync::Arc::ptr_eq(&debt.original, &self.original)
+                || debt.id != self.id
+                || debt.marker_data.founding != *guard.plan_data()
+                || debt.data.debit != guard.debit_id()
+            {
+                return Err(refused());
+            }
+            let path = founder_control_path(
+                store,
+                &self.original.data.invocation,
+                FounderControlSlot::Intent,
+            )?;
+            verify_archive_held_name(&path, debt.stage_file.as_ref().ok_or_else(refused)?)?;
+            let (_, bytes) =
+                read_archive_object(&path, founder::MAX_INTENT_FRAME)?.ok_or_else(refused)?;
+            if founder::IntentId::of(&bytes) != self.id
+                || bytes.as_slice() != debt.candidate.as_slice()
+            {
+                return Err(refused());
+            }
+            let name = critical_namespaces::archive_bootstrap::target_name(
+                &self.original.data.invocation.vault,
+                &debt.marker_data.founding.group,
+                &debt.marker_data.founding.signer,
+            )?;
+            let target = store
+                .dir
+                .join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
+                .join(std::str::from_utf8(&name).map_err(|_| refused())?);
+            validate_founder_target(&target, debt.target.as_ref().ok_or_else(refused)?)?;
+            validate_founder_marker(&target, &debt)?;
+            validate_actual_founder_debit(
+                store,
+                debt.debit.as_ref().ok_or_else(refused)?,
+                &self.original,
+                guard.debit_id(),
+            )?;
+            validate_founder_original_root(store, &self.original, root)?;
+            guard.validate_source_only(captured)
+        }
+    }
+    /// Only currently unresolved warm jobs occupy this fixed array. Immutable spent records
+    /// remain on disk after exact terminal/debt handoff; this is not a lifetime group limit.
+    pub(super) struct FounderInvocationRegistry {
+        slots: [Option<FounderInvocationSlot>; 5],
+    }
+    impl Default for FounderInvocationRegistry {
+        fn default() -> Self {
+            Self {
+                slots: std::array::from_fn(|_| None),
+            }
+        }
+    }
+    /// Inert paid lookup. No sender, runtime ticket or SDK permission follows from its bytes.
+    pub(super) struct ExistingFounderInvocation {
+        incomplete: bool,
+        warm: bool,
+        _control: critical_namespaces::read_pool::CatalogReadReservation,
+    }
+    impl ExistingFounderInvocation {
+        pub(super) fn is_incomplete(&self) -> bool {
+            self.incomplete
+        }
+        pub(super) fn is_warm(&self) -> bool {
+            self.warm
+        }
+    }
+    pub(super) enum InvocationDisposition {
+        Original(CapturedFounderInvocation),
+        Existing(ExistingFounderInvocation),
+    }
+    /// Shares SERIALIZED debt only. The actual sender stays in CapturedFounderInvocation,
+    /// and Store can keep these exact bytes/files/fee without owning inputs or a creator.
+    pub(super) struct PreparedCreationDebit {
+        original: std::sync::Arc<OriginalFounderInvocation>,
+        debt: std::sync::Arc<std::sync::Mutex<FounderDebitDebt>>,
+    }
+    impl std::fmt::Debug for PreparedCreationDebit {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("PreparedCreationDebit")
+                .finish_non_exhaustive()
+        }
+    }
+    /// Private fields: only the actual original create_new/held-object writer below can mint
+    /// this one-shot result AFTER file+parent barriers. A matching cold record cannot do so.
+    pub(super) struct SavedCreationDebit {
+        original: std::sync::Arc<OriginalFounderInvocation>,
+        debt: std::sync::Arc<std::sync::Mutex<FounderDebitDebt>>,
+        id: founder::DebitId,
+    }
+    impl std::fmt::Debug for SavedCreationDebit {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SavedCreationDebit").finish_non_exhaustive()
+        }
+    }
+    impl SavedCreationDebit {
+        pub(super) fn id(&self) -> founder::DebitId {
+            self.id
+        }
+        /// Consume BEFORE taking the actual original SDK inputs. No error/SDK failure may
+        /// mint another ticket or return this one to a captured/decoded invocation.
+        pub(super) fn consume_for_sdk(
+            self,
+            store: &ServerStore,
+            captured: &CapturedFounderInvocation,
+        ) -> Result<(), AppError> {
+            use critical_namespaces::refused;
+            if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
+                return Err(refused());
+            }
+            let root_guard = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(store, &self.original, root)?;
+            {
+                let debt = self.debt.lock().map_err(|_| refused())?;
+                validate_founder_original_root(store, &self.original, root)?;
+                if debt.id != self.id || !std::sync::Arc::ptr_eq(&debt.original, &self.original) {
+                    return Err(refused());
+                }
+                let path = founder_control_path(
+                    store,
+                    &self.original.data.invocation,
+                    FounderControlSlot::Debit,
+                )?;
+                verify_archive_held_name(&path, debt.created.as_ref().ok_or_else(refused)?)?;
+                let (_file, actual) =
+                    read_archive_object(&path, founder::MAX_DEBIT_FRAME)?.ok_or_else(refused)?;
+                if actual.as_slice() != debt.bytes.as_slice()
+                    || founder::DebitId::of(&actual) != self.id
+                {
+                    return Err(refused());
+                }
+            }
+            #[cfg(test)]
+            {
+                let hook = store
+                    .founder_before_sdk_consume
+                    .lock()
+                    .map_err(|_| refused())?
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            // The held-name/full-byte read may have blocked while the root or marker changed.
+            // Revalidate the SAME actual objects again; exact bytes at a replacement path do
+            // not inherit this live creator's original SDK admission.
+            validate_founder_original_root(store, &self.original, root)?;
+            // File/parent checks above can block. Sample the original negatives AFTER them,
+            // immediately before the one irreversible SDK admission; no reread by logical key
+            // can replace this creator when a close/unlock/new mount wins first.
+            if self.original.negative.is_cancelled()
+                || root.negative.is_cancelled()
+                || !self.original.sdk_issued.load(Ordering::Acquire)
+                || self
+                    .original
+                    .sdk_consumed
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+            {
+                return Err(refused());
+            }
+            Ok(())
+        }
+    }
 
     impl ServerStore {
+        /// Capture one LOCAL original request. ALL four fixed control slots are classified;
+        /// missing debit alone is never permission to ignore a stage/seed/unknown record.
+        /// The caller paid before copying the bounded name; this takes that real fee into
+        /// immutable invocation custody so later Store debt cannot outlive its accounting.
+        pub(super) fn capture_original_founder_invocation(
+            &self,
+            data: founder::DebitData,
+            control: critical_namespaces::read_pool::CatalogReadReservation,
+        ) -> Result<InvocationDisposition, AppError> {
+            use critical_namespaces::refused;
+            let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
+            control.validate(&policy.pending.pool, founder::CONTROL_FEE)?;
+            data.validate()?;
+            // Create the sole lifetime and variable input BEFORE writers. The final fixed
+            // original/control Arc holders below are small prepaid metadata allocations;
+            // they do not acquire another pool fee under those writers. Losing callers
+            // release buffers/fee only after guards drain, never from decoded credit fields.
+            let life = std::sync::Arc::new(FounderLife {
+                identity: std::sync::Arc::new(()),
+                signal: tokio::sync::watch::channel(false).0,
+            });
+            let observer = catcoms_rt::RequestCancellation::new(life.signal.subscribe(), None)
+                .with_authority(std::sync::Arc::new(FounderInvocationAuthority {
+                    creator: std::sync::Arc::downgrade(&life),
+                    signal: life.signal.subscribe(),
+                    mount: self.chat_mount.observer(),
+                }));
+            let key = data.invocation.name();
+            // Only a dead capture which NEVER registered write debt/admitted an SDK unit may
+            // be reclaimed from exact all-slot absence. Declare displaced fee owners BEFORE
+            // writers so every error/return drops them after those guards, never under them.
+            let mut retired: [Option<FounderInvocationSlot>; 5] = std::array::from_fn(|_| None);
+            let mounted_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let mounted = mounted_guard.as_ref().ok_or_else(refused)?;
+            if data.invocation.vault != mounted.descriptor.vault
+                || data.invocation.root != mounted.descriptor.root
+                || mounted.negative.is_cancelled()
+                || !std::sync::Arc::ptr_eq(&mounted.mount, &self.registry_mount())
+            {
+                return Err(refused());
+            }
+            let root_path = self.dir.join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT);
+            validate_archive_root_session(&root_path, mounted)?;
+            let mut runtime = self.founder_invocations.lock().map_err(|_| refused())?;
+            for (index, deferred) in retired.iter_mut().enumerate() {
+                let reclaimable = if let Some(slot) = &runtime.slots[index] {
+                    if !slot.original.negative.is_cancelled()
+                        || slot.debit.is_some()
+                        || slot.intent.is_some()
+                        || slot.original.sdk_issued.load(Ordering::Acquire)
+                        || slot.original.sdk_consumed.load(Ordering::Acquire)
+                        || !std::sync::Arc::ptr_eq(&slot.original.mount, &self.registry_mount())
+                        || slot.original.root_directory != mounted.directory_id
+                        || slot.original.root_marker != mounted.marker_id
+                        || slot.original.root_marker_digest != mounted.marker_digest
+                    {
+                        false
+                    } else {
+                        let mut absent = true;
+                        for source in [
+                            FounderControlSlot::Debit,
+                            FounderControlSlot::Intent,
+                            FounderControlSlot::Stage,
+                            FounderControlSlot::Seed,
+                        ] {
+                            let path =
+                                founder_control_path(self, &slot.original.data.invocation, source)?;
+                            if !matches!(fs::symlink_metadata(path),
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                            {
+                                absent = false;
+                            }
+                        }
+                        absent
+                    }
+                } else {
+                    false
+                };
+                if reclaimable {
+                    *deferred = runtime.slots[index].take();
+                }
+            }
+            validate_archive_root_session(&root_path, mounted)?;
+            if let Some(slot) = runtime
+                .slots
+                .iter()
+                .flatten()
+                .find(|slot| slot.original.key == key)
+            {
+                if slot.original.data != data {
+                    return Err(refused());
+                }
+                let existing = ExistingFounderInvocation {
+                    incomplete: false,
+                    warm: !slot.original.negative.is_cancelled(),
+                    _control: control,
+                };
+                drop(runtime);
+                drop(mounted_guard);
+                return Ok(InvocationDisposition::Existing(existing));
+            }
+            // The registry wait cannot turn a replaced parent into an absent invocation.
+            validate_archive_root_session(&root_path, mounted)?;
+            let mut any = false;
+            let mut incomplete = false;
+            let mut saved_id = None;
+            let encryption_key = Zeroizing::new(self.keys.db_key()?);
+            for slot in [
+                FounderControlSlot::Debit,
+                FounderControlSlot::Intent,
+                FounderControlSlot::Stage,
+                FounderControlSlot::Seed,
+            ] {
+                let path = founder_control_path(self, &data.invocation, slot)?;
+                match fs::symlink_metadata(&path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Ok(metadata)
+                        if metadata.file_type().is_file()
+                            && metadata.len() <= slot.limit() as u64 => {}
+                    _ => {
+                        any = true;
+                        incomplete = true;
+                        continue;
+                    }
+                }
+                any = true;
+                if matches!(slot, FounderControlSlot::Debit) {
+                    match read_archive_object(&path, slot.limit()) {
+                        Ok(Some((_file, raw))) => {
+                            match founder::open_debit_data(&encryption_key, data.invocation, &raw) {
+                                Ok(decoded) => {
+                                    if decoded != data {
+                                        return Err(refused());
+                                    }
+                                    saved_id = Some(founder::DebitId::of(&raw));
+                                }
+                                Err(_) => incomplete = true,
+                            }
+                        }
+                        _ => incomplete = true,
+                    }
+                } else {
+                    incomplete = true;
+                }
+            }
+            validate_archive_root_session(&root_path, mounted)?;
+            if any {
+                // No cold typed decoder/result here is an SDK ticket. Later bounded journal
+                // inspection decides its exact progress; the whole request stays non-vacant.
+                let existing = ExistingFounderInvocation {
+                    incomplete: incomplete || saved_id.is_none(),
+                    warm: false,
+                    _control: control,
+                };
+                drop(runtime);
+                drop(mounted_guard);
+                return Ok(InvocationDisposition::Existing(existing));
+            }
+            let index = runtime
+                .slots
+                .iter()
+                .position(Option::is_none)
+                .ok_or_else(refused)?;
+            let original = std::sync::Arc::new(OriginalFounderInvocation {
+                data,
+                key,
+                root_directory: mounted.directory_id,
+                root_marker: mounted.marker_id,
+                root_marker_digest: mounted.marker_digest,
+                mount: self.registry_mount(),
+                negative: observer,
+                creator: std::sync::Arc::downgrade(&life),
+                sdk_issued: std::sync::atomic::AtomicBool::new(false),
+                sdk_consumed: std::sync::atomic::AtomicBool::new(false),
+                control: std::sync::Arc::new(control),
+            });
+            runtime.slots[index] = Some(FounderInvocationSlot {
+                original: original.clone(),
+                debit: None,
+                intent: None,
+            });
+            drop(runtime);
+            drop(mounted_guard);
+            // No bytes or positive SDK operation has been admitted by capturing vacancy.
+            Ok(InvocationDisposition::Original(CapturedFounderInvocation {
+                original,
+                life,
+            }))
+        }
+
+        fn validate_original_founder_invocation(
+            &self,
+            original: &OriginalFounderInvocation,
+        ) -> Result<(), AppError> {
+            use critical_namespaces::refused;
+            let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(self, original, root)
+        }
+
+        /// Register the complete original serialized debit BEFORE any filesystem effect.
+        /// Only this caller's original capture can attach the debt; another same-byte request
+        /// has a different runtime identity and cannot claim the first writer's SDK ticket.
+        pub(super) fn prepare_original_creation_debit(
+            &self,
+            captured: &CapturedFounderInvocation,
+            sealed: Zeroizing<Vec<u8>>,
+        ) -> Result<PreparedCreationDebit, AppError> {
+            use critical_namespaces::refused;
+            captured.validate_original(self)?;
+            if sealed.len() > founder::MAX_DEBIT_FRAME {
+                return Err(refused());
+            }
+            let key = Zeroizing::new(self.keys.db_key()?);
+            let decoded = founder::open_debit_data(&key, captured.data().invocation, &sealed)?;
+            if decoded != *captured.data() {
+                return Err(refused());
+            }
+            let id = founder::DebitId::of(&sealed);
+            let debt = std::sync::Arc::new(std::sync::Mutex::new(FounderDebitDebt {
+                original: captured.original.clone(),
+                bytes: sealed,
+                id,
+                created: None,
+            }));
+            let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(self, &captured.original, root)?;
+            let mut runtime = self.founder_invocations.lock().map_err(|_| refused())?;
+            let slot = runtime
+                .slots
+                .iter_mut()
+                .flatten()
+                .find(|slot| std::sync::Arc::ptr_eq(&slot.original, &captured.original))
+                .ok_or_else(refused)?;
+            if slot.debit.is_some() || captured.original.sdk_issued.load(Ordering::Acquire) {
+                return Err(refused());
+            }
+            validate_founder_original_root(self, &captured.original, root)?;
+            slot.debit = Some(debt.clone());
+            drop(runtime);
+            drop(root_guard);
+            Ok(PreparedCreationDebit {
+                original: captured.original.clone(),
+                debt,
+            })
+        }
+
+        pub(super) fn write_original_creation_debit(
+            &self,
+            prepared: &mut PreparedCreationDebit,
+        ) -> Result<SavedCreationDebit, AppError> {
+            use critical_namespaces::refused;
+            let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(self, &prepared.original, root)?;
+            let mut debt = prepared.debt.lock().map_err(|_| refused())?;
+            validate_founder_original_root(self, &prepared.original, root)?;
+            if !std::sync::Arc::ptr_eq(&debt.original, &prepared.original)
+                || prepared.original.sdk_consumed.load(Ordering::Acquire)
+            {
+                return Err(refused());
+            }
+            let path = founder_control_path(
+                self,
+                &prepared.original.data.invocation,
+                FounderControlSlot::Debit,
+            )?;
+            #[cfg(test)]
+            self.archive_declaration_fault(121)?;
+            if debt.created.is_none() {
+                // Even a COMPLETE byte-identical existing debit is Existing DATA, never this
+                // creator's original positive grant. Atomic create_new is the actual arbiter.
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                debt.created = Some(critical_namespaces::pending_join::CreatedStage {
+                    file,
+                    identity: None,
+                });
+                #[cfg(test)]
+                self.archive_declaration_fault(122)?;
+            }
+            {
+                // Split borrows instead of temporarily taking the sole bytes out of Store
+                // custody. Even unwinding a lower call cannot leave this cell with an empty
+                // replacement and refund its original source/debt before actual destruction.
+                let FounderDebitDebt { bytes, created, .. } = &mut *debt;
+                ensure_archive_output(
+                    &path,
+                    bytes,
+                    created,
+                    ArchiveOutputMode::Original,
+                    #[cfg(test)]
+                    self.critical_namespace_fault.load(Ordering::SeqCst),
+                    #[cfg(test)]
+                    123,
+                )?;
+            }
+            #[cfg(test)]
+            self.archive_declaration_fault(124)?;
+            let parent = self.dir.join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT);
+            sync_directory(&parent)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            #[cfg(test)]
+            self.archive_declaration_fault(125)?;
+            validate_founder_original_root(self, &prepared.original, root)?;
+            verify_archive_held_name(&path, debt.created.as_ref().ok_or_else(refused)?)?;
+            // A lost LOCAL return may replay the SAME original admission while it remains
+            // unconsumed. Every handle shares sdk_consumed; only its first compare-exchange
+            // can enter the SDK. This never restores a consumed unit, replaces the source or
+            // admits a cold/new capture, and file ownership/barriers were rechecked above.
+            prepared.original.sdk_issued.store(true, Ordering::Release);
+            let id = debt.id;
+            drop(debt);
+            drop(root_guard);
+            Ok(SavedCreationDebit {
+                original: prepared.original.clone(),
+                debt: prepared.debt.clone(),
+                id,
+            })
+        }
+
+        /// Attach the COMPLETE private original transaction before any target-directory or
+        /// journal effect. The borrowed guard owns the real admission→pins→canonical writers
+        /// and source; raw decoded facts, a matching ciphertext or a bool cannot enter here.
+        pub(super) fn prepare_original_founding_intent<T, R>(
+            &self,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+            marker: Zeroizing<Vec<u8>>,
+            candidate: Zeroizing<Vec<u8>>,
+            seed: Zeroizing<Vec<u8>>,
+        ) -> Result<PreparedFoundingIntent, AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::refused;
+            guard.validate_source_only(captured)?;
+            captured.validate_original(self)?;
+            if marker.len() > founder::MAX_TARGET_MARKER_FRAME
+                || candidate.len() > founder::MAX_INTENT_FRAME
+                || seed.len() > founder::MAX_TRANSITION_FRAME
+                || !captured.original.sdk_consumed.load(Ordering::Acquire)
+            {
+                return Err(refused());
+            }
+            let key = Zeroizing::new(self.keys.db_key()?);
+            let debit = captured.data();
+            let debit_id = guard.debit_id();
+            let marker_data = founder::open_target_marker_data(&key, debit, debit_id, &marker)?;
+            if &marker_data.founding != guard.plan_data() {
+                return Err(refused());
+            }
+            let data = founder::open_intent_data(&key, debit, debit_id, &candidate)?;
+            if !matches!(data.kind, founder::IntentKind::Founding { .. }) {
+                return Err(refused());
+            }
+            data.successor(None, debit, debit_id)?;
+            data.matches_marker(&marker_data, founder::TargetMarkerId::of(&marker))?;
+            let seed_plain = founder::open_transition_seed(&key, &seed)?;
+            let decoded = founder::parse_transition_seed_data(&key, &seed_plain, debit, debit_id)?;
+            if decoded.expected_parent.is_some()
+                || decoded.marker_frame != Some(marker.as_slice())
+                || decoded.candidate_frame != candidate.as_slice()
+                || decoded.candidate != data
+                || decoded.marker.as_ref() != Some(&marker_data)
+            {
+                return Err(refused());
+            }
+            drop(decoded);
+            drop(seed_plain);
+            let id = founder::IntentId::of(&candidate);
+            let saved_facts = std::sync::Arc::new(marker_data.founding.clone());
+            let mut debt = std::sync::Arc::new(std::sync::Mutex::new(FounderIntentDebt {
+                target: None,
+                marker_file: None,
+                seed_file: None,
+                stage_file: None,
+                marker,
+                candidate,
+                seed,
+                data,
+                marker_data,
+                saved_facts,
+                id,
+                debit: None,
+                original: captured.original.clone(),
+            }));
+            let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(self, &captured.original, root)?;
+            guard.validate_source_only(captured)?;
+            let mut runtime = self.founder_invocations.lock().map_err(|_| refused())?;
+            let slot = runtime
+                .slots
+                .iter_mut()
+                .flatten()
+                .find(|slot| std::sync::Arc::ptr_eq(&slot.original, &captured.original))
+                .ok_or_else(refused)?;
+            if slot.intent.is_some() {
+                return Err(refused());
+            }
+            validate_actual_founder_debit(
+                self,
+                slot.debit.as_ref().ok_or_else(refused)?,
+                &captured.original,
+                debit_id,
+            )?;
+            // The same immutable debit/file remains retained with the intent debt. Later
+            // writes recheck it without acquiring registry beneath an intent/debt mutex.
+            std::sync::Arc::get_mut(&mut debt)
+                .ok_or_else(refused)?
+                .get_mut()
+                .map_err(|_| refused())?
+                .debit = Some(slot.debit.as_ref().ok_or_else(refused)?.clone());
+            validate_founder_original_root(self, &captured.original, root)?;
+            guard.validate_source_only(captured)?;
+            slot.intent = Some(debt.clone());
+            drop(runtime);
+            drop(root_guard);
+            Ok(PreparedFoundingIntent {
+                original: captured.original.clone(),
+                debt,
+            })
+        }
+
+        /// The target reservation/link is durable BEFORE the small invocation seed can exist.
+        /// A cold/foreign empty directory is never adopted by this original-positive writer.
+        /// Retrying an interrupted first seed uses only its same held object; a complete seed
+        /// authorizes bounded exact stage repair, not SDK re-entry or a different source.
+        pub(super) fn save_original_founding_intent<T, R>(
+            &self,
+            prepared: &mut PreparedFoundingIntent,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+        ) -> Result<SavedFoundingIntent, AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::{refused, ARCHIVE_BOOTSTRAP_ROOT};
+            // Completed serialized debt can retire only after all actual barriers. Declare
+            // its displaced owner before writers so files/buffers/fees never drain under them.
+            let mut retired = None;
+            if !std::sync::Arc::ptr_eq(&prepared.original, &captured.original) {
+                return Err(refused());
+            }
+            guard.validate_source_only(captured)?;
+            let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(self, &prepared.original, root)?;
+            let mut debt = prepared.debt.lock().map_err(|_| refused())?;
+            validate_founder_original_root(self, &prepared.original, root)?;
+            guard.validate_source_only(captured)?;
+            if !std::sync::Arc::ptr_eq(&debt.original, &prepared.original)
+                || debt.data.debit != guard.debit_id()
+                || debt.marker_data.founding != *guard.plan_data()
+                || founder::IntentId::of(&debt.candidate) != debt.id
+            {
+                return Err(refused());
+            }
+            validate_actual_founder_debit(
+                self,
+                debt.debit.as_ref().ok_or_else(refused)?,
+                &prepared.original,
+                guard.debit_id(),
+            )?;
+            let parent = self.dir.join(ARCHIVE_BOOTSTRAP_ROOT);
+            let name = critical_namespaces::archive_bootstrap::target_name(
+                &prepared.original.data.invocation.vault,
+                &debt.marker_data.founding.group,
+                &debt.marker_data.founding.signer,
+            )?;
+            let target_path = parent.join(std::str::from_utf8(&name).map_err(|_| refused())?);
+            if debt.target.is_none() {
+                #[cfg(test)]
+                self.archive_declaration_fault(131)?;
+                fs::create_dir(&target_path).map_err(|error| AppError::Io(error.to_string()))?;
+                // Remember uncertainty BEFORE opening/querying can fail. A later retry must
+                // not adopt a replacement empty path after losing the actual directory.
+                debt.target = Some(FounderTargetReservation {
+                    directory: None,
+                    identity: None,
+                });
+                #[cfg(test)]
+                self.archive_declaration_fault(144)?;
+                let file = open_archive_directory(&target_path)?;
+                debt.target.as_mut().ok_or_else(refused)?.directory = Some(file);
+                #[cfg(test)]
+                self.archive_declaration_fault(132)?;
+            }
+            let target = debt.target.as_mut().ok_or_else(refused)?;
+            let directory = target.directory.as_ref().ok_or_else(refused)?;
+            if target.identity.is_none() {
+                target.identity = Some(
+                    catcoms_storage::kept::session_id(directory)
+                        .map_err(|error| AppError::Io(error.to_string()))?,
+                );
+            }
+            validate_founder_target(&target_path, target)?;
+            directory
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            sync_directory(&parent)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            #[cfg(test)]
+            self.archive_declaration_fault(133)?;
+            validate_founder_original_root(self, &prepared.original, root)?;
+            guard.validate_source_only(captured)?;
+            {
+                let FounderIntentDebt {
+                    marker,
+                    marker_file,
+                    ..
+                } = &mut *debt;
+                ensure_new_founder_control(
+                    self,
+                    &target_path.join("origin"),
+                    marker,
+                    marker_file,
+                    134,
+                    135,
+                )?;
+            }
+            validate_founder_target(&target_path, debt.target.as_ref().ok_or_else(refused)?)?;
+            debt.target
+                .as_ref()
+                .and_then(|target| target.directory.as_ref())
+                .ok_or_else(refused)?
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            sync_directory(&parent)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            #[cfg(test)]
+            self.archive_declaration_fault(136)?;
+            validate_founder_original_root(self, &prepared.original, root)?;
+            guard.validate_source_only(captured)?;
+            let current_path = founder_control_path(
+                self,
+                &prepared.original.data.invocation,
+                FounderControlSlot::Intent,
+            )?;
+            let seed_path = founder_control_path(
+                self,
+                &prepared.original.data.invocation,
+                FounderControlSlot::Seed,
+            )?;
+            let stage_path = founder_control_path(
+                self,
+                &prepared.original.data.invocation,
+                FounderControlSlot::Stage,
+            )?;
+            let current = read_archive_object(&current_path, founder::MAX_INTENT_FRAME)?;
+            let promoted = match &current {
+                Some((_, bytes)) if bytes.as_slice() == debt.candidate.as_slice() => true,
+                Some(_) => return Err(refused()),
+                None => false,
+            };
+            if !promoted {
+                {
+                    let FounderIntentDebt {
+                        seed, seed_file, ..
+                    } = &mut *debt;
+                    ensure_new_founder_control(self, &seed_path, seed, seed_file, 137, 138)?;
+                }
+                sync_directory(&parent).map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(139)?;
+                {
+                    let FounderIntentDebt {
+                        candidate,
+                        stage_file,
+                        ..
+                    } = &mut *debt;
+                    ensure_archive_output(
+                        &stage_path,
+                        candidate,
+                        stage_file,
+                        ArchiveOutputMode::SeedRepair,
+                        #[cfg(test)]
+                        self.critical_namespace_fault.load(Ordering::SeqCst),
+                        #[cfg(test)]
+                        140,
+                    )?;
+                }
+                sync_directory(&parent).map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(141)?;
+                validate_founder_original_root(self, &prepared.original, root)?;
+                validate_founder_target(&target_path, debt.target.as_ref().ok_or_else(refused)?)?;
+                verify_archive_held_name(
+                    &target_path.join("origin"),
+                    debt.marker_file.as_ref().ok_or_else(refused)?,
+                )?;
+                verify_archive_held_name(
+                    &stage_path,
+                    debt.stage_file.as_ref().ok_or_else(refused)?,
+                )?;
+                guard.validate_source_only(captured)?;
+                if read_archive_object(&current_path, founder::MAX_INTENT_FRAME)?.is_some() {
+                    return Err(refused());
+                }
+                fs::rename(&stage_path, &current_path)
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(142)
+                    .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            }
+            // The promoted actual object, target/link and all negatives are checked again
+            // after filesystem waits. An old saved bit cannot issue this result on a new mount.
+            let (saved, bytes) = read_archive_object(&current_path, founder::MAX_INTENT_FRAME)?
+                .ok_or_else(refused)?;
+            if bytes.as_slice() != debt.candidate.as_slice() {
+                return Err(refused());
+            }
+            verify_archive_held_name(&current_path, debt.stage_file.as_ref().ok_or_else(refused)?)?;
+            saved
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            sync_directory(&parent)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            if let Some((seed, bytes)) =
+                read_archive_object(&seed_path, founder::MAX_TRANSITION_FRAME)?
+            {
+                if bytes.as_slice() != debt.seed.as_slice() {
+                    return Err(refused());
+                }
+                verify_archive_held_name(&seed_path, debt.seed_file.as_ref().ok_or_else(refused)?)?;
+                seed.sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                fs::remove_file(&seed_path).map_err(|error| AppError::Io(error.to_string()))?;
+            }
+            sync_directory(&parent)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            #[cfg(test)]
+            self.archive_declaration_fault(143)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            validate_founder_original_root(self, &prepared.original, root)?;
+            validate_founder_target(&target_path, debt.target.as_ref().ok_or_else(refused)?)?;
+            validate_founder_marker(&target_path, &debt)?;
+            validate_actual_founder_debit(
+                self,
+                debt.debit.as_ref().ok_or_else(refused)?,
+                &prepared.original,
+                guard.debit_id(),
+            )?;
+            guard.validate_source_only(captured)?;
+            let id = debt.id;
+            let facts = debt.saved_facts.clone();
+            let debit = debt.data.debit;
+            drop(debt);
+            {
+                let mut runtime = self.founder_invocations.lock().map_err(|_| refused())?;
+                validate_founder_original_root(self, &prepared.original, root)?;
+                guard.validate_source_only(captured)?;
+                if let Some(index) = runtime.slots.iter().position(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.original.key == prepared.original.key)
+                }) {
+                    let entry = runtime.slots[index].as_ref().ok_or_else(refused)?;
+                    if !std::sync::Arc::ptr_eq(&entry.original, &prepared.original)
+                        || !entry
+                            .intent
+                            .as_ref()
+                            .is_some_and(|intent| std::sync::Arc::ptr_eq(intent, &prepared.debt))
+                    {
+                        return Err(refused());
+                    }
+                    retired = runtime.slots[index].take();
+                }
+                // None is the exact same warm already-saved replay. Persistent debit/intent
+                // files still prevent any new capture from receiving an original SDK ticket.
+            }
+            drop(root_guard);
+            drop(retired);
+            Ok(SavedFoundingIntent {
+                original: prepared.original.clone(),
+                debt: prepared.debt.clone(),
+                id,
+                facts,
+                debit,
+            })
+        }
+
         /// Bounded read of the ONE closed declaration-seed destination. The actual private
         /// wrapper/constructor allowance is acquired before any frame allocation or unseal.
         pub(super) fn read_archive_declaration_seed(
@@ -1177,6 +2279,151 @@ mod persistence {
             self.sync_critical_catalog_parent()
                 .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))
         }
+    }
+
+    /// Called only beneath the real admission→pins→canonical→Root writers. The immutable
+    /// saved debit must remain the SAME original held file, not merely decodable request DATA.
+    fn validate_actual_founder_debit(
+        store: &ServerStore,
+        registered: &std::sync::Arc<std::sync::Mutex<FounderDebitDebt>>,
+        original: &std::sync::Arc<OriginalFounderInvocation>,
+        expected: founder::DebitId,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        let debit = registered.lock().map_err(|_| refused())?;
+        if !std::sync::Arc::ptr_eq(&debit.original, original)
+            || debit.id != expected
+            || !original.sdk_consumed.load(Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        let path =
+            founder_control_path(store, &original.data.invocation, FounderControlSlot::Debit)?;
+        verify_archive_held_name(&path, debit.created.as_ref().ok_or_else(refused)?)?;
+        let (_, bytes) =
+            read_archive_object(&path, founder::MAX_DEBIT_FRAME)?.ok_or_else(refused)?;
+        if bytes.as_slice() != debit.bytes.as_slice() || founder::DebitId::of(&bytes) != expected {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    /// Unlike the generic seeded repair helper, the first creator cannot adopt an already
+    /// existing byte-identical file. Save the newly created actual handle before any fallible
+    /// identity/write, so warm zero/short-write recovery remains that SAME object's work.
+    fn ensure_new_founder_control(
+        store: &ServerStore,
+        path: &Path,
+        bytes: &[u8],
+        held: &mut Option<critical_namespaces::pending_join::CreatedStage>,
+        zero_point: u8,
+        short_point: u8,
+    ) -> Result<(), AppError> {
+        if held.is_none() {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            *held = Some(critical_namespaces::pending_join::CreatedStage {
+                file,
+                identity: None,
+            });
+            #[cfg(test)]
+            store.archive_declaration_fault(zero_point)?;
+        }
+        #[cfg(not(test))]
+        let _ = (store, zero_point, short_point);
+        ensure_archive_output(
+            path,
+            bytes,
+            held,
+            ArchiveOutputMode::Original,
+            #[cfg(test)]
+            store.critical_namespace_fault.load(Ordering::SeqCst),
+            #[cfg(test)]
+            short_point,
+        )
+    }
+
+    fn validate_founder_target(
+        path: &Path,
+        target: &FounderTargetReservation,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        let expected = target.identity.ok_or_else(refused)?;
+        let held = target.directory.as_ref().ok_or_else(refused)?;
+        let actual = open_archive_directory(path)?;
+        for directory in [held, &actual] {
+            if catcoms_storage::kept::session_id(directory)
+                .map_err(|error| AppError::Io(error.to_string()))?
+                != expected
+            {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_founder_marker(path: &Path, debt: &FounderIntentDebt) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        let marker = path.join("origin");
+        verify_archive_held_name(&marker, debt.marker_file.as_ref().ok_or_else(refused)?)?;
+        let (_, bytes) =
+            read_archive_object(&marker, founder::MAX_TARGET_MARKER_FRAME)?.ok_or_else(refused)?;
+        if bytes.as_slice() != debt.marker.as_slice() {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    fn founder_control_path(
+        store: &ServerStore,
+        invocation: &founder::InvocationData,
+        slot: FounderControlSlot,
+    ) -> Result<PathBuf, AppError> {
+        let name = invocation.name();
+        let name = std::str::from_utf8(&name).map_err(|_| critical_namespaces::refused())?;
+        let mut leaf = String::with_capacity(64 + slot.suffix().len());
+        leaf.push_str(name);
+        leaf.push_str(slot.suffix());
+        Ok(store
+            .dir
+            .join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
+            .join(leaf))
+    }
+
+    fn validate_founder_original_root(
+        store: &ServerStore,
+        original: &OriginalFounderInvocation,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        let policy = store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?;
+        original
+            .control
+            .validate(&policy.pending.pool, founder::CONTROL_FEE)?;
+        if original.negative.is_cancelled()
+            || original.creator.upgrade().is_none()
+            || root.negative.is_cancelled()
+            || !std::sync::Arc::ptr_eq(&original.mount, &store.registry_mount())
+            || !std::sync::Arc::ptr_eq(&root.mount, &original.mount)
+            || root.descriptor.vault != original.data.invocation.vault
+            || root.descriptor.root != original.data.invocation.root
+            || root.directory_id != original.root_directory
+            || root.marker_id != original.root_marker
+            || root.marker_digest != original.root_marker_digest
+        {
+            return Err(refused());
+        }
+        validate_archive_root_session(
+            &store.dir.join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT),
+            root,
+        )
     }
 
     #[derive(Clone, Copy)]
@@ -3294,6 +4541,9 @@ pub struct ServerStore {
     // constructors continue rejecting its descriptor, seed and root before old cleaners.
     archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
     archive_bootstrap_root: critical_namespaces::archive_bootstrap::SharedRoot,
+    founder_invocations: std::sync::Mutex<persistence::FounderInvocationRegistry>,
+    #[cfg(test)]
+    founder_before_sdk_consume: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pending_join_catalog: critical_namespaces::pending_join::SharedMounted,
     #[cfg(test)]
     pending_join_before_catalog_writer: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -3430,6 +4680,9 @@ impl ServerStore {
             pending_join_policy,
             archive_bootstrap_policy,
             archive_bootstrap_root: Default::default(),
+            founder_invocations: Default::default(),
+            #[cfg(test)]
+            founder_before_sdk_consume: Default::default(),
             pending_join_catalog: Default::default(),
             #[cfg(test)]
             pending_join_before_catalog_writer: Default::default(),

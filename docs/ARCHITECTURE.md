@@ -3132,3 +3132,15 @@ backing storage is counted, zeroized and freed before physical idle can be publi
 This narrow empty-marker executor does not construct the separate seal/open body bridge. Its
 actor fixtures deliberately require rejection of a synthetic foreign pair; successful normal
 production-pair publication, listener dispatch and the browser action adapter remain unproved.
+
+### Private original archive-founder consumer (5 November; inactive)
+
+The archive-bootstrap opener now connects actual owned inputs to one durable spent creation
+debit and one private `Server::found` result. The same creator then supplies a RAM-only plan,
+actual admission/pins/canonical guard and physical target/link/FoundingIntent transaction. Scope
+rows and live actors remain absent. Exact saved intent objects replace only the same transient
+metadata; original revocation custody remains with the creator. All raw filesystem effects stay
+in Store persistence, and immutable ciphertext debt is retained before mutation. See the
+[factory contract](communication-recovery/CHAT-OWNER-FOUNDING-INTENT-FACTORY.md) for the implemented
+boundary and separate scope/S0/SourcePrepared/source-save/Current/native gates. Tests are authored
+but unrun while compilation is paused; this is not production Chat V2 activation.

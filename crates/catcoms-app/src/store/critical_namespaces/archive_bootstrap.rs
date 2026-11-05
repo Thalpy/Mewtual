@@ -112,6 +112,13 @@ pub(in crate::store) type SharedRoot = Mutex<Option<MountedRoot>>;
 
 mod seed;
 use seed::{encode_marker, encode_seed, open_marker_data, open_seed_data, seal_marker, seal_seed};
+pub(in crate::store) mod founder;
+pub(in crate::store) mod founder_codec;
+pub use founder::{
+    ArchiveFounderBegin, ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs,
+    ArchiveFounderPlanning, ArchiveFounderPlanningProgress, ArchiveFounderPolicy,
+    ArchiveFounderProgress, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+};
 
 impl ServerStore {
     /// Select only the actual physical opener's concrete grammar. A caller-supplied payload

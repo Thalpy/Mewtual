@@ -8230,3 +8230,22 @@ appearing during the later synchronous effect, so subordinate permit validation 
 catalog after a head lock. Retirement, same-original negative repair and unrelated-key work remain
 available. This is negative exclusion, never an intent-backed scope/Current bypass. The actual
 journal ScopeIntent consumer remains separate. Four additional regressions are authored UNRUN.
+
+### Private original archive founder and saved intent
+
+The concrete archive-bootstrap physical opener exposes `ArchiveFounderPolicy` and owned
+`ArchiveFounderInputs<T,R>`, never a supplied Server/snapshot or decoded positive proof.
+`prepare_archive_founder` binds one trusted local invocation32 to the full signer, bounded name
+and immutable limits/allowance, returning either its original creator or inert Existing status
+with the actual inputs returned. `advance` retains cached debit bytes and exact held-file debt;
+only the original saved file/parent result and shared one-shot CAS admit `Server::found`.
+Cold/foreign/matching-byte records cannot recreate a group. No actor or network starts here.
+
+`into_ram_plan` preserves the same creator on refusal. `prepare_ram_plan` samples its nonce once
+and registers a weak exclusion without creating a scope row. `save_founding_intent` keeps actual
+source/admission/pins/canonical custody through the concrete target/link/journal barriers, with
+Root rechecks after filesystem waits. Only an actual retained SavedFoundingIntent can replace
+that exact transient exclusion; the original creator still owns the sole revocation life.
+Completed metadata drains outside writers. The only public outcome is unexposed intent progress.
+Scope attachment, source preparation/execution/save, closed-result recovery, Current and native
+activation are separate unfinished consumers. All new compiled regressions remain UNRUN.
