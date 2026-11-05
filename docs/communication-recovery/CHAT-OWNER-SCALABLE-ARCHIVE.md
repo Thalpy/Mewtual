@@ -50,10 +50,11 @@ headers in prepaid contradiction escrow and mark the affected selected suffix br
 A positive effect requires the exact body, its semantic dependencies and resulting-state commitment
 to verify independently. Do not choose by timestamp, CID or first arrival. Unknown parent references
 are incomplete, not a free unbounded approval/fork cache. The separate bounded
-[successor-header codec](CHAT-OWNER-V2-HEADER-FORMAT.md) is implemented but uncompiled/unexecuted;
+[successor-header codec](CHAT-OWNER-V2-HEADER-FORMAT.md) is implemented but uncompiled/unexecuted.
 The separate [Profile/Admission codec](CHAT-OWNER-V2-PROFILE-ADMISSION.md) and stable ordinary labels
-are implemented too, without a live producer or positive witness. Production genesis/root provenance,
-complete review/body/state codecs and the actual pinned governing consumer remain gates.
+and [exact review-body grammar](CHAT-OWNER-V2-REVIEW-DECISION.md) are implemented too, without a
+live producer or positive witness. Production genesis/root provenance, resulting public-state
+grammar and the actual pinned governing consumer remain gates.
 
 Equal verified evidence unions use the same common nonconflicting prefix on a detected finalizer
 fork. No replica-local already-final exception is allowed. Previously exposed plaintext cannot be

@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Exact v2 review-decision data (5 November; inactive)
+
+`owner_bodies::ReviewDecisionBody` binds one complete target, stable case ID, intent nonce, decision
+and exact previous body ID in at most665bytes. It checks data transitions and actual action/header
+signatures, not selected-current case state or owner/root provenance. A later selected Approve can
+support REVIEWED admission without mutating a frozen LOG cut; Reject/Reopen are never positive.
+No opaque approval/admission issuer, native command or journal is added. Nine regressions remain
+unrun during the pause. [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
+
 ## Guarded current chat projection core (5 November; authored, unexecuted)
 
 `ChatLedger::projection` / `causal_heads` remain semantic/audit-only with unchanged raw snapshots.

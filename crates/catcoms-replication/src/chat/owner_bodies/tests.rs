@@ -12,6 +12,12 @@ fn context() -> TreeContext {
 }
 fn action(body: Body) -> SignedAction {
     let key = DeviceKeypair::from_seed(&[41; 32]);
+    // Real action/v1 grammar requires a causal parent for every non-Create. Supplying an
+    // empty list would stop at signing and never exercise the record-binding checks below.
+    let parents = match &body {
+        Body::Create { reply_to, .. } => reply_to.as_slice().to_vec(),
+        _ => body.create().into_iter().collect(),
+    };
     SignedAction::sign(
         &key,
         ActionSpec {
@@ -20,7 +26,7 @@ fn action(body: Body) -> SignedAction {
             grant: GrantId::from_bytes([4; 32]),
             nonce: [5; 16],
             presented_ms: 100,
-            parents: vec![],
+            parents,
             body,
         },
     )

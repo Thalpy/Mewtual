@@ -11,6 +11,11 @@ use super::owner_header::{HeaderKind, OwnerBodyId, OwnerHeaderId, SignedOwnerHea
 use super::{ActionId, BasisId, ChatError, GrantId, SignedAction, MAX_GROUP_ID_BYTES};
 use catcoms_wire::{Decoder, Encoder};
 
+mod review;
+pub use review::{
+    ReviewCaseId, ReviewDecision, ReviewDecisionBody, ReviewSpec, MAX_REVIEW_BODY_BYTES,
+};
+
 const RECORD_DOMAIN: &[u8] = b"mewtual/chat/acceptance-record/v2\0";
 const RECORD_ID_DOMAIN: &[u8] = b"mewtual/chat/acceptance-record-id/v2\0";
 const APPEND_DOMAIN: &[u8] = b"mewtual/chat/acceptance-append/v2\0";

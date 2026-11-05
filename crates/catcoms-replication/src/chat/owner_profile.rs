@@ -157,6 +157,8 @@ impl SignedOwnerProfile {
         e.put_bytes(&self.spec.group).expect("validated group");
         e.put_bytes(&self.spec.founder).expect("fixed founder");
         e.put_bytes(&self.spec.creation).expect("fixed creation");
+        // Acceptance rule1 is LOG inclusion, not the only projection route: body grammar2
+        // separately defines exact reviewed approval after a cut, without rewriting that cut.
         e.put_u8(1)
             .put_u8(0)
             .put_u16(MEMBER_RIGHTS)

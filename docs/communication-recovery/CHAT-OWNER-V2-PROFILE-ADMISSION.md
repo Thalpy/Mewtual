@@ -10,10 +10,14 @@ publication authority. Action/v1 and owner-fact/v1 bytes remain unchanged. Compi
 The canonical unsigned frame is bytes `mewtual/chat/owner-profile/v2\0`, u16 version2, group
 bytes1..256, full founder32, actual creation label32, then these CLOSED policy fields:
 u8 trust1 (non-equivocating original finalizer); u8 succession0 (unsupported); u16 ordinary MEMBER
-rights23; u8 member-created-realms1; u8 acceptance-rule1 (unsigned record authenticated by inclusion
+rights23; u8 member-created-realms1; u8 log-acceptance-rule1 (unsigned record authenticated by inclusion
 under a selected signed tip); u8 tree grammar2; u8 body grammar2; u8 header grammar2; u16 maximum
 CURRENT members64. No lifetime-admission or accepted-action count is introduced. Every32-byte field
 is length-prefixed; no unknown policy/trailing fields are accepted.
+
+This inclusion rule proves LOG acceptance. A later exact selected Review Approve under body
+grammar2 can instead grant REVIEWED admission without changing the frozen removal cut or claiming
+accepted-before-removal. Reject, Reopen, raw target records and mere body binding cannot grant it.
 
 The envelope is bytes `mewtual/chat/owner-profile-envelope/v2\0`, bytes unsigned frame, bytes
 signature64. The founder signs the exact unsigned frame. ProfileCID is BLAKE3(raw

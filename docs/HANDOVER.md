@@ -19,8 +19,9 @@ Work continues on `communication-chat-v2-production`. Chat V2 remains disabled a
 The new v2 Profile/Admission, successor headers, acceptance/append/removal records and tree proofs
 are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The real
 canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
-Add/save/install consumer and the new default-closed projection guard are still being connected.
-Scalable cold persistence, complete governing/review state, actual v2 creation/join/root distribution,
+Add/save/install consumer is still being connected. The default-closed projection guard core is
+integrated with28 authored/unrun tests; its production issuer and native/UI adapter remain absent.
+Scalable cold persistence, governing/review state, actual v2 creation/join/root distribution,
 typed durable send/receive, full admin actions/decisions and native/UI integration remain required.
 
 Compilation, compiled tests and builds are paused at the user's request. New regressions below
@@ -199,6 +200,14 @@ are now implemented with clear actual-diff review and twelve authored/unrun regr
 semantic/envelope maxima are379/494bytes; Add body490bytes. The MEMBER permission mask is fixed at23 and the64
 member cap is CURRENT only. Exact founder body/header binding supplies crypto/genesis geometry,
 not actual mounted provenance, governing selection or a positive authority token. [Profile contract](communication-recovery/CHAT-OWNER-V2-PROFILE-ADMISSION.md).
+
+The v2 exact review-decision data codec now completes the four supported header-body grammars.
+Its665-byte maximum, stable case identity, explicit Reject/Reopen/Approve transition rules and
+LOG-versus-REVIEWED distinction have clear actual-diff review. Nine tests are authored/unrun. A
+selected exact Review Approve is a later reviewed-admission route; it cannot change a frozen cut
+or claim accepted-before-removal. The governing decision producer/journal/UI remain open. Source
+review also corrected the acceptance-body test helper's non-Create parent precondition so those
+unrun tests reach their intended binding checks. [Review contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## PR82 follow-up review corrections (30 October; local gates passed)
 
