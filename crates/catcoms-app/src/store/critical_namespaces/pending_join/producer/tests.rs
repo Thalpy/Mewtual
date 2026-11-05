@@ -543,20 +543,20 @@ impl catcoms_rt::MeshTransport for NoRequestTransport {
         PeerId::from_u64(0x9002)
     }
     async fn subscribe(&self, _topic: catcoms_rt::Topic) -> Result<(), catcoms_rt::TransportError> {
-        Err(catcoms_rt::TransportError::Unreachable)
+        Err(catcoms_rt::TransportError::Closed)
     }
     async fn unsubscribe(
         &self,
         _topic: catcoms_rt::Topic,
     ) -> Result<(), catcoms_rt::TransportError> {
-        Err(catcoms_rt::TransportError::Unreachable)
+        Err(catcoms_rt::TransportError::Closed)
     }
     async fn publish(
         &self,
         _topic: catcoms_rt::Topic,
         _data: bytes::Bytes,
     ) -> Result<(), catcoms_rt::TransportError> {
-        Err(catcoms_rt::TransportError::Unreachable)
+        Err(catcoms_rt::TransportError::Closed)
     }
     async fn request(
         &self,
@@ -565,7 +565,19 @@ impl catcoms_rt::MeshTransport for NoRequestTransport {
         _data: bytes::Bytes,
     ) -> Result<bytes::Bytes, catcoms_rt::TransportError> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Err(catcoms_rt::TransportError::Unreachable)
+        Err(catcoms_rt::TransportError::Closed)
+    }
+    async fn request_cancellable(
+        &self,
+        _peer: PeerId,
+        _protocol: catcoms_rt::ProtocolId,
+        _data: bytes::Bytes,
+        _cancellation: catcoms_rt::RequestCancellation,
+    ) -> Result<bytes::Bytes, catcoms_rt::TransportError> {
+        // This negative-only probe queues no lower work. If any request crosses the original
+        // mount fence, count it and refuse immediately, including the required accounted seam.
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(catcoms_rt::TransportError::Closed)
     }
     async fn next_event(&self) -> Option<catcoms_rt::TransportEvent> {
         None
