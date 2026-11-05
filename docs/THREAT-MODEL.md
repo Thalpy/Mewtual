@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Private record-page content consistency (5 November; authored, unexecuted)
+
+The bounded private record codec checks actual typed semantics, complete original-byte digests,
+every supplied Profile/Header signature before duplicates, and composite Header/public-image
+binding. Acceptance rows must form an exact channel/CID bijection with the supplied actual Append
+inside its exact Profile/Admission context. Strict borrowed framing and fixed64 metadata avoid
+attacker-count allocations or sorting. Private payloads are excluded from row Debug output.
+
+These remain DATA checks. External Profile/vault/manifest labels do not establish root provenance,
+selected-source completeness, actual MLS execution, governing transition validity, ordinary/action
+rights, historical acceptance, cross-batch idempotency, read permission or Current. Public replay,
+cold accepted/case lookup, original mounted closure and mandatory control payment remain necessary.
+No ARCHIVE2 support or I/O path is added. The compound scratch inventory is separate from founder
+fees and SDK/AEAD/file/replay heaps; it is not a physical reservation. Ten tests remain authored
+UNRUN. [Exact boundary](communication-recovery/CHAT-OWNER-PRIVATE-RECORDS.md).
+
 ## Bounded private manifest consistency (5 November; authored, unexecuted)
 
 Each manifest DATA segment commits only its bounded new descriptors and backward original

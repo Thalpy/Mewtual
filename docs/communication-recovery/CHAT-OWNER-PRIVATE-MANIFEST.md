@@ -50,15 +50,16 @@ Descriptor consistency does not establish that any page exists, contains the req
 is durable, or is historically accepted. In particular a HeaderBodyRecords descriptor is not proof
 that either real signed header or body was supplied. No source absence or finality follows here.
 
-The future private Header row must retain BOTH the exact original public signed header envelope
-and its complete canonical public state image, and validate the image against that real signed
-header's state digest/fields. It is one composite private record, not a change to the public signed
-header wire grammar. The image is<=9244 bytes and the envelope<=634, so the separate bounded batch
-format can hold their framed pair. This preserves the3/2 logical row counts above and supplies the
-existing ReplayMath complete expected-state comparison during cold replay. The exact private
-composite/batch grammar remains a separate reviewed prerequisite; it cannot silently omit state
-validation or promote a raw decoded image to Current. Multiple Action chunk descriptors are
-fragments of ONE retained original action, not independent logical actions.
+The authored `cold_records::HeaderRow` retains BOTH the exact original public signed header
+envelope and complete canonical public state image, with actual signature and image/digest/field
+binding. Its reviewed [composite and batch grammar](CHAT-OWNER-PRIVATE-RECORDS.md) leaves public
+signed header bytes unchanged. The image is<=9244 bytes and envelope<=634; their private framed
+pair preserves the3/2 logical row counts above. Actual role-content checks require the Profile,
+body and full image; AcceptanceRecords requires an exact channel/CID bijection with the actual
+Append. These source regressions are authored/UNRUN, not a runtime reader or namespace handler.
+The real host must connect these checks to original selected-source replay and the existing
+ReplayMath complete expected-state comparison before authority; a raw decoded image never becomes
+Current. Multiple Action chunk descriptors are fragments of ONE original action.
 
 A data-link check compares the external selected previous sealed ID and current source-head ID,
 same exact vault/group/Profile, checked sequence+1, and preceding-header==previous resulting-header.

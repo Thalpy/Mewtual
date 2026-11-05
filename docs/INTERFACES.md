@@ -1,5 +1,18 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private typed record-page DATA (5 November; authored, unexecuted)
+
+`cold_records::{RecordBatch, BatchBinding, RecordSource, encode_record_batch}` uses shared manifest
+roles/operations and explicit external Profile/vault DATA. Genesis and HeaderBody pages bind real
+typed records; Acceptance pages require the actual Append and an exact channel/CID leaf bijection.
+`HeaderRow` retains the exact signed envelope AND full canonical public image, with actual signature
+and complete field/state commitment binding. Public wire bytes are unchanged. Strict framing and
+bounded row scratch precede output allocation; all supplied signed representations verify before
+semantic ordering/duplicate handling. Returned rows are DATA, with sanitized diagnostics, not a
+source, historical/read authority, selected prefix or Current capability. No I/O or namespace
+handler is added. Ten regressions remain UNRUN. See the [exact grammar and compound scratch
+inventory](communication-recovery/CHAT-OWNER-PRIVATE-RECORDS.md).
+
 ## Private manifest DATA links (5 November; authored, unexecuted)
 
 `cold_manifest::{ManifestPage, ManifestSpec, encode_manifest}` borrows bounded per-operation

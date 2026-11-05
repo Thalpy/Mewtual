@@ -26,6 +26,23 @@ changed Rust files, whitespace checks and both ambient-dependency/raw-filesystem
 are the narrow checks used during this pause. They do not substitute for compilation or the
 required full suites once the pause is lifted. Reviewed checkpoints are pushed to the branch.
 
+## Private typed record batches (5 November; authored, unexecuted)
+
+`cold_records` now supplies the bounded actual-content DATA prerequisite for Genesis3,
+HeaderBody2 and Acceptance1..64 manifest roles. A composite Header row retains the exact signed
+envelope and complete canonical public image; its signature, all frame fields and state digest
+must match. Every actual signed Profile/Header representation is checked before semantic order
+or duplicates. Acceptance rows are an exact channel/CID bijection with the actual Append and
+same Profile/Admission, rather than descriptor-only claims. No source/read/Current authority or
+ARCHIVE2 I/O/handler is introduced. Ten authored regressions cover all kinds, max64 batches,
+genuine Profile signature variants, invalid same-CID variants, substitutions and strict framing.
+All remain **UNRUN** under the compilation pause; direct rustfmt/diff checks only. Read-only
+design and final actual-diff review are clear for the stated DATA-only checkpoint. A reviewed
+fixture correction preserves the existing issuer-present image check before Profile rejection.
+Original governing/source/control/cold completeness consumers are still required. The named
+metadata size and full compound scratch inventory are logical bounds, not a paid physical fee.
+See [the exact format and scope](communication-recovery/CHAT-OWNER-PRIVATE-RECORDS.md).
+
 ## Bounded private history segments (5 November; authored, unexecuted)
 
 `cold_manifest` now describes one operation's<=3 content pages and exact prior sealed manifest/
