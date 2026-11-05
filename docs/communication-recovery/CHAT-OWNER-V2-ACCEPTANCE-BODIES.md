@@ -91,5 +91,5 @@ but uncompiled/unrun, including exact maxima, every truncated prefix, malformed 
 genuine action signature variants, A1/A2 separation without a false incarnation claim, actual tree
 append math, signed header binding and overflow/epoch refusal. Count1 vs1,000,000 tests use explicit
 data labels to pin constant encoding; they do not claim a million actual accepted actions. Only
-source formatting and whitespace checks ran. Profile/genesis, ordinary delegation, governing state,
+source formatting and whitespace checks ran. Production Profile/genesis, ordinary authority, governing state,
 cold storage, covering producers and live native/UI integration remain separate incomplete work.

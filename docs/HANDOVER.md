@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Current Chat V2 status (5 November; incomplete, compilation paused)
+
+Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
+The new v2 Profile/Admission, successor headers, acceptance/append/removal records and tree proofs
+are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The real
+canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
+Add/save/install consumer and the new default-closed projection guard are still being connected.
+Scalable cold persistence, complete governing/review state, actual v2 creation/join/root distribution,
+typed durable send/receive, full admin actions/decisions and native/UI integration remain required.
+
+Compilation, compiled tests and builds are paused at the user's request. New regressions below
+are authored but unrun. Source reviews, rustfmt and whitespace checks do not establish readiness.
+After implementation and once compilation is permitted, focused checks precede the complete required
+suites; the exceptionally slow10,000-operation test and other heavy acceptance run at the end.
+
 ## Historical package data prerequisite (5 November; static review clear, tests paused)
 
 The actual Add/own-credential code now shares its unchanged typed TLS digest with bounded plain
@@ -165,6 +180,12 @@ matching an action does not establish membership incarnation or acceptance. Cons
 binds a frozen labelled tip rather than materializing the historical accepted-ID set. Thirteen
 regressions are authored/unrun; actual-diff review is clear. These codecs add no governing state,
 Profile/genesis, cold archive, covering producer or live dispatch. [Exact body contract](communication-recovery/CHAT-OWNER-V2-ACCEPTANCE-BODIES.md).
+
+The separate signed v2 Profile/Admission codec and stable owner-offline Grant/Basis label derivation
+are now implemented with clear actual-diff review and twelve authored/unrun regressions. Profile
+semantic/envelope maxima are379/494bytes; Add body490bytes. The MEMBER permission mask is fixed at23 and the64
+member cap is CURRENT only. Exact founder body/header binding supplies crypto/genesis geometry,
+not actual mounted provenance, governing selection or a positive authority token. [Profile contract](communication-recovery/CHAT-OWNER-V2-PROFILE-ADMISSION.md).
 
 ## PR82 follow-up review corrections (30 October; local gates passed)
 

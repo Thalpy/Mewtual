@@ -458,7 +458,7 @@ fn hash(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     hash.update(bytes);
     *hash.finalize().as_bytes()
 }
-fn body_id(bytes: &[u8]) -> OwnerBodyId {
+pub(super) fn body_id(bytes: &[u8]) -> OwnerBodyId {
     OwnerBodyId::from_bytes(hash(BODY_ID_DOMAIN, bytes))
 }
 fn check_header(

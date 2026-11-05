@@ -1,6 +1,7 @@
 # V2 Profile, genesis anchor and ordinary Admission labels
 
-Concrete design for the next scalable-profile prerequisite. Review precedes source implementation.
+Concrete format for the implemented scalable-profile prerequisite. Independent design and
+actual-diff reviews are clear; compilation and execution are still paused.
 This creates no mounted pin, actual MLS observation, governing selection, Current, Saved or live
 publication authority. Action/v1 and owner-fact/v1 bytes remain unchanged. Compilation stays paused.
 
@@ -82,3 +83,13 @@ actual founder-vs-Add body bindings and epoch overflow; independently framed ord
 same-key fresh A1/A2 and cross-realm/group/Profile separation; member-created realms/offline replies
 without per-post owner facts; real action altered Grant/Basis/subject/SIG rejection; wrong/truncated/
 trailing/foreign-v1 frames. No execution is claimed while tests/compilation remain paused.
+
+## Source evidence
+
+`chat::owner_profile` now declares the strict signed Profile, unsigned Admission body, complete
+founder/genesis binding and exact stable ordinary labels/action matching. Twelve regressions are
+authored/unrun. The alternate-nonce Profile fixture was independently prepared offline and both
+signatures checked by installed Python cryptography; the actual Rust strict-verifier regression
+is still unrun. The130-origin test is synthetic codec data, not130 actual MLS admissions. Source
+formatting/whitespace checks pass. No actual private v2 founder/Add producer, root-distribution
+invite, known governing parent, semantic witness or projection-admission token is created here.

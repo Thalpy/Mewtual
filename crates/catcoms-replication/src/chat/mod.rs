@@ -13,6 +13,7 @@ mod ledger;
 pub mod owner_bodies;
 pub mod owner_facts;
 pub mod owner_header;
+pub mod owner_profile;
 mod projection;
 mod storage;
 

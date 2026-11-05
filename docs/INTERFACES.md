@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## V2 Profile and ordinary Admission labels (5 November; inactive)
+
+`chat::owner_profile` now implements closed signed v2 Profile framing (379/494-byte semantic/
+envelope caps) and unsigned Admission bodies (490-byte cap). Fixed delegation is text MEMBER23,
+with64 CURRENT slots and no lifetime-admission cutoff. Stable Grant/Basis IDs bind exact Profile,
+Admission incarnation, full subject and realm. Action matching creates no historical authority.
+Founder/genesis checks require the actual exact Founder body and signed first header; Add checks
+remain crypto/data consistency, with known-parent/common-prefix and original mounted provenance
+still separate. No positive semantic/projection token or live producer is added. Twelve regressions
+are authored/unrun. [Exact contract](communication-recovery/CHAT-OWNER-V2-PROFILE-ADMISSION.md).
+
 ## Historical package data (5 November; inactive owner prerequisite)
 
 The data-only KeyPackage identity helpers include a historical extractor that does not verify a KP,
@@ -12,7 +23,7 @@ owner-result consumer remains open; ordinary new-admission checks are unchanged.
 does not change action/v1 or owner-fact/v1 bytes. Semantic IDs exclude signature bytes, while every
 representation needs its own actual signature check. `verify_successor_of` verifies BOTH signatures
 and exact group/profile/full issuer/tenure, parent ID and checked next sequence; it creates no
-Current, membership or publication witness. Genesis, Profile/tenure provenance, exact body/state
+Current, membership or publication witness. Production genesis, Profile/tenure provenance, complete body/state
 grammar, cold persistence and native dispatch remain unfinished. Encoded maxima are 520 / 634 bytes;
 tests are authored/unrun under the compilation pause. [Exact contract](communication-recovery/CHAT-OWNER-V2-HEADER-FORMAT.md).
 
