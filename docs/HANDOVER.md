@@ -1,5 +1,15 @@
 # Mewtual; Handover
 
+## Public resulting-state data (5 November; authored, unexecuted)
+
+`owner_state` now defines the9244-byte public image behind v2 header state hashes: exact parent/
+prior-state/body fold plus at most64 CURRENT canonical admission/log slots, with no lifetime64
+history deletion. Tip BODY IDs avoid a self-header cycle; real tip HEADER identity remains derived
+selected-chain metadata. Borrowed decode, real signature/genesis/successor binding and six UNRUN
+regressions are present. This is NOT actual body/MLS/case application, governing selection, an
+authority issuer or activation. Current issuer removal/transfer is explicitly unsupported by the
+initial tenure. [Exact contract](communication-recovery/CHAT-OWNER-V2-PUBLIC-STATE.md).
+
 ## Closed covering owner Add (5 November; source checkpoint, validation paused)
 
 The actual App `OwnedOwnerServer` now consumes the bounded direct request through an isolated
@@ -122,7 +132,8 @@ Work continues on `communication-chat-v2-production`. Chat V2 remains disabled a
 The new v2 Profile/Admission, successor headers, acceptance/append/removal records and tree proofs
 are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The real
 canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
-Add/save/install consumer is still being connected. The default-closed projection guard core is
+Add/save/install consumer is integrated for the closed one-founder/one-Add checkpoint; known-v6
+and retained-client API integration is being completed separately. The default-closed projection guard core is
 integrated with42 authored/unrun tests; its production issuer and native/UI adapter remain absent.
 Scalable cold persistence, governing/review state, actual v2 creation/join/root distribution,
 typed durable send/receive, full admin actions/decisions and native/UI integration remain required.

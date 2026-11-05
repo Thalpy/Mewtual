@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Public state commitment prerequisite (5 November; authored, unexecuted)
+
+The v2 header's state digest now has a bounded public image: canonical current slots plus the
+exact prior-state/parent/body fold. Private vault ciphertext IDs and signature representatives
+cannot influence it; current tip HEADER identity is derived after signing to avoid self-reference.
+Data/crypto binding verifies signatures and exact roots/fields but does NOT apply an MLS/body
+transition, select a known prefix/current case or create mounted/current authority. The original
+private producer must observe actual MLS operations; public replay still relies on the declared
+pinned finalizer trust assumption, not independent proof of private execution. Current-issuer
+removal/succession is unsupported. Six regressions remain UNRUN during the compilation pause.
+See [the exact grammar and missing consumers](communication-recovery/CHAT-OWNER-V2-PUBLIC-STATE.md).
+
 ## Closed covering first Add and recovery (5 November; source only)
 
 The new closed owner host orders actual original Current admission -> canonical head -> file

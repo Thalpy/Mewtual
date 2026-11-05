@@ -52,7 +52,7 @@ pub enum HeaderKind {
     ReviewDecision,
 }
 impl HeaderKind {
-    fn tag(self) -> u8 {
+    pub(super) fn tag(self) -> u8 {
         match self {
             Self::Admission => 1,
             Self::AcceptanceAppend => 2,
@@ -60,7 +60,7 @@ impl HeaderKind {
             Self::ReviewDecision => 4,
         }
     }
-    fn from_tag(tag: u8) -> Result<Self, ChatError> {
+    pub(super) fn from_tag(tag: u8) -> Result<Self, ChatError> {
         match tag {
             1 => Ok(Self::Admission),
             2 => Ok(Self::AcceptanceAppend),

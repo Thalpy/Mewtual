@@ -15,6 +15,7 @@ pub mod owner_bodies;
 pub mod owner_facts;
 pub mod owner_header;
 pub mod owner_profile;
+pub mod owner_state;
 mod projection;
 mod projection_admission;
 mod storage;

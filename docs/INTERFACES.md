@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Public v2 result-state data (5 November; authored, unexecuted)
+
+`chat::owner_state` adds a bounded public image and data/crypto genesis/successor/header binding.
+It selects no current owner/MLS/case state and issues no authority. Header state remains32 bytes;
+its public image is at most9244 bytes, with64 CURRENT canonical slots and retained-history fold.
+Tip-header identity is derived separately to avoid a self-CID cycle. Six regressions are authored
+and UNRUN. [Exact grammar and remaining gates](communication-recovery/CHAT-OWNER-V2-PUBLIC-STATE.md).
+
 ## Closed owner Add source checkpoint (5 November; tests paused)
 
 `OwnedOwnerServer::run_owner_checkpoint_once` is a narrow trusted App host, not a renderer command
