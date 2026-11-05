@@ -15,6 +15,10 @@ pub(super) struct Facts {
     pub secret_size: u64,
     pub epoch: u64,
     pub unmerged_max: Option<u32>,
+    pub resumption_max: u64,
+    pub resumption_cursor: u64,
+    pub resumption_count: usize,
+    pub resumption_epochs: [Option<u64>; 2],
 }
 impl Facts {
     pub fn finish(&self) -> Result<(), Error> {
@@ -29,6 +33,20 @@ impl Facts {
             || self.unmerged_max.is_some_and(|index| index as usize >= self.leaves)
         {
             return Err(Error);
+        }
+        // OpenMLS0.9.2's founder builder hardcodes max32 independently of join-config0.
+        // It retains precisely epoch0 and, after the first Add, epoch1. Welcome config0 has
+        // an actually empty store. Preserve either genuine closed shape, never trim secrets
+        // or allocate from the max32 scalar. No later epoch/history profile is admitted.
+        match self.resumption_max {
+            0 if self.resumption_count == 0
+                && self.resumption_cursor == 0
+                && self.resumption_epochs == [None; 2] => {}
+            32 if self.resumption_count == self.epoch as usize + 1
+                && self.resumption_cursor == self.resumption_count as u64
+                && self.resumption_epochs[0] == Some(0)
+                && self.resumption_epochs[1] == if self.epoch == 1 { Some(1) } else { None } => {}
+            _ => return Err(Error),
         }
         Ok(())
     }
@@ -56,6 +74,9 @@ enum Shape {
     Message,
     SecretTree,
     Resumption,
+    ResumptionLimit,
+    ResumptionCursor,
+    ResumptionEntries,
     Config,
     WirePolicy,
     RatchetConfig,
@@ -127,24 +148,33 @@ const fn f(name: &'static str, shape: Shape) -> Field {
 }
 fn fields(shape: Shape) -> Option<&'static [Field]> {
     use Shape::*;
+    // Calling a const fn in an ordinary array expression does not itself make that
+    // temporary array a static table. Give every schema an explicit const context so this
+    // borrowed parser performs no table allocation/copy and returns a genuine static slice.
+    macro_rules! table {
+        ($($field:expr),* $(,)?) => {{
+            const FIELDS: &[Field] = &[$($field),*];
+            FIELDS
+        }};
+    }
     Some(match shape {
-        Signer => &[
+        Signer => table![
             f("private", Bytes32),
             f("public", BytesPublic),
             f("signature_scheme", Ed25519),
         ],
-        Tree => &[f("tree", PublicTree), f("tree_hash", Bytes32)],
-        PublicTree => &[
+        Tree => table![f("tree", PublicTree), f("tree_hash", Bytes32)],
+        PublicTree => table![
             f("leaf_nodes", Leaves),
             f("parent_nodes", Parents),
             f("default_leaf", BlankSlot),
             f("default_parent", BlankSlot),
         ],
-        LeafSlot => &[f("node", Leaf)],
-        ParentSlot => &[f("node", Parent)],
-        BlankSlot => &[f("node", Null)],
-        Leaf => &[f("payload", Payload), f("signature", Signature)],
-        Payload => &[
+        LeafSlot => table![f("node", Leaf)],
+        ParentSlot => table![f("node", Parent)],
+        BlankSlot => table![f("node", Null)],
+        Leaf => table![f("payload", Payload), f("signature", Signature)],
+        Payload => table![
             f("encryption_key", Key),
             f("signature_key", PublicKey),
             f("credential", Credential),
@@ -152,21 +182,21 @@ fn fields(shape: Shape) -> Option<&'static [Field]> {
             f("leaf_node_source", LeafSource),
             f("extensions", Extensions),
         ],
-        Capabilities => &[
+        Capabilities => table![
             f("versions", Versions),
             f("ciphersuites", Suites),
             f("extensions", Empty),
             f("proposals", Empty),
             f("credentials", Credentials),
         ],
-        Lifetime => &[f("not_before", U64), f("not_after", U64)],
-        Parent => &[
+        Lifetime => table![f("not_before", U64), f("not_after", U64)],
+        Parent => table![
             f("encryption_key", Key),
             f("parent_hash", VHash),
             f("unmerged_leaves", Unmerged),
         ],
-        Unmerged => &[f("list", Indices)],
-        Context => &[
+        Unmerged => table![f("list", Indices)],
+        Context => table![
             f("protocol_version", Mls10),
             f("ciphersuite", SuiteName),
             f("group_id", ContextGroup),
@@ -175,20 +205,20 @@ fn fields(shape: Shape) -> Option<&'static [Field]> {
             f("confirmed_transcript_hash", VHash),
             f("extensions", Extensions),
         ],
-        Confirmation => &[f("mac_value", V32)],
-        EpochSecrets => &[
+        Confirmation => table![f("mac_value", V32)],
+        EpochSecrets => table![
             f("init_secret", SecretWrap),
             f("exporter_secret", SecretWrap),
             f("epoch_authenticator", SecretWrap),
             f("external_secret", SecretWrap),
             f("resumption_psk", SecretWrap),
         ],
-        MessageStore => &[
+        MessageStore => table![
             f("max_epochs", Zero),
             f("past_epoch_trees", Empty),
             f("message_secrets", Message),
         ],
-        Message => &[
+        Message => table![
             f("sender_data_secret", SecretWrap),
             f("membership_key", SecretWrap),
             f("confirmation_key", SecretWrap),
@@ -201,7 +231,7 @@ fn fields(shape: Shape) -> Option<&'static [Field]> {
                 optional: true,
             },
         ],
-        SecretTree => &[
+        SecretTree => table![
             f("own_index", SecretIndex),
             f("leaf_nodes", SecretLeaves),
             f("parent_nodes", SecretParents),
@@ -209,12 +239,12 @@ fn fields(shape: Shape) -> Option<&'static [Field]> {
             f("application_sender_ratchets", Application),
             f("size", TreeSize),
         ],
-        Resumption => &[
-            f("max_number_of_secrets", Zero),
-            f("resumption_psk", Empty),
-            f("cursor", Zero),
+        Resumption => table![
+            f("max_number_of_secrets", ResumptionLimit),
+            f("resumption_psk", ResumptionEntries),
+            f("cursor", ResumptionCursor),
         ],
-        Config => &[
+        Config => table![
             f("wire_format_policy", WirePolicy),
             f("padding_size", Zero),
             Field {
@@ -227,28 +257,28 @@ fn fields(shape: Shape) -> Option<&'static [Field]> {
             f("use_ratchet_tree_extension", BoolTrue),
             f("sender_ratchet_configuration", RatchetConfig),
         ],
-        WirePolicy => &[f("outgoing", Ciphertext), f("incoming", Ciphertext)],
-        RatchetConfig => &[
+        WirePolicy => table![f("outgoing", Ciphertext), f("incoming", Ciphertext)],
+        RatchetConfig => table![
             f("out_of_order_tolerance", U64),
             f("maximum_forward_distance", U64),
         ],
-        Time => &[f("secs_since_epoch", U64), f("nanos_since_epoch", Nanos)],
-        Credential => &[
+        Time => table![f("secs_since_epoch", U64), f("nanos_since_epoch", Nanos)],
+        Credential => table![
             f("credential_type", Basic),
             f("serialized_credential_content", VCredential),
         ],
-        Extensions => &[f("unique", Empty)],
-        SecretWrap => &[f("secret", Secret)],
-        Secret => &[f("value", V32)],
-        Key => &[f("key", V32)],
-        PublicKey => &[f("value", V32)],
-        Signature => &[f("value", V64)],
-        V32 => &[f("vec", Bytes32)],
-        V64 => &[f("vec", Bytes64)],
-        VHash => &[f("vec", BytesHash)],
-        VCredential => &[f("vec", BytesCredential)],
-        VGroup => &[f("vec", BytesGroup)],
-        ContextGroup => &[f("value", VGroup)],
+        Extensions => table![f("unique", Empty)],
+        SecretWrap => table![f("secret", Secret)],
+        Secret => table![f("value", V32)],
+        Key => table![f("key", V32)],
+        PublicKey => table![f("value", V32)],
+        Signature => table![f("value", V64)],
+        V32 => table![f("vec", Bytes32)],
+        V64 => table![f("vec", Bytes64)],
+        VHash => table![f("vec", BytesHash)],
+        VCredential => table![f("vec", BytesCredential)],
+        VGroup => table![f("vec", BytesGroup)],
+        ContextGroup => table![f("value", VGroup)],
         _ => return None,
     })
 }
@@ -410,6 +440,42 @@ impl Scan<'_, '_> {
                     return Err(Error);
                 }
             }
+            ResumptionLimit => {
+                let maximum = self.cursor.number()?;
+                if !matches!(maximum, 0 | 32) {
+                    return Err(Error);
+                }
+                self.facts.resumption_max = maximum;
+            }
+            ResumptionCursor => self.facts.resumption_cursor = self.cursor.number()?,
+            ResumptionEntries => {
+                self.cursor.take(b'[')?;
+                let mut count = 0usize;
+                if !self.cursor.eat(b']')? {
+                    loop {
+                        if count >= 2 {
+                            return Err(Error);
+                        }
+                        self.cursor.take(b'[')?;
+                        let epoch = self.cursor.number()?;
+                        // The only supported nonempty store is original founder history,
+                        // in exact chronological order. Duplicates/gaps/future epochs refuse.
+                        if epoch != count as u64 {
+                            return Err(Error);
+                        }
+                        self.cursor.take(b',')?;
+                        self.value(SecretWrap, depth + 2)?;
+                        self.cursor.take(b']')?;
+                        self.facts.resumption_epochs[count] = Some(epoch);
+                        count += 1;
+                        if self.cursor.eat(b']')? {
+                            break;
+                        }
+                        self.cursor.take(b',')?;
+                    }
+                }
+                self.facts.resumption_count = count;
+            }
             SuiteNumber => {
                 if self.cursor.number()? != 3 {
                     return Err(Error);
@@ -524,6 +590,14 @@ pub(super) fn check(
     // value that could hide a changed/lowered row. N may occur later in JSON field order.
     if row == Row::Tree {
         facts.unmerged_max = None;
+    }
+    if row == Row::Resumption {
+        // Repeated actual getters recompute the SAME row facts. Never accumulate an earlier
+        // prefix, which could conceal a changed/shortened store between provider reads.
+        facts.resumption_max = 0;
+        facts.resumption_cursor = 0;
+        facts.resumption_count = 0;
+        facts.resumption_epochs = [None; 2];
     }
     let shape = match row {
         Row::Signer => Shape::Signer,

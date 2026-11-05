@@ -73,7 +73,7 @@ fn actual_restore_refuses_valid_sdk_proposal_reference_with_missing_companion_ro
     // Construct a real SDK ProposalRef using its public hash constructor. It is deliberately
     // dangling stored metadata, not an authenticated proposal/membership or a production writer.
     let provider = OpenMlsRustCrypto::default();
-    let reference = openmls::prelude::ProposalRef::new(
+    let reference = openmls::prelude::hash_ref::ProposalRef::new(
         b"test-only orphan proposal",
         crate::CIPHERSUITE,
         provider.crypto(),

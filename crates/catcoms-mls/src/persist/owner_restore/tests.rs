@@ -103,6 +103,63 @@ fn changed(source: &[u8], label: &[u8], value: &[u8]) -> Vec<u8> {
     e.put_bytes(group).unwrap();
     e.finish()
 }
+/// Failure-only diagnostics for this test's freshly generated SDK fixture. Report schema,
+/// enum labels and collection lengths, NEVER private/signing bytes, group IDs or credentials.
+/// This runs outside all SDK/provider locks and is not a production diagnostic interface.
+fn source_schema(source: &[u8]) -> String {
+    fn shape(value: &serde_json::Value) -> serde_json::Value {
+        use serde_json::{json, Value};
+        match value {
+            Value::Object(fields) => Value::Object(
+                fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), shape(value)))
+                    .collect(),
+            ),
+            Value::Array(values) if values.iter().all(Value::is_number) => {
+                json!({"byte_or_number_array_length": values.len()})
+            }
+            Value::Array(values) => {
+                json!({"array_length":values.len(),"element_shapes":values.iter().map(shape).collect::<Vec<_>>()})
+            }
+            Value::String(value)
+                if matches!(
+                    value.as_str(),
+                    "Operational"
+                        | "Basic"
+                        | "Mls10"
+                        | "ED25519"
+                        | "AlwaysCiphertext"
+                        | "MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519"
+                ) =>
+            {
+                Value::String(value.clone())
+            }
+            Value::String(value) => json!({"string_length":value.len()}),
+            Value::Number(value) => {
+                if value.as_u64().is_some_and(|n| n <= 1024) {
+                    value.clone().into()
+                } else {
+                    json!("large_number")
+                }
+            }
+            Value::Bool(value) => json!(value),
+            Value::Null => Value::Null,
+        }
+    }
+    let mut decoder = Decoder::new(source);
+    let map = deserialize_map(decoder.get_bytes().unwrap()).unwrap();
+    let mut rows = std::collections::BTreeMap::new();
+    for (key, bytes) in map {
+        let label_end = key.iter().position(|byte| *byte == b'{').unwrap_or(0);
+        let label = std::str::from_utf8(&key[..label_end]).unwrap_or("unknown-label");
+        rows.insert(
+            label.to_owned(),
+            shape(&serde_json::from_slice(&bytes).unwrap()),
+        );
+    }
+    serde_json::to_string(&rows).unwrap()
+}
 #[test]
 fn actual_founder_policy_precedes_signer_and_counts_every_real_generic_direct_list_getter() {
     let source = snapshot();
@@ -115,7 +172,13 @@ fn actual_founder_policy_precedes_signer_and_counts_every_real_generic_direct_li
         1024 * 1024,
         admission(&resources, GRAPH, WORK, calls.clone()).unwrap(),
     )
-    .unwrap();
+    .unwrap_or_else(|error| {
+        panic!(
+            "genuine initial SDK restore failed (SDK entries {}): {error}; schema {}",
+            SDK_LOAD_ENTRIES.with(Cell::get),
+            source_schema(&source)
+        )
+    });
     assert!(group.is_active());
     assert!(group.has_local_signer(device.public_key_ref()));
     assert_eq!(SDK_LOAD_ENTRIES.with(Cell::get), 1);

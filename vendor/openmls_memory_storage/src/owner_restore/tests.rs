@@ -146,6 +146,7 @@ fn strict_shape_duplicate_escape_unknown_count_and_wrong_geometry_refuse() {
         secret_size: 3,
         epoch: 1,
         unmerged_max: None,
+        ..shape::Facts::default()
     };
     facts.finish().unwrap();
     facts.secret_parents = 1;
