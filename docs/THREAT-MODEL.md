@@ -43,7 +43,7 @@ Native still accepts supported lower envelopes: it does not persist an independe
 floor. A development-only mixed-bundle hot reload with an already admitted old writer is outside
 that guarantee; packaged application updates restart native rather than overlap old/new bundles.
 
-## Inactive admin history observer boundary (30 October)
+## Privileged retained-original history boundary (5 November; partial ledger)
 
 Restored SignedOp presence is not proof of valid signature, containing document scope or historical
 membership. The observer preserves malformed and foreign-scope originals for inspection. A bounded
@@ -56,8 +56,28 @@ and checks actor-table references before its expanded conversion (which assumes 
 It explicitly validates the chunk checksum, which the pinned standalone Change parser does not.
 These are observer safeguards, not relaxed ingestion or authority rules. Oversized originals remain
 chunk-readable; their unavailable decode/verification status must never become positive evidence.
-Original-session/role authorization and scoped cache invalidation belong to the not-yet-wired
-Actor/native read consumers, so this primitive checkpoint claims no privileged UI access boundary.
+The integrated native read path uses the main-window ACL plus synchronous original UI/registry
+capture before scheduling. Actual Actor current locally verified owner/admin checks precede cursor
+or detail metadata. Independent account, registry-entry and pane cancellation is irreversible;
+final plaintext reply publication checks the original UI commit and exact current Actor/row. Lock
+cannot finish ahead of an already-admitted synchronous reply, and a lock/unlock cycle cannot adopt
+old queued reads. Native cached observers do not retain Actor senders after row removal. This does
+not solve global role freshness under partition: current local policy remains the R7 boundary.
+
+This history view never resolves a friendly name by short fingerprint alone, including valid signatures from
+a different complete identity with a colliding prefix. Invalid/unverified claims are labelled as
+such. Legacy signatures do not prove group/epoch membership, and valid current roster entries do
+not retroactively prove historical authorship. Exact original bytes remain distinguishable from
+bounded decoded projection; unsupported input does not become verified evidence. Returned strings
+are rendered as inert text, and server/session/role retirement clears the mounted reader's copies.
+
+The current reader inventories retained signed originals only and always reports incomplete ledger
+coverage. Applied unsigned/unattributed graph changes, orphan queues, typed actions and historical
+owner facts/decisions are not silently classified absent. Logical read/metadata/response quotas and
+finite prefix work prevent whole-history cloning; they do not claim a hard bound on opaque Tauri,
+SDK or JavaScript runtime heaps. Focused real native lifecycle/ACL-dispatch and frontend tests passed;
+complete continuation gates and the corrected browser scenario are deferred while compilation is
+paused by the user. Current evidence and limits are recorded in HANDOVER.
 
 ## Dormant owner-attested ordinary basis verifier (30 October; validation pending)
 

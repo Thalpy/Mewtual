@@ -1,30 +1,56 @@
 # Mewtual; Handover
 
-## Chat V2 production continuation (30 October; implementation in progress)
+## Chat V2 production continuation (5 November; incomplete, compilation paused)
 
-The separate Automerge observer prerequisite vendors the exact lock-pinned 0.10.0 archive with an
-additive borrowed applied/queued inventory API and a nonserialized replacement identity. It does
-not activate a reader or reconstruct applied changes. Its focused upstream-style tests are authored;
-compilation, focused execution and integration suites remain the primary agent's responsibility.
-See [source provenance and patch inventory](../vendor/automerge/MEWTUAL-PATCH.md).
+The production continuation is on `communication-chat-v2-production`, starting from validated
+PR82 head `5b057afc`. Chat V2 is **not enabled or complete**. Typed send/receive dispatch, scalable
+canonical historical-authority storage, durable membership/invite integration, migration and the
+complete privileged graph/action/fact/decision ledger remain required. Ordinary conflicts must
+resolve automatically; unproven late actions from removed members are the review exception.
 
-The new branch starts from validated PR82 head `5b057afc`; the complete results recorded below
-belong to that earlier runtime checkpoint, not this new implementation. Live typed dispatch,
-canonical historical-authority archive, migration and the full privileged admin view remain open.
+The bounded retained-original reader is implemented through Server/Actor, two privileged native
+commands and a separate Chat history tab in Moderation. It shows original legacy changes, including
+edits/deletes that ordinary chat no longer renders. A finite captured signed-log prefix does not
+restart on each append. It never claims that those originals exhaust applied/unattributed graph
+changes, or that a legacy signature proves historical server membership. Coverage stays explicitly
+incomplete. Full-identity lookup, rather than a short fingerprint, selects friendly author names.
 
-The first read-index slice now captures original signed-log prefixes and hashes/verifies them in
-bounded turns without cloning whole original frames. Seven focused regressions pass, including
-50 writers appending between every visit, original create/edit/delete frames, huge originals,
-bad signatures and foreign signed scopes after real snapshot restore, same-count replacement,
-partial-edit panic without transaction closing, and quota/page refusals. Actual-diff review is
-clear. This is explicitly not complete graph inventory, a native authorization boundary, or an
-activated admin panel. Applied and orphaned unattributed changes need separate bounded observation;
-the current upstream getters clone/reconstruct whole histories and must not be used per page.
+Native command routing captures the original UI generation, actual registry row/Actor and independent
+account/entry/pane cancellation before scheduling. Final publication uses the original UI commit
+barrier and actual registry row. A retired pane cancels queued Actor reads and frees their eight
+global slots without waiting for an unrelated durable-send Ready; the cached observer retains no
+strong Actor sender. Current locally verified owner/admin policy is required on every Actor read.
+This is not a proof of globally fresh role revocation under partition; the R7 limitation remains.
 
-Factory/canonical owner evidence is progressing in isolated sibling worktrees. Its old bounded
-checkpoint profile is nonactivatable for long-lived 20/50-member groups; scalable proof/cold-archive
-format and actual publication/restore consumers are still required. No full suites have been run
-for this new branch yet; primary will run them after the production continuation is integrated.
+Executed focused evidence for this continuation: signed-prefix **7**, bounded MLS snapshot **3**,
+Sync initialization **4**, Sync durable **18**, related App durable **19**, Server/Actor reader
+**12**, bounded roster **3**, native reader/DTO **18**, latest frontend integration **52**: all
+passed. Four affected crates passed strict all-target/all-feature Clippy. The byte-verified isolated
+Automerge runner passed **15** observer tests and is now a CI step, without replacing workspace
+tests. Its exact pinned-source patch preserves legacy encoding and does not reconstruct applied
+changes. [Source provenance](../vendor/automerge/MEWTUAL-PATCH.md).
+
+Svelte check passed with zero errors/warnings before the subsequent full-identity author-label
+correction; focused frontend tests include that correction. The new actual 900 x 640 Edge scenario
+reached the history view but found a test wait that accepted a previous detail before Svelte flushed
+the new selection. That wait is corrected and awaits rerun; no passing browser flow/screenshot is
+claimed for this continuation. An earlier sandbox attempt lost its debugger connection before
+testing the page. The separate native check was interrupted, not passed, and its following ACL
+batch did not run.
+
+The user requested a pause on compiling tests. The primary stopped its Cargo check and confirmed
+no worktree compiler remained. Do not start compilation, compiled tests or builds until that pause
+is lifted. New work receives static/actual-diff review and records tests as unexecuted. Complete
+Root, native and frontend suites and remaining applicable gates are still mandatory before final
+handoff when the user permits them. Older complete results below apply only to PR82.
+
+Canonical founder/member initialization and private restore are developed in the isolated
+`chat-admission-admin-audit-worktree` (checkpoint `72c790d5`); they are not yet integrated here.
+Membership candidate/strict operation persistence and safe automatic retirement of never-exposed
+initialization are in progress. The provider's physical allocation invoice and bounded restore need
+correction before claiming an end-to-end resource bound. The old bounded checkpoint profile remains
+nonactivatable for long-lived 20/50-member groups; scalable public headers/cold archive, genuine
+root-distribution invites and actual production consumers are open gates.
 
 ## PR82 follow-up review corrections (30 October; local gates passed)
 

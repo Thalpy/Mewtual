@@ -1,6 +1,38 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Borrowed Automerge inventory prerequisite (30 October; reader not activated)
+## Privileged retained-original reader (5 November; partial ledger)
+
+`get_admin_chat_ledger({server,cursor,limit})` and
+`get_admin_chat_ledger_detail({server,rowId,expectedRevision,frameOffset})` are the only commands
+in the synchronous admin-history router. Tauri's main-window command ACL applies before the router,
+which captures the original UI generation and actual registry row/Actor before scheduling. Both
+commands require current locally verified owner/admin authority in the Actor. The public legacy
+`get_moderation` endpoint is unchanged and does not expose retained deleted originals.
+
+One native pane owns an independent cancellation scope and a shared 64 MiB logical metadata budget;
+eight in-flight reads are allowed. Capturing a native history read for another server, lock or
+registry-row retirement revokes the old scope, and
+cancelled queued reads release their slots before an unrelated Actor Ready completes. The cache
+does not retain an Actor sender. Actor cache expiry uses the injected monotonic clock. Native's
+final reply checks its original UI commit, registry instance, actual Actor and cancellation scope.
+
+Responses are closed DTO variants: Page, Detail, Stale or Unavailable. A stale response names a
+revision obtained from the actual authorized Actor, never a fabricated reset value. Pages contain
+at most 32 original rows; raw frames are read in exact chunks of at most 64 KiB. Decoded text has a
+separate 64 KiB expansion budget and JSON encoding is capped before growth at 1 MiB. Large counters
+remain canonical decimal strings; byte offsets must be JavaScript-safe integers. Unsupported or
+oversized decoding does not hide the bounded raw original. Byte limits are logical owned-buffer
+limits, not a claim about Tauri/JavaScript engine heap allocation.
+
+The renderer retains one page and one chunk, not an accumulating full-history array. Each mounted
+reader captures original server/session/view scalars; the parent remounts on reactive view scope or
+role change and unmounts on lock/hydration. Negative scope observations clear newer positive replies
+too. Names resolve against complete signer identity; short fingerprints are display abbreviations.
+All original text is rendered inert. Legacy group binding/membership remains unproven, and every
+response reports incomplete graph coverage, inactive typed authority and unknown unattributed
+changes. [Native contract and limits](communication-recovery/CHAT-ADMIN-NATIVE-READ.md).
+
+## Borrowed Automerge inventory prerequisite (30 October; partial consumer integrated)
 
 The pinned 0.10.0 dependency has a narrow temporary local observer patch, shared by root and native
 workspaces. `Automerge` and `AutoCommit` expose borrowed `applied_change_hashes()` and
@@ -44,7 +76,8 @@ different signatures, messages, concurrent branches and edits remain distinct or
 
 Completion is **only this captured signed-log prefix**. It says nothing about unsigned/unattributed
 applied changes, orphan queues, membership or full-ledger coverage. Graph observation and the
-privileged native/App consumers remain in progress. A known row count must use completed unique
+complete graph reader remains in progress. The bounded signed-original Actor/native/App consumer
+is described above. A known row count must use completed unique
 rows, not the physical captured record count. No getter closes an AutoCommit transaction.
 
 ## Native unlock generation contract (30 October)
@@ -108,7 +141,7 @@ quiet-peer effects regressions passed in the primary's five-test focused run, fo
 test app effects/cap batch and the sync cap regression. Actual effects reviews are clear. Current
 complete-suite results and limitations are recorded in [HANDOVER.md](HANDOVER.md).
 
-## Inactive retained-history inspection primitives (30 October)
+## Retained-history inspection primitives (30 October; partial consumer integrated)
 
 `SignedOpFrame` borrows one immutable original SignedOp. Checked length, `visit_chunk` and
 `read_chunk` reproduce the existing exact frame without a full encode allocation. A visit/copy
@@ -123,8 +156,8 @@ the64 KiB raw ceiling and separate actor/RLE/cell/predecessor/string budgets bef
 including actor-table reference bounds; checksum validation precedes expanded decoding. Results
 are Decoded, Unsupported, TooLarge or Invalid. Refusal keeps exact raw bytes readable and changes
 no document or ingestion policy. Expanded actor-name cloning has its own bounded cost beyond
-the raw ceiling. Neither helper supplies native authorization, an index, a DTO or an admin panel;
-those production consumers remain in progress under the full retained-ledger read contract.
+the raw ceiling. These primitives supply no authorization themselves. The bounded Server/Actor,
+native DTO and admin panel consumers are described above; complete graph/typed coverage is open.
 
 ## Dormant owner-fact semantic verifier (30 October)
 

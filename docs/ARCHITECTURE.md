@@ -1,5 +1,25 @@
 # Mewtual; Architecture
 
+## Privileged legacy originals alongside ordinary chat (5 November)
+
+The retained-original history view is a read path through Server/Actor and a dedicated synchronous
+native router. It preserves ordinary chat projection and the separate typed ledger's inactive
+status. A captured signed-log prefix advances in bounded Actor turns, so continued appends do not
+starve one finite view. Current locally verified moderation policy, original source identities,
+cancellation and monotonic expiry guard the ephemeral paid index; it grants no historical authority.
+
+Native captures real UI/registry custody before async scheduling, and final reply publication uses
+the original UI commit/registry barrier. Its one pane cache keeps cancellation observers rather
+than an Actor sender, and retired queued reads release global read slots before unrelated Actor
+transactions complete. Moderation's Chat history tab retains one page/chunk and uses immutable
+original callbacks. Lock, server/view replacement and role remount discard its data. Friendly author
+labels require a complete signer identity match, with unverified claims labelled separately.
+
+This exposes retained legacy create/edit/delete originals with explicit incomplete coverage.
+Complete graph/typed/fact/decision history and production Chat V2 activation remain separate open
+work. [Interfaces](INTERFACES.md#privileged-retained-original-reader-5-november-partial-ledger) and
+[current validation](HANDOVER.md) define the present boundary.
+
 ## Inactive exact moderation approval (29 October; validation pending)
 
 The separate typed chat ledger now distinguishes ordinary historical authority from one exact

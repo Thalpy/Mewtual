@@ -3,7 +3,8 @@
 //! This is deliberately not a complete Automerge graph inventory or an authorization service.
 //! In particular an unsigned change, orphan queue entry or mismatched saved envelope cannot be
 //! inferred from these rows. The privileged consumer must report unknown/incomplete graph
-//! coverage until it has independently inspected that inventory. No native caller is wired here.
+//! coverage until it has independently inspected that inventory. The privileged Actor/native
+//! consumer supplies original scope and reader policy separately; this index grants neither.
 //!
 //! The log is private and append-only for the lifetime of one EncryptedDoc. Capturing its upper
 //! bound lets inspection finish even if fifty writers append between every visit. Graph changes,
