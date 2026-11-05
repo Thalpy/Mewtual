@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Private page encryption boundary (5 November; authored, unexecuted)
+
+Private chat pages use a dedicated BLAKE3-derived encryption key and strict complete frame ID,
+not raw snapshot db-key ciphertext or public file Cids. Expected identity/framing precede owned
+ciphertext copying and AEAD. A decryptable frame is untrusted DATA: the selected manifest/root,
+inner vault/group/Profile/kind, real signatures/semantics and admin read authorization remain
+consumer obligations. There is no actual archive namespace, writer or whole-host resource bound.
+Five regressions are authored/UNRUN. [Exact boundary](communication-recovery/CHAT-OWNER-PRIVATE-SEALED-PAGE.md).
+
 ## Actual V2 founder producer observation (5 November; source only)
 
 The new Sync producer uses actual `found` completion plus private physical identity/receiver-only

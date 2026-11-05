@@ -11,7 +11,7 @@ Action/v1 bytes and the already specified owner-evidence/v2 semantics remain unc
 Use a distinct private Store namespace; never put pages, manifests, journals or provider bytes in
 BlobStore or expose them to a network file service. Paths are fixed within the original physical
 Store, not supplied by RPC, a peer, decoded manifest or a numeric server alias. Each page is sealed
-with the original vault database key. Its file identity is a domain-separated BLAKE3 digest of the
+with a protocol-specific key derived from the original vault database key. Its file identity is a domain-separated BLAKE3 digest of the
 COMPLETE sealed frame, including its original nonce. A retry retains those same bytes/identity;
 resealing the same plaintext is not a retry. Private ciphertext IDs are not ActionIDs or public
 acceptance proofs. The actual sealed head/catalog authenticates the selected manifest ID.
@@ -19,8 +19,11 @@ acceptance proofs. The actual sealed head/catalog authenticates the selected man
 Maximum page plaintext is65536 bytes. Proposed fixed page prefix is a versioned domain, exact
 vault domain32, bounded group<=256, ProfileCID32 and a closed page kind. Every variable vector
 has complete borrowed framing/count preflight before copying. The parser never follows a path
-embedded in a page. Exact tag/header/AEAD overhead constants must be frozen by format review
-before implementation;65536 is a per-buffer limit, not a complete memory invoice.
+embedded in a page. The reviewed [sealed-page DATA format](CHAT-OWNER-PRIVATE-SEALED-PAGE.md)
+now fixes the36-byte framed domain, version1, raw nonce24 and ciphertext length/tag:86 bytes
+total overhead,65622-byte complete frame ceiling. Its dedicated derived key prevents relabelled
+ordinary snapshot ciphertext. This codec is authored/unexecuted, with no I/O/namespace/current
+consumer;65536 remains a per-buffer limit, not a complete memory invoice.
 
 Three content page kinds suffice for the first vertical:
 

@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private encrypted page DATA (5 November; authored, unexecuted)
+
+`private_chat_page::{PreparedPrivateChatPage, PrivateChatPageId, open_private_chat_page}` owns
+one exact original encrypted candidate or returns zeroizing untrusted inner bytes. The dedicated
+derived encryption key and distinct ciphertext ID are not BlobStore/file or authority interfaces.
+No paths, namespace handler, physical account, canonical head or admin permission is added.
+[Exact frame, resource obligations and unrun regressions](communication-recovery/CHAT-OWNER-PRIVATE-SEALED-PAGE.md).
+
 ## Private V2 genesis DATA source (5 November; authored, unexecuted)
 
 `ChannelSync::prepare_owner_v2_founder` accepts only its actual original opaque fresh creation,

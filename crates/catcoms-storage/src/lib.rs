@@ -29,6 +29,7 @@ pub mod cid;
 pub mod filecrypto;
 pub mod kept;
 pub mod pad;
+pub mod private_chat_page;
 pub mod retention;
 pub mod vault;
 

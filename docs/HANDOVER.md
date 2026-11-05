@@ -26,6 +26,16 @@ changed Rust files, whitespace checks and both ambient-dependency/raw-filesystem
 passed at the preceding integrated checkpoint. New source changes need the same narrow checks;
 none of these substitute for compilation or the required full suites when the pause is lifted.
 
+## Private sealed history-page data (5 November; authored, unexecuted)
+
+The storage crate now prepares immutable sealed private page DATA and opens a bounded frame
+against an external expected ciphertext ID. A dedicated derived key prevents ordinary db-key
+snapshot ciphertext relabelling; full syntax/identity validation precedes variable copies/AEAD.
+Original nonce/frame bytes survive retries. Five regressions are authored/UNRUN. No filesystem,
+archive namespace handler, canonical head, physical account or privileged reader is added.
+ARCHIVE ID2 remains rejected and production Chat V2 remains disabled/incomplete.
+[Exact format and overlapping buffer obligations](communication-recovery/CHAT-OWNER-PRIVATE-SEALED-PAGE.md).
+
 ## Actual private V2 founder source (5 November; authored, unexecuted)
 
 The Sync-only actual creation witness now produces typed V2 Profile, exact Founder Admission,
