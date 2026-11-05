@@ -8,6 +8,17 @@ derived encryption key and distinct ciphertext ID are not BlobStore/file or auth
 No paths, namespace handler, physical account, canonical head or admin permission is added.
 [Exact frame, resource obligations and unrun regressions](communication-recovery/CHAT-OWNER-PRIVATE-SEALED-PAGE.md).
 
+## Public V2 replay math DATA (5 November; authored, unexecuted)
+
+`ReplayMath::from_genesis` receives explicit typed Profile/Founder/header1/image DATA. Signature
+and image consistency do not select that caller's root. `derive_successor(&self, ...)` derives a
+bounded candidate `StepData`, with append nodes or exact cut DATA, without advancing the base.
+Only internally derived per-admission frontiers/tip headers govern the math. It issues no Current,
+lookup-complete, paid-control, saved, root-provenance or projection capability. Review refuses until
+real case/accepted-prefix evidence exists; no bool/callback can stand in for it. The actual governor
+must process known-parent signed contradictions before body availability and retain its original
+root/group/native barriers. This DATA helper does none of that mutation or source selection.
+
 ## Private V2 genesis DATA source (5 November; authored, unexecuted)
 
 `ChannelSync::prepare_owner_v2_founder` accepts only its actual original opaque fresh creation,

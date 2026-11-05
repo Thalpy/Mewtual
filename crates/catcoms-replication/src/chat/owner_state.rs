@@ -12,6 +12,7 @@ use super::owner_header::{
 use super::owner_profile::{AdmissionBody, SignedOwnerProfile, MAX_CURRENT_MEMBERS};
 use super::{ChatError, MAX_GROUP_ID_BYTES};
 use catcoms_wire::{Decoder, Encoder};
+pub mod transition;
 
 const DOMAIN: &[u8] = b"mewtual/chat/owner-public-state/v2\0";
 const ID_DOMAIN: &[u8] = b"mewtual/chat/owner-public-state-id/v2\0";

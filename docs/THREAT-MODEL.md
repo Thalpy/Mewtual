@@ -9,6 +9,23 @@ inner vault/group/Profile/kind, real signatures/semantics and admin read authori
 consumer obligations. There is no actual archive namespace, writer or whole-host resource bound.
 Five regressions are authored/UNRUN. [Exact boundary](communication-recovery/CHAT-OWNER-PRIVATE-SEALED-PAGE.md).
 
+## Bounded V2 transition mathematics, without governing authority (5 November)
+
+The new public replay-math initializer validates typed genesis/signatures/image but does not
+authenticate the caller's root trust decision. Sequential immutable candidate derivation checks
+whole expected public state, exact epochs/incarnations and each admission's own header/frontier.
+No raw-current-snapshot import, lifetime64 cache, implicit first-arrival winner, mutable prefix,
+Review default/absence callback or positive issuer is introduced. A repeated accepted leaf may
+be mathematically consistent; complete cold per-admission/action lookup remains mandatory for
+protocol idempotency. Checked sequence arithmetic is not prepaid mandatory-control capacity.
+
+Known-parent contradictory headers still need separate original pinned-root/prefix and shared
+group-negative closure BEFORE body checks; missing/invalid bodies cannot erase that evidence.
+Unknown parents need bounded handling, not a new cache. Actual native source/cold completeness,
+durable negative/control custody, semantic dependencies and projection issuance remain closed.
+The1MiB logical math invoice is separate from the founder64KiB and does not bound allocator/RSS,
+crypto/SDK/cold/global heaps. All ten regressions are authored/unrun, not production evidence.
+
 ## Actual V2 founder producer observation (5 November; source only)
 
 The new Sync producer uses actual `found` completion plus private physical identity/receiver-only

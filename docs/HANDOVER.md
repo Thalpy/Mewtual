@@ -36,6 +36,28 @@ archive namespace handler, canonical head, physical account or privileged reader
 ARCHIVE ID2 remains rejected and production Chat V2 remains disabled/incomplete.
 [Exact format and overlapping buffer obligations](communication-recovery/CHAT-OWNER-PRIVATE-SEALED-PAGE.md).
 
+## Public V2 body-transition math (5 November; authored, unexecuted)
+
+`owner_state::transition::ReplayMath` now derives the exact public result for Founder/Add/
+Append/Remove, retaining each current admission's OWN selected tip header and internally derived
+frontier. It compares the complete canonical image/epoch/all slots and returns immutable candidate
+DATA; errors and successful derivations leave the original cursor unchanged. Its public initializer
+requires full typed genesis consistency but makes no trusted-root/selected-prefix claim. There is
+no arbitrary current-snapshot initializer, first-arrival installation, lifetime history cache or
+projection issuer. Current64 and130-turnover source regressions distinguish current bounds from
+lifetime history. Invalid signatures/contexts, unchanged-row tampering, old-incarnation rejoin,
+issuer removal, sequence/full-log arithmetic and unsupported Review are covered in source tests.
+
+All ten regressions remain **UNRUN**; direct rustfmt parsing/diff checks only under the pause.
+Read-only design and final actual-diff reviews are clear for this public DATA-only math.
+The distinct1MiB named two-model logical invoice is not a debit, RSS, SDK/cold/active-host quota.
+Cross-batch duplicate math deliberately proves no exact acceptance/idempotency lookup. Actual
+root/prefix capture, body/ordinary semantic dependencies, Review/cold case/index completeness,
+private MLS Add/Remove producers, mandatory control reserves, known-parent fork escrow with the
+original shared group barrier, durable closure, positive issuance and native/UI activation remain
+separate required work. The creator Sync bridge is deferred. See
+[the exact scope](communication-recovery/CHAT-OWNER-V2-TRANSITION-CORE.md).
+
 ## Actual private V2 founder source (5 November; authored, unexecuted)
 
 The Sync-only actual creation witness now produces typed V2 Profile, exact Founder Admission,
