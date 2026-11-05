@@ -25,7 +25,10 @@ pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
 pub(in crate::store) mod pending_join;
 pub(in crate::store) mod pending_join_codec;
-pub use pending_join::{JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy};
+pub use pending_join::{
+    ActivatedCheckpointJoin, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,
+    ReturnedCheckpointJoinActivation,
+};
 
 const TAG: &str = "catcoms/critical-vault-namespaces/v1";
 pub(super) const MAX_PLAIN: usize = 512;

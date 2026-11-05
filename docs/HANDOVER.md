@@ -1,5 +1,6 @@
 # Mewtual; Handover
 
+
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
@@ -32,16 +33,24 @@ unexposed-negative recovery, independently durable exact repair seeds and unifie
 writer exclusion. It remains unimplemented: namespace mounting, fees, exact grants/seed/source
 codecs, actual head/scope saves and cold/crash acceptance cannot be inferred from that design.
 
-## Archive physical-orphan refusal (5 November; authored, unexecuted)
+## Original join task custody (5 November; authored, unexecuted)
 
-Both currently supported openers now refuse any `chat-owner-v2` root or
-`chat-critical-namespaces.archive.seed` before lower gates/cleaners; these reserved objects are
-also checked before generating a new vault DEK when the vault is absent. Presence includes
-nonregular objects, empty directories and dangling links. This is a negative safety fence,
-not support for ARCHIVE2 or a declaration/source saver. The eventual concrete handler must
-inspect the seed plus both complete catalog candidates and preserve the exact transaction;
-it cannot bypass the fence using a feature flag. Two constructor regressions are authored
-UNRUN (including a Unix-only dangling-link case); no compiler/test/build ran under the pause.
+The configured finite-checkpoint source can now bind one original transport to a negative task
+after exact saved-source/file/root and original admission/catalog checks. It exposes only
+close/cancellation and local route eligibility; it still cannot send, finish, or return a ready
+owner. A fixed five-slot predecessor registry weakly observes actual tasks captured even before
+an admission row exists; old generic fresh/legacy issuance cannot replace their source. Exact
+row changes close only the invalidated basis; old Retired/AlreadyCurrent no-ops preserve newer
+same-basis tasks. Pausing closes the old task before an uncertain schedule write. Retained weak
+registry metadata keeps its own shared fee after task Drop and never owns the sender/session.
+
+Fourteen regressions are authored UNRUN; compilation/tests/build remain paused. This is neither
+a five-groups lifetime quota nor a completed journal execution path. Durable arm/allowance,
+retained reply, ScopeIntent/Frozen/canonical terminal consumers and production root-kind2 joining
+remain open. The eventual actual intent-backed scope installer must preserve the SAME original
+sender through its own Current handoff and release the scarce slot only after an exact durable
+terminal/debt handoff; no scalar bypass/release API exists here. Existing saved-group control
+needs no new slot. [Contract](communication-recovery/CHAT-ORIGINAL-PREDECESSOR-NEGATIVE.md).
 
 ## Join submission transport prerequisite (5 November; unexecuted)
 
@@ -67,6 +76,17 @@ production root-kind2 invitation, ARCHIVE2 support, or full SDK/native/global ad
 ScopeIntent/FrozenCandidate/terminal/native activation and cold partial recovery remain open.
 [Contract](communication-recovery/CHAT-PENDING-JOIN-CATALOG-CHECKPOINT.md).
 
+
+## Archive physical-orphan refusal (5 November; authored, unexecuted)
+
+Both currently supported openers now refuse any `chat-owner-v2` root or
+`chat-critical-namespaces.archive.seed` before lower gates/cleaners; these reserved objects are
+also checked before generating a new vault DEK when the vault is absent. Presence includes
+nonregular objects, empty directories and dangling links. This is a negative safety fence,
+not support for ARCHIVE2 or a declaration/source saver. The eventual concrete handler must
+inspect the seed plus both complete catalog candidates and preserve the exact transaction;
+it cannot bypass the fence using a feature flag. Two constructor regressions are authored
+UNRUN (including a Unix-only dangling-link case); no compiler/test/build ran under the pause.
 
 ## Shared outer catalog parser (5 November; authored, unexecuted)
 

@@ -7,6 +7,8 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::sync::atomic::Ordering;
 
+mod activation;
+
 const SECRET: &[u8] = b"actual Pending-only destination source fixture";
 type Owner = OwnedOwnerServer<MemNetwork, ChaCha20Rng>;
 fn budget() -> OwnerEvidenceBudget {

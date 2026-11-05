@@ -101,7 +101,9 @@ pub(in crate::store) struct Mounted {
 }
 pub(in crate::store) type SharedMounted = Mutex<Option<Mounted>>;
 mod producer;
-pub use producer::JournalledCheckpointJoinPreparation;
+pub use producer::{
+    ActivatedCheckpointJoin, JournalledCheckpointJoinPreparation, ReturnedCheckpointJoinActivation,
+};
 
 #[derive(Clone, Copy)]
 pub(in crate::store) enum Settle {

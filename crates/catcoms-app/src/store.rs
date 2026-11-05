@@ -51,7 +51,8 @@ mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
 pub use critical_namespaces::{
-    CriticalCatalogReadPool, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,
+    ActivatedCheckpointJoin, CriticalCatalogReadPool, JournalledCheckpointJoinPreparation,
+    PendingJoinCatalogPolicy, ReturnedCheckpointJoinActivation,
 };
 mod owner_evidence;
 pub use chat_admission::{

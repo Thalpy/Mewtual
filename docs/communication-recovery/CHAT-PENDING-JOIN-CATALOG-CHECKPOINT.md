@@ -18,7 +18,10 @@ limits nor an IPC payload can issue the configured pool or namespace support.
 The configured mount disables the old unjournalled checkpoint join factory BEFORE reserve/mint,
 even when its catalog is Empty. An old bound attempt from an earlier physical mount remains
 cancelled and cannot send after reopen. The new preparation exposes only `save_pending`,
-`pause_pending` and `resume_pending`; there is NO transport/network/old-initializer/ready adapter.
+`pause_pending` and `resume_pending` in the original checkpoint. The later
+[negative task custody extension](CHAT-ORIGINAL-PREDECESSOR-NEGATIVE.md) adds one original
+transport bind with close/cancellation/route DATA only. There is still NO network, old-initializer
+or ready adapter, and no saved execution grant/receipt/ScopeIntent/Frozen terminal consumer.
 The authenticated recovered source remains opaque DATA with no into-Prepared/finish method.
 
 Public entry is `prepare_journalled_owner_checkpoint_join`, from a genuine ready source whose

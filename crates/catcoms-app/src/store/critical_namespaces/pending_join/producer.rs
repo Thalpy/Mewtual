@@ -6,6 +6,9 @@ use crate::store::owner_evidence::canonical::OwnerPendingCreation;
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_sync::{DirectJoinLimits, PreparedDirectJoin, RecoveredDirectJoinSource};
 
+mod activation;
+pub use activation::{ActivatedCheckpointJoin, ReturnedCheckpointJoinActivation};
+
 const MASTER: usize = 512 * 1024;
 const REQUEST: usize = 9 + 64 * 1024 + 32 * 1024;
 const SOURCE_PLAIN: usize = 640 * 1024;
@@ -29,9 +32,10 @@ enum Source {
     Recovered(RecoveredDirectJoinSource),
 }
 
-/// Secret source DATA retained under actual fees and original mounted custody. The only public
-/// effect is saving its exact Pending record. No existing `OwnerJoinedInitialization`, generic
-/// source extraction, transport binding, network request or ready-owner conversion is exposed.
+/// Secret source DATA retained under actual fees and original mounted custody. Public effects
+/// save/schedule its exact Pending record or move it into one original negative transport/task
+/// owner. No existing `OwnerJoinedInitialization`, generic source extraction, network request
+/// or ready-owner conversion is exposed; execution/receipt/intent consumers remain absent.
 pub struct JournalledCheckpointJoinPreparation {
     source: Source,
     original: Arc<Original>,
@@ -311,7 +315,8 @@ fn encode_immutable(
 
 impl JournalledCheckpointJoinPreparation {
     /// Pause scheduling DATA while preserving the SAME original encrypted keys/request. This
-    /// type has no network worker; actual future activation must have its own original lease.
+    /// object has no network worker; a previously activated original task is closed before the
+    /// dependent scheduling write, including when that write returns an uncertain result.
     pub fn pause_pending(
         &mut self,
         store: &ServerStore,
@@ -374,6 +379,13 @@ impl JournalledCheckpointJoinPreparation {
         if row.scheduling == desired {
             return self.confirm_existing(store);
         }
+        // Original negative closure precedes the dependent scheduling write. An uncertain
+        // failure cannot keep an old worker running or renew it from the unchanged revision.
+        store.close_original_join_predecessor(
+            &self.original.capture,
+            &self.metadata.source,
+            self.metadata.revision,
+        )?;
         let mut target = row.clone();
         target.revision = target.revision.checked_add(1).ok_or_else(refused)?;
         target.scheduling = desired;

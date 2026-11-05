@@ -152,6 +152,22 @@ impl JournalAdmissionPermit<'_> {
     }
 }
 
+impl<'writer> JournalAdmissionPermit<'writer> {
+    /// Admission-family constructor for a concrete original registration while its actual
+    /// Runtime writer is already held. It grants no scope advance or publication capability.
+    pub(super) fn for_original(
+        store: &'writer ServerStore,
+        capture: &'writer ChatAdmissionCapture,
+        runtime: &'writer Runtime,
+    ) -> Self {
+        Self {
+            store,
+            capture,
+            runtime,
+        }
+    }
+}
+
 impl ServerStore {
     /// Serialize a Pending-source write against the ORIGINAL admission capture. This callback
     /// may acquire only the catalog owner after admission; it must not call a Store admission/

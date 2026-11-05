@@ -8,6 +8,20 @@ new DEK. `symlink_metadata` preserves dangling/nonregular presence rather than i
 as absence. No ARCHIVE2 consumer, repair, deletion or source authority is granted by this fence.
 Two new constructor regressions remain UNRUN under the compilation pause.
 
+## Original pre-row task exclusion (5 November; authored, unexecuted)
+
+An absent or Retired local row has no live row publisher. Actual saved checkpoint tasks now
+register their own weak negative under original admission/catalog checks before any future
+network adapter. The registry owns no sender/source keys/transport/session and excludes old
+generic issuance even after owner Drop; weak expiry is not proof of durable debt absence.
+Exact row changes close only their captured basis, and unchanged old Retired/Current retries
+cannot revoke a newer same-basis task. Pausing closes the original before fallible scheduling
+IO. Retained metadata keeps its actual pool fee independently of the worker. This is negative
+exclusion only: no network, scope advance or ready handoff is supplied. The eventual concrete
+intent/terminal consumer must preserve its original live sender through its own Current
+transition and reclaim only exact durably handed-off debt, never by status/timeout/expiry.
+The fourteen authored regressions remain UNRUN and native/global admission is not established.
+
 ## Outer catalog data is not namespace support (5 November; authored, unexecuted)
 
 Shared outer framing/hash parsing borrows up to16 bounded declarations. Specific authenticated

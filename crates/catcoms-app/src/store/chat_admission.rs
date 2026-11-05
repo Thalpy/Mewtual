@@ -12,6 +12,7 @@ mod custody;
 pub(crate) mod fresh;
 pub(in crate::store) mod journal_basis;
 mod owner_writer;
+pub(in crate::store) mod predecessor;
 mod recovery;
 pub use recovery::{OwnerUnexposedInitialization, OwnerUnexposedRetirement};
 pub(crate) mod restore;
@@ -319,6 +320,9 @@ struct Runtime {
     managed: bool,
     format: Option<catcoms_storage::VaultFormat>,
     owners: BTreeMap<ChatAdmissionKey, AdmissionOwner>,
+    // Weak original-task exclusions, including tasks captured against absent/Retired rows.
+    // The sole typed creator owns its sender; no Store/debt can keep it running after Drop.
+    predecessors: predecessor::Registry,
 }
 #[cfg(test)]
 type BeforeWriterHook = Box<dyn FnOnce(&Mutex<Runtime>) + Send>;
@@ -770,6 +774,13 @@ impl ServerStore {
         {
             return Err(refused());
         }
+        // An actual source/plan owns this predecessor. Refuse BEFORE issued retry/dirty flush
+        // as well as RNG/new-owner creation: weak expiry is not durable source/debt absence.
+        // Future intent-backed consumers require their own exact original path; this function
+        // has no kind/status bypass or positive permission derived from a negative registry.
+        if runtime.predecessors.excludes_generic(&capture.key) {
+            return Err(refused());
+        }
         // Lock order is Store writer -> brief issued-slot access. No slot guard is held while
         // waiting for the writer or during I/O, and no slot reader ever waits for Store custody.
         // Re-read under the writer so simultaneous retries cannot each sample a new nonce.
@@ -881,6 +892,9 @@ impl ServerStore {
         // exactly this candidate, even though issuing it already invalidated the old observer.
         *capture.issued.lock().map_err(|_| refused())? = Some(preparation.clone());
         if let Some(owner) = new_owner {
+            runtime
+                .predecessors
+                .before_row_change(&capture.key, current.as_ref());
             if let Some(old) = runtime.owners.insert(capture.key.clone(), owner) {
                 old.life.revoke();
             }
@@ -973,6 +987,7 @@ impl ServerStore {
             .as_ref()
             .ok_or_else(refused)?
             .get(&preparation.key)
+            .cloned()
             .ok_or_else(refused)?;
         if row.nonce != preparation.record.nonce
             || row.revision != preparation.record.revision
@@ -1007,6 +1022,9 @@ impl ServerStore {
         if preparation.admission.is_cancelled() {
             return Err(refused());
         }
+        runtime
+            .predecessors
+            .before_row_change(&preparation.key, Some(&row));
         runtime
             .table
             .as_mut()
@@ -1217,19 +1235,27 @@ impl ServerStore {
         revision: u64,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        let row = runtime
+        let original = runtime
             .table
-            .as_mut()
+            .as_ref()
             .ok_or_else(refused)?
-            .get_mut(key)
+            .get(key)
+            .cloned()
             .ok_or_else(refused)?;
-        if row.nonce != nonce {
+        if original.nonce != nonce {
             return Err(refused());
         }
-        if row.phase != Phase::Retired {
-            if row.revision != revision {
+        if original.phase != Phase::Retired {
+            if original.revision != revision {
                 return Err(refused());
             }
+            runtime.predecessors.before_row_change(key, Some(&original));
+            let row = runtime
+                .table
+                .as_mut()
+                .ok_or_else(refused)?
+                .get_mut(key)
+                .ok_or_else(refused)?;
             row.phase = Phase::Retired;
             // Retirement still works at revision exhaustion; future renewal's checked_add refuses.
             row.revision = row.revision.saturating_add(1);

@@ -8135,6 +8135,18 @@ gates; legacy join bytes and expiry policy for new admission are unchanged. See
 
 ### Explicit Pending-only join catalog checkpoint
 
+`JournalledCheckpointJoinPreparation::activate_original_transport` consumes a saved Active source
+and ONE actual T/trusted finite-checkpoint endpoint into `ActivatedCheckpointJoin<T>`. Failure
+returns the SAME preparation/T. The wrapper exposes only original negative close/cancellation
+and local route eligibility DATA, with no network/old-initializer/ready/source getter. A fixed
+bounded predecessor exclusion is installed under original admission after actual catalog/file/
+root confirmation; Store retains only weak task signals and an independent real metadata fee.
+Same-revision rebind after Drop refuses. Pause closes its old original before scheduling IO;
+only the exact later saved schedule may register a new task. This is not the execution-grant,
+receipt, intent-backed scope or terminal handoff API. The registry grants no permission to call
+old generic issuance. Future scope installation/terminal release requires its actual original
+consumer and must preserve its live reservation sender through Current.
+
 `PendingJoinCatalogPolicy` + `ServerStore::open_with_pending_join_catalog` configure only a NEW,
 already-v6 physical mount. Default open stays Empty-only and old unjournalled checkpoint join
 preparation is refused on configured mounts before reserve/mint. The actual ready-source
