@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Historical package data (5 November; inactive owner prerequisite)
+
+The data-only KeyPackage identity helpers include a historical extractor that does not verify a KP,
+its signatures or lifetime and cannot admit it. Its exact caps and current/historical contract are in
+[CHAT-OWNER-HISTORICAL-KP-DATA](communication-recovery/CHAT-OWNER-HISTORICAL-KP-DATA.md). The covering
+owner-result consumer remains open; ordinary new-admission checks are unchanged.
 ## Scalable owner successor-header prerequisite (5 November; inactive)
 
 `chat::owner_header` is a separate closed v2 signed-data codec. It retains no cache or root and

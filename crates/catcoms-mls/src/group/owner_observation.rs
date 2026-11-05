@@ -116,19 +116,7 @@ impl ServerGroup {
             .own_leaf()
             .ok_or(MlsError::Internal("active own credential is unavailable"))?
             .credential();
-        if credential.serialized_content().len() > MAX_MEMBER_CATALOG_CREDENTIAL_BYTES {
-            return Err(MlsError::Internal(
-                "owner observation credential exceeds bound",
-            ));
-        }
-        before_encode();
-        let encoded = credential.tls_serialize_detached().map_err(proto)?;
-        if encoded.len() > MAX_MEMBER_CATALOG_CREDENTIAL_BYTES + 8 {
-            return Err(MlsError::Internal(
-                "owner credential TLS frame exceeds bound",
-            ));
-        }
-        Ok(credential_digest(&encoded))
+        crate::device::key_package_identity::credential_digest_with(credential, before_encode)
     }
 
     /// Actual Add plus an opaque exact-KP observation for the gated owner-fact producer.
@@ -140,25 +128,13 @@ impl ServerGroup {
         key_package: KeyPackage,
     ) -> Result<(AddOutcome, LocalMembershipChange), MlsError> {
         require_local_device(self, device)?;
-        let subject = crate::key_package_signature_key(&key_package)
-            .try_into()
-            .map_err(|_| MlsError::Internal("non-Ed25519 member key"))?;
-        let key_package_reference = device.key_package_reference(&key_package)?;
-        let credential = key_package.leaf_node().credential();
-        if credential.serialized_content().len() > MAX_MEMBER_CATALOG_CREDENTIAL_BYTES {
-            return Err(MlsError::Internal(
-                "owner observation credential exceeds bound",
-            ));
-        }
-        // Bind the credential TYPE and TLS framing too. The prior raw-content bound makes
-        // this allocation bounded before serialization, not just checked afterwards.
-        let credential = credential.tls_serialize_detached().map_err(proto)?;
-        if credential.len() > MAX_MEMBER_CATALOG_CREDENTIAL_BYTES + 8 {
-            return Err(MlsError::Internal(
-                "owner credential TLS frame exceeds bound",
-            ));
-        }
-        let credential = credential_digest(&credential);
+        // SAME metadata/digest implementation as historical owner-certificate comparison.
+        // This path still performs the actual Add below; the plain identity cannot manufacture
+        // its nonserialized LocalMembershipChange observation or replace admission validation.
+        let identity = device.key_package_identity(&key_package)?;
+        let subject = *identity.subject();
+        let key_package_reference = *identity.key_package_reference();
+        let credential = *identity.credential_digest();
         let group = self.group_id();
         let author = local_key(device)?;
         let before_epoch = self.epoch();
@@ -265,12 +241,8 @@ fn require_local_device(group: &ServerGroup, device: &MlsDevice) -> Result<(), M
     }
     Ok(())
 }
-fn credential_digest(bytes: &[u8]) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(b"mewtual/chat/mls-credential/v1\0");
-    h.update(bytes);
-    *h.finalize().as_bytes()
-}
+#[cfg(test)]
+use crate::device::key_package_identity::credential_digest;
 
 #[cfg(test)]
 mod tests;

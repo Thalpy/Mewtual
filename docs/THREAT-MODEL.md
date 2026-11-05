@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Historical package labels (5 November; inactive consumer prerequisite)
+
+Raw historical KP extraction authenticates nothing and cannot construct a runnable/validated KP.
+Only the independently pinned owner's original accepted reference/full subject/typed credential
+and complete retained request/result chain may authenticate those labels. A changed KP signature
+changes its exact SDK reference; no new admission may use this helper. Existing new-admission
+signature/lifetime policy remains unchanged. The actual current OpenMLS 0.9.2 ordinary parser uses
+wall time, so it must not be mistaken for time-independent accepted-result verification. The
+[bounded data-only contract](communication-recovery/CHAT-OWNER-HISTORICAL-KP-DATA.md) preserves the
+open whole-SDK heap and covering-consumer/physical-expiry acceptance limits.
 ## Stored SDK read error boundary (5 November; validation paused)
 
 The local pinned MemoryStorage patch returns the existing serialization error for malformed

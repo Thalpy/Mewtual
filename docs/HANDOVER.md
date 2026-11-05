@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+## Historical package data prerequisite (5 November; static review clear, tests paused)
+
+The actual Add/own-credential code now shares its unchanged typed TLS digest with bounded plain
+KeyPackage metadata helpers. Historical extraction deliberately returns no validated KeyPackage,
+Add observation or fresh authority, and checks no signatures/lifetime: a future retained-result
+consumer must independently authenticate the original owner-signed exact reference/subject/
+credential and complete request/result chain. Current new-admission checks are unchanged. This
+avoids using the actual OpenMLS 0.9.2 current-wall-clock parser for historical accepted outcomes.
+Five regressions are authored and UNRUN; direct rustfmt and diff checks only. The genuine
+expired-after-success saved-result/reply-loss/cold-reopen fixture and covering Add remain open.
+See [the exact boundary](communication-recovery/CHAT-OWNER-HISTORICAL-KP-DATA.md).
 ## Stored SDK read failures (5 November; authored, unexecuted)
 
 The pinned MemoryStorage read adapter now propagates its existing serialization error for present

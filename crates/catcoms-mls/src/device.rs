@@ -12,6 +12,9 @@ use crate::config::{capabilities, CIPHERSUITE};
 use crate::invite::{InviteError, MembershipCredential};
 use crate::{proto, MlsError};
 
+pub(crate) mod key_package_identity;
+pub use key_package_identity::KeyPackageIdentity;
+
 /// Serialize a KeyPackage for transport (so a joiner can send it to an inviter).
 pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsError> {
     MlsMessageOut::from(key_package.clone())
