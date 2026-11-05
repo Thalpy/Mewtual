@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Outer catalog data is not namespace support (5 November; authored, unexecuted)
+
+Shared outer framing/hash parsing borrows up to16 bounded declarations. Specific authenticated
+readers still inspect their exact supported set before any old cleanup; Pending-only rejects
+ID2/unknown/mixed sources. The complete plaintext hash includes all descriptors, not only JOIN.
+No parser flag can create handler support, mounted source or authority. Five tests remain UNRUN.
+[Exact separation](communication-recovery/CHAT-CRITICAL-CATALOG-ENVELOPE.md).
+
 ## Original-source genesis page preparation (5 November; authored, unexecuted)
 
 Actual founder/private-S0 preparation now consumes the bounded record/page/manifest codecs.

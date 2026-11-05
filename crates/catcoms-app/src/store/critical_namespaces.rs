@@ -19,6 +19,7 @@ use super::*;
 use catcoms_rt::RequestCancellation;
 use catcoms_storage::VaultFormat;
 use std::sync::Arc;
+mod catalog_envelope;
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};

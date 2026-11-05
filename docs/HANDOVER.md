@@ -46,6 +46,14 @@ unexposed-negative recovery, independently durable exact repair seeds and unifie
 writer exclusion. It remains unimplemented: namespace mounting, fees, exact grants/seed/source
 codecs, actual head/scope saves and cold/crash acceptance cannot be inferred from that design.
 
+## Shared outer catalog parser (5 November; authored, unexecuted)
+
+Only outer v1-Empty/v2 catalog framing and whole plaintext hashing are now shared borrowed DATA.
+The actual Pending-only reader STILL requires exactly JOIN1/version1; ARCHIVE2/unknown/mixed
+candidates refuse and default Empty behavior is unchanged. The configured read reservation adds
+the extra fixed envelope layout. Five tests are authored/UNRUN; no new handler, namespace or
+source/Current capability is enabled. [Contract](communication-recovery/CHAT-CRITICAL-CATALOG-ENVELOPE.md).
+
 ## Actual founder to genesis archive package (5 November; authored, unexecuted)
 
 The Sync-only `FounderArchivePreparation` now consumes the SAME actual frozen founder with a

@@ -1,17 +1,17 @@
-//! Closed borrowed Pending-only JOIN1 grammar. This module is being connected with the actual
-//! configured opener/producer; it must NOT be declared as a supported namespace independently.
+//! Closed borrowed Pending-only JOIN1 grammar used by the explicit configured opener/producer.
+//! The ordinary Store opener still rejects nonempty catalogs; this codec alone grants no handler.
 //! Parsing returns inert fixed metadata only, never admission, Fresh or an active worker lease.
 use super::*;
 use crate::store::chat_admission::journal_basis::{JournalBasis, MAX_ENCODED_BASIS};
 
-pub(super) const TAG_V2: &str = "catcoms/critical-vault-namespaces/v2";
+pub(super) use super::catalog_envelope::{catalog_digest, TAG_V2};
 pub(super) const JOIN_TAG: &str = "catcoms/destination-join-journal/v1";
 pub(super) const IMMUTABLE_TAG: &str = "catcoms/destination-join-source-binding/v1";
 pub(super) const JOIN_ID: u32 = 1;
 pub(super) const JOIN_VERSION: u32 = 1;
 pub(super) const MAX_ROWS: usize = 5;
 pub(super) const MAX_JOIN_PAYLOAD: usize = 16 * 1024 * 1024;
-pub(super) const MAX_CATALOG_PLAIN: usize = MAX_JOIN_PAYLOAD + 4 * 1024 + 512;
+pub(super) const MAX_CATALOG_PLAIN: usize = super::catalog_envelope::MAX_ENVELOPE_PLAIN;
 pub(super) const MAX_CATALOG_FRAMED: usize = MAX_CATALOG_PLAIN + 40;
 pub(super) const MAX_SOURCE: usize = 640 * 1024 + 40; // nonce24 + ciphertext(P+tag16)
 
@@ -105,12 +105,6 @@ impl Parsed<'_> {
     }
 }
 
-pub(super) fn catalog_digest(plain: &[u8]) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"catcoms/critical-catalog-plaintext/v1\0");
-    hash.update(plain);
-    *hash.finalize().as_bytes()
-}
 pub(super) fn binding_digest(immutable: &[u8]) -> [u8; 32] {
     let mut hash = blake3::Hasher::new();
     hash.update(b"catcoms/destination-join-source/v1\0");
@@ -121,60 +115,34 @@ pub(super) fn binding_digest(immutable: &[u8]) -> [u8; 32] {
 /// Scan the complete outer candidate before deciding supported IDs. An unknown descriptor,
 /// including reserved ARCHIVE2, is never skipped/truncated into a known JOIN-only history.
 pub(super) fn parse<'a>(plain: &'a [u8], domain: &[u8; 32]) -> Result<Parsed<'a>, AppError> {
-    if plain.len() > MAX_CATALOG_PLAIN {
-        return Err(refused());
-    }
-    let mut input = Decoder::new(plain);
-    let tag = input.get_str().map_err(|_| refused())?;
-    if tag == TAG {
-        validate_empty(plain, domain)?;
+    use super::catalog_envelope::{self, Format};
+    let envelope = catalog_envelope::parse(plain, domain, MAX_CATALOG_PLAIN)?;
+    if envelope.format == Format::LegacyEmpty {
         return Ok(Parsed {
-            generation: 1,
-            parent: None,
-            digest: catalog_digest(plain),
+            generation: envelope.generation,
+            parent: envelope.parent,
+            digest: envelope.digest,
             rows: std::array::from_fn(|_| None),
             count: 0,
         });
     }
-    if tag != TAG_V2 || input.get_bytes().map_err(|_| refused())? != domain {
+    // Shared outer parsing is DATA only. This concrete handler STILL accepts exactly JOIN1;
+    // an ARCHIVE2/unknown candidate in either source must refuse before any old cleaner.
+    if envelope.count != 1 {
         return Err(refused());
     }
-    let generation = input.get_u64().map_err(|_| refused())?;
-    let parent = input
-        .get_bytes()
-        .map_err(|_| refused())?
-        .try_into()
-        .map_err(|_| refused())?;
-    let count = input.get_u32().map_err(|_| refused())? as usize;
-    if count > MAX_ENTRIES || count > input.remaining() / 12 {
+    let entry = envelope.entry(0)?;
+    if entry.id != JOIN_ID
+        || entry.version != JOIN_VERSION
+        || entry.payload.len() > MAX_JOIN_PAYLOAD
+    {
         return Err(refused());
     }
-    let mut previous = 0;
-    let mut join = None;
-    let mut unsupported = false;
-    for _ in 0..count {
-        let id = input.get_u32().map_err(|_| refused())?;
-        let version = input.get_u32().map_err(|_| refused())?;
-        let payload = input.get_bytes().map_err(|_| refused())?;
-        if id <= previous || version == 0 {
-            return Err(refused());
-        }
-        previous = id;
-        if id == JOIN_ID && version == JOIN_VERSION && payload.len() <= MAX_JOIN_PAYLOAD {
-            join = Some(payload);
-        } else {
-            unsupported = true;
-        }
-    }
-    input.finish().map_err(|_| refused())?;
-    if generation < 2 || count != 1 || unsupported {
-        return Err(refused());
-    }
-    let (rows, count) = parse_rows(join.ok_or_else(refused)?, domain)?;
+    let (rows, count) = parse_rows(entry.payload, domain)?;
     Ok(Parsed {
-        generation,
-        parent: Some(parent),
-        digest: catalog_digest(plain),
+        generation: envelope.generation,
+        parent: envelope.parent,
+        digest: envelope.digest,
         rows,
         count,
     })

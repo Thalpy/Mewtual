@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Shared outer catalog DATA (5 November; authored, unexecuted)
+
+The private `catalog_envelope` parser returns fixed borrowed descriptor DATA after full bounded
+outer framing/EOF. Unknown descriptor parsing grants no handler: Pending-only still accepts
+exactly JOIN1/version1 and refuses ID2/unknown. Default Empty remains exact. Its extra fixed
+metadata enters the actual configured read reservation. Five regressions are UNRUN.
+[Contract and remaining consuming checks](communication-recovery/CHAT-CRITICAL-CATALOG-ENVELOPE.md).
+
 ## Actual original genesis archive DATA (5 November; authored, unexecuted)
 
 `FounderArchivePreparation::from_cached_source` consumes a real cached-S0 `FrozenFounder` with

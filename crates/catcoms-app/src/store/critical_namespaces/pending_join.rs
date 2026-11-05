@@ -14,7 +14,8 @@ pub(in crate::store) const READ_FEE: usize = codec::MAX_CATALOG_FRAMED
     + U
     + U
     + 2 * std::mem::size_of::<codec::Summary>()
-    + std::mem::size_of::<codec::Parsed<'static>>();
+    + std::mem::size_of::<codec::Parsed<'static>>()
+    + super::catalog_envelope::OUTER_METADATA_BYTES;
 const METADATA_FEE: usize =
     std::mem::size_of::<Mounted>() + 2 * std::mem::size_of::<codec::Summary>();
 
