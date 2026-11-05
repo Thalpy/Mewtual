@@ -302,6 +302,13 @@ pub(in crate::store) enum IntentKind {
         source: BootstrapSourceId,
         marker: TargetMarkerId,
     },
+    /// Historical producer-outcome DATA, not a reconstructed runtime SavedFiles/arm. Only
+    /// the actual completed writer's separately retained closure may publish this terminal.
+    SourceSaved {
+        context: BootstrapSourceContextData,
+        source: BootstrapSourceId,
+        marker: TargetMarkerId,
+    },
     ClosedDebit(CloseReason),
     ClosedFounding {
         facts: FoundingData,
@@ -332,6 +339,11 @@ impl IntentData {
         enum Payload<'a> {
             Founding(BorrowedFounding<'a>, TargetMarkerId),
             Source(
+                BootstrapSourceContextSpec<'a>,
+                BootstrapSourceId,
+                TargetMarkerId,
+            ),
+            SourceSaved(
                 BootstrapSourceContextSpec<'a>,
                 BootstrapSourceId,
                 TargetMarkerId,
@@ -369,6 +381,20 @@ impl IntentData {
                 TargetMarkerId::from_bytes(digest(&mut d)?),
                 get_reason(&mut d)?,
             ),
+            5 => {
+                // Identical bounded payload to SourcePrepared; the closed tag and counters,
+                // not any extra caller status/OS identity, distinguish the terminal record.
+                if d.get_u8().map_err(|_| refused())? != 0 {
+                    return Err(refused());
+                }
+                let marker = TargetMarkerId::from_bytes(digest(&mut d)?);
+                let source = BootstrapSourceId::from_bytes(digest(&mut d)?);
+                Payload::SourceSaved(
+                    decode_context(field(&mut d, MAX_CONTEXT_BYTES)?)?,
+                    source,
+                    marker,
+                )
+            }
             _ => return Err(refused()),
         };
         d.finish().map_err(|_| refused())?;
@@ -385,6 +411,11 @@ impl IntentData {
                 }
             }
             Payload::Source(spec, source, marker) => IntentKind::SourcePrepared {
+                context: BootstrapSourceContextData::from_data(spec).map_err(|_| refused())?,
+                source,
+                marker,
+            },
+            Payload::SourceSaved(spec, source, marker) => IntentKind::SourceSaved {
                 context: BootstrapSourceContextData::from_data(spec).map_err(|_| refused())?,
                 source,
                 marker,
@@ -429,13 +460,20 @@ impl IntentData {
                     return Err(refused());
                 }
             }
-            IntentKind::SourcePrepared { context, .. } => {
+            IntentKind::SourcePrepared { context, .. }
+            | IntentKind::SourceSaved { context, .. } => {
                 let c = context.spec_data();
+                let terminal = matches!(&self.kind, IntentKind::SourceSaved { .. });
+                let base: u64 = if terminal { 3 } else { 2 };
                 if c.vault != debit.invocation.vault
                     || c.signer != debit.signer
                     || c.limits != debit.limits
                     || c.planned_revision != 1
-                    || self.sequence != 2 + u64::from(self.io_spent)
+                    || (terminal && self.io_spent == 0)
+                    || self.sequence
+                        != base
+                            .checked_add(u64::from(self.io_spent))
+                            .ok_or_else(refused)?
                     || self.parent.is_none()
                 {
                     return Err(refused());
@@ -472,6 +510,7 @@ impl IntentData {
             IntentKind::SourcePrepared { .. } => 2,
             IntentKind::ClosedDebit(_) => 3,
             IntentKind::ClosedFounding { .. } => 4,
+            IntentKind::SourceSaved { .. } => 5,
         });
         e.put_u32(self.io_spent);
         match &self.kind {
@@ -480,6 +519,11 @@ impl IntentData {
                 put(&mut e, marker.as_bytes())?;
             }
             IntentKind::SourcePrepared {
+                context,
+                source,
+                marker,
+            }
+            | IntentKind::SourceSaved {
                 context,
                 source,
                 marker,
@@ -561,6 +605,27 @@ impl IntentData {
             {
                 Ok(())
             }
+            (
+                IntentKind::SourcePrepared {
+                    context,
+                    source,
+                    marker,
+                },
+                IntentKind::SourceSaved {
+                    context: next,
+                    source: next_source,
+                    marker: next_marker,
+                },
+            ) if context == next
+                && source == next_source
+                && marker == next_marker
+                && self.io_spent == old.io_spent =>
+            {
+                // Pure DATA transition only. The physical writer must additionally retain
+                // the SAME actual completed run+saved arm BEFORE replacing the top journal.
+                // No SourceSaved outgoing transition exists, even with unused I/O allowance.
+                Ok(())
+            }
             _ => Err(refused()),
         }
     }
@@ -583,6 +648,11 @@ impl IntentData {
                 ..
             } if facts == &marker.founding && *expected == id => Ok(()),
             IntentKind::SourcePrepared {
+                context,
+                marker: expected,
+                ..
+            }
+            | IntentKind::SourceSaved {
                 context,
                 marker: expected,
                 ..

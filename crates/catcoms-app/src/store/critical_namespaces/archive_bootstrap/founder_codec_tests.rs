@@ -328,3 +328,313 @@ fn debit_only_closure_seed_has_no_target_and_cross_kind_keys_never_alias() {
     let marker = seal_target_marker_data(&KEY, &marker(&d, did), &d, did, &mut rng()).unwrap();
     assert!(encode_transition_seed(&KEY, &d, did, None, Some(&marker), &cf).is_err());
 }
+
+/// Local DATA/MAC fixture only. A valid encoded terminal is deliberately NOT a real completed
+/// worker, saved arm or SavedSourceClosure. Root's physical tests must supply those originals.
+struct TerminalFixture {
+    debit: DebitData,
+    debit_id: DebitId,
+    marker_frame: Zeroizing<Vec<u8>>,
+    arm: IntentData,
+    arm_frame: Zeroizing<Vec<u8>>,
+    terminal: IntentData,
+}
+fn terminal_fixture(spent: u32) -> TerminalFixture {
+    let debit = debit();
+    let debit_frame = seal_debit_data(&KEY, &debit, &mut rng()).unwrap();
+    let debit_id = DebitId::of(&debit_frame);
+    let marker_frame = seal_target_marker_data(
+        &KEY,
+        &marker(&debit, debit_id),
+        &debit,
+        debit_id,
+        &mut rng(),
+    )
+    .unwrap();
+    let marker_id = TargetMarkerId::of(&marker_frame);
+    let mut arm = source(&debit, debit_id, marker_id, IntentId::from_bytes([81; 32]));
+    arm.sequence = 2 + u64::from(spent);
+    arm.io_spent = spent;
+    let arm_frame = seal_intent_data(&KEY, &arm, &debit, debit_id, &mut rng()).unwrap();
+    let IntentKind::SourcePrepared {
+        context,
+        source,
+        marker,
+    } = arm.kind.clone()
+    else {
+        unreachable!();
+    };
+    let terminal = IntentData {
+        invocation: debit.invocation,
+        debit: debit_id,
+        sequence: arm.sequence + 1,
+        parent: Some(IntentId::of(&arm_frame)),
+        io_spent: spent,
+        kind: IntentKind::SourceSaved {
+            context,
+            source,
+            marker,
+        },
+    };
+    TerminalFixture {
+        debit,
+        debit_id,
+        marker_frame,
+        arm,
+        arm_frame,
+        terminal,
+    }
+}
+
+/// Locate only fixed common framing in an already encoded fixture; malformed-field tests
+/// then exercise the real decoder, rather than calling a validation helper with a status flag.
+fn intent_kind_and_payload_offsets(raw: &[u8]) -> (usize, usize) {
+    let mut d = Decoder::new(raw);
+    assert!(d.get_bytes().unwrap() == INTENT_TAG);
+    assert_eq!(d.get_u16().unwrap(), VERSION);
+    get_invocation(&mut d).unwrap();
+    digest(&mut d).unwrap();
+    d.get_u64().unwrap();
+    get_parent(&mut d).unwrap();
+    let kind = raw.len() - d.remaining();
+    d.get_u8().unwrap();
+    d.get_u32().unwrap();
+    (kind, raw.len() - d.remaining())
+}
+
+#[test]
+fn source_saved_first_and_exhausted_pass_keep_original_spent_units() {
+    for spent in [1, 8] {
+        let f = terminal_fixture(spent);
+        f.terminal
+            .successor(
+                Some((&f.arm, IntentId::of(&f.arm_frame))),
+                &f.debit,
+                f.debit_id,
+            )
+            .unwrap();
+        let frame = seal_intent_data(&KEY, &f.terminal, &f.debit, f.debit_id, &mut rng()).unwrap();
+        let decoded = open_intent_data(&KEY, &f.debit, f.debit_id, &frame).unwrap();
+        assert!(decoded == f.terminal);
+        assert_eq!(decoded.io_spent, spent);
+        assert_eq!(decoded.sequence, 3 + u64::from(spent));
+        assert_eq!(decoded.parent, Some(IntentId::of(&f.arm_frame)));
+        assert!(matches!(decoded.kind, IntentKind::SourceSaved { .. }));
+        // Equality with allowance is a valid terminal, not a request for another write unit.
+        if spent == 8 {
+            assert_eq!(decoded.io_spent, f.debit.io_allowance);
+        }
+    }
+}
+
+#[test]
+fn source_saved_preserves_maximum_payload_geometry_and_existing_kind_tags() {
+    let f = terminal_fixture(8);
+    let terminal = f.terminal.encode(&f.debit, f.debit_id).unwrap();
+    let arm = f.arm.encode(&f.debit, f.debit_id).unwrap();
+    assert_eq!(terminal.len(), 1008);
+    assert_eq!(arm.len(), 1008);
+    let (kind_at, payload_at) = intent_kind_and_payload_offsets(&terminal);
+    let (arm_kind_at, arm_payload_at) = intent_kind_and_payload_offsets(&arm);
+    assert_eq!(terminal[kind_at], 5);
+    assert_eq!(arm[arm_kind_at], 2);
+    assert_eq!(payload_at, arm_payload_at);
+    assert!(terminal[payload_at..] == arm[arm_payload_at..]);
+    assert_eq!(terminal[payload_at], 0, "closed payload version");
+
+    let marker_id = TargetMarkerId::of(&f.marker_frame);
+    let founding = first(&f.debit, f.debit_id, marker_id);
+    let closed_debit = IntentData {
+        invocation: f.debit.invocation,
+        debit: f.debit_id,
+        sequence: 1,
+        parent: None,
+        io_spent: 0,
+        kind: IntentKind::ClosedDebit(CloseReason::CreatorLost),
+    };
+    let closed_founding = IntentData {
+        sequence: 2,
+        parent: Some(IntentId::from_bytes([82; 32])),
+        kind: IntentKind::ClosedFounding {
+            facts: facts(),
+            marker: marker_id,
+            reason: CloseReason::CreatorLost,
+        },
+        ..closed_debit.clone()
+    };
+    for (legacy, tag) in [
+        (founding, 1),
+        (f.arm, 2),
+        (closed_debit, 3),
+        (closed_founding, 4),
+    ] {
+        let raw = legacy.encode(&f.debit, f.debit_id).unwrap();
+        let (at, _) = intent_kind_and_payload_offsets(&raw);
+        assert_eq!(raw[at], tag);
+        assert!(IntentData::decode(&raw, &f.debit, f.debit_id).unwrap() == legacy);
+    }
+}
+
+#[test]
+fn source_saved_strict_framing_version_and_counters_refuse_before_adoption() {
+    let f = terminal_fixture(1);
+    let raw = f.terminal.encode(&f.debit, f.debit_id).unwrap();
+    let (kind_at, payload_at) = intent_kind_and_payload_offsets(&raw);
+    for tag in [0, 6, u8::MAX] {
+        let mut bad = raw.to_vec();
+        bad[kind_at] = tag;
+        assert!(IntentData::decode(&bad, &f.debit, f.debit_id).is_err());
+    }
+    let mut bad_payload_version = raw.to_vec();
+    bad_payload_version[payload_at] = 1;
+    assert!(IntentData::decode(&bad_payload_version, &f.debit, f.debit_id).is_err());
+    let mut bad_outer_version = raw.to_vec();
+    bad_outer_version[4 + INTENT_TAG.len() + 1] ^= 1;
+    assert!(IntentData::decode(&bad_outer_version, &f.debit, f.debit_id).is_err());
+    assert!(IntentData::decode(&[raw.as_slice(), &[0]].concat(), &f.debit, f.debit_id).is_err());
+    for length in [0, kind_at, payload_at, raw.len() - 1] {
+        assert!(IntentData::decode(&raw[..length], &f.debit, f.debit_id).is_err());
+    }
+    for spent in [0, 9, u32::MAX] {
+        let mut bad = f.terminal.clone();
+        bad.io_spent = spent;
+        bad.sequence = 3 + u64::from(spent);
+        assert!(bad.encode(&f.debit, f.debit_id).is_err());
+    }
+    for sequence in [0, 2, 3, 5, u64::MAX] {
+        let mut bad = f.terminal.clone();
+        bad.sequence = sequence;
+        assert!(bad.encode(&f.debit, f.debit_id).is_err());
+    }
+    let mut no_parent = f.terminal.clone();
+    no_parent.parent = None;
+    assert!(no_parent.encode(&f.debit, f.debit_id).is_err());
+}
+
+#[test]
+fn source_saved_has_no_outgoing_transition_or_counter_reset() {
+    let f = terminal_fixture(1);
+    let terminal_id = IntentId::from_bytes([83; 32]);
+    // Both candidates are independently well-formed and have the next sequence. Failure
+    // must follow from terminal finality, not merely malformed counters or a missing parent.
+    let mut reopen = f.arm.clone();
+    reopen.parent = Some(terminal_id);
+    reopen.io_spent = 3;
+    reopen.sequence = 5;
+    reopen.validate(&f.debit, f.debit_id).unwrap();
+    assert!(reopen
+        .successor(Some((&f.terminal, terminal_id)), &f.debit, f.debit_id)
+        .is_err());
+    let mut repeated = f.terminal.clone();
+    repeated.parent = Some(terminal_id);
+    repeated.io_spent = 2;
+    repeated.sequence = 5;
+    repeated.validate(&f.debit, f.debit_id).unwrap();
+    assert!(repeated
+        .successor(Some((&f.terminal, terminal_id)), &f.debit, f.debit_id)
+        .is_err());
+    assert!(f.terminal.successor(None, &f.debit, f.debit_id).is_err());
+    let founding = first(&f.debit, f.debit_id, TargetMarkerId::of(&f.marker_frame));
+    assert!(f
+        .terminal
+        .successor(
+            Some((&founding, IntentId::of(&f.arm_frame))),
+            &f.debit,
+            f.debit_id,
+        )
+        .is_err());
+}
+
+#[test]
+fn source_saved_requires_exact_actual_parent_and_complete_original_binding() {
+    let f = terminal_fixture(1);
+    let parent = IntentId::of(&f.arm_frame);
+    for mutation in 0..5 {
+        let mut changed = f.terminal.clone();
+        match mutation {
+            0 => changed.parent = Some(IntentId::from_bytes([84; 32])),
+            1 => {
+                let IntentKind::SourceSaved { source, .. } = &mut changed.kind else {
+                    unreachable!();
+                };
+                *source = BootstrapSourceId::from_bytes([85; 32]);
+            }
+            2 => {
+                let IntentKind::SourceSaved { marker, .. } = &mut changed.kind else {
+                    unreachable!();
+                };
+                *marker = TargetMarkerId::from_bytes([86; 32]);
+            }
+            3 => {
+                let IntentKind::SourceSaved { context, .. } = &mut changed.kind else {
+                    unreachable!();
+                };
+                let old = context.clone();
+                let mut spec = old.spec_data();
+                spec.profile = OwnerFactId::from_bytes([87; 32]);
+                *context = BootstrapSourceContextData::from_data(spec).unwrap();
+            }
+            4 => {
+                changed.io_spent = 2;
+                changed.sequence = 5;
+            }
+            _ => unreachable!(),
+        }
+        // Each is legal standalone DATA; none may replace the selected actual SP.
+        changed.validate(&f.debit, f.debit_id).unwrap();
+        assert!(changed
+            .successor(Some((&f.arm, parent)), &f.debit, f.debit_id)
+            .is_err());
+    }
+    let mut foreign_debit = f.debit.clone();
+    foreign_debit.invocation.invocation[0] ^= 1;
+    assert!(f.terminal.encode(&foreign_debit, f.debit_id).is_err());
+    assert!(f
+        .terminal
+        .encode(&f.debit, DebitId::from_bytes([88; 32]))
+        .is_err());
+}
+
+#[test]
+fn source_saved_seed_parent_label_is_not_the_actual_parent_transition_proof() {
+    let f = terminal_fixture(8);
+    let parent = IntentId::of(&f.arm_frame);
+    for retarget in [false, true] {
+        let mut candidate = f.terminal.clone();
+        if retarget {
+            let IntentKind::SourceSaved { source, .. } = &mut candidate.kind else {
+                unreachable!();
+            };
+            *source = BootstrapSourceId::from_bytes([89; 32]);
+        }
+        let frame = seal_intent_data(&KEY, &candidate, &f.debit, f.debit_id, &mut rng()).unwrap();
+        let seed = encode_transition_seed(
+            &KEY,
+            &f.debit,
+            f.debit_id,
+            Some(parent),
+            Some(&f.marker_frame),
+            &frame,
+        )
+        .unwrap();
+        assert!(seed.len() <= 2366);
+        let parsed = parse_transition_seed_data(&KEY, &seed, &f.debit, f.debit_id).unwrap();
+        assert_eq!(parsed.expected_parent, Some(parent));
+        assert!(parsed.candidate == candidate);
+        // Complete outer MAC/marker/parent-label consistency does NOT prove same SourceId.
+        // The actual writer must perform this additional comparison with the selected parent.
+        assert_eq!(
+            parsed
+                .candidate
+                .successor(Some((&f.arm, parent)), &f.debit, f.debit_id)
+                .is_ok(),
+            !retarget
+        );
+    }
+}
+
+#[test]
+fn source_saved_debug_omits_private_context_and_correlation_labels() {
+    let f = terminal_fixture(1);
+    assert_eq!(format!("{:?}", f.terminal), "FounderIntentData { .. }");
+}
