@@ -105,7 +105,7 @@ impl ServerStore {
         signer: [u8; 32],
     ) -> Result<ValidatedOwnerSnapshot, AppError> {
         pin.validate_original(self, pin.group())?;
-        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence {
+        if !self.chat_vault_format()?.requires_owner_evidence() {
             return Err(refused());
         }
         let identifier = key(pin.group(), &signer);

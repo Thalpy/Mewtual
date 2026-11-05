@@ -135,7 +135,7 @@ impl ServerStore {
         display_name: impl Into<String>,
         channel: u128,
     ) -> Result<OwnerFounderInitialization<T, R>, AppError> {
-        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence {
+        if !self.chat_vault_format()?.requires_owner_evidence() {
             return Err(refused());
         }
         let creation = self.reserve_pending_owner_creation()?;

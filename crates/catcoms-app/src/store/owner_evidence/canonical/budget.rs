@@ -197,7 +197,7 @@ impl ServerStore {
         &self,
         budget: OwnerEvidenceBudget,
     ) -> Result<(), AppError> {
-        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence {
+        if !self.chat_vault_format()?.requires_owner_evidence() {
             return Err(refused());
         }
         let mut runtime = self
@@ -220,7 +220,7 @@ impl ServerStore {
     }
 
     pub(super) fn reserve_pending_owner_creation(&self) -> Result<OwnerPendingCreation, AppError> {
-        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence {
+        if !self.chat_vault_format()?.requires_owner_evidence() {
             return Err(refused());
         }
         let mut runtime = self
@@ -264,7 +264,7 @@ impl ServerStore {
         attempt: [u8; 32],
         creation: &mut OwnerPendingCreation,
     ) -> Result<OwnerInitializationReservation, AppError> {
-        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence
+        if !self.chat_vault_format()?.requires_owner_evidence()
             || preparation.reservation_observer().is_cancelled()
         {
             return Err(refused());

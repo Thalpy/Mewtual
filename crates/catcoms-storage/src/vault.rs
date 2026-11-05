@@ -37,6 +37,11 @@ const CHAT_SCOPE_SECRET_DOMAIN: &str = "mewtual-vault-chat-scope/v3";
 /// format therefore has its OWN KDF domain, not a feature bit an older reader could ignore.
 const VAULT_VERSION_OWNER_EVIDENCE: u8 = 4;
 const OWNER_EVIDENCE_SECRET_DOMAIN: &str = "mewtual-vault-chat-owner-evidence/v4";
+/// Owner operations must be fenced BEFORE a v4 reader reaches its older stage cleaners. This
+/// cryptographic version gate preserves the DEK; it is not an external rollback anchor. Replaying
+/// an authentic old wrapper alone can still reveal that same DEK to an old binary.
+const VAULT_VERSION_OWNER_OPERATIONS: u8 = 5;
+const OWNER_OPERATIONS_SECRET_DOMAIN: &str = "mewtual-vault-chat-owner-evidence/v5";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const SEALED_DEK_LEN: usize = 32 + 16; // 32-byte DEK plus Poly1305 authentication tag.
@@ -62,6 +67,16 @@ pub enum VaultFormat {
     ChatScope,
     /// Mandatory v4 owner pin/canonical-head inventory, in addition to local admission lineage.
     OwnerEvidence,
+    /// Mandatory v5 activation intent/operation-aware namespace, preserving every v3/v4 record.
+    OwnerOperations,
+}
+
+impl VaultFormat {
+    /// Format metadata only: both versions require the retained owner-pin/canonical inventory.
+    /// This never establishes a live admission, historical membership, Saved head or writer.
+    pub fn requires_owner_evidence(self) -> bool {
+        matches!(self, Self::OwnerEvidence | Self::OwnerOperations)
+    }
 }
 
 /// Authenticated keys and their indivisible format classification. Construction is private;
@@ -170,6 +185,7 @@ fn open_classified_with_hooks(
             VAULT_VERSION_RAW_SECRET | VAULT_VERSION_PREHASHED_SECRET => VaultFormat::Legacy,
             VAULT_VERSION_CHAT_SCOPE => VaultFormat::ChatScope,
             VAULT_VERSION_OWNER_EVIDENCE => VaultFormat::OwnerEvidence,
+            VAULT_VERSION_OWNER_OPERATIONS => VaultFormat::OwnerOperations,
             // New authenticated versions must extend this classification deliberately. Refuse
             // rather than treating a future mandatory format as legacy or panicking on it.
             _ => return Err(StorageError::Malformed),
@@ -203,6 +219,9 @@ mod classification_tests;
 #[cfg(test)]
 #[path = "vault_owner_evidence_tests.rs"]
 mod owner_evidence_tests;
+#[cfg(test)]
+#[path = "vault_owner_operations_tests.rs"]
+mod owner_operations_tests;
 
 /// Does a vault already exist under `dir`? The gate before [`open_or_create_vault`] is asked to
 /// open one: that call *creates* on first use, so a UI with no way to tell the two cases apart
@@ -218,7 +237,7 @@ pub fn vault_exists(dir: impl AsRef<Path>) -> bool {
 pub fn chat_scope_vault_managed(dir: impl AsRef<Path>) -> Result<bool, StorageError> {
     Ok(matches!(
         vault_version(&read_vault_wrapper(&dir.as_ref().join(VAULT_FILE))?)?,
-        VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE
+        VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE | VAULT_VERSION_OWNER_OPERATIONS
     ))
 }
 
@@ -280,6 +299,25 @@ pub fn activate_owner_evidence_vault(
     )
 }
 
+/// Commit the critical operation-aware wrapper after the host has durably preserved its v3/v4
+/// inventories and activation intent. This low-level primitive creates none of those records and
+/// returns no Store/owner capability. Exact retries cross the real directory barrier. The host
+/// must drop its pre-exposure mount on any error, including a possibly visible replacement.
+pub fn activate_owner_operations_vault(
+    dir: impl AsRef<Path>,
+    passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Result<(), StorageError> {
+    activate_managed_vault_with_hooks(
+        dir.as_ref(),
+        passphrase,
+        rng,
+        VAULT_VERSION_OWNER_OPERATIONS,
+        |_, _| {},
+        sync_managed_directory,
+    )
+}
+
 fn activate_managed_vault_with_hooks(
     dir: &Path,
     passphrase: &[u8],
@@ -295,7 +333,13 @@ fn activate_managed_vault_with_hooks(
     let old_version = vault_version(&old)?;
     let dek = decode_and_unseal(&old, passphrase)?;
     let version = match (requested_version, old_version) {
-        // Scope-only callers must not turn off mandatory owner semantics on an existing v4 vault.
+        // All known critical versions are sticky. Older setup/secret callers cannot silently
+        // turn off operation semantics after a v5 upgrade. Unknown requests still refuse.
+        (VAULT_VERSION_OWNER_OPERATIONS, _)
+        | (
+            VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE,
+            VAULT_VERSION_OWNER_OPERATIONS,
+        ) => VAULT_VERSION_OWNER_OPERATIONS,
         (VAULT_VERSION_CHAT_SCOPE, VAULT_VERSION_OWNER_EVIDENCE)
         | (VAULT_VERSION_OWNER_EVIDENCE, _) => VAULT_VERSION_OWNER_EVIDENCE,
         (VAULT_VERSION_CHAT_SCOPE, _) => VAULT_VERSION_CHAT_SCOPE,
@@ -381,7 +425,9 @@ fn change_vault_passphrase_with_hooks(
     // A secret change must never silently re-enable old binaries that ignore admission fences.
     let version = vault_version(&old)?;
     let replacement = match version {
-        VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE => {
+        VAULT_VERSION_CHAT_SCOPE
+        | VAULT_VERSION_OWNER_EVIDENCE
+        | VAULT_VERSION_OWNER_OPERATIONS => {
             seal_and_encode_version(&dek, new_passphrase, rng, version)?
         }
         _ => seal_and_encode(&dek, new_passphrase, rng)?,
@@ -475,7 +521,8 @@ fn vault_version(bytes: &[u8]) -> Result<u8, StorageError> {
             VAULT_VERSION_RAW_SECRET
             | VAULT_VERSION_PREHASHED_SECRET
             | VAULT_VERSION_CHAT_SCOPE
-            | VAULT_VERSION_OWNER_EVIDENCE,
+            | VAULT_VERSION_OWNER_EVIDENCE
+            | VAULT_VERSION_OWNER_OPERATIONS,
         ) => Ok(bytes[0]),
         _ => Err(StorageError::Malformed),
     }
@@ -495,11 +542,13 @@ fn derive_passphrase_store(
             let normalized = Zeroizing::new(*hasher.finalize().as_bytes());
             Ok(PassphraseKeyStore::derive(normalized.as_slice(), salt)?)
         }
-        VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE => {
-            let domain = if version == VAULT_VERSION_OWNER_EVIDENCE {
-                OWNER_EVIDENCE_SECRET_DOMAIN
-            } else {
-                CHAT_SCOPE_SECRET_DOMAIN
+        VAULT_VERSION_CHAT_SCOPE
+        | VAULT_VERSION_OWNER_EVIDENCE
+        | VAULT_VERSION_OWNER_OPERATIONS => {
+            let domain = match version {
+                VAULT_VERSION_OWNER_OPERATIONS => OWNER_OPERATIONS_SECRET_DOMAIN,
+                VAULT_VERSION_OWNER_EVIDENCE => OWNER_EVIDENCE_SECRET_DOMAIN,
+                _ => CHAT_SCOPE_SECRET_DOMAIN,
             };
             let mut hasher = blake3::Hasher::new_derive_key(domain);
             hasher.update(&(passphrase.len() as u64).to_be_bytes());

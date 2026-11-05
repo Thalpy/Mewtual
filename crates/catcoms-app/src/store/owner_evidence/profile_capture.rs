@@ -144,7 +144,7 @@ impl ServerStore {
         prepared: &PreparedOwnerEvidence,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence
+        if !self.chat_vault_format()?.requires_owner_evidence()
             || !prepared.matches_original_mls_state(&private.server()?.sync)
         {
             return Err(pins::refused());
@@ -241,7 +241,7 @@ impl ServerStore {
         verified: &catcoms_sync::owner_evidence::VerifiedJoinedOwnerEvidence,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        if self.chat_vault_format()? != catcoms_storage::VaultFormat::OwnerEvidence
+        if !self.chat_vault_format()?.requires_owner_evidence()
             || !verified.matches_original(&private.server()?.sync)
         {
             return Err(pins::refused());

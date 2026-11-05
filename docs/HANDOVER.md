@@ -1,5 +1,35 @@
 # Mewtual; Handover
 
+## Critical owner-operation wrapper (5 November; implementation review, validation paused)
+
+The next inactive source slice adds vault v5 with a distinct KDF domain while preserving the DEK,
+all v3/v4 scope rows and owner pins/canonical files. The actual consuming Store upgrade prepares v4
+inventories first, then durably records fixed sealed activation intent before rewriting the wrapper.
+Cold open recognizes authenticated current/staged intent before ordinary owner cleaners, validates
+the mandatory EXISTING inventories and automatically completes a supported pending transition.
+Missing/corrupt/unsupported records refuse with bytes retained; missing or nonfile vault plus intent
+cannot trigger new-DEK creation. Scope/owner activation and secret changes keep v5 once present.
+
+Four Storage and twelve App regressions are authored, UNRUN (two App link regressions are Unix-only).
+They cover real wrapper/marker rename and parent faults, old authentic v3 wrapper plus nonempty pins,
+Current/Retired/Initializing canonical retention, stale mount revocation, numerical alias refusal,
+stage recovery, mandatory metadata and dangling-vault RNG/byte preservation. Static formatting and
+whitespace checks pass; actual-diff review corrected a dangling-vault-link new-DEK hazard and a
+scratch-estimate/quota wording error. No compiler, test or build command ran during the user's pause.
+
+An authentic old wrapper ALONE can still reveal the preserved DEK to an old binary, which ignores
+the new marker. This normal-reader version fence is not a component-rollback anchor. Unknown retained
+root-pin staging currently refuses/preserves rather than deleting it; safe automatic repair of that
+separate source remains open. v5 source-absent negative initialization is also closed until the actual
+operation/journal absence fence is implemented. No operation-tail codec, covering owner Add, typed
+dispatch, scalable public header/cold archive, whole SDK heap bound or active native host is claimed.
+
+When validation resumes, defer the exceptionally slow 10,000-operation catch-up and full combined
+acceptance until implementation is complete, without ignores or weaker tests. Explicitly compile the
+excluded MemoryStorage `test-utils` and `persistence` feature paths as well as normal MLS tests; root/
+native all-features alone does not enable those transitive optional paths. Full required suites and
+applicable native/frontend gates remain primary-owned.
+
 ## Chat V2 production continuation (5 November; incomplete, compilation paused)
 
 The production continuation is on `communication-chat-v2-production`, starting from validated

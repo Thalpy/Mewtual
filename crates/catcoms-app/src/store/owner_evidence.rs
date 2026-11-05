@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 pub(crate) mod canonical;
+pub(in crate::store) mod operations;
 mod pins;
 mod profile_capture;
 pub(crate) use profile_capture::CapturedOwnerProfilePin;
@@ -30,6 +31,8 @@ pub(super) struct StoreOwnerState {
     pub(super) restore_sync_failure: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub(super) before_owner_initialization_pool: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    pub(super) operations_marker_fault: std::sync::atomic::AtomicU8,
 }
 
 impl ServerStore {
@@ -52,7 +55,7 @@ impl ServerStore {
                 .pins
                 .lock()
                 .map_err(|_| pins::refused())?;
-            if roots.managed != (format == catcoms_storage::VaultFormat::OwnerEvidence) {
+            if roots.managed != format.requires_owner_evidence() {
                 return Err(pins::refused());
             }
             self.flush_owner_pins(&mut roots, &original_mount, rng)?;

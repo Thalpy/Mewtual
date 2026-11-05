@@ -1370,6 +1370,22 @@ mod persistence {
         pub(super) fn sync_own_vault_root(&self) -> std::io::Result<()> {
             sync_directory(&self.dir)
         }
+
+        /// Fixed activation-marker mutation barrier. Test scheduling chooses a real failure in
+        /// this SAME directory-sync implementation after rename, never a fake saved boolean.
+        /// The original Store owns both fixed destinations; callers supply neither path.
+        pub(super) fn sync_owner_operations_after_rename(&self) -> std::io::Result<()> {
+            #[cfg(test)]
+            if self
+                .owner_evidence
+                .operations_marker_fault
+                .swap(0, Ordering::SeqCst)
+                == 2
+            {
+                return sync_directory(&self.dir.join("missing-owner-operations-sync-parent"));
+            }
+            sync_directory(&self.dir)
+        }
     }
 
     impl ServerStore {
@@ -1395,7 +1411,7 @@ mod persistence {
             &self,
             format: catcoms_storage::VaultFormat,
         ) -> Result<(), AppError> {
-            if format != catcoms_storage::VaultFormat::OwnerEvidence {
+            if !format.requires_owner_evidence() {
                 let stage = self.dir.join("chat-owner-pins.replace.tmp");
                 if matches!(fs::symlink_metadata(&stage), Err(error)
                     if error.kind() == std::io::ErrorKind::NotFound)
@@ -1972,6 +1988,7 @@ impl ServerStore {
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
         // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
         let session = acquire_vault_session(&dir)?;
+        owner_evidence::operations::refuse_orphaned_intent_before_vault_creation(&dir)?;
         let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
         let store = Self {
@@ -2000,8 +2017,7 @@ impl ServerStore {
         // Classify from the SAME authenticated wrapper bytes, then validate mandatory lineage
         // before returning any usable mount. A later public-header read cannot replace this
         // evidence. Even legacy wrappers cannot ignore a nonempty prior managed inventory.
-        store.open_chat_admission_inventory(format)?;
-        store.open_owner_evidence_inventory(format)?;
+        store.open_owner_operations_gate(format, passphrase, rng)?;
         // Persist the `servers` directory entry as well as later contents. Without this flush, a
         // first-launch power loss could retain a synced record but forget the newly created
         // parent. It runs through the store so the destination cannot be supplied by a caller.

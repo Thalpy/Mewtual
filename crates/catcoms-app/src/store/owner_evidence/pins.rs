@@ -130,7 +130,7 @@ impl ServerStore {
         if roots.table.is_some() || roots.dirty {
             return Err(refused());
         }
-        let managed = format == catcoms_storage::VaultFormat::OwnerEvidence;
+        let managed = format.requires_owner_evidence();
         // Exclusive Store::open owns the physical vault session. This one fixed stage can only
         // be pre-rename unpublished bytes; it is never the current registry or a canonical head.
         self.cleanup_owner_pins_stage_for_open(format)?;
@@ -140,6 +140,28 @@ impl ServerStore {
         }
         roots.table = Some(table);
         roots.managed = managed;
+        Ok(())
+    }
+
+    /// The authenticated v5 intent requires an ALREADY prepared owner inventory, including with
+    /// an older v3 wrapper. Never route this through legacy absence/cleanup or create an empty
+    /// pin table from a marker. A retained unrelated root stage stays preserved/refuses until its
+    /// exact source is understood; it must not be erased before the wrapper recovery fence.
+    pub(in crate::store) fn open_owner_pins_for_operations_recovery(
+        &self,
+        intent: &super::operations::ValidatedOwnerOperationsIntent,
+    ) -> Result<(), AppError> {
+        intent.validate_original(self)?;
+        match fs::symlink_metadata(self.dir.join("chat-owner-pins.replace.tmp")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(refused()),
+        }
+        let mut roots = self.owner_evidence.pins.lock().map_err(|_| refused())?;
+        if roots.table.is_some() || roots.dirty {
+            return Err(refused());
+        }
+        roots.table = Some(self.read_owner_pins(true)?);
+        roots.managed = true;
         Ok(())
     }
     fn read_owner_pins(&self, managed: bool) -> Result<BTreeMap<Vec<u8>, Pin>, AppError> {

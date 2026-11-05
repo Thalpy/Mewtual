@@ -502,7 +502,8 @@ impl ServerStore {
         let managed = match format {
             catcoms_storage::VaultFormat::Legacy => false,
             catcoms_storage::VaultFormat::ChatScope
-            | catcoms_storage::VaultFormat::OwnerEvidence => true,
+            | catcoms_storage::VaultFormat::OwnerEvidence
+            | catcoms_storage::VaultFormat::OwnerOperations => true,
         };
         let table = self.read_chat_admissions(managed)?;
         if !managed && !table.is_empty() {
@@ -593,7 +594,8 @@ impl ServerStore {
         let managed = match format {
             catcoms_storage::VaultFormat::Legacy => false,
             catcoms_storage::VaultFormat::ChatScope
-            | catcoms_storage::VaultFormat::OwnerEvidence => true,
+            | catcoms_storage::VaultFormat::OwnerEvidence
+            | catcoms_storage::VaultFormat::OwnerOperations => true,
         };
         if runtime.table.is_none() {
             runtime.table = Some(self.read_chat_admissions(managed)?);
@@ -607,11 +609,55 @@ impl ServerStore {
         ))?;
         runtime.managed = true;
         runtime.format = Some(match format {
+            catcoms_storage::VaultFormat::OwnerOperations => {
+                catcoms_storage::VaultFormat::OwnerOperations
+            }
             catcoms_storage::VaultFormat::OwnerEvidence => {
                 catcoms_storage::VaultFormat::OwnerEvidence
             }
             _ => catcoms_storage::VaultFormat::ChatScope,
         });
+        Ok(())
+    }
+
+    /// Constructor-only pending-v5 recovery. The actual authenticated intent makes existing
+    /// lineage mandatory even if an older authentic wrapper was replayed. It never fabricates a
+    /// wrapper classification or initializes missing rows. No Store escapes this temporary state
+    /// before the SAME keys authenticate v5 and confirm_owner_operations_format completes.
+    pub(in crate::store) fn open_chat_admissions_for_operations_recovery(
+        &self,
+        actual_format: catcoms_storage::VaultFormat,
+        intent: &super::owner_evidence::operations::ValidatedOwnerOperationsIntent,
+    ) -> Result<(), AppError> {
+        intent.validate_original(self)?;
+        let mut runtime = self.chat_mount.locked()?;
+        if runtime.table.is_some() || runtime.format.is_some() {
+            return Err(refused());
+        }
+        runtime.table = Some(self.read_chat_admissions(true)?);
+        runtime.managed = true;
+        runtime.format = Some(actual_format);
+        Ok(())
+    }
+
+    /// Actual opaque authenticated result, not a later public-header read or caller boolean.
+    pub(in crate::store) fn confirm_owner_operations_format(
+        &self,
+        opened: catcoms_storage::OpenedVault,
+        intent: &super::owner_evidence::operations::ValidatedOwnerOperationsIntent,
+    ) -> Result<(), AppError> {
+        intent.validate_original(self)?;
+        let (keys, format) = opened.into_parts();
+        if format != catcoms_storage::VaultFormat::OwnerOperations
+            || keys.db_key()? != self.keys.db_key()?
+        {
+            return Err(refused());
+        }
+        let mut runtime = self.chat_mount.locked()?;
+        if !runtime.managed || runtime.dirty || runtime.table.is_none() {
+            return Err(refused());
+        }
+        runtime.format = Some(format);
         Ok(())
     }
 
