@@ -379,3 +379,116 @@ fn pending_creation_is_prepaid_before_founder_profile_and_transfers_fee_once() {
     );
     assert!(next.reservation.is_some());
 }
+
+#[test]
+fn concurrent_groups_merge_whole_uncertain_pin_table_before_original_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc010);
+    let store = ServerStore::open(directory.path(), SECRET, &mut rng)
+        .unwrap()
+        .into_owner_evidence_store(SECRET, &mut rng)
+        .unwrap();
+    store
+        .configure_owner_evidence_budget(
+            OwnerEvidenceBudget::checkpoint(
+                4,
+                16 * 1024 * 1024,
+                16 * 1024 * 1024,
+                1024 * 1024,
+                512 * 1024,
+                512 * 1024,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    // Construct both fallible private creations BEFORE spawning/barrier; an earlier regression
+    // must fail the test, not strand the other worker forever waiting for a panicked peer.
+    let first_attempt = begin(&store, 0xc011);
+    let second_attempt = begin(&store, 0xc012);
+    let (first_start, first_gate) = std::sync::mpsc::channel();
+    let (second_start, second_gate) = std::sync::mpsc::channel();
+    let shared = &store;
+    let run = |mut attempt: Attempt, peer| {
+        let mut rng = ChaCha20Rng::seed_from_u64(peer);
+        let outcome = attempt.retry(shared, &mut rng);
+        (attempt, outcome)
+    };
+    store.owner_evidence.pin_fault.store(2, Ordering::SeqCst);
+    let ((mut first, first_result), (mut second, second_result)) = std::thread::scope(|scope| {
+        // These bounded coordination waits affect test scheduling only, never protocol time.
+        // If creating either OS thread panics, the other exits instead of stranding scope's
+        // mandatory join forever at a Barrier. Both real private attempts already exist.
+        let first = scope.spawn(move || {
+            first_gate
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("first writer start");
+            run(first_attempt, 0xc011)
+        });
+        let second = scope.spawn(move || {
+            second_gate
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("second writer start");
+            run(second_attempt, 0xc012)
+        });
+        first_start.send(()).unwrap();
+        second_start.send(()).unwrap();
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_ne!(
+        first_result.is_ok(),
+        second_result.is_ok(),
+        "one real root parent fault"
+    );
+    let first_group = first
+        .prepared
+        .as_ref()
+        .map(|p| p.group().to_vec())
+        .unwrap_or_else(|| first_result.as_ref().unwrap().group());
+    let second_group = second
+        .prepared
+        .as_ref()
+        .map(|p| p.group().to_vec())
+        .unwrap_or_else(|| second_result.as_ref().unwrap().group());
+    assert_ne!(first_group, second_group);
+    {
+        let roots = store.owner_evidence.pins.lock().unwrap();
+        assert!(
+            !roots.dirty,
+            "the second writer synced the WHOLE possibly installed table"
+        );
+        assert_eq!(roots.table.as_ref().unwrap().len(), 2);
+        assert!(roots.table.as_ref().unwrap().contains_key(&first_group));
+        assert!(roots.table.as_ref().unwrap().contains_key(&second_group));
+    }
+    let mut completed = Vec::new();
+    for (attempt, result) in [(&mut first, first_result), (&mut second, second_result)] {
+        match result {
+            Ok(owned) => completed.push(owned),
+            Err(AppError::CommittedButNotDurable(_)) => {
+                let original = attempt.private.preparation().unwrap().nonce();
+                let owned = attempt.retry(&store, &mut rng).unwrap();
+                assert_eq!(owned.binding.scope.nonce(), original);
+                completed.push(owned);
+            }
+            Err(error) => panic!("unexpected real root fault outcome: {error}"),
+        }
+    }
+    let records: Vec<_> = completed
+        .iter()
+        .map(|owner| (owner.group(), owner.profile()))
+        .collect();
+    drop(completed);
+    drop(first);
+    drop(second);
+    drop(store);
+    let reopened = ServerStore::open(directory.path(), SECRET, &mut rng).unwrap();
+    for (group, profile) in records {
+        assert_eq!(
+            reopened
+                .capture_mounted_owner_profile(&group)
+                .unwrap()
+                .profile(),
+            profile
+        );
+    }
+}
