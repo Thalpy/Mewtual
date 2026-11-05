@@ -27,6 +27,10 @@ pub(in crate::store) const MAX_TRANSITION_PLAIN: usize = 4096;
 pub(in crate::store) const MAX_TRANSITION_FRAME: usize = MAX_TRANSITION_PLAIN + 40;
 pub(in crate::store) const MAX_NAME: usize = 256;
 pub(in crate::store) const PERSISTENT_CONTENT_BYTES: u64 = 17_119_058;
+// Frozen per-invocation wire grant: debit, intent current/stage/transition seed, target
+// marker, source seed/current, records and manifest. Directory barriers are separate;
+// adding terminal journal events does not add fixed destinations or change this grammar.
+const FIXED_FILES: u16 = 9;
 pub(in crate::store) const CONTROL_FEE: usize = 256 * 1024;
 pub(in crate::store) const MAX_CONTEXT_BYTES: usize = 692;
 const _: () = assert!(488 <= MAX_DEBIT_PLAIN && 600 <= MAX_MARKER_PLAIN);

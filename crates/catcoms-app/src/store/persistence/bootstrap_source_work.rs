@@ -6,7 +6,7 @@ use catcoms_storage::VaultPhysicalWorkLease;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 mod terminal;
-pub(super) use terminal::{
+pub(in crate::store) use terminal::{
     OriginalSourceTerminal, PreparedBootstrapSourceTerminal, SavedBootstrapSourceTerminal,
 };
 

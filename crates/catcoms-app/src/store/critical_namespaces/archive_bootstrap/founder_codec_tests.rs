@@ -176,6 +176,23 @@ fn maximum_data_grammar_reaches_exact_debit_marker_context_intent_and_seed_sizes
 }
 
 #[test]
+fn debit_wire_keeps_the_reviewed_nine_file_grant_exact() {
+    let debit = debit();
+    let raw = debit.encode().unwrap();
+    // The original fixed grant is part of both the authenticated debit and request binding.
+    // A different supported-file count is a format change, not a retry-time policy choice.
+    let grant = raw.len() - 10;
+    assert_eq!(&raw[grant..grant + 8], &17_119_058u64.to_be_bytes());
+    assert_eq!(&raw[grant + 8..], &9u16.to_be_bytes());
+    for files in [0u16, 8, 10, u16::MAX] {
+        let mut changed = raw.to_vec();
+        changed[grant + 8..].copy_from_slice(&files.to_be_bytes());
+        assert!(DebitData::decode(&changed, debit.invocation).is_err());
+    }
+    assert!(DebitData::decode(&raw, debit.invocation).unwrap() == debit);
+}
+
+#[test]
 fn original_request_binds_full_device_signer_name_limits_allowance_and_fixed_invocation() {
     let d = debit();
     let old = d.request_binding();

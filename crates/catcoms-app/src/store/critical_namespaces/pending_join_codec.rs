@@ -12,7 +12,7 @@ pub(super) const JOIN_VERSION: u32 = 1;
 pub(super) const MAX_ROWS: usize = 5;
 pub(super) const MAX_JOIN_PAYLOAD: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CATALOG_PLAIN: usize = super::catalog_envelope::MAX_ENVELOPE_PLAIN;
-pub(super) const MAX_CATALOG_FRAMED: usize = MAX_CATALOG_PLAIN + 40;
+pub(in crate::store) const MAX_CATALOG_FRAMED: usize = MAX_CATALOG_PLAIN + 40;
 pub(super) const MAX_SOURCE: usize = 640 * 1024 + 40; // nonce24 + ciphertext(P+tag16)
 
 /// No Vec backing is retained for dormant group labels. The complete bounded metadata array
@@ -99,7 +99,7 @@ pub(in crate::store) struct Summary {
     pub(in crate::store) framed: [u8; 32],
     pub(super) rows: [Option<Metadata>; MAX_ROWS],
     pub(super) count: usize,
-    pub(super) archive: Option<super::archive_bootstrap::Descriptor>,
+    pub(in crate::store) archive: Option<super::archive_bootstrap::Descriptor>,
     pub(super) join_version: Option<u32>,
 }
 impl Parsed<'_> {

@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Namespace compilation corrections (5 November; focused validation owned by primary)
+
+The first resumed App compilation identified missing internal paths/visibility and the omitted
+founder debit file-count constant. The constant is restored to the frozen nine-file grant
+documented in `CHAT-OWNER-FOUNDING-INTENT-FACTORY.md`; a new DATA regression pins its exact
+wire value and rejects other counts. Namespace helper/reexport visibility remains Store-internal,
+and the fresh scalar fixture helper remains test-only. The wrong archive sibling path and a
+test's borrowed temporary digest are corrected. Static review and direct formatting/whitespace
+checks accompany this narrow checkpoint; its new regression is UNRUN here. The primary owns
+the resumed serial focused and full-suite validation, with the slow10,000-operation acceptance
+test last. These compilation corrections supply no ID3 handler or Current activation.
+
 ## Group-wide pre-row admission exclusion (5 November; authored, UNRUN)
 
 Original archive founder planning now rejects ANY same-group admission row/owner across signers,

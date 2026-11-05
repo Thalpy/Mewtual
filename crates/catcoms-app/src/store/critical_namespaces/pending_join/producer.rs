@@ -875,8 +875,8 @@ fn append_original_archive(
 ) -> Result<(), AppError> {
     archive_suffix_length(current)?;
     if let Some(payload) = current.archive_payload {
-        output.put_u32(super::super::super::archive_bootstrap::ARCHIVE_ID);
-        output.put_u32(super::super::super::archive_bootstrap::ARCHIVE_VERSION);
+        output.put_u32(super::super::archive_bootstrap::ARCHIVE_ID);
+        output.put_u32(super::super::archive_bootstrap::ARCHIVE_VERSION);
         output.put_bytes(payload).map_err(|_| refused())?;
     }
     Ok(())

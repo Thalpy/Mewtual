@@ -142,7 +142,10 @@ impl ServerStore {
 impl ServerStore {
     /// Inert root first, before the covering private snapshot. A post-rename uncertain registry
     /// rewrites its SAME entire table before returning success; no other group/alias is dropped.
-    pub(super) fn install_private_founder_pin<T: catcoms_rt::MeshTransport, R: CryptoRngCore>(
+    pub(in crate::store) fn install_private_founder_pin<
+        T: catcoms_rt::MeshTransport,
+        R: CryptoRngCore,
+    >(
         &self,
         private: &crate::store::chat_admission::fresh::PrivateManagedServer<T, R>,
         prepared: &PreparedOwnerEvidence,

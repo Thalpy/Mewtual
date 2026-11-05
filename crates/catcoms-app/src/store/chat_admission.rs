@@ -950,7 +950,7 @@ impl ServerStore {
     /// owns the original pre-await capture and exact live KeyPackage evidence; it is not supplied
     /// by this unwired storage foundation and must never be minted from this scalar test seam.
     #[cfg(test)]
-    fn prepare_fresh_chat_admission(
+    pub(in crate::store) fn prepare_fresh_chat_admission(
         &self,
         capture: &ChatAdmissionCapture,
         verified_attempt: [u8; 32],

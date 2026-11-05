@@ -729,13 +729,12 @@ fn archive_two_unknown_progress_and_wrong_whole_parent_preserve_before_construct
         encoder.put_str(codec::TAG_V2).unwrap();
         encoder.put_bytes(domain).unwrap();
         encoder.put_u64(generation + 1);
-        encoder
-            .put_bytes(if fault == 2 {
-                &[0x99; 32]
-            } else {
-                &codec::catalog_digest(&plain)
-            })
-            .unwrap();
+        let parent = if fault == 2 {
+            [0x99; 32]
+        } else {
+            codec::catalog_digest(&plain)
+        };
+        encoder.put_bytes(&parent).unwrap();
         encoder.put_u32(if fault == 0 { 2 } else { 1 });
         encoder.put_u32(1);
         encoder.put_u32(1);
