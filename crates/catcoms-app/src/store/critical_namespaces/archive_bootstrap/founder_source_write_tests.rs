@@ -2,6 +2,7 @@
 //! compilation pause. A source-file result is not scope Current or native activation evidence.
 use super::super::super::tests::{created, fixture, NeverRng, SECRET};
 use super::super::*;
+use crate::store::critical_namespaces::archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE;
 use crate::store::persistence::OriginalSourceWriteWork;
 use catcoms_rt::MemNetwork;
 use rand_chacha::ChaCha20Rng;
@@ -327,12 +328,25 @@ fn other_group_actual_admission_progresses_while_source_a_holds_file_io_mutex() 
 fn actual_worker_retains_vault_exclusion_after_store_drop_until_file_work_drains() {
     let (path, store, mut rng) = fixture(0xff80);
     let mut source = owner(&store, &mut rng, 88);
+    let pool = store
+        .archive_bootstrap_policy
+        .as_ref()
+        .unwrap()
+        .pending
+        .pool
+        .clone();
     let negative = source.original.creator.original.observer().clone();
     let running = BlockedIo::start(prepare(&store, &mut source, &mut rng));
     let seed = target(&store, &source).join("source.seed");
     let retained = fs::read(&seed).unwrap();
     drop(store);
+    drop(source);
     assert!(negative.is_cancelled());
+    assert_eq!(
+        pool.charged_for_test(),
+        BOOTSTRAP_SOURCE_CUSTODY_FEE,
+        "only the actual Work's separate cipher/output invoice survives both authority owners"
+    );
     assert!(matches!(
         ServerStore::open(path.path(), b"not consulted", &mut rng),
         Err(AppError::Storage(catcoms_storage::StorageError::VaultBusy))
@@ -340,6 +354,11 @@ fn actual_worker_retains_vault_exclusion_after_store_drop_until_file_work_drains
     assert!(
         running.drain().is_err(),
         "mount loss prevents further positive work"
+    );
+    assert_eq!(
+        pool.charged_for_test(),
+        0,
+        "last physical Work drains its real invoice"
     );
     // The lock is now available. Legacy grammar rejects the private namespace, independently
     // of vault exclusion; it must no longer report Busy or clean up the retained source seed.
