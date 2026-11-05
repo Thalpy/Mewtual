@@ -263,6 +263,12 @@ fn deserialize_map(bytes: &[u8]) -> Result<StorageMap, MlsError> {
 #[cfg(test)]
 mod compat_tests;
 
+// Genuine live-state requirements for the later closed loader. These deliberately use the
+// unchanged legacy decoder, not a fabricated restore reservation or a claimed paid operation.
+#[cfg(test)]
+#[path = "persist/owner_restore/live_shape_tests.rs"]
+mod live_shape_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
