@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Bounded private manifest consistency (5 November; authored, unexecuted)
+
+Each manifest DATA segment commits only its bounded new descriptors and backward original
+head/manifest references. New-head/self-ID cycles and unbounded complete-history lists are
+excluded. Descriptor/hash/label consistency is not existence, inner signature, historical/current
+authority, selected source or durability. Ordinary records must preserve the preceding public
+header, governing records change it; actual semantic checks remain separate. Mandatory private
+sequence/page/journal reserves and real inner Header state-image records are required before
+archive activation. Seven regressions are UNRUN. [Contract](communication-recovery/CHAT-OWNER-PRIVATE-MANIFEST.md).
+
 ## Private page encryption boundary (5 November; authored, unexecuted)
 
 Private chat pages use a dedicated BLAKE3-derived encryption key and strict complete frame ID,

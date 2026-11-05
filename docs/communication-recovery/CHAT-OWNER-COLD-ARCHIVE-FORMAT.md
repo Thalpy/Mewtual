@@ -47,6 +47,10 @@ Three content page kinds suffice for the first vertical:
 Known record kinds are original Action envelope, signed v2 Profile, signed v2 owner header,
 Admission body, AcceptanceRecord, Append body, Removal body and ReviewDecision body. They are
 closed distinct keys, not interchangeable32-byte IDs. Unknown kind/version refuses/preserves.
+The private Header row also retains its complete canonical public state image alongside the
+exact original signed envelope; both must match the actual header binding. This is a composite
+private row, not a change to public header bytes or an extra logical history operation. The
+separate bounded batch grammar remains required before the archive consumer is mounted.
 The archive retains one independently validated original envelope per semantic action/header;
 every received signature variant is verified before duplicate handling. An equivalent valid
 variant need not create another retained row or rewrite old pages. Replicas agree on semantics,
@@ -55,14 +59,16 @@ all actual edits/deletes remain distinct retained originals.
 
 ## Bounded manifests, without path-copy history
 
-Each immutable manifest segment links its exact prior manifest ID and commits one operation's
+The reviewed [manifest DATA codec](CHAT-OWNER-PRIVATE-MANIFEST.md) is now authored/unexecuted.
+It adds no namespace or filesystem consumer. Each immutable segment links its exact prior manifest ID and commits one operation's
 bounded new page descriptors, original source-head identity and resulting owner-header identity
 (unchanged for a plain retained-action operation). Descriptor ranges/counts/record kinds are
 canonical and nonoverlapping; no arbitrary filenames or external URLs occur. A segment is one
 bounded page. The private canonical head contains only the latest manifest ID, total counters
 and bounded hot state, not another complete page list or the complete historical action graph.
 No current header's own CID may enter its pre-signature state commitment: that would be cyclic.
-The separate resulting-public-state grammar still needs its own review before signing v2 heads.
+The reviewed [public resulting-state grammar](CHAT-OWNER-V2-PUBLIC-STATE.md) is now authored as
+DATA/crypto binding; actual governing body-transition/selected-prefix consumers remain open.
 That public commitment must be reproducible from public verified semantics, not a private vault's
 randomized ciphertext/manifest IDs that another member cannot inspect or independently replay.
 

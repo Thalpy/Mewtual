@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private manifest DATA links (5 November; authored, unexecuted)
+
+`cold_manifest::{ManifestPage, ManifestSpec, encode_manifest}` borrows bounded per-operation
+descriptors, separate original private-head labels and exact prior/result public-header IDs.
+`check_data_successor` checks external-label/context/sequence consistency ONLY; it authenticates
+no mounted source, inner contents, selected chain, paid control reserve or historical/current
+authority. There is no I/O/namespace handler. Seven regressions remain UNRUN.
+[Exact grammar and remaining consumers](communication-recovery/CHAT-OWNER-PRIVATE-MANIFEST.md).
+
 ## Private encrypted page DATA (5 November; authored, unexecuted)
 
 `private_chat_page::{PreparedPrivateChatPage, PrivateChatPageId, open_private_chat_page}` owns

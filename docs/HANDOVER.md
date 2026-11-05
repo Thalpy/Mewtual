@@ -3,8 +3,8 @@
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
-The new v2 Profile/Admission, successor headers, acceptance/append/removal records and tree proofs
-are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The actual
+The new v2 Profile/Admission, successor headers, acceptance/append/removal records, public transition
+math and tree proofs are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The actual
 Sync-only v2 founder producer now derives its genesis from original real creation/scope custody;
 its covering App/archive save and live governing/dispatch consumers are still absent. The real
 canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
@@ -23,8 +23,19 @@ suites; the exceptionally slow10,000-operation test and other heavy acceptance r
 
 Current source checkpoint: all new compiled regressions remain UNRUN. Direct rustfmt checks over
 changed Rust files, whitespace checks and both ambient-dependency/raw-filesystem static gates
-passed at the preceding integrated checkpoint. New source changes need the same narrow checks;
-none of these substitute for compilation or the required full suites when the pause is lifted.
+are the narrow checks used during this pause. They do not substitute for compilation or the
+required full suites once the pause is lifted. Reviewed checkpoints are pushed to the branch.
+
+## Bounded private history segments (5 November; authored, unexecuted)
+
+`cold_manifest` now describes one operation's<=3 content pages and exact prior sealed manifest/
+PRE-OPERATION private head/public header labels. Derived action/node geometry and closed batch
+roles/counts replace a complete historical page list. Strict borrowed parsing and fixed descriptor
+scratch impose no lifetime history cache. Seven regressions are authored/UNRUN, including real
+signed-action/encrypted-page assembly, all source/context swaps and5000 finite DATA links.
+This remains DATA only: exact inner batch/state records, original Store/CAS/journal/fees/control
+reserves, selected lookup/case and privileged readers are required. ARCHIVE2 stays unsupported.
+[Contract](communication-recovery/CHAT-OWNER-PRIVATE-MANIFEST.md).
 
 ## Private sealed history-page data (5 November; authored, unexecuted)
 
