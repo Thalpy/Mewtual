@@ -298,6 +298,25 @@ impl RequestCancellation {
         self
     }
 
+    /// Retain extra service accounting through actual lower ownership without changing this
+    /// token's ORIGINAL cancellation receiver or effect authority. Existing accounting is
+    /// composed, never replaced/refunded. This grants no authority and cannot revive a revoked
+    /// scope. Caller prepays the fixed two-owner Arc allocation and uses this once per bounded
+    /// lower attempt, not as a peer-sized or unbounded recursive owner chain.
+    ///
+    /// Bytes ownership protects the original input separately; this keepalive follows drivers
+    /// that serialize into a new Vec and drop those original Bytes before queued work retires.
+    pub fn retain_custody(mut self, additional: SharedRequestKeepalive) -> Self {
+        self.keepalive = Some(match self.keepalive.take() {
+            Some(original) => Arc::new(ReplyCustody {
+                _driver: original,
+                _service: additional,
+            }),
+            None => additional,
+        });
+        self
+    }
+
     /// Whether cancellation was published, its publisher disappeared, or authority was revoked.
     pub fn is_cancelled(&self) -> bool {
         *self.signal.borrow()
@@ -1273,6 +1292,50 @@ mod authority_tests {
     use super::*;
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn request_custody_retains_both_original_and_additional_through_lower_clones() {
+        #[derive(Debug)]
+        struct Credit(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Credit {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let retired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (owner, receiver) = watch::channel(false);
+        let cancellation =
+            RequestCancellation::new(receiver, Some(Arc::new(Credit(retired.clone()))))
+                .retain_custody(Arc::new(Credit(retired.clone())));
+        let clone = cancellation.clone();
+        let lower = clone.keepalive().unwrap();
+        drop(cancellation);
+        drop(clone);
+        assert_eq!(retired.load(Ordering::SeqCst), 0);
+        drop(owner); // accounting owners cannot renew the retired original signal
+        assert_eq!(retired.load(Ordering::SeqCst), 0);
+        drop(lower);
+        assert_eq!(retired.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn request_custody_preserves_original_signal_and_effect_refusal() {
+        let (owner, receiver) = watch::channel(true);
+        let mut cancellation =
+            RequestCancellation::new(receiver, None).retain_custody(Arc::new(()));
+        assert!(cancellation.is_cancelled());
+        cancellation.cancelled().await;
+        drop(owner);
+        let (_owner, receiver) = watch::channel(false);
+        let authority = Gate::new(false);
+        let mut cancellation = RequestCancellation::new(receiver, None)
+            .with_authority(authority.clone())
+            .retain_custody(Arc::new(()));
+        assert!(!cancellation.is_cancelled());
+        authority.revoke();
+        assert!(cancellation.is_cancelled());
+        cancellation.cancelled().await;
+    }
 
     #[derive(Debug)]
     struct Gate {
