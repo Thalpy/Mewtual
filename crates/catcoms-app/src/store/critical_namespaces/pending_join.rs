@@ -116,6 +116,7 @@ pub(super) mod execution_policy;
 pub(super) mod execution_state;
 pub use execution_policy::CheckpointJoinExecutionPolicy;
 mod producer;
+mod source_exclusion;
 pub use producer::{
     ActivatedCheckpointJoin, CheckpointJoinNetwork, CheckpointJoinSubmissionStatus,
     JournalledCheckpointJoinPreparation, ReturnedCheckpointJoinActivation,

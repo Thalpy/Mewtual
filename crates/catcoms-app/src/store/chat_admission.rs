@@ -784,6 +784,10 @@ impl ServerStore {
         // A supported V2 namespace may retain a source/intent even with no old scope row.
         // Inspect its original root under this SAME serializer before issued retry/dirty
         // flush as well as pre-RNG issuance. Unknown target presence is never old absence.
+        // Cold/paused JOIN source has no runtime task yet but still owns this exact basis.
+        // Check BEFORE both issued retry/dirty flush and pre-RNG admission. Keep catalog before
+        // any subordinate pins/head/Root; admission remains held through the eventual effect.
+        self.require_no_pending_checkpoint_join_source(capture.key.group(), capture.key.signer())?;
         self.require_no_archive_bootstrap_target(capture.key.group(), capture.key.signer())?;
         // Lock order is Store writer -> brief issued-slot access. No slot guard is held while
         // waiting for the writer or during I/O, and no slot reader ever waits for Store custody.
@@ -986,6 +990,12 @@ impl ServerStore {
         {
             return Err(refused());
         }
+        // An old preparation may predate a newly saved JOIN source. It cannot advance that
+        // source's captured Initializing row or flush/rebind an old Current result afterward.
+        self.require_no_pending_checkpoint_join_source(
+            preparation.key.group(),
+            preparation.key.signer(),
+        )?;
         self.require_no_archive_bootstrap_target(
             preparation.key.group(),
             preparation.key.signer(),
@@ -1101,6 +1111,9 @@ impl ServerStore {
         if row.nonce != nonce || row.phase == Phase::Retired {
             return Ok(ChatAdmissionResolution::Retired);
         }
+        // Retired above remains a negative result. Positive Initializing/Current resolution
+        // must not reopen an older generic owner over a retained private JOIN source.
+        self.require_no_pending_checkpoint_join_source(key.group(), key.signer())?;
         self.require_no_archive_bootstrap_target(key.group(), key.signer())?;
         match row.phase {
             Phase::Current => self
@@ -1146,6 +1159,9 @@ impl ServerStore {
         if !runtime.managed || runtime.dirty {
             return Err(refused());
         }
+        // Fence even bindings captured before source save. Check while admission is held and
+        // BEFORE a subordinate saver/head lock; source admission cannot race this later write.
+        self.require_no_pending_checkpoint_join_source(binding.key.group(), binding.key.signer())?;
         self.require_no_archive_bootstrap_target(binding.key.group(), binding.key.signer())?;
         let row = runtime
             .table

@@ -1,3 +1,12 @@
+### Retained JOIN source cannot be overwritten by generic admission (UNRUN)
+
+The actual catalog source/debt fence now covers cold/paused/no-worker rows and Store-admitted
+unwritten candidates. It runs under admission->catalog before generic issued retry/dirty flush/
+RNG, old captured finish/AlreadyCurrent, positive resolve and positive storage. It matches only
+full group/signer; retirement, negative repair and unrelated group work remain available. Four
+real sealed-source regressions are authored UNRUN. No scope/Current or typed journal bypass is
+added; actual ScopeIntent/terminal joining still remains open. No compiler/tests/build ran.
+
 <!-- JOIN execution source checkpoint; primary must retain current global gate status. -->
 ### Private checkpoint arm/input source checkpoint (all new tests UNRUN)
 

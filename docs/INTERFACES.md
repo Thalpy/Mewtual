@@ -8216,3 +8216,17 @@ change with source/counters/schedule/other rows/descriptors unchanged. It never 
 or a writer. The host traits are trusted Rust boundaries; arbitrary implementations are trusted
 code, not authenticated disk evidence. See CHAT-DESTINATION-JOIN-EXECUTION-SCHEMA.md for the
 explicit remaining RetryGrant/SDK/Intent/Current/native/heap gates. All new tests remain UNRUN.
+
+
+### Retained JOIN source exclusion at generic admission boundaries
+
+A fixed-five per-key negative check reads the actual configured catalog current and Store-owned
+pending candidate summaries under admission then catalog. An exact group/full-signer source
+remains reserved when paused, after its worker drops, and on cold reopen before activation.
+Generic preparation checks it before issued/dirty retry and before nonce/RNG work. Previously
+captured finish/AlreadyCurrent, positive resolve and positive storage also check before any
+covering callback or subordinate saver/head writer. Holding admission prevents a source from
+appearing during the later synchronous effect, so subordinate permit validation does not acquire
+catalog after a head lock. Retirement, same-original negative repair and unrelated-key work remain
+available. This is negative exclusion, never an intent-backed scope/Current bypass. The actual
+journal ScopeIntent consumer remains separate. Four additional regressions are authored UNRUN.
