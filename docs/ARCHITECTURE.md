@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Running physical work and vault mount exclusion (5 November; authored, unexecuted)
+
+The vault session's private OS-locked File can now be retained by a distinct non-Clone physical
+work loan. It keeps replacement mounts out until already-admitted I/O/files/cleanup drain without
+keeping a Store, keys or creator authority alive. Inert debt cannot own the loan. This is a
+resource prerequisite; the actual source-worker constructor and its short final publication
+barrier remain separate integration work. Four tests are authored UNRUN under the compilation
+pause. [Exact lifecycle contract](communication-recovery/VAULT-PHYSICAL-WORK-SESSION-LEASE.md).
+
 ## Private archive namespace (5 November; authored, unexecuted)
 
 An explicit new-physical-open wrapper now consumes the unexposed ARCHIVE2 declaration through

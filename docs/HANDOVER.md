@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Physical-work OS-session prerequisite (5 November; authored, unexecuted)
+
+`VaultSessionGuard` now lends a non-Clone OS-lock-only `VaultPhysicalWorkLease`. The SAME
+private File stays locked until both Store and all actual running jobs drain; the loan holds
+no Store/keys/creator sender or authority and must never be retained by inert debt. Three storage
+tests plus one actual Store-drop/continued-write test are authored UNRUN. Design and read-only
+actual-diff reviews are CLEAR. Direct format/whitespace/ambient/raw-fs gates passed; no compilation/
+tests/build ran under the user's pause. Root must
+consume this resource in its paid physical source-worker constructor before claiming that actual
+large-I/O/remount race closed. [Contract](communication-recovery/VAULT-PHYSICAL-WORK-SESSION-LEASE.md).
+Pending focused selectors: `cargo test -p catcoms-storage vault::physical_work_tests` and
+`cargo test -p catcoms-app store::physical_work_session_tests`. Full gates remain deferred.
+
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.

@@ -5487,9 +5487,10 @@ pub struct ServerStore {
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
     replay_mount: std::sync::Arc<()>,
-    // This OS lock is intentionally held until the store is dropped. The in-process Tauri mutex
-    // serializes commands, while this guard prevents a second app process from forking durable MLS,
-    // invite-ledger, registry, or transport state from the same starting snapshot.
+    // The OS lock lasts through this Store AND any admitted physical-work loans. A real
+    // worker must keep its resource-only loan until files/I/O/cleanup drain, even after Store
+    // Drop revokes all original authority. Inert debt must never retain one. This prevents a
+    // replacement mount racing old blocking writes; the in-process Tauri mutex alone cannot.
     _session: VaultSessionGuard,
 }
 
@@ -6274,6 +6275,8 @@ fn decode_registry(bytes: &[u8]) -> Result<Vec<ServerRecord>, AppError> {
     Ok(out)
 }
 
+#[cfg(test)]
+mod physical_work_session_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

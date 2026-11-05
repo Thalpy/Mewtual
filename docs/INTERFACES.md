@@ -6766,10 +6766,16 @@ concurrent record types cannot alias and a pre-planted symlink is not followed. 
 sync failure is reported distinctly as `CommittedButNotDurable`: the replacement is already visible
 and a retry is safe. Logical read-modify-write operations still require serialization to prevent a
 stale last writer from replacing newer state. `ServerStore::open` additionally acquires a
-non-blocking OS session lock before unsealing and holds it for the store's lifetime. A second
+non-blocking OS session lock before unsealing and holds it for the store's lifetime. The actual
+guard additionally supports a resource-only `VaultPhysicalWorkLease` for already-admitted running
+I/O: its private shared File keeps that SAME OS lock until the last physical job drains, even
+after Store destruction. It exposes no keys, File/path, mount, admission or Current authority;
+inert debt/observers must never retain it. The actual source-worker consumer remains a separate
+integration gate. [Lease contract and four UNRUN tests](communication-recovery/VAULT-PHYSICAL-WORK-SESSION-LEASE.md).
+A second
 desktop process therefore receives `VaultBusy` instead of mounting duplicate MLS, invite-ledger
-and transport actors from the same snapshot. Normal drop and abrupt process termination release
-the OS lock. An explicitly UI-locked webview re-authenticates with `verify_passphrase`, under the
+and transport actors from the same snapshot. Normal last guard/physical-loan drop and abrupt
+process termination release the OS lock. An explicitly UI-locked webview re-authenticates with `verify_passphrase`, under the
 short vault transaction lock, rather than trying to mount a second `ServerStore` in its own native
 process; a wrong passphrase still leaves the IPC boundary locked.
 

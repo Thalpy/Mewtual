@@ -16,6 +16,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use catcoms_crypto::{Dek, KeyHierarchy, PassphraseKeyStore, SealedBlob, SecureKeyStore};
 use catcoms_rt::CryptoRngCore;
@@ -399,11 +400,46 @@ fn activate_managed_vault_with_hooks(
     write_atomic_with_hook_and_sync(&path, &replacement, phase, sync_parent)
 }
 
-/// An exclusive installation mount held for the lifetime of the product's loaded server store.
-/// Dropping this value, including during process termination, releases the operating-system lock.
-#[derive(Debug)]
+/// Exclusive installation session held by the loaded Store. The SAME operating-system lock
+/// can additionally be retained by admitted physical work, so Store destruction cannot permit
+/// a replacement mount while an old blocking write is still draining. This is not a key handle.
 pub struct VaultSessionGuard {
-    _lock: File,
+    lock: Arc<File>,
+}
+impl std::fmt::Debug for VaultSessionGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultSessionGuard").finish_non_exhaustive()
+    }
+}
+impl VaultSessionGuard {
+    /// Retain ONLY the original OS lock for one running physical job. This neither keeps the
+    /// Store/keys/creator alive nor grants admission, Current or permission to begin new work.
+    /// The concrete host must separately prepay/admit the job and hold this loan until every
+    /// write, sync, result-file handle and potentially blocking cleanup has drained.
+    ///
+    /// Never store the loan in inert debt, an observer or an abandoned caller/waiter. It has
+    /// no Clone, path/File access, unlock or authority API. No second file is opened/duplicated:
+    /// the original file closes only after the last Store guard or running-work loan drops.
+    pub fn retain_for_physical_work(&self) -> VaultPhysicalWorkLease {
+        VaultPhysicalWorkLease {
+            _lock: self.lock.clone(),
+        }
+    }
+}
+
+/// OS exclusion only, not a mounted Store, live scope, key or source/persistence capability.
+/// Move into admitted RUNNING work, with its files/payloads declared before this field so
+/// their I/O and cleanup drain FIRST. Dropping the original Store must still revoke all its
+/// publication authority immediately; this resource only blocks a competing physical session.
+#[must_use = "physical work must retain its session lease through all I/O and file cleanup"]
+pub struct VaultPhysicalWorkLease {
+    _lock: Arc<File>,
+}
+impl std::fmt::Debug for VaultPhysicalWorkLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultPhysicalWorkLease")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Refuse a second application process from mounting and mutating the same vault concurrently.
@@ -413,8 +449,14 @@ pub struct VaultSessionGuard {
 pub fn acquire_vault_session(dir: impl AsRef<Path>) -> Result<VaultSessionGuard, StorageError> {
     std::fs::create_dir_all(dir.as_ref()).map_err(|e| StorageError::Io(e.to_string()))?;
     let lock = try_lock_file(&dir.as_ref().join(VAULT_SESSION_LOCK_FILE))?;
-    Ok(VaultSessionGuard { _lock: lock })
+    Ok(VaultSessionGuard {
+        lock: Arc::new(lock),
+    })
 }
+
+#[cfg(test)]
+#[path = "vault_physical_work_tests.rs"]
+mod physical_work_tests;
 
 /// Authenticate `passphrase` against an existing vault without acquiring another lifetime
 /// session lock or returning its keys. The desktop uses this when an explicitly locked webview
