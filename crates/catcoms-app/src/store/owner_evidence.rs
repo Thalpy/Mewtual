@@ -49,6 +49,17 @@ pub(super) struct StoreOwnerState {
     pub(super) operations_marker_fault: std::sync::atomic::AtomicU8,
 }
 
+#[cfg(test)]
+impl StoreOwnerState {
+    /// Both real host writers, without blocking or exposing guards/positive capabilities.
+    pub(in crate::store) fn writers_available_for_test(&self) -> [(&'static str, bool); 2] {
+        [
+            ("owner pins", self.pins.try_lock().is_ok()),
+            ("canonical runtime", self.canonical.try_lock().is_ok()),
+        ]
+    }
+}
+
 impl ServerStore {
     /// Critical-format activation consumes the still-private mounted Store. Any failure drops
     /// its session and revokes original mount observers; no half-activated usable Store escapes.

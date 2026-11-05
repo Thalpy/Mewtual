@@ -378,7 +378,12 @@ impl Drop for BlockedRead {
     fn drop(&mut self) {
         drop(self.release.take());
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            // A lock-probe failure must not unwind into an unbounded join. Completion is
+            // sent only AFTER the actual read/result DATA drains; otherwise detach this
+            // private work/capture (which structurally contains no Store, Node or session).
+            if self.result.recv_timeout(Duration::from_secs(10)).is_ok() {
+                let _ = join.join();
+            }
         }
     }
 }
@@ -389,7 +394,9 @@ impl BlockedRead {
         let (done, result) = channel();
         work.after_open = Some(Box::new(move || {
             ready_tx.send(()).unwrap();
-            advance.recv_timeout(Duration::from_secs(10)).unwrap();
+            // The owner controls this barrier; its hold duration includes B's legitimate
+            // crypto/file work and is not a throughput deadline. Drop disconnects it too.
+            let _ = advance.recv();
         }));
         let join = std::thread::spawn(move || {
             let _ = done.send(work.run().map(drop).map_err(|e| e.to_string()));
@@ -471,7 +478,6 @@ fn another_groups_actual_source_writer_progresses_during_a_completed_opener_wait
         .store
         .capture_bootstrap_source_read(&f.group, f.signer)
         .unwrap();
-    let running = BlockedRead::start(work);
     let device = MlsDevice::generate().unwrap();
     let signer: [u8; 32] = device.public_key_bytes().try_into().unwrap();
     let limits = FounderSnapshotLimits::new(
@@ -500,7 +506,47 @@ fn another_groups_actual_source_writer_progresses_during_a_completed_opener_wait
     let mut plan = creator.into_ram_plan(&f.store).unwrap();
     plan.save_founding_intent(&f.store, &mut f.rng).unwrap();
     let mut source = plan.into_source_preparation(&f.store).unwrap();
+    // SDK setup is separate from this actual writer-independence check. B's full real file
+    // and terminal writes below still complete entirely while A's opener is paused.
+    source
+        .register_private_source(&f.store, &mut f.rng)
+        .unwrap();
+    let running = BlockedRead::start(work);
+    // Probe the COMPLETE host-lock set B's source path may need while A is frozen. A leaked
+    // writer fails immediately, before B could block on it. Keep this set in sync with the
+    // real send/source lock order; no fake guard or SDK-speed deadline stands in for it.
+    let available = [
+        ("admission", f.store.chat_mount.writer_available_for_test()),
+        (
+            "archive Root",
+            f.store.archive_bootstrap_root.try_lock().is_ok(),
+        ),
+        (
+            "source registry",
+            f.store.founder_sources.try_lock().is_ok(),
+        ),
+        (
+            "invocation registry",
+            f.store.founder_invocations.try_lock().is_ok(),
+        ),
+        (
+            "pending JOIN catalog",
+            f.store.pending_join_catalog.try_lock().is_ok(),
+        ),
+        (
+            "Current namespace",
+            f.store.current_layout.try_lock().is_ok(),
+        ),
+        ("read account counter", f.pool.counter_available_for_test()),
+    ];
+    for (name, free) in available
+        .into_iter()
+        .chain(f.store.owner_evidence.writers_available_for_test())
+    {
+        assert!(free, "paused completed opener retained {name}");
+    }
     source.save_source_terminal(&f.store, &mut f.rng).unwrap();
+    running.drain().unwrap();
     drop(source);
     let other = f
         .store
@@ -510,5 +556,4 @@ fn another_groups_actual_source_writer_progresses_during_a_completed_opener_wait
         other.data().view_data().context.spec_data().group,
         group.as_slice()
     );
-    running.drain().unwrap();
 }

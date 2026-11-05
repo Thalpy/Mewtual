@@ -35,6 +35,12 @@ impl std::fmt::Debug for CriticalCatalogReadPool {
     }
 }
 impl CriticalCatalogReadPool {
+    /// Negative contention observation for actual blocked-I/O tests; no credit or guard.
+    #[cfg(test)]
+    pub(in crate::store) fn counter_available_for_test(&self) -> bool {
+        self.inner.state.try_lock().is_ok()
+    }
+
     #[cfg(test)]
     pub(in crate::store) fn read_entries_for_test(&self) -> usize {
         self.inner.entries.load(std::sync::atomic::Ordering::SeqCst)

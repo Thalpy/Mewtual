@@ -339,6 +339,12 @@ pub(super) struct MountOwner {
     before_writer: Mutex<Option<BeforeWriterHook>>,
 }
 impl MountOwner {
+    /// Negative test observation only; never returns Runtime, a permit or a new owner.
+    #[cfg(test)]
+    pub(in crate::store) fn writer_available_for_test(&self) -> bool {
+        self.runtime.try_lock().is_ok()
+    }
+
     pub(super) fn new() -> Self {
         Self {
             identity: Arc::new(()),
