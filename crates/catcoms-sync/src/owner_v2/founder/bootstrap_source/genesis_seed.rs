@@ -15,7 +15,7 @@ use catcoms_replication::chat::{
     owner_state::{StateFrame, MAX_STATE_BYTES},
 };
 use catcoms_rt::Clock;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// Negative closed-source allowances. These cannot reserve provider/metadata/SDK memory or
 /// authenticate a source. The actual host must retain those separate fees for the node lifetime.
@@ -46,6 +46,7 @@ pub const V2_GENESIS_SEED_METADATA_BYTES: usize = std::mem::size_of::<SeedBody>(
     + 4101
     + 98
     + 512
+    + 64 // private seed identity/control block retained by a separately paid weak observation
     + 16 * 1024; // policy/tenure/scope/verification and fixed key scratch
 
 /// Empty ledger/docs/commits/peers/results/admin/obligation inventories are proved by the whole
@@ -71,12 +72,36 @@ struct SeedBody {
     // Both actual graph objects carry the SAME SDK lease last in their own field layout.
     device: MlsDevice,
     group: ServerGroup,
+    // LAST: an expired original identity must not race ahead of SDK/metadata cleanup.
+    identity: Arc<()>,
 }
 
 /// Opaque unbound initial graph + complete bounded metadata, never a runnable Server.
 /// Private preallocated body makes later owning pairing refusals allocation-free.
 pub struct UnboundV2GenesisSeed {
     body: Box<SeedBody>,
+}
+
+/// Original process identity DATA only. No graph, source, fee, key, sender or Store is retained.
+/// The host must pay its tiny retained control-block allowance separately if this observation
+/// outlives the seed. It certifies neither source liveness, a save, Current nor publication.
+pub struct OriginalV2GenesisSeedObservation {
+    identity: Weak<()>,
+}
+impl std::fmt::Debug for OriginalV2GenesisSeedObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OriginalV2GenesisSeedObservation")
+            .finish_non_exhaustive()
+    }
+}
+impl OriginalV2GenesisSeedObservation {
+    /// No allocation, SDK/codec operation, caller callback, lock or ownership reconstruction.
+    pub fn require_same_seed_data(&self, seed: &UnboundV2GenesisSeed) -> Result<(), SyncError> {
+        match self.identity.upgrade() {
+            Some(original) if Arc::ptr_eq(&original, &seed.body.identity) => Ok(()),
+            _ => Err(unavailable()),
+        }
+    }
 }
 
 /// Borrowed verified public/label DATA. Neither this view nor its fields certify a saved root,
@@ -235,11 +260,18 @@ pub fn prepare_v2_genesis_seed(
             metadata,
             device,
             group,
+            identity: Arc::new(()),
         }),
     })
 }
 
 impl UnboundV2GenesisSeed {
+    /// Weak immutable original identity, not a positive graph/resource or Current capability.
+    pub fn observe_original_seed_data(&self) -> OriginalV2GenesisSeedObservation {
+        OriginalV2GenesisSeedObservation {
+            identity: Arc::downgrade(&self.body.identity),
+        }
+    }
     pub fn data(&self) -> V2GenesisSeedData<'_> {
         self.body.data()
     }
@@ -465,6 +497,12 @@ pub struct UnboundV2GenesisNode<T, R> {
     _parts: V2GenesisRuntimeParts<T, R>,
 }
 impl<T, R> UnboundV2GenesisNode<T, R> {
+    /// Immutable closed genesis DATA/resource loan. Owning/mutable seed operations cannot be
+    /// invoked through this reference, and no SDK, run method or owned extraction is exposed.
+    /// App borrows BOTH this seed and its SAME separate resources for final post-pair checks.
+    pub fn borrow_genesis_seed_data(&self) -> &UnboundV2GenesisSeed {
+        &self.seed
+    }
     pub fn data(&self) -> V2GenesisSeedData<'_> {
         self.seed.data()
     }

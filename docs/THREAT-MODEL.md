@@ -6044,6 +6044,15 @@ access prevents raw-seed extraction with premature metadata-fee release. Runtime
 actual group pin/head/scope/native admission and live operation accounting remain separate.
 Six regressions are authored UNRUN; final actual static review is clear during the pause.
 
+The capsule's actual resource loan now binds BOTH original paid read and actual SDK seed
+identities, including two loads of identical ciphertext. The separate seed identity is a tiny
+private weak allocation, never a graph/publisher owner; its allowance is charged before it is
+allocated and its weak metadata drains before the last resource fee. A borrowed post-pair
+Sync seed exposes no SDK/mutable/run/owned escape. App's private two-owner loan must retain the
+same support fees through final source/Current checks after pairing callbacks. Those actual
+Current/runtime consumers remain unfinished; identity consistency is not publication or a
+native disclosure grant. New exact-identity/cross-resource regressions are authored UNRUN.
+
 ## Closed V2 genesis DATA seed (5 November; authored, UNRUN)
 
 The actual sealed bootstrap opener retains its verified exact public genesis and whole source

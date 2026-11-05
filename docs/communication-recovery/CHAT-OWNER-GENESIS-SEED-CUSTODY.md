@@ -93,7 +93,7 @@ before returning DATA. Owning SDK refusals therefore move the SAME existing sour
 small fixed envelope, without allocating an error after a quota refusal. Compile-time size
 assertions pin both the retained source and refusal envelope; the pressure regression also
 checks that the opened DATA address is unchanged across refusal.
-Seven genuine cold-source tests cover independent charge/drop lifetime, one-byte-short combined
+Eight genuine cold-source tests cover independent charge/drop lifetime, one-byte-short combined
 pressure before SDK, provider/setup refusal cleanup, cancellation after fee wait, actual final
 control replacement and foreign Store/account rejection. The work1 test refuses SDK setup
 before typed getters; partial typed graph cleanup is covered by the prior MLS loader tests.
@@ -104,3 +104,17 @@ original read mount/root negatives without acquiring a host writer, pool, filesy
 This supports a concrete caller ALREADY holding Root; it does not replace full control/name
 or resource validation. Its bounded held-Root regression releases that guard before joining
 even on timeout, and also checks foreign Store and cancelled-mount refusal.
+
+The Store-private `GenesisSourceDataRef` borrows BOTH the actual immutable Sync seed and its
+original supporting resource bundle. Private constructors alone loan them; no public adopter,
+raw label constructor or generic host-validation trait exists. The same loan shape can follow
+the graph into an owning Node and let final Current/source checks run AFTER pairing callbacks.
+The actual App owning Node/runtime method remains unfinished; this change does not enable it.
+
+The resource bundle captures a tiny weak ORIGINAL SDK-seed identity as well as the actual
+read identity. Two genuine SDK loads of identical source bytes cannot exchange those bundles.
+The new Sync weak identity carries no graph, source, fee, key, sender or Store and grants no
+save/liveness/Current authority. Its identity/control block is explicitly included before
+allocation in Sync metadata and the actual App fee. The seed drops before this bundle; weak
+identity/source owners drain before its LAST non-SDK metadata fee. An additional App corruption
+regression pairs one genuine graph with another's resources and requires refusal.

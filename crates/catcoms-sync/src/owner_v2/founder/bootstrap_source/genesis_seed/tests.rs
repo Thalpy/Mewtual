@@ -384,11 +384,42 @@ fn cold_parts_are_fresh_free_require_attachment_and_keep_sdk_fee_until_node_drop
     let (mut seed, parts, _) = seed.prepare_runtime(parts).unwrap_err().into_originals();
     seed.prepare_scope(&f.reservation).unwrap();
     seed.prepare_scope(&f.reservation).unwrap();
+    let original_seed = seed.observe_original_seed_data();
     let node = seed.prepare_runtime(parts).unwrap().into_node();
+    original_seed
+        .require_same_seed_data(node.borrow_genesis_seed_data())
+        .unwrap();
+    node.borrow_genesis_seed_data()
+        .check_opened_source_data(&f.opened)
+        .unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
     assert!(node._parts.body.fresh.is_none());
     drop(node);
     assert_eq!(count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn seed_observation_binds_actual_graph_not_equal_source_and_expires_after_graph_drain() {
+    let f = fixture(0x61b0);
+    let count = Arc::new(AtomicUsize::new(0));
+    let a = seed(&f.opened, &count);
+    let b = seed(&f.opened, &count);
+    assert_eq!(a.data().source, b.data().source);
+    assert_eq!(a.data().context, b.data().context);
+    let original_a = a.observe_original_seed_data();
+    let original_b = b.observe_original_seed_data();
+    original_a.require_same_seed_data(&a).unwrap();
+    original_b.require_same_seed_data(&b).unwrap();
+    assert!(original_a.require_same_seed_data(&b).is_err());
+    assert!(original_b.require_same_seed_data(&a).is_err());
+    drop(a);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert!(original_a.identity.upgrade().is_none());
+    assert!(original_a.require_same_seed_data(&b).is_err());
+    original_b.require_same_seed_data(&b).unwrap();
+    drop(b);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(original_b.identity.upgrade().is_none());
 }
 
 #[test]

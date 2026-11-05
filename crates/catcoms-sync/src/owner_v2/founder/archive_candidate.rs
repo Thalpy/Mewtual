@@ -27,12 +27,13 @@ mod bootstrap_source;
 pub use bootstrap_source::{
     open_bootstrap_source_data, prepare_v2_genesis_seed, BootstrapSourceContextData,
     BootstrapSourceContextSpec, BootstrapSourceDataView, BootstrapSourceId, BootstrapSourceRefusal,
-    FounderBootstrapPreparation, OpenedBootstrapSourceData, PreparedBootstrapSource,
-    PreparedUnboundV2GenesisNode, ReturnedV2GenesisAttach, UnboundV2GenesisNode,
-    UnboundV2GenesisSeed, V2GenesisRuntimeParts, V2GenesisRuntimeRefusal, V2GenesisSeedData,
-    V2GenesisSeedLimits, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE, BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES,
-    BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES, MAX_BOOTSTRAP_SOURCE_FRAME_BYTES,
-    MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, V2_GENESIS_SEED_METADATA_BYTES,
+    FounderBootstrapPreparation, OpenedBootstrapSourceData, OriginalV2GenesisSeedObservation,
+    PreparedBootstrapSource, PreparedUnboundV2GenesisNode, ReturnedV2GenesisAttach,
+    UnboundV2GenesisNode, UnboundV2GenesisSeed, V2GenesisRuntimeParts, V2GenesisRuntimeRefusal,
+    V2GenesisSeedData, V2GenesisSeedLimits, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE,
+    BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES, BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES,
+    MAX_BOOTSTRAP_SOURCE_FRAME_BYTES, MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES,
+    V2_GENESIS_SEED_METADATA_BYTES,
 };
 
 const KEY_BINDING_DOMAIN: &str = "catcoms/private-chat-genesis-archive-key-binding/v1";

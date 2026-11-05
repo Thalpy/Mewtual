@@ -17,9 +17,10 @@ pub use codec::{
     MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES,
 };
 pub use genesis_seed::{
-    prepare_v2_genesis_seed, PreparedUnboundV2GenesisNode, ReturnedV2GenesisAttach,
-    UnboundV2GenesisNode, UnboundV2GenesisSeed, V2GenesisRuntimeParts, V2GenesisRuntimeRefusal,
-    V2GenesisSeedData, V2GenesisSeedLimits, V2_GENESIS_SEED_METADATA_BYTES,
+    prepare_v2_genesis_seed, OriginalV2GenesisSeedObservation, PreparedUnboundV2GenesisNode,
+    ReturnedV2GenesisAttach, UnboundV2GenesisNode, UnboundV2GenesisSeed, V2GenesisRuntimeParts,
+    V2GenesisRuntimeRefusal, V2GenesisSeedData, V2GenesisSeedLimits,
+    V2_GENESIS_SEED_METADATA_BYTES,
 };
 
 const KEY_BINDING_DOMAIN: &str = "catcoms/private-chat-bootstrap-source-key-binding/v1";

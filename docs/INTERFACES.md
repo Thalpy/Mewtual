@@ -8437,3 +8437,19 @@ representatives/image/frontier. It performs no encoding/allocation/SDK/pool/call
 and grants no SourceSaved, liveness, resource payment or Current authority. The actual paid
 App reader and original Root/admission validation remain separate. Two focused regressions
 are authored UNRUN; compilation/tests/builds remain paused.
+
+## Original V2 genesis seed resource loan (5 November; authored, UNRUN)
+
+`OriginalV2GenesisSeedObservation` is a private-constructor weak process identity. Its
+`require_same_seed_data` compares the actual seed object, not source/CID labels, and returns
+only negative consistency. It retains no SDK/source/resource/sender and cannot issue Current.
+`UnboundV2GenesisNode::borrow_genesis_seed_data` exposes the same immutable closed seed after
+owning pairing, with no SDK getter, run method, mutable access or extraction.
+
+App's Store-private `GenesisSourceDataRef` loans that actual seed together with its SAME private
+original read/provider/metadata resource bundle. Both SDK-seed and read identities are checked;
+private constructors alone build the view. Actual retained seed access/validation uses it now.
+The later owning Node/runtime consumer must loan both owners and repeat full Current/source/
+writer/task proofs after pairing callbacks. Neither the loan nor graph payment supplies those
+permissions. One new Sync identity regression plus one App cross-resource regression are UNRUN;
+App runtime/Current/governor/native integration and compiled verification remain unfinished.

@@ -213,3 +213,34 @@ fn original_negative_check_works_under_actual_root_and_refuses_foreign_or_closed
     a.store.chat_mount_revoker().revoke();
     assert!(seed.require_original_negative(&a.store).is_err());
 }
+
+#[test]
+fn borrowed_view_rejects_another_genuine_graphs_resources_even_for_identical_source() {
+    let f = fixture(0xd00a);
+    let a_read = f
+        .store
+        .read_saved_bootstrap_source_data(&f.group, f.signer)
+        .unwrap();
+    let a = f.store.prepare_genesis_seed(a_read, budget()).unwrap();
+    let b_read = f
+        .store
+        .read_saved_bootstrap_source_data(&f.group, f.signer)
+        .unwrap();
+    let b = f.store.prepare_genesis_seed(b_read, budget()).unwrap();
+    assert_eq!(a.data().source, b.data().source);
+    a.borrow_source_data().validate_original(&f.store).unwrap();
+    b.borrow_source_data().validate_original(&f.store).unwrap();
+    // Private-field corruption seam only. Production views have no caller constructor or
+    // trait adopter; each real owner loans its OWN graph and resource bundle together.
+    let swapped = GenesisSourceDataRef {
+        seed: a.seed(),
+        resources: &b.resources,
+    };
+    assert!(swapped.require_original_negative(&f.store).is_err());
+    assert!(swapped.validate_original(&f.store).is_err());
+    let swapped = GenesisSourceDataRef {
+        seed: b.seed(),
+        resources: &a.resources,
+    };
+    assert!(swapped.require_original_negative(&f.store).is_err());
+}

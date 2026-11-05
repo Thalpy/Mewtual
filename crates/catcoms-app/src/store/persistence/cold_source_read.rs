@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Weak;
 mod genesis_seed;
+pub(in crate::store) use genesis_seed::GenesisSourceDataRef;
 pub use genesis_seed::{
     GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
     ReturnedBootstrapSourceData,

@@ -247,3 +247,19 @@ same-CID invalid signature representatives. Public seed/source constructors cann
 corrupted objects. This brings this module to15 authored UNRUN regressions; none has been run
 under the compilation/test/build pause. Narrow independent actual-diff STATIC review is CLEAR. Direct formatting, whitespace,
 ambient-dependency and Store raw-fs checks passed; no compiler/tests/build/clippy ran.
+
+## Original seed identity and post-pair borrowed DATA (additional1 test, UNRUN)
+
+`OriginalV2GenesisSeedObservation` holds only a tiny private `Weak<()>`. Its allocation-free
+`require_same_seed_data` comparison rejects another SDK instance even when complete source
+bytes/context match. The actual seed identity is LAST after graph/metadata fields; moving the
+seed into its Node preserves it. Weak identity/control-block bytes are named in the metadata
+invoice, not inferred from a public limit or substituted for the SDK graph's own payment.
+This negative process identity is not source liveness, SourceSaved, a quota or Current.
+
+`UnboundV2GenesisNode::borrow_genesis_seed_data` loans the same immutable closed seed. It
+exposes no SDK/run/mutable/owned escape; App must borrow its SAME separately paid resource
+bundle alongside it for final source/Current proof after pairing callbacks. Production Current
+and the App owning runtime consumer remain unfinished. One additional genuine two-load test
+pins cross-instance/expiry rejection; the existing actual cold-pair test now checks the exact
+identity and whole source after the move. This module has16 authored UNRUN tests.
