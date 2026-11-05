@@ -281,9 +281,7 @@ fn root_held_source_check_uses_same_creator_and_cannot_escape_original_writer() 
         let other = created(&store, &mut rng, 8);
         let mut planning = creator.into_ram_plan(&store).unwrap();
         planning.prepare_ram_plan(&store, &mut rng).unwrap();
-        let source = ActualFounderSource {
-            creator: &planning.creator,
-        };
+        let source = ActualFounderSource::founding(&planning.creator);
         let plan = planning.plan.as_ref().unwrap();
         store
             .with_original_archive_founder(&source, plan, |permit| {

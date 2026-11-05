@@ -3144,3 +3144,12 @@ in Store persistence, and immutable ciphertext debt is retained before mutation.
 [factory contract](communication-recovery/CHAT-OWNER-FOUNDING-INTENT-FACTORY.md) for the implemented
 boundary and separate scope/S0/SourcePrepared/source-save/Current/native gates. Tests are authored
 but unrun while compilation is paused; this is not production Chat V2 activation.
+
+The actual saved-intent consumer now retains the same creator through a private RAM scope,
+signed genesis, cached S0 and complete bootstrap encryption. Closed producer phases prevent
+staged/consumed work from reverting to an untouched source. A distinct original resource payment
+and complete detached ciphertext move together into inert Store RAM, before SourcePrepared.
+No node/key/publisher is retained by that debt, and all final storage-root checks follow lengthy
+source comparisons. This is source preparation/registration only: source journals, execution
+arms/files, SDK restore, canonical activation and native dispatch are still unfinished. See the
+[source consumer](communication-recovery/CHAT-OWNER-FOUNDING-SOURCE-CONSUMER.md).

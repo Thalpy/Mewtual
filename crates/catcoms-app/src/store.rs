@@ -54,9 +54,10 @@ pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
     ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
-    CheckpointJoinExecutionPolicy, CheckpointJoinNetwork, CheckpointJoinSubmissionStatus,
-    CriticalCatalogReadPool, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,
-    PreparedArchiveBootstrapStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress, CheckpointJoinExecutionPolicy,
+    CheckpointJoinNetwork, CheckpointJoinSubmissionStatus, CriticalCatalogReadPool,
+    JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
     ReturnedCheckpointJoinActivation,
 };
 mod owner_evidence;
@@ -787,6 +788,27 @@ mod persistence {
             guard.validate_source_only(captured)?;
             let root_guard = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
             let root = root_guard.as_ref().ok_or_else(refused)?;
+            self.validate_under_root(store, captured, guard, root)
+        }
+
+        // The source-registration writer already owns Root. Reuse the SAME complete checks
+        // after its registry waits without recursively entering Root or selecting new custody.
+        fn validate_under_root<T, R>(
+            &self,
+            store: &ServerStore,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+            root: &critical_namespaces::archive_bootstrap::MountedRoot,
+        ) -> Result<(), AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::refused;
+            if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
+                return Err(refused());
+            }
+            guard.validate_source_only(captured)?;
             validate_founder_original_root(store, &self.original, root)?;
             let debt = self.debt.lock().map_err(|_| refused())?;
             if !std::sync::Arc::ptr_eq(&debt.original, &self.original)
@@ -834,6 +856,94 @@ mod persistence {
     /// remain on disk after exact terminal/debt handoff; this is not a lifetime group limit.
     pub(super) struct FounderInvocationRegistry {
         slots: [Option<FounderInvocationSlot>; 5],
+    }
+    /// Complete detached ciphertext moves here before SourcePrepared can mutate its journal.
+    /// This cell deliberately has no live source/node/sender/key/Store/session. Its original
+    /// weak metadata and separate actual fee survive caller loss until exact repair drains.
+    struct FounderSourceDebt {
+        source: Option<catcoms_sync::owner_v2::PreparedBootstrapSource>,
+        context: catcoms_sync::owner_v2::BootstrapSourceContextData,
+        source_id: catcoms_sync::owner_v2::BootstrapSourceId,
+        founding: std::sync::Arc<SavedFoundingIntent>,
+        // Registration-only phase still requires that exact physical FI current. Before a
+        // SourcePrepared writer replaces .intent, add its actual retained journal/arm state
+        // and validate THAT exact current/pending successor. Never weaken SavedFI to accept
+        // arbitrary descendants or keep using its old held-file identity after replacement.
+        original: std::sync::Arc<OriginalFounderInvocation>,
+        // This reservation is LAST: complete cipher/context/file metadata drains first.
+        custody: Option<critical_namespaces::read_pool::CatalogReadReservation>,
+    }
+    pub(super) struct FounderSourceRegistry {
+        slots: [Option<std::sync::Arc<std::sync::Mutex<FounderSourceDebt>>>; 5],
+    }
+    impl Default for FounderSourceRegistry {
+        fn default() -> Self {
+            Self {
+                slots: std::array::from_fn(|_| None),
+            }
+        }
+    }
+    /// Inert handle to the one original retained complete source. No cipher getter, source
+    /// adopter, SDK/fresh/current token or independent constructor exists outside persistence.
+    pub(super) struct RegisteredBootstrapSource {
+        cell: std::sync::Arc<std::sync::Mutex<FounderSourceDebt>>,
+    }
+    impl std::fmt::Debug for RegisteredBootstrapSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("RegisteredBootstrapSource")
+                .finish_non_exhaustive()
+        }
+    }
+    impl RegisteredBootstrapSource {
+        /// Reobserve this SAME actual Store cell, not a lookup/adoption by decoded identity.
+        /// This checks bounded metadata and immutable producer labels only; full large-frame
+        /// reads/decryption/verification require a separately saved per-pass execution arm.
+        pub(super) fn validate_original<T, R>(
+            &self,
+            store: &ServerStore,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+        ) -> Result<(), AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
+            let root_guard = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(store, &captured.original, root)?;
+            let registry = store.founder_sources.lock().map_err(|_| refused())?;
+            if !registry
+                .slots
+                .iter()
+                .flatten()
+                .any(|entry| std::sync::Arc::ptr_eq(entry, &self.cell))
+            {
+                return Err(refused());
+            }
+            let actual = self.cell.lock().map_err(|_| refused())?;
+            if !std::sync::Arc::ptr_eq(&actual.original, &captured.original) {
+                return Err(refused());
+            }
+            let policy = store
+                .archive_bootstrap_policy
+                .as_ref()
+                .ok_or_else(refused)?;
+            actual
+                .custody
+                .as_ref()
+                .ok_or_else(refused)?
+                .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
+            let source = actual.source.as_ref().ok_or_else(refused)?;
+            if source.id() != actual.source_id || source.context_data() != &actual.context {
+                return Err(refused());
+            }
+            actual
+                .founding
+                .validate_under_root(store, captured, guard, root)?;
+            guard.validate_transferred_source(captured, &actual.context, actual.source_id)?;
+            recheck_source_capture_after_waits(store, &captured.original, root)
+        }
     }
     impl Default for FounderInvocationRegistry {
         fn default() -> Self {
@@ -956,6 +1066,209 @@ mod persistence {
     }
 
     impl ServerStore {
+        /// Test-only inert inspection after creator Drop. Scalar length/ID/hash evidence
+        /// checks retained ciphertext without exporting a source, bytes, key or positive
+        /// witness. Production has no corresponding getter/adopter.
+        #[cfg(test)]
+        pub(super) fn retained_bootstrap_source_for_test(
+            &self,
+            invocation: [u8; 32],
+        ) -> Option<(usize, [u8; 32], [u8; 32])> {
+            let _root = self.archive_bootstrap_root.lock().ok()?;
+            let registry = self.founder_sources.lock().ok()?;
+            for cell in registry.slots.iter().flatten() {
+                let actual = cell.lock().ok()?;
+                if actual.original.data.invocation.invocation != invocation {
+                    continue;
+                }
+                let source = actual.source.as_ref()?;
+                actual.custody.as_ref()?;
+                return Some((
+                    source.as_bytes().len(),
+                    *source.id().as_bytes(),
+                    *blake3::hash(source.as_bytes()).as_bytes(),
+                ));
+            }
+            None
+        }
+
+        /// A distinct actual fee must survive complete ciphertext transfer and creator Drop.
+        /// Keep the original creator's node invoice with that still-live node. Funding is
+        /// obtained OUTSIDE writers, then its SAME captured root/negative is checked again;
+        /// this resource handle grants no source, I/O arm, scope row or Current permission.
+        pub(super) fn reserve_original_bootstrap_source_custody(
+            &self,
+            captured: &CapturedFounderInvocation,
+        ) -> Result<critical_namespaces::read_pool::CatalogReadReservation, AppError> {
+            use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
+            captured.validate_original(self)?;
+            let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
+            let fee = policy
+                .pending
+                .pool
+                .try_reserve(BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
+            captured.validate_original(self)?;
+            Ok(fee)
+        }
+
+        /// Move the ONE actual detached object and its distinct real fee into inert Store
+        /// custody BEFORE SourcePrepared. Every refusal leaves both caller Options intact;
+        /// there is no fallible operation after taking their final ownership into the cell.
+        /// Large-frame rehash/decryption is deliberately not repeated here: the immutable
+        /// producer type and actual transferred-source guard bind its original context/ID.
+        pub(super) fn register_original_bootstrap_source<T, R>(
+            &self,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+            founding: std::sync::Arc<SavedFoundingIntent>,
+            source: &mut Option<catcoms_sync::owner_v2::PreparedBootstrapSource>,
+            custody: &mut Option<critical_namespaces::read_pool::CatalogReadReservation>,
+        ) -> Result<RegisteredBootstrapSource, AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
+            let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
+            custody
+                .as_ref()
+                .ok_or_else(refused)?
+                .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
+            let pending = source.as_ref().ok_or_else(refused)?;
+            if pending.as_bytes().len() < 40
+                || pending.as_bytes().len()
+                    > catcoms_sync::owner_v2::MAX_BOOTSTRAP_SOURCE_FRAME_BYTES
+            {
+                return Err(refused());
+            }
+            guard.validate_transferred_source(captured, pending.context_data(), pending.id())?;
+            founding.retains_original(captured, guard.plan_data(), guard.debit_id())?;
+            let context = pending.context_data().clone();
+            let source_id = pending.id();
+            let spec = context.spec_data();
+            let facts = guard.plan_data();
+            if spec.vault != captured.data().invocation.vault
+                || spec.group != facts.group
+                || spec.signer != facts.signer
+                || spec.fresh_attempt != facts.fresh_attempt
+                || spec.scope_domain != facts.scope_domain
+                || spec.scope_nonce != facts.nonce
+                || spec.planned_revision != facts.revision
+                || spec.limits != captured.data().limits
+            {
+                return Err(refused());
+            }
+            // Preallocate the bounded cell before Root/source-registry writers; the borrowed
+            // admission/pins/canonical guard is already held. This is small prepaid metadata,
+            // not another pool acquisition. It remains private/unregistered
+            // with empty owned slots until the final original checks all succeed.
+            let mut cell = std::sync::Arc::new(std::sync::Mutex::new(FounderSourceDebt {
+                source: None,
+                context,
+                source_id,
+                founding,
+                original: captured.original.clone(),
+                custody: None,
+            }));
+            let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(self, &captured.original, root)?;
+            let mut registry = self.founder_sources.lock().map_err(|_| refused())?;
+            // Known original occupancy is not permission to drop a duplicate ciphertext or
+            // adopt a source. Lost-return recovery uses the separate exact lookup below.
+            for existing in registry.slots.iter().flatten() {
+                let existing = existing.lock().map_err(|_| refused())?;
+                if existing.original.key == captured.original.key {
+                    return Err(refused());
+                }
+            }
+            let index = registry
+                .slots
+                .iter()
+                .position(Option::is_none)
+                .ok_or_else(refused)?;
+            let owned = std::sync::Arc::get_mut(&mut cell)
+                .ok_or_else(refused)?
+                .get_mut()
+                .map_err(|_| refused())?;
+            owned
+                .founding
+                .validate_under_root(self, captured, guard, root)?;
+            guard.validate_transferred_source(captured, &owned.context, owned.source_id)?;
+            custody
+                .as_ref()
+                .ok_or_else(refused)?
+                .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
+            recheck_source_capture_after_waits(self, &captured.original, root)?;
+            // Test hooks/future operations must precede ownership moves. In particular no
+            // `?`, callback, allocation, I/O or cancellation check may be appended between
+            // taking these values and installing their complete cell into Store custody.
+            let Some(actual_source) = source.take() else {
+                return Err(refused());
+            };
+            let Some(actual_fee) = custody.take() else {
+                *source = Some(actual_source);
+                return Err(refused());
+            };
+            owned.source = Some(actual_source);
+            owned.custody = Some(actual_fee);
+            registry.slots[index] = Some(cell.clone());
+            drop(registry);
+            drop(root_guard);
+            Ok(RegisteredBootstrapSource { cell })
+        }
+
+        /// Recover only this SAME warm registration after a lost local return. A cold decode
+        /// or equal context cannot construct the original captured creator/transferred guard.
+        /// The result exposes no bytes and does not admit SourcePrepared or a large I/O pass.
+        pub(super) fn lookup_original_bootstrap_source<T, R>(
+            &self,
+            captured: &CapturedFounderInvocation,
+            guard: &owner_evidence::canonical::archive_vacancy::ArchiveVacantOwnerGuard<'_, T, R>,
+            context: &catcoms_sync::owner_v2::BootstrapSourceContextData,
+            source_id: catcoms_sync::owner_v2::BootstrapSourceId,
+        ) -> Result<RegisteredBootstrapSource, AppError>
+        where
+            T: catcoms_rt::MeshTransport,
+            R: rand_core::CryptoRngCore,
+        {
+            use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
+            guard.validate_transferred_source(captured, context, source_id)?;
+            let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let root = root_guard.as_ref().ok_or_else(refused)?;
+            validate_founder_original_root(self, &captured.original, root)?;
+            let registry = self.founder_sources.lock().map_err(|_| refused())?;
+            for cell in registry.slots.iter().flatten() {
+                let actual = cell.lock().map_err(|_| refused())?;
+                if actual.original.key != captured.original.key {
+                    continue;
+                }
+                if !std::sync::Arc::ptr_eq(&actual.original, &captured.original)
+                    || &actual.context != context
+                    || actual.source_id != source_id
+                {
+                    return Err(refused());
+                }
+                let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
+                actual
+                    .custody
+                    .as_ref()
+                    .ok_or_else(refused)?
+                    .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
+                let cipher = actual.source.as_ref().ok_or_else(refused)?;
+                if cipher.context_data() != context || cipher.id() != source_id {
+                    return Err(refused());
+                }
+                actual
+                    .founding
+                    .validate_under_root(self, captured, guard, root)?;
+                guard.validate_transferred_source(captured, context, source_id)?;
+                recheck_source_capture_after_waits(self, &captured.original, root)?;
+                return Ok(RegisteredBootstrapSource { cell: cell.clone() });
+            }
+            Err(refused())
+        }
+
         /// Capture one LOCAL original request. ALL four fixed control slots are classified;
         /// missing debit alone is never permission to ignore a stage/seed/unknown record.
         /// The caller paid before copying the bounded name; this takes that real fee into
@@ -1298,6 +1611,7 @@ mod persistence {
             R: rand_core::CryptoRngCore,
         {
             use critical_namespaces::refused;
+            guard.require_founding_phase()?;
             guard.validate_source_only(captured)?;
             captured.validate_original(self)?;
             if marker.len() > founder::MAX_TARGET_MARKER_FRAME
@@ -1402,6 +1716,7 @@ mod persistence {
             R: rand_core::CryptoRngCore,
         {
             use critical_namespaces::{refused, ARCHIVE_BOOTSTRAP_ROOT};
+            guard.require_founding_phase()?;
             // Completed serialized debt can retire only after all actual barriers. Declare
             // its displaced owner before writers so files/buffers/fees never drain under them.
             let mut retired = None;
@@ -2392,6 +2707,32 @@ mod persistence {
             .dir
             .join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
             .join(leaf))
+    }
+
+    // Full source/S0 and fee validation can block after an earlier Root check. Revalidate the
+    // actual root/marker after those waits, then sample negatives WITHOUT another full source
+    // comparer or quota wait. This is the final gate before ownership moves/result exposure.
+    fn recheck_source_capture_after_waits(
+        store: &ServerStore,
+        original: &OriginalFounderInvocation,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+    ) -> Result<(), AppError> {
+        #[cfg(test)]
+        {
+            let hook = store
+                .founder_before_source_admission
+                .lock()
+                .map_err(|_| critical_namespaces::refused())?
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        validate_founder_original_root(store, original, root)?;
+        if original.negative.is_cancelled() || root.negative.is_cancelled() {
+            return Err(critical_namespaces::refused());
+        }
+        Ok(())
     }
 
     fn validate_founder_original_root(
@@ -4542,8 +4883,11 @@ pub struct ServerStore {
     archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
     archive_bootstrap_root: critical_namespaces::archive_bootstrap::SharedRoot,
     founder_invocations: std::sync::Mutex<persistence::FounderInvocationRegistry>,
+    founder_sources: std::sync::Mutex<persistence::FounderSourceRegistry>,
     #[cfg(test)]
     founder_before_sdk_consume: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    founder_before_source_admission: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pending_join_catalog: critical_namespaces::pending_join::SharedMounted,
     #[cfg(test)]
     pending_join_before_catalog_writer: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -4681,8 +5025,11 @@ impl ServerStore {
             archive_bootstrap_policy,
             archive_bootstrap_root: Default::default(),
             founder_invocations: Default::default(),
+            founder_sources: Default::default(),
             #[cfg(test)]
             founder_before_sdk_consume: Default::default(),
+            #[cfg(test)]
+            founder_before_source_admission: Default::default(),
             pending_join_catalog: Default::default(),
             #[cfg(test)]
             pending_join_before_catalog_writer: Default::default(),

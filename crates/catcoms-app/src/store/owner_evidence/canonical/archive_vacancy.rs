@@ -37,6 +37,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveVacantOwnerGuard<'_, T, R> {
     pub(in crate::store) fn debit_id(&self) -> codec::DebitId {
         self.admission.debit_id()
     }
+    pub(in crate::store) fn require_founding_phase(&self) -> Result<(), AppError> {
+        self.admission.require_founding_phase()
+    }
+    /// Large-source effects require the SAME actual transferred source, not merely prepared
+    /// ciphertext or a Founding guard. There is no extra writer/Root acquisition in this path.
+    pub(in crate::store) fn validate_transferred_source(
+        &self,
+        captured: &CapturedFounderInvocation,
+        context: &catcoms_sync::owner_v2::BootstrapSourceContextData,
+        id: catcoms_sync::owner_v2::BootstrapSourceId,
+    ) -> Result<(), AppError> {
+        self.admission
+            .validate_transferred_source(captured, context, id)?;
+        self.validate_owned_namespace()
+    }
     pub(in crate::store) fn validate_original(&self) -> Result<(), AppError> {
         let admission = self.admission;
         admission.validate_original()?;

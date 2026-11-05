@@ -13,6 +13,11 @@ pub(in crate::store) const MAX_SEED_FRAMED: usize =
     super::pending_join_codec::MAX_CATALOG_FRAMED + MAX_MARKER_FRAMED + 8192;
 pub(in crate::store) const DECLARATION_FEE: usize = 12 * MAX_SEED_FRAMED + 64 * 1024;
 pub(in crate::store) const ROOT_METADATA_FEE: usize = 64 * 1024;
+// Retained detached cipher plus the existing three-buffer DATA opener. Full verification
+// reads must drain BEFORE that opener runs. Fixed control/page/metadata is separately included
+// here; this pays named private buffers, not all SDK/allocator/native heaps.
+pub(in crate::store) const BOOTSTRAP_SOURCE_CUSTODY_FEE: usize =
+    4 * catcoms_sync::owner_v2::MAX_BOOTSTRAP_SOURCE_FRAME_BYTES + 512 * 1024;
 
 /// Trusted, explicit PRIVATE archive-bootstrap configuration. Its actual consumer is a newly
 /// opened, never-exposed Store; normal and Pending-only mounts remain unable to read ARCHIVE2.
@@ -117,7 +122,8 @@ pub(in crate::store) mod founder_codec;
 pub use founder::{
     ArchiveFounderBegin, ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs,
     ArchiveFounderPlanning, ArchiveFounderPlanningProgress, ArchiveFounderPolicy,
-    ArchiveFounderProgress, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ArchiveFounderProgress, ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress,
+    ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
 };
 
 impl ServerStore {

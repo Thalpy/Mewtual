@@ -26,9 +26,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
         store: &ServerStore,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), AppError> {
-        let source = ActualFounderSource {
-            creator: &self.creator,
-        };
+        let source = ActualFounderSource::founding(&self.creator);
         source.validate_original(store)?;
         source.untouched_scope()?;
         let plan = self.plan.as_ref().ok_or_else(refused)?;
@@ -89,9 +87,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
         store: &ServerStore,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ArchiveFounderPlanningProgress, AppError> {
-        let source = ActualFounderSource {
-            creator: &self.creator,
-        };
+        let source = ActualFounderSource::founding(&self.creator);
         source.validate_original(store)?;
         source.untouched_scope()?;
         if self.plan.as_ref().is_none_or(|plan| plan.data().is_err()) {
@@ -101,9 +97,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
             // Refuse already-known old-source conflicts BEFORE even small AEAD work. An
             // exact prepared Root debt may already own a target; a new candidate needs actual
             // target absence. No foreign/partial directory is adopted from matching labels.
-            let source = ActualFounderSource {
-                creator: &self.creator,
-            };
+            let source = ActualFounderSource::founding(&self.creator);
             let plan = self.plan.as_ref().ok_or_else(refused)?;
             store.with_original_archive_founder(&source, plan, |admission| {
                 let vacancy = store.lock_archive_vacant_owner_namespace(admission)?;
@@ -118,9 +112,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
             })?;
         }
         self.cache_founding_frames(store, rng)?;
-        let source = ActualFounderSource {
-            creator: &self.creator,
-        };
+        let source = ActualFounderSource::founding(&self.creator);
         let plan = self.plan.as_ref().ok_or_else(refused)?;
         let captured = &self.creator.original;
         let frames = &self.founding;

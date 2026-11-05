@@ -71,6 +71,29 @@ SourcePrepared and full detached ciphertext remain retained after any ambiguous 
 
 ## Persistent allowance and one bounded large pass
 
+Large I/O must NOT retain the global admission/pins/canonical/Root/registry mutexes for the
+whole pass. Otherwise an8MiB source on a slow disk can stop unrelated text groups. Under short
+original writers, save/debit the exact arm and install its unique running-work identity BEFORE
+release. The admitted worker receives an immutable shared original source payload plus its
+actual fee, fixed target/root identities, original negatives and a retained output/file cell.
+Source/frame and fee move together into that immutable payload before initial registration;
+workers clone only the small Arc, never the frame or creator/sender/Server/Store/session.
+
+The per-source output cell retains newly created file handles BEFORE identity/write can fail.
+Root keeps that cell and immutable payload even if the caller disappears. Only that actual
+admitted work may mutate its file state; another arm/repair cannot race it merely because a
+global writer was released. No code may acquire Root/admission while holding this per-source
+I/O mutex. Release the file/output guard before final short admission→pins→canonical→Root
+validation and saved-result installation. An output-cell handle does not confer Current.
+
+After admission, cancellation may stop new large work but cannot pretend in-flight writes did
+not happen. Retain exact data/file outcomes under a distinct narrow preservation obligation;
+positive saved-source/native results still need the original final guards. Every worker keeps
+its original payload/control fees through actual file work and result collection. Counter,
+running identity and file-result transfer must be reviewed/tested before this asynchronous
+admission is implemented. Add a barrier regression proving groupB's ordinary admission can
+progress while groupA's source worker is held in real I/O; a queued job alone is not that proof.
+
 Keep the one group-creation SDK unit distinct from the original source-write allowance1..8.
 Each large pass durably writes the exact next SourcePrepared successor with io_spent incremented
 once, same full context/SourceId/marker and contiguous sequence. Only the SAME live cell receives
@@ -105,13 +128,17 @@ scope-table/head installation, protocol selection, Current or native publication
 ## Cold and cancellation boundaries
 
 A cold opener never reconstructs an old SDK or warm large-pass runtime arm. Known invocation/target lookup
-classifies all fixed small controls and source files under real bounded fees. An actual complete
-SourcePrepared plus complete independently selected large seed may obtain a DISTINCT fresh
-negative-only per-pass admission. It first durably advances the actual current SP io_spent and
+classifies all fixed small controls under real bounded fees. Before a new pass, large-file
+inspection is limited to bounded metadata/presence; it does not read/hash/decrypt the large seed
+to prove completeness for free. An actual complete SourcePrepared and the selected seed's bounded
+file observation may obtain a DISTINCT fresh negative-only per-pass admission. It first durably
+advances the actual current SP io_spent and
 sequence, preserving exact context/SourceId/marker/parent and consuming only remaining allowance.
 It never reconstructs/reuses any old warm saved arm from decoded bytes. All full seed/destination
 verification and resync work belongs to that new pass, including complete destinations. No
-live/Fresh/Current source or positive saved-source result is reconstructed.
+live/Fresh/Current source or positive saved-source result is reconstructed. Full seed verification
+then occurs INSIDE that spent pass: a truncated/corrupt seed consumes the pass and remains held.
+A known missing file may refuse through metadata alone without performing any large read.
 Missing/partial first large seed remains unavailable and preserves all known records. In
 particular, SourcePrepared absence-of-file is not an unexposed-closure witness.
 
@@ -141,4 +168,5 @@ send/receive, administrative full history and native/UI activation remain separa
 
 Design review: the restricted warm source-cell/SourcePrepared/one-shot-pass design is static
 clear with the phase-separated invoice and distinct cold negative admission above. Actual source
-and physical implementation/review plus all focused/full validation remain required.
+and physical implementation/review plus all focused/full validation remain required. The added
+short-lock asynchronous worker requirement is a further design-review gate before implementation.

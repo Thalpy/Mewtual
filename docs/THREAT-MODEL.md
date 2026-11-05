@@ -5887,3 +5887,14 @@ exclusive-path/hardlink guarantee. Named logical fees do not bound all SDK/alloc
 No scope row, saved source, Current, protocol rollout or native Chat V2 follows from this slice.
 SourcePrepared/source writes, negative closure and complete SDK admission remain unfinished;
 compiled regressions are authored UNRUN during the explicit pause.
+
+The next private source owner is retained before RAM scope mutation; incomplete staging cannot
+escape back to untouched Planning. Actual saved-only reservation, private producer phases and
+one-time transfer bind the same original node/key/context/SourceId. A consuming freeze refusal
+closes that creator. Complete detached cipher and separate real source payment move together to
+Store RAM before SP mutation, with no fallible operation between final ownership moves and
+insertion. Caller loss closes the source life while inert complete debt/fees remain. Original
+node fees stay with the node. Final actual Root/session/marker checks follow full comparisons
+and quota waits, then cheap negatives precede admission/return. This provides no durable source,
+cold repair, execution arm, SDK restore, Current or native activation. Eleven new regressions
+are authored UNRUN; combined static review is clear but no compiler or test has run.

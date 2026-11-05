@@ -18,7 +18,8 @@ use catcoms_sync::owner_v2::{
 #[path = "founder_plan.rs"]
 pub(in crate::store) mod plan;
 pub use plan::{
-    ArchiveFounderPlanning, ArchiveFounderPlanningProgress, ReturnedArchiveFounderCreation,
+    ArchiveFounderPlanning, ArchiveFounderPlanningProgress, ArchiveFounderSourcePreparation,
+    ArchiveFounderSourceProgress, ReturnedArchiveFounderCreation, ReturnedArchiveFounderPlanning,
 };
 
 /// Explicit trusted LOCAL configuration, never decoded limits or a paid/verified status flag.

@@ -7,6 +7,11 @@ use crate::store::persistence::{PreparedFoundingIntent, SavedFoundingIntent};
 use catcoms_rt::RequestCancellation;
 #[path = "founder_intent.rs"]
 mod intent;
+#[path = "founder_source.rs"]
+mod source;
+pub use source::{
+    ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress, ReturnedArchiveFounderPlanning,
+};
 
 /// A source borrow is constructible only here, from the direct `Server::found` result retained
 /// by the actual one-shot creator. Keeping it borrowed through Root I/O prevents this creator's
@@ -14,8 +19,108 @@ mod intent;
 /// It is negative validation, never a saved-source/Current/publication capability.
 pub(in crate::store) struct ActualFounderSource<'source, T: MeshTransport, R: CryptoRngCore> {
     creator: &'source ArchiveFounderCreation<T, R>,
+    phase: ActualSourcePhase<'source>,
+}
+/// Closed original phases only. PendingPrivateStage can never furnish this guard. Neither
+/// variant is constructed from decoded source labels, a generic Server or an allow-scope bit.
+enum ActualSourcePhase<'source> {
+    Founding,
+    Bootstrap {
+        source: &'source catcoms_sync::owner_v2::FounderBootstrapPreparation,
+        key: &'source [u8; 32],
+    },
+    Transferred {
+        source: &'source catcoms_sync::owner_v2::FounderBootstrapPreparation,
+        key: &'source [u8; 32],
+        context: &'source catcoms_sync::owner_v2::BootstrapSourceContextData,
+        id: catcoms_sync::owner_v2::BootstrapSourceId,
+    },
 }
 impl<T: MeshTransport, R: CryptoRngCore> ActualFounderSource<'_, T, R> {
+    pub(super) fn founding(
+        creator: &ArchiveFounderCreation<T, R>,
+    ) -> ActualFounderSource<'_, T, R> {
+        ActualFounderSource {
+            creator,
+            phase: ActualSourcePhase::Founding,
+        }
+    }
+    fn compare_planned_context(
+        &self,
+        context: &catcoms_sync::owner_v2::BootstrapSourceContextData,
+        facts: &codec::FoundingData,
+    ) -> Result<(), AppError> {
+        let value = context.spec_data();
+        let debit = self.creator.original.data();
+        if value.vault != debit.invocation.vault
+            || value.group != facts.group
+            || value.signer != facts.signer
+            || value.fresh_attempt != facts.fresh_attempt
+            || value.scope_domain != facts.scope_domain
+            || value.scope_nonce != facts.nonce
+            || value.planned_revision != facts.revision
+            || value.limits != debit.limits
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    /// Actual original producer/phase observation; no generic permission to accept scope labels.
+    pub(in crate::store) fn validate_admission_phase(
+        &self,
+        facts: &codec::FoundingData,
+    ) -> Result<(), AppError> {
+        let node = &self.creator.server.as_ref().ok_or_else(refused)?.sync;
+        match &self.phase {
+            ActualSourcePhase::Founding => self.untouched_scope(),
+            ActualSourcePhase::Bootstrap { source, key } => {
+                let output = source.borrow_prepared_for_handoff(node, key)?;
+                self.compare_planned_context(output.context_data(), facts)
+            }
+            ActualSourcePhase::Transferred {
+                source,
+                key,
+                context,
+                id,
+            } => {
+                source.validate_transferred_source(node, key, context, *id)?;
+                self.compare_planned_context(context, facts)
+            }
+        }
+    }
+    pub(in crate::store) fn require_founding_phase(&self) -> Result<(), AppError> {
+        if !matches!(self.phase, ActualSourcePhase::Founding) {
+            return Err(refused());
+        }
+        self.untouched_scope()
+    }
+    /// Root source effects require ACTUAL one-time transfer, not merely a prepared source or
+    /// the Founding phase. The caller's context/ID must equal this owner's retained selection.
+    pub(in crate::store) fn validate_transferred_source(
+        &self,
+        captured: &CapturedFounderInvocation,
+        context: &catcoms_sync::owner_v2::BootstrapSourceContextData,
+        id: catcoms_sync::owner_v2::BootstrapSourceId,
+        facts: &codec::FoundingData,
+    ) -> Result<(), AppError> {
+        self.validate_captured(captured)?;
+        self.validate_source_only()?;
+        let ActualSourcePhase::Transferred {
+            source,
+            key,
+            context: original,
+            id: original_id,
+        } = &self.phase
+        else {
+            return Err(refused());
+        };
+        if original_id != &id || *original != context {
+            return Err(refused());
+        }
+        let node = &self.creator.server.as_ref().ok_or_else(refused)?.sync;
+        source.validate_transferred_source(node, key, context, id)?;
+        self.compare_planned_context(context, facts)
+    }
     pub(in crate::store) fn validate_original(&self, store: &ServerStore) -> Result<(), AppError> {
         self.creator.original.validate_original(store)?;
         self.validate_source_only()
@@ -122,7 +227,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderCreation<T, R> {
         self,
         store: &ServerStore,
     ) -> Result<ArchiveFounderPlanning<T, R>, ReturnedArchiveFounderCreation<T, R>> {
-        let source = ActualFounderSource { creator: &self };
+        let source = ActualFounderSource::founding(&self);
         let result = source
             .validate_original(store)
             .and_then(|()| source.untouched_scope());
@@ -162,9 +267,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
         if self.saved_founding.is_some() {
             return self.save_founding_intent(store, rng);
         }
-        let source = ActualFounderSource {
-            creator: &self.creator,
-        };
+        let source = ActualFounderSource::founding(&self.creator);
         source.validate_original(store)?;
         source.untouched_scope()?;
         if self.plan.is_none() {

@@ -8,6 +8,7 @@ use crate::store::persistence::{
     CapturedFounderInvocation, FounderCreationRevoker, SavedFoundingIntent,
 };
 use catcoms_rt::{CryptoRngCore, MeshTransport};
+mod reservation;
 
 /// RAM-only planned lineage. Private construction requires the actual original source, actual
 /// mounted-v6 VACANT table, and the same creator identity/control custody. No sender, Store,
@@ -110,6 +111,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderAdmission<'_, T, R> {
     pub(in crate::store) fn debit_id(&self) -> codec::DebitId {
         self.plan.debit
     }
+    pub(in crate::store) fn require_founding_phase(&self) -> Result<(), AppError> {
+        self.source.require_founding_phase()
+    }
+    pub(in crate::store) fn validate_transferred_source(
+        &self,
+        captured: &CapturedFounderInvocation,
+        context: &catcoms_sync::owner_v2::BootstrapSourceContextData,
+        id: catcoms_sync::owner_v2::BootstrapSourceId,
+    ) -> Result<(), AppError> {
+        self.validate_source_only(captured)?;
+        self.source
+            .validate_transferred_source(captured, context, id, &self.plan.facts)
+    }
     /// NO Root or subordinate writer acquisition here. Physical persistence already holds
     /// those ORIGINAL locks and must repeat its own Root/session validation separately.
     pub(in crate::store) fn validate_source_only(
@@ -118,7 +132,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderAdmission<'_, T, R> {
     ) -> Result<(), AppError> {
         self.source.validate_captured(captured)?;
         self.source.validate_source_only()?;
-        self.source.untouched_scope()?;
+        self.source.validate_admission_phase(&self.plan.facts)?;
         self.plan.validate_captured(captured)?;
         if (!self.plan.registered && self.plan.saved_foundation.is_none())
             || !self.plan.nonce_sampled
@@ -149,7 +163,7 @@ fn validate_plan_source<T: MeshTransport, R: CryptoRngCore>(
     // This deliberately avoids chat_vault_format/domain/capture getters: admission is already
     // held. Root identity/source checks acquire only the subsequent Root lock in the order.
     source.validate_original(store)?;
-    source.untouched_scope()?;
+    source.validate_admission_phase(&plan.facts)?;
     plan.validate_captured(source.captured())?;
     if !runtime.managed
         || runtime.dirty

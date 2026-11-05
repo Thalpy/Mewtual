@@ -8260,3 +8260,20 @@ First admission still uses the original full row/task or restrictive genuine-inp
 Repair cannot first-admit a source/counter, issue a ticket, renew a task, grant Current or refund
 units. Cold parsed bytes cannot reconstruct the opaque runtime identity. Dirty negative inventory
 must be repaired independently. Four additional regressions are authored UNRUN.
+
+### Private saved-intent source preparation and RAM registration
+
+`ArchiveFounderPlanning::into_source_preparation` preserves the original on early refusal and
+creates `ArchiveFounderSourcePreparation<T,R>` before private scope mutation. Its closed phases
+retain exact producer originals through staging, signed genesis, cached S0 and encrypted source.
+`prepare_private_source` returns only unexposed in-memory progress; a consuming freeze refusal
+closes the original and cannot sign again. The saved-only reservation has the same weak creator
+revoker and Some(1) durable revision, without a new publisher or Current binding.
+
+`register_private_source` reserves distinct real source custody before one-time detach. Actual
+Transferred/source/context checks and borrowed writers govern Root registration, which moves
+both complete ciphertext and fee from caller Options into inert Store RAM before any SP write.
+Refusal preserves both Options; lost-handle recovery requires the same original registered cell.
+No production cipher getter, cold source adopter or positive saved-source token is exposed.
+SP/arms/source-file persistence, SDK restore, Current and native activation remain separate.
+All eleven new compiled regressions remain UNRUN; static review is clear, not build validation.

@@ -34,6 +34,27 @@ writer exclusion. Original bootstrap ciphertext and the namespace-only declarati
 authored consuming prerequisites. Actual creation debit/FoundingIntent source is now reviewed;
 source persistence, canonical head/scope saves and cold/crash acceptance remain unfinished.
 
+## Private founder S0 and complete ciphertext custody (5 November; authored, UNRUN)
+
+The same saved-intent creator now enters a separately funded private source owner BEFORE scope
+mutation. Its closed Pending/Frozen/Archive/Bootstrap/Transferred phases retain actual originals;
+consuming freeze failure closes once. A saved-only original reservation supplies durable planned
+revision1 while the local staged label reaches revision2. No scope-table row or Current is issued.
+The real producer creates/caches S0, genesis pages and complete encrypted bootstrap source.
+
+Before one-time detach, a separate actual same-pool source fee is reserved. Complete immutable
+ciphertext and that fee move together into Store RAM before any SourcePrepared mutation. Refusal
+keeps both caller Options. Exact original lookup and validation cannot adopt cold bytes. Final
+Root/session and cheap negative checks follow full S0/fee waits. An actual owner-Drop test pins
+cipher hash/length/ID and retained source/control fees without retaining its sender/node.
+
+Eleven regressions are authored UNRUN. Combined adversarial static review is clear after fixes;
+no compiler/tests/build ran. This is RAM custody, not durable source storage. SourcePrepared,
+saved execution arms, large source/page writes, cold negative repair, closed-result recovery,
+SDK typed restore, head/scope Current and native activation remain unfinished. See the
+[source consumer](communication-recovery/CHAT-OWNER-FOUNDING-SOURCE-CONSUMER.md) and
+[next physical boundary](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-PERSISTENCE.md).
+
 ## Original founder debit and FoundingIntent (5 November; authored, UNRUN)
 
 The private archive opener now has an actual original creation consumer: supplied fresh-device
