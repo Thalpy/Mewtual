@@ -141,6 +141,13 @@ reuse the checked u128 creation-order calculation. Seven additional regressions 
 and actual-diff review is clear. The conservative 4,160-node-read invoice is a logical work cap,
 not a physical page layout or an implemented authenticated cold reader. Compilation remains paused.
 
+The separate scalable successor-header codec is now declared: strict v2 framing, exact 520-byte
+semantic / 634-byte envelope maximum, unsigned-semantic IDs, real signature callback and checked
+same-scope successor geometry. Nine regressions are authored/unrun, including a frozen genuine
+alternate-signing-nonce fixture independently prepared offline. It is not a Profile/genesis/body/
+state codec, trusted-root verifier, fork cache or live producer. Its actual-diff review is clear;
+no test/compiler/build ran. [Header contract](communication-recovery/CHAT-OWNER-V2-HEADER-FORMAT.md).
+
 ## PR82 follow-up review corrections (30 October; local gates passed)
 
 The five findings against `6fc7ae6d` are corrected in the text-chat branch. Complete Send/Edit/Delete

@@ -11,6 +11,7 @@ mod action;
 mod authority;
 mod ledger;
 pub mod owner_facts;
+pub mod owner_header;
 mod projection;
 mod storage;
 

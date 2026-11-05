@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Scalable owner successor-header prerequisite (5 November; inactive)
+
+`chat::owner_header` is a separate closed v2 signed-data codec. It retains no cache or root and
+does not change action/v1 or owner-fact/v1 bytes. Semantic IDs exclude signature bytes, while every
+representation needs its own actual signature check. `verify_successor_of` verifies BOTH signatures
+and exact group/profile/full issuer/tenure, parent ID and checked next sequence; it creates no
+Current, membership or publication witness. Genesis, Profile/tenure provenance, exact body/state
+grammar, cold persistence and native dispatch remain unfinished. Encoded maxima are 520 / 634 bytes;
+tests are authored/unrun under the compilation pause. [Exact contract](communication-recovery/CHAT-OWNER-V2-HEADER-FORMAT.md).
+
 ## Exact initial owner stage restore (5 November; authored, unexecuted)
 
 The same opaque `prepare_owner_evidence_restore` entry first uses canonical bytes and only falls
