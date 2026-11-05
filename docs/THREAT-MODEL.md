@@ -22,6 +22,22 @@ intent/terminal consumer must preserve its original live sender through its own 
 transition and reclaim only exact durably handed-off debt, never by status/timeout/expiry.
 The thirteen current regressions remain UNRUN and native/global admission is not established.
 
+## Original bootstrap ciphertext is not fresh provenance (5 November; authored, unexecuted)
+
+Only an actual original cached-S0 founder/archive can construct the new private bootstrap
+producer. Original physical Fresh/scope/watch checks and current full-S0 equality precede
+nonce/key work and positive handoff. Host-planned durable revision is captured from the original
+reservation; scalar labels and the local process revision cannot supply it. A cancellation after
+sealing retains its unexposed exact ciphertext, preventing nonce resampling; transfer is once.
+Detached bytes hold no original observer/key/creator and grant no continuing I/O authority.
+
+Cold inspection authenticates the separately domain/key-separated frame against an external
+full SourcePrepared context and complete SourceId. It checks raw secret S0 framing/digest/labels
+and exact original signed genesis/page consistency, without importing Fresh or loading SDK/JSON.
+The caller must independently retain that context BEFORE seedwrite, pay all large raw/plain/cipher
+overlap, and enforce its original atomic save admission. No Store/fee/Current/native activation
+is claimed by this Sync slice. [Limits and unrun evidence](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-CONTAINER.md).
+
 ## Outer catalog data is not namespace support (5 November; authored, unexecuted)
 
 Shared outer framing/hash parsing borrows up to16 bounded declarations. Specific authenticated

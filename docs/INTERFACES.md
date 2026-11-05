@@ -7,6 +7,19 @@ The currently supported default/Pending-only constructors reject their presence 
 gates/cleaners, including orphan objects before new-vault creation. This adds no public path,
 configured archive opener, namespace declaration or source-save API. Two regressions are UNRUN.
 
+## Original founder bootstrap source DATA (5 November; authored, unexecuted)
+
+`FounderBootstrapPreparation::from_archive` consumes the actual already-prepared founder/archive
+owner, deriving its complete context from the SAME source and original host reservation. The
+new default-None `planned_revision_data` is captured once; local process revisions cannot stand
+in for durable admission lineage. One separately keyed source ciphertext is cached before the
+final negative check, then transferred once as `PreparedBootstrapSource`. Detached ciphertext
+access needs no live creator and supplies no write permission. The cold DATA reader takes an
+independently retained full context+SourceId, checks framing/AEAD/raw S0 digest and borrowed schema,
+then real original Profile/genesis record/manifest consistency, without SDK/serde restoration.
+No App/native command, actual source saver, namespace handler, fee, Saved/Current or activation
+is added. Eleven regressions remain UNRUN. [Grammar, APIs and separate buffer inventories](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-CONTAINER.md).
+
 ## Shared outer catalog DATA (5 November; authored, unexecuted)
 
 The private `catalog_envelope` parser returns fixed borrowed descriptor DATA after full bounded

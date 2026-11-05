@@ -22,6 +22,16 @@ use catcoms_storage::private_chat_page::{
     MAX_PRIVATE_CHAT_PAGE_PLAIN_BYTES,
 };
 use zeroize::Zeroizing;
+#[path = "bootstrap_source/mod.rs"]
+mod bootstrap_source;
+pub use bootstrap_source::{
+    open_bootstrap_source_data, BootstrapSourceContextData, BootstrapSourceContextSpec,
+    BootstrapSourceDataView, BootstrapSourceId, BootstrapSourceRefusal,
+    FounderBootstrapPreparation, OpenedBootstrapSourceData, PreparedBootstrapSource,
+    BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE, BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES,
+    BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES, MAX_BOOTSTRAP_SOURCE_FRAME_BYTES,
+    MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES,
+};
 
 const KEY_BINDING_DOMAIN: &str = "catcoms/private-chat-genesis-archive-key-binding/v1";
 /// Named logical original-package/encoding allowance, NOT a prepaid fee or SDK/whole-host cap.

@@ -14,8 +14,13 @@ mod snapshot;
 pub use snapshot::{FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits};
 mod archive_candidate;
 pub use archive_candidate::{
-    ArchiveSourceRefusal, FounderArchivePreparation, GenesisArchiveView,
-    GENESIS_ARCHIVE_PRIVATE_INVOICE,
+    open_bootstrap_source_data, ArchiveSourceRefusal, BootstrapSourceContextData,
+    BootstrapSourceContextSpec, BootstrapSourceDataView, BootstrapSourceId, BootstrapSourceRefusal,
+    FounderArchivePreparation, FounderBootstrapPreparation, GenesisArchiveView,
+    OpenedBootstrapSourceData, PreparedBootstrapSource, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE,
+    BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES, BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES,
+    GENESIS_ARCHIVE_PRIVATE_INVOICE, MAX_BOOTSTRAP_SOURCE_FRAME_BYTES,
+    MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES,
 };
 
 /// Conservative logical invoice for the named private public-record/scope/watch/signature

@@ -26,6 +26,13 @@ pub trait ManagedChatScopeReservation {
     fn signer(&self) -> &[u8; 32];
     fn domain(&self) -> [u8; 32];
     fn nonce(&self) -> [u8; 32];
+    /// Original host-planned DURABLE admission-row revision, when this reservation actually
+    /// owns one. This is DATA, not Current or a persistence permit. Never substitute Sync's
+    /// process-local `chat_scope_revision`, or implement this for decoded labels. Existing
+    /// reservation implementations default to None and cannot feed the new bootstrap source.
+    fn planned_revision_data(&self) -> Option<u64> {
+        None
+    }
     /// Runtime identity only. Retaining this dummy allocation cannot keep its owner alive.
     fn owner_identity(&self) -> Arc<()>;
     fn reservation_observer(&self) -> RequestCancellation;
@@ -87,6 +94,7 @@ struct Reservation {
     identity: Arc<()>,
     observer: RequestCancellation,
     revoker: Arc<dyn ManagedChatScopeRevocation>,
+    planned_revision: Option<u64>,
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
@@ -455,6 +463,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Result<(), SyncError> {
         let domain = source.domain();
         let nonce = source.nonce();
+        // Capture ONCE from the original trusted host seam. A later attachment cannot refresh
+        // this value even when it supplies the same identity/domain/nonce.
+        let planned_revision = source.planned_revision_data();
         let group = source.group().to_vec();
         let signer = *source.signer();
         let identity = source.owner_identity();
@@ -474,6 +485,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if let Some(original) = &self.local_chat_scope.reservation {
             return if Arc::ptr_eq(&original.identity, &identity)
                 && !original.observer.is_cancelled()
+                && original.planned_revision == planned_revision
             {
                 Ok(())
             } else {
@@ -484,6 +496,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             identity,
             observer,
             revoker,
+            planned_revision,
         });
         Ok(())
     }

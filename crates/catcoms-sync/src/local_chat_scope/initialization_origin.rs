@@ -7,7 +7,7 @@ pub(crate) struct OriginalInitializationObservation {
     required: bool,
     label: Option<ChatScopeLabel>,
     revision: u64,
-    reservation: Option<(Arc<()>, RequestCancellation)>,
+    reservation: Option<(Arc<()>, RequestCancellation, Option<u64>)>,
 }
 
 fn private_shape(scope: &LocalChatScope) -> bool {
@@ -41,14 +41,35 @@ impl LocalChatScope {
             required: self.required,
             label: self.label.clone(),
             revision: self.revision,
-            reservation: self
-                .reservation
-                .as_ref()
-                .map(|source| (source.identity.clone(), source.observer.clone())),
+            reservation: self.reservation.as_ref().map(|source| {
+                (
+                    source.identity.clone(),
+                    source.observer.clone(),
+                    source.planned_revision,
+                )
+            }),
         })
     }
 }
 impl OriginalInitializationObservation {
+    /// Complete original host-planned scope labels for the private bootstrap DATA producer.
+    /// The durable row revision must have been captured from the actual original reservation;
+    /// the local process revision and scalar saved labels cannot supply it. This observation
+    /// still needs the host's atomic admission through its actual save edge.
+    pub(crate) fn planned_archive_context(
+        &self,
+        scope: &LocalChatScope,
+    ) -> Result<([u8; 32], [u8; 32], u64), SyncError> {
+        let domain = self.managed_archive_domain(scope)?;
+        let revision = self
+            .reservation
+            .as_ref()
+            .and_then(|(_, _, revision)| *revision)
+            .filter(|revision| *revision != 0)
+            .ok_or(SyncError::ChatScopeUnavailable)?;
+        let label = self.label.as_ref().ok_or(SyncError::ChatScopeUnavailable)?;
+        Ok((domain, label.nonce, revision))
+    }
     /// Original managed-domain DATA for a private archive producer, never a mounted key,
     /// Current or storage/publication permit. A staged scalar label without its ORIGINAL live
     /// reservation is insufficient, even when its group/domain/nonce happen to match.
@@ -74,8 +95,10 @@ impl OriginalInitializationObservation {
             && self.revision == scope.revision
             && match (&self.reservation, &scope.reservation) {
                 (None, None) => true,
-                (Some((identity, negative)), Some(current)) => {
-                    !negative.is_cancelled() && Arc::ptr_eq(identity, &current.identity)
+                (Some((identity, negative, revision)), Some(current)) => {
+                    !negative.is_cancelled()
+                        && Arc::ptr_eq(identity, &current.identity)
+                        && *revision == current.planned_revision
                 }
                 _ => false,
             }

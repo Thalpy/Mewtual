@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Private original founder bootstrap source DATA (5 November; authored, unexecuted)
+
+The Sync founder/archive owner now prepares one independently tagged/key-separated complete
+encrypted source containing its exact cached S0 and original encrypted public genesis pages.
+It derives all target/creation/planned lineage labels from the original source and transfers
+detached ciphertext once, retaining no source observer in that output. Its strict cold reader
+uses external expected full context/SourceId and checks borrowed S0 framing plus actual signed
+genesis/page consistency without loading an SDK or creating Fresh. This supplies source DATA
+for the later physical Store; actual intent/seed/source I/O, fee/atomic admission, Current and
+production/native integration remain separate. [Contract and eleven UNRUN regressions](communication-recovery/CHAT-OWNER-BOOTSTRAP-SOURCE-CONTAINER.md).
+
 ## Privileged legacy originals alongside ordinary chat (5 November)
 
 The retained-original history view is a read path through Server/Actor and a dedicated synchronous

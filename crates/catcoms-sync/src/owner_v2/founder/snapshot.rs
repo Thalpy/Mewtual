@@ -5,7 +5,7 @@ use super::*;
 const MAX_MLS: usize = 8 * 1024 * 1024;
 const MAX_BACKING: usize = 8 * 1024 * 1024;
 const METADATA: usize = initialization_snapshot::METADATA_FEE;
-const MAX_SNAPSHOT: usize = MAX_MLS + METADATA;
+pub(super) const MAX_SNAPSHOT: usize = MAX_MLS + METADATA;
 const DIGEST_DOMAIN: &[u8] = b"mewtual/chat/founder-s0/v2\0";
 
 /// Closed never-run S0 bounds, not a lifetime-history/member limit or a paid host admission.
@@ -87,7 +87,7 @@ impl std::fmt::Debug for FounderPrivateSnapshotView<'_> {
 fn unsupported() -> SyncError {
     SyncError::OwnerInitializationUnsupported
 }
-fn digest(profile: OwnerFactId, snapshot: &[u8]) -> FounderSnapshotDigest {
+pub(super) fn digest(profile: OwnerFactId, snapshot: &[u8]) -> FounderSnapshotDigest {
     let mut h = blake3::Hasher::new();
     h.update(DIGEST_DOMAIN);
     h.update(profile.as_bytes());
