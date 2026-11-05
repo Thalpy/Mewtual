@@ -9,6 +9,24 @@ use catcoms_crypto::DeviceKeypair;
 
 const GROUP: &[u8] = b"body-transition-math-real-signatures";
 
+#[test]
+fn replay_debug_omits_slot_frontier_and_transition_payloads() {
+    let (key, base) = genesis();
+    assert_eq!(
+        format!("{:?}", base.slots().next().unwrap()),
+        "SlotData { .. }"
+    );
+    let (body, header, image) = add(&base, &key, [91; 32], 92);
+    assert_eq!(
+        format!("{:?}", ReplayBody::Admission(&body)),
+        "ReplayBody::Admission { .. }"
+    );
+    let step = base
+        .derive_successor(&header, ReplayBody::Admission(&body), &image)
+        .unwrap();
+    assert_eq!(format!("{step:?}"), "StepData { .. }");
+}
+
 fn sign(key: &DeviceKeypair, image: &[u8]) -> SignedOwnerHeader {
     let frame = StateFrame::decode(image).unwrap();
     let m = frame.meta();

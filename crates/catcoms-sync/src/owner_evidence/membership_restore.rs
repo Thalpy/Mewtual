@@ -163,6 +163,12 @@ pub struct OwnerOperationSourceExpectation<'a> {
     pub predecessor: operation_tail::OwnerOperationPredecessor,
     pub request: [u8; 32],
 }
+impl std::fmt::Debug for OwnerOperationSourceExpectation<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerOperationSourceExpectation")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Borrow/preflight the complete body and compare every authenticated parent/scope label
 /// BEFORE SDK restore. Local encrypted metadata coherence only, never public history finality.

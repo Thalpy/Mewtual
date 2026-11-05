@@ -29,6 +29,12 @@ pub struct DirectJoinRequestIdentity {
     request: [u8; 32],
     package: [u8; 32],
 }
+impl fmt::Debug for DirectJoinRequestIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectJoinRequestIdentity")
+            .finish_non_exhaustive()
+    }
+}
 impl DirectJoinRequestIdentity {
     pub fn invite_nonce(&self) -> &[u8; 16] {
         &self.invite_nonce
@@ -51,6 +57,11 @@ pub struct DirectJoinLimits {
     provider: usize,
     backing: usize,
     exchange: usize,
+}
+impl fmt::Debug for DirectJoinLimits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectJoinLimits").finish_non_exhaustive()
+    }
 }
 impl DirectJoinLimits {
     pub fn new(provider: usize, backing: usize, exchange: usize) -> Result<Self, SyncError> {
@@ -98,6 +109,12 @@ pub struct CompletedDirectJoin {
     device: MlsDevice,
     group: ServerGroup,
     routing: RoutingState,
+}
+impl fmt::Debug for CompletedDirectJoin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompletedDirectJoin")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Borrowed verified envelope only. It has not entered the selected-KP Welcome SDK and carries

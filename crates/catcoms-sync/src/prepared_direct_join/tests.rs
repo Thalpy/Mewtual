@@ -46,6 +46,11 @@ fn signed_invalid_routing_consumes_only_candidate_and_original_ready_still_compl
     let hub = Hub::new();
     let mut node = owner(&hub, PeerId::from_u64(0x5101));
     let source = prepare(&mut node);
+    assert_eq!(format!("{:?}", limits()), "DirectJoinLimits { .. }");
+    assert_eq!(
+        format!("{:?}", source.request_identity().unwrap()),
+        "DirectJoinRequestIdentity { .. }"
+    );
     let ready = node
         .serve_join(PeerId::from_u64(0x5102), &source.request[1..])
         .unwrap();
@@ -93,6 +98,7 @@ fn signed_invalid_routing_consumes_only_candidate_and_original_ready_still_compl
     assert!(source.finish_authenticated_body(&bad).is_err());
     assert_eq!(source.master.as_slice(), master.as_slice());
     let completed = source.finish_authenticated_body(&ready[1..]).unwrap();
+    assert_eq!(format!("{completed:?}"), "CompletedDirectJoin { .. }");
     let (device, group, routing) = completed.into_parts();
     assert_eq!(
         device.public_key_bytes().as_slice(),

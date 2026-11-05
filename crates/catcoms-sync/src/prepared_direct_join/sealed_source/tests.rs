@@ -1,7 +1,7 @@
 //! Authenticated secret DATA only. None of these fixtures claims a durable mounted join,
 //! actual catalog/source capture, Current publication or physical crash acceptance. UNRUN.
 use super::*;
-use catcoms_rt::{Hub, ManualClock, MemNetwork};
+use catcoms_rt::{Hub, ManualClock};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
 
@@ -10,7 +10,7 @@ fn limits() -> DirectJoinLimits {
 }
 fn prepare() -> PreparedDirectJoin {
     let hub = Hub::new();
-    let mut owner = ChannelSync::found(
+    let owner = ChannelSync::found(
         hub.join(PeerId::from_u64(0x71)),
         MlsDevice::generate().unwrap(),
         ChaCha20Rng::seed_from_u64(0x71),
@@ -155,7 +155,7 @@ fn authenticated_nested_malformed_counts_and_unknown_flavor_refuse_before_owned_
 #[test]
 fn same_signer_master_without_selected_private_bundle_cannot_recover() {
     let hub = Hub::new();
-    let mut owner = ChannelSync::found(
+    let owner = ChannelSync::found(
         hub.join(PeerId::from_u64(0x81)),
         MlsDevice::generate().unwrap(),
         ChaCha20Rng::seed_from_u64(0x81),

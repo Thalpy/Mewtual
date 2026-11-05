@@ -222,6 +222,12 @@ pub struct ActionPagesExpectation<'a> {
     pub action: ActionId,
     pub original: OriginalActionDigest,
 }
+impl std::fmt::Debug for ActionPagesExpectation<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionPagesExpectation")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Signature-checked assembled original DATA only. This is NOT historical authority, a durable
 /// source, Current or permission to expose text. Raw and typed owned representations overlap;

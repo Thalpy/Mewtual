@@ -3,6 +3,26 @@
 //! tests belong to the covering owner/member consumer and must run before activation.
 use super::*;
 
+#[test]
+fn source_expectation_debug_omits_scope_and_predecessor_labels() {
+    let (tail, _) = shape();
+    assert_eq!(
+        format!("{:?}", tail.predecessor),
+        "OwnerOperationPredecessor { .. }"
+    );
+    let expected = super::super::membership_restore::OwnerOperationSourceExpectation {
+        group: &tail.group,
+        signer: &tail.owner,
+        profile: tail.profile,
+        predecessor: tail.predecessor,
+        request: tail.binding,
+    };
+    assert_eq!(
+        format!("{expected:?}"),
+        "OwnerOperationSourceExpectation { .. }"
+    );
+}
+
 fn shape() -> (OwnerOperationTail, CommitRecord) {
     let record = CommitRecord {
         group_id: vec![1; 16],

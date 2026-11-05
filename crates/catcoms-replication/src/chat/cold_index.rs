@@ -154,10 +154,20 @@ pub struct ChildRefData<'a> {
     pub context: IndexContextData<'a>,
     pub node: NodeRefData,
 }
+impl std::fmt::Debug for ChildRefData<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildRefData").finish_non_exhaustive()
+    }
+}
 #[derive(Clone, Copy)]
 pub struct LeafRowData {
     pub key: [u8; 32],
     pub value: ValueData,
+}
+impl std::fmt::Debug for LeafRowData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeafRowData").finish_non_exhaustive()
+    }
 }
 
 /// Complete borrowed structural node. No full historical/row map or variable owning decode.

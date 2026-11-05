@@ -21,6 +21,12 @@ pub struct OriginalJoinArmData {
     pub invocation: [u8; 32],
     pub deadline_ms: u64,
 }
+impl fmt::Debug for OriginalJoinArmData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OriginalJoinArmData")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Trusted host boundary, comparable to managed scope reservations. Arbitrary Rust impls are
 /// TRUSTED CODE, not authenticated disk evidence. Actual App impls retain original mounted

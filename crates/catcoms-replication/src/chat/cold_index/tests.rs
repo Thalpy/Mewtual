@@ -834,12 +834,24 @@ fn diagnostics_omit_private_context_payload_and_claim_identifiers() {
     let ctx = actions();
     let node = leaf(ctx, 0, 16, 19);
     let query = open(ctx, &node, key(1));
+    let child = ChildRefData {
+        context: ctx,
+        node: node.node,
+    };
+    let row = LeafRowData {
+        key: key(1),
+        value: ValueData::Action(claim(ctx, key(1), 0, ClaimHint::Canonical)),
+    };
+    assert_eq!(format!("{child:?}"), "ChildRefData { .. }");
+    assert_eq!(format!("{row:?}"), "LeafRowData { .. }");
     for debug in [
         format!("{ctx:?}"),
         format!("{:?}", ctx.scope),
         format!("{query:?}"),
         format!("{:?}", query.node()),
         format!("{:?}", query.search_data().unwrap()),
+        format!("{child:?}"),
+        format!("{row:?}"),
     ] {
         assert!(!debug.contains("private-index-test-group"));
         assert!(!debug.contains("record_page"));

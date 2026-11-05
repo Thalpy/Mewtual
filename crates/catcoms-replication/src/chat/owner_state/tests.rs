@@ -6,6 +6,11 @@ use super::*;
 use catcoms_crypto::DeviceKeypair;
 
 const GROUP: &[u8] = b"public-state-real-signature-fixture";
+
+#[test]
+fn metadata_debug_omits_identity_and_history_fields() {
+    assert_eq!(format!("{:?}", meta(GROUP)), "StateMeta { .. }");
+}
 fn empty_slot(profile: OwnerFactId, id: u8, subject: [u8; 32]) -> CurrentAdmissionSlot {
     let admission = OwnerBodyId::from_bytes([id; 32]);
     CurrentAdmissionSlot {

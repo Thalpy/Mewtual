@@ -27,6 +27,7 @@ fn actual_v2_founder_produces_exact_signed_genesis_with_empty_context_and_no_run
     let profile_id = prepared.profile_id();
     let frozen = prepared.freeze(&node).unwrap();
     let view = frozen.borrow_for_covering_save(&node).unwrap();
+    assert_eq!(format!("{view:?}"), "FounderDataView { .. }");
     let profile = SignedOwnerProfile::decode(view.profile).unwrap();
     let admission = AdmissionBody::decode(view.admission).unwrap();
     let header = SignedOwnerHeader::decode(view.header).unwrap();

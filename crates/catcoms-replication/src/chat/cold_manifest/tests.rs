@@ -16,6 +16,13 @@ use rand_core::SeedableRng;
 const GROUP: &[u8] = b"bounded-private-manifest";
 const VAULT: [u8; 32] = [1; 32];
 const KEY: [u8; 32] = [2; 32];
+
+#[test]
+fn manifest_input_debug_omits_private_context_and_source_links() {
+    let pages = header_page(true);
+    let input = spec(ArchiveOperation::Genesis { body: body() }, &pages);
+    assert_eq!(format!("{input:?}"), "ManifestSpec { .. }");
+}
 fn profile() -> OwnerFactId {
     OwnerFactId::from_bytes([3; 32])
 }

@@ -136,6 +136,11 @@ pub struct ManifestSpec<'a> {
     pub operation: ArchiveOperation,
     pub pages: &'a [PageDescriptor],
 }
+impl std::fmt::Debug for ManifestSpec<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManifestSpec").finish_non_exhaustive()
+    }
+}
 
 /// Complete strict borrowed syntax. Keeps no owned group, page Vec, runtime or read permission.
 pub struct ManifestPage<'a> {

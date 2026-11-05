@@ -78,6 +78,11 @@ pub struct FounderDataView<'a> {
     /// fed back into its own state image, and is not selected-finality/covering-save authority.
     pub initial_tip_header: OwnerHeaderId,
 }
+impl std::fmt::Debug for FounderDataView<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FounderDataView").finish_non_exhaustive()
+    }
+}
 
 fn unavailable() -> SyncError {
     SyncError::ChatScopeUnavailable

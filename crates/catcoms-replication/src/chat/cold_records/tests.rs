@@ -266,6 +266,30 @@ fn genuine_genesis_retains_exact_header_and_complete_state() {
     let header = HeaderRow::decode(row.payload).unwrap();
     assert_eq!(header.header().encode(), f.header.encode());
     assert_eq!(header.image(), f.image.as_slice());
+    assert_eq!(format!("{header:?}"), "HeaderRow { .. }");
+    assert_eq!(format!("{page:?}"), "RecordBatch { .. }");
+    assert_eq!(
+        format!("{:?}", binding(&f, PageRole::GenesisRecords, &op, None)),
+        "BatchBinding { .. }"
+    );
+    assert_eq!(
+        format!("{:?}", RecordSource::Profile(&f.profile)),
+        "RecordSource::Profile { .. }"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            RecordSource::Header {
+                header: &f.header,
+                image: &f.image
+            }
+        ),
+        "RecordSource::Header { .. }"
+    );
+    assert_eq!(
+        format!("{:?}", RecordSource::Admission(&f.founder)),
+        "RecordSource::Admission { .. }"
+    );
     assert_eq!(row.original, original(RecordKind::Header, row.payload));
     let debug = format!("{row:?}");
     assert_eq!(

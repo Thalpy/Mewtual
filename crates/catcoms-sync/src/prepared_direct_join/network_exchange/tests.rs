@@ -7,6 +7,20 @@ use rand_core::SeedableRng;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
+#[test]
+fn arm_data_debug_omits_invocation_and_execution_metadata() {
+    // Inert labels only; formatting this does not model a saved arm/ticket or paid work.
+    let data = OriginalJoinArmData {
+        grant: 1,
+        ordinal: 2,
+        revision: 3,
+        activation: [4; 32],
+        invocation: [5; 32],
+        deadline_ms: 6,
+    };
+    assert_eq!(format!("{data:?}"), "OriginalJoinArmData { .. }");
+}
+
 struct Context {
     id: Arc<()>,
     request: DirectJoinRequestIdentity,

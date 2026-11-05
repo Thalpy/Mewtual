@@ -10,6 +10,14 @@ is clear, with no compiler/tests/build execution. The future own-row-only
 query stays test-only until its actual typed Current consumer is declared. No ID3/Current
 activation is supplied by this negative helper. [Contract](communication-recovery/CHAT-V2-GROUP-LINEAGE.md).
 
+## Sanitized protocol diagnostics (compiler follow-up)
+
+Nineteen public cold-record/index/state and Sync join/owner DATA types now implement manual
+`Debug` that prints only the type or enum variant label. Formatting does not traverse groups,
+keys, original records, provider state or history. Focused privacy assertions are authored;
+the primary owns serial validation. This cleanup changes no wire format or authorization and
+does not enable Chat V2 Current, its governor or native/UI integration.
+
 ## Group-wide negative V2 exclusion (5 November; authored, UNRUN)
 
 Existing ID2 mounts now check the fixed signer-independent `g-` group reservation before old

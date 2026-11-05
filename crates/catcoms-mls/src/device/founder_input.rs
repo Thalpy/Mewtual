@@ -5,7 +5,7 @@ use super::*;
 use openmls_memory_storage::{MemoryStorage, StorageMap};
 use openmls_traits::{types::SignatureScheme, OpenMlsProvider};
 use std::hash::BuildHasher;
-use tls_codec::{Serialize as _, Size};
+use tls_codec::Size;
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_BACKING: usize = 4096;

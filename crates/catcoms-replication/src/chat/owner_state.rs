@@ -86,6 +86,11 @@ pub struct StateMeta<'a> {
     pub body: OwnerBodyId,
     pub mls_epoch: u64,
 }
+impl std::fmt::Debug for StateMeta<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateMeta").finish_non_exhaustive()
+    }
+}
 
 /// Strict borrowed state image. Successful decode/hash/signature binding does NOT prove that
 /// these slots result from applying the actual body/MLS operation to a selected prior state.

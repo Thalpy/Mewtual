@@ -102,6 +102,11 @@ pub struct HeaderRow<'a> {
     header: SignedOwnerHeader,
     image: &'a [u8],
 }
+impl std::fmt::Debug for HeaderRow<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeaderRow").finish_non_exhaustive()
+    }
+}
 impl<'a> HeaderRow<'a> {
     pub fn decode(raw: &'a [u8]) -> Result<Self, ChatError> {
         if raw.len() > MAX_HEADER_ROW_BYTES {
@@ -159,6 +164,11 @@ pub struct BatchBinding<'a> {
     pub operation: &'a ArchiveOperation,
     /// Mandatory for AcceptanceRecords. Other roles validate their actual retained body row.
     pub append: Option<&'a AppendBody>,
+}
+impl std::fmt::Debug for BatchBinding<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchBinding").finish_non_exhaustive()
+    }
 }
 impl BatchBinding<'_> {
     fn body(self) -> Result<OwnerBodyId, ChatError> {
@@ -230,6 +240,20 @@ pub enum RecordSource<'a> {
     Removal(&'a RemovalBody),
     Review(&'a ReviewDecisionBody),
 }
+impl std::fmt::Debug for RecordSource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Profile(_) => "RecordSource::Profile",
+            Self::Header { .. } => "RecordSource::Header",
+            Self::Admission(_) => "RecordSource::Admission",
+            Self::Acceptance(_) => "RecordSource::Acceptance",
+            Self::Append(_) => "RecordSource::Append",
+            Self::Removal(_) => "RecordSource::Removal",
+            Self::Review(_) => "RecordSource::Review",
+        };
+        f.debug_struct(name).finish_non_exhaustive()
+    }
+}
 impl RecordSource<'_> {
     fn encode(&self) -> Result<(RecordKind, Zeroizing<Vec<u8>>), ChatError> {
         let (kind, bytes) = match self {
@@ -287,6 +311,11 @@ pub struct RecordBatch<'a> {
     body: OwnerBodyId,
     rows: [Option<RecordRow<'a>>; MAX_RECORD_BATCH_ROWS],
     count: usize,
+}
+impl std::fmt::Debug for RecordBatch<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordBatch").finish_non_exhaustive()
+    }
 }
 impl<'a> RecordBatch<'a> {
     pub fn decode(raw: &'a [u8], binding: BatchBinding<'_>) -> Result<Self, ChatError> {

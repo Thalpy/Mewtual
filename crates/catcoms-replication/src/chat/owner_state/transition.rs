@@ -49,6 +49,11 @@ pub struct SlotData<'a> {
     pub tip_header: OwnerHeaderId,
     pub frontier: &'a Frontier,
 }
+impl std::fmt::Debug for SlotData<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlotData").finish_non_exhaustive()
+    }
+}
 
 /// Missing Review case/accepted-prefix evidence cannot be replaced by a boolean or callback.
 /// The Review variant deliberately refuses until the real cold/governor consumer exists.
@@ -57,6 +62,17 @@ pub enum ReplayBody<'a> {
     Append(&'a AppendBody),
     Removal(&'a RemovalBody),
     Review(&'a ReviewDecisionBody),
+}
+impl std::fmt::Debug for ReplayBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Admission(_) => "ReplayBody::Admission",
+            Self::Append(_) => "ReplayBody::Append",
+            Self::Removal(_) => "ReplayBody::Removal",
+            Self::Review(_) => "ReplayBody::Review",
+        };
+        f.debug_struct(name).finish_non_exhaustive()
+    }
 }
 
 /// Frozen cut DATA for later retention, not accepted-history proof or a new open admission.
@@ -76,6 +92,11 @@ pub struct StepData {
     pub next: ReplayMath,
     pub append: Option<PreparedAppend>,
     pub removal: Option<FrozenCutData>,
+}
+impl std::fmt::Debug for StepData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepData").finish_non_exhaustive()
+    }
 }
 
 // Named simultaneous layouts, evaluated for the actual compiled target. Fixed requested Vec

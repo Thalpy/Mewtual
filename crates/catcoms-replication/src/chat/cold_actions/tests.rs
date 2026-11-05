@@ -67,6 +67,10 @@ fn private_action_pages_roundtrip_exact_small_and_max_text_envelopes_with_actual
     for large in [false, true] {
         let action = action(large, 1);
         let prepared = PreparedActionPages::prepare(VAULT, profile(), &action).unwrap();
+        assert_eq!(
+            format!("{:?}", expected(action.spec().realm.group(), &prepared)),
+            "ActionPagesExpectation { .. }"
+        );
         if large {
             assert!(prepared.chunk_count() > 1);
         }

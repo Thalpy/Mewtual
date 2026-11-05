@@ -28,6 +28,12 @@ pub struct OwnerOperationPredecessor {
     pub generation: u64,
     pub snapshot: [u8; 32],
 }
+impl std::fmt::Debug for OwnerOperationPredecessor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerOperationPredecessor")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Complete zero-copy grammar result. It is safe to discard on any failure: it owns no provider,
 /// response, key, callback or runtime observer. Semantic verification must still prove all these
