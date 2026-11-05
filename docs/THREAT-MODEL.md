@@ -7,8 +7,9 @@ SAME private OS-locked File through a running job. Store/creator Drop still revo
 the loan contains no Store, key, source or sender, and cannot grant Current or new work. Files,
 results and all blocking cleanup must drain before the loan. Inert debt must not hold one.
 This closes the primitive lifetime gap where a replacement mount could acquire the old lock
-while an admitted syscall continued; Root's actual source-worker constructor must still consume
-it before the complete integration can be claimed. Four tests are authored UNRUN. Short vault
+while an admitted syscall continued. The warm original source worker now consumes this loan;
+its implementation and regressions remain unexecuted, and native/other writers are separate
+integration work. Four primitive/session tests are authored UNRUN. Short vault
 transaction locks and the existing non-hostile private-directory assumption are unchanged.
 [Contract and evidence](communication-recovery/VAULT-PHYSICAL-WORK-SESSION-LEASE.md).
 
@@ -5929,3 +5930,22 @@ never activates. The same owned transport/prefix continues with a new context; b
 not reset, old watchers remain closed, and dropped/error/paused owners cannot rebind the same
 revision. No decoded grant or saved arm can reconstruct an unstarted ticket. Tests are UNRUN;
 SDK/Accepted/ScopeIntent/Current and native rollout remain separate closed boundaries.
+## Warm original bootstrap-source execution boundary (5 November; authored, unexecuted)
+
+The warm source worker spends an exact original persistent SP I/O unit before every bounded
+large pass, including verification of complete files. Counts, equal ciphertext and old saved
+events cannot reconstruct Work or refund a lost/ambiguous pass. Actual complete cipher+fee and
+created file objects survive caller loss. The real Work alone holds an ephemeral zeroizing
+dbkey copy for the existing offline source/nested-page DATA opener and a non-authorizing loan
+on the SAME physical vault lock; neither enters idle debt. That loan drains after actual file
+work/cleanup, even after Store revocation, before a new mount can proceed.
+
+Large file I/O holds no global authority writer. Those writers never wait on the long output
+mutex; actual completed result collection uses try_lock and bounded named-object checks. A
+retained historical writer outcome is insufficient alone: the actual latest journal, original
+source/root/target/session and final negatives still govern any saved result. An ancestor SP
+cannot become current after a later save. Completed same-object bytes rely on the existing
+non-hostile live private-directory/vault-lock assumption; hostile local mutation is not newly
+claimed to be prevented. Cold negative repair, terminal SourceSaved crash closure, Current and
+production chat dispatch remain separate open boundaries. Thirteen regressions are authored but
+unrun; final actual-diff static review is clear during the user's compilation pause.

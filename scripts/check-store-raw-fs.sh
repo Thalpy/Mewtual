@@ -46,6 +46,14 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/epoch_registry.rs|sync_registry|file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;']=1
   ['crates/catcoms-app/src/store/epoch_studio.rs|sync_studio|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/epoch_studio.rs|sync_studio|file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;']=1
+  # Original unexposed bootstrap source worker, a child of persistence. Only these fixed
+  # source.seed/source.bin/records.bin/manifest.bin destinations are reachable after its
+  # actual saved per-pass SP debit. No epoch inventory family or caller path is accepted.
+  # Keep exact site keys rather than exempting this child (or all persistence descendants).
+  ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|held.file.sync_all().map_err(io)?;']=1
 )
 
 # Print `file<TAB>line<TAB>enclosing fn<TAB>trimmed text` for every match in non-test code. The

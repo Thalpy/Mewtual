@@ -547,6 +547,8 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 mod persistence {
     use super::*;
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
+    mod bootstrap_source_work;
+    pub(super) use bootstrap_source_work::{OriginalSourceWriteWork, SavedBootstrapSourceFiles};
 
     /// Closed flat control destinations under the SAME original declared root. In particular
     /// there is no unowned invocation directory whose mkdir/open gap could mint another SDK
@@ -893,7 +895,6 @@ mod persistence {
     /// This cell deliberately has no live source/node/sender/key/Store/session. Its original
     /// weak metadata and separate actual fee survive caller loss until exact repair drains.
     struct FounderSourceDebt {
-        source: Option<catcoms_sync::owner_v2::PreparedBootstrapSource>,
         context: catcoms_sync::owner_v2::BootstrapSourceContextData,
         source_id: catcoms_sync::owner_v2::BootstrapSourceId,
         founding: std::sync::Arc<SavedFoundingIntent>,
@@ -903,6 +904,16 @@ mod persistence {
         // arbitrary descendants or keep using its old held-file identity after replacement.
         original: std::sync::Arc<OriginalFounderInvocation>,
         prepared: Option<FounderSourcePreparedJournal>,
+        output: std::sync::Arc<std::sync::Mutex<bootstrap_source_work::FounderSourceOutput>>,
+        // LAST: source/control metadata drains before the immutable payload's actual fee.
+        // Large workers clone this Arc without locking the mutable journal/run state.
+        payload: Option<std::sync::Arc<FounderSourcePayload>>,
+    }
+    /// Filled once before registration, then immutable. It contains no files, session, key,
+    /// live source or publisher. Sharing it never copies the large encrypted frame or releases
+    /// its original quota while a physical worker is still reading/verifying those bytes.
+    struct FounderSourcePayload {
+        source: Option<catcoms_sync::owner_v2::PreparedBootstrapSource>,
         // This reservation is LAST: complete cipher/context/file metadata drains first.
         custody: Option<critical_namespaces::read_pool::CatalogReadReservation>,
     }
@@ -920,6 +931,11 @@ mod persistence {
         saved: Option<std::sync::Arc<()>>,
         seed_file: Option<critical_namespaces::pending_join::CreatedStage>,
         stage_file: Option<critical_namespaces::pending_join::CreatedStage>,
+        // At most the initial SP plus the original allowance (<=8). Keeping the actual
+        // saved parent, not just its digest, permits exact interrupted successor repair.
+        // These are event receipts; an ancestor is NEVER accepted as the current head.
+        parent: Option<Box<FounderSourcePreparedJournal>>,
+        execution: Option<std::sync::Arc<bootstrap_source_work::FounderSourceRun>>,
     }
     /// Exact actual small journal save, never a source-file save, large I/O arm or Current.
     /// Its complete source/cipher fee stays with the SAME cell through every retained handle.
@@ -965,7 +981,10 @@ mod persistence {
                 return Err(refused());
             }
             let actual = self.cell.lock().map_err(|_| refused())?;
-            let journal = actual.prepared.as_ref().ok_or_else(refused)?;
+            let mut journal = actual.prepared.as_ref().ok_or_else(refused)?;
+            while !std::sync::Arc::ptr_eq(&journal.operation, &self.operation) {
+                journal = journal.parent.as_deref().ok_or_else(refused)?;
+            }
             if !std::sync::Arc::ptr_eq(&journal.operation, &self.operation)
                 || !journal
                     .admitted
@@ -1169,8 +1188,9 @@ mod persistence {
                 if actual.original.data.invocation.invocation != invocation {
                     continue;
                 }
-                let source = actual.source.as_ref()?;
-                actual.custody.as_ref()?;
+                let payload = actual.payload.as_ref()?;
+                let source = payload.source.as_ref()?;
+                payload.custody.as_ref()?;
                 return Some((
                     source.as_bytes().len(),
                     *source.id().as_bytes(),
@@ -1222,6 +1242,7 @@ mod persistence {
                 .as_ref()
                 .ok_or_else(refused)?
                 .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
+            bootstrap_source_work::validate_metadata_invoice(self)?;
             let pending = source.as_ref().ok_or_else(refused)?;
             if pending.as_bytes().len() < 40
                 || pending.as_bytes().len()
@@ -1250,14 +1271,20 @@ mod persistence {
             // admission/pins/canonical guard is already held. This is small prepaid metadata,
             // not another pool acquisition. It remains private/unregistered
             // with empty owned slots until the final original checks all succeed.
-            let mut cell = std::sync::Arc::new(std::sync::Mutex::new(FounderSourceDebt {
+            let mut payload = std::sync::Arc::new(FounderSourcePayload {
                 source: None,
+                custody: None,
+            });
+            let mut cell = std::sync::Arc::new(std::sync::Mutex::new(FounderSourceDebt {
                 context,
                 source_id,
                 founding,
                 original: captured.original.clone(),
                 prepared: None,
-                custody: None,
+                output: std::sync::Arc::new(std::sync::Mutex::new(
+                    bootstrap_source_work::FounderSourceOutput::new(),
+                )),
+                payload: None,
             }));
             let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
             let root = root_guard.as_ref().ok_or_else(refused)?;
@@ -1288,6 +1315,7 @@ mod persistence {
                 .as_ref()
                 .ok_or_else(refused)?
                 .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
+            let owned_payload = std::sync::Arc::get_mut(&mut payload).ok_or_else(refused)?;
             recheck_source_capture_after_waits(
                 self,
                 &captured.original,
@@ -1305,8 +1333,9 @@ mod persistence {
                 *source = Some(actual_source);
                 return Err(refused());
             };
-            owned.source = Some(actual_source);
-            owned.custody = Some(actual_fee);
+            owned_payload.source = Some(actual_source);
+            owned_payload.custody = Some(actual_fee);
+            owned.payload = Some(payload);
             registry.slots[index] = Some(cell.clone());
             drop(registry);
             drop(root_guard);
@@ -1344,7 +1373,11 @@ mod persistence {
                 {
                     return Err(refused());
                 }
-                let cipher = actual.source.as_ref().ok_or_else(refused)?;
+                let cipher = actual
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.source.as_ref())
+                    .ok_or_else(refused)?;
                 if cipher.context_data() != context || cipher.id() != source_id {
                     return Err(refused());
                 }
@@ -1414,6 +1447,8 @@ mod persistence {
                         saved: None,
                         seed_file: None,
                         stage_file: None,
+                        parent: None,
+                        execution: None,
                     });
                 }
                 let journal = actual.prepared.as_mut().ok_or_else(refused)?;
@@ -1495,7 +1530,17 @@ mod persistence {
             if decoded != journal.data {
                 return Err(refused());
             }
-            {
+            if let Some(parent) = journal.parent.as_deref() {
+                require_saved_source_journal(parent)?;
+                decoded.successor(
+                    Some((
+                        &parent.data,
+                        founder::IntentId::of(parent.candidate.as_ref().ok_or_else(refused)?),
+                    )),
+                    captured.data(),
+                    guard.debit_id(),
+                )?;
+            } else {
                 let parent = founding.debt.lock().map_err(|_| refused())?;
                 decoded.successor(
                     Some((&parent.data, founding.id)),
@@ -1520,7 +1565,7 @@ mod persistence {
                 captured.data(),
                 guard.debit_id(),
             )?;
-            if parsed.expected_parent != Some(founding.id)
+            if parsed.expected_parent != journal.data.parent
                 || parsed.marker_frame != Some(journal.marker.as_slice())
                 || parsed.candidate_frame != candidate.as_slice()
                 || parsed.candidate != decoded
@@ -1555,7 +1600,7 @@ mod persistence {
                     return Err(refused());
                 }
                 // Actual full FI/held-name validation, not merely the parent's scalar ID.
-                founding.validate_under_root(self, captured, guard, root)?;
+                validate_source_parent_current_file_only(self, &founding, journal)?;
             }
             guard.validate_transferred_source(captured, &context, source_id)?;
             recheck_source_capture_after_waits(
@@ -1595,7 +1640,7 @@ mod persistence {
                 sync_directory(&parent_path).map_err(|error| AppError::Io(error.to_string()))?;
                 #[cfg(test)]
                 self.archive_declaration_fault(155)?;
-                founding.validate_under_root(self, captured, guard, root)?;
+                validate_source_parent_current_file_only(self, &founding, journal)?;
                 verify_archive_held_name(
                     &stage_path,
                     journal.stage_file.as_ref().ok_or_else(refused)?,
@@ -3163,12 +3208,13 @@ mod persistence {
             .archive_bootstrap_policy
             .as_ref()
             .ok_or_else(refused)?;
-        actual
+        let payload = actual.payload.as_ref().ok_or_else(refused)?;
+        payload
             .custody
             .as_ref()
             .ok_or_else(refused)?
             .validate(&policy.pending.pool, BOOTSTRAP_SOURCE_CUSTODY_FEE)?;
-        let source = actual.source.as_ref().ok_or_else(refused)?;
+        let source = payload.source.as_ref().ok_or_else(refused)?;
         if source.id() != actual.source_id || source.context_data() != &actual.context {
             return Err(refused());
         }
@@ -3212,9 +3258,12 @@ mod persistence {
         journal: Option<&FounderSourcePreparedJournal>,
     ) -> Result<(), AppError> {
         use critical_namespaces::refused;
-        let Some(journal) = journal.filter(|journal| journal.admitted.is_some()) else {
+        let Some(journal) = journal else {
             return founding.validate_current_file_only(store);
         };
+        if journal.admitted.is_none() {
+            return validate_source_parent_current_file_only(store, founding, journal);
+        }
         if !journal
             .admitted
             .as_ref()
@@ -3239,8 +3288,41 @@ mod persistence {
         } else if journal.saved.is_none() {
             // An admitted first seed/stage may still be pending under its exact real parent.
             // Its old FI must satisfy the original held-object/full-byte check, not just ID.
-            founding.validate_current_file_only(store)?;
+            validate_source_parent_current_file_only(store, founding, journal)?;
         } else {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    /// A pending successor may still be under its actual retained SAVED parent. This never
+    /// searches arbitrary history or accepts an ancestor once this operation was saved.
+    fn validate_source_parent_current_file_only(
+        store: &ServerStore,
+        founding: &SavedFoundingIntent,
+        journal: &FounderSourcePreparedJournal,
+    ) -> Result<(), AppError> {
+        if let Some(parent) = journal.parent.as_deref() {
+            require_saved_source_journal(parent)?;
+            validate_source_current_file_only(store, founding, Some(parent))
+        } else {
+            founding.validate_current_file_only(store)
+        }
+    }
+
+    fn require_saved_source_journal(
+        journal: &FounderSourcePreparedJournal,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        if !journal
+            .admitted
+            .as_ref()
+            .is_some_and(|id| std::sync::Arc::ptr_eq(id, &journal.operation))
+            || !journal
+                .saved
+                .as_ref()
+                .is_some_and(|id| std::sync::Arc::ptr_eq(id, &journal.operation))
+        {
             return Err(refused());
         }
         Ok(())
@@ -5433,6 +5515,8 @@ pub struct ServerStore {
     founder_before_source_admission: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     founder_before_source_prepared_saved: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    founder_before_source_files_saved: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pending_join_catalog: critical_namespaces::pending_join::SharedMounted,
     #[cfg(test)]
     pending_join_before_catalog_writer: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -5578,6 +5662,8 @@ impl ServerStore {
             founder_before_source_admission: Default::default(),
             #[cfg(test)]
             founder_before_source_prepared_saved: Default::default(),
+            #[cfg(test)]
+            founder_before_source_files_saved: Default::default(),
             pending_join_catalog: Default::default(),
             #[cfg(test)]
             pending_join_before_catalog_writer: Default::default(),

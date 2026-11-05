@@ -34,6 +34,45 @@ writer exclusion. Original bootstrap ciphertext and the namespace-only declarati
 authored consuming prerequisites. Actual creation debit/FoundingIntent source is now reviewed;
 source persistence, canonical head/scope saves and cold/crash acceptance remain unfinished.
 
+## Warm bootstrap source execution (5 November; authored, UNRUN; static review clear)
+
+`ArchiveFounderSourcePreparation::save_source_files` now has an actual warm physical consumer.
+It retains immutable cipher+fee separately from mutable small journal/run state. Every pass saves
+the exact next SP successor, spending one of the ORIGINAL1..8 I/O units before large effects.
+The actual initial SP and at most8 real successor events are retained; old receipts cannot
+stand in for current. An abandoned/ambiguous prepared Work is not revived/refunded from counts.
+Its same small operation repairs first, and another large pass needs another durable successor.
+
+A non-Clone Work retains only fixed original file identities/paths, negative observers, shared
+cipher/output custody, an ephemeral zeroizing dbkey copy and the OS-only physical session loan.
+After the entire admission closure drains, it writes/verifies/syncs `source.seed`, `source.bin`,
+`records.bin` and `manifest.bin`. No global writer spans this pass. Short global writers use
+try_lock rather than waiting for its long output mutex. Newly created Files enter retained
+output custody before identity/write can fail. Idle debt contains neither key nor session loan.
+Named file handles can remain idle, but any later mutation needs a new actual Work and lease.
+
+Only the real completed writer installs a historical outcome. Its opaque SavedFiles consumer
+still checks the actual latest journal, original root/target/source, output identities/lengths
+and final negatives; it does not repeat full source reads under Root. The existing non-hostile
+live private-directory assumption remains; this is not protection against same-object edits by
+another process bypassing the vault lock. Bounded already-paid crypto/read allocations occur
+inside the spent pass; no whole allocator/SDK/native/RSS limit is claimed.
+
+Thirteen focused regressions are authored UNRUN, covering150..169 faults, spent/abandoned work,
+retained source and SAME file retries, exhaustion, foreign/equal replacement, lost replies,
+parent rollback, cancellation after source opening, final-boundary named-output replacement,
+actual other-group progress during source I/O and actual Store
+Drop/new-open exclusion until work drains. Design and final actual-diff reviews are clear after
+two ordering fixes.
+No compilation/tests/build ran. Cold negative repair, durable SourceSaved terminal closure,
+head/scope Current, governing/send/receive/admin and native activation remain unfinished.
+
+Seven genuine live-MLS SDK shape regressions were separately integrated at `0d7eb0a4` (UNRUN).
+They cover actual ratchet/reopen/interoperation, skip/replay/authentication, exact1000/1001
+derivation boundaries, removal/slot reuse and50-member topology. The50-member test belongs in
+final slow validation. They use unchanged legacy restore and do not activate a new loader.
+See [the live SDK extension audit](communication-recovery/CHAT-MLS-LIVE-TEXT-EXTENSION.md).
+
 ## Physical-work OS-session prerequisite (5 November; authored, unexecuted)
 
 `VaultSessionGuard` now lends a non-Clone OS-lock-only `VaultPhysicalWorkLease`. The SAME
@@ -41,9 +80,9 @@ private File stays locked until both Store and all actual running jobs drain; th
 no Store/keys/creator sender or authority and must never be retained by inert debt. Three storage
 tests plus one actual Store-drop/continued-write test are authored UNRUN. Design and read-only
 actual-diff reviews are CLEAR. Direct format/whitespace/ambient/raw-fs gates passed; no compilation/
-tests/build ran under the user's pause. Root must
-consume this resource in its paid physical source-worker constructor before claiming that actual
-large-I/O/remount race closed. [Contract](communication-recovery/VAULT-PHYSICAL-WORK-SESSION-LEASE.md).
+tests/build ran under the user's pause. The warm original source-worker constructor above now
+consumes this loan; its large-I/O/remount integration remains unexecuted, and native/other
+writers are still separate work. [Contract](communication-recovery/VAULT-PHYSICAL-WORK-SESSION-LEASE.md).
 Pending focused selectors: `cargo test -p catcoms-storage vault::physical_work_tests` and
 `cargo test -p catcoms-app store::physical_work_session_tests`. Full gates remain deferred.
 

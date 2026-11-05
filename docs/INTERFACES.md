@@ -8295,6 +8295,24 @@ read API remains exact-FI-only. All full comparisons precede final current bytes
 Root/negative proofs. This interface admits no large pass/source file, SDK restore or Current.
 Eight additional regressions remain authored UNRUN; combined adversarial static review is clear.
 
+`ArchiveFounderSourcePreparation::save_source_files` now consumes an actual original saved SP.
+Before large I/O it persists a contiguous SP successor with the SAME full context/source/marker
+and incremented original io_spent. Only a non-Clone preconstructed Work can run that arm; its
+Drop abandons it, never reconstructs/refunds it from a count. Small ambiguity repairs the same
+cached operation before another separately charged pass. All quota/metadata/output/session
+resources precede debit; bounded already-paid DATA-opener allocations occur inside the pass.
+
+The actual file pass runs outside all admission/pin/canonical/Root/registry/source-cell guards.
+It owns the SAME physical session loan through blocking I/O/cleanup; idle output debt owns only
+held file objects, never keys/session/task/publisher. Its historical completion is retained in
+the actual cell. `SavedBootstrapSourceFiles::validate_original` requires the same cell, exact
+latest saved arm/run, original root/target/source and named output identities/lengths plus final
+negatives. Global result writers use only try_lock on the long output mutex, and perform no
+full-frame read/hash/decrypt there. An old SavedSP remains an ancestor event receipt, never a
+replacement for the actual selected current. This is warm, unexposed source progress; no cold
+positive result, SourceSaved terminal record, head/scope Current or native creation is implied.
+Thirteen new regressions are authored UNRUN; final actual-diff static review is clear.
+
 ### Explicit original checkpoint retry continuation
 
 `CheckpointJoinNetwork::ensure_retry_grant` is a trusted local ACTIVE-source action. It retains

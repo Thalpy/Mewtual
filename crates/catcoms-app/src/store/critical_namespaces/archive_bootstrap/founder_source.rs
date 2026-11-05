@@ -2,7 +2,9 @@
 //! source I/O is admitted here. Incomplete private stages retain this owner before mutation;
 //! they can NEVER fall back into the old untouched Planning/Founding constructor.
 use super::*;
-use crate::store::persistence::{RegisteredBootstrapSource, SavedBootstrapSourcePrepared};
+use crate::store::persistence::{
+    RegisteredBootstrapSource, SavedBootstrapSourceFiles, SavedBootstrapSourcePrepared,
+};
 use catcoms_sync::owner_v2::{
     BootstrapSourceContextData, BootstrapSourceId, FounderArchivePreparation,
     FounderBootstrapPreparation, FrozenFounder, PreparedBootstrapSource,
@@ -11,6 +13,8 @@ use catcoms_sync::owner_v2::{
 const PHASE_METADATA_FEE: usize = 64 * 1024;
 #[path = "founder_source_prepared.rs"]
 mod prepared;
+#[path = "founder_source_write.rs"]
+mod write;
 
 enum SourcePhase {
     PendingPrivateStage,
@@ -36,11 +40,14 @@ pub struct ArchiveFounderSourcePreparation<T: MeshTransport, R: CryptoRngCore> {
     source_fee: Option<CatalogReadReservation>,
     registered: Option<RegisteredBootstrapSource>,
     prepared_journal: Option<SavedBootstrapSourcePrepared>,
+    saved_files: Option<SavedBootstrapSourceFiles>,
     original: ArchiveFounderPlanning<T, R>,
     #[cfg(test)]
     before_freeze: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
     before_source_return: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    before_source_io: Option<Box<dyn FnOnce() + Send>>,
     _phase_fee: CatalogReadReservation,
 }
 impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for ArchiveFounderSourcePreparation<T, R> {
@@ -68,6 +75,9 @@ pub enum ArchiveFounderSourceProgress {
     /// Only the actual small SourcePrepared journal passed its barriers. No source file,
     /// large-write execution arm, Current or native creation success follows from this.
     SourcePreparedJournalSavedUnexposed,
+    /// Exact source seed, destination and two genesis pages passed one durably debited
+    /// physical pass and final original guards. Still no scope/head/Current/native success.
+    SourceFilesSavedUnexposed,
 }
 pub struct ReturnedArchiveFounderPlanning<T: MeshTransport, R: CryptoRngCore> {
     original: ArchiveFounderPlanning<T, R>,
@@ -139,11 +149,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
                 source_fee: None,
                 registered: None,
                 prepared_journal: None,
+                saved_files: None,
                 original: self,
                 #[cfg(test)]
                 before_freeze: None,
                 #[cfg(test)]
                 before_source_return: None,
+                #[cfg(test)]
+                before_source_io: None,
                 _phase_fee: fee,
             }),
             Err(error) => Err(ReturnedArchiveFounderPlanning {

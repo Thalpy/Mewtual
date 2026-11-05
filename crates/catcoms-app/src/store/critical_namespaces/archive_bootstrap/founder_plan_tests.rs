@@ -6,7 +6,7 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 
-const SECRET: &[u8] = b"actual original archive plan";
+pub(super) const SECRET: &[u8] = b"actual original archive plan";
 type Creator = ArchiveFounderCreation<MemNetwork, ChaCha20Rng>;
 pub(super) fn fixture(seed: u64) -> (tempfile::TempDir, ServerStore, ChaCha20Rng) {
     let path = tempfile::tempdir().unwrap();

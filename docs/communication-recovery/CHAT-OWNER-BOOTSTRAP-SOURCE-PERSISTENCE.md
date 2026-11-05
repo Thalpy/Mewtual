@@ -6,8 +6,12 @@ are not implementations and activate no Chat V2 path.
 Compilation/tests/builds remain paused; source and design review are not execution evidence.
 The warm initial small SP journal described below is now authored and has passed combined
 adversarial static review after a final-current ordering fix. Eight regressions are authored
-UNRUN. Large execution arms/files, cold negative repair and the asynchronous worker are still
-design/implementation gates; this document does not imply they have been delivered.
+UNRUN. The smaller synchronous warm execution consumer is now authored with13 further UNRUN
+regressions; design and final actual-diff static review are clear. It saves/debits a real SP
+successor, then runs a non-Clone original Work outside every global writer, retaining the
+OS-only physical lease through I/O. Large files are `source.seed`, `source.bin`, `records.bin`
+and `manifest.bin` in the same original target. Cold negative repair, SourceSaved terminal
+closure, asynchronous native scheduling and Current remain implementation gates.
 
 ## Actual source before journal effects
 
@@ -114,9 +118,13 @@ Keep the one group-creation SDK unit distinct from the original source-write all
 Each large pass durably writes the exact next SourcePrepared successor with io_spent incremented
 once, same full context/SourceId/marker and contiguous sequence. Only the SAME live cell receives
 its unique saved runtime arm after those actual barriers. Drop/timeout/restart/configuration cannot
-refund it. A saved unconsumed original local result may be reobserved only through its same actual
-cell and held files; two handles share one consumed flag. Consuming happens BEFORE the first large
-filesystem effect, with no fallible capacity acquisition remaining. A failed/ambiguous pass stays
+refund it. The smaller implementation prepares one actual non-Clone Work before saving the arm
+and runs it immediately after all global guards drain. If that Work drops, even an unconsumed
+saved arm cannot reconstruct it: resolve its same small operation first, then spend a NEW pass.
+There are at most9 retained real journal events, not arbitrary-history ancestry adoption.
+Consuming happens BEFORE the first large filesystem effect. All quota/metadata/output/session
+resources precede debit; bounded already-paid read/AEAD/DATA-opener allocations still occur
+inside the spent pass and may refuse without refund. A failed/ambiguous pass stays
 spent. Exhaustion retains source/debt and pauses this original; this slice exposes no refill API.
 Count ALL full large-frame reads, verification, prefix comparisons and resync work inside that
 one pass, including already-complete files. Replaying a lost return cannot repeat large reads
@@ -184,5 +192,7 @@ send/receive, administrative full history and native/UI activation remain separa
 
 Design review: the restricted warm source-cell/SourcePrepared/one-shot-pass design is static
 clear with the phase-separated invoice and distinct cold negative admission above. Actual source
-and physical implementation/review plus all focused/full validation remain required. The added
-short-lock asynchronous worker requirement is a further design-review gate before implementation.
+and physical actual-diff review plus all focused/full validation remain required. The smaller
+synchronous Work has design clearance, including ephemeral dbkey custody (the existing DATA
+opener also needs it for nested pages), already-paid allocation semantics and idle file handles
+without queued work/session/key. It has no cold positive SourceSaved or activation result.
