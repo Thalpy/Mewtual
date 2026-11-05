@@ -31,6 +31,77 @@ fn private_shape(scope: &LocalChatScope) -> bool {
     }
 }
 impl LocalChatScope {
+    /// Receiver-only V2 genesis DATA attachment. The decoded scope has no process lifetime;
+    /// retain the SAME trusted host reservation instead of manufacturing publication runtime.
+    /// All host fields are captured once, and the durable planned revision must be exact.
+    pub(crate) fn attach_genesis_reservation(
+        &mut self,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        source: &impl ManagedChatScopeReservation,
+        expected_revision: u64,
+    ) -> Result<(), SyncError> {
+        let domain = source.domain();
+        let nonce = source.nonce();
+        let revision = source.planned_revision_data();
+        let source_group = source.group();
+        let signer = *source.signer();
+        let identity = source.owner_identity();
+        let observer = source.reservation_observer();
+        let revoker = source.revocation();
+        if !private_shape(self)
+            || self.revision != 0
+            || !self.required
+            || self.label.as_ref().is_none_or(|label| {
+                label.domain != domain
+                    || label.nonce != nonce
+                    || label.retired
+                    || label.initializing
+            })
+            || source_group != group.group_id_ref()
+            || signer.as_slice() != device.public_key_bytes()
+            || !group.is_active()
+            || !group.has_local_signer(&signer)
+            || expected_revision == 0
+            || revision != Some(expected_revision)
+            || observer.is_cancelled()
+        {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
+        if let Some(original) = &self.reservation {
+            return if Arc::ptr_eq(&original.identity, &identity)
+                && !original.observer.is_cancelled()
+                && original.planned_revision == revision
+            {
+                Ok(())
+            } else {
+                Err(SyncError::ChatScopeUnavailable)
+            };
+        }
+        self.reservation = Some(Reservation {
+            identity,
+            observer,
+            revoker,
+            planned_revision: revision,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn genesis_attachment_live(&self) -> bool {
+        private_shape(self)
+            && self.revision == 0
+            && self.required
+            && self.label.is_some()
+            && self.reservation.as_ref().is_some_and(|source| {
+                !source.observer.is_cancelled()
+                    && source.planned_revision.is_some_and(|revision| revision > 0)
+            })
+    }
+
+    pub(crate) fn genesis_label_data(&self) -> Option<&ChatScopeLabel> {
+        self.label.as_ref()
+    }
+
     pub(crate) fn observe_private_initialization(
         &self,
     ) -> Result<OriginalInitializationObservation, SyncError> {
@@ -52,6 +123,24 @@ impl LocalChatScope {
     }
 }
 impl OriginalInitializationObservation {
+    /// Compare an actual original private source to its newly decoded receiver-only genesis
+    /// attachment. Its process-local revision is0, not the old source revision; only SAME
+    /// reservation identity, saved labels, durable planned revision and original negatives can
+    /// bridge this reconstruction. No publication runtime or newer owner is adopted.
+    pub(crate) fn matches_genesis_attachment(&self, scope: &LocalChatScope) -> bool {
+        scope.genesis_attachment_live()
+            && self.required
+            && self.label == scope.label
+            && match (&self.reservation, &scope.reservation) {
+                (Some((identity, negative, revision)), Some(current)) => {
+                    !negative.is_cancelled()
+                        && Arc::ptr_eq(identity, &current.identity)
+                        && *revision == current.planned_revision
+                }
+                _ => false,
+            }
+    }
+
     /// Complete original host-planned scope labels for the private bootstrap DATA producer.
     /// The durable row revision must have been captured from the actual original reservation;
     /// the local process revision and scalar saved labels cannot supply it. This observation

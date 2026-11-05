@@ -52,7 +52,11 @@ pub const BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES: usize =
 /// quota or host reservation. The large source plaintext/raw/read buffers above remain live.
 /// Both nested opens are summed although manifest plaintext drops before records open. There
 /// is no JSON/SDK expansion; all inspected public codecs have bounded framing/group copies.
-pub const BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE: usize = 256 * 1024;
+// The opener now keeps exact verified genesis DATA; seed construction overlaps one additional
+// bounded copy. These named retained copies are additional to the original nested scratch.
+pub(super) const VERIFIED_GENESIS_LAYOUT: usize =
+    std::mem::size_of::<VerifiedGenesisData>() + MAX_STATE_BYTES + 3 * MAX_GROUP_ID_BYTES;
+pub const BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE: usize = 256 * 1024 + 2 * VERIFIED_GENESIS_LAYOUT;
 const NAMED_NESTED_LAYOUT: usize = 2 * (MAX_RECORD_BATCH_BYTES + TAG_BYTES)
     + 2 * (MAX_MANIFEST_PAGE_BYTES + TAG_BYTES)
     + RECORD_BATCH_METADATA_BYTES
@@ -61,9 +65,11 @@ const NAMED_NESTED_LAYOUT: usize = 2 * (MAX_RECORD_BATCH_BYTES + TAG_BYTES)
     + 4101 + 512 + 16 * 1024 // bounded policy/field/signature/canonical-encoding scratch
     + 4 * std::mem::size_of::<BootstrapSourceContextData>()
     + 4 * std::mem::size_of::<BootstrapSourceContextSpec<'static>>()
+    + std::mem::size_of::<s0::Fields<'static>>()
     + std::mem::size_of::<OpenedBootstrapSourceData>()
     + std::mem::size_of::<FounderBootstrapPreparation>()
-    + std::mem::size_of::<FounderArchivePreparation>(); // boxed pre-candidate refusal
+    + std::mem::size_of::<FounderArchivePreparation>()
+    + 2 * VERIFIED_GENESIS_LAYOUT; // boxed pre-candidate refusal + retained/cloned genesis
 const _: () = assert!(NAMED_NESTED_LAYOUT <= BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE);
 const _: () = assert!(MAX_BODY_METADATA == 755);
 const _: () = assert!(MAX_PROFILE_BYTES == 494 && MAX_MANIFEST_FRAME == 1110);
@@ -317,11 +323,25 @@ fn parse_body(raw: &[u8]) -> Result<Body<'_>, SyncError> {
 }
 
 /// Immutable offline DATA. It contains secret S0 in a zeroizing allocation; Debug exposes no
-/// plaintext/context/digest. Borrowed accessors cannot mint Fresh, restore an SDK or create a host.
+/// plaintext/context/digest. Borrowed accessors cannot mint Fresh or create a host. The separate
+/// opaque-source seed builder requires an actual SDK admission and returns only unbound DATA.
 pub struct OpenedBootstrapSourceData {
     plaintext: Zeroizing<Vec<u8>>,
     context: BootstrapSourceContextData,
     ranges: PayloadRanges,
+    pub(super) id: BootstrapSourceId,
+    pub(super) genesis: VerifiedGenesisData,
+}
+
+/// Exact objects/image retained from the real authenticated record open. This is public
+/// consistency DATA only; no key, live original, Saved receipt or Current authority is kept.
+#[derive(Clone)]
+pub(super) struct VerifiedGenesisData {
+    pub profile: SignedOwnerProfile,
+    pub admission: AdmissionBody,
+    pub header: SignedOwnerHeader,
+    pub image: Vec<u8>,
+    pub frontier: catcoms_replication::chat::acceptance_tree::Frontier,
 }
 pub struct BootstrapSourceDataView<'a> {
     pub context: &'a BootstrapSourceContextData,
@@ -331,6 +351,10 @@ pub struct BootstrapSourceDataView<'a> {
     pub manifest_frame: &'a [u8],
 }
 impl OpenedBootstrapSourceData {
+    /// Whole sealed source identity DATA, not a durable source capture or writer result.
+    pub fn source_id_data(&self) -> BootstrapSourceId {
+        self.id
+    }
     pub fn view_data(&self) -> BootstrapSourceDataView<'_> {
         BootstrapSourceDataView {
             context: &self.context,
@@ -376,7 +400,7 @@ pub fn open_bootstrap_source_data(
         };
         Zeroizing::new(unseal(&key, &sealed).map_err(|_| bad())?)
     };
-    let ranges = {
+    let (ranges, genesis) = {
         let body = parse_body(&plaintext)?;
         if body.spec != expected.spec_data()
             || snapshot::digest(body.spec.profile, body.snapshot).as_bytes()
@@ -385,17 +409,19 @@ pub fn open_bootstrap_source_data(
             return Err(bad());
         }
         s0::preflight(body.snapshot, body.spec)?;
-        validate_genesis(dbkey, &body)?;
-        body.ranges
+        let genesis = validate_genesis(dbkey, &body)?;
+        (body.ranges, genesis)
     };
     Ok(OpenedBootstrapSourceData {
         plaintext,
         context: expected.clone(),
         ranges,
+        id: expected_id,
+        genesis,
     })
 }
 
-fn validate_genesis(key: &[u8; 32], body: &Body<'_>) -> Result<(), SyncError> {
+fn validate_genesis(key: &[u8; 32], body: &Body<'_>) -> Result<VerifiedGenesisData, SyncError> {
     let spec = body.spec;
     let profile = SignedOwnerProfile::decode(body.profile).map_err(|_| bad())?;
     let mut creation = blake3::Hasher::new();
@@ -458,8 +484,8 @@ fn validate_genesis(key: &[u8; 32], body: &Body<'_>) -> Result<(), SyncError> {
     )
     .map_err(|_| bad())?;
     let mut found_profile = false;
-    let mut found_header = false;
-    let mut found_admission = false;
+    let mut found_header = None;
+    let mut found_admission = None;
     for row in batch.rows() {
         match row.key.kind {
             RecordKind::Profile => {
@@ -473,22 +499,37 @@ fn validate_genesis(key: &[u8; 32], body: &Body<'_>) -> Result<(), SyncError> {
                 if header.header().id() != spec.header {
                     return Err(bad());
                 }
-                found_header = true;
+                // Keep the actual representative and EXACT image, not a normalized re-encode.
+                found_header = Some((header.header().clone(), header.image().to_vec()));
             }
             RecordKind::Admission => {
                 let admission = AdmissionBody::decode(row.payload).map_err(|_| bad())?;
                 if admission.id() != spec.admission {
                     return Err(bad());
                 }
-                found_admission = true;
+                found_admission = Some(admission);
             }
             _ => return Err(bad()),
         }
     }
     // RecordBatch checked every actual signed representative, exact founder/body/header/state
     // genesis consistency and unique sorted kinds before this exact original-frame comparison.
-    if !found_profile || !found_header || !found_admission {
+    if !found_profile {
         return Err(bad());
     }
-    Ok(())
+    let (header, image) = found_header.ok_or_else(bad)?;
+    let admission = found_admission.ok_or_else(bad)?;
+    let frontier = catcoms_replication::chat::acceptance_tree::Frontier::empty(
+        catcoms_replication::chat::acceptance_tree::TreeContext {
+            profile: profile.id(),
+            admission: admission.admission_id(),
+        },
+    );
+    Ok(VerifiedGenesisData {
+        profile,
+        admission,
+        header,
+        image,
+        frontier,
+    })
 }

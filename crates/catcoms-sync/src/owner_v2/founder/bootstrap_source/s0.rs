@@ -29,13 +29,38 @@ fn fixed<'a>(d: &mut Decoder<'a>, len: usize) -> Result<&'a [u8], SyncError> {
     Ok(bytes)
 }
 
+/// Complete borrowed metadata, available only after the WHOLE closed S0 reached EOF. Empty
+/// legacy inventories remain an invariant, not permission to construct a legacy synchronizer.
+pub(super) struct Fields<'a> {
+    pub mls: &'a [u8],
+    pub routing: &'a [u8],
+    pub file_wrap_key: &'a [u8; 32],
+    pub rendezvous:
+        [Option<(&'a str, &'a [u8])>; crate::initialization_snapshot::MAX_INITIAL_RENDEZVOUS],
+    pub rendezvous_count: usize,
+    pub tenure: &'a [u8],
+    pub policy: &'a [u8],
+    pub durable_version: u8,
+    pub pending_version: u8,
+    pub scope: &'a [u8],
+}
+
 pub(super) fn preflight(raw: &[u8], spec: BootstrapSourceContextSpec<'_>) -> Result<(), SyncError> {
+    fields(raw, spec).map(|_| ())
+}
+
+pub(super) fn fields<'a>(
+    raw: &'a [u8],
+    spec: BootstrapSourceContextSpec<'_>,
+) -> Result<Fields<'a>, SyncError> {
     if raw.is_empty() || raw.len() > spec.limits.max_snapshot_bytes() {
         return Err(bad());
     }
     let mut d = Decoder::new(raw);
-    mls(field(&mut d, spec.limits.max_mls_bytes())?, spec)?;
-    routing(field(&mut d, 12 + crate::MAX_ROUTING_SECRETS * 44)?)?;
+    let mls_bytes = field(&mut d, spec.limits.max_mls_bytes())?;
+    mls(mls_bytes, spec)?;
+    let routing_bytes = field(&mut d, 12 + crate::MAX_ROUTING_SECRETS * 44)?;
+    routing(routing_bytes)?;
     {
         let mut ledger = Decoder::new(field(&mut d, 8)?);
         zero(&mut ledger)?;
@@ -45,7 +70,7 @@ pub(super) fn preflight(raw: &[u8], spec: BootstrapSourceContextSpec<'_>) -> Res
     zero(&mut d)?;
     zero(&mut d)?;
     zero(&mut d)?; // docs/log/peers: never-run source only
-    fixed(&mut d, 32)?; // opaque original file-wrap key
+    let file_wrap_key = fixed(&mut d, 32)?.try_into().map_err(|_| bad())?;
     if d.get_u64().map_err(|_| bad())? != 0 {
         return Err(bad());
     } // initial admin generation
@@ -54,45 +79,63 @@ pub(super) fn preflight(raw: &[u8], spec: BootstrapSourceContextSpec<'_>) -> Res
     if count > crate::initialization_snapshot::MAX_INITIAL_RENDEZVOUS {
         return Err(bad());
     }
-    for _ in 0..count {
-        std::str::from_utf8(field(&mut d, 1024)?).map_err(|_| bad())?;
-        field(&mut d, 128)?;
+    let mut rendezvous = [None; crate::initialization_snapshot::MAX_INITIAL_RENDEZVOUS];
+    for slot in rendezvous.iter_mut().take(count) {
+        let address = std::str::from_utf8(field(&mut d, 1024)?).map_err(|_| bad())?;
+        *slot = Some((address, field(&mut d, 128)?));
     }
     zero(&mut d)?; // direct results
-    tenure(field(&mut d, 98)?, spec.signer)?;
+    let tenure_bytes = field(&mut d, 98)?;
+    tenure(tenure_bytes, spec.signer)?;
     let policy = field(&mut d, 4101)?;
-    // A bounded actual public policy decode is allowed; this does NOT expand SDK/provider data.
-    if let Some(policy) = group_policy::decode_pin(policy)? {
-        if policy.group_id() != spec.group {
-            return Err(bad());
-        }
-        group_policy::require_supported(&policy)?;
-    }
-    {
+    let durable_version = {
         let mut durable = Decoder::new(field(&mut d, 5)?);
-        if !matches!(durable.get_u8().map_err(|_| bad())?, 1 | 2) {
+        let version = durable.get_u8().map_err(|_| bad())?;
+        if !matches!(version, 1 | 2) {
             return Err(bad());
         }
         zero(&mut durable)?;
         durable.finish().map_err(|_| bad())?;
-    }
-    member_finalization::preflight_owner_initialization_pending(field(&mut d, 5)?, 0)?;
+        version
+    };
+    let pending = field(&mut d, 5)?;
+    member_finalization::preflight_owner_initialization_pending(pending, 0)?;
     if field(&mut d, 64)? != b"catcoms/admin-authority/v2" {
         return Err(bad());
     }
     zero(&mut d)?;
-    let scope = field(&mut d, 512)?;
-    LocalChatScope::preflight_owner_initialization(scope, spec.group, &spec.signer)?;
+    let scope_bytes = field(&mut d, 512)?;
+    LocalChatScope::preflight_owner_initialization(scope_bytes, spec.group, &spec.signer)?;
     // Reuse the exact closed first-source parser above, then compare the actual scope labels.
     // The durable planned row revision is NOT encoded in S0; only external intent/context binds it.
-    let mut scope = Decoder::new(scope);
+    let mut scope = Decoder::new(scope_bytes);
     field(&mut scope, 64)?;
     field(&mut scope, MAX_GROUP_ID_BYTES)?;
     fixed(&mut scope, 32)?;
     if fixed(&mut scope, 32)? != spec.scope_domain || fixed(&mut scope, 32)? != spec.scope_nonce {
         return Err(bad());
     }
-    d.finish().map_err(|_| bad()) // unknown/v1-owner/operation tails cannot be ignored
+    d.finish().map_err(|_| bad())?; // unknown/v1-owner/operation tails cannot be ignored
+                                    // Complete outer framing precedes even this small owning policy decode. SDK/provider
+                                    // expansion remains a later separately admitted step, never hidden inside this parser.
+    if let Some(policy) = group_policy::decode_pin(policy)? {
+        if policy.group_id() != spec.group {
+            return Err(bad());
+        }
+        group_policy::require_supported(&policy)?;
+    }
+    Ok(Fields {
+        mls: mls_bytes,
+        routing: routing_bytes,
+        file_wrap_key,
+        rendezvous,
+        rendezvous_count: count,
+        tenure: tenure_bytes,
+        policy,
+        durable_version,
+        pending_version: pending[0], // complete fixed5 grammar checked above
+        scope: scope_bytes,
+    })
 }
 
 fn mls(raw: &[u8], spec: BootstrapSourceContextSpec<'_>) -> Result<(), SyncError> {

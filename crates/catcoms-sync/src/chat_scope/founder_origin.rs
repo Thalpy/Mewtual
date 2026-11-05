@@ -29,6 +29,28 @@ pub(crate) struct OriginalFounderObservation {
     negative: RequestCancellation,
 }
 impl OriginalFounderObservation {
+    /// Allocation-free, negative-only comparison for the closed V2 genesis pairing phase.
+    /// Its private constructor already bound the immutable restored device's full signer;
+    /// here use borrowed group/own-leaf fields rather than the generic allocating comparison.
+    pub(crate) fn matches_genesis_restored(
+        &self,
+        source: &VerifiedFreshChatAdmission,
+        group: &ServerGroup,
+        actual_signer: &[u8; 32],
+    ) -> bool {
+        !self.negative.is_cancelled()
+            && self
+                .identity
+                .upgrade()
+                .is_some_and(|original| Arc::ptr_eq(&original, &source.origin.identity))
+            && matches!(source.kind, FreshKind::Found { .. })
+            && source.group.as_slice() == group.group_id_ref()
+            && &source.signer == actual_signer
+            && source.admission_state == group.epoch_authenticator_id()
+            && group.is_active()
+            && group.has_local_signer(actual_signer)
+    }
+
     pub(crate) fn matches(
         &self,
         source: &VerifiedFreshChatAdmission,

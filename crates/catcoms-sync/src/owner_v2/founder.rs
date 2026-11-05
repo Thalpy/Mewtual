@@ -14,13 +14,16 @@ mod snapshot;
 pub use snapshot::{FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits};
 mod archive_candidate;
 pub use archive_candidate::{
-    open_bootstrap_source_data, ArchiveSourceRefusal, BootstrapSourceContextData,
-    BootstrapSourceContextSpec, BootstrapSourceDataView, BootstrapSourceId, BootstrapSourceRefusal,
-    FounderArchivePreparation, FounderBootstrapPreparation, GenesisArchiveView,
-    OpenedBootstrapSourceData, PreparedBootstrapSource, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE,
+    open_bootstrap_source_data, prepare_v2_genesis_seed, ArchiveSourceRefusal,
+    BootstrapSourceContextData, BootstrapSourceContextSpec, BootstrapSourceDataView,
+    BootstrapSourceId, BootstrapSourceRefusal, FounderArchivePreparation,
+    FounderBootstrapPreparation, GenesisArchiveView, OpenedBootstrapSourceData,
+    PreparedBootstrapSource, PreparedUnboundV2GenesisNode, ReturnedV2GenesisAttach,
+    UnboundV2GenesisNode, UnboundV2GenesisSeed, V2GenesisRuntimeParts, V2GenesisRuntimeRefusal,
+    V2GenesisSeedData, V2GenesisSeedLimits, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE,
     BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES, BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES,
     GENESIS_ARCHIVE_PRIVATE_INVOICE, MAX_BOOTSTRAP_SOURCE_FRAME_BYTES,
-    MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES,
+    MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, V2_GENESIS_SEED_METADATA_BYTES,
 };
 
 /// Conservative logical invoice for the named private public-record/scope/watch/signature

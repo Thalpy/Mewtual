@@ -1,18 +1,25 @@
 //! One original founder's complete sealed source, separate from ordinary database/private-page
 //! encryption. Live preparation owns the actual source; detached ciphertext and cold reads are
-//! DATA only. No bytes-to-Fresh, SDK expansion, mounted key, I/O, Saved or Current path exists.
+//! DATA only. The separately paid closed genesis seed can retain an initial SDK graph; it
+//! creates no bytes-to-Fresh path, mounted key, I/O, Saved, Current or runnable scheduler.
 use super::super::{snapshot, FounderSnapshotLimits};
 use super::*;
 use catcoms_replication::chat::owner_header::OwnerBodyId;
 use catcoms_rt::CryptoRngCore;
 
 mod codec;
+mod genesis_seed;
 mod s0;
 pub use codec::{
     open_bootstrap_source_data, BootstrapSourceDataView, OpenedBootstrapSourceData,
     BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE, BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES,
     BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES, MAX_BOOTSTRAP_SOURCE_FRAME_BYTES,
     MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES,
+};
+pub use genesis_seed::{
+    prepare_v2_genesis_seed, PreparedUnboundV2GenesisNode, ReturnedV2GenesisAttach,
+    UnboundV2GenesisNode, UnboundV2GenesisSeed, V2GenesisRuntimeParts, V2GenesisRuntimeRefusal,
+    V2GenesisSeedData, V2GenesisSeedLimits, V2_GENESIS_SEED_METADATA_BYTES,
 };
 
 const KEY_BINDING_DOMAIN: &str = "catcoms/private-chat-bootstrap-source-key-binding/v1";

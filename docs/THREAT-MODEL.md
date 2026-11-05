@@ -5975,3 +5975,16 @@ events plus actual closure/return/path overlap fit the explicit fixed metadata f
 writer regressions are authored UNRUN with final actual-diff static review clear. Cold reads must still
 obtain a NEW paid source/SDK capture; historical terminal evidence does not guarantee today's
 file availability or give an old SDK/write arm back.
+
+## Closed V2 genesis DATA seed (5 November; authored, UNRUN)
+
+The actual sealed bootstrap opener retains its verified exact public genesis and whole source
+identity. A separate `prepare_v2_genesis_seed` scans the complete closed S0 before its real paid
+SDK load, requires epoch0/one founder and retains routing/file key/rendezvous/tenure/policy/scope
+metadata. It creates no legacy synchronizer or runnable Server. Checked warm pairing moves the
+original transport/clock Arcs, same RNG and actual Fresh lifetime only for the exact source and
+original scope identity; cold runtime inputs create no Fresh. Final node assembly is field moves.
+The node is DATA/resource ownership, not Current or publication. Root's actual SourceSaved,
+pin/head/row/mount and original negative checks, all non-SDK lifetime fees, governor/live SDK
+operations and native integration remain separate. All13 regressions are authored UNRUN;
+compilation, tests and builds remain paused. [Boundary and invoice](communication-recovery/CHAT-V2-GENESIS-DATA-SEED.md).
