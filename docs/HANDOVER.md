@@ -124,6 +124,12 @@ Actual-diff review is clear. It has no production log/header/cold-store consumer
 the optional independent literal-digest vector follow-up remains before format release. See
 [the exact tree contract](communication-recovery/CHAT-ACCEPTANCE-TREE-FORMAT.md).
 
+The tree now also plans exact inclusion/prefix proof ranges without scanning history. Private
+canonical range construction bounds allocation-free complete-node decomposition; logical positions
+reuse the checked u128 creation-order calculation. Seven additional regressions are authored/unrun
+and actual-diff review is clear. The conservative 4,160-node-read invoice is a logical work cap,
+not a physical page layout or an implemented authenticated cold reader. Compilation remains paused.
+
 ## PR82 follow-up review corrections (30 October; local gates passed)
 
 The five findings against `6fc7ae6d` are corrected in the text-chat branch. Complete Send/Edit/Delete

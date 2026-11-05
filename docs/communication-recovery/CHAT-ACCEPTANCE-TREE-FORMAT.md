@@ -1,7 +1,7 @@
 # Bounded acceptance tree primitives
 
 Concrete proposed hashing/proof contract for the scalable owner-evidence/v2 successor. Read-only
-design review precedes implementation. These primitives do not sign a tip, select an owner/root,
+design and actual-diff reviews cover the implemented prerequisites. These primitives do not sign a tip, select an owner/root,
 prove historical membership, approve an action or perform storage. Actual pinned owner facts and
 covering cold-page/head publication remain required. Existing action/v1 and owner-fact/v1 bytes
 are unchanged. Compilation and compiled tests remain paused by the user.
@@ -47,6 +47,31 @@ BEFORE doubling; total retained node count can exceed u64 while leaf count is st
 zero/non-power span, unaligned first and overflowing end. This derives a logical position only,
 not node presence/hash validation or a physical page address. Future cold-page/manifest encoding
 must still prove and durably publish the exact record. No path-copy index is implied.
+
+## Bounded proof lookup plans
+
+The count-only planner produces exact recursive subtree ranges in the verifier's bottom-up inclusion
+or SUBPROOF consistency order. It does not read or hash history. Inclusion refuses an empty tree or
+an out-of-range index before output allocation; prefix planning refuses reversed counts. Empty/equal
+prefix plans contain no ranges, without claiming the verifier's context/empty/equal-root checks ran.
+
+An output range has private construction: its positive count and checked end are bounded by the
+requested tree, and its first index is aligned to the largest power-of-two component. This canonical
+shape is necessary. An arbitrary interval can need 126 aligned components; it must never be passed
+through a future raw constructor/parser assuming the canonical range's 64-component limit.
+
+Each range decomposes without allocation into complete aligned node labels, rightmost-smallest to
+leftmost-largest. Their checked u128 creation ordinals are logical lookup positions. Folding exactly
+those hashes uses `node(left, accumulated_right)`; short/extra hash lists refuse. The host must check
+each loaded committed record's exact range and ordinal, then verify the completed proof against its
+independently authenticated tips. Geometry, folding and an empty plan do not establish retained node
+presence, grant filesystem access, or authenticate any root or owner.
+
+Inclusion has at most 64 ranges, consistency at most 65; a conservative export invoice is 65 * 64 =
+4,160 logical complete-node reads. Plans also report their smaller exact decomposition read count.
+The fixed planner stack/output and actual I/O buffers, page-cache behavior, work scheduling and
+publication remain separately paid host responsibilities. This prerequisite adds no cold-page
+format, network request, storage reader or active export path and performs no full-history scan.
 
 ## Inclusion and historical prefix proofs
 
@@ -95,3 +120,8 @@ They have NOT been compiled or executed during the user pause; only source forma
 checks ran. An optional low-priority follow-up remains before format release: independently compute
 and freeze literal empty/leaf/internal digest outputs alongside the existing frozen exact input-byte
 vector. Do not mistake the currently runtime-hashed expected frame for that independent digest set.
+
+The additional proof planner has seven authored/unrun regressions and clear actual-diff review:
+independent recursive small-tree plans, complete-node reconstruction into the actual proof verifiers,
+hash substitution, canonical range/fold refusal, exact 64/65 depths and checked near-u64-limit node
+positions. Source formatting and whitespace checks are the only new executed checks during the pause.

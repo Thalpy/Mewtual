@@ -6,6 +6,8 @@
 //! This module never scans a log, selects a root, changes the legacy format or performs I/O.
 use super::owner_facts::OwnerFactId;
 
+pub mod proof_plan;
+
 const EMPTY_DOMAIN: &[u8] = b"mewtual/chat/acceptance-empty/v2\0";
 const LEAF_DOMAIN: &[u8] = b"mewtual/chat/acceptance-leaf/v2\0";
 const NODE_DOMAIN: &[u8] = b"mewtual/chat/acceptance-node/v2\0";
@@ -149,17 +151,23 @@ impl CreatedNode {
     /// This checks only RANGE shape: it authenticates neither this node's hash nor its presence
     /// in a particular log/manifest. Actual cold-page layout and durable lookup are separate.
     pub fn creation_ordinal(self) -> Result<u128, TreeError> {
-        if !self.count.is_power_of_two() || self.first % self.count != 0 {
-            return Err(TreeError::Node);
-        }
-        let end = self.first.checked_add(self.count).ok_or(TreeError::Count)?;
-        let before = end.checked_sub(1).ok_or(TreeError::Count)?;
-        u128::from(before)
-            .checked_mul(2)
-            .and_then(|value| value.checked_sub(u128::from(before.count_ones())))
-            .and_then(|value| value.checked_add(u128::from(self.count.trailing_zeros())))
-            .ok_or(TreeError::Count)
+        creation_ordinal(self.first, self.count)
     }
+}
+
+/// Shared checked geometry for newly created records and cold-proof lookup labels. Neither
+/// caller obtains hash authentication or storage access from a valid sequence position.
+fn creation_ordinal(first: u64, count: u64) -> Result<u128, TreeError> {
+    if !count.is_power_of_two() || first % count != 0 {
+        return Err(TreeError::Node);
+    }
+    let end = first.checked_add(count).ok_or(TreeError::Count)?;
+    let before = end.checked_sub(1).ok_or(TreeError::Count)?;
+    u128::from(before)
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(u128::from(before.count_ones())))
+        .and_then(|value| value.checked_add(u128::from(count.trailing_zeros())))
+        .ok_or(TreeError::Count)
 }
 
 /// Bounded derived witness. Each occupied slot is the complete subtree corresponding to one
