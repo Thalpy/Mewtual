@@ -6,6 +6,7 @@
 //! signature, snapshot, context ID or a peer's "verified" flag never creates that witness.
 //! Governance/root continuity, conflicting succession and old-context moderation policy
 //! remain unresolved production boundaries; this core does not decide them by arrival.
+pub mod acceptance_tree;
 mod action;
 mod authority;
 mod ledger;

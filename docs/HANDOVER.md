@@ -43,6 +43,11 @@ no worktree compiler remained. Do not start compilation, compiled tests or build
 is lifted. New work receives static/actual-diff review and records tests as unexecuted. Complete
 Root, native and frontend suites and remaining applicable gates are still mandatory before final
 handoff when the user permits them. Older complete results below apply only to PR82.
+Once validation resumes, use the focused new checks first and defer expensive acceptance to the end.
+The prior separate `cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations`
+regression took478.28 seconds; storage/Studio crash/maximum cases and native multi-client matrices
+are also expensive. Do not add ignores, alter assertions or count deferred cases as passed; the
+final complete suites must include them.
 
 Canonical founder/member initialization and private restore from the isolated
 `chat-admission-admin-audit-worktree` (checkpoint `72c790d5`) are now integrated locally but remain
@@ -62,6 +67,14 @@ or package-version updates. The direct MLS-to-storage dependency is retained in 
 Membership candidate/strict operation persistence is still in progress. The old bounded checkpoint profile remains
 nonactivatable for long-lived 20/50-member groups; scalable public headers/cold archive, genuine
 root-distribution invites and actual production consumers are open gates.
+
+The separate scalable acceptance-tree prerequisite now has bounded append/frontier, inclusion and
+historical-prefix consistency mathematics. Tips explicitly carry both profile/admission context
+labels; hash proofs do not authenticate those labels or grant authority. Nine authored/unrun
+regressions include the distinct65-hash consistency vs64-hash inclusion limits and actual120-node
+carry boundary. Actual-diff review is clear. It has no production log/header/cold-store consumer yet;
+the optional independent literal-digest vector follow-up remains before format release. See
+[the exact tree contract](communication-recovery/CHAT-ACCEPTANCE-TREE-FORMAT.md).
 
 ## PR82 follow-up review corrections (30 October; local gates passed)
 

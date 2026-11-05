@@ -1,0 +1,88 @@
+# Bounded acceptance tree primitives
+
+Concrete proposed hashing/proof contract for the scalable owner-evidence/v2 successor. Read-only
+design review precedes implementation. These primitives do not sign a tip, select an owner/root,
+prove historical membership, approve an action or perform storage. Actual pinned owner facts and
+covering cold-page/head publication remain required. Existing action/v1 and owner-fact/v1 bytes
+are unchanged. Compilation and compiled tests remain paused by the user.
+
+## Exact semantics
+
+All hashes are BLAKE3-256. The immutable context is exactly `ProfileCID32 || AdmissionCID32`.
+The leaf record is exactly `channel_u128_big_endian || AcceptanceFactCID32`; an Acceptance fact,
+not this record alone, binds the exact action/signer/grant/basis/Create. Hash inputs have fixed
+lengths after their domain, with no implicit native integer encoding:
+
+- Empty: `"mewtual/chat/acceptance-empty/v2\0" || context`.
+- Leaf: `"mewtual/chat/acceptance-leaf/v2\0" || context || leaf_record`.
+- Internal: `"mewtual/chat/acceptance-node/v2\0" || left32 || right32`.
+
+A nonempty tree of n leaves splits at the largest power of two STRICTLY smaller than n. The tip
+API carries `(context, count_u64, root32)`. A count-zero tip must have the exact context's empty hash. Node
+hashes/tips/context labels are untrusted data until their external signed/current sources verify.
+
+## Append and frontier
+
+A frontier has exactly one subtree hash for each set bit of count, in ASCENDING bit order. No
+extra/missing slot is accepted. Folding from low to high uses `node(higher_subtree, accumulated)`;
+this is the required right-associated shape for an incomplete tree. A loaded frontier must fold
+to its supplied expected tip before append; matching a caller's tip is not tip authentication.
+
+Each batch has 1..64 leaves, strictly sorted by `(channel, AcceptanceFactCID)` with no duplicate
+within the batch. Cross-batch idempotency/absence remains the real owner's independently verified
+retained lookup, not a claim this primitive can make. Count addition is checked before mutation.
+The primitive prepares a new frontier/result without changing the supplied original on refusal.
+
+For initial n and batch k, the exact new internal-node count is
+`popcount(n) + k - popcount(n+k)`. At most127 internal nodes plus64 leaves are admitted; the known
+actual maximum internal count for k64 is120. An emitted node record contains its first-leaf index,
+power-of-two leaf count and hash, in creation order. These are O(N) append-only node records for
+bounded cold-page persistence, not a retained full path copy for every historical root. The actual
+host must reserve `k + internal_count` records/bytes and one bounded scratch/frontier before calling.
+
+## Inclusion and historical prefix proofs
+
+Inclusion accepts an exact leaf/index/count and BOTTOM-UP siblings. The index must be less than a
+nonzero count; the exact path is derived from index/count. At most64 siblings, no trailing or short
+path. It must match the supplied expected tip under the same context. It grants no action authority.
+
+Historical-prefix verification FIRST requires identical tip contexts, then follows the count-aware
+binary consistency construction for that same split rule. Opaque subtree hashes cannot independently
+authenticate those labels: the caller must verify both contexts against their external signed tips.
+Zero old count requires its canonical empty root and an empty proof; equal counts
+require equal roots and an empty proof. Reversed counts refuse. For unequal nonzero counts, the
+proof is the canonical recursive SUBPROOF(m,n,complete) sequence, not a free node bag. Start with
+complete=true; if m==n emit nothing when complete, otherwise emit that subtree root. At split k,
+recurse left with the same complete flag when m<=k and append the right root; otherwise recurse
+right with complete=false and append the left root. Verification consumes that exact path shape.
+
+Consistency needs its OWN **65-hash** maximum: for m=7,n=15 the canonical proof has five hashes,
+and m=2^63-1,n=u64::MAX has65. Reusing the inclusion limit64 silently loses a valid u64 boundary.
+Frontier exports have at most64 hashes. These different bounds must remain separate in public
+codecs, work/memory invoices and tests.
+
+## Required regressions
+
+Compare small 0..257 trees against an independent recursive root/proof generator, including every
+leaf and all old/new prefix counts. Test exact/short/extra/swapped/mutated paths, wrong context,
+leaf/channel/acceptance/index/count, empty/equal/reversed tips, frontier occupancy/root mismatch,
+batch ordering/duplicates/count overflow and byte-order golden vectors. Cover powers of two and
+u64 boundaries without allocating their imagined leaves: synthetic independently folded subtree
+roots pin path shape, proof65 and checked node-count arithmetic. Verify every prepared node's range,
+that a bad batch leaves the original unchanged and that batches partitioning the same ordered
+leaves produce identical final roots. No whole-log scan or caller-supplied success flag is involved.
+
+The first implementation is a format prerequisite for the upcoming owner log, whose actual consumer
+remains an integration gate. It is not production activation or a claim that cold pages, headers,
+journal, lookup or migration are implemented.
+
+## Implementation evidence and remaining validation
+
+The declared `chat::acceptance_tree` module now implements these bounded primitives. Actual-diff
+adversarial review found no blocker/high/medium. Nine regressions are authored, including exhaustive
+small recursive reference paths/prefixes, mutation/reordering/refusal cases, exact append ranges,
+partition invariance, 120 internal carries, 65-hash consistency and 64-hash inclusion at u64 limits.
+They have NOT been compiled or executed during the user pause; only source formatting/whitespace
+checks ran. An optional low-priority follow-up remains before format release: independently compute
+and freeze literal empty/leaf/internal digest outputs alongside the existing frozen exact input-byte
+vector. Do not mistake the currently runtime-hashed expected frame for that independent digest set.
