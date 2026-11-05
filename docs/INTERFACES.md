@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private node-page data (5 November; authored, unexecuted)
+
+`chat::cold_nodes::{NodePage, encode_node_page}` is a bounded borrowed codec, not a file service
+or retained/authenticated source. The6578-byte cap, before/after-derived u128 positions and exact
+leaf/body/every-node checks are described in the
+[node contract](communication-recovery/CHAT-OWNER-COLD-NODE-PAGE.md). Six regressions are authored
+and UNRUN. The archive/catalog handler and production authority consumer remain absent.
+
 ## Empty critical namespace catalog (5 November; authored, unexecuted)
 
 `ServerStore::into_critical_namespace_store` consumes the private Store and crosses the actual

@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Private node-page prerequisite (5 November; authored, unexecuted)
+
+The pending archive has a separate borrowed complete-node DATA page:6578-byte conservative cap,
+exact body/context/count geometry and u128-derived contiguous ordinals, with one zeroizing output
+buffer. Producer validation binds every leaf to the actual body; verification recomputes/checks
+every node. Six regressions are authored and UNRUN; no disk/catalog/authority/host integration is
+claimed. Source review corrected a same-declared-root/different-leaf producer gap. The broader
+archive remains [draft](communication-recovery/CHAT-OWNER-COLD-ARCHIVE-FORMAT.md); its availability
+design now separates essential proof, per-Admission lookup and audit-body coverage so missing old
+audit chunks cannot stop independent proven control work. Full compound SDK/control/index invoices
+remain gates. [Node contract](communication-recovery/CHAT-OWNER-COLD-NODE-PAGE.md).
+
 ## Shared group publication lifetime (5 November; authored, unexecuted)
 
 `ProjectionGroup` now gives attached channel views one original negative group lifetime/barrier.
@@ -37,6 +49,9 @@ heads; guarded heads still traverse held Join metadata. No snapshot/wire bytes o
 change. Eight work/ordering/restore/rejection regressions are authored and UNRUN. Compilation and
 builds remain paused; direct formatting and source review cannot establish runtime correctness.
 Per-target graph size, BTree allocation fees, production cold indexes and activation remain separate.
+An independent Python DAG model compared126,976 selected-set/traversal permutations and agreed
+with per-root reference ancestry. That checks the shared-visited design, not the Rust source,
+signature/dependency consumers, allocations or production behavior; Rust regressions remain unrun.
 
 ## Default-closed chat projection core (5 November; authored, unexecuted)
 

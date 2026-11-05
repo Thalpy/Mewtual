@@ -15,17 +15,21 @@ owner-evidence/v2 profile/record grammar; never reinterpret v1 signed bytes. The
 explicit trusted captured founder handoff BEFORE the real fresh-KP join. A downloaded Profile,
 current roster, numeric server ID or local vault scope cannot select its own trusted root.
 
-The scalable successor requires authenticated top-level VAULT5 with its own KDF domain BEFORE
-opening any owner-state stage/journal cleaner, Actor or network path. VAULT4 checkpoint readers
-must reject it at authenticated vault framing, even if a captured older canonical v1 file exists;
-strict inner-tail rejection alone is too late because v4 startup already cleans fixed stages.
-Unsupported format is never interpreted as missing/createable. Covering3/4->5 upgrade preserves all
+The scalable successor now requires authenticated top-level VAULT6 plus its supported critical
+archive namespace, BEFORE opening any archive-dependent cleaner, Actor or network path. The
+current implemented v6 reader supports Empty only and refuses that future archive declaration.
+The earlier VAULT5 fence remains the owner-operation prerequisite, not archive activation.
+Both wrappers use distinct KDF domains. Critical framing/catalog checks precede every old owner
+stage/journal cleaner, Actor and network path. Earlier v4/v5 readers must refuse the newer format
+even when an older canonical v1 source remains; strict inner-tail rejection is too late because
+older startup already cleans fixed stages. Unknown critical namespaces refuse before cleanup.
+Unsupported format is never interpreted as missing/createable. Covering3/4->5->6 upgrade preserves all
 scope Current/Retired/Initializing rows, immutable pins, exact receipts/publication aliases and
 uncertain debts. A failed covering upgrade leaves every prior sealed byte/obligation intact or
 explicitly latched for exact repair; no compatibility downgrade can launder debt through
 stop_obsolete(None). New v2 issuance starts only from actual fresh provenance. Existing legacy
 retained originals remain readable as legacy/unproven, without retroactive typed authority.
-Regress old-v4 refusal BEFORE any stage cleanup and faulted upgrade with fresh-reopen classification.
+Regress earlier-reader refusal BEFORE stage cleanup and faulted upgrades with fresh-reopen classification.
 
 The initial policy remains the explicitly trusted non-equivocating owner finalizer and
 admin recommendations. MLS alone does not prove unique public finality. The finalizer's
@@ -165,18 +169,22 @@ released before the covering save AND original admission/head custody succeed. R
 retains the entire candidate and fences every alias until exact repair. Restore re-syncs validated
 current canonical bytes and their child directory before publication.
 
-Restore validates the EXACT reachable manifest/page closure before export, not only the canonical
-head and its parent directory. Every referenced file's bounded authenticated bytes and required
-file/child-directory durability barrier must be satisfied. Missing/corrupt child pages remain
-incomplete/unbound; automatic bounded repair may recover exact journal/replica bytes, but may not
-invent an empty page, reconstruct signed bodies from current projections, or claim unavailable data
-was synced. No actor/publication starts while this closure is unresolved in the initial conservative mode.
-This trades restart latency/availability for a complete retained source: even a missing audit-only
-body initially blocks chat startup. Large-archive reopen and bounded partial repair must measure that
-cost. A later independently reviewed essential-proof vs audit-only availability split may let healthy
-chat run while the admin ledger truthfully stays incomplete; it may never bypass unresolved admission,
-prior-effective Delete suppression, retained Stops or required authority/publication debt. The final format must
-make both manifest reachability and repair-obligation charges mechanically checkable.
+Restore validates the EXACT essential governing/root/key/negative-journal closure before positive
+exposure, not only the canonical head and its parent directory. Every required file's bounded
+authenticated bytes and actual file/child-directory barrier must be satisfied. Missing/corrupt
+essential proof remains incomplete/unbound; automatic bounded repair cannot invent an empty page,
+reconstruct signed bodies from projections or claim unavailable data was synced. Unresolved
+admission, prior-effective Delete suppression, retained Stops and publication debt are never bypassed.
+
+The5November archive design review rejects the earlier blanket audit-body startup barrier: one
+missing old original-action chunk must not disable an independently proven Remove or unrelated
+healthy work. Separate essential closure, per-Admission accepted-lookup prefix completeness and
+requested audit/body availability. A missing/corrupt lookup blocks only dependent duplicate/append
+decisions; unavailable audit bodies report incomplete admin history and get bounded exact repair.
+No effect can use missing authority or clear a prior Delete capsule. This is a pending production
+design change, not an implemented availability guarantee; see the
+[private archive draft](CHAT-OWNER-COLD-ARCHIVE-FORMAT.md#derived-lookup-and-bounded-progress).
+Large-archive reopen/repair, exact class reachability and physical repair fees still require tests.
 
 One fixed prepaid operation journal per head identifies exact unpublished stage/page candidates.
 Crash cleanup never deletes a committed page/current head or uncertain candidate. Stage/page count
