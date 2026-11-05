@@ -22,6 +22,9 @@ use catcoms_wire::{Decoder, Encoder};
 
 use crate::{MlsDevice, MlsError, ServerGroup};
 
+mod provider_restore;
+pub use provider_restore::restore_server_provider_bounded;
+
 // Test-only work boundary, local to each synchronous test thread. Mark legacy entry too so a
 // future "serialize everything, then check length" implementation cannot pass refusal tests.
 #[cfg(test)]
@@ -200,8 +203,18 @@ pub fn restore_server(snapshot: &[u8]) -> Result<(MlsDevice, ServerGroup), MlsEr
         *values = map;
     }
 
-    let device = MlsDevice::restore(provider, &public_key)?;
-    let group = ServerGroup::load(&device, &group_id)?;
+    restore_device_and_group(provider, &public_key, &group_id)
+}
+
+// Both parsers reach the SAME strict SDK/signing-leaf check. The bounded provider parser does
+// not make an inactive/removed group runnable or weaken the legacy stored-state contract.
+fn restore_device_and_group(
+    provider: OpenMlsRustCrypto,
+    public_key: &[u8],
+    group_id: &[u8],
+) -> Result<(MlsDevice, ServerGroup), MlsError> {
+    let device = MlsDevice::restore(provider, public_key)?;
+    let group = ServerGroup::load(&device, group_id)?;
     // Cross-check that the restored device actually belongs to the restored group, so a
     // mismatched snapshot fails loudly here rather than deep inside a later MLS operation.
     if !group.contains_device(&device.device_id()) {
