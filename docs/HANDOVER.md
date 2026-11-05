@@ -1,14 +1,57 @@
 # Mewtual; Handover
 
-## Opaque ID3 physical declaration and historical reader (5 November; authored, UNRUN)
+## Focused execution checkpoint (5 November; Chat V2 still incomplete)
+
+The user permits tests again; defer only
+`cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations` to the end.
+One primary-owned serial Cargo pipeline uses `-j1`, two test threads, debug0/incremental0 and
+`target/chat-v2-production-check-target`. No other agent builds.
+
+Actual results so far: **9 MLS bounded-restore tests**, **11 vendor owner-restore tests**,
+the earlier **16 Sync genesis tests**, **3 App save-barrier tests** and **12 App Current-layout
+tests** passed. The initial App cold-reader run passed18/19; the remaining test's10s hold
+incorrectly timed unrelated SDK/file throughput. Its corrected focused rerun passed: a
+channel-controlled pause checks all actual global mutexes with nonblocking negative probes,
+keeps B's complete real terminal save inside the pause, and bounds readiness/drain/cleanup.
+No writer-progress assertion was replaced by a fake permit or a wider timeout.
+
+The first four old-filename lineage tests passed2/4. Both failures exposed a real bug:
+`kept::session_at` is a regular-FILE check and rejects directories. The actual directory proof
+now opens the named directory and compares its original held object number, with replacement,
+missing-name and non-directory controls. All **4 lineage tests** and **2 new directory-identity
+tests** now pass. All **17 founder-codec tests** also pass, including the frozen nine-file
+grant. The affected remount test, **4 group-lineage tests** and **8 `current_group`-filtered
+tests** also pass. This is focused evidence, not full-suite evidence.
+
+Standalone vendor tests require `test-utils`. Cargo's excluded-package discovery also finds
+the outer main workspace from this nested worktree; local verification used a temporary
+standalone manifest under `target/vendor-owner-restore-check`, pointing to the ACTUAL vendor
+source, retaining its dependency/features, with an empty workspace and the root lock copied
+before offline resolution. No production manifest or dependency version was changed for it.
+
+Local paid activation, scope, writer and cold-read workers remain undeclared, uncommitted
+integration drafts; they are not supplied by the pushed runtime checkpoints yet.
+Cold read roles are distinct Initializing1/Current2 borrowers with no owner/Some1 effects.
+The new Root capture accepts only complete seed-present pin/genesis-head closures; partial
+activation repair, seed-settled Current and later-head restoration remain unfinished. Its
+early static review is clear after original-object caching and post-allocation proof fixes;
+genuine paired guard/receipt/crash tests have not run. The writer classifier's foreign-Weak
+upgrade was removed so concurrent last-owner cleanup cannot move under canonical.
+
+Actual Current/node assembly, operational SDK admission, governing/append/index transactions,
+ingress/catch-up and native/UI routing are still required. Chat V2 remains disabled. Complete
+root/native/frontend suites, clippy/build/native gates and the slow test remain outstanding.
+
+## Opaque ID3 physical declaration and historical reader (5 November; focused tests resumed)
 
 The explicit private Current-layout opener now classifies/repairs its complete fixed namespace
 before older cleaners, retains the same original ID2 root and exposes the actual paid SourceSaved
 DATA reader. Whole-catalog JOIN versions/counters and descriptors are preserved. An independent
 paid row-key index/read-only filename pass tracks known old canonical effects without activating
 checkpoint storage. Full actual-diff static review is CLEAR after the reported corrections.
-Fifteen regressions are authored UNRUN; primary owns resumed serial compiled
-validation and the full required suites. No group mkdir task, strong pending-group registry,
+The original eleven namespace tests and a new under-held-Root marker-identity test passed;
+four filename-lineage tests now pass after the directory-proof correction above. The primary owns
+the full required suites. No group mkdir task, strong pending-group registry,
 typed vacancy/Initializing/Current guard or application Current is implemented by this slice.
 [Contract and unfinished boundary](communication-recovery/CHAT-V2-CURRENT-LAYOUT-OPENER.md).
 
@@ -20,9 +63,30 @@ documented in `CHAT-OWNER-FOUNDING-INTENT-FACTORY.md`; a new DATA regression pin
 wire value and rejects other counts. Namespace helper/reexport visibility remains Store-internal,
 and the fresh scalar fixture helper remains test-only. The wrong archive sibling path and a
 test's borrowed temporary digest are corrected. Static review and direct formatting/whitespace
-checks accompany this narrow checkpoint; its new regression is UNRUN here. The primary owns
+checks accompany this narrow checkpoint; its new regression and16 neighboring codec tests pass. The primary owns
 the resumed serial focused and full-suite validation, with the slow10,000-operation acceptance
 test last. These compilation corrections supply no ID3 handler or Current activation.
+
+## Focused validation resumed (5 November)
+
+The user clarified that test runs may resume; defer only
+`cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations` until the end.
+The primary owns one serial Cargo pipeline (`-j1`, two test threads, debug0/incremental0) in
+`target/chat-v2-production-check-target`. Do not start competing agent builds.
+
+The bounded SDK schema first failed to compile because its static field tables borrowed
+temporary arrays. The explicit const-table fix preserves the exact schema. Five other Sync
+compile errors were corrected without loosening tests or source/cancellation checks.
+Execution then found that the pinned SDK's founder builder actually retains resumption-store
+max32 with epoch0/first-Add secrets even though join-config says0. The closed loader now
+preserves only that exact bounded initial shape or the genuine empty configured Welcome store;
+the128KiB typed cap is unchanged. The expanded focused MLS loader tests: **9 passed**; vendor
+owner-restore tests: **11 passed**. Focused Sync genesis tests: **16 passed**. App checks and
+their failures/corrections are recorded above. Full suites and the slow test remain outstanding.
+
+The Current activation/registration/scope workers remain undeclared drafts awaiting their
+shared physical guards, cold recovery consumers and real caller. Chat V2 remains disabled and
+incomplete; these focused passes do not establish live send/receive or native/UI integration.
 
 ## Group-wide pre-row admission exclusion (5 November; authored, UNRUN)
 
@@ -55,7 +119,7 @@ the stale-pin wait race fix. No compiler/tests/build ran. This supplies
 no ID3 handler, group writer/registry, Current or live protocol activation.
 [Boundary and remaining work](communication-recovery/CHAT-V2-GROUP-EXCLUSION.md).
 
-## Current Chat V2 status (5 November; incomplete, compilation paused)
+## Current Chat V2 status (5 November; incomplete, focused validation resumed)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
 The new v2 Profile/Admission, successor headers, acceptance/append/removal records, public transition
@@ -71,16 +135,17 @@ integrated with42 authored/unrun tests; its production issuer and native/UI adap
 Scalable cold persistence, governing/review state, actual v2 creation/join/root distribution,
 typed durable send/receive, full admin actions/decisions and native/UI integration remain required.
 
-Compilation, compiled tests and builds are paused at the user's request. New regressions below
-are authored but unrun. Source reviews, rustfmt and whitespace checks do not establish readiness.
-After implementation and once compilation is permitted, focused checks precede the complete required
-suites; the exceptionally slow10,000-operation test and other heavy acceptance run at the end.
+Compilation and focused tests have resumed as recorded above. Most historical checkpoints below
+were authored during the earlier pause; their UNRUN counts remain until the corresponding
+execution evidence is recorded. Source reviews, rustfmt and whitespace checks do not establish
+readiness. Focused checks precede the complete required suites; the exceptionally slow
+10,000-operation test remains at the end.
 
 
-Current source checkpoint: all new compiled regressions remain UNRUN. Direct rustfmt checks over
+Current source checkpoint: many new compiled regressions remain UNRUN. Direct rustfmt checks over
 changed Rust files, whitespace checks and both ambient-dependency/raw-filesystem static gates
-are the narrow checks used during this pause. They do not substitute for compilation or the
-required full suites once the pause is lifted. Reviewed checkpoints are pushed to the branch.
+were the narrow checks used during the pause. They do not substitute for the required full
+suites. Reviewed checkpoints are pushed to the branch.
 
 The next actual consuming [archive-host vertical](communication-recovery/CHAT-OWNER-ARCHIVE-HOST-VERTICAL.md)
 has passed design review, including original FoundingIntent before scope mutation, a NEW exact
@@ -104,12 +169,19 @@ another genuine paid read of identical source bytes/paths for the original held-
 The observer retains neither DATA nor the read fee and supplies no positive permission; normal
 original mount/control/object checks still apply. Two observation regressions are authored UNRUN.
 
-Seven genuine-source regressions are authored UNRUN. They cover independent payment/drop
+Eight genuine-source regressions are authored UNRUN. They cover independent payment/drop
 lifetimes, one-byte-short combined pressure before SDK, provider/setup refusal cleanup,
 cancellation after fee waits, control replacement after real decode and foreign account/mount.
 The additional closed `require_original_negative` check reuses exact read identity and original
 mount/root negatives under an already-held Root, with no host writer/pool/I/O/SDK acquisition.
 Its bounded regression checks that held-Root path, foreign Store refusal and mount cancellation.
+The additional borrowed `GenesisSourceDataRef` loans the actual closed SDK seed and SAME private
+resource bundle together. Both actual original seed/read identities are checked, so even two
+genuine loads of identical ciphertext cannot exchange resources. This is historical DATA/resource
+ownership, not Current. A future Node handoff must derive the same loan from the owned Node and
+repeat full Current/source proofs AFTER pairing callbacks; the owning App runtime handoff remains
+unfinished. The Sync closed seed now has16 authored UNRUN regressions (one new same-source seed
+identity test and an expanded actual cold-pair identity check).
 The work1 test exercises setup/provider cleanup, not a partially decoded typed graph. Design
 and final actual source static reviews are clear. No compiler/tests/build ran. Runtime
 attachment must still preserve the entire resource capsule and pay generic parts/refusal layouts

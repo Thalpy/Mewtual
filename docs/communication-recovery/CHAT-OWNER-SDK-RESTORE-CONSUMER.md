@@ -231,7 +231,7 @@ provider/Server/global fees and operation admission are separate unfinished gate
 
 Deferred verification selectors: root `catcoms-mls persist::owner_restore`, App
 `store::owner_evidence::canonical::budget::sdk` and `canonical::restore::tests::sdk`, plus vendor
-`cargo test --manifest-path vendor/openmls_memory_storage/Cargo.toml owner_restore` (dependency
+`cargo test --manifest-path vendor/openmls_memory_storage/Cargo.toml --features test-utils --lib owner_restore` (dependency
 unit tests are not automatically root-workspace tests). Production-config root/native checks,
 optional-feature refusal paths, clippy, dependency audit and required whole suites remain for
 the primary's resumed serial pipeline. No new ignored/skipped/loosened tests.
