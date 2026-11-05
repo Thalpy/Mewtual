@@ -75,7 +75,7 @@ Root, native and frontend suites and remaining applicable gates are still mandat
 handoff when the user permits them. Older complete results below apply only to PR82.
 Once validation resumes, use the focused new checks first and defer expensive acceptance to the end.
 The prior separate `cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations`
-regression took478.28 seconds; storage/Studio crash/maximum cases and native multi-client matrices
+regression took 478.28 seconds; storage/Studio crash/maximum cases and native multi-client matrices
 are also expensive. Do not add ignores, alter assertions or count deferred cases as passed; the
 final complete suites must include them.
 

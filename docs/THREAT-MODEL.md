@@ -18,8 +18,17 @@ repair and native automatic startup are unfinished; missing bytes never prove co
 The bounded provider paths admit actual table backing and copied/retained byte buffers, preserving
 the legacy format and strict restored-device/group check. They do not bound all SDK typed-deserialize
 heap expansion, and transient canonical fees do not pay an active Server forever. Those remain
-activation gates. Top-level critical vault framing must precede older stage cleaners when the new
-operation namespace is added. The reviewed contract requires v5; its implementation is still open.
+activation gates. Critical vault v5 and its fixed sealed activation intent are now implemented,
+but uncompiled/unexecuted. The consuming upgrade prepares mandatory existing inventories before
+the intent, then durably rewraps the same DEK. Cold open authenticates and repairs supported intent
+before older stage cleaners. V5 without intent refuses; retained current/staged intent without a
+vault refuses before new-DEK creation. Corrupt/nonfile artifacts also refuse. A genuine fresh
+installation with neither vault nor intent still follows the ordinary creation path.
+This fences ordinary older readers, not component rollback: replaying an authentic old wrapper
+ALONE can reveal the preserved DEK to an old binary which ignores the new marker. Preventing that
+requires an external monotonic anchor or a separately agreed full rekey. Unknown root-pin stages
+remain preserved/refused, and v5 source-absent negative retirement stays closed until the actual
+operation-journal absence fence exists. [Exact contract](communication-recovery/CHAT-OWNER-OPERATIONS-VAULT-V5.md).
 The current v4 checkpoint and finite owner-fact profile must not enable long-lived production V2.
 Owner-side covering membership, signed public root distribution, scalable history, decisions and
 the active host remain separate unfinished boundaries. Current focused evidence is in HANDOVER;

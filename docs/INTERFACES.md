@@ -31,6 +31,16 @@ compilation pause. [Kernel scope](communication-recovery/CHAT-OWNER-CANONICAL-KE
 and [operation contract](communication-recovery/CHAT-OWNER-OPERATION-TAIL.md) retain the remaining
 membership, scalable public archive, compatibility and activation gates.
 
+`ServerStore::into_owner_operations_store` now consumes the original pre-exposure Store, prepares
+the supported v4 inventories, saves fixed sealed activation intent and rewraps the SAME DEK as v5.
+Any failure drops/revokes that original mount; no borrowed half-upgraded Store is returned. The
+constructor recognizes current/staged intent before ordinary inventory cleaners and automatically
+finishes a supported pending transition only after authenticating existing mandatory inventories.
+The marker is intent, never a Current/save witness. V5 is sticky through supported activation and
+passphrase changes. The exact v4 source-absent negative initializer remains v4-only. Tests for this
+new gate are authored but unexecuted; it creates no operation-tail codec, membership response or
+active host. [V5 contract and rollback limits](communication-recovery/CHAT-OWNER-OPERATIONS-VAULT-V5.md).
+
 ## Privileged retained-original reader (5 November; partial ledger)
 
 `get_admin_chat_ledger({server,cursor,limit})` and

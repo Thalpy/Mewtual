@@ -1,7 +1,8 @@
 # Critical v5 gate for owner operations
 
-Proposed concrete format/ordering supplement for
-[the retained operation tail](CHAT-OWNER-OPERATION-TAIL.md). Design review precedes implementation.
+Concrete format/ordering supplement for
+[the retained operation tail](CHAT-OWNER-OPERATION-TAIL.md). The source is implemented and its actual
+diff reviewed; compilation and test execution remain paused by the user.
 This does not activate a scalable public profile or the native product. The existing fixed-founder
 kernel uses owner-evidence vault **v4**; it is unsafe to assume that reader never ships or that an
 unknown inner tail prevents it reaching its earlier stage cleaners.
