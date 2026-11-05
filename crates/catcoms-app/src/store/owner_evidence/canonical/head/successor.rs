@@ -36,7 +36,7 @@ impl SavedOwnerSuccessor {
             || self.meta.snapshot != digest
             || head.state.pending.is_some()
             || head.state.current.as_ref() != Some(&self.meta)
-            || permit.vault_format()? != catcoms_storage::VaultFormat::OwnerOperations
+            || !permit.vault_format()?.requires_owner_operations()
         {
             return Err(refused());
         }

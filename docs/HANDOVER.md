@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Known-format owner checkpoint integration (5 November; authored, unexecuted)
+
+The closed owner Add/save/install/reply and exact successor-recovery paths now accept known
+v5/v6 positive operation formats through `requires_owner_operations()`. That helper is metadata,
+not catalog validation or a new capability: the actual Store constructor/consuming transition
+first authenticates the supported EMPTY v6 catalog before a mounted Current permit can reach
+these paths. Unknown/nonempty namespaces still refuse before older inventory/stage cleanup.
+Exact-v4 source-absent negative recovery and gen1 S1 fallback remain exact v4. The real selected
+member fixture now binds its original transport once before borrowed finish; no retry replaces T.
+
+Additional source regressions cover actual v6 first Add/post-rename retry/member save/cold gen2
+reopen, v5+v6 retained stages/duplicate/damage/stable-key/parent checks, unsupported catalogs before
+old cleanup, and v5+v6 refusal of v4-only absence/stage recovery. All remain **UNRUN** under the
+compilation/test/build pause. Direct rustfmt and whitespace checks plus independent actual-diff
+review are source evidence only. Production Chat V2, scalable state/archive/lookup consumers,
+durable client join journal, generic receive-union and native/UI/physical acceptance remain open.
+
 ## Public resulting-state data (5 November; authored, unexecuted)
 
 `owner_state` now defines the9244-byte public image behind v2 header state hashes: exact parent/
@@ -132,8 +149,9 @@ Work continues on `communication-chat-v2-production`. Chat V2 remains disabled a
 The new v2 Profile/Admission, successor headers, acceptance/append/removal records and tree proofs
 are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The real
 canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
-Add/save/install consumer is integrated for the closed one-founder/one-Add checkpoint; known-v6
-and retained-client API integration is being completed separately. The default-closed projection guard core is
+Add/save/install/reply and exact retained-successor recovery source is integrated, with regressions
+authored but unrun; it remains one founder/one Add/zero history, not the production v2 consumer.
+The default-closed projection guard core is
 integrated with42 authored/unrun tests; its production issuer and native/UI adapter remain absent.
 Scalable cold persistence, governing/review state, actual v2 creation/join/root distribution,
 typed durable send/receive, full admin actions/decisions and native/UI integration remain required.
@@ -147,12 +165,14 @@ suites; the exceptionally slow10,000-operation test and other heavy acceptance r
 
 The actual Add/own-credential code now shares its unchanged typed TLS digest with bounded plain
 KeyPackage metadata helpers. Historical extraction deliberately returns no validated KeyPackage,
-Add observation or fresh authority, and checks no signatures/lifetime: a future retained-result
+Add observation or fresh authority, and checks no signatures/lifetime: the retained-result
 consumer must independently authenticate the original owner-signed exact reference/subject/
-credential and complete request/result chain. Current new-admission checks are unchanged. This
+credential and complete request/result chain, as the closed covering owner consumer now does.
+Current new-admission checks are unchanged. This
 avoids using the actual OpenMLS 0.9.2 current-wall-clock parser for historical accepted outcomes.
 Five regressions are authored and UNRUN; direct rustfmt and diff checks only. The genuine
-expired-after-success saved-result/reply-loss/cold-reopen fixture and covering Add remain open.
+expired-after-success accepted-KP fixture remains open; closed saved-result/reply-loss/cold-reopen
+regressions are authored but unrun.
 See [the exact boundary](communication-recovery/CHAT-OWNER-HISTORICAL-KP-DATA.md).
 ## Stored SDK read failures (5 November; authored, unexecuted)
 

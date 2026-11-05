@@ -33,7 +33,7 @@ impl OwnerHeadWriteGuard<'_> {
         cap: usize,
     ) -> Result<bool, AppError> {
         if permit.mode() != ChatAdmissionStorageMode::Current
-            || permit.vault_format()? != catcoms_storage::VaultFormat::OwnerOperations
+            || !permit.vault_format()?.requires_owner_operations()
             || candidate.generation != 2
         {
             return Err(refused());

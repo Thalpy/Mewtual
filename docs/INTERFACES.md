@@ -25,6 +25,10 @@ reply driver and queued publication retain the accounting even after caller inpu
 Local publish classification neither clears the durable commit/result nor proves remote receipt.
 Exact old v1 bytes and exact-v4 S1/negative recovery remain unchanged; gen2 uses a distinct strict
 snapshot tag and requires the supported mounted owner-operation format, full tail and parent CAS.
+Known v5/v6 positive-format checks use `requires_owner_operations()` only inside the actual
+mounted Store/permit path. The helper alone authenticates no catalog: the constructor has already
+required the supported EMPTY v6 catalog. The selected member fixture binds its actual transport
+once using `bind_direct_transport`, then borrows that same owner for `finish_direct` retries.
 
 ## Retained direct client source (5 November; authored, unexecuted)
 

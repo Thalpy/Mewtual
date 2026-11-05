@@ -182,9 +182,12 @@ impl ServerStore {
                 },
             )
         };
-        let operation_stage = format == catcoms_storage::VaultFormat::OwnerOperations
-            && self.owner_canonical_stage_exists(&identifier)?;
-        let (original, pending) = if format == catcoms_storage::VaultFormat::OwnerOperations {
+        // Metadata classification is used only after this actual Store's constructor accepted
+        // its mandatory inventories and supported catalog. Known v6 is not permission to
+        // ignore a nonempty/unknown namespace, or to use the exact-v4 negative/S1 fallback.
+        let operation_stage =
+            format.requires_owner_operations() && self.owner_canonical_stage_exists(&identifier)?;
+        let (original, pending) = if format.requires_owner_operations() {
             cell.read_operation_stamp(operation_stage)?
         } else {
             (cell.read_stamp()?, None)
@@ -194,8 +197,9 @@ impl ServerStore {
         let mut location = if self.owner_canonical_record_exists(&identifier)? {
             OwnerSourceLocation::Canonical
         } else {
-            // Keep this exact v4 check even when the positive canonical format guard above
-            // grows to support v5. A v5 stage can cover operation/debt state, not this S1 path.
+            // Keep this exact v4 check while the positive guard accepts known v5/v6. Their
+            // stages can cover operation/debt state; only the separate exact recovery may
+            // interpret them, never this source-absent S1 path.
             if format != catcoms_storage::VaultFormat::OwnerEvidence {
                 return Err(refused());
             }
@@ -328,7 +332,7 @@ impl ServerStore {
         }
         if location == OwnerSourceLocation::InitialStage {
             // Known Retired bytes can remain an offline capsule. Current plus a missing .bin
-            // is never permission to reinstall a possibly stale stage. v5 is excluded by the
+            // is never permission to reinstall a possibly stale stage. v5/v6 are excluded by the
             // actual mounted-format gate above, independently of any saved source labels.
             match &admission {
                 ChatAdmissionResolution::Initializing(preparation) => {
@@ -372,11 +376,7 @@ fn decode(
     let mut decoder = Decoder::new(bytes);
     let is_operation = match decoder.get_str().map_err(|_| refused())? {
         "catcoms/owner-canonical-snapshot/v1" => false,
-        "catcoms/owner-canonical-snapshot/v2"
-            if format == catcoms_storage::VaultFormat::OwnerOperations =>
-        {
-            true
-        }
+        "catcoms/owner-canonical-snapshot/v2" if format.requires_owner_operations() => true,
         _ => return Err(refused()),
     };
     if decoder.get_bytes().map_err(|_| refused())? != pin.group()

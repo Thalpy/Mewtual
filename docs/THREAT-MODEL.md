@@ -34,6 +34,9 @@ scratch; they do not bound arbitrary SDK typed heaps or active Server/cache life
 reduction occurs only after private payload Drop and unique original accounting ownership; it
 never grants authority. Lower reply/publication custody preserves both original cancellation
 and accounting. New regressions are authored/unrun while validation is explicitly paused.
+The owner-operation metadata helper recognizes only known v5/v6 formats; actual Store constructor
+catalog validation precedes every mounted permit. It cannot turn an unsupported namespace into
+Empty, widen exact-v4 absence/S1 recovery, or grant Saved/current/head authority from a version.
 
 ## Private client retries (5 November; authored, unexecuted)
 

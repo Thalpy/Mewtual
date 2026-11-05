@@ -1790,7 +1790,7 @@ mod persistence {
             file: File,
             duplicate: bool,
         ) -> Result<(), AppError> {
-            if permit.vault_format()? != catcoms_storage::VaultFormat::OwnerOperations
+            if !permit.vault_format()?.requires_owner_operations()
                 || permit.mode() != chat_admission::ChatAdmissionStorageMode::Current
             {
                 return Err(AppError::Invalid(
@@ -1902,8 +1902,8 @@ mod persistence {
                 ));
             }
             let parent = self.owner_canonical_directory()?;
-            if permit.vault_format()? == catcoms_storage::VaultFormat::OwnerOperations {
-                // A v5 stage may contain a different exact accepted/result candidate. The
+            if permit.vault_format()?.requires_owner_operations() {
+                // A known v5/v6 stage may contain a different exact accepted/result candidate. The
                 // legacy cleaner cannot decide that it is disposable. Same-candidate/parent-
                 // aware recovery must settle it explicitly before this create-new writer.
                 if self.owner_canonical_stage_exists(&key)? {

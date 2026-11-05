@@ -10,6 +10,8 @@ use std::sync::atomic::Ordering;
 
 const SECRET: &[u8] = b"actual first covering owner Add fixture";
 type Owner = OwnedOwnerServer<MemNetwork, ChaCha20Rng>;
+mod v6;
+mod v6_negative;
 fn budget() -> OwnerEvidenceBudget {
     OwnerEvidenceBudget::checkpoint(
         1,
@@ -22,10 +24,18 @@ fn budget() -> OwnerEvidenceBudget {
     .unwrap()
 }
 fn open(path: &std::path::Path, rng: &mut ChaCha20Rng) -> ServerStore {
+    open_format(path, rng, false)
+}
+fn open_format(path: &std::path::Path, rng: &mut ChaCha20Rng, critical: bool) -> ServerStore {
     let store = ServerStore::open(path, SECRET, rng)
         .unwrap()
         .into_owner_operations_store(SECRET, rng)
         .unwrap();
+    let store = if critical {
+        store.into_critical_namespace_store(SECRET, rng).unwrap()
+    } else {
+        store
+    };
     store.configure_owner_evidence_budget(budget()).unwrap();
     store
 }
@@ -69,12 +79,11 @@ async fn complete_actual_join(
         )
         .unwrap();
     let transport = hub.join(PeerId::from_u64(member_peer));
-    let join = attempt.finish_direct(
-        transport,
+    let mut direct = attempt.bind_direct_transport(transport, PeerId::from_u64(source_peer));
+    let join = direct.finish_direct(
         ChaCha20Rng::seed_from_u64(member_peer),
         Box::new(ManualClock::new(1_000)),
         "actual selected member",
-        PeerId::from_u64(source_peer),
     );
     let drive = async {
         if let Some(fault) = fault {
@@ -446,17 +455,32 @@ async fn owner_actual_temp_synced_successor_recovers_original_add_same_process_a
 ) {
     // Duplicate means a prior exact retry renamed the child but process loss also retained an
     // identical stage (e.g. a replayed fixed-name copy). Only complete equality permits unlink.
-    for (cold, duplicate, corrupt) in [
-        (false, false, 0),
-        (true, false, 0),
-        (true, true, 0),
-        (true, false, 1),
-        (true, false, 2),
-        (true, false, 3),
+    // Repeat the original v5 cases through actual supported EMPTY v6 constructor admission.
+    for (critical, cold, duplicate, corrupt) in [
+        (false, false, false, 0),
+        (false, true, false, 0),
+        (false, true, true, 0),
+        (false, true, false, 1),
+        (false, true, false, 2),
+        (false, true, false, 3),
+        (true, false, false, 0),
+        (true, true, false, 0),
+        (true, true, true, 0),
+        (true, true, false, 1),
+        (true, true, false, 2),
+        (true, true, false, 3),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let mut rng = ChaCha20Rng::seed_from_u64(0xadf1);
-        let store = open(directory.path(), &mut rng);
+        let store = open_format(directory.path(), &mut rng, critical);
+        assert_eq!(
+            store.chat_vault_format().unwrap(),
+            if critical {
+                catcoms_storage::VaultFormat::CriticalNamespaces
+            } else {
+                catcoms_storage::VaultFormat::OwnerOperations
+            }
+        );
         let hub = Hub::new();
         let peer = PeerId::from_u64(0xadf1);
         let client = hub.join(PeerId::from_u64(0xadf2));

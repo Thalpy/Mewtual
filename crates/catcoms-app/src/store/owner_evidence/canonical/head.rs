@@ -515,7 +515,7 @@ impl OwnerHeadWriteGuard<'_> {
             return self.establish_operation_stage_barrier(permit, source);
         }
         // A preparation made before a successor appeared cannot publish the old parent.
-        if permit.vault_format()? == catcoms_storage::VaultFormat::OwnerOperations
+        if permit.vault_format()?.requires_owner_operations()
             && permit
                 .store()
                 .owner_canonical_stage_exists(&self.cell.key)?

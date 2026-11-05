@@ -89,7 +89,7 @@ impl OwnerOperationReservation {
             || !Arc::ptr_eq(&self.mount, &permit.store().registry_mount())
             || !Arc::ptr_eq(&self.writer, &writer.identity())
             || &self.expected != expected
-            || permit.vault_format()? != catcoms_storage::VaultFormat::OwnerOperations
+            || !permit.vault_format()?.requires_owner_operations()
         {
             return Err(refused());
         }
@@ -104,6 +104,8 @@ impl ServerStore {
     /// Called under the ORIGINAL Current admission, before decoding/cloning the bounded
     /// request or any candidate SDK/signing work. Lock order remains admission -> pool -> head.
     /// The result is retained outside both locks; its Drop can safely return the hot allowance.
+    /// Known v6 is reachable only after the actual Store's supported catalog constructor gate;
+    /// the version helper below authenticates no namespace and grants no independent authority.
     pub(crate) fn reserve_owner_operation(
         &self,
         permit: &ChatAdmissionStoragePermit<'_>,
@@ -111,9 +113,7 @@ impl ServerStore {
         binding: &ChatAdmissionBinding,
         expected: &head::Meta,
     ) -> Result<OwnerOperationReservation, AppError> {
-        if permit.vault_format()? != catcoms_storage::VaultFormat::OwnerOperations
-            || expected.generation != 1
-        {
+        if !permit.vault_format()?.requires_owner_operations() || expected.generation != 1 {
             return Err(refused());
         }
         permit.validate_original(self, binding.group(), binding.signer())?;
@@ -171,9 +171,7 @@ impl ServerStore {
         binding: &ChatAdmissionBinding,
         expected: &head::Meta,
     ) -> Result<catcoms_rt::SharedRequestKeepalive, AppError> {
-        if permit.vault_format()? != catcoms_storage::VaultFormat::OwnerOperations
-            || expected.generation != 2
-        {
+        if !permit.vault_format()?.requires_owner_operations() || expected.generation != 2 {
             return Err(refused());
         }
         permit.validate_original(self, binding.group(), binding.signer())?;
