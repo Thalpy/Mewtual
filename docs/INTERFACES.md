@@ -27,9 +27,14 @@ current-effect tokens and expose results only inside `with_publication`. The ori
 remain held through final synchronous native resolution after UI/registry guards. View/admission
 revokers are negative-only; Drop never waits, while must-use close completion uses nonblocking
 writer probes and must be retained/polled before acknowledging drain. Nested replacements share
-the actual ledger barrier. Each Delete's fixed negative capsule survives runtime proof loss and
+the actual ledger barrier. `ProjectionGroup::begin_view` additionally creates only a negative group
+lifetime; `begin_projection_view_in` binds the exact original group before channel work. All
+bound publications/mutations retain group -> ledger guards, and must-use group close completion
+cannot acknowledge ahead of either. Group cancellation reaches all attached channels without
+enumeration. The unbound begin API is core-only and must be refused by a future production issuer.
+Each Delete's fixed negative capsule survives runtime proof loss and
 clears only through an opaque exact complete-current resolution. No positive issuer/decoder,
-durable capsule format or native/UI adapter is implemented. Twenty-eight new tests are authored and
+durable capsule format or native/UI adapter is implemented. Forty-two new tests are authored and
 unexecuted; see [the exact core contract](communication-recovery/CHAT-V2-PROJECTION-ADMISSION.md).
 
 ## V2 Profile and ordinary Admission labels (5 November; inactive)

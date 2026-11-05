@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Shared group publication lifetime (5 November; authored, unexecuted)
+
+`ProjectionGroup` now gives attached channel views one original negative group lifetime/barrier.
+Closing it cancels all channels in O(1); explicit completion waits for admitted callbacks AND
+token/capsule mutations. Publication/mutation takes original group -> ledger guards, with final
+liveness validation inside both. Replacement group views share the same flat gate and cannot
+bypass older readers. Exact group matching precedes channel replacement; equal labels on another
+mount cannot renew old tokens/results. Group/view Drop never waits, including in callbacks/unwind.
+Capsule plans are frozen before final admission; later cancellation cannot erase a precomputed
+Proven Delete remint. Eleven new regressions are authored and UNRUN. This is lifecycle custody,
+not the actual governing verifier, selected root, positive issuer, durable closure or native/UI
+adapter. Compilation remains paused. See [the exact boundary](communication-recovery/CHAT-V2-PROJECTION-ADMISSION.md#shared-original-group-lifetime).
+
 ## Empty critical catalog prerequisite (5 November; authored, unexecuted)
 
 The private Store now has a consuming v6 transition over the SAME DEK and existing v5/owner/scope
@@ -33,7 +46,7 @@ view/admission owners cancel without waiting; explicit must-use completion polls
 publication barrier, and replacements remain pending until earlier admitted replies drain. Each
 Delete has fixed prior-Proven-effect custody independent of rendering; proof loss suppresses bodies
 until exact complete-current resolution. Visible exposes only chosen text/original creation time;
-Deleted has certainty and no history text. Thirty-one regressions are authored/unrun. Compilation,
+Deleted has certainty and no history text. Forty-two regressions are authored/unrun. Compilation,
 tests and builds remain paused; formatting/static review is not runtime evidence. Real governance,
 critical durable negative closure, complete host memory fees and native/UI lease consumers remain
 open. See [the guarded projection contract](communication-recovery/CHAT-V2-PROJECTION-ADMISSION.md).
@@ -45,7 +58,7 @@ The new v2 Profile/Admission, successor headers, acceptance/append/removal recor
 are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The real
 canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
 Add/save/install consumer is still being connected. The default-closed projection guard core is
-integrated with31 authored/unrun tests; its production issuer and native/UI adapter remain absent.
+integrated with42 authored/unrun tests; its production issuer and native/UI adapter remain absent.
 Scalable cold persistence, governing/review state, actual v2 creation/join/root distribution,
 typed durable send/receive, full admin actions/decisions and native/UI integration remain required.
 

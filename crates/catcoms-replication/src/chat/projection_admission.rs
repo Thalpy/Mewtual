@@ -7,7 +7,13 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, TryLockError};
 
+mod group;
 mod guarded;
+use group::GroupViewLife;
+pub use group::{
+    ProjectionGroup, ProjectionGroupCloseCompletion, ProjectionGroupView,
+    ProjectionGroupViewRevoker,
+};
 pub use guarded::{GuardedCausalHeads, GuardedMessageProjection, GuardedProjection};
 
 const OPEN: u8 = 0;
@@ -40,15 +46,18 @@ impl ProjectionState {
             realm,
         }
     }
-    pub(super) fn begin(&mut self) -> ProjectionView {
+    fn begin(&mut self, group: Option<Arc<GroupViewLife>>) -> ProjectionView {
         let previous = self.current.as_ref().map(ViewLife::request_close);
         let life = Arc::new(ViewLife {
             gate: self.gate.clone(),
+            group,
             realm: self.realm,
             revision: AtomicU64::new(1),
             cancelled: AtomicBool::new(false),
             pending: AtomicUsize::new(if previous.is_some() { 1 } else { 0 }),
             closed: AtomicBool::new(false),
+            #[cfg(test)]
+            mutation_hook: std::sync::Mutex::new(None),
         });
         self.current = Some(life.clone());
         ProjectionView { life, previous }
@@ -71,11 +80,15 @@ impl Drop for ProjectionState {
 
 struct ViewLife {
     gate: Arc<RwLock<()>>,
+    // Immutable ORIGINAL group identity; never looked up anew after body/actor work.
+    group: Option<Arc<GroupViewLife>>,
     realm: RealmId,
     revision: AtomicU64,
     cancelled: AtomicBool,
     pending: AtomicUsize,
     closed: AtomicBool,
+    #[cfg(test)]
+    mutation_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 impl ViewLife {
     fn bump(&self) -> Result<(), ChatError> {
@@ -98,6 +111,7 @@ impl ViewLife {
         !self.cancelled.load(Ordering::Acquire)
             && !self.gate.is_poisoned()
             && self.pending.load(Ordering::Acquire) == 0
+            && self.group.as_ref().is_none_or(|group| group.live())
     }
     fn request_close(this: &Arc<Self>) -> ProjectionCloseCompletion {
         this.cancel();
@@ -464,6 +478,19 @@ impl ProjectionLease {
         }
     }
     pub(super) fn publish<T>(&self, callback: impl FnOnce() -> T) -> Result<T, ChatError> {
+        // Refuse already-cancelled callers before taking either reader. Repeated obsolete
+        // replies must not compete with the explicit negative drain probe. Recheck INSIDE
+        // both guards too: cancellation may race this preliminary observation.
+        self.validate()?;
+        // Fixed native commit order: outer UI -> registry -> original group -> ledger. Never
+        // acquire the group after the ledger, and retain both readers through actual reply.
+        let _group_reader = self
+            .view
+            .group
+            .as_ref()
+            .map(|group| group.gate.try_read())
+            .transpose()
+            .map_err(|_| ChatError::Scope)?;
         let _reader = self.view.gate.try_read().map_err(|_| ChatError::Scope)?;
         self.validate()?;
         // No post-callback refusal: this reply was already admitted. Explicit completion must
@@ -596,10 +623,12 @@ impl std::fmt::Debug for CompleteProjectionResolution {
 }
 
 impl ChatLedger {
-    /// Begin an original default-closed view. It issues no positive tokens. A replacement
+    /// Begin an UNBOUND core-only default-closed view. It issues no positive tokens. A future
+    /// production issuer MUST refuse unbound views and use begin_projection_view_in with its
+    /// original verified governing source. A replacement
     /// remains pending until its returned owner's try_ready completes the old drain barrier.
     pub fn begin_projection_view(&mut self) -> ProjectionView {
-        self.projection.begin()
+        self.projection.begin(None)
     }
 
     /// Install only opaque current support for already Valid semantic evidence. This never
@@ -611,6 +640,19 @@ impl ChatLedger {
         token: &ProjectionAdmissionToken,
         budget: usize,
     ) -> Result<(), ChatError> {
+        let group = self
+            .projection
+            .current
+            .as_ref()
+            .and_then(|view| view.group.clone());
+        if group.as_ref().is_some_and(|group| !group.live()) {
+            return Err(ChatError::Scope);
+        }
+        let _group_reader = group
+            .as_ref()
+            .map(|group| group.gate.try_read())
+            .transpose()
+            .map_err(|_| ChatError::Scope)?;
         let gate = self.projection.gate.clone();
         let _writer = gate.try_write().map_err(|_| ChatError::Scope)?;
         let view = self
@@ -642,6 +684,7 @@ impl ChatLedger {
         // Prepare ALL new capsules before mutation. Installing the Create after its Deletes
         // must not produce a proof-loss window or a partial scan labelled complete. A Proven
         // Delete needs an admitted Create, which may itself still be Provisional.
+        let original_revision = view.revision.load(Ordering::Acquire);
         let mut capsules = Vec::new();
         let mut left = budget;
         match entry.action.spec().body {
@@ -666,6 +709,19 @@ impl ChatLedger {
                 }
             }
             _ => {}
+        }
+        // Capsule preparation may inspect many own-message candidates. If negative custody
+        // won during that preflight, refuse BEFORE committing any positive metadata. After
+        // this final admission the already prepared capsules must not be re-evaluated against
+        // a later cancellation: both real guards retain the operation until mutation ends.
+        if !token.live_for(&view, id, &entry.action)
+            || view.revision.load(Ordering::Acquire) != original_revision
+        {
+            return Err(ChatError::Scope);
+        }
+        #[cfg(test)]
+        if let Some(hook) = view.mutation_hook.lock().unwrap().take() {
+            hook();
         }
         view.bump()?;
         self.entries
@@ -723,6 +779,19 @@ impl ChatLedger {
         &mut self,
         resolution: &CompleteProjectionResolution,
     ) -> Result<(), ChatError> {
+        let group = self
+            .projection
+            .current
+            .as_ref()
+            .and_then(|view| view.group.clone());
+        if group.as_ref().is_some_and(|group| !group.live()) {
+            return Err(ChatError::Scope);
+        }
+        let _group_reader = group
+            .as_ref()
+            .map(|group| group.gate.try_read())
+            .transpose()
+            .map_err(|_| ChatError::Scope)?;
         let gate = self.projection.gate.clone();
         let _writer = gate.try_write().map_err(|_| ChatError::Scope)?;
         let view = self.projection.current.as_ref().ok_or(ChatError::Scope)?;
@@ -742,6 +811,13 @@ impl ChatLedger {
             return Err(ChatError::Authority);
         }
         let replacement = self.eligible_capsule(id, view, None);
+        if !view.live() || view.revision.load(Ordering::Acquire) != resolution.revision {
+            return Err(ChatError::Scope);
+        }
+        #[cfg(test)]
+        if let Some(hook) = view.mutation_hook.lock().unwrap().take() {
+            hook();
+        }
         view.bump()?;
         self.entries
             .get_mut(&id)

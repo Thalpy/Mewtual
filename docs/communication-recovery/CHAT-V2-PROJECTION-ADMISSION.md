@@ -108,7 +108,7 @@ closure, native command, frontend result or live dispatch is claimed by this pro
 
 ## Implemented core checkpoint; tests not executed
 
-`ChatLedger::begin_projection_view` returns only a negative owner and default-closed view. Its
+`ChatLedger::begin_projection_view` returns only an UNBOUND core negative owner and default-closed view. Its
 original revoker, admission owners/revokers and must-use `ProjectionCloseCompletion` never wait in
 Drop. Explicit completion uses only `try_write`; a pending admission count prevents new body
 publication while old readers drain. All views share the actual ledger's barrier, so nested
@@ -179,3 +179,48 @@ cover a96-edit chain within a linear edge-work allowance, unrelated messages/rep
 reverse import and byte-identical restore, rejected signatures/quota/duplicates, retained pending/
 invalid candidates, shared Join diamonds and atomic capsule creation/proof-loss suppression.
 These are deterministic allowance assertions, not a wall-time benchmark or 20/50-peer acceptance.
+
+## Shared original group lifetime
+
+`ProjectionGroup` owns one bounded exact group identity and ONE actual shared publication gate.
+Its `begin_view` returns an original negative `ProjectionGroupView`; cancelling that lifetime
+immediately closes future positive work for every attached channel without scanning channel rows.
+Drop never waits or reports completion. Explicit must-use `ProjectionGroupCloseCompletion` polls
+that original gate's exclusive writer and therefore cannot acknowledge before admitted callbacks
+or positive token/capsule mutations finish. Poison may prove negative drain through its real
+exclusive guard but never opens a replacement. No generation counter wraps and replacements retain
+no recursive parent chain: all share the same flat gate, so a pending middle view cannot hide an
+older reader from the next replacement. Unrelated mounted groups have independent barriers.
+
+`ChatLedger::begin_projection_view_in` checks exact full group identity and original group liveness
+BEFORE replacing its existing channel view. It captures the supplied original Arc, never a later
+lookup of a group with matching labels. Cancelled/pending/poisoned group views refuse. Creating
+that view is not a root/Profile/tenure selection or a positive authorization. The future production
+issuer MUST refuse unbound `begin_projection_view` views and bind the actual verified original
+governing source; raw bytes or this lifecycle owner cannot supply that verification.
+
+Final synchronous commit order is outer native UI -> registry -> ORIGINAL GROUP -> ledger.
+`with_publication` first refuses already obsolete callers, then takes group/ledger readers,
+validates original view/revision/scope inside both and retains them throughout the callback.
+No post-callback check retracts an admitted reply. Token installation and exact capsule resolution
+likewise retain the group reader before the ledger writer. All probes are nonblocking; no await
+belongs inside the callback or either mutation. Capture original group/view cancellation custody
+before actor/body waits. Looking up a newer view afterward cannot renew an old result.
+
+Capsule installation prepares its whole per-message plan before final original-token/liveness/
+revision admission. Resolution freezes its exact replacement before the same final view/revision
+check. If cancellation wins BEFORE that admission, no positive metadata changes. If it wins AFTER,
+the admitted operation installs the PRECOMPUTED effect and retains both guards until done: it
+must not re-read later liveness and silently turn an eligible Proven Delete remint into None.
+Group close completion covers these mutations as well as body callbacks. These ordering rules
+were corrected during actual-diff adversarial review; no execution is claimed during the pause.
+
+Eleven additional regressions are authored and UNRUN (nine group lifecycle/mutation tests and
+two group bound/poison tests). Real signed channel fixtures cover multi-channel cancellation,
+before/after admitted publication and capsule installation, both exact-resolution orderings with
+and without current Proven support, nested replacement, equal-label remount, foreign refusal
+without channel mutation, owner Drop/self-close/unwind and independent unrelated-group progress.
+Worker completion waits are explicitly bounded before joining. The total projection admission
+regression count is42; five separate semantic message-work regressions are also unexecuted.
+This adds no production governor, physical control-memory invoice, durable negative journal,
+native/UI command or activation. Those remain required before Chat V2 can be enabled.

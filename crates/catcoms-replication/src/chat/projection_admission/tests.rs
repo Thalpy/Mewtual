@@ -4,6 +4,7 @@ use super::*;
 use catcoms_crypto::{verify_with_public_bytes, DeviceKeypair};
 use catcoms_wire::Encoder;
 use std::collections::BTreeSet;
+mod group_work;
 
 struct Fixture {
     owner: DeviceKeypair,

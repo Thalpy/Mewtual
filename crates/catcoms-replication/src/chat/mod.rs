@@ -25,7 +25,9 @@ pub use projection::{EditAlternative, MessageProjection};
 pub use projection_admission::{
     CompleteProjectionResolution, GuardedCausalHeads, GuardedMessageProjection, GuardedProjection,
     ProjectionAdmissionRevoker, ProjectionAdmissionToken, ProjectionCertainty,
-    ProjectionCloseCompletion, ProjectionOpenAdmission, ProjectionView, ProjectionViewRevoker,
+    ProjectionCloseCompletion, ProjectionGroup, ProjectionGroupCloseCompletion,
+    ProjectionGroupView, ProjectionGroupViewRevoker, ProjectionOpenAdmission, ProjectionView,
+    ProjectionViewRevoker,
 };
 pub use storage::{ChatSnapshot, Page, PageCursor, MAX_PAGE_BYTES, MAX_PAGE_RECORDS};
 

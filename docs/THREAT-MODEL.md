@@ -20,13 +20,19 @@ admission lifetime. Closing A1 cannot renew it through A2 labels, while Proven A
 an unrelated A1 close after old publications drain. Scope cancellation/Drop never waits on its own
 reader; explicit nonblocking completion cannot acknowledge drain ahead of an admitted callback.
 Nested replacement views share the original barrier and remain pending until earlier replies end.
+The same rule now covers one original group-wide lifetime across channels. Its O(1) negative
+cancellation and actual group barrier precede each channel barrier; both are retained through
+admitted publication and positive token/capsule mutation. A group-label match or fresh domain
+cannot renew an old original lease. Capsule preflight freezes the complete effect, then rechecks
+original liveness/revision before admission. A cancellation AFTER admission cannot change a
+precomputed Delete remint into an empty capsule. Close completion waits for that mutation.
 
 Each previously eligible Proven Delete keeps separate exact negative custody even if its Create
 was still Provisional and no replica rendered it. Missing current proof suppresses body text;
 runtime custody is not an accepted tombstone or a replica-local grandfathered branch. Clearing it
 requires an opaque complete-current closure for the exact capsule and view. No production issuer,
 critical durable negative journal or active native/UI gate exists yet. Raw semantic snapshots are
-unchanged and restore guarded projection closed. Twenty-eight authored regressions remain unexecuted;
+unchanged and restore guarded projection closed. Forty-two authored regressions remain unexecuted;
 shared control/output memory and complete governing-inventory/native admission are separate gates.
 
 ## Historical package labels (5 November; inactive consumer prerequisite)
