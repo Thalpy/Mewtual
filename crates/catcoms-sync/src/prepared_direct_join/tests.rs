@@ -334,6 +334,7 @@ fn post_welcome_raw_provider_must_fit_original_retained_invoice_before_handoff()
         .unwrap();
     // Exact actual prejoin source under a smaller POLICY in this private test fixture, not a
     // public raw-source issuer. Its master genuinely fits; the newly written group does not.
+    assert!(!source.request_started && !source.recovered && source.sealed.is_none());
     let narrowed = PreparedDirectJoin {
         master: source.master.clone(),
         request: source.request.clone(),
@@ -343,6 +344,9 @@ fn post_welcome_raw_provider_must_fit_original_retained_invoice_before_handoff()
         limits: DirectJoinLimits::new(source.master.len(), limits().backing, limits().exchange)
             .unwrap(),
         completed: false,
+        request_started: source.request_started,
+        recovered: source.recovered,
+        sealed: None,
     };
     assert!(restore_join_device_provider_bounded(
         &narrowed.master,

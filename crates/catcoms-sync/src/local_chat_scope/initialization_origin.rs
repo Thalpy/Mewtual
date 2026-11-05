@@ -31,6 +31,16 @@ fn private_shape(scope: &LocalChatScope) -> bool {
     }
 }
 impl LocalChatScope {
+    /// Test-only negative corruption of an ALREADY attached reservation. This cannot create
+    /// a reservation, sender, Current binding or publication authority from scalar labels.
+    #[cfg(test)]
+    pub(crate) fn corrupt_genesis_planned_revision_for_test(&mut self, revision: Option<u64>) {
+        self.reservation
+            .as_mut()
+            .expect("actual attached test reservation")
+            .planned_revision = revision;
+    }
+
     /// Receiver-only V2 genesis DATA attachment. The decoded scope has no process lifetime;
     /// retain the SAME trusted host reservation instead of manufacturing publication runtime.
     /// All host fields are captured once, and the durable planned revision must be exact.

@@ -5,7 +5,7 @@ use catcoms_rt::RequestAuthority;
 mod operation_recovery;
 mod staged_restore;
 mod successor;
-pub(crate) use successor::{OwnerSuccessorInput, SavedOwnerSuccessor};
+pub(super) use successor::OwnerSuccessorInput;
 
 pub(super) struct HeadCell {
     pub(super) key: [u8; 32],

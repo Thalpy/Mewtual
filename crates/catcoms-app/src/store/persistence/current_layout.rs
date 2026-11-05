@@ -15,6 +15,7 @@ use crate::store::critical_namespaces::{
     read_pool::CatalogReadReservation,
 };
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 // This constructor keeps the existing 4096-byte base-path policy. Its five declaration
 // selectors add only closed fixed names; do not spend the filename walk's separate 32KiB

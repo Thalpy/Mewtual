@@ -654,7 +654,10 @@ impl<T: MeshTransport> BoundOriginalJoinNetwork<T> {
         };
         let source = state.source.as_mut().ok_or(SyncError::JoinRejected)?;
         source.request_started = true;
-        let response = tokio::select! {biased;_=cancel.cancelled()=>Err(TransportError::Cancelled),result=self.transport.request_connected_cancellable(self.target,ProtocolId(RR_PROTOCOL),state.source.as_ref().ok_or(SyncError::JoinRejected)?.request.clone(),cancel.clone())=>result};
+        // The waiter needs a mutable receiver while the transport owns its SAME original
+        // signal/authority/accounting. Clone before select creates either future's borrow.
+        let request_cancel = cancel.clone();
+        let response = tokio::select! {biased;_=cancel.cancelled()=>Err(TransportError::Cancelled),result=self.transport.request_connected_cancellable(self.target,ProtocolId(RR_PROTOCOL),state.source.as_ref().ok_or(SyncError::JoinRejected)?.request.clone(),request_cancel)=>result};
         let body = match response {
             Ok(response) => {
                 tokio::select! {biased;_=cancel.cancelled()=>Err(SyncError::Transport(TransportError::Cancelled)),result=state.source.as_ref().ok_or(SyncError::JoinRejected)?.receive_original_ready_body_limit(&self.transport,&mut self.prefix,self.target,response,BODY_LIMIT+2)=>result}

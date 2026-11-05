@@ -264,7 +264,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         ));
         // ONLY node-RNG use: consume original stream once, retain exact bytes, NEVER install a
         // candidate RNG or reseal on retry. SDK entropy above is its existing sanctioned source.
-        let sealed_routing = encode_sealed(&seal(&key, &plaintext, &mut self.rng)?);
+        let sealed_routing =
+            encode_sealed(&seal(&key, &plaintext, &mut self.rng).map_err(|_| refusal())?);
         let owner_sig = device.sign(&join_transcript(
             &group_id,
             &invite.invite_nonce,

@@ -292,10 +292,7 @@ fn changed_durable_revision_same_labels_identity_and_local_revision_refuses_reat
     // Simulate an internal replacement of the actual stored original observation, not just a
     // caller changing its claimed method: the already captured source must refuse that too.
     node.local_chat_scope
-        .reservation
-        .as_mut()
-        .unwrap()
-        .planned_revision = Some(13);
+        .corrupt_genesis_planned_revision_for_test(Some(13));
     assert!(source.borrow_prepared_for_handoff(&node, &KEY).is_err());
 }
 
@@ -669,7 +666,9 @@ fn freshly_encrypted_nested_frames_still_require_real_header_signature_and_manif
     let output = source
         .prepare(&node, &KEY, &mut CountingRng::new())
         .unwrap();
-    let context = output.context_data();
+    // Own the small DATA context before reading the original source again below; keeping
+    // its borrowed view would extend prepare's exclusive source loan across that read.
+    let context = output.context_data().clone();
     let raw = plaintext(output);
     let ranges = payload_ranges(&raw);
     let spec = context.spec_data();

@@ -103,7 +103,8 @@ pub(in crate::store) struct Summary {
     pub(super) count: usize,
     pub(in crate::store) archive: Option<super::archive_bootstrap::Descriptor>,
     pub(super) join_version: Option<u32>,
-    pub(super) current_layout: Option<super::archive_current_namespace_codec::CurrentLayoutData>,
+    pub(in crate::store) current_layout:
+        Option<super::archive_current_namespace_codec::CurrentLayoutData>,
     pub(super) current_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {

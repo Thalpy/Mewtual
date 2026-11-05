@@ -36,6 +36,7 @@ impl VerifiedJoinedOwnerEvidence {
     pub fn profile_id(&self) -> OwnerFactId {
         self.profile
     }
+    #[cfg(test)]
     pub(super) fn initial_channel(&self) -> u128 {
         self.channel
     }

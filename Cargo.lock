@@ -520,6 +520,7 @@ dependencies = [
  "catcoms-storage",
  "catcoms-sync",
  "catcoms-wire",
+ "futures",
  "hex",
  "libp2p",
  "rand_chacha 0.3.1",

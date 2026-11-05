@@ -562,7 +562,8 @@ mod persistence {
         ReturnedBootstrapSourceData,
     };
     pub(super) use cold_source_read::{
-        OriginalBootstrapReadObservation, ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
+        GenesisSourceDataRef, OriginalBootstrapReadObservation,
+        ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
     };
     pub(in crate::store) use current_layout::{
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,
@@ -3926,7 +3927,7 @@ mod persistence {
     fn atomic_write_with_hook(
         path: &Path,
         bytes: &[u8],
-        mut phase: impl FnMut(AtomicWritePhase, &Path) -> Result<(), AppError>,
+        mut phase: impl FnMut(AtomicWritePhase, &Path),
     ) -> Result<(), AppError> {
         atomic_write_with_hook_and_sync(path, bytes, &mut phase, sync_directory)
     }
@@ -3988,6 +3989,50 @@ mod persistence {
         use super::*;
 
         #[test]
+        fn controlled_owner_stop_before_rename_keeps_synced_candidate_and_old_current() {
+            let directory = tempfile::tempdir().unwrap();
+            let current = directory.path().join("owner.bin");
+            let stage = directory.path().join("owner.replace.tmp");
+            fs::write(&current, b"old current").unwrap();
+            let result = write_owner_fixed_record(
+                &current,
+                &stage,
+                b"exact retained candidate",
+                |phase, _| {
+                    assert_eq!(phase, AtomicWritePhase::TempSynced);
+                    Err(AppError::Io("controlled before-rename stop".into()))
+                },
+                |_| panic!("no rename was admitted, so no new-current parent barrier"),
+            );
+            assert!(matches!(result, Err(AppError::Io(_))));
+            assert_eq!(fs::read(&current).unwrap(), b"old current");
+            assert_eq!(fs::read(&stage).unwrap(), b"exact retained candidate");
+        }
+
+        #[test]
+        fn controlled_owner_stop_after_rename_reports_visible_but_not_durable_current() {
+            let directory = tempfile::tempdir().unwrap();
+            let current = directory.path().join("owner.bin");
+            let stage = directory.path().join("owner.replace.tmp");
+            fs::write(&current, b"old current").unwrap();
+            let result = write_owner_fixed_record(
+                &current,
+                &stage,
+                b"exact renamed candidate",
+                |phase, _| match phase {
+                    AtomicWritePhase::TempSynced => Ok(()),
+                    AtomicWritePhase::Renamed => {
+                        Err(AppError::Io("controlled after-rename stop".into()))
+                    }
+                },
+                |_| panic!("the injected post-rename stop precedes parent sync"),
+            );
+            assert!(matches!(result, Err(AppError::CommittedButNotDurable(_))));
+            assert_eq!(fs::read(&current).unwrap(), b"exact renamed candidate");
+            assert!(!stage.exists());
+        }
+
+        #[test]
         fn absent_stage_retry_still_settles_real_unlink_parent_barrier() {
             let directory = tempfile::tempdir().unwrap();
             let parent = directory.path();
@@ -4018,7 +4063,7 @@ mod persistence {
         path: &Path,
         stage: &Path,
         bytes: &[u8],
-        mut phase: impl FnMut(AtomicWritePhase, &Path),
+        mut phase: impl FnMut(AtomicWritePhase, &Path) -> Result<(), AppError>,
         sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
     ) -> Result<(), AppError> {
         let mut file =

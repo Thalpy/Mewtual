@@ -2,24 +2,25 @@
 //! visible authenticated file or decoded operation label never constructs the covering result.
 use super::*;
 
-pub(crate) struct SavedOwnerSuccessor {
+pub(in crate::store::owner_evidence::canonical) struct SavedOwnerSuccessor {
     mount: Arc<()>,
     writer: Arc<()>,
     meta: Meta,
     predecessor: Meta,
 }
-pub(crate) struct OwnerSuccessorInput<'a> {
-    pub(crate) binding: &'a ChatAdmissionBinding,
-    pub(crate) expected: &'a Meta,
-    pub(crate) reservation: &'a budget::OwnerOperationReservation,
-    pub(crate) attempt: [u8; 32],
-    pub(crate) frozen: &'a [u8],
+pub(in crate::store::owner_evidence::canonical) struct OwnerSuccessorInput<'a> {
+    pub(in crate::store::owner_evidence::canonical) binding: &'a ChatAdmissionBinding,
+    pub(in crate::store::owner_evidence::canonical) expected: &'a Meta,
+    pub(in crate::store::owner_evidence::canonical) reservation:
+        &'a budget::OwnerOperationReservation,
+    pub(in crate::store::owner_evidence::canonical) attempt: [u8; 32],
+    pub(in crate::store::owner_evidence::canonical) frozen: &'a [u8],
 }
 impl SavedOwnerSuccessor {
-    pub(crate) fn metadata(&self) -> Meta {
+    pub(in crate::store::owner_evidence::canonical) fn metadata(&self) -> Meta {
         self.meta.clone()
     }
-    pub(crate) fn validate_install(
+    pub(in crate::store::owner_evidence::canonical) fn validate_install(
         &self,
         head: &OwnerHeadWriteGuard<'_>,
         permit: &ChatAdmissionStoragePermit<'_>,
@@ -47,7 +48,7 @@ impl SavedOwnerSuccessor {
 impl OwnerWriterRegistration {
     /// Original admission is already held. The private caller performs only its validated
     /// install inside this callback; no public arbitrary callback or async writer escape exists.
-    pub(crate) fn with_first_add_successor<Out>(
+    pub(in crate::store::owner_evidence::canonical) fn with_first_add_successor<Out>(
         &self,
         permit: &ChatAdmissionStoragePermit<'_>,
         input: OwnerSuccessorInput<'_>,

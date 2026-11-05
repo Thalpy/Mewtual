@@ -78,7 +78,7 @@ impl OwnerOperationReservation {
     ) -> Result<catcoms_rt::SharedRequestKeepalive, AppError> {
         OperationFee::into_response(self.fee)
     }
-    pub(crate) fn validate_original(
+    pub(in crate::store::owner_evidence::canonical) fn validate_original(
         &self,
         permit: &ChatAdmissionStoragePermit<'_>,
         writer: &OwnerWriterRegistration,
@@ -106,7 +106,7 @@ impl ServerStore {
     /// The result is retained outside both locks; its Drop can safely return the hot allowance.
     /// Known v6 is reachable only after the actual Store's supported catalog constructor gate;
     /// the version helper below authenticates no namespace and grants no independent authority.
-    pub(crate) fn reserve_owner_operation(
+    pub(in crate::store::owner_evidence::canonical) fn reserve_owner_operation(
         &self,
         permit: &ChatAdmissionStoragePermit<'_>,
         writer: &OwnerWriterRegistration,
@@ -164,7 +164,7 @@ impl ServerStore {
 
     /// One exact retained-result retry, under that invocation's original current head. This
     /// acquires capacity only; the same captured native effect still gates actual driver send.
-    pub(crate) fn reserve_owner_response(
+    pub(in crate::store::owner_evidence::canonical) fn reserve_owner_response(
         &self,
         permit: &ChatAdmissionStoragePermit<'_>,
         writer: &OwnerWriterRegistration,

@@ -6,7 +6,7 @@
 use super::*;
 use crate::store::chat_admission::{ChatAdmissionStorageMode, ChatAdmissionStoragePermit};
 use crate::store::{ChatAdmissionBinding, ChatAdmissionPreparation};
-use catcoms_sync::local_chat_scope::{ManagedChatScopeBinding, ManagedChatScopeReservation};
+use catcoms_sync::local_chat_scope::ManagedChatScopeReservation;
 use std::sync::{Arc, MutexGuard, Weak};
 use tokio::sync::watch;
 
@@ -23,12 +23,10 @@ mod restore;
 mod source;
 pub use budget::OwnerEvidenceBudget;
 pub(crate) use budget::{
-    OwnerInitializationReservation, OwnerInitializationSnapshotLimits, OwnerOperationReservation,
-    OwnerPendingCreation,
+    OwnerInitializationReservation, OwnerOperationReservation, OwnerPendingCreation,
 };
 pub(crate) use head::{
     OwnerHeadWriteGuard, OwnerWriterRegistration, SavedOwnerInitialization, SavedOwnerRestore,
-    SavedOwnerSuccessor,
 };
 pub use initialize::{OwnedOwnerServer, OwnerFounderInitialization};
 pub(in crate::store) use restore::UnexposedHeadAction;

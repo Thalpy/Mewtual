@@ -370,7 +370,7 @@ async fn actual_same_key_remove_and_fresh_welcome_cannot_reuse_the_old_private_s
 #[tokio::test]
 async fn original_join_attempt_refuses_revocation_and_mount_drop_before_any_handshake() {
     let (dir, store, mut rng) = managed();
-    let mut owner = Server::found(
+    let owner = Server::found(
         Hub::new().join(PeerId::from_u64(806)),
         MlsDevice::generate().unwrap(),
         ChaCha20Rng::seed_from_u64(806),
@@ -501,7 +501,7 @@ async fn cancelled_join_keeps_original_paid_source_and_cannot_adopt_reopened_mou
     let (dir, store, mut rng) = managed();
     let hub = Hub::new();
     let owner_peer = PeerId::from_u64(0x5b02);
-    let mut owner = Server::found(
+    let owner = Server::found(
         hub.join(owner_peer),
         MlsDevice::generate().unwrap(),
         ChaCha20Rng::seed_from_u64(0x5b02),
