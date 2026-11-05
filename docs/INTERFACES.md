@@ -8148,6 +8148,12 @@ gates; legacy join bytes and expiry policy for new admission are unchanged. See
 
 ### Explicit Pending-only join catalog checkpoint
 
+The retained direct client has a private READY normalization/signature-only DATA boundary shared
+by its existing legacy finisher. A valid inviter signature alone is not selected-package/routing
+acceptance; the legacy consumer still runs every actual SDK/policy/provider check before completion.
+Neither helper is public or turns a recovered source into a runnable Prepared object. The future
+execution consumer still needs its actual original journal/arm/counter/retained-input owners.
+
 `JournalledCheckpointJoinPreparation::activate_original_transport` consumes a saved Active source
 and ONE actual T/trusted finite-checkpoint endpoint into `ActivatedCheckpointJoin<T>`. Failure
 returns the SAME preparation/T. The wrapper exposes only original negative close/cancellation

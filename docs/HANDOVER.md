@@ -1,5 +1,15 @@
 # Mewtual; Handover
 
+## Private join input separation (5 November; unexecuted)
+
+The retained direct client now shares PRIVATE bounded READY-envelope normalization and pinned
+invite signature checking before SDK entry. The existing legacy finish path still immediately
+performs the same actual selected-package, routing, policy and provider checks, marking completion
+only after success. One bounded regression and an expanded signed-invalid-routing control are
+authored UNRUN; actual-diff review is clear and formatting/whitespace passed. No compiler or suite
+ran. These helpers return only private DATA and do not expose recovered keys, an Accepted receipt,
+network policy, a durable ticket, scope or ready owner. Actual schema2 execution remains next.
+
 
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 

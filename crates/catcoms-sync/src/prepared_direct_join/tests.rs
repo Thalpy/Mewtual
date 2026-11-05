@@ -61,6 +61,10 @@ fn signed_invalid_routing_consumes_only_candidate_and_original_ready_still_compl
         ))
         .unwrap();
     let bad = encode_join_resp(&welcome, &signature, invalid_routing);
+    assert!(
+        source.verify_original_ready_body(&bad).is_ok(),
+        "an inviter-signed body is DATA, not proof of selected-KP/routing acceptance"
+    );
     let master = source.master.clone();
     // Pin the original bug: once SDK selection happened, routing rejection does not leave
     // that SAME mutable provider usable. Merely retrying finish_join on it is insufficient.
@@ -104,6 +108,39 @@ fn signed_invalid_routing_consumes_only_candidate_and_original_ready_still_compl
         Some(source.expected)
     );
     assert_eq!(source.master.as_slice(), master.as_slice());
+}
+
+#[tokio::test]
+async fn normalized_signed_input_is_exact_data_without_sdk_completion_or_master_mutation() {
+    let hub = Hub::new();
+    let peer = PeerId::from_u64(0xc301);
+    let mut node = owner(&hub, peer);
+    let source = prepare(&mut node);
+    let ready = node
+        .serve_join(PeerId::from_u64(0xc302), &source.request[1..])
+        .unwrap();
+    let master = source.master.clone();
+    let network = hub.join(PeerId::from_u64(0xc302));
+    let mut prefix = PreOwnerConnectionHandoff::default();
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        source.receive_original_ready_body(&network, &mut prefix, peer, Bytes::from(ready.clone())),
+    )
+    .await
+    .expect("inline normalization must complete within the harness bound")
+    .unwrap();
+    assert_eq!(body, ready[1..]);
+    assert!(source.verify_original_ready_body(&body).is_ok());
+    assert!(!source.completed);
+    assert_eq!(source.master.as_slice(), master.as_slice());
+    assert!(
+        source.finish_authenticated_body(&body).is_ok(),
+        "only later actual SDK checks may complete the private candidate"
+    );
+    assert!(
+        !source.completed,
+        "only the actual handoff marks legacy completion"
+    );
 }
 
 #[test]

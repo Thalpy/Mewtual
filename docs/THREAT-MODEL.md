@@ -1,5 +1,9 @@
 # Threat model; client integrity & enforcement boundaries
 
+The private direct-join input check distinguishes a complete inviter-signed envelope from an
+actual selected-KeyPackage/routing/policy completion. Sharing that negative DATA check does not
+skip the existing SDK checks, mint an Accepted receipt, or expose recovered private state.
+
 ## Unsupported private archive files cannot imply absence (5 November; unexecuted)
 
 The default and Pending-only openers reject the reserved private archive root and declaration

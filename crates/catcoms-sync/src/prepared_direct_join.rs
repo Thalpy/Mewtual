@@ -92,6 +92,15 @@ pub struct CompletedDirectJoin {
     group: ServerGroup,
     routing: RoutingState,
 }
+
+/// Borrowed verified envelope only. It has not entered the selected-KP Welcome SDK and carries
+/// no membership/completion/receipt authority. Keep this private when sharing the bounded
+/// network-input check with a future journal consumer.
+struct SignedJoinBody<'a> {
+    welcome: &'a [u8],
+    signature: &'a [u8; 64],
+    sealed_routing: &'a [u8],
+}
 impl CompletedDirectJoin {
     /// Negative consistency check on this actual nondecoded completion, never a constructor
     /// from labels or a proof of Current/save. Used before moving the original owned transport.
@@ -240,9 +249,30 @@ impl PreparedDirectJoin {
         let response = transport
             .request(inviter, ProtocolId(RR_PROTOCOL), self.request.clone())
             .await?;
-        let response = own_response(response, self.limits.exchange)?;
-        let completed = match response.split_first() {
-            Some((&JOIN_READY, body)) => self.finish_authenticated_body(body)?,
+        let body = self
+            .receive_original_ready_body(transport, connection_handoff, inviter, response)
+            .await?;
+        let completed = self.finish_authenticated_body(&body)?;
+        self.completed = true;
+        Ok(completed)
+    }
+
+    /// Normalize only the existing ready/pending transport envelope. Return exact body bytes
+    /// before any SDK/private candidate work. Caller preserves T/prefix across future Drop and
+    /// chooses whether the next boundary is journal DATA custody or the existing legacy SDK.
+    async fn receive_original_ready_body<T: MeshTransport>(
+        &self,
+        transport: &T,
+        connection_handoff: &mut PreOwnerConnectionHandoff,
+        inviter: PeerId,
+        response: Bytes,
+    ) -> Result<Vec<u8>, SyncError> {
+        let mut response = own_response(response, self.limits.exchange)?;
+        match response.split_first() {
+            Some((&JOIN_READY, _)) => {
+                response.remove(0);
+                Ok(response)
+            }
             Some((&JOIN_PENDING, pending)) if pending.is_empty() => {
                 let mut dispatched = 0;
                 loop {
@@ -260,10 +290,15 @@ impl PreparedDirectJoin {
                             ..
                         }) if from == inviter && data.first() == Some(&KIND_WELCOME) => {
                             responder.respond(Bytes::new());
-                            let data = own_response(data, self.limits.exchange)?;
+                            let mut data = own_response(data, self.limits.exchange)?;
                             match data[1..].split_first() {
-                                Some((&JOIN_READY, body)) => {
-                                    break self.finish_authenticated_body(body)?
+                                Some((&JOIN_READY, _)) => {
+                                    // Remove only transport discriminants in-place. This
+                                    // retains one bounded owned response allocation, without
+                                    // creating a second body copy before the chosen consumer.
+                                    data.copy_within(2.., 0);
+                                    data.truncate(data.len() - 2);
+                                    return Ok(data);
                                 }
                                 _ => return Err(SyncError::JoinRejected),
                             }
@@ -277,13 +312,14 @@ impl PreparedDirectJoin {
                     }
                 }
             }
-            _ => return Err(SyncError::JoinRejected),
-        };
-        self.completed = true;
-        Ok(completed)
+            _ => Err(SyncError::JoinRejected),
+        }
     }
 
-    fn finish_authenticated_body(&self, body: &[u8]) -> Result<CompletedDirectJoin, SyncError> {
+    fn verify_original_ready_body<'a>(
+        &self,
+        body: &'a [u8],
+    ) -> Result<SignedJoinBody<'a>, SyncError> {
         // Borrowed COMPLETE framing and pinned signature precede provider allocation/SDK load.
         // An inviter-signed but invalid Welcome/routing/policy may consume ONLY the candidate.
         if body.len() > self.limits.exchange {
@@ -309,6 +345,15 @@ impl PreparedDirectJoin {
                 return Err(SyncError::JoinRejected);
             }
         }
+        Ok(SignedJoinBody {
+            welcome,
+            signature,
+            sealed_routing,
+        })
+    }
+
+    fn finish_authenticated_body(&self, body: &[u8]) -> Result<CompletedDirectJoin, SyncError> {
+        let signed = self.verify_original_ready_body(body)?;
         let candidate = restore_join_device_provider_bounded(
             &self.master,
             self.limits.provider,
@@ -322,9 +367,9 @@ impl PreparedDirectJoin {
         let (group, routing) = finish_join(
             &candidate,
             &self.invite,
-            welcome,
-            signature,
-            sealed_routing,
+            signed.welcome,
+            signed.signature,
+            signed.sealed_routing,
             &self.expected,
         )?;
         // Welcome processing writes NEW JSON/group rows into the candidate. The original
