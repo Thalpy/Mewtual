@@ -144,7 +144,7 @@ current resolution addresses each original capsule separately; eligible current 
 re-capsuled rather than exposing a future proof-loss gap. No capsule/status is added to raw
 ChatSnapshot bytes. Critical durable negative closure and the actual governing producer remain open.
 
-Twenty-eight regressions are authored in `chat::projection_admission::tests`; none have run. They
+Thirty-one regressions are authored in `chat::projection_admission::tests`; none have run. They
 cover signed exact fixtures, restored default closure, held effects/Join traversal, A1/A2 and
 Provisional/Proven separation, independent Delete obligations, complete-resolution binding,
 timestamp/work limits, actual admitted-reader drain, concurrent duplicate close, nested replacement,
@@ -153,3 +153,29 @@ signature variants, retry idempotency, common-evidence convergence, original-bar
 and arithmetic exhaustion. Test-only signed current-
 effect/complete-closure assertions exercise capability binding; they do not implement the absent
 production governance verifier. Primary owns all deferred focused/full/native validation.
+
+## Message-local work, without authority from an index
+
+The ledger derives a sorted message-candidate index at successful original-action import, after
+signature/scope/duplicate/capacity checks. Every retained action has exactly one membership under
+its target Create, or under its OWN CID for a Create. Reply Creates never join their reply target's
+candidate set. Pending and semantically invalid evidence is indexed too, so consumers retain their
+existing independent validity/current-token/body checks. The index supplies neither acceptance nor
+effect authority. Restore rebuilds it through the same import path; no index bytes enter snapshots,
+pages, action IDs or signatures. There are at most max_actions memberships and message keys, not
+a claim that logical labels equal physical BTree memory or a complete native invoice.
+
+Raw and guarded projection/heads and atomic Create capsule preflight scan only those candidates.
+For the fixed selected Edit/head set, ancestor expansion uses one shared visited set, initially
+EMPTY rather than seeded with roots. A selected root is superseded only upon reaching it through
+an actual ancestor edge, independent of CID/root order. Each root starts its own bounded parent
+stack; every pushed and popped edge spends work even when that ancestor was already visited.
+Create remains a stop boundary, and held Join metadata remains traversable without releasing an
+effect. Raw heads retain their direct-parent semantics; guarded heads retain transitive filtering
+through held metadata. Work exhaustion returns an explicit refusal, not partial heads/effects.
+
+Five additional semantic regressions and three guarded regressions are authored/unexecuted. They
+cover a96-edit chain within a linear edge-work allowance, unrelated messages/reply Creates,
+reverse import and byte-identical restore, rejected signatures/quota/duplicates, retained pending/
+invalid candidates, shared Join diamonds and atomic capsule creation/proof-loss suppression.
+These are deterministic allowance assertions, not a wall-time benchmark or 20/50-peer acceptance.

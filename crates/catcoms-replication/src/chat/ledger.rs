@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// cannot outgrow max_actions or allocate a separate unknown-action cache. The fixed projection
 /// token and per-Delete prior-effect slots (`PROJECTION_ADMISSION_ENTRY_BYTES`) are likewise
 /// structurally bounded by those retained entries, with no unknown-action admission cache.
+/// Derived message routing adds one index membership per retained action and at most that many
+/// message keys. These logical bounds are not physical BTree allocation charges.
 /// Shared lifetime/control allocations still require their own future host invoice. The byte allowance
 /// counts canonical action envelopes only, not this entry metadata, allocator/RSS or a complete
 /// production payer invoice (activation is absent).
@@ -72,6 +74,11 @@ pub struct ChatLedger {
     pub(super) entries: BTreeMap<ActionId, Entry>,
     bytes: usize,
     dependents: BTreeMap<ActionId, BTreeSet<ActionId>>,
+    // Derived routing metadata only: exactly one membership per retained action. A reply
+    // Create belongs to its OWN message, not the message it replies to. Pending/invalid
+    // actions are indexed too; every consumer must still check its independent authority.
+    // Rebuilt by import on restore, never serialized or accepted as proof from a peer.
+    message_actions: BTreeMap<ActionId, BTreeSet<ActionId>>,
     tasks: VecDeque<Task>,
     queued: BTreeSet<ActionId>,
 }
@@ -95,6 +102,7 @@ impl ChatLedger {
             entries: BTreeMap::new(),
             bytes: 0,
             dependents: BTreeMap::new(),
+            message_actions: BTreeMap::new(),
             tasks: VecDeque::new(),
             queued: BTreeSet::new(),
         })
@@ -104,6 +112,17 @@ impl ChatLedger {
     }
     pub fn action_ids(&self) -> impl Iterator<Item = ActionId> + '_ {
         self.entries.keys().copied()
+    }
+    /// Borrow only this message's retained candidates, in the same CID order as entries.
+    /// Missing targets may have indexed pending children; this is not a validity assertion.
+    pub(super) fn message_action_ids(
+        &self,
+        create: ActionId,
+    ) -> impl Iterator<Item = ActionId> + '_ {
+        self.message_actions
+            .get(&create)
+            .into_iter()
+            .flat_map(|actions| actions.iter().copied())
     }
     pub fn action(&self, id: ActionId) -> Option<&SignedAction> {
         self.entries.get(&id).map(|entry| &entry.action)
@@ -147,6 +166,10 @@ impl ChatLedger {
         for dependency in action.dependencies() {
             self.dependents.entry(dependency).or_default().insert(id);
         }
+        self.message_actions
+            .entry(action.spec().body.create().unwrap_or(id))
+            .or_default()
+            .insert(id);
         self.entries.insert(
             id,
             Entry {

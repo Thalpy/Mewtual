@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Message-local projection work (5 November; authored, unexecuted)
+
+The inactive typed ledger now derives one message-index membership per retained action, rebuilt
+through normal import on restore. Reply Creates belong to their own message. Semantic/guarded
+projection, heads and Create/Delete-capsule preflight no longer scan unrelated messages. Ancestor
+expansion shares a visited set across the fixed selected roots; every parent edge still spends
+work and actual ancestry, not root/CID order, decides supersession. Raw heads remain direct-parent
+heads; guarded heads still traverse held Join metadata. No snapshot/wire bytes or authority rules
+change. Eight work/ordering/restore/rejection regressions are authored and UNRUN. Compilation and
+builds remain paused; direct formatting and source review cannot establish runtime correctness.
+Per-target graph size, BTree allocation fees, production cold indexes and activation remain separate.
+
 ## Default-closed chat projection core (5 November; authored, unexecuted)
 
 The typed semantic ledger now has a separate guarded current-view API. Snapshot/historical Valid
@@ -8,7 +20,7 @@ view/admission owners cancel without waiting; explicit must-use completion polls
 publication barrier, and replacements remain pending until earlier admitted replies drain. Each
 Delete has fixed prior-Proven-effect custody independent of rendering; proof loss suppresses bodies
 until exact complete-current resolution. Visible exposes only chosen text/original creation time;
-Deleted has certainty and no history text. Twenty-eight regressions are authored/unrun. Compilation,
+Deleted has certainty and no history text. Thirty-one regressions are authored/unrun. Compilation,
 tests and builds remain paused; formatting/static review is not runtime evidence. Real governance,
 critical durable negative closure, complete host memory fees and native/UI lease consumers remain
 open. See [the guarded projection contract](communication-recovery/CHAT-V2-PROJECTION-ADMISSION.md).
@@ -20,7 +32,7 @@ The new v2 Profile/Admission, successor headers, acceptance/append/removal recor
 are implemented as reviewed data/crypto prerequisites, not live authority or dispatch. The real
 canonical checkpoint factory uses the separate finite v1 test profile. Its first covering owner
 Add/save/install consumer is still being connected. The default-closed projection guard core is
-integrated with28 authored/unrun tests; its production issuer and native/UI adapter remain absent.
+integrated with31 authored/unrun tests; its production issuer and native/UI adapter remain absent.
 Scalable cold persistence, governing/review state, actual v2 creation/join/root distribution,
 typed durable send/receive, full admin actions/decisions and native/UI integration remain required.
 

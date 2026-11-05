@@ -134,25 +134,26 @@ impl ChatLedger {
         let mut proven_delete = None;
         let mut provisional_delete = None;
         let mut incomplete = false;
-        for (id, entry) in &self.entries {
+        for id in self.message_action_ids(create) {
             work.spend()?;
+            let entry = &self.entries[&id];
             if entry.action.spec().body.create() != Some(create) {
                 continue;
             }
             if entry.prior_delete.is_some() {
                 incomplete = true;
             }
-            let Some(token) = self.current_token(*id, &lease) else {
+            let Some(token) = self.current_token(id, &lease) else {
                 continue;
             };
             match entry.action.spec().body {
                 Body::Edit { .. } => {
-                    edits.insert(*id);
+                    edits.insert(id);
                 }
                 Body::Delete { .. } if token.certainty() == ProjectionCertainty::Proven => {
-                    proven_delete = Some(*id)
+                    proven_delete = Some(id)
                 }
-                Body::Delete { .. } => provisional_delete = Some(*id),
+                Body::Delete { .. } => provisional_delete = Some(id),
                 _ => {}
             }
         }
@@ -246,13 +247,14 @@ impl ChatLedger {
         lease.observe(create_token);
         let mut work = Work(budget);
         let mut heads = BTreeSet::new();
-        for (id, entry) in &self.entries {
+        for id in self.message_action_ids(create) {
             work.spend()?;
-            if *id != create && entry.action.spec().body.create() != Some(create) {
+            let entry = &self.entries[&id];
+            if id != create && entry.action.spec().body.create() != Some(create) {
                 continue;
             }
-            if let Some(token) = self.current_token(*id, &lease) {
-                heads.insert(*id);
+            if let Some(token) = self.current_token(id, &lease) {
+                heads.insert(id);
                 lease.observe(token);
             }
         }
@@ -271,6 +273,10 @@ impl ChatLedger {
         work: &mut Work,
     ) -> Result<BTreeSet<ActionId>, ChatError> {
         let mut ancestors = BTreeSet::new();
+        // This fixed root set shares ancestor expansion, but roots are NOT previsited.
+        // A root may also be another root's ancestor, regardless of CID traversal order.
+        // Every pushed/popped edge still spends work, including duplicate edges.
+        let mut visited = BTreeSet::new();
         for id in selected {
             if matches!(self.entries[id].action.spec().body, Body::Create { .. }) {
                 continue;
@@ -280,7 +286,6 @@ impl ChatLedger {
                 work.spend()?;
                 stack.push(*parent);
             }
-            let mut visited = BTreeSet::new();
             while let Some(parent) = stack.pop() {
                 work.spend()?;
                 if !visited.insert(parent) {

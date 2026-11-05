@@ -196,6 +196,221 @@ fn result(ledger: &ChatLedger, create: ActionId) -> GuardedProjection {
         .with_publication(Clone::clone)
         .unwrap()
 }
+
+#[test]
+fn guarded_long_edit_chain_uses_linear_edge_work_for_body_and_heads() {
+    let f = Fixture::new();
+    let mut ledger = f.ledger();
+    let view = ledger.begin_projection_view();
+    let create = f.create(0, "base");
+    f.retain(&mut ledger, &create);
+    ledger
+        .admit_projection(&f.token(&create, &view, None), 1)
+        .unwrap();
+    const EDITS: u8 = 96;
+    let mut parent = create.id();
+    let mut earlier_ancestor = false;
+    let mut later_ancestor = false;
+    for nonce in 1..=EDITS {
+        let edit = f.action(
+            nonce,
+            Body::Edit {
+                create: create.id(),
+                text: format!("edit {nonce}"),
+            },
+            vec![parent],
+        );
+        f.retain(&mut ledger, &edit);
+        ledger
+            .admit_projection(&f.token(&edit, &view, None), 0)
+            .unwrap();
+        if nonce > 1 {
+            earlier_ancestor |= parent < edit.id();
+            later_ancestor |= parent > edit.id();
+        }
+        parent = edit.id();
+    }
+    assert!(
+        earlier_ancestor && later_ancestor,
+        "real selected-ancestor edges exercise both CID traversal orders"
+    );
+    let budget = 5 * usize::from(EDITS) + 32;
+    let projected = ledger
+        .guarded_projection(create.id(), budget)
+        .unwrap()
+        .with_publication(Clone::clone)
+        .unwrap();
+    assert!(
+        matches!(projected, GuardedProjection::Visible { selected, text, presented_ms: 0, certainty: ProjectionCertainty::Proven, .. } if selected == parent && text == "edit 96")
+    );
+    assert_eq!(
+        ledger
+            .projectable_causal_heads(create.id(), budget)
+            .unwrap()
+            .with_publication(|heads| heads.to_vec())
+            .unwrap(),
+        vec![parent]
+    );
+}
+
+#[test]
+fn guarded_message_and_create_capsule_admission_ignore_unrelated_messages_and_replies() {
+    let f = Fixture::new();
+    let mut ledger = f.ledger();
+    let view = ledger.begin_projection_view();
+    let create = f.create(0, "base");
+    let delete = f.action(
+        1,
+        Body::Delete {
+            create: create.id(),
+        },
+        vec![create.id()],
+    );
+    f.retain(&mut ledger, &create);
+    f.retain(&mut ledger, &delete);
+    for nonce in 2..=60 {
+        let reply_to = (nonce % 2 == 0).then_some(create.id());
+        let unrelated = f.action(
+            nonce,
+            Body::Create {
+                text: "unrelated".into(),
+                reply_to,
+            },
+            reply_to.into_iter().collect(),
+        );
+        f.retain(&mut ledger, &unrelated);
+    }
+    ledger
+        .admit_projection(&f.token(&delete, &view, None), 1)
+        .unwrap();
+    assert!(ledger.entries[&delete.id()].prior_delete.is_none());
+    // Only two own candidates are scanned. In particular reply Creates cannot inflate this
+    // preflight or make admission of the original Create fail behind unrelated chat history.
+    ledger
+        .admit_projection(&f.token(&create, &view, None), 2)
+        .unwrap();
+    assert!(ledger.entries[&delete.id()].prior_delete.is_some());
+    assert!(matches!(
+        ledger
+            .guarded_projection(create.id(), 2)
+            .unwrap()
+            .with_publication(Clone::clone)
+            .unwrap(),
+        GuardedProjection::Deleted { .. }
+    ));
+    assert_eq!(
+        ledger
+            .projectable_causal_heads(create.id(), 8)
+            .unwrap()
+            .with_publication(|heads| heads.to_vec())
+            .unwrap(),
+        vec![delete.id()]
+    );
+    let mut next = ledger.begin_projection_view();
+    assert!(next.try_ready());
+    ledger
+        .admit_projection(&f.token(&create, &next, None), 2)
+        .unwrap();
+    assert!(matches!(
+        ledger
+            .guarded_projection(create.id(), 2)
+            .unwrap()
+            .with_publication(Clone::clone)
+            .unwrap(),
+        GuardedProjection::IncompleteSuppressed { .. }
+    ));
+}
+
+#[test]
+fn guarded_shared_held_join_preserves_transitive_heads_and_all_maximal_edits() {
+    let f = Fixture::new();
+    let create = f.create(0, "base");
+    let left = f.action(
+        1,
+        Body::Edit {
+            create: create.id(),
+            text: "left".into(),
+        },
+        vec![create.id()],
+    );
+    let right = f.action(
+        2,
+        Body::Edit {
+            create: create.id(),
+            text: "right".into(),
+        },
+        vec![create.id()],
+    );
+    let join = f.action(
+        3,
+        Body::Join {
+            create: create.id(),
+        },
+        vec![left.id(), right.id()],
+    );
+    let top1 = f.action(
+        4,
+        Body::Edit {
+            create: create.id(),
+            text: "top one".into(),
+        },
+        vec![join.id()],
+    );
+    let top2 = f.action(
+        5,
+        Body::Edit {
+            create: create.id(),
+            text: "top two".into(),
+        },
+        vec![join.id()],
+    );
+    let expected: BTreeSet<_> = [top1.id(), top2.id()].into_iter().collect();
+    let actions = [&create, &left, &right, &join, &top1, &top2];
+    for reverse in [false, true] {
+        let mut ledger = f.ledger();
+        let view = ledger.begin_projection_view();
+        for index in 0..actions.len() {
+            let index = if reverse {
+                actions.len() - 1 - index
+            } else {
+                index
+            };
+            let action = actions[index];
+            ledger.import(action.clone()).unwrap();
+            ledger.authorize(action.id(), f.witness()).unwrap();
+        }
+        for _ in 0..1024 {
+            if !ledger.advance(32).remaining {
+                break;
+            }
+        }
+        assert!(
+            !ledger.has_pending_work(),
+            "finite diamond fixture must settle"
+        );
+        for action in actions {
+            if action.id() != join.id() {
+                ledger
+                    .admit_projection(&f.token(action, &view, None), 100)
+                    .unwrap();
+            }
+        }
+        let heads = ledger
+            .projectable_causal_heads(create.id(), 100)
+            .unwrap()
+            .with_publication(|heads| heads.to_vec())
+            .unwrap();
+        assert_eq!(
+            heads,
+            expected.iter().copied().collect::<Vec<_>>(),
+            "a held Join still carries knowledge of selected ancestors"
+        );
+        let chosen = *expected.last().unwrap();
+        assert!(
+            matches!(ledger.guarded_projection(create.id(), 100).unwrap().with_publication(Clone::clone).unwrap(), GuardedProjection::Visible { selected, .. } if selected == chosen)
+        );
+    }
+}
 fn visible(ledger: &ChatLedger, create: ActionId, expected: &str, certainty: ProjectionCertainty) {
     assert!(
         matches!(result(ledger, create), GuardedProjection::Visible { text, certainty: actual, .. } if text == expected && actual == certainty)

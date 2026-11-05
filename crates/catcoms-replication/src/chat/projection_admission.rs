@@ -646,14 +646,15 @@ impl ChatLedger {
         let mut left = budget;
         match entry.action.spec().body {
             Body::Create { .. } => {
-                for (delete_id, delete) in &self.entries {
+                for delete_id in self.message_action_ids(id) {
                     left = left.checked_sub(1).ok_or(ChatError::WorkLimit)?;
+                    let delete = &self.entries[&delete_id];
                     if delete.prior_delete.is_none()
                         && matches!(delete.action.spec().body, Body::Delete { create } if create == id)
                     {
-                        if let Some(capsule) = self.eligible_capsule(*delete_id, &view, Some(token))
+                        if let Some(capsule) = self.eligible_capsule(delete_id, &view, Some(token))
                         {
-                            capsules.push((*delete_id, capsule));
+                            capsules.push((delete_id, capsule));
                         }
                     }
                 }
