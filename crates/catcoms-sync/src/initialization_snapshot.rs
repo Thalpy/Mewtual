@@ -26,6 +26,10 @@ std::thread_local! {
 pub(super) fn note_encoding() {
     ENCODING_ENTRIES.with(|entries| entries.set(entries.get() + 1));
 }
+#[cfg(test)]
+pub(crate) fn encoding_entries_on_this_thread() -> usize {
+    ENCODING_ENTRIES.with(std::cell::Cell::get)
+}
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Encode exact existing snapshot framing under previously reserved explicit limits.

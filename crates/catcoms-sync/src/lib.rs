@@ -5076,6 +5076,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         capacity: Option<usize>,
         view: Option<&owner_evidence::OwnerMembershipSnapshot<'_>>,
     ) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+        // The V2 founder S0 comparer in owner_v2/founder/snapshot.rs checks EVERY field below
+        // against its immutable original, without resampling a replacement snapshot. Any new
+        // field/order/framing MUST update that closed comparer, its caps and mutation tests too.
         #[cfg(test)]
         initialization_snapshot::note_encoding();
         // `routing` carries the live routing secrets in the clear; zeroize the intermediate

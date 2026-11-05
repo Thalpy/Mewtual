@@ -7,6 +7,7 @@ use rand_core::{RngCore, SeedableRng};
 use tokio::sync::watch;
 
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
+mod snapshot_tests;
 fn found(seed: u64) -> Node {
     ChannelSync::found(
         Hub::new().join(PeerId::from_u64(seed)),

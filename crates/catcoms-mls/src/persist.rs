@@ -26,6 +26,8 @@ mod provider_restore;
 pub use provider_restore::restore_server_provider_bounded;
 mod join_device;
 pub use join_device::{restore_join_device_provider_bounded, snapshot_join_device_bounded};
+mod snapshot_compare;
+pub use snapshot_compare::compare_server_snapshot_bounded;
 
 // Test-only work boundary, local to each synchronous test thread. Mark legacy entry too so a
 // future "serialize everything, then check length" implementation cannot pass refusal tests.

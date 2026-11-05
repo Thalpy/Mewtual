@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## One original founder private S0 DATA (5 November; authored, unexecuted)
+
+`FounderSnapshotLimits` provides checked closed initial-source bounds, never payment or Current.
+`FrozenFounder::cache_private_snapshot` captures ONE zeroizing exact secret S0 after original
+Fresh/scope/public checks and stricter nonmutating initialization preflight. It compares that
+capture to the current provider and every serialized outer field before retaining it. Immutable
+`borrow_private_snapshot_for_covering_save` refuses an uncached or mismatching source and returns
+borrowed private bytes/digest/limits only. Public borrows also perform exact cache/source checks.
+Retries retain the same bytes/digest; changed limits cannot replace them. The MLS comparer holds
+the actual provider guard through physical backing/payload admission and ordered exact row equality,
+with no cloned provider or fresh encoded MLS output. Bounded metadata field encoding remains
+allowed on comparison. No v1 saver/restore gate, App/native command or archive namespace is widened.
+Actual host fee and atomic source/key/scope commit remain required. Ten regressions remain UNRUN.
+[Exact API, resource invoice and limits](communication-recovery/CHAT-OWNER-V2-FOUNDER-S0.md).
+
 ## Private typed record-page DATA (5 November; authored, unexecuted)
 
 `cold_records::{RecordBatch, BatchBinding, RecordSource, encode_record_batch}` uses shared manifest

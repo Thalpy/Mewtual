@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original private founder snapshot equality (5 November; authored, unexecuted)
+
+A cached V2 founder S0 is private DATA, not an epoch-zero/Fresh/current import. Every public or
+private borrow retains original physical Fresh/scope negatives and exact public representations,
+then compares the cached provider rows and ALL allowed outer snapshot fields with the current
+source. An extra KeyPackage can change provider storage without changing epoch; the held-guard
+backing/payload/count/row comparison catches it. Rendezvous/policy/routing/wrapping-key mismatches
+also refuse; no resampling can overwrite the immutable cache. Finalization must be empty before
+the shared encoder, so pruning cannot silently make the source fit. Unknown/v1 tails refuse.
+
+This checks CURRENT exact equality, not all transient mutation history: metadata restored exactly
+before observation may pass. Permanent Fresh/scope revocation remains separately enforced. A DATA
+borrow can outlive external cancellation, so the eventual host must hold its original atomic
+source/key/scope admission at actual storage/export. No fee, positive restore, v1 Saved grant or
+ARCHIVE2 handler is created. Private snapshot/provider/metadata scratch is separate from the
+founder64KiB public invoice; typed SDK, retained metadata spare capacity and active-host memory
+remain separate gates. Ten regressions are authored UNRUN. [Contract](communication-recovery/CHAT-OWNER-V2-FOUNDER-S0.md).
+
 ## Private record-page content consistency (5 November; authored, unexecuted)
 
 The bounded private record codec checks actual typed semantics, complete original-byte digests,

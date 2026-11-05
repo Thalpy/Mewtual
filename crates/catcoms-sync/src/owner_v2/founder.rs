@@ -10,6 +10,8 @@ use catcoms_replication::chat::{
     },
     owner_state::{self, CurrentAdmissionSlot, StateFrame, StateMeta},
 };
+mod snapshot;
+pub use snapshot::{FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits};
 
 /// Conservative logical invoice for the named private public-record/scope/watch/signature
 /// buffers in this producer, NOT a quota debit, SDK/provider heap or active Server bound.
@@ -35,13 +37,14 @@ impl std::fmt::Debug for PreparedFounder {
     }
 }
 
-/// Exact frozen PUBLIC data, not a private MLS snapshot, Saved/current/selected-head witness
-/// or publisher. Retain the same source/negative checks through every trusted-host DATA borrow.
+/// Exact frozen public data with an optional ONE original private S0 cache. Neither is a
+/// Saved/current/selected-head witness or publisher. Every DATA borrow repeats original checks.
 pub struct FrozenFounder {
     original: PreparedFounder,
     profile: Vec<u8>,
     admission: Vec<u8>,
     header: Vec<u8>,
+    snapshot: Option<snapshot::CachedFounderSnapshot>,
 }
 impl std::fmt::Debug for FrozenFounder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -298,6 +301,7 @@ impl PreparedFounder {
             admission: self.admission.encode(),
             header: self.header.encode(),
             original: self,
+            snapshot: None,
         };
         frozen.original.validate_original(node)?;
         Ok(frozen)
@@ -320,6 +324,7 @@ impl FrozenFounder {
         {
             return Err(unavailable());
         }
+        self.check_cached_source(node)?;
         self.original.validate_original(node)?;
         Ok(FounderDataView {
             profile: &self.profile,

@@ -46,6 +46,24 @@ unexposed-negative recovery, independently durable exact repair seeds and unifie
 writer exclusion. It remains unimplemented: namespace mounting, fees, exact grants/seed/source
 codecs, actual head/scope saves and cold/crash acceptance cannot be inferred from that design.
 
+## One cached private founder S0 (5 November; authored, unexecuted)
+
+The same original `FrozenFounder` can now retain ONE bounded zeroizing private SDK/Sync S0 and
+its exact Profile-bound raw digest. Typed limits reject unsupported initial-source sizes before
+work; they are not a paid flag. Source/public checks precede capture, finalization is empty before
+the shared encoder, and exact current provider/outer-field comparison precedes cache admission.
+Both public and immutable private borrows recheck the cache's original Fresh/scope and complete
+current bytes. Extra KP with unchanged epoch, routing/policy/rendezvous/wrapping-key changes,
+take/drop/retire/Add/equal restore and invalid public frames refuse without replacing S0. No
+global mutation-history counter is claimed: byte-exact metadata return may pass current equality.
+
+Two MLS and eight Sync regressions are authored **UNRUN**. Direct rustfmt/diff checks only;
+design and final actual-diff static reviews are clear for this private DATA checkpoint. Original host
+fee/atomic commit, actual archive candidate/storage/namespace/restore and native activation are
+still absent. The separate private raw/provider/metadata invoice does not consume founder64KiB
+or claim whole typed SDK/retained-container/active-host memory bounds. See
+[the exact private source contract](communication-recovery/CHAT-OWNER-V2-FOUNDER-S0.md).
+
 ## Private typed record batches (5 November; authored, unexecuted)
 
 `cold_records` now supplies the bounded actual-content DATA prerequisite for Genesis3,
