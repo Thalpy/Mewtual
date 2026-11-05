@@ -21,6 +21,9 @@ pub(crate) struct ValidatedOwnerSnapshot {
     pub(super) plain: Zeroizing<Vec<u8>>,
     snapshot: Range<usize>,
     pub(super) file_cap: usize,
+    // Captured with the SAME read-fee reservation, never selected by a later caller or reread
+    // from a replacement mount. These are negative resource limits, not runtime authority.
+    restore_limits: catcoms_sync::OwnerInitializationRestoreLimits,
     _fee: ReadFee,
 }
 impl std::fmt::Debug for ValidatedOwnerSnapshot {
@@ -66,6 +69,9 @@ impl ValidatedOwnerSnapshot {
     pub(crate) fn snapshot_digest(&self) -> [u8; 32] {
         self.meta.snapshot
     }
+    pub(crate) fn restore_limits(&self) -> catcoms_sync::OwnerInitializationRestoreLimits {
+        self.restore_limits
+    }
     pub(crate) fn validate_original(&self, store: &ServerStore) -> Result<(), AppError> {
         self.pin.validate_original(store, self.group())?;
         if self.labels.domain != store.chat_vault_domain()? {
@@ -103,7 +109,7 @@ impl ServerStore {
             return Err(refused());
         }
         let identifier = key(pin.group(), &signer);
-        let (cell, cap, fee) = {
+        let (cell, cap, restore_limits, fee) = {
             let mut pool = self
                 .owner_evidence
                 .canonical
@@ -121,6 +127,11 @@ impl ServerStore {
             (
                 cell,
                 budget.snapshot + WRAPPER_FEE + SEALED_FEE,
+                catcoms_sync::OwnerInitializationRestoreLimits {
+                    max_snapshot_bytes: budget.snapshot,
+                    max_mls_bytes: budget.mls,
+                    max_mls_backing_bytes: budget.mls_backing,
+                },
                 ReadFee {
                     pool: Arc::downgrade(&self.owner_evidence.canonical),
                     bytes,
@@ -147,6 +158,7 @@ impl ServerStore {
             plain,
             snapshot,
             file_cap: cap,
+            restore_limits,
             _fee: fee,
         };
         source.validate_original(self)?;

@@ -76,7 +76,9 @@ pub mod checkpoint_exchange;
 pub mod durable_chat;
 pub mod epoch_service;
 mod group_policy;
+mod initialization_restore;
 mod initialization_snapshot;
+pub use initialization_restore::OwnerInitializationRestoreLimits;
 pub mod local_chat_scope;
 pub mod owner_evidence;
 mod owner_tenure;
@@ -2285,6 +2287,10 @@ pub enum SyncError {
     ChatScopeUnavailable,
     #[error("CHAT_SCOPE_MIGRATION_PENDING: retained original recovery needs another owner turn")]
     ChatScopeMigrationPending,
+    /// The private first-owner checkpoint never truncates history, receipts or unsupported
+    /// inventories to fit its bounded restore grammar. General restore remains separate.
+    #[error("saved state is outside the supported owner initialization checkpoint")]
+    OwnerInitializationUnsupported,
     /// A join request was rejected by the inviter.
     #[error("join request rejected")]
     JoinRejected,
@@ -5152,6 +5158,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         rng: R,
         clock: Box<dyn Clock + Send>,
     ) -> Result<Self, SyncError> {
+        Self::restore_with_mls(
+            snapshot,
+            transport,
+            rng,
+            clock,
+            initialization_restore::MlsDecode::Legacy,
+        )
+    }
+
+    // One common body, with one actual MLS load. Keeping the strategy a private enum avoids
+    // monomorphizing this entire compatibility decoder again for a second closure type.
+    fn restore_with_mls(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        mls_decode: initialization_restore::MlsDecode,
+    ) -> Result<Self, SyncError> {
+        #[cfg(test)]
+        initialization_restore::note_decoder_entry();
         let bad = || SyncError::Malformed;
         let mut d = Decoder::new(snapshot);
         let mls = d.get_bytes().map_err(|_| bad())?.to_vec();
@@ -5303,7 +5329,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // `adopt_routing_state` then replaces it with the persisted label + secrets. The
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
-        let (device, group) = restore_server(&mls)?;
+        let (device, group) = mls_decode.restore(&mls)?;
         let mut durable_chat = match durable_chat_bytes {
             Some(bytes) => durable_chat::DurableChatState::decode(bytes, &device)?,
             None => Default::default(),

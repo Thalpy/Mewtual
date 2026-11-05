@@ -101,6 +101,12 @@ impl ServerStore {
 }
 
 impl PrivateManagedRestoreAttempt {
+    /// Negative limits captured with this original source's actual read reservation. Inspecting
+    /// them cannot choose new caps, construct a source or authorize a runtime owner.
+    pub(crate) fn restore_limits(&self) -> catcoms_sync::OwnerInitializationRestoreLimits {
+        self.source.restore_limits()
+    }
+
     /// Decode synchronously and privately under the original charged source. This performs no
     /// networking/owner run. Actual self-removal is NEVER bypassed to obtain a runnable Server:
     /// retired sources were classified above, and ordinary positive MLS restore stays strict.
@@ -122,8 +128,15 @@ impl PrivateManagedRestoreAttempt {
                 if !preparation.mount.is_cancelled() && !preparation.admission.is_cancelled() => {}
             _ => return Err(refused()),
         }
-        let mut server =
-            Server::restore(self.source.snapshot(), transport, rng, clock, display_name)?;
+        let limits = self.restore_limits();
+        let mut server = Server::restore_owner_initialization(
+            self.source.snapshot(),
+            transport,
+            rng,
+            clock,
+            display_name,
+            limits,
+        )?;
         // No await, callback, network entry or Server borrow occurs before mandatory managed
         // classification, including if future decoders encounter a captured legacy no-tail.
         server.sync.require_managed_chat_scope();

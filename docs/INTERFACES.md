@@ -189,6 +189,21 @@ are Decoded, Unsupported, TooLarge or Invalid. Refusal keeps exact raw bytes rea
 no document or ingestion policy. Expanded actor-name cloning has its own bounded cost beyond
 the raw ceiling. These primitives supply no authorization themselves. The bounded Server/Actor,
 native DTO and admin panel consumers are described above; complete graph/typed coverage is open.
+## Closed initial owner restore (5 November; authored, unexecuted)
+
+The opaque canonical generation-1 source captures `OwnerInitializationRestoreLimits` from the SAME
+configured budget that issued its retained read fee. Private App restore consumes those exact limits
+through `ChannelSync::restore_owner_initialization`; no later caller chooses a larger cap. Borrowed
+outer/checkpoint metadata and owner-fact count scans precede the common decoder's first clone. Its
+bounded MLS strategy preflights nested provider storage before provider allocation/SDK load, using
+`restore_server_provider_bounded` once. Unsupported history, receipts, aliases,
+responses and later tails refuse with `OwnerInitializationUnsupported`, preserving original source.
+Legacy generic restore behavior and bytes are unchanged. Syntax-only signed-fact preflight is not
+signature verification or authority. Exact original pin, Current, file/parent and head/writer barriers
+still govern final transfer. This does not support generation-2 operation snapshots, SDK typed-heap
+accounting, active-host resource admission or production activation. Eleven regressions are authored;
+compilation/tests/builds remain paused. See the
+[closed restore contract](communication-recovery/CHAT-OWNER-CHECKPOINT-RESTORE-BOUND.md).
 
 ## Dormant owner-fact semantic verifier (30 October)
 

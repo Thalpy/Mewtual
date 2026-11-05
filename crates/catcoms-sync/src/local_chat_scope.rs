@@ -231,6 +231,44 @@ impl LocalChatScope {
         Ok(Some(encoded))
     }
 
+    /// Borrow the first-initialization subset before generic restore can allocate aliases or
+    /// load MLS. Exact original group/key labels are scope metadata, never a live binding.
+    pub(crate) fn preflight_owner_initialization(
+        bytes: &[u8],
+        group: &[u8],
+        signer: &[u8],
+    ) -> Result<(), SyncError> {
+        let bad = || SyncError::Malformed;
+        if bytes.len() > 512 {
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
+        let mut decoder = Decoder::new(bytes);
+        if decoder.get_str().map_err(|_| bad())? != TAG
+            || decoder.get_bytes().map_err(|_| bad())? != group
+            || decoder.get_bytes().map_err(|_| bad())? != signer
+            || decoder.get_bytes().map_err(|_| bad())?.len() != 32
+            || decoder.get_bytes().map_err(|_| bad())?.len() != 32
+        {
+            return Err(bad());
+        }
+        match decoder.get_u8().map_err(|_| bad())? {
+            0 => {} // the candidate is privately staged Active BEFORE its canonical save
+            1 | 2 => return Err(SyncError::OwnerInitializationUnsupported),
+            _ => return Err(bad()),
+        }
+        let aliases = decoder.get_u32().map_err(|_| bad())? as usize;
+        // Each alias requires at least five framed32-byte fields plus16B channel, action,
+        // encoded-original framing and its remaining metadata. Use a conservative minimum;
+        // this path rejects ALL nonempty aliases rather than dropping accepted originals.
+        if aliases > decoder.remaining() / 201 {
+            return Err(bad());
+        }
+        if aliases != 0 {
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
+        decoder.finish().map_err(|_| bad())
+    }
+
     pub(super) fn decode(
         bytes: &[u8],
         group: &ServerGroup,

@@ -10,6 +10,7 @@ use catcoms_crypto::verify_with_public_bytes;
 use catcoms_wire::{Decoder, Encoder};
 
 mod authority;
+mod initialization;
 pub use authority::{OwnerBasisFacts, OwnerProfileExpectation};
 
 const FACT_DOMAIN: &[u8] = b"mewtual/chat/owner-fact/v1\0";

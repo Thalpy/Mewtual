@@ -5,6 +5,51 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[test]
+fn actual_selected_kp_member_initialization_restores_through_closed_provider_strategy_without_authority(
+) {
+    let mut f = fixture();
+    let verified = verify(&f.member, &f.expected, &f.facts).unwrap();
+    f.member
+        .stage_managed_chat_scope([21; 32], [22; 32])
+        .unwrap();
+    f.member
+        .stage_joined_owner_evidence_checkpoint(&verified)
+        .unwrap();
+    let limits = crate::OwnerInitializationRestoreLimits {
+        max_snapshot_bytes: 1024 * 1024,
+        max_mls_bytes: 512 * 1024,
+        max_mls_backing_bytes: 512 * 1024,
+    };
+    let bytes = f
+        .member
+        .snapshot_owner_initialization(
+            limits.max_snapshot_bytes,
+            limits.max_mls_bytes,
+            limits.max_mls_backing_bytes,
+        )
+        .unwrap();
+    let original = f.member.group.epoch_authenticator_id();
+    let restored = ChannelSync::restore_owner_initialization(
+        &bytes,
+        Hub::new().join(PeerId::from_u64(0xf101)),
+        ChaCha20Rng::seed_from_u64(0xf101),
+        Box::new(ManualClock::new(2_000)),
+        limits,
+    )
+    .unwrap();
+    assert_eq!(restored.group.epoch_authenticator_id(), original);
+    assert_eq!(restored.device.device_id(), f.member.device.device_id());
+    assert_eq!(
+        restored.owner_evidence_profile_id(),
+        Some(verified.profile_id())
+    );
+    assert!(restored.fresh_chat_admission().is_none());
+    assert!(restored.durable_send_context().is_err());
+    // This proves exact-KP/codec restoration only; no remote fsync, local Current or native
+    // host resource admission is inferred from these test-supplied negative caps.
+}
+
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
 struct Fixture {
     owner: Node,

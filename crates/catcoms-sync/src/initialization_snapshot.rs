@@ -12,10 +12,10 @@ use super::*;
 // <=1024+128+8B (9280B); tenure <=256B; policy <=4101B; admin <=64*36+4B;
 // scope <=512B; <=8 small owner facts/tail <33KiB. Reserve64KiB for all outer framing.
 // New variable fields MUST enter this preflight/invoice before the shared encoder changes.
-const METADATA_FEE: usize = 64 * 1024;
-const MAX_INITIAL_RENDEZVOUS: usize = 8;
-const MAX_INITIAL_ADMINS: usize = 64;
-const MAX_INITIAL_FINALIZATIONS: usize = 8;
+pub(super) const METADATA_FEE: usize = 64 * 1024;
+pub(super) const MAX_INITIAL_RENDEZVOUS: usize = 8;
+pub(super) const MAX_INITIAL_ADMINS: usize = 64;
+pub(super) const MAX_INITIAL_FINALIZATIONS: usize = 8;
 const MAX_INITIAL_FINALIZATION_CAPACITY: usize = 16;
 
 #[cfg(test)]

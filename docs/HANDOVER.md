@@ -54,6 +54,9 @@ possible source bytes; native automatic restart and exact stage-only repair rema
 The bounded MLS encoder now checks actual provider-table backing and retained Vec capacities under
 the same guard, through a narrow exact-pinned storage patch shared by both workspaces. Its new
 regressions are also unexecuted; SDK restore expansion and active-host admission remain open.
+The actual generation-1 canonical reopen now consumes a complete borrowed checkpoint preflight
+before common-decoder field copies and the bounded provider restore before its map/SDK load.
+Its 11 authored regressions are unexecuted; generation-2 operation restore is a separate open gate.
 Offline dependency metadata resolves both local patches in both workspaces without compilation
 or package-version updates. The direct MLS-to-storage dependency is retained in both lockfiles.
 Membership candidate/strict operation persistence is still in progress. The old bounded checkpoint profile remains
@@ -187,6 +190,20 @@ DTO conversion, original-session authorization and actual App/admin-panel integr
 These helpers are not an implemented full ledger view or activation of typed chat.
 
 ## Integrated text-chat validation (29 October; local gates passed)
+## Closed first-owner restore consumer (5 November; authored, unexecuted)
+
+The actual private canonical generation-1 restore now borrows/preflights outer Sync framing and bounded
+checkpoint metadata before the common decoder clones fields. Its nested provider-map preflight runs
+inside the bounded MLS strategy before provider allocation/SDK load. The source retains its exact
+read-fee budget limits; the provider decoder runs once. Ordinary legacy restore
+retains its original grammar. Original owner facts also receive a borrowed syntax/count scan; this
+does not verify signatures or historical authority. Eleven new regressions cover actual founder and
+fresh-KP member restores, inner/outer count bombs, unsupported obligations, exact byte caps, original
+legacy signed history and actual opaque-source refusal with unchanged retained bytes/read-fee release.
+They are unexecuted under the user compilation pause; only static formatting/diff checks ran.
+Generation-2 operation restore, full SDK heap bounds and active/native host admission remain open.
+See [the consumed checkpoint contract](communication-recovery/CHAT-OWNER-CHECKPOINT-RESTORE-BOUND.md).
+
 ## Unexposed owner initialization recovery (5 November; authored, unexecuted)
 
 The real canonical restore entry now classifies a Fresh Initializing reservation with no registered

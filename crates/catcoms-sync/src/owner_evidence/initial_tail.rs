@@ -235,6 +235,37 @@ impl InitialOwnerEvidence {
         }
         Ok(encoder.finish())
     }
+    /// Complete borrowed initialization grammar, including counted fields INSIDE original
+    /// small signed facts, before the common restore decoder can clone or enter OpenMLS.
+    /// This creates no verified fact, trusted root, runtime observer or authority witness.
+    pub(crate) fn preflight_owner_initialization(bytes: &[u8]) -> Result<(), SyncError> {
+        let bad = || SyncError::Malformed;
+        if bytes.len() > MAX_BYTES {
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
+        let mut decoder = Decoder::new(bytes);
+        if decoder.get_str().map_err(|_| bad())? != TAG
+            || decoder.get_bytes().map_err(|_| bad())?.len() != 32
+        {
+            return Err(bad());
+        }
+        let count = decoder.get_u32().map_err(|_| bad())? as usize;
+        if count == 0 || count > decoder.remaining() / 4 {
+            return Err(bad());
+        }
+        if count > MAX_FACTS {
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
+        for _ in 0..count {
+            let raw = decoder.get_bytes().map_err(|_| bad())?;
+            SignedOwnerFact::preflight_initialization(raw).map_err(|error| match error {
+                ChatError::Bound => SyncError::OwnerInitializationUnsupported,
+                _ => SyncError::Malformed,
+            })?;
+        }
+        decoder.finish().map_err(|_| bad())
+    }
+
     pub(crate) fn decode(bytes: &[u8], group: &[u8]) -> Result<Self, SyncError> {
         let bad = || SyncError::Malformed;
         if bytes.len() > MAX_BYTES {

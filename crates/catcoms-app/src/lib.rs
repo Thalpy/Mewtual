@@ -4135,8 +4135,31 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         display_name: impl Into<String>,
     ) -> Result<Self, AppError> {
         let sync = ChannelSync::restore(snapshot, transport, rng, clock)?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    /// Actual opaque canonical checkpoint restore only. Borrowed outer/metadata preflight
+    /// precedes common-decoder clones; nested provider-map admission precedes its allocation
+    /// and SDK load inside the bounded MLS decoder.
+    /// This confers no Current/head/pin or fresh-admission authority; the original factory
+    /// consumer must still cross its exact saved/current/head handoff. Typed SDK heap and
+    /// active-server resource admission are separately required before production activation.
+    pub(crate) fn restore_owner_initialization(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+    ) -> Result<Self, AppError> {
+        let sync =
+            ChannelSync::restore_owner_initialization(snapshot, transport, rng, clock, limits)?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    fn from_restored_sync(sync: ChannelSync<T, R>, display_name: impl Into<String>) -> Self {
         let device_id = sync.device_id();
-        Ok(Self {
+        Self {
             sync,
             display_name: display_name.into(),
             device_id,
@@ -4146,7 +4169,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
-        })
+        }
     }
 
     /// This server's MLS group id (stable across restarts); keys its on-disk blob directory.

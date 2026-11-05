@@ -68,10 +68,15 @@ impl ServerStore {
         signer: [u8; 32],
     ) -> Result<OwnerRestoreClassification, AppError> {
         let identity = crate::store::ChatAdmissionKey::new(group, signer)?;
-        if let Some(unexposed) = self.try_prepare_unexposed_owner_initialization(&identity)? {
-            return Ok(OwnerRestoreClassification::UnexposedInitialization(
-                unexposed,
-            ));
+        // Source-absent negative recovery proves only the v4 canonical namespace. A v5
+        // operation journal may retain another possible terminal and needs its own fence;
+        // keep that negative gate closed while still permitting positive known-source open.
+        if self.chat_vault_format()? == catcoms_storage::VaultFormat::OwnerEvidence {
+            if let Some(unexposed) = self.try_prepare_unexposed_owner_initialization(&identity)? {
+                return Ok(OwnerRestoreClassification::UnexposedInitialization(
+                    unexposed,
+                ));
+            }
         }
         let pin = self.capture_mounted_owner_profile(group)?;
         let source = self.prepare_owner_canonical_restore(pin, signer)?;

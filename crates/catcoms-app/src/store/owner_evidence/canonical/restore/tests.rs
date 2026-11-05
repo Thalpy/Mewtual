@@ -304,3 +304,89 @@ fn authenticated_stripped_owner_tail_refuses_before_any_reservation_attachment()
         0
     );
 }
+
+#[test]
+fn actual_canonical_consumer_uses_captured_restore_limits_and_preserves_unsupported_history_source()
+{
+    let directory = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xf201);
+    let store = open(directory.path(), &mut rng);
+    let mut initial = founder(&store, 0xf201);
+    let owned = initial.retry(&store, &mut rng).unwrap();
+    let group = owned.group();
+    let signer = *owned.founder();
+    let path = directory
+        .path()
+        .join("owner-state")
+        .join(format!("{}.bin", hex::encode(key(&group, &signer))));
+    let original = fs::read(&path).unwrap();
+    let plain = Zeroizing::new(
+        unseal(
+            &store.keys.db_key().unwrap(),
+            &crate::store::unframe(&original).unwrap(),
+        )
+        .unwrap(),
+    );
+    let mut decoder = Decoder::new(&plain);
+    let mut replacement = Encoder::new();
+    replacement.put_str(decoder.get_str().unwrap()).unwrap();
+    for _ in 0..5 {
+        replacement.put_bytes(decoder.get_bytes().unwrap()).unwrap();
+    }
+    replacement.put_u64(decoder.get_u64().unwrap());
+    replacement.put_u64(decoder.get_u64().unwrap());
+    for _ in 0..2 {
+        replacement.put_bytes(decoder.get_bytes().unwrap()).unwrap();
+    }
+    let snapshot = decoder.get_bytes().unwrap();
+    decoder.finish().unwrap();
+    let mut original_body = Decoder::new(snapshot);
+    for _ in 0..3 {
+        original_body.get_bytes().unwrap();
+    }
+    let document_count = snapshot.len() - original_body.remaining();
+    assert_eq!(original_body.get_u32().unwrap(), 0);
+    let mut unsupported = Zeroizing::new(snapshot.to_vec());
+    unsupported[document_count..document_count + 4].copy_from_slice(&1u32.to_be_bytes());
+    replacement.put_bytes(&unsupported).unwrap();
+    let replacement = Zeroizing::new(replacement.finish());
+    let sealed = seal(&store.keys.db_key().unwrap(), &replacement, &mut rng).unwrap();
+    let retained = crate::store::frame(&sealed);
+    // Authenticated malformed local source fixture, NOT a claim that a peer without the DB key
+    // can rewrite canonical state. Reopen removes the old in-process known-head memo so this
+    // exercises the actual source decoder/private restore, not an earlier memo mismatch.
+    drop(owned);
+    drop(initial);
+    fs::write(&path, &retained).unwrap();
+    drop(store);
+    let store = open(directory.path(), &mut rng);
+    let OwnerRestoreClassification::Current(prepared) = store
+        .prepare_owner_evidence_restore(&group, signer)
+        .unwrap()
+    else {
+        panic!("exact sealed external lineage is Current, not a fresh admission");
+    };
+    let limits = prepared.attempt.restore_limits();
+    assert_eq!(limits.max_snapshot_bytes, 1024 * 1024);
+    assert_eq!(limits.max_mls_bytes, 512 * 1024);
+    assert_eq!(limits.max_mls_backing_bytes, 512 * 1024);
+    let refused = prepared.restore_private(
+        &store,
+        Hub::new().join(PeerId::from_u64(0xf202)),
+        ChaCha20Rng::seed_from_u64(0xf202),
+        Box::new(ManualClock::new(2_000)),
+        "unsupported history remains retained",
+    );
+    assert!(matches!(
+        refused,
+        Err(AppError::Sync(
+            catcoms_sync::SyncError::OwnerInitializationUnsupported
+        ))
+    ));
+    assert_eq!(fs::read(path).unwrap(), retained);
+    assert_eq!(
+        store.owner_evidence.canonical.lock().unwrap().hot_bytes,
+        0,
+        "actual original read fee drops on refusal outside any final writer"
+    );
+}
