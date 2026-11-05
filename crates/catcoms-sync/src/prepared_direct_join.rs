@@ -12,6 +12,31 @@ const MAX_KEY_PACKAGE_BYTES: usize = 32 * 1024;
 mod sealed_source;
 pub use sealed_source::{RecoveredDirectJoinSource, SealedDirectJoinSource};
 
+/// Exact inert request labels for a local sealed-journal binding. No field can admit a device,
+/// reopen an admission or finish a join; the original actual source and mounted capture remain
+/// mandatory. Hashes cover complete canonical bytes, not rendered invite hints or PeerIds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DirectJoinRequestIdentity {
+    invite_nonce: [u8; 16],
+    invite: [u8; 32],
+    request: [u8; 32],
+    package: [u8; 32],
+}
+impl DirectJoinRequestIdentity {
+    pub fn invite_nonce(&self) -> &[u8; 16] {
+        &self.invite_nonce
+    }
+    pub fn invite_digest(&self) -> &[u8; 32] {
+        &self.invite
+    }
+    pub fn request_digest(&self) -> &[u8; 32] {
+        &self.request
+    }
+    pub fn package_reference(&self) -> &[u8; 32] {
+        &self.package
+    }
+}
+
 /// Resource metadata, not proof of payment, Fresh membership or a saved result. The actual App
 /// client derives these limits from its retained original creation fee and keeps that owner.
 #[derive(Clone, Copy)]
@@ -94,6 +119,20 @@ impl CompletedDirectJoin {
 }
 
 impl PreparedDirectJoin {
+    /// Bounded canonical invite DATA hash before a journal chooses whether an exact retained
+    /// source already exists. This mints no package and authenticates no membership/root.
+    pub fn invite_data_digest(invite: &InviteToken) -> Result<[u8; 32], SyncError> {
+        preflight_invite(invite)?;
+        let encoded = invite.encode();
+        if encoded.len() > MAX_INVITE_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        Ok(blake3::derive_key(
+            "catcoms/destination-invite-data/v1",
+            &encoded,
+        ))
+    }
+
     /// Mint exactly ONCE before network work, snapshot that actual private material, then drop
     /// the original mutable device. Provider raw capacities/output are preflighted. The input
     /// Invite is re-materialized from bounded canonical frames so spare caller Vec/String
@@ -165,6 +204,24 @@ impl PreparedDirectJoin {
     }
     pub fn inviter_device_id(&self) -> DeviceId {
         self.invite.inviter_device_id
+    }
+
+    /// Borrowed canonical request framing precedes hashing; no secret snapshot or selected key
+    /// is exported. This is DATA for the actual journal producer's immutable binding only.
+    pub fn request_identity(&self) -> Result<DirectJoinRequestIdentity, SyncError> {
+        let mut input = Decoder::new(&self.request);
+        if input.get_u8().map_err(|_| SyncError::Malformed)? != KIND_JOIN {
+            return Err(SyncError::Malformed);
+        }
+        let invite = input.get_bytes().map_err(|_| SyncError::Malformed)?;
+        input.get_bytes().map_err(|_| SyncError::Malformed)?;
+        input.finish().map_err(|_| SyncError::Malformed)?;
+        Ok(DirectJoinRequestIdentity {
+            invite_nonce: self.invite.invite_nonce,
+            invite: blake3::derive_key("catcoms/destination-invite-data/v1", invite),
+            request: blake3::derive_key("catcoms/destination-request-data/v1", &self.request),
+            package: self.expected,
+        })
     }
 
     /// Retry the original bytes. Caller MUST bound the whole direct/pushed exchange with its

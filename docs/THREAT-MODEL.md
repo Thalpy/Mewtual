@@ -5716,3 +5716,17 @@ remint keys. It creates no public runnable/recovered join adapter: actual mounte
 original row/intent, pin and negative worker lease remain mandatory future enforcement. Same-key
 component replay and a caller holding the vault key are not resolved by encrypted data alone.
 This slice enables neither JOIN1 nor native Chat V2 and makes no complete SDK/global memory claim.
+
+### Configured Pending join source custody
+
+The inactive configured JOIN1 checkpoint blocks the old App join factory before mint/send, saves
+one exact original source under complete-parent/catalog and original admission CAS, and supports
+five retained source DATA rows with at most one Active. No decoded scheduling/phase gives network,
+Fresh, Current or ready authority. Exact same-key source coalescing cannot retarget root-kind1
+into a public-owner-v2 Profile or replace the original package for a changed invite. In-process
+partial repair uses an actual retained created File, regular same SessionId and exact-prefix
+verification; unknown/foreign/cold partial sources preserve/refuse. This uses the existing
+non-hostile live private-vault-directory assumption, not an exclusive/no-hardlink or external
+export atomic-path guarantee. Source/worker/native activation and ScopeIntent/Frozen/terminal
+publication remain separate; no earlier exact-v4 negative/S1 gate is widened. Full SDK/global
+resource admission and physical cold-crash acceptance remain open.

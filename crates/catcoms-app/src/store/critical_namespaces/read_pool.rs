@@ -35,6 +35,16 @@ impl std::fmt::Debug for CriticalCatalogReadPool {
     }
 }
 impl CriticalCatalogReadPool {
+    #[cfg(test)]
+    pub(in crate::store) fn read_entries_for_test(&self) -> usize {
+        self.inner.entries.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(in crate::store) fn charged_for_test(&self) -> usize {
+        self.inner.state.lock().expect("test catalog account").used
+    }
+
     /// Set a trusted local logical hard capacity; never initialize this from decoded journal
     /// limits or untrusted IPC. Construction reserves no buffers and promises no physical RAM.
     pub fn new(capacity: usize) -> Result<Self, AppError> {

@@ -40,10 +40,62 @@ uncertain catalog state wait for its resolution. No catalog mutex stays held aft
 over network work. Unknown cold sources still refuse before exposing any unsupported handler.
 All mutation remains in Store persistence.
 
+## First connected Pending-only implementation boundary
+
+The first configured opener/handler may support only JOIN1 Pending with Active/Paused scheduling.
+It must refuse all later progress and ID2 before old gates, even though their future tags are
+reserved here. Normal unconfigured open remains Empty512. The trusted local policy supplies the
+SAME explicit shared catalog pool and a persistent allowance for both fixed files; saved fields
+cannot configure that account. No runtime handler or source support is inferred from an ID.
+
+The actual producer must capture the real finite-checkpoint ready root, original destination row,
+creation fee and mount BEFORE constructing/sealing an original Prepared source. It saves Pending
+through the actual fixed catalog transaction before exposing any network method. The returned
+new opaque preparation has no old unjournalled initializer/retry/ready adapter. A later actual
+mounted resume bridge must consume the catalog capture and original source; private Welcome
+completion remains unavailable to publication until ScopeIntent/FrozenCandidate/Settled consumers
+land. Persisting source DATA alone is not a complete durable client.
+
+Pending immutable metadata contains source nonce, vault domain, explicit protocol1/root-kind1,
+full group/signer/Profile/founder, exact invite digest/nonce, request digest, selected reference
+and original optional admission basis. Its canonical complete hash is the sealed-source binding.
+Scheduling revision is separate. The whole catalog stage either duplicates exact current plaintext
+or names its checked next generation and COMPLETE predecessor hash. Closed Pending transitions
+only add one original source or pause/resume one exact source; all other rows and immutable fields
+must remain byte-equivalent. No removal, secret replacement, phase laundering or matching-JOIN-only
+comparison can authorize promotion. Before new declarations, resolve any uncertain catalog writer.
+
+One per-mount shared catalog serializer owns metadata and at most ONE retained encoded pending
+candidate. Encoding/crypto/large allocation happen before taking final original admission ->
+catalog guards; those repeat exact source/row/scheduling/complete-parent CAS before synchronous
+fixed-destination I/O. The pending candidate and its fee outlive every ambiguous write outcome.
+No second candidate or waiter may overtake it, and no mutex is kept after returning a refusal.
+Startup authenticates/preflights BOTH complete fixed inputs before old gates or settling either.
+It preserves foreign, unknown or incomparable stages, and settles only the exact known closed
+successor using actual opened-file/root barriers. A renamed-current retry still syncs the actual
+source; catalog visibility is not its durability witness.
+
+Dormant runtime slots retain only bounded fixed metadata, digests and source ranges, never full
+plaintext masters. A selected source is reread from the exact current catalog under original
+metadata/file identity and a separately debited copy fee; its authenticated binding is rechecked
+before any recovered DATA is offered to the actual mounted consumer. Pausing durably records the
+transition and revokes the old active worker; another active slot may then be admitted. Unchanged
+independently admitted namespace/control dependencies do not wait for this worker. ID2 remains
+unsupported until its real handler exists, so no archive progress acceptance is claimed yet.
+
+The implementing fee table must enumerate fixed row metadata using its actual struct sizes plus
+bounded group/source-label backing, whole read classification scratch `(F+1)+2U`, writer `C+U+F`,
+and the selected sealed-source/master/request/decrypt/encoding copies under separate strong fees.
+An existing creation fee is not silently presumed to cover these new overlapping copies. Its
+raw-provider allowance remains original and separately retained; SDK typed heap/global/lower
+transport admission stay open. At most two fixed catalog files plus one in-memory candidate are
+allowed; no unbounded retry staging names or eviction of ambiguous keys are introduced.
+
 ## Slots and duplicate intent
 
-Admit one active attempt plus four retained paused attempts, with a separate explicit persistent/
-hot allowance. Pausing preserves the original private source and frees scheduling capacity only
+Admit FIVE retained attempts TOTAL with at most one Active, with a separate explicit persistent/
+hot allowance. All five may be Paused so a full pool can durably pause an unreachable Active
+source and then resume another without admitting a sixth source or requiring two Active workers. Pausing preserves the original private source and frees scheduling capacity only
 after its durable transition; it does not undo a remote Add or authorize minting another package.
 A full retained pool refuses a new attempt rather than evicting ambiguous keys. This is a local
 concurrency/resource policy, not a group-member or lifetime-admission cutoff.

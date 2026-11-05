@@ -47,6 +47,26 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for OwnerJoinedInitiali
     }
 }
 impl ServerStore {
+    /// Inactive Pending-only durable checkpoint producer. Its opaque result deliberately has
+    /// no network/old initializer/ready adapter until original mounted resume, ScopeIntent and
+    /// exact FrozenCandidate/terminal saving are connected. This is the only join preparation
+    /// admitted on an explicitly configured Pending mount; normal mounts retain their old API.
+    pub fn prepare_journalled_owner_checkpoint_join<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        source_store: &ServerStore,
+        source: &OwnedOwnerServer<T, R>,
+        device: MlsDevice,
+        invite: InviteToken,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<crate::store::JournalledCheckpointJoinPreparation, AppError> {
+        if !self.pending_join_policy_enabled() {
+            return Err(refused());
+        }
+        let creation = self.reserve_pending_owner_creation()?;
+        let pin = self.capture_ready_owner_profile(source_store, source)?;
+        self.prepare_pending_checkpoint_join(device, invite, pin, creation, rng)
+    }
+
     /// Explicit trusted-process CHECKPOINT path from an actual opaque ready source. Source
     /// Current/head is captured then released before destination pin checks; no cross-Store
     /// writer is held across handshake. Remote production input needs the signed v2 invite.
@@ -57,6 +77,11 @@ impl ServerStore {
         device: MlsDevice,
         invite: InviteToken,
     ) -> Result<OwnerCheckpointJoinAttempt, AppError> {
+        // A configured join journal owns exact invite/KP custody. The old path must not mint
+        // a replacement package even while the catalog is Empty, nor consume a retained invite.
+        if self.pending_join_policy_enabled() {
+            return Err(refused());
+        }
         let creation = self.reserve_pending_owner_creation()?;
         let pin = self.capture_ready_owner_profile(source_store, source)?;
         let attempt = self.private_managed_join_attempt(device, invite, pin, creation)?;

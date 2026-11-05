@@ -8077,3 +8077,16 @@ inert labels only and NO finish/into-Prepared/plaintext adapter. It is not mount
 Current/Saved authority. Actual fees and mounted-source resume admission remain caller/next-stage
 gates; legacy join bytes and expiry policy for new admission are unchanged. See
 [sealed source contract](communication-recovery/CHAT-SEALED-DIRECT-JOIN-SOURCE.md).
+
+### Explicit Pending-only join catalog checkpoint
+
+`PendingJoinCatalogPolicy` + `ServerStore::open_with_pending_join_catalog` configure only a NEW,
+already-v6 physical mount. Default open stays Empty-only and old unjournalled checkpoint join
+preparation is refused on configured mounts before reserve/mint. The actual ready-source
+`prepare_journalled_owner_checkpoint_join` returns opaque DATA with save/pause/resume methods,
+no transport/old-initializer/ready conversion. It coalesces exact retained invites/keys and keeps
+uncertain ciphertext/original/fee in Store for exact retry. Whole catalog-v2 parent/generation
+and source-basis CAS precede fixed I/O; no callback declares unknown namespaces supported.
+ARCHIVE2/root-kind2 and non-Pending phases remain closed. See
+[Pending contract](communication-recovery/CHAT-PENDING-JOIN-CATALOG-CHECKPOINT.md). All13 new
+regressions remain UNRUN; native/SDK/global/activation and full cold-partial recovery stay open.

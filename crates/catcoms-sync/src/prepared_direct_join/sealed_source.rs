@@ -144,6 +144,9 @@ impl RecoveredDirectJoinSource {
     pub fn source_binding(&self) -> &[u8; 32] {
         &self.binding
     }
+    pub fn request_identity(&self) -> Result<DirectJoinRequestIdentity, SyncError> {
+        self.original.request_identity()
+    }
 }
 
 impl PreparedDirectJoin {

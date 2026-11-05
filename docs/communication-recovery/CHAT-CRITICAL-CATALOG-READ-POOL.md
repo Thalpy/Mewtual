@@ -1,5 +1,12 @@
 # Critical catalog read pool (5 November; authored, unexecuted)
 
+Current extension: an explicitly configured private Pending-only JOIN1 handler now has a larger
+actual shared invoice and original fixed-file producer. Normal/Empty readers keep this document's
+Empty-only behavior and refuse the new catalog-v2 tag. No ARCHIVE2, network/ready or native
+activation follows. See [Pending checkpoint](CHAT-PENDING-JOIN-CATALOG-CHECKPOINT.md); tests remain
+UNRUN during the compilation pause. The earlier Empty prerequisite below remains unchanged.
+
+
 This is a narrow App-layer resource owner for configured catalog opening. It does not authorize
 a namespace, create owner/Fresh/Current/Saved evidence, activate native Chat V2, or measure process
 RSS/SDK/KDF heaps. The current v6 handler remains generation1/EMPTY only. No compiler, tests or

@@ -143,6 +143,9 @@ impl ServerStore {
         expected_profile: CapturedOwnerProfilePin,
         creation: OwnerPendingCreation,
     ) -> Result<PrivateManagedJoinAttempt, AppError> {
+        if self.pending_join_policy_enabled() {
+            return Err(refused());
+        }
         // Choosing a root is an explicit trusted invitation/configuration decision. A Profile
         // downloaded after Welcome, roster entry or self-signed body cannot replace this input.
         expected_profile.validate_original(self, &invite.group_id)?;

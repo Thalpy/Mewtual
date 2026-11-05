@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Pending-only join catalog (5 November; authored, unexecuted)
+
+An explicit private configured v6 opener now supports sealed Pending JOIN1 DATA while ordinary
+open stays Empty-only. A genuine ready-root producer retains/coalesces the exact original keys/
+request, blocks the old unjournalled join path, and saves through original admission/catalog CAS.
+Five sources total may all pause; only one may be Active. Store keeps an uncertain exact output/
+original/fee after caller Drop and repairs its own held-file short write without resealing.
+Foreign/cold partial sources preserve/refuse. Thirteen tests are authored/UNRUN; no compiler or
+suite ran. Read-only design and actual-diff reviews are clear. There is NO network/old-initializer/ready adapter,
+production root-kind2 invitation, ARCHIVE2 support, or full SDK/native/global admission claim.
+ScopeIntent/FrozenCandidate/terminal/native activation and cold partial recovery remain open.
+[Contract](communication-recovery/CHAT-PENDING-JOIN-CATALOG-CHECKPOINT.md).
+
+
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.

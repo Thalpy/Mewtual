@@ -1,9 +1,11 @@
-//! Pre-cleaner critical-format catalog. EMPTY is the only supported namespace set today.
+//! Pre-cleaner critical-format catalog. The DEFAULT reader supports only EMPTY; the explicit
+//! private Pending-only policy below has its own bounded parser, source producer and invoice.
 //!
-//! This is deliberately not a join/archive implementation. A nonempty candidate, including an
-//! otherwise well-framed future join entry, refuses BEFORE the older operation/pin cleaners.
+//! This default path is not a join/archive implementation. A nonempty candidate refuses BEFORE
+//! the older operation/pin cleaners unless the concrete configured Pending handler admits it.
 //! The fixed current AND stage must both authenticate before either can be settled. No exposed
-//! Store has a catalog writer in this slice; the physical session excludes another constructor.
+//! Store has a writer in the Empty prerequisite; the configured extension owns a separate exact
+//! original catalog serializer. The physical session excludes another constructor in either.
 //!
 //! Fixed logical allocation inventory (excluding the separately existing vault KDF/inventories):
 //! one requested 553-byte read buffer, <=528-byte unframed ciphertext and <=512-byte plaintext,
@@ -20,6 +22,9 @@ use std::sync::Arc;
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
+pub(in crate::store) mod pending_join;
+pub(in crate::store) mod pending_join_codec;
+pub use pending_join::{JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy};
 
 const TAG: &str = "catcoms/critical-vault-namespaces/v1";
 pub(super) const MAX_PLAIN: usize = 512;
@@ -140,6 +145,9 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        if self.pending_join_policy_enabled() {
+            return self.open_pending_join_catalog_gate(actual_format, passphrase, rng);
+        }
         let Some(catalog) = self.inspect_empty_critical_catalog()? else {
             if actual_format == VaultFormat::CriticalNamespaces {
                 return Err(refused());

@@ -1,5 +1,12 @@
 # Critical namespace catalog v6 (5 November; authored, unexecuted)
 
+Current extension: an explicitly configured private Pending-only JOIN1 handler now has a larger
+actual shared invoice and original fixed-file producer. Normal/Empty readers keep this document's
+Empty-only behavior and refuse the new catalog-v2 tag. No ARCHIVE2, network/ready or native
+activation follows. See [Pending checkpoint](CHAT-PENDING-JOIN-CATALOG-CHECKPOINT.md); tests remain
+UNRUN during the compilation pause. The earlier Empty prerequisite below remains unchanged.
+
+
 This is a narrow prerequisite for destination join custody and future retained proof archives.
 The implementation currently supports an EMPTY namespace set only. It implements no join journal, archive,
 fresh admission, historical authority, publication grant or active native host. Compilation,

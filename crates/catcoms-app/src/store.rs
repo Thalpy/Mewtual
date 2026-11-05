@@ -50,7 +50,9 @@ pub(crate) fn studio_refused(
 mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
-pub use critical_namespaces::CriticalCatalogReadPool;
+pub use critical_namespaces::{
+    CriticalCatalogReadPool, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,
+};
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
@@ -654,6 +656,333 @@ mod persistence {
             }
             sync_directory(&self.dir)
         }
+
+        /// Configured larger reader, fixed names only. The actual shared debit and bounded
+        /// metadata check precede allocation; unknown/nonregular sources are never absence.
+        pub(super) fn open_pending_join_catalog_slot(
+            &self,
+            slot: critical_namespaces::Slot,
+            read: &critical_namespaces::read_pool::CatalogReadReservation,
+        ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+            use critical_namespaces::pending_join::READ_FEE;
+            use critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED;
+            use critical_namespaces::refused;
+            let policy = self.pending_join_policy.as_ref().ok_or_else(refused)?;
+            read.validate(&policy.pool, READ_FEE)?;
+            let path = self.dir.join(slot.name());
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Ok(metadata)
+                    if metadata.file_type().is_file()
+                        && metadata.len() <= MAX_CATALOG_FRAMED as u64 => {}
+                _ => return Err(refused()),
+            }
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            #[cfg(test)]
+            read.before_read_buffer();
+            let mut raw = Zeroizing::new(Vec::with_capacity(MAX_CATALOG_FRAMED + 1));
+            (&mut file)
+                .take((MAX_CATALOG_FRAMED + 1) as u64)
+                .read_to_end(&mut raw)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            if raw.len() > MAX_CATALOG_FRAMED {
+                return Err(refused());
+            }
+            Ok(Some((file, raw)))
+        }
+
+        /// The configured inspector authenticated BOTH complete candidates and their known
+        /// whole-parent Pending transition before constructing this opaque input. It issues no
+        /// worker: actual file/root barriers only settle existing DATA, never Fresh or Current.
+        pub(super) fn settle_pending_join_catalog(
+            &self,
+            opened: &critical_namespaces::pending_join::Opened,
+        ) -> Result<(), AppError> {
+            use critical_namespaces::pending_join::Settle;
+            use critical_namespaces::Slot;
+            opened.validate_original(self)?;
+            for file in opened.current.iter().chain(opened.stage.iter()) {
+                file.sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+            }
+            sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+            match opened.settle {
+                Settle::None => {}
+                Settle::DuplicateStage => {
+                    fs::remove_file(self.dir.join(Slot::Stage.name()))
+                        .map_err(|error| AppError::Io(error.to_string()))?;
+                    self.sync_critical_catalog_parent()
+                        .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+                }
+                Settle::PromoteStage => {
+                    fs::rename(
+                        self.dir.join(Slot::Stage.name()),
+                        self.dir.join(Slot::Current.name()),
+                    )
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                    self.sync_critical_catalog_parent()
+                        .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+                }
+            }
+            opened.validate_original(self)
+        }
+
+        /// Execute only the retained exact frame under the ORIGINAL admission owner and the
+        /// catalog serializer. No keys, paths, status booleans or replacement ciphertext are
+        /// accepted. An actual retained created-file handle may repair its exact partial prefix;
+        /// other stage bytes must be the complete same candidate. Cold/foreign partial sources
+        /// remain preserved rather than being truncated as an availability shortcut.
+        pub(super) fn write_pending_join_catalog_candidate(
+            &self,
+            permit: &chat_admission::journal_basis::JournalAdmissionPermit<'_>,
+            candidate: &mut critical_namespaces::pending_join::PendingCandidate,
+        ) -> Result<(), AppError> {
+            use critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED;
+            use critical_namespaces::{refused, Slot};
+            permit.validate_capture(&candidate.original.capture)?;
+            if candidate.bytes.len() > MAX_CATALOG_FRAMED
+                || *blake3::hash(&candidate.bytes).as_bytes() != candidate.next.framed
+            {
+                return Err(refused());
+            }
+            let current_path = self.dir.join(Slot::Current.name());
+            let stage_path = self.dir.join(Slot::Stage.name());
+            let (current, current_hash) =
+                read_pending_catalog_hash(&current_path)?.ok_or_else(refused)?;
+            if current_hash != candidate.expected.framed && current_hash != candidate.next.framed {
+                return Err(refused());
+            }
+            let stage = if candidate.created.is_none() || current_hash == candidate.next.framed {
+                read_pending_catalog_hash(&stage_path)?
+            } else {
+                None
+            };
+            if stage
+                .as_ref()
+                .is_some_and(|(_, hash)| *hash != candidate.next.framed)
+            {
+                return Err(refused());
+            }
+            // Original effects are fixed at this final admission. No later negative check may
+            // reinterpret the candidate as Empty, replace another source, or delete old keys.
+            current
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            if current_hash == candidate.next.framed {
+                if let Some((stage, _)) = stage {
+                    stage
+                        .sync_all()
+                        .map_err(|error| AppError::Io(error.to_string()))?;
+                    sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+                    fs::remove_file(stage_path).map_err(|error| AppError::Io(error.to_string()))?;
+                }
+                return self
+                    .sync_critical_catalog_parent()
+                    .map_err(|error| AppError::CommittedButNotDurable(error.to_string()));
+            }
+            if let Some(created) = candidate.created.as_mut() {
+                repair_created_pending_stage(
+                    created,
+                    &candidate.bytes,
+                    &stage_path,
+                    #[cfg(test)]
+                    self.critical_namespace_fault.load(Ordering::SeqCst),
+                )?;
+            } else if let Some((stage, _)) = stage {
+                stage
+                    .sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+            } else {
+                #[cfg(test)]
+                if self.critical_namespace_fault.load(Ordering::SeqCst) == 3 {
+                    return Err(AppError::Io(
+                        "injected Pending stage creation refusal".into(),
+                    ));
+                }
+                let stage = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&stage_path)
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                // Keep the ACTUAL file before the first fallible identity query or write.
+                candidate.created = Some(critical_namespaces::pending_join::CreatedStage {
+                    file: stage,
+                    identity: None,
+                });
+                #[cfg(test)]
+                if self.critical_namespace_fault.load(Ordering::SeqCst) == 5 {
+                    return Err(AppError::Io(
+                        "injected zero-length Pending stage loss".into(),
+                    ));
+                }
+                repair_created_pending_stage(
+                    candidate.created.as_mut().ok_or_else(refused)?,
+                    &candidate.bytes,
+                    &stage_path,
+                    #[cfg(test)]
+                    self.critical_namespace_fault.load(Ordering::SeqCst),
+                )?;
+            }
+            #[cfg(test)]
+            if self.critical_namespace_fault.load(Ordering::SeqCst) == 1 {
+                return Err(AppError::Io(
+                    "injected retained Pending stage sync loss".into(),
+                ));
+            }
+            if let Some(created) = &candidate.created {
+                let identity = created.identity.ok_or_else(refused)?;
+                if !matches!(
+                    catcoms_storage::kept::session_at(&stage_path, identity),
+                    catcoms_storage::kept::SessionAt::Ours
+                ) {
+                    return Err(refused());
+                }
+            }
+            fs::rename(stage_path, current_path)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            self.sync_critical_catalog_parent()
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))
+        }
+    }
+
+    /// Warm repair writes only through the SAME object this process created and retained.
+    /// SessionAt proves regular+same object, not exclusive/no-hardlink custody. The existing
+    /// non-hostile live private-vault-directory assumption remains; no stronger export/path
+    /// race guarantee or cold ownership inference is claimed by this exact prefix repair.
+    fn repair_created_pending_stage(
+        created: &mut critical_namespaces::pending_join::CreatedStage,
+        expected: &[u8],
+        path: &Path,
+        #[cfg(test)] fault: u8,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        use std::io::{Seek, SeekFrom};
+        let identity = match created.identity {
+            Some(identity) => identity,
+            None => {
+                let identity = catcoms_storage::kept::session_id(&created.file)
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                created.identity = Some(identity);
+                identity
+            }
+        };
+        if !matches!(
+            catcoms_storage::kept::session_at(path, identity),
+            catcoms_storage::kept::SessionAt::Ours
+        ) {
+            return Err(refused());
+        }
+        let length = created
+            .file
+            .metadata()
+            .map_err(|error| AppError::Io(error.to_string()))?
+            .len();
+        if length > expected.len() as u64 {
+            return Err(refused());
+        }
+        created
+            .file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        let mut actual = 0usize;
+        let mut buffer = [0; 8192];
+        {
+            let mut input = (&mut created.file).take(expected.len() as u64 + 1);
+            loop {
+                let read = input
+                    .read(&mut buffer)
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                let next = actual
+                    .checked_add(read)
+                    .filter(|next| *next <= expected.len())
+                    .ok_or_else(refused)?;
+                if buffer[..read] != expected[actual..next] {
+                    return Err(refused());
+                }
+                actual = next;
+            }
+        }
+        if actual as u64 != length {
+            return Err(refused());
+        }
+        created
+            .file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        #[cfg(test)]
+        if fault == 4 {
+            created
+                .file
+                .write_all(&expected[..expected.len().min(17)])
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            created
+                .file
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            return Err(AppError::Io(
+                "injected short Pending stage write loss".into(),
+            ));
+        }
+        created
+            .file
+            .write_all(expected)
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        created
+            .file
+            .sync_all()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        if !matches!(
+            catcoms_storage::kept::session_at(path, identity),
+            catcoms_storage::kept::SessionAt::Ours
+        ) {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    /// One fixed stack buffer bounds verification work without allocating a whole frame while
+    /// original writers are held. The read limit includes one byte to detect forbidden growth.
+    fn read_pending_catalog_hash(path: &Path) -> Result<Option<(File, [u8; 32])>, AppError> {
+        use critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED;
+        use critical_namespaces::refused;
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Ok(metadata)
+                if metadata.file_type().is_file()
+                    && metadata.len() <= MAX_CATALOG_FRAMED as u64 => {}
+            _ => return Err(refused()),
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        let mut limited = (&mut file).take((MAX_CATALOG_FRAMED + 1) as u64);
+        let mut buffer = [0; 8192];
+        let mut bytes = 0usize;
+        let mut hash = blake3::Hasher::new();
+        loop {
+            let count = limited
+                .read(&mut buffer)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            if count == 0 {
+                break;
+            }
+            bytes = bytes
+                .checked_add(count)
+                .filter(|bytes| *bytes <= MAX_CATALOG_FRAMED)
+                .ok_or_else(refused)?;
+            hash.update(&buffer[..count]);
+        }
+        Ok(Some((file, *hash.finalize().as_bytes())))
     }
 
     fn staging_candidate(path: &Path, id: u64) -> PathBuf {
@@ -2367,6 +2696,12 @@ pub struct ServerStore {
     // Caller handle only, NEVER an outstanding prepaid fee. Every actual configured catalog
     // read acquires its own original debit before buffer allocation, then retains it with data.
     catalog_read_pool: Option<CriticalCatalogReadPool>,
+    // Fixed only at a NEW physical open. Pending-only policy forbids the old unjournalled
+    // checkpoint join path; source DATA never becomes a ready owner through a decoder.
+    pending_join_policy: Option<PendingJoinCatalogPolicy>,
+    pending_join_catalog: critical_namespaces::pending_join::SharedMounted,
+    #[cfg(test)]
+    pending_join_before_catalog_writer: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     dir: PathBuf,
     keys: KeyHierarchy,
     // Actual physical-mount custody and serialized admission lineage, never restored from bytes.
@@ -2440,7 +2775,7 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, AppError> {
-        Self::open_with_catalog_policy(dir, passphrase, rng, None)
+        Self::open_with_catalog_policy(dir, passphrase, rng, None, None)
     }
 
     /// Explicit configured catalog reader. Clones of the SAME provided pool share its hardcap;
@@ -2454,7 +2789,26 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         pool: CriticalCatalogReadPool,
     ) -> Result<Self, AppError> {
-        Self::open_with_catalog_policy(dir, passphrase, rng, Some(pool))
+        Self::open_with_catalog_policy(dir, passphrase, rng, Some(pool), None)
+    }
+
+    /// Open an ALREADY activated v6 vault with the explicitly configured, private Pending-only
+    /// JOIN1 DATA handler. The normal opener stays Empty-only. This mount refuses the old
+    /// unjournalled checkpoint join preparation from the outset, including with an Empty catalog.
+    /// It starts no worker and grants no network, Fresh, Current or ready-owner authority.
+    pub fn open_with_pending_join_catalog(
+        dir: impl AsRef<Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        policy: PendingJoinCatalogPolicy,
+    ) -> Result<Self, AppError> {
+        Self::open_with_catalog_policy(
+            dir,
+            passphrase,
+            rng,
+            Some(policy.pool.clone()),
+            Some(policy),
+        )
     }
 
     fn open_with_catalog_policy(
@@ -2462,6 +2816,7 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
         catalog_read_pool: Option<CriticalCatalogReadPool>,
+        pending_join_policy: Option<PendingJoinCatalogPolicy>,
     ) -> Result<Self, AppError> {
         let dir = dir.as_ref().to_path_buf();
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
@@ -2473,6 +2828,10 @@ impl ServerStore {
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
         let store = Self {
             catalog_read_pool,
+            pending_join_policy,
+            pending_join_catalog: Default::default(),
+            #[cfg(test)]
+            pending_join_before_catalog_writer: Default::default(),
             creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,
