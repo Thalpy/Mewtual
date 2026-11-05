@@ -18,8 +18,10 @@ pub enum OwnerRestoreClassification {
     Current(OwnerRestorePreparation),
     Initializing(OwnerRestorePreparation),
     Retired(OfflineOwnerEvidence),
-    /// No canonical or staged source exists and no live creator owns this first reservation.
-    /// Host recovery retries this negative closure automatically; it cannot construct transport.
+    /// No canonical/staged source or registered canonical writer owns this first reservation.
+    /// A private creator before registration can still lose to this negative closure. The host
+    /// must schedule its retry; the native automatic startup adapter is a separate open gate.
+    /// This object cannot construct a transport or authorize a new admission.
     UnexposedInitialization(OwnerUnexposedInitialization),
 }
 #[derive(Debug)]
