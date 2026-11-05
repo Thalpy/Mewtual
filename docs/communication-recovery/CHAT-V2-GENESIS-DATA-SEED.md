@@ -42,6 +42,7 @@ prepare_v2_genesis_seed(
 ) -> Result<UnboundV2GenesisSeed, SyncError>
 
 seed.data() -> V2GenesisSeedData<'_>
+seed.check_opened_source_data(&OpenedBootstrapSourceData) -> Result<(),SyncError>
 seed.prepare_scope(&mut self, original: &impl ManagedChatScopeReservation)
     -> Result<(), SyncError>
 seed.prepare_runtime<T: MeshTransport, R: CryptoRngCore>(
@@ -228,3 +229,21 @@ remain intact. Direct rustfmt of10 Rust files, whitespace, ambient-dependency an
 Design and final actual-diff STATIC reviews are CLEAR; these are not compiled/runtime evidence. All13 new tests are UNRUN, and normal
 production-config compilation, full suites and native validation remain deferred under the
 user pause. No Current/governor/native/live-operation or complete-host claim is made.
+
+
+## Borrowed exact-source consistency check (additional2 tests, UNRUN)
+
+`UnboundV2GenesisSeed::check_opened_source_data` compares the actual opaque opened source's
+whole SourceId/full context and retained exact Profile/Admission/Header representatives
+(including their signatures), raw state image and entire fixed Frontier. It does not encode,
+copy, verify a signature, call SDK/pools/host callbacks or mutate either input. A semantic CID
+alone cannot hide a changed retained signature. This returns unit/error DATA consistency,
+not a SourceSaved/file/mount/resource/Current witness; an equal cancelled source remains equal
+DATA. The actual App reader and original admission/Root checks remain independently mandatory.
+
+Two additional focused regressions are authored UNRUN: genuine matching/different sources
+with unchanged fee/SDK entries, and private corruption of each retained component including
+same-CID invalid signature representatives. Public seed/source constructors cannot create those
+corrupted objects. This brings this module to15 authored UNRUN regressions; none has been run
+under the compilation/test/build pause. Narrow independent actual-diff STATIC review is CLEAR. Direct formatting, whitespace,
+ambient-dependency and Store raw-fs checks passed; no compiler/tests/build/clippy ran.

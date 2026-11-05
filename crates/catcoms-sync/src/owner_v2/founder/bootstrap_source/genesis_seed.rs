@@ -243,6 +243,31 @@ impl UnboundV2GenesisSeed {
     pub fn data(&self) -> V2GenesisSeedData<'_> {
         self.body.data()
     }
+
+    /// Allocation-free NEGATIVE DATA consistency against the exact opaque opened source.
+    /// Compare whole source/context and full retained public representatives, not just CIDs.
+    /// This performs no encode, signature/SDK operation, callback, pool access or mutation.
+    ///
+    /// Success is NOT SourceSaved, original file/mount liveness, a resource payment, Current
+    /// or permission to publish. App must separately validate its actual paid source capture
+    /// against the already-held original Root and repeat its concrete admission checks.
+    pub fn check_opened_source_data(
+        &self,
+        source: &OpenedBootstrapSourceData,
+    ) -> Result<(), SyncError> {
+        if self.body.source != source.id
+            || self.body.context != *source.view_data().context
+            || self.body.genesis.profile != source.genesis.profile
+            || self.body.genesis.admission != source.genesis.admission
+            || self.body.genesis.header != source.genesis.header
+            || self.body.genesis.image != source.genesis.image
+            || self.body.genesis.frontier != source.genesis.frontier
+        {
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+
     /// Negative/DATA attachment only, never publication. The actual host still checks its
     /// original mounted Saved/Current/pin/head capture. A replacement owner cannot renew this.
     pub fn prepare_scope(

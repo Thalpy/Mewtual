@@ -8388,3 +8388,13 @@ The node is DATA/resource ownership, not Current or publication. Root's actual S
 pin/head/row/mount and original negative checks, all non-SDK lifetime fees, governor/live SDK
 operations and native integration remain separate. All13 regressions are authored UNRUN;
 compilation, tests and builds remain paused. [Boundary and invoice](communication-recovery/CHAT-V2-GENESIS-DATA-SEED.md).
+
+
+## V2 seed exact-source DATA comparison (additional2 tests, UNRUN)
+
+`UnboundV2GenesisSeed::check_opened_source_data(&OpenedBootstrapSourceData)` returns only
+negative unit/error consistency for the full SourceId/context and exact retained public
+representatives/image/frontier. It performs no encoding/allocation/SDK/pool/callback/mutation
+and grants no SourceSaved, liveness, resource payment or Current authority. The actual paid
+App reader and original Root/admission validation remain separate. Two focused regressions
+are authored UNRUN; compilation/tests/builds remain paused.

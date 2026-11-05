@@ -546,3 +546,73 @@ fn real_first_add_sdk_shape_is_supported_but_rejected_as_initial_v2_genesis() {
     );
     assert_eq!(count.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn opened_source_check_is_borrowed_data_only_and_refuses_a_different_actual_source() {
+    let a = fixture(0x61ae);
+    let b = fixture(0x61af);
+    let count = Arc::new(AtomicUsize::new(0));
+    let seed = seed(&a.opened, &count);
+    let original = seed.body.genesis.clone();
+    SDK_ENTRIES.with(|n| n.set(0));
+    seed.check_opened_source_data(&a.opened).unwrap();
+    assert!(seed.check_opened_source_data(&b.opened).is_err());
+    assert_eq!(seed.body.genesis.profile, original.profile);
+    assert_eq!(seed.body.genesis.header, original.header);
+    assert_eq!(seed.body.genesis.image, original.image);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(SDK_ENTRIES.with(Cell::get), 0);
+    a.reservation.owner.send_replace(true);
+    // Byte consistency cannot renew or certify that cancelled original reservation. It is
+    // deliberately distinct from Root's actual source/row/lifetime admission.
+    seed.check_opened_source_data(&a.opened).unwrap();
+}
+
+#[test]
+fn opened_source_check_compares_representatives_image_frontier_and_full_context_not_only_ids() {
+    let a = fixture(0x61b0);
+    let b = fixture(0x61b1);
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut seed = seed(&a.opened, &count);
+    let original = seed.body.genesis.clone();
+    let context = seed.body.context.clone();
+    let source = seed.body.source;
+    for variant in 0..7 {
+        seed.body.genesis = original.clone();
+        seed.body.context = context.clone();
+        seed.body.source = source;
+        match variant {
+            0 => seed.body.source = BootstrapSourceId::from_bytes([0; 32]),
+            1 => seed.body.context = b.opened.view_data().context.clone(),
+            2 => {
+                // Private-corruption fixture only: public construction rejects this signature.
+                // Same semantic CID must not hide a changed retained representative here.
+                let mut encoded = original.profile.encode();
+                *encoded.last_mut().unwrap() ^= 1;
+                seed.body.genesis.profile = SignedOwnerProfile::decode(&encoded).unwrap();
+                assert_eq!(seed.body.genesis.profile.id(), original.profile.id());
+                assert!(!seed.body.genesis.profile.verify());
+            }
+            3 => seed.body.genesis.admission = b.opened.genesis.admission.clone(),
+            4 => {
+                let mut encoded = original.header.encode();
+                *encoded.last_mut().unwrap() ^= 1;
+                seed.body.genesis.header = SignedOwnerHeader::decode(&encoded).unwrap();
+                assert_eq!(seed.body.genesis.header.id(), original.header.id());
+                assert!(!seed.body.genesis.header.verify());
+            }
+            5 => seed.body.genesis.image[0] ^= 1,
+            _ => {
+                seed.body.genesis.frontier =
+                    catcoms_replication::chat::acceptance_tree::Frontier::empty(
+                        b.opened.genesis.frontier.tip().context,
+                    );
+            }
+        }
+        SDK_ENTRIES.with(|n| n.set(0));
+        assert!(seed.check_opened_source_data(&a.opened).is_err());
+        assert_eq!(SDK_ENTRIES.with(Cell::get), 0);
+        assert!(a.opened.genesis.profile.verify() && a.opened.genesis.header.verify());
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
