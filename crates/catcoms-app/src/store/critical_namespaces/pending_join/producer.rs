@@ -406,9 +406,9 @@ impl JournalledCheckpointJoinPreparation {
             created: None,
             _fee: write_fee,
         };
-        drop(candidate_parse);
+        // Parsed views own no buffers; their borrows end at the last use above. Drop only the
+        // actual byte/file/quota owners, avoiding a meaningless drop of those fixed views.
         drop(candidate_plain);
-        drop(parsed);
         drop(plain);
         drop(raw);
         drop(file);
@@ -603,10 +603,10 @@ impl ServerStore {
         };
         // Release ALL large parsing/encoding scratch before taking original writers. The
         // retained framed candidate keeps its own actual fee through every ambiguous outcome.
-        drop(candidate_parse);
+        // The fixed parsed views own no data and are no longer borrowed here. Actual buffers
+        // and their fee are released below before entering original synchronous writers.
         drop(candidate_plain);
         drop(encrypted);
-        drop(current);
         drop(plain);
         drop(raw);
         drop(file);
