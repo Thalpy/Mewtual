@@ -443,6 +443,7 @@ impl JournalledCheckpointJoinPreparation {
             created: None,
             execution_task: None,
             received_input: None,
+            continuation_outcome: None,
             _fee: write_fee,
         };
         // Parsed views own no buffers; their borrows end at the last use above. Drop only the
@@ -579,6 +580,11 @@ impl ServerStore {
         // No negative reclassification after this point. SAME already-admitted DATA repairs
         // byte-for-byte, never creates a ticket, and cannot turn cancellation into source loss.
         self.write_pending_join_catalog_candidate(permit, pending)?;
+        if let Some(outcome) = &pending.continuation_outcome {
+            // Actual file/rename/root barriers above mint this original SavedData result.
+            // It contains no sender and cannot transition its reserved task Active.
+            outcome.mark_saved_data(pending.next.framed)?;
+        }
         mounted.current = pending.next.clone();
         Ok(mounted.pending.take())
     }
@@ -655,6 +661,7 @@ impl ServerStore {
             created: None,
             execution_task: None,
             received_input: None,
+            continuation_outcome: None,
             _fee: write_fee,
         };
         // Release ALL large parsing/encoding scratch before taking original writers. The
@@ -724,6 +731,9 @@ impl ServerStore {
         let mut mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
         let mounted = mounted.as_mut().ok_or_else(refused)?;
         let pending = candidate.as_mut().ok_or_else(refused)?;
+        if pending.continuation_outcome.is_some() {
+            return Err(refused());
+        }
         permit.validate_candidate(pending)?; // Final same-held Runtime check AFTER catalog wait.
         original.pin.validate_original(self, original.pin.group())?;
         if mounted.pending.is_some()

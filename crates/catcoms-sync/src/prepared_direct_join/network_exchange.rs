@@ -25,6 +25,8 @@ pub struct OriginalJoinArmData {
 /// Trusted host boundary, comparable to managed scope reservations. Arbitrary Rust impls are
 /// TRUSTED CODE, not authenticated disk evidence. Actual App impls retain original mounted
 /// source/fees and weak task observations, but NO Store, vault session/key or sender.
+/// Every method must be bounded/pure and must not reacquire Store/pool/cell locks or perform
+/// I/O: these checks also run inside the private cell or an actual admission/catalog writer.
 pub trait OriginalJoinNetworkContext: Send + Sync + fmt::Debug {
     fn identity(&self) -> Arc<()>;
     fn binding(&self) -> [u8; 32];
@@ -35,6 +37,7 @@ pub trait OriginalJoinNetworkContext: Send + Sync + fmt::Debug {
 }
 /// Actual saved-arm DATA witness, separate from lower request capacity. It must survive a
 /// consumed ticket's retirement without retaining its lower-work fee or revoking task owner.
+/// Getters/checks are bounded/pure, with no Store/pool/cell lock or I/O (including DATA repair).
 pub trait OriginalJoinSavedArm: Send + Sync + fmt::Debug {
     fn context_identity(&self) -> Arc<()>;
     fn binding(&self) -> [u8; 32];
@@ -148,7 +151,7 @@ enum Phase {
     Held(HeldInput),
 }
 struct State {
-    source: PreparedDirectJoin,
+    source: Option<PreparedDirectJoin>,
     phase: Phase,
     ordinal: u64,
     target: Option<PeerId>,
@@ -206,6 +209,7 @@ pub struct BoundOriginalJoinNetwork<T> {
     target: PeerId,
     prefix: PreOwnerConnectionHandoff,
     cell: Arc<RetainedOriginalJoinNetwork>,
+    identity: Arc<()>,
 }
 impl<T> fmt::Debug for BoundOriginalJoinNetwork<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -263,7 +267,7 @@ impl RetainedOriginalJoinNetwork {
         let ordinal = context.spent_ordinal_floor();
         Ok(Arc::new(Self {
             state: Mutex::new(State {
-                source,
+                source: Some(source),
                 phase: Phase::Idle,
                 ordinal,
                 target: None,
@@ -424,7 +428,136 @@ impl RetainedOriginalJoinNetwork {
             target,
             prefix: PreOwnerConnectionHandoff::default(),
             cell: self,
+            identity: Arc::new(()),
         })
+    }
+}
+
+/// Non-Clone continuation DATA bound to ONE actual physical Bound owner. It owns the moved
+/// secret source only in its new cell, never a replacement T/prefix or a scope/publication proof.
+/// The new bind claim is already reserved true; even its retained DATA Arc cannot bind another T.
+pub struct PreparedOriginalJoinContinuation {
+    original_bound: Arc<()>,
+    original_cell: Arc<RetainedOriginalJoinNetwork>,
+    next: Arc<RetainedOriginalJoinNetwork>,
+}
+impl fmt::Debug for PreparedOriginalJoinContinuation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedOriginalJoinContinuation")
+            .finish_non_exhaustive()
+    }
+}
+impl PreparedOriginalJoinContinuation {
+    /// Retained DATA/custody only. Its permanently reserved bind claim prevents replacement T.
+    pub fn retained_cell_data(&self) -> Arc<RetainedOriginalJoinNetwork> {
+        self.next.clone()
+    }
+}
+pub struct ReturnedOriginalJoinContinuation {
+    original: PreparedOriginalJoinContinuation,
+    error: SyncError,
+}
+impl fmt::Debug for ReturnedOriginalJoinContinuation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReturnedOriginalJoinContinuation")
+            .finish_non_exhaustive()
+    }
+}
+impl ReturnedOriginalJoinContinuation {
+    pub fn into_parts(self) -> (PreparedOriginalJoinContinuation, SyncError) {
+        (self.original, self.error)
+    }
+}
+impl<T: MeshTransport> BoundOriginalJoinNetwork<T> {
+    /// Trusted-host preparation only. Actual App must reserve THIS original new owner with its
+    /// durable RetryGrant candidate, then prove its real saved outcome before attachment. No
+    /// network/SDK runs here. All checks precede the one source move; failures leave it intact.
+    pub fn prepare_original_continuation(
+        &mut self,
+        context: Arc<dyn OriginalJoinNetworkContext>,
+    ) -> Result<PreparedOriginalJoinContinuation, SyncError> {
+        if !(self.cell.local.observer().is_cancelled()
+            || self.cell.context.cancellation().is_cancelled())
+            || context.check_original().is_err()
+            || Arc::ptr_eq(&context.identity(), &self.cell.context.identity())
+            || context.binding() != self.cell.context.binding()
+            || context.request() != self.cell.context.request()
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        let floor = context.spent_ordinal_floor();
+        // All fresh cell/wakeup allocations precede moving the only private source. The new
+        // cell is not exposed, so its mutex has no competing owner or external lock order.
+        let next = Arc::new(RetainedOriginalJoinNetwork {
+            state: Mutex::new(State {
+                source: None,
+                phase: Phase::Idle,
+                ordinal: floor,
+                target: Some(self.target),
+            }),
+            local: NegativeOwner::new(),
+            bound: AtomicBool::new(true),
+            context,
+        });
+        let mut state = self
+            .cell
+            .state
+            .try_lock()
+            .map_err(|_| SyncError::JoinRejected)?;
+        let retired = state.reconcile(true);
+        let result = (|| {
+            if matches!(state.phase, Phase::Held(_))
+                || state.target != Some(self.target)
+                || floor < state.ordinal
+                || state.source.as_ref().is_none_or(|source| source.completed)
+                || next.context.check_original().is_err()
+            {
+                return Err(SyncError::JoinRejected);
+            }
+            let mut next_state = next.state.try_lock().map_err(|_| SyncError::JoinRejected)?;
+            let source = state.source.take().ok_or(SyncError::JoinRejected)?;
+            // No fallible operation/authority check after source.take. Old cell remains closed
+            // and bind=true forever; new cell is reserved to this SAME actual Bound identity.
+            next_state.source = Some(source);
+            drop(next_state);
+            Ok(())
+        })();
+        drop(state);
+        drop(retired); // Last upper lower-capacity owner never drops under the cell guard.
+                       // Even a trusted context owning its last metadata fee retires outside the OLD cell
+                       // guard on an error. Keep next outside the closure rather than dropping a moved
+                       // captured Arc while that writer is held.
+        result?;
+        Ok(PreparedOriginalJoinContinuation {
+            original_bound: self.identity.clone(),
+            original_cell: self.cell.clone(),
+            next,
+        })
+    }
+
+    /// Attach only the opaque continuation prepared by THIS physical Bound. The trusted App
+    /// caller must already hold its exact Active registration/SavedData outcome. On refusal
+    /// return the SAME source owner so a transient error cannot strand its registered identity.
+    pub fn attach_original_continuation(
+        &mut self,
+        original: PreparedOriginalJoinContinuation,
+    ) -> Result<(), ReturnedOriginalJoinContinuation> {
+        if !Arc::ptr_eq(&self.identity, &original.original_bound)
+            || !Arc::ptr_eq(&self.cell, &original.original_cell)
+            || !(self.cell.local.observer().is_cancelled()
+                || self.cell.context.cancellation().is_cancelled())
+            || !original.next.bound.load(Ordering::Acquire)
+            || original.next.context.check_original().is_err()
+        {
+            return Err(ReturnedOriginalJoinContinuation {
+                original,
+                error: SyncError::JoinRejected,
+            });
+        }
+        let old = std::mem::replace(&mut self.cell, original.next.clone());
+        drop(original);
+        drop(old); // T/target/ordered lifecycle prefix were never replaced.
+        Ok(())
     }
 }
 
@@ -513,11 +646,12 @@ impl<T: MeshTransport> BoundOriginalJoinNetwork<T> {
             slot,
             flight: flight.observer(),
         };
-        state.source.request_started = true;
-        let response = tokio::select! {biased;_=cancel.cancelled()=>Err(TransportError::Cancelled),result=self.transport.request_connected_cancellable(self.target,ProtocolId(RR_PROTOCOL),state.source.request.clone(),cancel.clone())=>result};
+        let source = state.source.as_mut().ok_or(SyncError::JoinRejected)?;
+        source.request_started = true;
+        let response = tokio::select! {biased;_=cancel.cancelled()=>Err(TransportError::Cancelled),result=self.transport.request_connected_cancellable(self.target,ProtocolId(RR_PROTOCOL),state.source.as_ref().ok_or(SyncError::JoinRejected)?.request.clone(),cancel.clone())=>result};
         let body = match response {
             Ok(response) => {
-                tokio::select! {biased;_=cancel.cancelled()=>Err(SyncError::Transport(TransportError::Cancelled)),result=state.source.receive_original_ready_body_limit(&self.transport,&mut self.prefix,self.target,response,BODY_LIMIT+2)=>result}
+                tokio::select! {biased;_=cancel.cancelled()=>Err(SyncError::Transport(TransportError::Cancelled)),result=state.source.as_ref().ok_or(SyncError::JoinRejected)?.receive_original_ready_body_limit(&self.transport,&mut self.prefix,self.target,response,BODY_LIMIT+2)=>result}
             }
             Err(error) => Err(error.into()),
         };
@@ -525,7 +659,11 @@ impl<T: MeshTransport> BoundOriginalJoinNetwork<T> {
             if body.len() > BODY_LIMIT {
                 return Err(SyncError::Malformed);
             }
-            state.source.verify_original_ready_body(&body)?;
+            state
+                .source
+                .as_ref()
+                .ok_or(SyncError::JoinRejected)?
+                .verify_original_ready_body(&body)?;
             Ok(body)
         });
         let phase = match body {

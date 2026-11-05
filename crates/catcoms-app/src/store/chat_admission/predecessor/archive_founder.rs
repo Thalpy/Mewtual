@@ -79,6 +79,7 @@ impl ArchiveFounderPlan {
             identity: self.identity.clone(),
             revoker: PredecessorRevoker::Archive(self.revoker.clone()),
             negative: self.observer.clone(),
+            continuation: None,
             _metadata_fee: MetadataCustody::Archive {
                 _fee: self.control.clone(),
             },

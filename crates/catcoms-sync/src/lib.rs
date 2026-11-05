@@ -84,8 +84,9 @@ pub use prepared_direct_join::{
     BoundOriginalJoinNetwork, CompletedDirectJoin, DirectJoinLimits, DirectJoinRequestIdentity,
     OriginalJoinArmData, OriginalJoinNetworkContext, OriginalJoinNetworkStatus,
     OriginalJoinNetworkSubmission, OriginalJoinSavedArm, PreparedDirectJoin,
-    RecoveredDirectJoinSource, RetainedOriginalJoinNetwork, ReturnedOriginalJoinBinding,
-    ReturnedOriginalJoinSubmission, SealedDirectJoinSource, SealedOriginalJoinInput,
+    PreparedOriginalJoinContinuation, RecoveredDirectJoinSource, RetainedOriginalJoinNetwork,
+    ReturnedOriginalJoinBinding, ReturnedOriginalJoinContinuation, ReturnedOriginalJoinSubmission,
+    SealedDirectJoinSource, SealedOriginalJoinInput,
 };
 pub mod local_chat_scope;
 pub mod owner_evidence;

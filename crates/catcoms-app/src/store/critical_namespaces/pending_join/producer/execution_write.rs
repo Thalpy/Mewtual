@@ -88,6 +88,7 @@ impl JournalledCheckpointJoinPreparation {
             created: None,
             execution_task: observation,
             received_input: None,
+            continuation_outcome: None,
             _fee: write_fee,
         };
         // Complete all large encodings/decryption and release scratch/key/fees BEFORE writers.
@@ -218,6 +219,7 @@ impl PendingCandidate {
             || self.expected.join_version != Some(payload::VERSION)
             || self.next.join_version != Some(payload::VERSION)
             || self.execution_task.is_some()
+            || self.continuation_outcome.is_some()
         {
             return Err(refused());
         }
@@ -389,6 +391,7 @@ impl JournalledCheckpointJoinPreparation {
             created: None,
             execution_task: None,
             received_input: Some(received.clone()),
+            continuation_outcome: None,
             _fee: write_fee,
         };
         candidate.validate_received_input_change()?;
@@ -399,5 +402,149 @@ impl JournalledCheckpointJoinPreparation {
         drop(read_fee);
         drop(key);
         store.install_pending_join_candidate(candidate)
+    }
+}
+
+impl PendingCandidate {
+    pub(in crate::store) fn matches_expected_catalog(&self, current: &codec::Summary) -> bool {
+        self.expected.digest == current.digest && self.expected.framed == current.framed
+    }
+    /// Strict syntax/equality classification only; actual reservation additionally proves the
+    /// exact old/new runtime owners and original complete parent under both serializers.
+    pub(in crate::store) fn retry_grant_binding(
+        &self,
+    ) -> Result<crate::store::chat_admission::predecessor::JoinRetryCandidateBinding<'_>, AppError>
+    {
+        use crate::store::chat_admission::predecessor::JoinRetryCandidateBinding;
+        codec::successor(&self.expected, &self.next)?;
+        if self.expected.count != self.next.count
+            || self.expected.archive != self.next.archive
+            || self.expected.join_version != Some(payload::VERSION)
+            || self.next.join_version != Some(payload::VERSION)
+            || self.execution_task.is_some()
+            || self.received_input.is_some()
+        {
+            return Err(refused());
+        }
+        let mut binding = None;
+        for old in self.expected.rows.iter().flatten() {
+            let next = self
+                .next
+                .rows
+                .iter()
+                .flatten()
+                .find(|row| row.source == old.source)
+                .ok_or_else(refused)?;
+            if old == next {
+                continue;
+            }
+            let old_state = old.execution.ok_or_else(refused)?;
+            let next_state = next.execution.ok_or_else(refused)?;
+            let mut expected = old.clone();
+            expected.revision = next.revision;
+            expected.execution = Some(next_state);
+            if next != &expected
+                || old.scheduling != codec::Scheduling::Active
+                || old_state.input.is_some()
+                || next_state.input.is_some()
+                || execution::successor(
+                    &old_state,
+                    &next_state,
+                    &payload::source_identity(old),
+                    old.revision,
+                    next.revision,
+                )? != execution::Change::RetryGrant
+                || binding.is_some()
+            {
+                return Err(refused());
+            }
+            binding = Some(JoinRetryCandidateBinding {
+                group: old.group.as_slice(),
+                signer: &old.signer,
+                source: old.source,
+                previous_revision: old.revision,
+                revision: next.revision,
+                expected_frame: self.expected.framed,
+                frame: self.next.framed,
+            });
+        }
+        binding.ok_or_else(refused)
+    }
+}
+
+impl JournalledCheckpointJoinPreparation {
+    /// Build the exact ciphertext outside writers and keep it in the caller's retry invocation
+    /// BEFORE first reservation admission. This never admits/reserves anything itself.
+    pub(super) fn prepare_retry_grant_candidate(
+        &self,
+        store: &ServerStore,
+        target: &codec::Metadata,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<PendingCandidate, AppError> {
+        self.original
+            .pin
+            .validate_original(store, self.metadata.group.as_slice())?;
+        self.creation.snapshot_limits(store)?;
+        if self.transition.is_some() {
+            return Err(refused());
+        }
+        let policy = store.pending_join_policy.as_ref().ok_or_else(refused)?;
+        policy.execution.ok_or_else(refused)?;
+        store.retry_pending_join_catalog()?;
+        let current = store.pending_join_summary()?;
+        if !current
+            .rows
+            .iter()
+            .flatten()
+            .any(|row| row == &self.metadata)
+        {
+            return Err(refused());
+        }
+        let write_fee = policy.pool.try_reserve(WRITE_FEE)?;
+        let read_fee = policy.pool.try_reserve(READ_FEE)?;
+        let (file, raw) = store
+            .open_pending_join_catalog_slot(Slot::Current, &read_fee)?
+            .ok_or_else(refused)?;
+        if *blake3::hash(&raw).as_bytes() != current.framed {
+            return Err(refused());
+        }
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
+        let parsed = store.parse_configured_join_catalog(&plain)?;
+        if parsed.digest != current.digest {
+            return Err(refused());
+        }
+        let candidate_plain = encode_execution_change(
+            &parsed,
+            target,
+            None,
+            WriteShape::OneSource,
+            &store.chat_vault_domain()?,
+        )?;
+        let candidate_parse = store.parse_configured_join_catalog(&candidate_plain)?;
+        let mut next = candidate_parse.summary([0; 32]);
+        let bytes = Zeroizing::new(frame(&seal(&key, &candidate_plain, rng)?));
+        next.framed = *blake3::hash(&bytes).as_bytes();
+        let candidate = PendingCandidate {
+            identity: Arc::new(()),
+            bytes,
+            next,
+            expected: current,
+            original: self.original.clone(),
+            created: None,
+            execution_task: None,
+            received_input: None,
+            continuation_outcome: None,
+            _fee: write_fee,
+        };
+        candidate.retry_grant_binding()?;
+        // All real plaintext/cipher/parser/file scratch and read fee retire before admission.
+        drop(candidate_plain);
+        drop(plain);
+        drop(raw);
+        drop(file);
+        drop(read_fee);
+        drop(key);
+        Ok(candidate)
     }
 }

@@ -14,8 +14,8 @@ mod sealed_source;
 pub use network_exchange::{
     BoundOriginalJoinNetwork, OriginalJoinArmData, OriginalJoinNetworkContext,
     OriginalJoinNetworkStatus, OriginalJoinNetworkSubmission, OriginalJoinSavedArm,
-    RetainedOriginalJoinNetwork, ReturnedOriginalJoinBinding, ReturnedOriginalJoinSubmission,
-    SealedOriginalJoinInput,
+    PreparedOriginalJoinContinuation, RetainedOriginalJoinNetwork, ReturnedOriginalJoinBinding,
+    ReturnedOriginalJoinContinuation, ReturnedOriginalJoinSubmission, SealedOriginalJoinInput,
 };
 pub use sealed_source::{RecoveredDirectJoinSource, SealedDirectJoinSource};
 

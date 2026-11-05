@@ -35,6 +35,10 @@ impl Registry {
         }
         if self.slots.iter().flatten().any(|entry| {
             entry.kind == Kind::JoinCheckpoint
+                && entry
+                    .continuation
+                    .as_ref()
+                    .is_none_or(|outcome| outcome.is_active())
                 && entry.key == observation.key
                 && entry.original == observation.original
                 && Arc::ptr_eq(&entry.mount, &observation.mount)

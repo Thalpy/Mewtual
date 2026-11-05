@@ -7,10 +7,11 @@ use catcoms_rt::{Clock, RequestAuthority, SharedRequestKeepalive};
 use catcoms_sync::{
     BoundOriginalJoinNetwork, DirectJoinRequestIdentity, OriginalJoinArmData,
     OriginalJoinNetworkContext, OriginalJoinNetworkStatus, OriginalJoinNetworkSubmission,
-    OriginalJoinSavedArm, RetainedOriginalJoinNetwork, SealedOriginalJoinInput, SyncError,
+    OriginalJoinSavedArm, RetainedOriginalJoinNetwork, SyncError,
 };
 use std::sync::Mutex;
 use std::time::Duration;
+mod continuation;
 
 // Named logical inventories. Lower16MiB response custody is independent from retained2MiB
 // application input; these are NOT allocator/RSS or global native/SDK admission claims.
@@ -22,7 +23,7 @@ const INPUT_FEE: usize = 5 * (2 * 1024 * 1024 + 1024 + 16) + 32 * 1024;
 const LOWER_FEE: usize = 16 * 1024 * 1024 + 2 * (9 + 64 * 1024 + 32 * 1024) + 16 * 1024;
 
 struct Control {
-    preparation: Mutex<JournalledCheckpointJoinPreparation>,
+    preparation: Arc<Mutex<JournalledCheckpointJoinPreparation>>,
     identity: Arc<()>,
     binding: [u8; 32],
     request: DirectJoinRequestIdentity,
@@ -30,7 +31,8 @@ struct Control {
     data_negative: RequestCancellation,
     floor: u64,
     target: PeerId,
-    _input_fee: CatalogReadReservation,
+    _input_fee: Arc<CatalogReadReservation>,
+    _continuation_fee: Option<Arc<CatalogReadReservation>>,
 }
 impl std::fmt::Debug for Control {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -191,6 +193,7 @@ pub struct CheckpointJoinNetwork<T> {
     bound: BoundOriginalJoinNetwork<T>,
     shared: Arc<Shared>,
     _activation_fee: CatalogReadReservation,
+    retry: Option<Box<continuation::RetryContinuation>>,
 }
 impl<T> std::fmt::Debug for CheckpointJoinNetwork<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -201,6 +204,8 @@ impl<T> std::fmt::Debug for CheckpointJoinNetwork<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointJoinSubmissionStatus {
     Armed,
+    /// No usable runtime ticket. This also covers a new Idle cell: it is NOT the journal's
+    /// numeric spent count. ensure_submission_armed checks the actual saved allowance.
     Spent,
     InputHeld,
     Exhausted,
@@ -247,7 +252,7 @@ impl<T: MeshTransport> ActivatedCheckpointJoin<T> {
             .execution
             .map_or(0, |state| state.ordinal);
         let control = Arc::new(Control {
-            preparation: Mutex::new(preparation),
+            preparation: Arc::new(Mutex::new(preparation)),
             identity,
             binding,
             request,
@@ -255,7 +260,8 @@ impl<T: MeshTransport> ActivatedCheckpointJoin<T> {
             data_negative: store.chat_mount.observer(),
             floor,
             target,
-            _input_fee: input_fee,
+            _input_fee: Arc::new(input_fee),
+            _continuation_fee: None,
         });
         let cell = match source {
             Source::Local(source) => {
@@ -283,6 +289,7 @@ impl<T: MeshTransport> ActivatedCheckpointJoin<T> {
             bound,
             shared,
             _activation_fee,
+            retry: None,
         })
     }
 }
@@ -421,7 +428,16 @@ impl<T: MeshTransport> CheckpointJoinNetwork<T> {
     pub fn close(&self) {
         self.task.close();
         self.shared.cell.close();
+        if let Some(retry) = &self.retry {
+            retry.close();
+        }
     }
+    /// Original task observation only. After a manual retry this getter names the new task;
+    /// any previously returned observer stays closed forever and cannot adopt that task.
+    pub fn cancellation(&self) -> RequestCancellation {
+        self.task.observer()
+    }
+
     /// Bounded local observation; Busy never implies a completed request or saved input.
     pub fn status(&self) -> CheckpointJoinSubmissionStatus {
         self.shared.retire_closed_unstarted();

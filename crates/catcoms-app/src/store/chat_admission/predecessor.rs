@@ -10,7 +10,9 @@ use crate::store::CriticalCatalogReadPool;
 pub(in crate::store) mod archive_founder;
 
 const MAX_PREDECESSORS: usize = 5;
+mod join_continuation;
 mod join_execution;
+pub(in crate::store) use join_continuation::{JoinContinuationOutcome, JoinRetryCandidateBinding};
 pub(in crate::store) use join_execution::OriginalJoinExecutionObservation;
 // Fixed logical metadata debit, not a physical allocator/RSS measurement. Unlike the typed
 // task fee it survives in the inert unresolved slot after the sender and caller disappear.
@@ -55,6 +57,7 @@ struct Entry {
     identity: Arc<()>,
     revoker: PredecessorRevoker,
     negative: RequestCancellation,
+    continuation: Option<Arc<JoinContinuationOutcome>>,
     _metadata_fee: MetadataCustody,
 }
 
@@ -93,6 +96,11 @@ impl Registry {
         prepared: &mut PreparedOriginalPredecessor,
     ) -> Result<Option<Entry>, AppError> {
         let next = prepared.entry.as_ref().ok_or_else(refused)?;
+        // A continuation's saved revision is already reserved to its original owner. It may
+        // become Active only through that exact claim + actual SavedData finalizer below.
+        if next.continuation.is_some() {
+            return Err(refused());
+        }
         let index = if let Some(index) = self
             .slots
             .iter()
@@ -170,6 +178,7 @@ pub(in crate::store) struct PreparedOriginalPredecessor {
     // Dropped after the sole sender/task on a refused preparation. Successful installation
     // transfers this fee to Runtime; source/worker Drop must not refund retained exclusions.
     entry: Option<Entry>,
+    continuation_claim: Option<Arc<JoinContinuationOutcome>>,
 }
 impl PreparedOriginalPredecessor {
     /// Construct ONLY after the concrete caller prepays bounded key/Arc/wakeup metadata. This
@@ -216,9 +225,11 @@ impl PreparedOriginalPredecessor {
                 identity: owner.identity(),
                 revoker: PredecessorRevoker::Join(owner.handle()),
                 negative: observer.clone(),
+                continuation: None,
                 _metadata_fee: MetadataCustody::Join { _fee: metadata_fee },
             }),
             task: OriginalPredecessorTask { owner, observer },
+            continuation_claim: None,
         })
     }
 

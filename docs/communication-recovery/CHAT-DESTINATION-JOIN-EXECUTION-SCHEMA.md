@@ -260,11 +260,15 @@ candidate before file I/O. It cannot enter any grant/task/scope path. Existing u
 whole-parent, root barriers and warm same-handle partial repair remain mandatory. Cold malformed
 partial stage preservation/refusal remains unchanged.
 
-This packet does NOT implement an executable explicit RetryGrant/same-T continuation, cold
-input-body authentication/SDK reconstruction, Accepted receipt, ScopeIntent/Frozen/Current/ready,
+The follow-on private source now implements an explicit ACTIVE-only RetryGrant/same-T
+continuation under exact original reservation/SavedData gates; see
+[continuation contract](CHAT-DESTINATION-JOIN-RETRY-CONTINUATION.md). Compilation/tests remain
+paused. This still does NOT implement cold input-body authentication/SDK reconstruction,
+Accepted receipt, ScopeIntent/Frozen/Current/ready,
 public-owner-v2 invitation/root distribution, global native admission or complete typed SDK heap.
-The RetryGrant grammar is inert retained DATA for its next actual consumer; no renewal API is
-exposed. The older undeclared `retained_exchange.rs` SDK draft remains excluded.
+No automatic refill/renewal follows from a parsed RetryGrant. Only the explicit local
+ensure_retry_grant/next_retry_grant consumer may request another saved grant; it retains ONE
+original request/result across lost returns and never resets an old bind claim. The older undeclared `retained_exchange.rs` SDK draft remains excluded.
 
 Authored UNRUN coverage: eight execution-state DATA tests, seven nested payload DATA tests,
 thirteen App Store/network tests and three Sync lower/once-bound tests. This is source evidence,

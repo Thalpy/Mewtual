@@ -1,6 +1,7 @@
 //! Actual configured Store arms + ONE owned MemNetwork + real saved owner reply. These
 //! tests are authored UNRUN under the user compilation/test/build pause. No SDK acceptance,
 //! member Current or physical/network test is inferred from retaining signed INPUT DATA.
+mod continuation;
 use super::*;
 use crate::store::{
     CheckpointJoinExecutionPolicy, CheckpointJoinNetwork, CheckpointJoinSubmissionStatus as Status,
@@ -850,6 +851,7 @@ fn valid_bytes_on_an_unadmitted_candidate_identity_cannot_enter_the_repair_callb
             created: None,
             execution_task: None,
             received_input: None,
+            continuation_outcome: None,
             _fee: fee,
         }
     };

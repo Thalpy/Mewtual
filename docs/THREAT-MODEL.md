@@ -5920,3 +5920,12 @@ rollback to FI refuses. All full source/S0 comparisons precede final exact curre
 verification and Root/negative checks. The old FI read contract remains unchanged. There is no
 new large-I/O, cold restore, scope Current or native authority. Eight regressions are authored
 UNRUN; static source review is clear, not compiled validation.
+
+The explicit private ACTIVE-only RetryGrant consumer reserves its original successor identity
+with first catalog admission, so a genuine coalesced caller cannot steal a saved retry revision.
+Only actual physical barriers mark that exact private SavedData outcome, and only its retained
+original sender can finalize Active after current full-envelope/root/source checks. DATA repair
+never activates. The same owned transport/prefix continues with a new context; bind claims do
+not reset, old watchers remain closed, and dropped/error/paused owners cannot rebind the same
+revision. No decoded grant or saved arm can reconstruct an unstarted ticket. Tests are UNRUN;
+SDK/Accepted/ScopeIntent/Current and native rollout remain separate closed boundaries.

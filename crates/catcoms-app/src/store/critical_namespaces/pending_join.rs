@@ -100,6 +100,10 @@ pub(in crate::store) struct PendingCandidate {
     // Presence selects the separate physical DATA permit; the full exact Input-only transition
     // is rechecked under both serializers on first admission AND every admitted repair.
     pub(in crate::store) received_input: Option<Arc<catcoms_sync::SealedOriginalJoinInput>>,
+    // Only the special original RetryGrant admission can reserve this genuine owner. DATA
+    // repair marks SavedData after real barriers; it never activates or owns the task sender.
+    pub(in crate::store) continuation_outcome:
+        Option<Arc<crate::store::chat_admission::predecessor::JoinContinuationOutcome>>,
     pub(in crate::store) _fee: CatalogReadReservation,
 }
 /// Inert snapshot from the ACTUAL Store-owned pending object. A final private repair permit

@@ -224,6 +224,13 @@ impl RetainedJoinDataRepairPermit<'_> {
     ) -> Result<(), AppError> {
         self.physical
             .validate_capture(&candidate.original.capture)?;
+        if let Some(outcome) = &candidate.continuation_outcome {
+            self.physical
+                .runtime
+                .predecessors
+                .validate_continuation_data(self.physical.capture, outcome)?;
+            outcome.validate_candidate(candidate)?;
+        }
         self.identity.validate_candidate(candidate)
     }
 }
@@ -253,7 +260,15 @@ impl JoinCatalogWritePermit<'_, '_> {
     ) -> Result<(), AppError> {
         match self {
             Self::Original(permit) if candidate.received_input.is_none() => {
-                permit.validate_capture(&candidate.original.capture)
+                permit.validate_capture(&candidate.original.capture)?;
+                if let Some(outcome) = &candidate.continuation_outcome {
+                    permit
+                        .runtime
+                        .predecessors
+                        .validate_continuation_data(permit.capture, outcome)?;
+                    outcome.validate_candidate(candidate)?;
+                }
+                Ok(())
             }
             Self::Received(permit)
                 if candidate.received_input.is_some() && candidate.execution_task.is_none() =>

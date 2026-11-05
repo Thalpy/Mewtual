@@ -8294,3 +8294,25 @@ construct a result. Registered validation uses the exact admitted/saved SP file,
 read API remains exact-FI-only. All full comparisons precede final current bytes/identity and
 Root/negative proofs. This interface admits no large pass/source file, SDK restore or Current.
 Eight additional regressions remain authored UNRUN; combined adversarial static review is clear.
+
+### Explicit original checkpoint retry continuation
+
+`CheckpointJoinNetwork::ensure_retry_grant` is a trusted local ACTIVE-source action. It retains
+ONE exact checked grant/revision target and outcome; repeated/lost returns do not create another
+grant, and a changed limit refuses. `next_retry_grant` starts another explicit local action only
+after completion. Paused/newer schedules and received INPUT refuse; this is not a remote command,
+automatic timeout policy, SDK completion or Current. Original lifetime ordinal/latest arm remain.
+
+First admission atomically reserves the exact new task identity and Store candidate under
+admission->catalog BEFORE r2 becomes visible. The caller alone owns the new sender. Same-version
+coalesced consumers cannot steal Reserved even after weak expiry. Only actual same-byte file/
+rename/root barriers mark the private original outcome SavedData; repair cannot activate it.
+Exact original-owner finalization additionally crosses current whole-file/root/source/pin gates
+before Active. Registered task/cell ownership is retained before any fallible Sync attachment.
+
+Sync's opaque continuation moves the same immutable source to a new cell reserved to the SAME
+physical Bound identity, retaining its T/target/ordered prefix. Both bind claims stay true forever;
+no alternate T or caller prefix is accepted. The old scope cannot adopt the new sender. Errors
+return the same pending owner; close also cancels prospective owners. Strong resource metadata
+is retained with the actual new context, and last owners drain outside original writers. Ten
+regressions (7App+3Sync) are authored UNRUN; no native/SDK/root-kind2/global heap acceptance follows.

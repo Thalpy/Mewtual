@@ -1,18 +1,5 @@
 # Mewtual; Handover
 
-## Physical-work OS-session prerequisite (5 November; authored, unexecuted)
-
-`VaultSessionGuard` now lends a non-Clone OS-lock-only `VaultPhysicalWorkLease`. The SAME
-private File stays locked until both Store and all actual running jobs drain; the loan holds
-no Store/keys/creator sender or authority and must never be retained by inert debt. Three storage
-tests plus one actual Store-drop/continued-write test are authored UNRUN. Design and read-only
-actual-diff reviews are CLEAR. Direct format/whitespace/ambient/raw-fs gates passed; no compilation/
-tests/build ran under the user's pause. Root must
-consume this resource in its paid physical source-worker constructor before claiming that actual
-large-I/O/remount race closed. [Contract](communication-recovery/VAULT-PHYSICAL-WORK-SESSION-LEASE.md).
-Pending focused selectors: `cargo test -p catcoms-storage vault::physical_work_tests` and
-`cargo test -p catcoms-app store::physical_work_session_tests`. Full gates remain deferred.
-
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
@@ -46,6 +33,19 @@ unexposed-negative recovery, independently durable exact repair seeds and unifie
 writer exclusion. Original bootstrap ciphertext and the namespace-only declaration below are now
 authored consuming prerequisites. Actual creation debit/FoundingIntent source is now reviewed;
 source persistence, canonical head/scope saves and cold/crash acceptance remain unfinished.
+
+## Physical-work OS-session prerequisite (5 November; authored, unexecuted)
+
+`VaultSessionGuard` now lends a non-Clone OS-lock-only `VaultPhysicalWorkLease`. The SAME
+private File stays locked until both Store and all actual running jobs drain; the loan holds
+no Store/keys/creator sender or authority and must never be retained by inert debt. Three storage
+tests plus one actual Store-drop/continued-write test are authored UNRUN. Design and read-only
+actual-diff reviews are CLEAR. Direct format/whitespace/ambient/raw-fs gates passed; no compilation/
+tests/build ran under the user's pause. Root must
+consume this resource in its paid physical source-worker constructor before claiming that actual
+large-I/O/remount race closed. [Contract](communication-recovery/VAULT-PHYSICAL-WORK-SESSION-LEASE.md).
+Pending focused selectors: `cargo test -p catcoms-storage vault::physical_work_tests` and
+`cargo test -p catcoms-app store::physical_work_session_tests`. Full gates remain deferred.
 
 ## Actual small SourcePrepared journal (5 November; authored, UNRUN)
 
@@ -102,6 +102,18 @@ adversarial static review is clear after fixes. No compiler, compiled tests or b
 SourcePrepared/source execution/save, negative closure, typed SDK restore, canonical activation
 and native Chat V2 remain open. See the
 [factory contract](communication-recovery/CHAT-OWNER-FOUNDING-INTENT-FACTORY.md).
+
+### Explicit original RetryGrant source continuation (UNRUN)
+
+Private ACTIVE-only retries now retain one checked new grant/schedule revision, reserve the
+exact successor identity atomically with first candidate admission, and keep that sender only
+in the caller. Real file/root barriers mark SavedData; only the same original owner can finalize
+Active, then move the same T/prefix/source to its reserved cell without resetting any bind claim.
+Coalesced callers cannot steal r2; errors/close retain/cancel prospective owners appropriately.
+No timeout/restart/configuration refills units. Ten new regressions (7App+3Sync) are authored UNRUN
+with final adversarial static review clear; no compiler/tests/build. Cold INPUT/SDK/Accepted, ScopeIntent/Frozen/
+Current/ready, production root-kind2/native/global heap remain OPEN. See
+[retry contract](communication-recovery/CHAT-DESTINATION-JOIN-RETRY-CONTINUATION.md).
 
 ### Exact already-admitted JOIN DATA repair after row retirement (UNRUN)
 
