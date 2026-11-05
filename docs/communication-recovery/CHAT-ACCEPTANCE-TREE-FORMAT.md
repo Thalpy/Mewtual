@@ -40,6 +40,14 @@ power-of-two leaf count and hash, in creation order. These are O(N) append-only 
 bounded cold-page persistence, not a retained full path copy for every historical root. The actual
 host must reserve `k + internal_count` records/bytes and one bounded scratch/frontier before calling.
 
+For a complete aligned node range `[first,first+span)`, let checked `n=first+span` and
+`height=log2(span)`. Its logical zero-based creation ordinal is
+`2*(n-1)-popcount(n-1)+height`: the nth leaf creates its leaf then all lower carries. Use u128
+BEFORE doubling; total retained node count can exceed u64 while leaf count is still valid. Reject
+zero/non-power span, unaligned first and overflowing end. This derives a logical position only,
+not node presence/hash validation or a physical page address. Future cold-page/manifest encoding
+must still prove and durably publish the exact record. No path-copy index is implied.
+
 ## Inclusion and historical prefix proofs
 
 Inclusion accepts an exact leaf/index/count and BOTTOM-UP siblings. The index must be less than a
@@ -79,9 +87,10 @@ journal, lookup or migration are implemented.
 ## Implementation evidence and remaining validation
 
 The declared `chat::acceptance_tree` module now implements these bounded primitives. Actual-diff
-adversarial review found no blocker/high/medium. Nine regressions are authored, including exhaustive
+adversarial review found no blocker/high/medium. Ten regressions are authored, including exhaustive
 small recursive reference paths/prefixes, mutation/reordering/refusal cases, exact append ranges,
-partition invariance, 120 internal carries, 65-hash consistency and 64-hash inclusion at u64 limits.
+partition invariance, 120 internal carries, 65-hash consistency and 64-hash inclusion at u64 limits,
+and independently enumerated creation ordinals extending beyond u64.
 They have NOT been compiled or executed during the user pause; only source formatting/whitespace
 checks ran. An optional low-priority follow-up remains before format release: independently compute
 and freeze literal empty/leaf/internal digest outputs alongside the existing frozen exact input-byte

@@ -81,6 +81,8 @@ pub enum TreeError {
     Context,
     #[error("acceptance frontier does not match its claimed tip")]
     Frontier,
+    #[error("acceptance node range is not a complete aligned subtree")]
+    Node,
     #[error("acceptance batch is empty, too large, duplicated or out of order")]
     Batch,
     #[error("acceptance proof does not match its exact path and tip")]
@@ -140,6 +142,24 @@ pub struct CreatedNode {
     pub first: u64,
     pub count: u64,
     pub hash: TreeHash,
+}
+impl CreatedNode {
+    /// Logical zero-based position in the leaf+carry creation sequence, using wide arithmetic.
+    /// The nth leaf follows2*(n-1)-popcount(n-1) earlier records, then creates heights0..v2(n).
+    /// This checks only RANGE shape: it authenticates neither this node's hash nor its presence
+    /// in a particular log/manifest. Actual cold-page layout and durable lookup are separate.
+    pub fn creation_ordinal(self) -> Result<u128, TreeError> {
+        if !self.count.is_power_of_two() || self.first % self.count != 0 {
+            return Err(TreeError::Node);
+        }
+        let end = self.first.checked_add(self.count).ok_or(TreeError::Count)?;
+        let before = end.checked_sub(1).ok_or(TreeError::Count)?;
+        u128::from(before)
+            .checked_mul(2)
+            .and_then(|value| value.checked_sub(u128::from(before.count_ones())))
+            .and_then(|value| value.checked_add(u128::from(self.count.trailing_zeros())))
+            .ok_or(TreeError::Count)
+    }
 }
 
 /// Bounded derived witness. Each occupied slot is the complete subtree corresponding to one

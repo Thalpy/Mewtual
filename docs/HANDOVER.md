@@ -70,9 +70,11 @@ root-distribution invites and actual production consumers are open gates.
 
 The separate scalable acceptance-tree prerequisite now has bounded append/frontier, inclusion and
 historical-prefix consistency mathematics. Tips explicitly carry both profile/admission context
-labels; hash proofs do not authenticate those labels or grant authority. Nine authored/unrun
+labels; hash proofs do not authenticate those labels or grant authority. Ten authored/unrun
 regressions include the distinct65-hash consistency vs64-hash inclusion limits and actual120-node
-carry boundary. Actual-diff review is clear. It has no production log/header/cold-store consumer yet;
+carry boundary. Complete-node creation positions use checked u128 arithmetic and are compared
+against independently enumerated records; positions prove neither node content nor stored presence.
+Actual-diff review is clear. It has no production log/header/cold-store consumer yet;
 the optional independent literal-digest vector follow-up remains before format release. See
 [the exact tree contract](communication-recovery/CHAT-ACCEPTANCE-TREE-FORMAT.md).
 

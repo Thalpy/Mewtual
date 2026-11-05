@@ -255,6 +255,7 @@ fn append_partitions_match_recursive_roots_and_emit_each_exact_complete_node_onc
     for batch_size in [1, 2, 3, 7, 16, 64] {
         let mut frontier = Frontier::empty(context());
         let mut ranges = BTreeSet::new();
+        let mut ordinal = 0u128;
         for batch in leaves.chunks(batch_size) {
             let original = frontier.clone();
             let invoice = append_nodes(frontier.tip().count, batch.len()).unwrap();
@@ -265,6 +266,8 @@ fn append_partitions_match_recursive_roots_and_emit_each_exact_complete_node_onc
             let after = prepared.new_tip();
             assert_eq!(after, reference.tip(after.count as usize));
             for node in prepared.created_nodes() {
+                assert_eq!(node.creation_ordinal().unwrap(), ordinal);
+                ordinal += 1;
                 assert!(node.count.is_power_of_two());
                 assert_eq!(node.first % node.count, 0);
                 assert!(node.first.checked_add(node.count).unwrap() <= after.count);
@@ -284,6 +287,37 @@ fn append_partitions_match_recursive_roots_and_emit_each_exact_complete_node_onc
         assert_eq!(frontier.tip(), reference.tip(257));
         assert_eq!(ranges.len(), 2 * 257 - 257usize.count_ones() as usize);
     }
+}
+
+#[test]
+fn node_creation_ordinal_is_wide_checked_range_data_not_a_stored_hash_witness() {
+    let record = |first, count| CreatedNode {
+        first,
+        count,
+        hash: TreeHash::from_bytes([0; 32]),
+    };
+    assert_eq!(record(0, 1).creation_ordinal().unwrap(), 0);
+    assert_eq!(record(0, 2).creation_ordinal().unwrap(), 2);
+    assert_eq!(record(2, 2).creation_ordinal().unwrap(), 5);
+    assert_eq!(record(0, 4).creation_ordinal().unwrap(), 6);
+    assert_eq!(
+        record(0, 1u64 << 63).creation_ordinal().unwrap(),
+        u128::from(u64::MAX) - 1
+    );
+    let last = record(u64::MAX - 1, 1).creation_ordinal().unwrap();
+    assert_eq!(last, 2 * u128::from(u64::MAX) - 65);
+    assert!(last > u128::from(u64::MAX));
+    for invalid in [record(0, 0), record(0, 3), record(1, 2)] {
+        assert_eq!(invalid.creation_ordinal(), Err(TreeError::Node));
+    }
+    for overflow in [record(u64::MAX, 1), record(1u64 << 63, 1u64 << 63)] {
+        assert_eq!(overflow.creation_ordinal(), Err(TreeError::Count));
+    }
+    // This is not hash validation or presence: the same valid range has the same position
+    // even when its entirely untrusted hash is changed. The real signed manifest must check it.
+    let mut changed = record(0, 4);
+    changed.hash = TreeHash::from_bytes([0xff; 32]);
+    assert_eq!(changed.creation_ordinal(), record(0, 4).creation_ordinal());
 }
 
 #[test]
