@@ -536,7 +536,8 @@ impl ServerStore {
             catcoms_storage::VaultFormat::Legacy => false,
             catcoms_storage::VaultFormat::ChatScope
             | catcoms_storage::VaultFormat::OwnerEvidence
-            | catcoms_storage::VaultFormat::OwnerOperations => true,
+            | catcoms_storage::VaultFormat::OwnerOperations
+            | catcoms_storage::VaultFormat::CriticalNamespaces => true,
         };
         let table = self.read_chat_admissions(managed)?;
         if !managed && !table.is_empty() {
@@ -628,7 +629,8 @@ impl ServerStore {
             catcoms_storage::VaultFormat::Legacy => false,
             catcoms_storage::VaultFormat::ChatScope
             | catcoms_storage::VaultFormat::OwnerEvidence
-            | catcoms_storage::VaultFormat::OwnerOperations => true,
+            | catcoms_storage::VaultFormat::OwnerOperations
+            | catcoms_storage::VaultFormat::CriticalNamespaces => true,
         };
         if runtime.table.is_none() {
             runtime.table = Some(self.read_chat_admissions(managed)?);
@@ -642,6 +644,9 @@ impl ServerStore {
         ))?;
         runtime.managed = true;
         runtime.format = Some(match format {
+            catcoms_storage::VaultFormat::CriticalNamespaces => {
+                catcoms_storage::VaultFormat::CriticalNamespaces
+            }
             catcoms_storage::VaultFormat::OwnerOperations => {
                 catcoms_storage::VaultFormat::OwnerOperations
             }
@@ -681,7 +686,28 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         intent.validate_original(self)?;
         let (keys, format) = opened.into_parts();
-        if format != catcoms_storage::VaultFormat::OwnerOperations
+        if !format.requires_owner_operations() || keys.db_key()? != self.keys.db_key()? {
+            return Err(refused());
+        }
+        let mut runtime = self.chat_mount.locked()?;
+        if !runtime.managed || runtime.dirty || runtime.table.is_none() {
+            return Err(refused());
+        }
+        runtime.format = Some(format);
+        Ok(())
+    }
+
+    /// Only the actual pre-exposure catalog transaction calls this with its original known
+    /// files and freshly authenticated SAME-DEK wrapper. Decoded catalog bytes/format metadata
+    /// alone cannot update a mount or construct an admission. Exact v4 negative gates remain v4.
+    pub(super) fn confirm_critical_namespace_format(
+        &self,
+        opened: catcoms_storage::OpenedVault,
+        catalog: &super::critical_namespaces::ValidatedEmptyCatalog,
+    ) -> Result<(), AppError> {
+        catalog.validate_original(self)?;
+        let (keys, format) = opened.into_parts();
+        if format != catcoms_storage::VaultFormat::CriticalNamespaces
             || keys.db_key()? != self.keys.db_key()?
         {
             return Err(refused());

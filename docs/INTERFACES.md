@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Empty critical namespace catalog (5 November; authored, unexecuted)
+
+`ServerStore::into_critical_namespace_store` consumes the private Store and crosses the actual
+supported v5 inventories, sealed Empty catalog and SAME-DEK v6 wrapper barriers before return.
+Constructor inspection authenticates current AND stage before older gates/cleaners, including
+with an older authentic wrapper. Missing mandatory metadata or ANY nonempty/unknown candidate
+refuses with bytes preserved. V6 is sticky; exact v4 negative/stage exceptions remain v4. No join
+journal/archive namespace or active native issuer is supported. Thirteen App/four Storage tests
+are authored and UNRUN during the compilation pause. [Contract and rollback limits](communication-recovery/CHAT-CRITICAL-NAMESPACE-CATALOG-V6.md).
+
 ## Exact v2 review-decision data (5 November; inactive)
 
 `owner_bodies::ReviewDecisionBody` binds one complete target, stable case ID, intent nonce, decision

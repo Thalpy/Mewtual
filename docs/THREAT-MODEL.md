@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Critical namespace fence prerequisite (5 November; authored, unexecuted)
+
+Vault v6 binds its distinct KDF domain to a mandatory sealed critical catalog. The mounted host
+authenticates BOTH fixed current/stage sources before old inventory cleanup; this implementation
+accepts generation1/count0 only. Unknown/nonempty or malformed metadata cannot be ignored or
+discarded, and an orphan catalog cannot trigger a new DEK. Supported consuming activation keeps
+all older lineage/owner state; missing inventories refuse. This supports no join/archive records
+and grants no fresh or historical authority. Authentic old-wrapper-alone/component catalog replay
+is not prevented by external monotonic storage. Fixed requested buffer limits are not whole SDK
+or process heap admission. Seventeen regressions are authored/UNRUN under the compilation pause.
+See [the exact v6 boundary](communication-recovery/CHAT-CRITICAL-NAMESPACE-CATALOG-V6.md).
+
 ## Default-closed current chat effects (5 November; validation paused)
 
 Historical Valid/ordinary rights are not current projection authority. The guarded ledger requires

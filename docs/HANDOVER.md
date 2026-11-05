@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Empty critical catalog prerequisite (5 November; authored, unexecuted)
+
+The private Store now has a consuming v6 transition over the SAME DEK and existing v5/owner/scope
+inventories. Its constructor validates BOTH sealed catalog current/stage candidates before any
+old gate or cleaner; only generation1/count0 is supported. Unknown/nonempty, missing, malformed,
+foreign or nonregular metadata refuses/preserves. Actual catalog stage/rename/parent and wrapper
+barriers govern recovery; old activation/secret paths keep6. Source-absent negative/S1 promotion
+remain exact v4. No join/archive handler or native activation was added. Thirteen App tests (one
+Unix-only) and four Storage tests are authored and UNRUN; direct formatting/whitespace checks
+are not runtime evidence. Read-only design and actual-diff reviews are clear. Durable client KP custody, bounded
+active/paused attempt slots, governing/native integration and full SDK heap admission remain open.
+[Contract](communication-recovery/CHAT-CRITICAL-NAMESPACE-CATALOG-V6.md) · [Client design](communication-recovery/CHAT-DESTINATION-JOIN-CUSTODY.md).
+
 ## Message-local projection work (5 November; authored, unexecuted)
 
 The inactive typed ledger now derives one message-index membership per retained action, rebuilt

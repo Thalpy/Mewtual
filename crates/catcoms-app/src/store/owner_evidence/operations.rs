@@ -114,7 +114,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         let Some(intent) = self.inspect_owner_operations_intent()? else {
-            if actual_format == VaultFormat::OwnerOperations {
+            if actual_format.requires_owner_operations() {
                 return Err(refused());
             }
             self.open_chat_admission_inventory(actual_format)?;
@@ -124,7 +124,7 @@ impl ServerStore {
         self.open_chat_admissions_for_operations_recovery(actual_format, &intent)?;
         self.open_owner_pins_for_operations_recovery(&intent)?;
         intent.settle(self)?;
-        if actual_format != VaultFormat::OwnerOperations {
+        if !actual_format.requires_owner_operations() {
             self.activate_owner_operations_wrapper(passphrase, rng, &intent)?;
         }
         // An already authenticated v5 needs no extra Argon2/rewrap. Its managed root barrier
@@ -145,8 +145,7 @@ impl ServerStore {
         let intent = match store.inspect_owner_operations_intent()? {
             Some(intent) => intent,
             None => {
-                if store.chat_vault_format()? == VaultFormat::OwnerOperations
-                    || original.is_cancelled()
+                if store.chat_vault_format()?.requires_owner_operations() || original.is_cancelled()
                 {
                     return Err(refused());
                 }
@@ -208,6 +207,13 @@ impl ServerStore {
             current,
             stage,
         }))
+    }
+
+    /// Negative constructor preflight for a pending newer critical catalog. No inventory is
+    /// opened/created or stage settled here. Authentication of both fixed intent sources must
+    /// succeed before the new catalog gate may enter the existing operation recovery path.
+    pub(in crate::store) fn has_owner_operations_intent(&self) -> Result<bool, AppError> {
+        Ok(self.inspect_owner_operations_intent()?.is_some())
     }
 
     fn read_owner_operations_intent_file(

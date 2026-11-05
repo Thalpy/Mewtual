@@ -49,6 +49,7 @@ pub(crate) fn studio_refused(
 
 mod chat_admission;
 mod chat_fences;
+mod critical_namespaces;
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
@@ -535,6 +536,117 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 mod persistence {
     use super::*;
+
+    impl ServerStore {
+        /// Fixed critical metadata read. The single frame is bounded BEFORE allocation/unseal;
+        /// both current/stage are authenticated by the caller before any mutation or old cleaner.
+        /// Windows sync requires writable existing handles; no create/truncate flag is present.
+        pub(super) fn open_critical_catalog_slot(
+            &self,
+            slot: critical_namespaces::Slot,
+        ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+            use critical_namespaces::{refused, MAX_FRAMED};
+            let path = self.dir.join(slot.name());
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Ok(metadata)
+                    if metadata.file_type().is_file() && metadata.len() <= MAX_FRAMED as u64 => {}
+                _ => return Err(refused()),
+            }
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            let mut raw = Zeroizing::new(Vec::with_capacity(MAX_FRAMED + 1));
+            (&mut file)
+                .take((MAX_FRAMED + 1) as u64)
+                .read_to_end(&mut raw)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            if raw.len() > MAX_FRAMED {
+                return Err(refused());
+            }
+            Ok(Some((file, raw)))
+        }
+
+        /// Exact Empty bootstrap, called only by the consuming pre-exposure transition. A
+        /// collision refuses instead of truncating/cleaning a possibly newer critical source.
+        /// Errors keep the original stage/canonical bytes for mandatory constructor inspection.
+        pub(super) fn write_initial_critical_catalog(&self, bytes: &[u8]) -> Result<(), AppError> {
+            use critical_namespaces::{refused, Slot, MAX_FRAMED};
+            let original = self.chat_mount.observer();
+            if bytes.len() > MAX_FRAMED || original.is_cancelled() {
+                return Err(refused());
+            }
+            // The initial consumer already proved complete catalog absence under the exclusive
+            // session. No exposed Store writer can race this fixed metadata in this slice.
+            let stage = self.dir.join(Slot::Stage.name());
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&stage)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            file.write_all(bytes)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            file.sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            drop(file);
+            #[cfg(test)]
+            if self.critical_namespace_fault.load(Ordering::SeqCst) == 1 {
+                return Err(AppError::Io(
+                    "injected retained catalog stage sync loss".into(),
+                ));
+            }
+            if original.is_cancelled() {
+                return Err(refused());
+            }
+            fs::rename(stage, self.dir.join(Slot::Current.name()))
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            self.sync_critical_catalog_parent()
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))
+        }
+
+        /// A known original candidate is settled only after BOTH complete Empty sources were
+        /// independently authenticated. They have identical canonical plaintext even when their
+        /// sealing nonces differ. No unrecognized source can construct this private capability.
+        pub(super) fn settle_empty_critical_catalog(
+            &self,
+            catalog: &critical_namespaces::ValidatedEmptyCatalog,
+        ) -> Result<(), AppError> {
+            use critical_namespaces::Slot;
+            catalog.validate_original(self)?;
+            for file in catalog.current.iter().chain(catalog.stage.iter()) {
+                file.sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+            }
+            sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+            if catalog.stage.is_some() {
+                catalog.validate_original(self)?;
+                if catalog.current.is_some() {
+                    fs::remove_file(self.dir.join(Slot::Stage.name()))
+                        .map_err(|error| AppError::Io(error.to_string()))?;
+                } else {
+                    fs::rename(
+                        self.dir.join(Slot::Stage.name()),
+                        self.dir.join(Slot::Current.name()),
+                    )
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                }
+                self.sync_critical_catalog_parent()
+                    .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            }
+            catalog.validate_original(self)
+        }
+
+        fn sync_critical_catalog_parent(&self) -> std::io::Result<()> {
+            #[cfg(test)]
+            if self.critical_namespace_fault.swap(0, Ordering::SeqCst) == 2 {
+                // Fail the SAME real directory-open/sync operation after actual rename.
+                return sync_directory(&self.dir.join("missing-critical-catalog-sync-parent"));
+            }
+            sync_directory(&self.dir)
+        }
+    }
 
     fn staging_candidate(path: &Path, id: u64) -> PathBuf {
         let parent = path
@@ -2061,6 +2173,8 @@ pub struct ServerStore {
     chat_parent_sync_failure: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     chat_fence_pre_rename_failure: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    critical_namespace_fault: std::sync::atomic::AtomicU8,
     creative_protection: creative_references::SharedProtection,
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
@@ -2093,6 +2207,7 @@ impl ServerStore {
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
         // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
         let session = acquire_vault_session(&dir)?;
+        critical_namespaces::refuse_orphan_before_vault_creation(&dir)?;
         owner_evidence::operations::refuse_orphaned_intent_before_vault_creation(&dir)?;
         let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
@@ -2116,13 +2231,15 @@ impl ServerStore {
             chat_parent_sync_failure: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             chat_fence_pre_rename_failure: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            critical_namespace_fault: std::sync::atomic::AtomicU8::new(0),
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         };
         // Classify from the SAME authenticated wrapper bytes, then validate mandatory lineage
         // before returning any usable mount. A later public-header read cannot replace this
         // evidence. Even legacy wrappers cannot ignore a nonempty prior managed inventory.
-        store.open_owner_operations_gate(format, passphrase, rng)?;
+        store.open_critical_namespace_gate(format, passphrase, rng)?;
         // Persist the `servers` directory entry as well as later contents. Without this flush, a
         // first-launch power loss could retain a synced record but forget the newly created
         // parent. It runs through the store so the destination cannot be supplied by a caller.

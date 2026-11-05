@@ -42,6 +42,12 @@ const OWNER_EVIDENCE_SECRET_DOMAIN: &str = "mewtual-vault-chat-owner-evidence/v4
 /// an authentic old wrapper alone can still reveal that same DEK to an old binary.
 const VAULT_VERSION_OWNER_OPERATIONS: u8 = 5;
 const OWNER_OPERATIONS_SECRET_DOMAIN: &str = "mewtual-vault-chat-owner-evidence/v5";
+/// V6 readers must understand the mandatory sealed critical-namespace catalog before touching
+/// older staging/cleanup paths. The initial host supports EMPTY catalogs only. A distinct KDF
+/// domain fences normal v1-v5 readers, while preserving the DEK and the documented authentic
+/// old-wrapper component-rollback limitation.
+const VAULT_VERSION_CRITICAL_NAMESPACES: u8 = 6;
+const CRITICAL_NAMESPACES_SECRET_DOMAIN: &str = "mewtual-vault-critical-namespaces/v6";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const SEALED_DEK_LEN: usize = 32 + 16; // 32-byte DEK plus Poly1305 authentication tag.
@@ -69,13 +75,24 @@ pub enum VaultFormat {
     OwnerEvidence,
     /// Mandatory v5 activation intent/operation-aware namespace, preserving every v3/v4 record.
     OwnerOperations,
+    /// Mandatory v6 sealed namespace catalog in addition to all v3/v4/v5 inventories.
+    CriticalNamespaces,
 }
 
 impl VaultFormat {
-    /// Format metadata only: both versions require the retained owner-pin/canonical inventory.
+    /// Format metadata only: all supported owner formats require the owner-pin/canonical inventory.
     /// This never establishes a live admission, historical membership, Saved head or writer.
     pub fn requires_owner_evidence(self) -> bool {
-        matches!(self, Self::OwnerEvidence | Self::OwnerOperations)
+        matches!(
+            self,
+            Self::OwnerEvidence | Self::OwnerOperations | Self::CriticalNamespaces
+        )
+    }
+
+    /// Metadata only. V6 additionally requires actual catalog validation by its mounted host;
+    /// this predicate cannot create that validation, an owner writer or publication authority.
+    pub fn requires_owner_operations(self) -> bool {
+        matches!(self, Self::OwnerOperations | Self::CriticalNamespaces)
     }
 }
 
@@ -186,6 +203,7 @@ fn open_classified_with_hooks(
             VAULT_VERSION_CHAT_SCOPE => VaultFormat::ChatScope,
             VAULT_VERSION_OWNER_EVIDENCE => VaultFormat::OwnerEvidence,
             VAULT_VERSION_OWNER_OPERATIONS => VaultFormat::OwnerOperations,
+            VAULT_VERSION_CRITICAL_NAMESPACES => VaultFormat::CriticalNamespaces,
             // New authenticated versions must extend this classification deliberately. Refuse
             // rather than treating a future mandatory format as legacy or panicking on it.
             _ => return Err(StorageError::Malformed),
@@ -217,6 +235,9 @@ fn open_classified_with_hooks(
 #[path = "vault_classification_tests.rs"]
 mod classification_tests;
 #[cfg(test)]
+#[path = "vault_critical_namespace_tests.rs"]
+mod critical_namespace_tests;
+#[cfg(test)]
 #[path = "vault_owner_evidence_tests.rs"]
 mod owner_evidence_tests;
 #[cfg(test)]
@@ -237,7 +258,10 @@ pub fn vault_exists(dir: impl AsRef<Path>) -> bool {
 pub fn chat_scope_vault_managed(dir: impl AsRef<Path>) -> Result<bool, StorageError> {
     Ok(matches!(
         vault_version(&read_vault_wrapper(&dir.as_ref().join(VAULT_FILE))?)?,
-        VAULT_VERSION_CHAT_SCOPE | VAULT_VERSION_OWNER_EVIDENCE | VAULT_VERSION_OWNER_OPERATIONS
+        VAULT_VERSION_CHAT_SCOPE
+            | VAULT_VERSION_OWNER_EVIDENCE
+            | VAULT_VERSION_OWNER_OPERATIONS
+            | VAULT_VERSION_CRITICAL_NAMESPACES
     ))
 }
 
@@ -318,6 +342,24 @@ pub fn activate_owner_operations_vault(
     )
 }
 
+/// Commit v6 only AFTER the actual private mounted host durably validates its supported sealed
+/// catalog and mandatory older inventories. This low-level wrapper primitive does not create or
+/// validate any catalog. Failure must drop the host's private mount, including after rename.
+pub fn activate_critical_namespace_vault(
+    dir: impl AsRef<Path>,
+    passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Result<(), StorageError> {
+    activate_managed_vault_with_hooks(
+        dir.as_ref(),
+        passphrase,
+        rng,
+        VAULT_VERSION_CRITICAL_NAMESPACES,
+        |_, _| {},
+        sync_managed_directory,
+    )
+}
+
 fn activate_managed_vault_with_hooks(
     dir: &Path,
     passphrase: &[u8],
@@ -333,6 +375,13 @@ fn activate_managed_vault_with_hooks(
     let old_version = vault_version(&old)?;
     let dek = decode_and_unseal(&old, passphrase)?;
     let version = match (requested_version, old_version) {
+        (VAULT_VERSION_CRITICAL_NAMESPACES, _)
+        | (
+            VAULT_VERSION_CHAT_SCOPE
+            | VAULT_VERSION_OWNER_EVIDENCE
+            | VAULT_VERSION_OWNER_OPERATIONS,
+            VAULT_VERSION_CRITICAL_NAMESPACES,
+        ) => VAULT_VERSION_CRITICAL_NAMESPACES,
         // All known critical versions are sticky. Older setup/secret callers cannot silently
         // turn off operation semantics after a v5 upgrade. Unknown requests still refuse.
         (VAULT_VERSION_OWNER_OPERATIONS, _)
@@ -427,7 +476,8 @@ fn change_vault_passphrase_with_hooks(
     let replacement = match version {
         VAULT_VERSION_CHAT_SCOPE
         | VAULT_VERSION_OWNER_EVIDENCE
-        | VAULT_VERSION_OWNER_OPERATIONS => {
+        | VAULT_VERSION_OWNER_OPERATIONS
+        | VAULT_VERSION_CRITICAL_NAMESPACES => {
             seal_and_encode_version(&dek, new_passphrase, rng, version)?
         }
         _ => seal_and_encode(&dek, new_passphrase, rng)?,
@@ -522,7 +572,8 @@ fn vault_version(bytes: &[u8]) -> Result<u8, StorageError> {
             | VAULT_VERSION_PREHASHED_SECRET
             | VAULT_VERSION_CHAT_SCOPE
             | VAULT_VERSION_OWNER_EVIDENCE
-            | VAULT_VERSION_OWNER_OPERATIONS,
+            | VAULT_VERSION_OWNER_OPERATIONS
+            | VAULT_VERSION_CRITICAL_NAMESPACES,
         ) => Ok(bytes[0]),
         _ => Err(StorageError::Malformed),
     }
@@ -544,8 +595,10 @@ fn derive_passphrase_store(
         }
         VAULT_VERSION_CHAT_SCOPE
         | VAULT_VERSION_OWNER_EVIDENCE
-        | VAULT_VERSION_OWNER_OPERATIONS => {
+        | VAULT_VERSION_OWNER_OPERATIONS
+        | VAULT_VERSION_CRITICAL_NAMESPACES => {
             let domain = match version {
+                VAULT_VERSION_CRITICAL_NAMESPACES => CRITICAL_NAMESPACES_SECRET_DOMAIN,
                 VAULT_VERSION_OWNER_OPERATIONS => OWNER_OPERATIONS_SECRET_DOMAIN,
                 VAULT_VERSION_OWNER_EVIDENCE => OWNER_EVIDENCE_SECRET_DOMAIN,
                 _ => CHAT_SCOPE_SECRET_DOMAIN,
