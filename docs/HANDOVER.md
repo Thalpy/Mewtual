@@ -77,6 +77,22 @@ invoice supplies no paid fee, namespace, file/head save, Current or publication 
 The actual App archive host remains required and Chat V2 stays disabled/incomplete.
 [Source package contract](communication-recovery/CHAT-OWNER-V2-GENESIS-ARCHIVE-PREPARATION.md).
 
+## Private index nodes and fixed-key queries (5 November; authored, unexecuted)
+
+The new `cold_index` prerequisite supplies bounded Directory/Actions node DATA, exact closed
+value/receipt/location framing and real private-page root/child opening. Selected steps preserve
+the original query key/root and check actual ciphertext/context/count/height/min/max/separators.
+Unknown/Empty/Present and incomplete/conflicting claim states remain distinct; structural misses
+grant no complete-prefix/Current/historical authority. No Store source, node writer, namespace,
+WAL/seed, repair/GC or native activation is implemented. Current Chat V2 remains incomplete.
+
+Ten regressions cover real AEAD links, layout/minfill/max counts, malformed framing/overflow,
+wrong contexts/roots/edge bounds and claim/receipt states; all are **UNRUN** under the pause.
+Direct rustfmt/diff checks only. Concrete design and final actual-diff static reviews are clear
+for this DATA-only checkpoint. The caller must pay retained parent plaintext during child transition,
+separately from raw/cipher/new plaintext and all source/journal/SDK buffers. See
+[the exact DATA contract](communication-recovery/CHAT-OWNER-ACCEPTED-INDEX-NODES.md).
+
 ## One cached private founder S0 (5 November; authored, unexecuted)
 
 The same original `FrozenFounder` can now retain ONE bounded zeroizing private SDK/Sync S0 and

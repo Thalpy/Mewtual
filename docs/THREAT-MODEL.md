@@ -19,6 +19,22 @@ authorize I/O or remain atomic across a later host commit. The actual App still 
 mount/key/fee/scope/head/native custody and covering child barriers. Six regressions remain UNRUN.
 [Exact contract](communication-recovery/CHAT-OWNER-V2-GENESIS-ARCHIVE-PREPARATION.md).
 
+## Private index path DATA, without prefix authority (5 November; authored, unexecuted)
+
+The node/query codec bounds borrowed framing/counts/values before variable ownership and binds
+actual private ciphertext IDs, context, root summary and every selected child edge. Root/child
+occupancy, sums<=u64, height<=9 and separator/key-span checks reject inconsistent labels. Query
+key/root cannot be replaced at a child step. Reached Actions leaves check ALL claims against
+carried public-leaf-count DATA; incomplete/conflict never becomes a miss, and Unknown never Empty.
+
+Self-selected expected roots and directory metadata remain untrusted DATA. Ciphertext integrity,
+receipt-hash agreement and structural misses do not create actual selected source, complete prefix,
+historical authorization or Current. Actual producer/replay, original mounted source/head/negative
+capture, result evidence, fees, seed/WAL and GC remain mandatory independent consumers. No namespace
+or native I/O is enabled. Parent plaintext must remain paid during child opening; keeping extra
+ancestors adds their full retained allocations. Ten regressions are authored UNRUN.
+[Exact boundary](communication-recovery/CHAT-OWNER-ACCEPTED-INDEX-NODES.md).
+
 ## Original private founder snapshot equality (5 November; authored, unexecuted)
 
 A cached V2 founder S0 is private DATA, not an epoch-zero/Fresh/current import. Every public or

@@ -10,6 +10,7 @@ pub mod acceptance_tree;
 mod action;
 mod authority;
 pub mod cold_actions;
+pub mod cold_index;
 pub mod cold_manifest;
 pub mod cold_nodes;
 pub mod cold_records;

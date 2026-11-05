@@ -17,6 +17,17 @@ binding. Checked views repeat complete source/S0/negative observations; they are
 host admission, mounted-key proof, fee, Saved/Current or native command. Six tests are UNRUN.
 [Exact API, package and remaining host boundary](communication-recovery/CHAT-OWNER-V2-GENESIS-ARCHIVE-PREPARATION.md).
 
+## Bounded private index node/query DATA (5 November; authored, unexecuted)
+
+`chat::cold_index` encodes borrowed two-scope index nodes and opens actual sealed root/child DATA
+under external expected IDs/context. `IndexQueryData` preserves its original key/root through
+private child steps, checking full count/height/min/max/interval context on each opened edge.
+Directory Unknown/Empty/Present are distinct; a missing directory entry is incomplete. Action
+claims, including incomplete/conflict hints, remain present. Structural `NoActionKey` is DATA,
+never complete absence. No actual Store/root capture, I/O/namespace, accepted-history issuer,
+balanced-tree writer, WAL/GC or native command is supplied. Ten regressions remain UNRUN.
+[Exact grammar, source limitations and parent/child memory overlap](communication-recovery/CHAT-OWNER-ACCEPTED-INDEX-NODES.md).
+
 ## One original founder private S0 DATA (5 November; authored, unexecuted)
 
 `FounderSnapshotLimits` provides checked closed initial-source bounds, never payment or Current.
