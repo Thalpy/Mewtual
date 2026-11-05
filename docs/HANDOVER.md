@@ -26,6 +26,12 @@ changed Rust files, whitespace checks and both ambient-dependency/raw-filesystem
 are the narrow checks used during this pause. They do not substitute for compilation or the
 required full suites once the pause is lifted. Reviewed checkpoints are pushed to the branch.
 
+The next actual consuming [archive-host vertical](communication-recovery/CHAT-OWNER-ARCHIVE-HOST-VERTICAL.md)
+has passed design review, including original FoundingIntent before scope mutation, a NEW exact
+unexposed-negative recovery, independently durable exact repair seeds and unified protocol-aware
+writer exclusion. It remains unimplemented: namespace mounting, fees, exact grants/seed/source
+codecs, actual head/scope saves and cold/crash acceptance cannot be inferred from that design.
+
 ## Private typed record batches (5 November; authored, unexecuted)
 
 `cold_records` now supplies the bounded actual-content DATA prerequisite for Genesis3,
