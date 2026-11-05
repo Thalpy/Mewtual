@@ -19,7 +19,9 @@ use super::*;
 use catcoms_rt::RequestCancellation;
 use catcoms_storage::VaultFormat;
 use std::sync::Arc;
+pub(in crate::store) mod archive_bootstrap;
 mod catalog_envelope;
+pub use archive_bootstrap::{ArchiveBootstrapCatalogPolicy, PreparedArchiveBootstrapStore};
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
@@ -171,6 +173,9 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        if self.archive_bootstrap_policy.is_some() {
+            return self.open_archive_bootstrap_catalog_gate(actual_format, passphrase, rng);
+        }
         // Both the default and explicit Pending-only constructor still reject ARCHIVE2.
         // Refuse its physical artifacts even if a replayed Empty/old catalog omits ID2;
         // no lower-format gate may clean or infer absence first. This is not an archive

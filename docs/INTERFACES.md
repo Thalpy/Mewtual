@@ -4,8 +4,11 @@
 
 `chat-owner-v2` and `chat-critical-namespaces.archive.seed` are reserved fixed Store names.
 The currently supported default/Pending-only constructors reject their presence before old
-gates/cleaners, including orphan objects before new-vault creation. This adds no public path,
-configured archive opener, namespace declaration or source-save API. Two regressions are UNRUN.
+gates/cleaners, including orphan objects before new-vault creation. The separate explicit
+`PreparedArchiveBootstrapStore` opens a NEW existing-v6 physical Store privately and completes
+the exact seed/stage/marker/current transaction before `into_store`. No incomplete borrowed
+Store, exposed-store conversion, source-save/SDK/Current or native command is added. Thirteen
+new regressions are UNRUN. [Exact API/physical contract](communication-recovery/CHAT-ARCHIVE-NAMESPACE-DECLARATION.md).
 
 ## Original founder bootstrap source DATA (5 November; authored, unexecuted)
 

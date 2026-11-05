@@ -51,8 +51,9 @@ mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
 pub use critical_namespaces::{
-    ActivatedCheckpointJoin, CriticalCatalogReadPool, JournalledCheckpointJoinPreparation,
-    PendingJoinCatalogPolicy, ReturnedCheckpointJoinActivation,
+    ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, CriticalCatalogReadPool,
+    JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    ReturnedCheckpointJoinActivation,
 };
 mod owner_evidence;
 pub use chat_admission::{
@@ -542,6 +543,332 @@ mod persistence {
     use super::*;
 
     impl ServerStore {
+        /// Bounded read of the ONE closed declaration-seed destination. The actual private
+        /// wrapper/constructor allowance is acquired before any frame allocation or unseal.
+        pub(super) fn read_archive_declaration_seed(
+            &self,
+            fee: &critical_namespaces::read_pool::CatalogReadReservation,
+        ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+            use critical_namespaces::archive_bootstrap::{DECLARATION_FEE, MAX_SEED_FRAMED};
+            let policy = self
+                .archive_bootstrap_policy
+                .as_ref()
+                .ok_or_else(critical_namespaces::refused)?;
+            fee.validate(&policy.pending.pool, DECLARATION_FEE)?;
+            read_archive_object(
+                &self.dir.join(critical_namespaces::ARCHIVE_DECLARATION_SEED),
+                MAX_SEED_FRAMED,
+            )
+        }
+
+        /// Exact pre-exposure transaction, including cold retries derived from its independently
+        /// authenticated complete seed. No exposed Store/other writer exists at this call path.
+        /// The original mount is checked before effects; after admission effects stay fixed.
+        pub(super) fn write_archive_namespace_declaration(
+            &self,
+            declaration: &mut critical_namespaces::archive_bootstrap::Declaration,
+            fee: &critical_namespaces::read_pool::CatalogReadReservation,
+        ) -> Result<(), AppError> {
+            use critical_namespaces::archive_bootstrap::{DECLARATION_FEE, ROOT_MARKER};
+            use critical_namespaces::{
+                refused, Slot, ARCHIVE_BOOTSTRAP_ROOT, ARCHIVE_DECLARATION_SEED,
+            };
+            let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
+            fee.validate(&policy.pending.pool, DECLARATION_FEE)?;
+            if self.chat_mount.observer().is_cancelled()
+                || *blake3::hash(&declaration.candidate).as_bytes() != declaration.next.framed
+                || declaration.next.archive.as_ref() != Some(&declaration.descriptor)
+            {
+                return Err(refused());
+            }
+            let current_path = self.dir.join(Slot::Current.name());
+            let stage_path = self.dir.join(Slot::Stage.name());
+            let seed_path = self.dir.join(ARCHIVE_DECLARATION_SEED);
+            let root_path = self.dir.join(ARCHIVE_BOOTSTRAP_ROOT);
+            let (current, current_hash) =
+                read_pending_catalog_hash(&current_path)?.ok_or_else(refused)?;
+            let already_promoted = current_hash == declaration.next.framed;
+            if !already_promoted && current_hash != declaration.expected.framed {
+                return Err(refused());
+            }
+
+            if !already_promoted {
+                #[cfg(test)]
+                self.archive_declaration_fault(101)?;
+                // The first seed can repair only its SAME warm held object. A partial first
+                // seed after process loss is not self-authenticating and the constructor refuses.
+                ensure_archive_output(
+                    &seed_path,
+                    &declaration.seed,
+                    &mut declaration.seed_file,
+                    ArchiveOutputMode::Original,
+                    #[cfg(test)]
+                    self.critical_namespace_fault.load(Ordering::SeqCst),
+                    #[cfg(test)]
+                    102,
+                )?;
+                sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(103)?;
+
+                // Only a COMPLETE synced seed over the actual old current grants this bounded
+                // cold prefix completion. The stage must be complete BEFORE first root creation.
+                ensure_archive_output(
+                    &stage_path,
+                    &declaration.candidate,
+                    &mut declaration.stage_file,
+                    ArchiveOutputMode::SeedRepair,
+                    #[cfg(test)]
+                    self.critical_namespace_fault.load(Ordering::SeqCst),
+                    #[cfg(test)]
+                    104,
+                )?;
+                sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(105)?;
+
+                match fs::symlink_metadata(&root_path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        fs::create_dir(&root_path)
+                            .map_err(|error| AppError::Io(error.to_string()))?;
+                    }
+                    Ok(metadata) if archive_real_directory(&metadata) => {}
+                    _ => return Err(refused()),
+                }
+                // There can be NO source work before namespace completion. Refuse extra root
+                // entries rather than adopting a formerly populated/foreign directory as new.
+                for entry in
+                    fs::read_dir(&root_path).map_err(|error| AppError::Io(error.to_string()))?
+                {
+                    if entry
+                        .map_err(|error| AppError::Io(error.to_string()))?
+                        .file_name()
+                        .as_os_str()
+                        != OsStr::new(ROOT_MARKER)
+                    {
+                        return Err(refused());
+                    }
+                }
+                let root = open_archive_directory(&root_path)?;
+                let root_identity = catcoms_storage::kept::session_id(&root)
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                ensure_archive_output(
+                    &root_path.join(ROOT_MARKER),
+                    &declaration.marker,
+                    &mut declaration.marker_file,
+                    ArchiveOutputMode::SeedRepair,
+                    #[cfg(test)]
+                    self.critical_namespace_fault.load(Ordering::SeqCst),
+                    #[cfg(test)]
+                    107,
+                )?;
+                root.sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(108)?;
+                let same_root = open_archive_directory(&root_path)?;
+                if catcoms_storage::kept::session_id(&same_root)
+                    .map_err(|error| AppError::Io(error.to_string()))?
+                    != root_identity
+                {
+                    return Err(refused());
+                }
+                // Recheck exact fixed sources after all child/root waits. Only the seeded
+                // original stage is promoted, never a replacement/other namespace transition.
+                let (actual_current, actual_hash) =
+                    read_pending_catalog_hash(&current_path)?.ok_or_else(refused)?;
+                if actual_hash != declaration.expected.framed {
+                    return Err(refused());
+                }
+                actual_current
+                    .sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                verify_archive_held_name(
+                    &stage_path,
+                    declaration.stage_file.as_ref().ok_or_else(refused)?,
+                )?;
+                fs::rename(&stage_path, &current_path)
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(109)
+                    .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+                sync_directory(&self.dir)
+                    .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            } else {
+                // A committed declaration MUST find its original complete root. Do not create
+                // a root or finish a partial marker from the retained seed on this branch.
+                let root = open_archive_directory(&root_path)?;
+                let mut no_created_marker = None;
+                ensure_archive_output(
+                    &root_path.join(ROOT_MARKER),
+                    &declaration.marker,
+                    &mut no_created_marker,
+                    ArchiveOutputMode::SavedExact,
+                    #[cfg(test)]
+                    0,
+                    #[cfg(test)]
+                    0,
+                )?;
+                root.sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                if let Some((stage, raw)) = read_archive_object(
+                    &stage_path,
+                    critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED,
+                )? {
+                    if raw.as_slice() != declaration.candidate.as_slice() {
+                        return Err(refused());
+                    }
+                    stage
+                        .sync_all()
+                        .map_err(|error| AppError::Io(error.to_string()))?;
+                    fs::remove_file(&stage_path)
+                        .map_err(|error| AppError::Io(error.to_string()))?;
+                }
+                current
+                    .sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+            }
+
+            // Re-sync the actual promoted Current, not just the file which used to occupy its
+            // old name. An interrupted unlink/barrier retries the SAME candidate without RNG.
+            let (saved, saved_hash) =
+                read_pending_catalog_hash(&current_path)?.ok_or_else(refused)?;
+            if saved_hash != declaration.next.framed {
+                return Err(refused());
+            }
+            saved
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            if let Some((seed, raw)) = read_archive_object(
+                &seed_path,
+                critical_namespaces::archive_bootstrap::MAX_SEED_FRAMED,
+            )? {
+                if raw.as_slice() != declaration.seed.as_slice() {
+                    return Err(refused());
+                }
+                seed.sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                fs::remove_file(&seed_path).map_err(|error| AppError::Io(error.to_string()))?;
+                #[cfg(test)]
+                self.archive_declaration_fault(110)
+                    .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            }
+            sync_directory(&self.dir)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))
+        }
+
+        #[cfg(test)]
+        fn archive_declaration_fault(&self, point: u8) -> Result<(), AppError> {
+            if self.critical_namespace_fault.load(Ordering::SeqCst) == point {
+                return Err(AppError::Io(format!(
+                    "injected archive declaration interruption {point}"
+                )));
+            }
+            Ok(())
+        }
+
+        /// Strict bounded original-root read and real barriers. Root/marker IDs remain held for
+        /// final on-demand absence checks; authenticated labels alone never construct this value.
+        pub(super) fn open_declared_archive_root(
+            &self,
+            descriptor: &critical_namespaces::archive_bootstrap::Descriptor,
+            fee: critical_namespaces::read_pool::CatalogReadReservation,
+        ) -> Result<critical_namespaces::archive_bootstrap::MountedRoot, AppError> {
+            use critical_namespaces::archive_bootstrap::{self as archive, ROOT_METADATA_FEE};
+            use critical_namespaces::refused;
+            let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
+            fee.validate(&policy.pending.pool, ROOT_METADATA_FEE)?;
+            if descriptor.vault != self.chat_vault_domain()?
+                || self.chat_mount.observer().is_cancelled()
+            {
+                return Err(refused());
+            }
+            let path = self.dir.join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT);
+            let directory = open_archive_directory(&path)?;
+            let directory_id = catcoms_storage::kept::session_id(&directory)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            let (marker, raw) =
+                read_archive_object(&path.join(archive::ROOT_MARKER), archive::MAX_MARKER_FRAMED)?
+                    .ok_or_else(refused)?;
+            archive::verify_marker_frame(&self.keys.db_key()?, descriptor, &raw)?;
+            let marker_id = catcoms_storage::kept::session_id(&marker)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            marker
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            directory
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+            let reopened = open_archive_directory(&path)?;
+            if catcoms_storage::kept::session_id(&reopened)
+                .map_err(|error| AppError::Io(error.to_string()))?
+                != directory_id
+                || !matches!(
+                    catcoms_storage::kept::session_at(&path.join(archive::ROOT_MARKER), marker_id),
+                    catcoms_storage::kept::SessionAt::Ours
+                )
+            {
+                return Err(refused());
+            }
+            Ok(archive::MountedRoot {
+                descriptor: descriptor.clone(),
+                directory,
+                directory_id,
+                marker,
+                marker_id,
+                marker_digest: *blake3::hash(&raw).as_bytes(),
+                mount: self.registry_mount(),
+                negative: self.chat_mount.observer(),
+                _fee: fee,
+            })
+        }
+
+        pub(super) fn archive_target_absent_under_original_root(
+            &self,
+            mounted: &critical_namespaces::archive_bootstrap::MountedRoot,
+            group: &[u8],
+            signer: &[u8; 32],
+        ) -> Result<bool, AppError> {
+            use critical_namespaces::archive_bootstrap as archive;
+            use critical_namespaces::refused;
+            if mounted.negative.is_cancelled()
+                || !std::sync::Arc::ptr_eq(&mounted.mount, &self.registry_mount())
+            {
+                return Err(refused());
+            }
+            let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
+            mounted
+                ._fee
+                .validate(&policy.pending.pool, archive::ROOT_METADATA_FEE)?;
+            let path = self.dir.join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT);
+            validate_archive_root_session(&path, mounted)?;
+            let name = archive::target_name(&mounted.descriptor.vault, group, signer)?;
+            let name = std::str::from_utf8(&name).map_err(|_| refused())?;
+            let absent = match fs::symlink_metadata(path.join(name)) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Ok(_) => false,
+                Err(_) => return Err(refused()),
+            };
+            #[cfg(test)]
+            {
+                let hook = self
+                    .archive_after_target_lookup
+                    .lock()
+                    .map_err(|_| refused())?
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            // NotFound caused by a missing/replaced parent is never target absence. This final
+            // check runs while the actual caller still holds admission/absence serialization.
+            validate_archive_root_session(&path, mounted)?;
+            Ok(absent)
+        }
+
         /// Fixed critical metadata read. The single frame is bounded BEFORE allocation/unseal;
         /// both current/stage are authenticated by the caller before any mutation or old cleaner.
         /// Windows sync requires writable existing handles; no create/truncate flag is present.
@@ -849,6 +1176,268 @@ mod persistence {
             self.sync_critical_catalog_parent()
                 .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ArchiveOutputMode {
+        /// Only a newly created or SAME warm held object can be completed. A pre-existing
+        /// complete exact output may be re-synced; an unowned partial first seed refuses.
+        Original,
+        /// The complete independently authenticated seed and actual parent authorized this
+        /// exact fixed stage/marker. Bounded cold prefix completion is permitted.
+        SeedRepair,
+        /// Already-current declaration: no creation or partial repair, especially no root reset.
+        SavedExact,
+    }
+
+    fn archive_real_directory(metadata: &fs::Metadata) -> bool {
+        let regular = metadata.file_type().is_dir() && !metadata.file_type().is_symlink();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            regular && metadata.file_attributes() & 0x400 == 0 // all reparse points
+        }
+        #[cfg(not(windows))]
+        regular
+    }
+
+    fn open_archive_directory(path: &Path) -> Result<File, AppError> {
+        use critical_namespaces::refused;
+        let metadata =
+            fs::symlink_metadata(path).map_err(|error| AppError::Io(error.to_string()))?;
+        if !archive_real_directory(&metadata) {
+            return Err(refused());
+        }
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+                FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)
+                .map_err(|error| AppError::Io(error.to_string()))?
+        };
+        #[cfg(unix)]
+        let file = File::open(path).map_err(|error| AppError::Io(error.to_string()))?;
+        #[cfg(not(any(unix, windows)))]
+        return Err(refused());
+        #[cfg(any(unix, windows))]
+        {
+            if !archive_real_directory(
+                &file
+                    .metadata()
+                    .map_err(|error| AppError::Io(error.to_string()))?,
+            ) {
+                return Err(refused());
+            }
+            Ok(file)
+        }
+    }
+
+    fn read_archive_object(
+        path: &Path,
+        limit: usize,
+    ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+        use critical_namespaces::refused;
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= limit as u64 => {}
+            _ => return Err(refused()),
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        if !metadata.file_type().is_file() || metadata.len() > limit as u64 {
+            return Err(refused());
+        }
+        let mut raw = Zeroizing::new(Vec::with_capacity(limit + 1));
+        (&mut file)
+            .take((limit + 1) as u64)
+            .read_to_end(&mut raw)
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        if raw.len() > limit {
+            return Err(refused());
+        }
+        Ok(Some((file, raw)))
+    }
+
+    fn verify_archive_held_name(
+        path: &Path,
+        held: &critical_namespaces::pending_join::CreatedStage,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        let identity = held.identity.ok_or_else(refused)?;
+        if catcoms_storage::kept::session_id(&held.file)
+            .map_err(|error| AppError::Io(error.to_string()))?
+            != identity
+            || !matches!(
+                catcoms_storage::kept::session_at(path, identity),
+                catcoms_storage::kept::SessionAt::Ours
+            )
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    /// One bounded exact-prefix engine, PRIVATE to persistence and only invoked at the three
+    /// closed declaration destinations above. The mode is chosen by actual source/transaction
+    /// ordering; no RPC, saved scalar or test-only boolean supplies cold repair permission.
+    fn ensure_archive_output(
+        path: &Path,
+        expected: &[u8],
+        held: &mut Option<critical_namespaces::pending_join::CreatedStage>,
+        mode: ArchiveOutputMode,
+        #[cfg(test)] fault: u8,
+        #[cfg(test)] short_point: u8,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::refused;
+        use std::io::{Seek, SeekFrom};
+        if expected.len() < 40
+            || expected.len() > critical_namespaces::archive_bootstrap::MAX_SEED_FRAMED
+        {
+            return Err(refused());
+        }
+        let already_held = held.is_some();
+        let mut created_here = false;
+        if held.is_none() {
+            let file = match fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if matches!(mode, ArchiveOutputMode::SavedExact) {
+                        return Err(refused());
+                    }
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .open(path)
+                        .map_err(|error| AppError::Io(error.to_string()))?;
+                    created_here = true;
+                    file
+                }
+                Ok(metadata)
+                    if metadata.file_type().is_file()
+                        && metadata.len() <= expected.len() as u64 =>
+                {
+                    if matches!(mode, ArchiveOutputMode::Original) {
+                        // Do NOT retain an unowned prefix and turn it into "already held" on
+                        // the next retry. Only a complete exact original output may be adopted
+                        // for re-sync; a foreign partial first seed refuses on EVERY attempt.
+                        let (file, raw) =
+                            read_archive_object(path, expected.len())?.ok_or_else(refused)?;
+                        if raw.as_slice() != expected {
+                            return Err(refused());
+                        }
+                        file
+                    } else {
+                        OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(path)
+                            .map_err(|error| AppError::Io(error.to_string()))?
+                    }
+                }
+                _ => return Err(refused()),
+            };
+            // Store the actual object BEFORE its first fallible identity query or byte write.
+            *held = Some(critical_namespaces::pending_join::CreatedStage {
+                file,
+                identity: None,
+            });
+            #[cfg(test)]
+            if fault == 111 && short_point == 102 && created_here {
+                return Err(AppError::Io(
+                    "injected zero-length first archive seed".into(),
+                ));
+            }
+        }
+        let held = held.as_mut().ok_or_else(refused)?;
+        if held.identity.is_none() {
+            held.identity = Some(
+                catcoms_storage::kept::session_id(&held.file)
+                    .map_err(|error| AppError::Io(error.to_string()))?,
+            );
+        }
+        verify_archive_held_name(path, held)?;
+        held.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        let mut previous = Zeroizing::new(Vec::with_capacity(expected.len() + 1));
+        (&mut held.file)
+            .take((expected.len() + 1) as u64)
+            .read_to_end(&mut previous)
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        if previous.len() > expected.len() || expected[..previous.len()] != previous[..] {
+            return Err(refused());
+        }
+        if previous.len() != expected.len() {
+            if matches!(mode, ArchiveOutputMode::SavedExact)
+                || (matches!(mode, ArchiveOutputMode::Original) && !already_held && !created_here)
+            {
+                return Err(refused());
+            }
+            verify_archive_held_name(path, held)?;
+            held.file
+                .seek(SeekFrom::Start(0))
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            #[cfg(test)]
+            if fault != 0 && fault == short_point {
+                held.file
+                    .write_all(&expected[..expected.len() / 2])
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                return Err(AppError::Io("injected archive output short write".into()));
+            }
+            held.file
+                .write_all(expected)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+        }
+        held.file
+            .sync_all()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        verify_archive_held_name(path, held)
+    }
+
+    fn validate_archive_root_session(
+        path: &Path,
+        mounted: &critical_namespaces::archive_bootstrap::MountedRoot,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::archive_bootstrap as archive;
+        use critical_namespaces::refused;
+        let directory = open_archive_directory(path)?;
+        if catcoms_storage::kept::session_id(&directory)
+            .map_err(|error| AppError::Io(error.to_string()))?
+            != mounted.directory_id
+            || catcoms_storage::kept::session_id(&mounted.directory)
+                .map_err(|error| AppError::Io(error.to_string()))?
+                != mounted.directory_id
+            || catcoms_storage::kept::session_id(&mounted.marker)
+                .map_err(|error| AppError::Io(error.to_string()))?
+                != mounted.marker_id
+        {
+            return Err(refused());
+        }
+        let (marker, raw) =
+            read_archive_object(&path.join(archive::ROOT_MARKER), archive::MAX_MARKER_FRAMED)?
+                .ok_or_else(refused)?;
+        if *blake3::hash(&raw).as_bytes() != mounted.marker_digest
+            || catcoms_storage::kept::session_id(&marker)
+                .map_err(|error| AppError::Io(error.to_string()))?
+                != mounted.marker_id
+        {
+            return Err(refused());
+        }
+        Ok(())
     }
 
     /// Warm repair writes only through the SAME object this process created and retained.
@@ -2700,9 +3289,15 @@ pub struct ServerStore {
     // Fixed only at a NEW physical open. Pending-only policy forbids the old unjournalled
     // checkpoint join path; source DATA never becomes a ready owner through a decoder.
     pending_join_policy: Option<PendingJoinCatalogPolicy>,
+    // Only the private new-physical-open wrapper supplies this concrete handler. Ordinary
+    // constructors continue rejecting its descriptor, seed and root before old cleaners.
+    archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
+    archive_bootstrap_root: critical_namespaces::archive_bootstrap::SharedRoot,
     pending_join_catalog: critical_namespaces::pending_join::SharedMounted,
     #[cfg(test)]
     pending_join_before_catalog_writer: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    archive_after_target_lookup: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     dir: PathBuf,
     keys: KeyHierarchy,
     // Actual physical-mount custody and serialized admission lineage, never restored from bytes.
@@ -2776,7 +3371,7 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, AppError> {
-        Self::open_with_catalog_policy(dir, passphrase, rng, None, None)
+        Self::open_with_catalog_policy(dir, passphrase, rng, None, None, None)
     }
 
     /// Explicit configured catalog reader. Clones of the SAME provided pool share its hardcap;
@@ -2790,7 +3385,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         pool: CriticalCatalogReadPool,
     ) -> Result<Self, AppError> {
-        Self::open_with_catalog_policy(dir, passphrase, rng, Some(pool), None)
+        Self::open_with_catalog_policy(dir, passphrase, rng, Some(pool), None, None)
     }
 
     /// Open an ALREADY activated v6 vault with the explicitly configured, private Pending-only
@@ -2809,6 +3404,7 @@ impl ServerStore {
             rng,
             Some(policy.pool.clone()),
             Some(policy),
+            None,
         )
     }
 
@@ -2818,6 +3414,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         catalog_read_pool: Option<CriticalCatalogReadPool>,
         pending_join_policy: Option<PendingJoinCatalogPolicy>,
+        archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
     ) -> Result<Self, AppError> {
         let dir = dir.as_ref().to_path_buf();
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
@@ -2830,9 +3427,13 @@ impl ServerStore {
         let store = Self {
             catalog_read_pool,
             pending_join_policy,
+            archive_bootstrap_policy,
+            archive_bootstrap_root: Default::default(),
             pending_join_catalog: Default::default(),
             #[cfg(test)]
             pending_join_before_catalog_writer: Default::default(),
+            #[cfg(test)]
+            archive_after_target_lookup: Default::default(),
             creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,

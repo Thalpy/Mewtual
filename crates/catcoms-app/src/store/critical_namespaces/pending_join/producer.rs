@@ -223,7 +223,7 @@ impl ServerStore {
             return Err(refused());
         }
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&raw)?)?);
-        let parsed = codec::parse(&plain, &self.chat_vault_domain()?)?;
+        let parsed = self.parse_configured_join_catalog(&plain)?;
         if parsed.digest != expected.digest {
             return Err(refused());
         }
@@ -400,12 +400,12 @@ impl JournalledCheckpointJoinPreparation {
         }
         let key = Zeroizing::new(store.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
-        let parsed = codec::parse(&plain, &store.chat_vault_domain()?)?;
+        let parsed = store.parse_configured_join_catalog(&plain)?;
         if parsed.digest != current.digest {
             return Err(refused());
         }
         let candidate_plain = encode_schedule(&parsed, &target, &store.chat_vault_domain()?)?;
-        let candidate_parse = codec::parse(&candidate_plain, &store.chat_vault_domain()?)?;
+        let candidate_parse = store.parse_configured_join_catalog(&candidate_plain)?;
         let mut next = candidate_parse.summary([0; 32]);
         codec::successor(&current, &next)?;
         let encoded = Zeroizing::new(frame(&seal(&key, &candidate_plain, rng)?));
@@ -573,7 +573,7 @@ impl ServerStore {
         }
         let key = Zeroizing::new(self.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
-        let current = codec::parse(&plain, &self.chat_vault_domain()?)?;
+        let current = self.parse_configured_join_catalog(&plain)?;
         if current.digest != preparation.expected.digest {
             return Err(refused());
         }
@@ -592,7 +592,7 @@ impl ServerStore {
             &encrypted,
             &self.chat_vault_domain()?,
         )?;
-        let candidate_parse = codec::parse(&candidate_plain, &self.chat_vault_domain()?)?;
+        let candidate_parse = self.parse_configured_join_catalog(&candidate_plain)?;
         let mut next = candidate_parse.summary([0; 32]);
         codec::successor(&preparation.expected, &next)?;
         if !next
@@ -680,6 +680,7 @@ fn encode_schedule(
     }
     let total = (4 + codec::TAG_V2.len() + 36 + 8 + 36 + 4 + 12usize)
         .checked_add(payload)
+        .and_then(|total| total.checked_add(archive_suffix_length(current).ok()?))
         .ok_or_else(refused)?;
     if payload > codec::MAX_JOIN_PAYLOAD || total > codec::MAX_CATALOG_PLAIN {
         return Err(refused());
@@ -689,10 +690,8 @@ fn encode_schedule(
     output.put_bytes(domain).map_err(|_| refused())?;
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
-    output.put_u32(1);
-    output.put_u32(codec::JOIN_ID);
-    output.put_u32(codec::JOIN_VERSION);
-    output.put_u32(payload as u32);
+    output.put_u32(1 + u32::from(current.archive.is_some()));
+    encode_join_entry_header(&mut output, current, payload)?;
     output.put_str(codec::JOIN_TAG).map_err(|_| refused())?;
     output.put_u32(current.count as u32);
     let mut changed = false;
@@ -704,6 +703,7 @@ fn encode_schedule(
             encode_row(&mut output, &row.metadata, row.immutable, row.encrypted)?;
         }
     }
+    append_original_archive(&mut output, current)?;
     if !changed || output.len() != total {
         return Err(refused());
     }
@@ -715,6 +715,45 @@ fn encoded_row_len(immutable: &[u8], encrypted: &[u8]) -> Result<usize, AppError
         .checked_add(immutable.len())
         .and_then(|bytes| bytes.checked_add(encrypted.len()))
         .ok_or_else(refused)
+}
+
+/// Exact borrowed descriptor bytes, not a re-created layout or an ignored second namespace.
+/// All payload/framing bytes are included in the writer's existing bounded catalog invoice.
+fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError> {
+    match (&current.archive, current.archive_payload) {
+        (None, None) => Ok(0),
+        (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused),
+        _ => Err(refused()),
+    }
+}
+
+/// Outer header only; payload version/tag/rows remain the actual JOIN consumer's contract.
+/// No namespace preservation or archive-layout selection is delegated to payload writers.
+fn encode_join_entry_header(
+    output: &mut Encoder,
+    current: &codec::Parsed<'_>,
+    payload: usize,
+) -> Result<(), AppError> {
+    if payload > codec::MAX_JOIN_PAYLOAD {
+        return Err(refused());
+    }
+    output.put_u32(codec::JOIN_ID);
+    output.put_u32(current.join_version.unwrap_or(codec::JOIN_VERSION));
+    output.put_u32(payload as u32);
+    Ok(())
+}
+
+fn append_original_archive(
+    output: &mut Encoder,
+    current: &codec::Parsed<'_>,
+) -> Result<(), AppError> {
+    archive_suffix_length(current)?;
+    if let Some(payload) = current.archive_payload {
+        output.put_u32(super::super::super::archive_bootstrap::ARCHIVE_ID);
+        output.put_u32(super::super::super::archive_bootstrap::ARCHIVE_VERSION);
+        output.put_bytes(payload).map_err(|_| refused())?;
+    }
+    Ok(())
 }
 fn encode_row(
     output: &mut Encoder,
@@ -755,6 +794,7 @@ fn encode_added(
     }
     let total = (4 + codec::TAG_V2.len() + 36 + 8 + 36 + 4 + 12usize)
         .checked_add(payload)
+        .and_then(|total| total.checked_add(archive_suffix_length(current).ok()?))
         .ok_or_else(refused)?;
     if payload > codec::MAX_JOIN_PAYLOAD || total > codec::MAX_CATALOG_PLAIN {
         return Err(refused());
@@ -764,10 +804,8 @@ fn encode_added(
     output.put_bytes(domain).map_err(|_| refused())?;
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
-    output.put_u32(1);
-    output.put_u32(codec::JOIN_ID);
-    output.put_u32(codec::JOIN_VERSION);
-    output.put_u32(payload as u32);
+    output.put_u32(1 + u32::from(current.archive.is_some()));
+    encode_join_entry_header(&mut output, current, payload)?;
     output.put_str(codec::JOIN_TAG).map_err(|_| refused())?;
     output.put_u32((current.count + 1) as u32);
     let mut added = false;
@@ -781,6 +819,7 @@ fn encode_added(
     if !added {
         encode_row(&mut output, metadata, immutable, encrypted)?;
     }
+    append_original_archive(&mut output, current)?;
     if output.len() != total {
         return Err(refused());
     }

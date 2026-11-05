@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Private archive namespace (5 November; authored, unexecuted)
+
+An explicit new-physical-open wrapper now consumes the unexposed ARCHIVE2 declaration through
+actual seeded catalog/root-marker barriers before releasing the Store. It preserves JOIN payloads
+and supplies per-target negative old-path exclusion using original held directory/marker identity.
+Default/Pending-only constructors remain strict. This namespace prerequisite does not create
+SDK groups, grants, source saves, Current, native activation or a completed Chat V2 host.
+Thirteen regressions remain UNRUN under the compilation pause.
+[Actual transaction and resource boundaries](communication-recovery/CHAT-ARCHIVE-NAMESPACE-DECLARATION.md).
+
 ## Private original founder bootstrap source DATA (5 November; authored, unexecuted)
 
 The Sync founder/archive owner now prepares one independently tagged/key-separated complete

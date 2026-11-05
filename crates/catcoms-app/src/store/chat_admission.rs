@@ -781,6 +781,10 @@ impl ServerStore {
         if runtime.predecessors.excludes_generic(&capture.key) {
             return Err(refused());
         }
+        // A supported V2 namespace may retain a source/intent even with no old scope row.
+        // Inspect its original root under this SAME serializer before issued retry/dirty
+        // flush as well as pre-RNG issuance. Unknown target presence is never old absence.
+        self.require_no_archive_bootstrap_target(capture.key.group(), capture.key.signer())?;
         // Lock order is Store writer -> brief issued-slot access. No slot guard is held while
         // waiting for the writer or during I/O, and no slot reader ever waits for Store custody.
         // Re-read under the writer so simultaneous retries cannot each sample a new nonce.
@@ -982,6 +986,10 @@ impl ServerStore {
         {
             return Err(refused());
         }
+        self.require_no_archive_bootstrap_target(
+            preparation.key.group(),
+            preparation.key.signer(),
+        )?;
         let row = runtime
             .table
             .as_ref()
@@ -1093,6 +1101,7 @@ impl ServerStore {
         if row.nonce != nonce || row.phase == Phase::Retired {
             return Ok(ChatAdmissionResolution::Retired);
         }
+        self.require_no_archive_bootstrap_target(key.group(), key.signer())?;
         match row.phase {
             Phase::Current => self
                 .bind_chat_admission_locked(&mut runtime, key, nonce)
@@ -1137,6 +1146,7 @@ impl ServerStore {
         if !runtime.managed || runtime.dirty {
             return Err(refused());
         }
+        self.require_no_archive_bootstrap_target(binding.key.group(), binding.key.signer())?;
         let row = runtime
             .table
             .as_ref()

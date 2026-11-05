@@ -8,6 +8,7 @@ use rand_core::SeedableRng;
 use std::sync::atomic::Ordering;
 
 mod activation;
+mod archive;
 
 const SECRET: &[u8] = b"actual Pending-only destination source fixture";
 type Owner = OwnedOwnerServer<MemNetwork, ChaCha20Rng>;

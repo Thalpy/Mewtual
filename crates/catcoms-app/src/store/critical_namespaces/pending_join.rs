@@ -186,9 +186,8 @@ impl ServerStore {
     pub(in crate::store) fn inspect_pending_join_catalog(&self) -> Result<Opened, AppError> {
         let policy = self.pending_join_policy.as_ref().ok_or_else(refused)?;
         let read = policy.pool.try_reserve(READ_FEE)?;
-        let domain = self.chat_vault_domain()?;
-        let current = self.read_pending_join_catalog_slot(Slot::Current, &domain, &read)?;
-        let stage = self.read_pending_join_catalog_slot(Slot::Stage, &domain, &read)?;
+        let current = self.read_pending_join_catalog_slot(Slot::Current, &read)?;
+        let stage = self.read_pending_join_catalog_slot(Slot::Stage, &read)?;
         let (selected, settle) = match (&current, &stage) {
             (Some((_, current)), None) => (current.clone(), Settle::None),
             (Some((_, current)), Some((_, stage))) if current.digest == stage.digest => {
@@ -218,14 +217,13 @@ impl ServerStore {
     fn read_pending_join_catalog_slot(
         &self,
         slot: Slot,
-        domain: &[u8; 32],
         read: &CatalogReadReservation,
     ) -> Result<Option<(File, codec::Summary)>, AppError> {
         let Some((file, raw)) = self.open_pending_join_catalog_slot(slot, read)? else {
             return Ok(None);
         };
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&raw)?)?);
-        let parsed = codec::parse(&plain, domain)?;
+        let parsed = self.parse_configured_join_catalog(&plain)?;
         let summary = parsed.summary(*blake3::hash(&raw).as_bytes());
         // All borrowed/plain/raw/cipher input is released on return BEFORE the next source.
         Ok(Some((file, summary)))

@@ -97,7 +97,7 @@ impl ServerStore {
             return Err(pins::refused());
         }
         let table = roots.table.as_ref().ok_or_else(pins::refused)?;
-        if table.is_empty() {
+        if table.is_empty() && self.archive_bootstrap_policy.is_none() {
             return Ok(());
         }
         let mut outer = Decoder::new(snapshot);
@@ -110,6 +110,12 @@ impl ServerStore {
         {
             return Err(pins::refused());
         }
+        let signer: &[u8; 32] = signer.try_into().map_err(|_| pins::refused())?;
+        // A V2 intent/source can reserve this target before any v1 pin exists. Drop the pin
+        // guard before root I/O; this path also runs inside an already-held admission save
+        // callback, so the archive fence must never recursively acquire admission.
+        drop(roots);
+        self.require_no_archive_bootstrap_target(group, signer)?;
         Ok(())
     }
 }

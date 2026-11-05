@@ -77,6 +77,12 @@ pub(super) struct Parsed<'a> {
     pub(super) digest: [u8; 32],
     pub(super) rows: [Option<Row<'a>>; MAX_ROWS],
     pub(super) count: usize,
+    // Only the concrete combined reader can populate these. The strict Pending-only parser
+    // still rejects ID2. Preserve the complete original bytes when a JOIN writer re-encodes
+    // the surrounding catalog; a shared outer hash does not permit dropping another namespace.
+    pub(super) archive: Option<super::archive_bootstrap::Descriptor>,
+    pub(super) archive_payload: Option<&'a [u8]>,
+    pub(super) join_version: Option<u32>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -89,6 +95,8 @@ pub(in crate::store) struct Summary {
     pub(in crate::store) framed: [u8; 32],
     pub(super) rows: [Option<Metadata>; MAX_ROWS],
     pub(super) count: usize,
+    pub(super) archive: Option<super::archive_bootstrap::Descriptor>,
+    pub(super) join_version: Option<u32>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -101,6 +109,8 @@ impl Parsed<'_> {
                 self.rows[index].as_ref().map(|row| row.metadata.clone())
             }),
             count: self.count,
+            archive: self.archive.clone(),
+            join_version: self.join_version,
         }
     }
 }
@@ -115,6 +125,28 @@ pub(super) fn binding_digest(immutable: &[u8]) -> [u8; 32] {
 /// Scan the complete outer candidate before deciding supported IDs. An unknown descriptor,
 /// including reserved ARCHIVE2, is never skipped/truncated into a known JOIN-only history.
 pub(super) fn parse<'a>(plain: &'a [u8], domain: &[u8; 32]) -> Result<Parsed<'a>, AppError> {
+    parse_known(plain, domain, SupportedLayout::PendingOnly)
+}
+
+/// Concrete known-layout DATA parsing for the archive constructor. This function is not a
+/// support switch: its consumer must inspect the actual seed/root before any old gate or I/O.
+pub(super) fn parse_bootstrap<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(plain, domain, SupportedLayout::ArchiveBootstrap)
+}
+
+enum SupportedLayout {
+    PendingOnly,
+    ArchiveBootstrap,
+}
+
+fn parse_known<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    layout: SupportedLayout,
+) -> Result<Parsed<'a>, AppError> {
     use super::catalog_envelope::{self, Format};
     let envelope = catalog_envelope::parse(plain, domain, MAX_CATALOG_PLAIN)?;
     if envelope.format == Format::LegacyEmpty {
@@ -124,28 +156,61 @@ pub(super) fn parse<'a>(plain: &'a [u8], domain: &[u8; 32]) -> Result<Parsed<'a>
             digest: envelope.digest,
             rows: std::array::from_fn(|_| None),
             count: 0,
+            archive: None,
+            archive_payload: None,
+            join_version: None,
         });
     }
-    // Shared outer parsing is DATA only. This concrete handler STILL accepts exactly JOIN1;
-    // an ARCHIVE2/unknown candidate in either source must refuse before any old cleaner.
-    if envelope.count != 1 {
-        return Err(refused());
+    let mut rows = std::array::from_fn(|_| None);
+    let mut count = 0;
+    let mut archive = None;
+    let mut archive_payload = None;
+    let mut join_version = None;
+    for index in 0..envelope.count {
+        let entry = envelope.entry(index)?;
+        match entry.id {
+            JOIN_ID => {
+                (rows, count) = parse_join_entry(entry, domain)?;
+                join_version = Some(entry.version);
+            }
+            super::archive_bootstrap::ARCHIVE_ID
+                if matches!(layout, SupportedLayout::ArchiveBootstrap)
+                    && entry.version == super::archive_bootstrap::ARCHIVE_VERSION =>
+            {
+                archive = Some(super::archive_bootstrap::Descriptor::parse(
+                    entry.payload,
+                    domain,
+                )?);
+                archive_payload = Some(entry.payload);
+            }
+            _ => return Err(refused()),
+        }
     }
-    let entry = envelope.entry(0)?;
-    if entry.id != JOIN_ID
-        || entry.version != JOIN_VERSION
-        || entry.payload.len() > MAX_JOIN_PAYLOAD
-    {
-        return Err(refused());
-    }
-    let (rows, count) = parse_rows(entry.payload, domain)?;
     Ok(Parsed {
         generation: envelope.generation,
         parent: envelope.parent,
         digest: envelope.digest,
         rows,
         count,
+        archive,
+        archive_payload,
+        join_version,
     })
+}
+
+/// JOIN payload support stays with the actual JOIN consumer. Future execution schemas must
+/// add their concrete policy/producer here; a known outer ID is never enough to admit them.
+pub(super) fn parse_join_entry<'a>(
+    entry: super::catalog_envelope::Entry<'a>,
+    domain: &[u8; 32],
+) -> Result<([Option<Row<'a>>; MAX_ROWS], usize), AppError> {
+    if entry.id != JOIN_ID
+        || entry.version != JOIN_VERSION
+        || entry.payload.len() > MAX_JOIN_PAYLOAD
+    {
+        return Err(refused());
+    }
+    parse_rows(entry.payload, domain)
 }
 
 fn parse_rows<'a>(
@@ -272,6 +337,36 @@ pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppErro
         || next.parent != Some(current.digest)
         || next.count < current.count
         || next.count > current.count + 1
+    {
+        return Err(refused());
+    }
+    match (&current.archive, &next.archive) {
+        // The only namespace-set change is a concrete archive declaration over the exact
+        // original JOIN contents. Ordinary JOIN updates below preserve the immutable layout.
+        (None, Some(_)) => {
+            return if current.count == next.count
+                && current.rows == next.rows
+                && current.join_version == next.join_version
+            {
+                Ok(())
+            } else {
+                Err(refused())
+            };
+        }
+        (old, new) if old == new => {}
+        _ => return Err(refused()),
+    }
+    join_payload_successor(current, next)
+}
+
+/// Actual JOIN payload transition, kept separate from namespace-set/whole-parent validation.
+/// A future execution consumer owns its concrete version/state transition here; this v1
+/// implementation permits no downgrade, arm/grant migration or unknown payload version.
+fn join_payload_successor(current: &Summary, next: &Summary) -> Result<(), AppError> {
+    if next.join_version != Some(JOIN_VERSION)
+        || current
+            .join_version
+            .is_some_and(|version| version != JOIN_VERSION)
     {
         return Err(refused());
     }

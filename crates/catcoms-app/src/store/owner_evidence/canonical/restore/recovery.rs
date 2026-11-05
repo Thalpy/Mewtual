@@ -23,6 +23,7 @@ impl ServerStore {
     ) -> Result<Option<T>, AppError> {
         // Do not call chat_vault_format here: that would recursively take the admission writer
         // already held by our sole trusted caller. It checks managed OwnerEvidence beforehand.
+        self.require_no_archive_bootstrap_target(identity.group(), identity.signer())?;
         let identifier = key(identity.group(), identity.signer());
         let mut pool = self
             .owner_evidence

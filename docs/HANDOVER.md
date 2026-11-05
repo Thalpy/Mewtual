@@ -1,16 +1,5 @@
 # Mewtual; Handover
 
-## Private join input separation (5 November; unexecuted)
-
-The retained direct client now shares PRIVATE bounded READY-envelope normalization and pinned
-invite signature checking before SDK entry. The existing legacy finish path still immediately
-performs the same actual selected-package, routing, policy and provider checks, marking completion
-only after success. One bounded regression and an expanded signed-invalid-routing control are
-authored UNRUN; actual-diff review is clear and formatting/whitespace passed. No compiler or suite
-ran. These helpers return only private DATA and do not expose recovered keys, an Accepted receipt,
-network policy, a durable ticket, scope or ready owner. Actual schema2 execution remains next.
-
-
 ## Current Chat V2 status (5 November; incomplete, compilation paused)
 
 Work continues on `communication-chat-v2-production`. Chat V2 remains disabled and incomplete.
@@ -40,8 +29,35 @@ required full suites once the pause is lifted. Reviewed checkpoints are pushed t
 The next actual consuming [archive-host vertical](communication-recovery/CHAT-OWNER-ARCHIVE-HOST-VERTICAL.md)
 has passed design review, including original FoundingIntent before scope mutation, a NEW exact
 unexposed-negative recovery, independently durable exact repair seeds and unified protocol-aware
-writer exclusion. It remains unimplemented: namespace mounting, fees, exact grants/seed/source
-codecs, actual head/scope saves and cold/crash acceptance cannot be inferred from that design.
+writer exclusion. Original bootstrap ciphertext and the namespace-only declaration below are now
+authored consuming prerequisites; actual creation grants/FoundingIntent/source persistence,
+canonical head/scope saves and cold/crash acceptance remain unfinished.
+
+## Private join input separation (5 November; unexecuted)
+
+The retained direct client now shares PRIVATE bounded READY-envelope normalization and pinned
+invite signature checking before SDK entry. The existing legacy finish path still immediately
+performs the same actual selected-package, routing, policy and provider checks, marking completion
+only after success. One bounded regression and an expanded signed-invalid-routing control are
+authored UNRUN; actual-diff review is clear and formatting/whitespace passed. No compiler or suite
+ran. These helpers return only private DATA and do not expose recovered keys, an Accepted receipt,
+network policy, a durable ticket, scope or ready owner. Actual schema2 execution remains next.
+
+
+## Private archive namespace transaction (5 November; authored, unexecuted)
+
+The new-physical-open `PreparedArchiveBootstrapStore` declares the actual unexposed ARCHIVE2
+layout through exact encrypted seed, catalog stage, directory marker and current/parent barriers.
+No Store reference escapes before completion; errors retain original candidate/files/fee. Cold
+complete seeds repair exact known stage/marker prefixes; a partial first seed stays preserved/
+refused and a missing committed root is never recreated. Default/Pending readers still refuse.
+JOIN updates preserve the descriptor; old admission and numeric paths inspect actual per-target
+negative inventory. Original root/marker checks bracket absence, including same-object byte
+integrity. This is NOT the source saver, grant, Current owner, native adapter or Chat V2 activation.
+
+Thirteen regressions are authored UNRUN. Static review corrected the numeric empty-pin bypass
+and repeated foreign-prefix adoption; final re-review is clear. No compiler/tests/build ran.
+[Actual API, barriers, accounting and limits](communication-recovery/CHAT-ARCHIVE-NAMESPACE-DECLARATION.md).
 
 ## Original founder bootstrap source container (5 November; authored, unexecuted)
 

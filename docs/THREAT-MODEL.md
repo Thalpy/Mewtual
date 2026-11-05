@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original archive namespace transaction (5 November; authored, unexecuted)
+
+The explicit new-physical-open wrapper owns the actual Store and exact ciphertext/fee until
+the separately keyed seed, stage, original directory/marker and current/parent barriers finish.
+Unknown critical layout refuses before old cleaners. Complete cold seeds authorize only exact
+known stage/marker prefix repair over their actual parent; partial first seeds remain held and
+missing committed roots never become empty archives. No source/SDK/Fresh/Current is issued.
+Per-target inventory brackets NotFound with actual root/marker identity and full-marker digest.
+Old admission AND numeric adapters refuse present targets; numeric checks release pins before
+root I/O and never reacquire admission. Foreign partial seeds stay unowned over repeated errors.
+Thirteen regressions are UNRUN; static re-review is clear. The existing non-hostile live private-
+vault-directory assumption remains; no exclusive-link/global-memory proof is claimed.
+[Full contract](communication-recovery/CHAT-ARCHIVE-NAMESPACE-DECLARATION.md).
+
 The private direct-join input check distinguishes a complete inviter-signed envelope from an
 actual selected-KeyPackage/routing/policy completion. Sharing that negative DATA check does not
 skip the existing SDK checks, mint an Accepted receipt, or expose recovered private state.
