@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Negative group-lineage bounds (5 November; authored, UNRUN)
+
+`chat_admission::group_lineage::ChatAdmissionGroupBounds` owns separately prepaid complete
+group/signer endpoint keys. The actual archive pre-row consumer checks the managed clean loaded
+table/owners by borrowed BTree range, rejecting every same-group phase/signer. The future
+`require_no_foreign` remains cfg(test), admits dirty SAME-table negative comparison only, and
+cannot grant an own scope or a durability result. [Seven UNRUN regressions/contract](communication-recovery/CHAT-V2-GROUP-LINEAGE.md).
+
 ## Fixed negative Current destinations (5 November; authored, UNRUN)
 
 The old ID2 physical inspector refuses `chat-critical-namespaces.current.seed` or

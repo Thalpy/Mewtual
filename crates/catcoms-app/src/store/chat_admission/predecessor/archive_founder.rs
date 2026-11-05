@@ -2,6 +2,9 @@
 //! decoded intent or matching scalar group as Fresh. It accepts only the private source borrow
 //! created by the consuming actual `Server::found` factory, and installs no admission row.
 use super::*;
+use crate::store::chat_admission::group_lineage::{
+    ChatAdmissionGroupBounds, GROUP_BOUNDS_ALLOCATION_BYTES,
+};
 use crate::store::critical_namespaces::archive_bootstrap::founder::plan::ActualFounderSource;
 use crate::store::critical_namespaces::archive_bootstrap::founder_codec as codec;
 use crate::store::persistence::{
@@ -27,6 +30,9 @@ pub(in crate::store) struct ArchiveFounderPlan {
     // ONLY the actual physical saved result can replace transient registry exclusion. It
     // contains inert exact ciphertext/debt/original weak metadata, never the creator sender.
     saved_foundation: Option<Arc<SavedFoundingIntent>>,
+    group_bounds: ChatAdmissionGroupBounds,
+    // LAST: independent paid range-key/cursor metadata, not inferred from a serialized budget.
+    _group_bounds_fee: CatalogReadReservation,
 }
 impl std::fmt::Debug for ArchiveFounderPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -161,6 +167,10 @@ fn validate_plan_source<T: MeshTransport, R: CryptoRngCore>(
     plan: &ArchiveFounderPlan,
     runtime: &Runtime,
 ) -> Result<(), AppError> {
+    if plan.group_bounds.group() != plan.capture.key.group() {
+        return Err(refused());
+    }
+    plan.group_bounds.require_absent(runtime)?;
     // This deliberately avoids chat_vault_format/domain/capture getters: admission is already
     // held. Root identity/source checks acquire only the subsequent Root lock in the order.
     source.validate_original(store)?;
@@ -221,6 +231,14 @@ impl ServerStore {
         source.validate_original(self)?;
         source.untouched_scope()?;
         let captured = source.captured();
+        let group_bounds_fee = self
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool
+            .try_reserve(GROUP_BOUNDS_ALLOCATION_BYTES)?;
+        let group_bounds = ChatAdmissionGroupBounds::new(source.group()?)?;
         let key = ChatAdmissionKey::new(source.group()?, captured.data().signer)?;
         let facts = codec::FoundingData {
             group: key.group.clone(),
@@ -249,6 +267,8 @@ impl ServerStore {
             control: captured.control_custody(),
             registered: false,
             saved_foundation: None,
+            group_bounds,
+            _group_bounds_fee: group_bounds_fee,
         };
         let runtime = self.chat_mount.locked()?;
         // SAME admission -> bounded catalog, before any pin/head/Root subordinate. Cold JOIN

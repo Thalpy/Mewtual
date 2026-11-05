@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+## First genesis cannot ignore another signer's old group row (5 November; authored, UNRUN)
+
+The archive pre-row path now checks ANY same-group loaded admission row/runtime owner before
+registration/effects. A Retired/Current/Initializing row without pin/file is still history, not
+vacancy for another signer. Original creator/source, exact table bytes and unrelated progress
+are preserved. The separately paid bound keys support only negative range checks; no decoded
+status or dirty inventory supplies Current. [Contract/seven UNRUN regressions](communication-recovery/CHAT-V2-GROUP-LINEAGE.md).
+
 ## Group reservation cannot be bypassed by another old signer (5 November; authored, UNRUN)
 
 The original ID2 root now checks fixed group-wide `g-` presence before old per-signer target

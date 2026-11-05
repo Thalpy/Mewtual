@@ -115,6 +115,113 @@ impl RngCore for NeverRng {
 impl CryptoRng for NeverRng {}
 
 #[test]
+fn genuine_founder_plan_refuses_other_signer_initializing_current_and_retired_group_rows() {
+    for phase in 0..3 {
+        let (path, store, mut rng) = fixture(0xfa80 + phase);
+        let creator = created(&store, &mut rng, 40 + phase as u8);
+        let original = actual_key(&creator);
+        let other = ChatAdmissionKey::new(
+            original.group(),
+            (*original.signer()).map(|byte| byte ^ 0xff),
+        )
+        .unwrap();
+        let capture = store.capture_chat_admission(other).unwrap();
+        let old = store
+            .prepare_legacy_chat_admission(&capture, b"real other signer history", &mut rng)
+            .unwrap();
+        if phase != 0 {
+            let current = store
+                .finish_chat_admission(&old, &mut rng, |_, _| Ok(()))
+                .unwrap()
+                .into_binding();
+            if phase == 2 {
+                store.retire_chat_admission(&current, &mut rng).unwrap();
+            }
+        }
+        let admission = fs::read(path.path().join("chat-admissions.bin")).unwrap();
+        let pins = fs::read(path.path().join("chat-owner-pins.bin")).unwrap();
+        assert!(
+            !path.path().join("owner-state").exists(),
+            "fixture conflict is actual admission-only history"
+        );
+        let mut planning = creator.into_ram_plan(&store).unwrap();
+        assert!(planning.prepare_ram_plan(&store, &mut NeverRng).is_err());
+        assert!(
+            planning.plan.is_none(),
+            "no sampled new scope/plan may survive conflict"
+        );
+        assert_eq!(
+            fs::read(path.path().join("chat-admissions.bin")).unwrap(),
+            admission
+        );
+        assert_eq!(
+            fs::read(path.path().join("chat-owner-pins.bin")).unwrap(),
+            pins
+        );
+        let independent = created(&store, &mut rng, 50 + phase as u8);
+        let mut independent = independent.into_ram_plan(&store).unwrap();
+        independent.prepare_ram_plan(&store, &mut rng).unwrap();
+    }
+}
+
+#[test]
+fn new_foreign_group_row_after_plan_capture_refuses_before_first_nonce_and_keeps_bounds_fee() {
+    let (path, store, mut rng) = fixture(0xfa84);
+    let creator = created(&store, &mut rng, 44);
+    let key = actual_key(&creator);
+    let source = ActualFounderSource::founding(&creator);
+    let mut plan = store.capture_original_archive_plan(&source).unwrap();
+    let other =
+        ChatAdmissionKey::new(key.group(), (*key.signer()).map(|byte| byte ^ 0xff)).unwrap();
+    let capture = store.capture_chat_admission(other).unwrap();
+    store
+        .prepare_legacy_chat_admission(&capture, b"foreign won after plan capture", &mut rng)
+        .unwrap();
+    let before = fs::read(path.path().join("chat-admissions.bin")).unwrap();
+    assert!(store
+        .register_original_archive_plan(&source, &mut plan, &mut NeverRng)
+        .is_err());
+    assert!(plan.sampled_nonce_data_for_test().is_none());
+    assert_eq!(
+        fs::read(path.path().join("chat-admissions.bin")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn group_bounds_are_separately_paid_before_construction_and_refund_after_original_plan_drops() {
+    use crate::store::chat_admission::group_lineage::GROUP_BOUNDS_ALLOCATION_BYTES;
+    let (_path, store, mut rng) = fixture(0xfa85);
+    let creator = created(&store, &mut rng, 45);
+    let mut planning = creator.into_ram_plan(&store).unwrap();
+    let pool = store
+        .archive_bootstrap_policy
+        .as_ref()
+        .unwrap()
+        .pending
+        .pool
+        .clone();
+    let charged = pool.charged_for_test();
+    let pressure = pool
+        .try_reserve(1024 * 1024 * 1024 - charged - GROUP_BOUNDS_ALLOCATION_BYTES + 1)
+        .unwrap();
+    assert!(planning.prepare_ram_plan(&store, &mut NeverRng).is_err());
+    assert!(planning.plan.is_none());
+    drop(pressure);
+    assert_eq!(pool.charged_for_test(), charged);
+    planning.prepare_ram_plan(&store, &mut rng).unwrap();
+    assert_eq!(
+        pool.charged_for_test(),
+        charged + GROUP_BOUNDS_ALLOCATION_BYTES
+    );
+    let plan = planning.plan.take().unwrap();
+    drop(planning);
+    let held = pool.charged_for_test();
+    drop(plan);
+    assert!(pool.charged_for_test() <= held - GROUP_BOUNDS_ALLOCATION_BYTES);
+}
+
+#[test]
 fn early_move_returns_same_creator_then_actual_plan_keeps_nonce_without_rows_or_sdk_retry() {
     let (path, store, mut rng) = fixture(0xfa01);
     let creator = begin(&store, 1);

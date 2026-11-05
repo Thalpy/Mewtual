@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 mod custody;
 pub(crate) mod fresh;
+pub(in crate::store) mod group_lineage;
 pub(in crate::store) mod journal_basis;
 mod old_owner_group;
 mod owner_writer;

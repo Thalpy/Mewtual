@@ -1,5 +1,15 @@
 # Mewtual; Handover
 
+## Group-wide pre-row admission exclusion (5 November; authored, UNRUN)
+
+Original archive founder planning now rejects ANY same-group admission row/owner across signers,
+including Retired and admission-only history with no owner pin/file. It uses separately paid
+borrowed BTree bounds and repeats the check after capture before registration/effects; unrelated
+groups remain available. Seven new regressions are authored UNRUN; final actual static review
+is clear, with no compiler/tests/build execution. The future own-row-only
+query stays test-only until its actual typed Current consumer is declared. No ID3/Current
+activation is supplied by this negative helper. [Contract](communication-recovery/CHAT-V2-GROUP-LINEAGE.md).
+
 ## Group-wide negative V2 exclusion (5 November; authored, UNRUN)
 
 Existing ID2 mounts now check the fixed signer-independent `g-` group reservation before old
