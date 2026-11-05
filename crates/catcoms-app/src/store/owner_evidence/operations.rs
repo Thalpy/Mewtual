@@ -9,15 +9,15 @@ const TAG: &str = "catcoms/chat-owner-operations-format/v1";
 const FILE: &str = "chat-owner-operations.bin";
 const STAGE: &str = "chat-owner-operations.replace.tmp";
 const MAX_PLAIN: usize = 128;
-const MAX_FRAMED: usize = MAX_PLAIN + 40;
+pub(in crate::store) const MAX_FRAMED: usize = MAX_PLAIN + 40;
 
 #[derive(Clone, Copy)]
-enum IntentSlot {
+pub(in crate::store) enum IntentSlot {
     Current,
     Stage,
 }
 impl IntentSlot {
-    fn name(self) -> &'static str {
+    pub(in crate::store) fn name(self) -> &'static str {
         match self {
             Self::Current => FILE,
             Self::Stage => STAGE,
@@ -52,31 +52,11 @@ impl ValidatedOwnerOperationsIntent {
         Ok(())
     }
 
-    /// Re-sync actual known files before promoting/discarding a fixed activation stage. Both
-    /// files already validated to the SAME immutable tag/domain; unknown bytes never reach here.
-    fn settle(&self, store: &ServerStore) -> Result<(), AppError> {
-        self.validate_original(store)?;
-        for file in self.current.iter().chain(self.stage.iter()) {
-            file.sync_all()
-                .map_err(|error| AppError::Io(error.to_string()))?;
-        }
-        store
-            .sync_own_vault_root()
-            .map_err(|error| AppError::Io(error.to_string()))?;
-        if self.stage.is_some() {
-            self.validate_original(store)?;
-            if self.current.is_some() {
-                fs::remove_file(store.dir.join(STAGE))
-                    .map_err(|error| AppError::Io(error.to_string()))?;
-            } else {
-                fs::rename(store.dir.join(STAGE), store.dir.join(FILE))
-                    .map_err(|error| AppError::Io(error.to_string()))?;
-            }
-            store
-                .sync_owner_operations_after_rename()
-                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
-        }
-        self.validate_original(store)
+    /// Borrow only the original authenticated fixed handles, never paths or a constructor.
+    /// The persistence consumer must validate this SAME opaque mount before using them. Both
+    /// sources passed complete semantic validation before this object was constructed.
+    pub(in crate::store) fn known_files(&self) -> (Option<&File>, Option<&File>) {
+        (self.current.as_ref(), self.stage.as_ref())
     }
 }
 
@@ -123,7 +103,7 @@ impl ServerStore {
         };
         self.open_chat_admissions_for_operations_recovery(actual_format, &intent)?;
         self.open_owner_pins_for_operations_recovery(&intent)?;
-        intent.settle(self)?;
+        self.settle_owner_operations_intent(&intent)?;
         if !actual_format.requires_owner_operations() {
             self.activate_owner_operations_wrapper(passphrase, rng, &intent)?;
         }
@@ -169,7 +149,7 @@ impl ServerStore {
                     .ok_or_else(refused)?
             }
         };
-        intent.settle(&store)?;
+        store.settle_owner_operations_intent(&intent)?;
         store.activate_owner_operations_wrapper(passphrase, rng, &intent)?;
         if original.is_cancelled() {
             return Err(refused());
@@ -220,28 +200,9 @@ impl ServerStore {
         &self,
         slot: IntentSlot,
     ) -> Result<Option<File>, AppError> {
-        let path = self.dir.join(slot.name());
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Ok(metadata)
-                if metadata.file_type().is_file() && metadata.len() <= MAX_FRAMED as u64 => {}
-            _ => return Err(refused()),
-        }
-        // Windows FlushFileBuffers needs a write-capable handle. No truncate/create option is
-        // used: this opens the SAME already existing fixed marker for read and later sync.
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|error| AppError::Io(error.to_string()))?;
-        let mut raw = Zeroizing::new(Vec::with_capacity(MAX_FRAMED + 1));
-        (&mut file)
-            .take((MAX_FRAMED + 1) as u64)
-            .read_to_end(&mut raw)
-            .map_err(|error| AppError::Io(error.to_string()))?;
-        if raw.len() > MAX_FRAMED {
-            return Err(refused());
-        }
+        let Some((file, raw)) = self.open_owner_operations_intent_slot(slot)? else {
+            return Ok(None);
+        };
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&raw)?)?);
         if plain.len() > MAX_PLAIN {
             return Err(refused());
@@ -254,44 +215,6 @@ impl ServerStore {
         }
         decoder.finish().map_err(|_| refused())?;
         Ok(Some(file))
-    }
-
-    /// Fixed create-new metadata stage only. It is preserved on any failure; constructor repair
-    /// authenticates/syncs it before adoption. This never writes a history/owner canonical path.
-    fn write_owner_operations_intent(&self, bytes: &[u8]) -> Result<(), AppError> {
-        if bytes.len() > MAX_FRAMED || self.chat_mount.observer().is_cancelled() {
-            return Err(refused());
-        }
-        let staged = self.dir.join(STAGE);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged)
-            .map_err(|error| AppError::Io(error.to_string()))?;
-        file.write_all(bytes)
-            .map_err(|error| AppError::Io(error.to_string()))?;
-        file.sync_all()
-            .map_err(|error| AppError::Io(error.to_string()))?;
-        drop(file);
-        #[cfg(test)]
-        let fault = self
-            .owner_evidence
-            .operations_marker_fault
-            .load(std::sync::atomic::Ordering::SeqCst);
-        #[cfg(test)]
-        if fault == 1 {
-            fs::remove_file(&staged).expect("remove actual marker stage before rename");
-        }
-        #[cfg(test)]
-        if fault == 3 {
-            return Err(AppError::Io(
-                "injected loss after actual intent stage sync".into(),
-            ));
-        }
-        fs::rename(&staged, self.dir.join(FILE))
-            .map_err(|error| AppError::Io(error.to_string()))?;
-        self.sync_owner_operations_after_rename()
-            .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))
     }
 }
 

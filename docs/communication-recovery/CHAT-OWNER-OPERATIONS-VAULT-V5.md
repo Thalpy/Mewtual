@@ -86,6 +86,13 @@ ambiguous failure.
 
 ## Source and test invoice
 
+All physical fixed-marker open/write/sync/move/unlink primitives live in `store.rs::persistence`,
+as required by the raw-filesystem gate. `owner_evidence::operations` retains complete semantic
+unseal/tag/domain validation of BOTH current and stage before constructing the opaque original
+intent; settlement takes that exact intent and repeats its mount checks. Closed slot names and
+bounds cannot redirect these non-inventoried root metadata operations to an epoch-family file.
+No scanner allowance, epoch generation rule or durability/error classification is relaxed.
+
 The fixed marker limits are PER BUFFER:128 plaintext and168 sealed/framed input/output. A conservative
 4KiB bound covers this helper's current+stage raw/unframed/plain buffers and a replacement
 sealing/frame at once, plus fixed decoder state; it is a scratch estimate, NOT a charged runtime

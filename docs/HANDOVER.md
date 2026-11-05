@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Owner-operation marker persistence boundary (5 November; static gate passed)
+
+The fixed owner-operation intent's bounded open/read, create-new write and actual sync/move/unlink
+now live in `store.rs::persistence`. Authentication, full tag/domain framing and inspection of BOTH
+current/stage remain in `owner_evidence::operations`; only its opaque original validated intent
+can reach settlement. Original mount revocation, pre/post-rename errors and actual file/root
+barriers are preserved. These closed-name root markers are non-inventoried critical metadata,
+never epoch/server files; no allowlist exception or inventory check was relaxed.
+
+`scripts/check-store-raw-fs.sh` passed using installed Git Bash after direct rustfmt. Two extra
+regressions are authored for foreign/revoked original settlement and valid-current/invalid-stage
+preservation. Compiled tests/builds remain paused; existing marker crash/fault tests and the new
+regressions are UNRUN. This is a persistence-boundary correction, not Chat V2 activation evidence.
+
 ## Known-format owner checkpoint integration (5 November; authored, unexecuted)
 
 The closed owner Add/save/install/reply and exact successor-recovery paths now accept known

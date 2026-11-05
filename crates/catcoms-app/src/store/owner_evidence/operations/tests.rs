@@ -421,6 +421,87 @@ fn operations_duplicate_valid_stage_is_settled_and_v5_missing_intent_never_downg
 }
 
 #[test]
+fn operations_persistence_settlement_refuses_foreign_or_revoked_original_before_fixed_stage_mutation(
+) {
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xe011);
+    let first = v4(first_dir.path(), &mut rng)
+        .into_owner_operations_store(SECRET, &mut rng)
+        .unwrap();
+    let second = v4(second_dir.path(), &mut rng)
+        .into_owner_operations_store(SECRET, &mut rng)
+        .unwrap();
+    let first_marker = fs::read(first_dir.path().join(FILE)).unwrap();
+    let second_marker = fs::read(second_dir.path().join(FILE)).unwrap();
+    fs::write(first_dir.path().join(STAGE), &first_marker).unwrap();
+    fs::write(second_dir.path().join(STAGE), &second_marker).unwrap();
+    let original = first.inspect_owner_operations_intent().unwrap().unwrap();
+    assert!(
+        second.settle_owner_operations_intent(&original).is_err(),
+        "an authenticated original intent is not transferable to a different Store mount"
+    );
+    assert_eq!(
+        fs::read(first_dir.path().join(STAGE)).unwrap(),
+        first_marker
+    );
+    assert_eq!(
+        fs::read(second_dir.path().join(STAGE)).unwrap(),
+        second_marker
+    );
+    first.revoke_chat_mount();
+    assert!(
+        first.settle_owner_operations_intent(&original).is_err(),
+        "same labels/files cannot revive a revoked original marker capability"
+    );
+    assert_eq!(
+        fs::read(first_dir.path().join(STAGE)).unwrap(),
+        first_marker
+    );
+    assert_eq!(fs::read(first_dir.path().join(FILE)).unwrap(), first_marker);
+    assert_eq!(
+        fs::read(second_dir.path().join(FILE)).unwrap(),
+        second_marker
+    );
+}
+
+#[test]
+fn operations_valid_current_and_invalid_stage_never_construct_settlement_authority() {
+    for trailing in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xe012);
+        let store = v4(directory.path(), &mut rng)
+            .into_owner_operations_store(SECRET, &mut rng)
+            .unwrap();
+        let current = fs::read(directory.path().join(FILE)).unwrap();
+        let mut encoder = Encoder::new();
+        encoder.put_str(TAG).unwrap();
+        let domain = if trailing {
+            store.chat_vault_domain().unwrap()
+        } else {
+            [99; 32]
+        };
+        encoder.put_bytes(&domain).unwrap();
+        let mut plain = encoder.finish();
+        if trailing {
+            plain.push(0);
+        }
+        let staged = frame(&seal(&store.keys.db_key().unwrap(), &plain, &mut rng).unwrap());
+        fs::write(directory.path().join(STAGE), &staged).unwrap();
+        assert!(
+            store.inspect_owner_operations_intent().is_err(),
+            "a valid Current cannot conceal a foreign or incomplete Stage"
+        );
+        assert_eq!(fs::read(directory.path().join(FILE)).unwrap(), current);
+        assert_eq!(fs::read(directory.path().join(STAGE)).unwrap(), staged);
+        drop(store);
+        assert!(ServerStore::open(directory.path(), SECRET, &mut rng).is_err());
+        assert_eq!(fs::read(directory.path().join(FILE)).unwrap(), current);
+        assert_eq!(fs::read(directory.path().join(STAGE)).unwrap(), staged);
+    }
+}
+
+#[test]
 fn operations_foreign_domain_oversized_and_nonfile_intents_remain_present_refusals() {
     for variant in 0..3 {
         let directory = tempfile::tempdir().unwrap();

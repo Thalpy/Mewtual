@@ -1504,6 +1504,121 @@ mod persistence {
             }
             sync_directory(&self.dir)
         }
+
+        /// Open only an existing fixed owner-operation format marker, with its exact bounded
+        /// raw frame. Windows flush needs write access; no truncate/create flag is allowed.
+        /// Semantic tag/domain/unseal checks remain in owner_evidence::operations, and BOTH
+        /// current/stage must authenticate before that module constructs its opaque intent.
+        /// These are non-inventoried root metadata, never epoch-family/server files: the closed
+        /// slot derives its name here and cannot redirect this I/O around EpochMutation.
+        pub(super) fn open_owner_operations_intent_slot(
+            &self,
+            slot: owner_evidence::operations::IntentSlot,
+        ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+            let refused = || {
+                AppError::Invalid("owner operation storage is unavailable or unsupported".into())
+            };
+            let path = self.dir.join(slot.name());
+            let cap = owner_evidence::operations::MAX_FRAMED;
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= cap as u64 => {}
+                _ => return Err(refused()),
+            }
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            let mut raw = Zeroizing::new(Vec::with_capacity(cap + 1));
+            (&mut file)
+                .take((cap + 1) as u64)
+                .read_to_end(&mut raw)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            if raw.len() > cap {
+                return Err(refused());
+            }
+            Ok(Some((file, raw)))
+        }
+
+        /// Settle only the SAME opaque original mount after BOTH fixed sources authenticated.
+        /// This is a file/directory barrier, not format/Current/membership authority. Unknown
+        /// bytes cannot reach it through a parsed tag or caller-selected path/success boolean.
+        pub(super) fn settle_owner_operations_intent(
+            &self,
+            intent: &owner_evidence::operations::ValidatedOwnerOperationsIntent,
+        ) -> Result<(), AppError> {
+            use owner_evidence::operations::IntentSlot;
+            intent.validate_original(self)?;
+            let (current, stage) = intent.known_files();
+            for file in current.into_iter().chain(stage) {
+                file.sync_all()
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+            }
+            self.sync_own_vault_root()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            if stage.is_some() {
+                intent.validate_original(self)?;
+                if current.is_some() {
+                    fs::remove_file(self.dir.join(IntentSlot::Stage.name()))
+                        .map_err(|error| AppError::Io(error.to_string()))?;
+                } else {
+                    fs::rename(
+                        self.dir.join(IntentSlot::Stage.name()),
+                        self.dir.join(IntentSlot::Current.name()),
+                    )
+                    .map_err(|error| AppError::Io(error.to_string()))?;
+                }
+                self.sync_owner_operations_after_rename()
+                    .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+            }
+            intent.validate_original(self)
+        }
+
+        /// Fixed create-new owner-operation metadata stage only. Preserve every actual write,
+        /// sync, rename and failure classification of the critical-format transaction. This
+        /// root marker is outside epoch inventories and cannot address their files; all raw
+        /// mutation stays in this persistence module, without adding a scanner exception.
+        pub(super) fn write_owner_operations_intent(&self, bytes: &[u8]) -> Result<(), AppError> {
+            use owner_evidence::operations::IntentSlot;
+            if bytes.len() > owner_evidence::operations::MAX_FRAMED
+                || self.chat_mount.observer().is_cancelled()
+            {
+                return Err(AppError::Invalid(
+                    "owner operation storage is unavailable or unsupported".into(),
+                ));
+            }
+            let staged = self.dir.join(IntentSlot::Stage.name());
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            file.write_all(bytes)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            file.sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            drop(file);
+            #[cfg(test)]
+            let fault = self
+                .owner_evidence
+                .operations_marker_fault
+                .load(Ordering::SeqCst);
+            #[cfg(test)]
+            if fault == 1 {
+                fs::remove_file(&staged).expect("remove actual marker stage before rename");
+            }
+            #[cfg(test)]
+            if fault == 3 {
+                return Err(AppError::Io(
+                    "injected loss after actual intent stage sync".into(),
+                ));
+            }
+            fs::rename(&staged, self.dir.join(IntentSlot::Current.name()))
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            self.sync_owner_operations_after_rename()
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))
+        }
     }
 
     impl ServerStore {
