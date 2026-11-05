@@ -83,6 +83,9 @@ pub struct ReturnedBootstrapSourceData {
     source: RetainedBootstrapSourceData,
     reason: GenesisSeedRefusal,
 }
+// Never box an error AFTER an actual quota refusal. Its source already owns the prepaid
+// metadata Box, so the complete original can move through this fixed owning return envelope.
+const _: () = assert!(std::mem::size_of::<ReturnedBootstrapSourceData>() <= 128);
 impl ReturnedBootstrapSourceData {
     pub fn into_parts(self) -> (RetainedBootstrapSourceData, GenesisSeedRefusal) {
         (self.source, self.reason)

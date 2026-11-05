@@ -64,9 +64,14 @@ struct ReadCapture {
 /// ORIGINAL read payment. This is historical private DATA only, not a latest-host selector,
 /// SavedTerminal, Fresh, SDK admission, Current or native/UI disclosure lease. No Serialize.
 pub struct RetainedBootstrapSourceData {
-    opened: OpenedBootstrapSourceData,
+    // This includes the complete fixed-size frontier metadata. Prepay its Box in READ_FEE
+    // before the opener, keeping later owning refusals small WITHOUT allocating an error
+    // after a reservation failure. The SAME Box moves through every downstream refusal.
+    opened: Box<OpenedBootstrapSourceData>,
     capture: Arc<ReadCapture>,
 }
+const _: () =
+    assert!(std::mem::size_of::<RetainedBootstrapSourceData>() <= 2 * std::mem::size_of::<usize>());
 /// Weak original READ identity for a retained group task. Matching whole ciphertext alone
 /// cannot swap that task to a different paid capture/held-object set. This observation keeps
 /// no DATA, fee, sender, key, Store or session alive and grants no positive permission.
@@ -377,7 +382,7 @@ impl ReadWork {
         // the public helper returns. All full reads/opener work has already drained.
         self.capture.verify_selected_files()?;
         Ok(RetainedBootstrapSourceData {
-            opened,
+            opened: Box::new(opened),
             capture: self.capture,
         })
     }
@@ -545,6 +550,7 @@ fn validate_fixed_invoice() -> Result<(), AppError> {
         + std::mem::size_of::<ReadCapture>()
         + std::mem::size_of::<ReadWork>()
         + std::mem::size_of::<RetainedBootstrapSourceData>()
+        + std::mem::size_of::<OpenedBootstrapSourceData>() // prepaid retained metadata Box
         + ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES
         + 8 * 1024;
     if named > FIXED_FEE {

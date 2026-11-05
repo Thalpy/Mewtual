@@ -49,6 +49,7 @@ fn one_byte_short_combined_payments_refuse_before_sdk_and_return_same_source_for
         .read_saved_bootstrap_source_data(&f.group, f.signer)
         .unwrap();
     let identity = read.capture.clone();
+    let opened_identity = read.data() as *const OpenedBootstrapSourceData;
     let baseline = f.pool.charged_for_test();
     let limits = budget();
     let required = limits.metadata_bytes().unwrap() + limits.sdk.max_typed_bytes;
@@ -62,6 +63,10 @@ fn one_byte_short_combined_payments_refuse_before_sdk_and_return_same_source_for
     assert_eq!(reason, GenesisSeedRefusal::CapacityUnavailable);
     assert_eq!(SDK_ENTRIES.with(|entries| entries.get()), 0);
     assert!(Arc::ptr_eq(&read.capture, &identity));
+    assert_eq!(
+        read.data() as *const OpenedBootstrapSourceData,
+        opened_identity
+    );
     drop(identity);
     drop(pressure);
     assert_eq!(f.pool.charged_for_test(), baseline);

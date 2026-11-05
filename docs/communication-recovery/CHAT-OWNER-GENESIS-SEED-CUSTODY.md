@@ -88,6 +88,11 @@ limits; `ServerStore::prepare_genesis_seed(source, budget)` consumes the real re
 It validates that source before fees, after resource waits before SDK entry, and after decode.
 Success owns `RetainedBootstrapGenesisSeed`; fixed-reason refusal owns the SAME source and
 read fee for a genuinely new SDK attempt, without another full source read or write unit.
+The cold reader prepays and boxes its large opened metadata (including the complete frontier)
+before returning DATA. Owning SDK refusals therefore move the SAME existing source Box in a
+small fixed envelope, without allocating an error after a quota refusal. Compile-time size
+assertions pin both the retained source and refusal envelope; the pressure regression also
+checks that the opened DATA address is unchanged across refusal.
 Six genuine cold-source tests cover independent charge/drop lifetime, one-byte-short combined
 pressure before SDK, provider/setup refusal cleanup, cancellation after fee wait, actual final
 control replacement and foreign Store/account rejection. The work1 test refuses SDK setup
