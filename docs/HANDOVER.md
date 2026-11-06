@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Historical policy validation after real restore (6 November; focused checks pass)
+
+Restoring a saved nonempty policy increments the new node's process-local revision.
+The first-Add parent validator incorrectly required that counter to remain zero, rejecting
+the genuine original parent after cold restore. It now compares the exact serialized policy
+while retaining all signed parent, MLS, routing, wrapping-key, durable scope and tenure checks.
+Live prepared-operation fencing still uses the policy revision; it is not reset or removed.
+All nine Sync initial-operation tests pass, including a new exact-policy/changed-policy
+regression. Both previously failing actual App Add stage/save/reopen tests also pass in the
+focused run. Adversarial inspection found no remaining blocker/high in this correction.
+These results do not close the other root-suite failures or activate Chat V2.
+
 ## Operational Chat V2 integration (6 November; in progress)
 
 Core's founder-only acceptance verifier and Sync's raw-signature/inert-handoff boundary
@@ -18,8 +30,10 @@ native aborts on stack overflow in abandoned voice custody. Its actual wrapper-s
 regression fails locally at93,936 bytes before the narrow child-future boxing fix. The
 fix retains all actual branches/assertions. All3 focused default-stack tests pass in21.97s,
 and strict native Clippy passes in2m41s after building the unchanged frontend. The separate
-native fixture commit `bd11fe37` is pushed; fresh Linux execution is pending. Full suites are not
-green. Normal test runs are authorized again; the ten-thousand-operation regression stays
+native fixture commit `bd11fe37` is pushed. Full suites are not
+green. Subsequent `fa0d142e` Linux CI confirms all 1,042 native tests pass in 2,199.44s,
+including abandoned custody, and strict native Clippy passes. The root jobs still fail;
+this native result does not supersede them. Normal test runs are authorized again; the ten-thousand-operation regression stays
 deferred until the end.
 
 ## Native infrastructure reservation (6 November; focused tests pass)

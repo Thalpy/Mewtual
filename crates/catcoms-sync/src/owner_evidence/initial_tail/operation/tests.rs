@@ -224,6 +224,49 @@ fn first_add_canonical_parent_expectation_is_checked_before_owner_restore() {
 }
 
 #[test]
+fn first_add_restored_policy_counter_is_not_historical_parent_authority() {
+    let (mut original, binding, candidate) = fixture();
+    let parent = original.snapshot().unwrap();
+    // A different complete policy field must still refuse. This is an explicit trusted-
+    // host test fixture, not a claim that modifying bytes creates a real saved receipt.
+    let policy = original.group_policy.take().unwrap();
+    let changed_policy_parent = original.snapshot().unwrap();
+    original.group_policy = Some(policy);
+    let child = freeze(&mut original, &candidate).unwrap();
+    let limits = OwnerInitializationRestoreLimits {
+        max_snapshot_bytes: 24 * 1024 * 1024,
+        max_mls_bytes: 512 * 1024,
+        max_mls_backing_bytes: 512 * 1024,
+    };
+    let mut restored = ChannelSync::restore_owner_operation_checkpoint(
+        &child,
+        Hub::new().join(PeerId::from_u64(0xae10)),
+        ChaCha20Rng::seed_from_u64(0xae10),
+        Box::new(ManualClock::new(1_000_000)),
+        limits,
+    )
+    .unwrap();
+    assert!(restored.group_policy().is_some());
+    assert_ne!(
+        restored.group_policy_revision(),
+        0,
+        "real restore installs its saved policy"
+    );
+    restored
+        .validate_owner_operation_parent(&parent, limits, &binding.signer)
+        .unwrap();
+    assert!(restored
+        .validate_owner_operation_parent(&changed_policy_parent, limits, &binding.signer)
+        .is_err());
+    // The runtime counter still fences in-process prepared work elsewhere. It never was
+    // serialized, so another value cannot invalidate these same historical signed facts.
+    restored.group_policy_revision += 7;
+    restored
+        .validate_owner_operation_parent(&parent, limits, &binding.signer)
+        .unwrap();
+}
+
+#[test]
 fn first_add_same_invite_and_package_cannot_choose_another_channel() {
     let (mut node, _binding, candidate) = fixture();
     let invite = InviteToken::decode(&candidate.operation.invite).unwrap();

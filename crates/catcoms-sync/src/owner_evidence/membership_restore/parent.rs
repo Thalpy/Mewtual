@@ -142,12 +142,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 &self.durable_chat,
             )?
             .ok_or_else(bad)?;
+        // The serialized policy pin is historical evidence; the process-local revision is
+        // only live invalidation state. Restore legitimately increments it when installing
+        // Some(policy) into a new node. Requiring zero here rejects an exact real parent.
+        // Keep the actual encoded policy equality and every source/scope/tenure check.
         if p.routing != routing.as_slice()
             || p.wrap != self.file_wrap_key.as_slice()
             || p.policy != group_policy::encode_pin(self.group_policy.as_ref())
             || p.durable != self.durable_chat.encode()?
             || p.scope != scope
-            || self.group_policy_revision != 0
             || !self.durable_chat.initialization_empty()
         {
             return Err(bad());
