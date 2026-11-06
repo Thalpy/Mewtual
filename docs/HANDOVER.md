@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Cross-platform validation failures (6 November; fixes in progress)
+
+The pushed `81d3a162` checkpoint is **not CI-green**. Linux strict Clippy rejects eight
+test-only helpers/fixture cases used exclusively by the Windows physical-repair tests.
+The Linux native run reports a collision between two private-download tests using the
+same process-wide claim IDs, then aborts with a stack overflow in the three-bubble chat
+scenario. The Windows root suite aborts with a stack overflow in registry owner rotation.
+The focused Windows results below do not supersede these full-suite failures.
+
+The corrections keep Windows-only observation APIs under their actual platform gate,
+give the independent claim test distinct IDs, and move large composed test futures to
+heap construction boundaries. Future-size regressions accompany the latter; assertions,
+real transport/admission paths, isolation, teardown and timeout limits remain intact.
+The default-stack native three-bubble scenario and its new size regression pass
+(2 tests, 109.76s), after reproducing the original stack abort locally in0.28s. All16
+private-download cleanup tests pass in0.46s and all6 fixture-isolation/timeout tests pass
+in0.03s, using that same newly compiled native test executable. All5 focused registry seed
+tests now pass in50.65s on the default stack. Boxing rediscovery and Pair construction
+alone was not sufficient: retaining the SAME Pair in a Box across fixture returns shrinks
+SeedFixture from94,432 to2,160 bytes on this desktop. The original two Servers/stores and
+all assertions remain. All17 registry ingress/head/page/seed tests using the shared fixture
+also pass in80.42s. Cross-platform CI confirmation remains required; these focused results
+are not full-suite sign-off.
+The named10,000-operation catch-up test remains deferred to the final pass, as requested.
+
 ## Same-owner cleanup after Init1 recovery (6 November; focused tests pass)
 
 The repaired owning output now has a concrete third settlement branch alongside the real

@@ -30,17 +30,17 @@ std::thread_local! {
     static AFTER_RECEIPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) fn after_comparers_for_test(hook: Box<dyn FnOnce()>) {
     AFTER_COMPARERS.with(|slot| *slot.borrow_mut() = Some(hook));
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) fn after_source_for_test(hook: Box<dyn FnOnce()>) {
     AFTER_SOURCE.with(|slot| *slot.borrow_mut() = Some(hook));
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) fn after_receipt_for_test(hook: Box<dyn FnOnce()>) {
     AFTER_RECEIPT.with(|slot| *slot.borrow_mut() = Some(hook));
 }

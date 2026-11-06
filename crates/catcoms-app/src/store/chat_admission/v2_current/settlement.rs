@@ -123,7 +123,8 @@ impl<'writer> GenesisCurrent2SettlementReadAdmission<'writer> {
     pub(in crate::store) fn writer_observation(&self) -> Result<&V2WriterObservation, AppError> {
         Ok(&self.binding()?.writer)
     }
-    #[cfg(test)]
+    // Only the Windows physical-settlement tests exercise this observation.
+    #[cfg(all(test, windows))]
     pub(in crate::store) fn owner_observer(&self) -> &RequestCancellation {
         match &self.scope {
             ReadScope::Warm(admission) => &admission.preparation.inner.admission,

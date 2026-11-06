@@ -1,11 +1,36 @@
 //! Real remounted row1/row2 artifacts. These are capture/resource tests, not cold ownership,
 //! repair, native disclosure or permission to run the restored SDK.
 use super::*;
-use crate::store::critical_namespaces::current_layout::cold_read::tests::{fixture, ColdFixture};
+use crate::store::critical_namespaces::current_layout::cold_read::tests::{
+    fixture, fixture_at_cut, ColdFixture, ColdFixtureCut,
+};
 use crate::store::persistence::v2_genesis_activation::{
     ColdV2GenesisActivationSeed, ColdV2GenesisCurrentHead,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[test]
+fn genuine_complete_seed_before_scope_is_neither_loaded_initializing_nor_current() {
+    let f = fixture_at_cut(0xc0ff, ColdFixtureCut::CompleteSeedBeforeScope);
+    let store = f.layout.checked_store().unwrap();
+    let source = f.source.borrow_source_data();
+    source.validate_original(store).unwrap();
+    // A complete journal is not a row or mounted owner. The new no-row consumer must
+    // establish its own actual birth protocol; neither historical role may be coerced.
+    assert!(store
+        .with_cold_v2_genesis_initializing_read(&source, |_| -> Result<(), AppError> {
+            panic!("absent row entered loaded Initializing1 reader")
+        })
+        .is_err());
+    assert!(store
+        .with_cold_v2_genesis_current_read(&source, |_| -> Result<(), AppError> {
+            panic!("absent row entered loaded Current2 reader")
+        })
+        .is_err());
+    source.validate_original(store).unwrap();
+    assert!(!source.source().capture.target.join("head.bin").exists());
+    assert!(!source.source().capture.target.join("head.stage").exists());
+}
 
 #[cfg(windows)]
 fn seed_path(f: &ColdFixture, capture: &PreparedColdV2GenesisCapture) -> PathBuf {

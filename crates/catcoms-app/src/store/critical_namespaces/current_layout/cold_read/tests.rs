@@ -82,11 +82,21 @@ pub(in crate::store) fn fixture(number: u64, initializing: bool) -> ColdFixture 
 pub(in crate::store) enum ColdFixtureCut {
     Current,
     CompleteInitializing,
+    // Real journal file+group-parent barriers completed; no row1 insertion was attempted.
+    CompleteSeedBeforeScope,
+    // Partial physical repair is supported and exercised only on Windows. Keep its
+    // producer cuts under the same platform gate as those genuine repair tests.
+    #[cfg(windows)]
     BeforePin,
+    #[cfg(windows)]
     EmptyPin,
+    #[cfg(windows)]
     ShortPin,
+    #[cfg(windows)]
     EmptyStage,
+    #[cfg(windows)]
     ShortStage,
+    #[cfg(windows)]
     CompleteStage,
 }
 
@@ -166,86 +176,100 @@ pub(in crate::store) fn fixture_at_cut(number: u64, cut: ColdFixtureCut) -> Cold
                 activation.save_seed(&task.lock_vacant(admission)?)
             })
             .unwrap();
-        let mut scope = None;
-        store
-            .reserve_v2_genesis_initializing(
+        if !matches!(cut, ColdFixtureCut::CompleteSeedBeforeScope) {
+            let mut scope = None;
+            store
+                .reserve_v2_genesis_initializing(
+                    &source_ref,
+                    &task,
+                    saved_seed,
+                    &mut scope,
+                    &buffers,
+                    &mut rng,
+                )
+                .unwrap();
+            let scope = scope.as_mut().unwrap();
+            let mut writer =
+                PreparedV2WriterRegistration::prepare(store, &source_ref, &task, scope).unwrap();
+            let metadata_fault = match cut {
+                ColdFixtureCut::Current
+                | ColdFixtureCut::CompleteInitializing
+                | ColdFixtureCut::CompleteSeedBeforeScope => 0,
+                #[cfg(windows)]
+                ColdFixtureCut::BeforePin => 0,
+                #[cfg(windows)]
+                ColdFixtureCut::EmptyPin => 182,
+                #[cfg(windows)]
+                ColdFixtureCut::ShortPin => 183,
+                #[cfg(windows)]
+                ColdFixtureCut::EmptyStage => 184,
+                #[cfg(windows)]
+                ColdFixtureCut::ShortStage => 185,
+                #[cfg(windows)]
+                ColdFixtureCut::CompleteStage => 186,
+            };
+            store
+                .critical_namespace_fault
+                .store(metadata_fault, Ordering::SeqCst);
+            let mut saved_head = false;
+            let result = store.finish_v2_genesis_current(
+                scope,
                 &source_ref,
                 &task,
-                saved_seed,
-                &mut scope,
                 &buffers,
                 &mut rng,
-            )
-            .unwrap();
-        let scope = scope.as_mut().unwrap();
-        let mut writer =
-            PreparedV2WriterRegistration::prepare(store, &source_ref, &task, scope).unwrap();
-        let metadata_fault = match cut {
-            ColdFixtureCut::Current
-            | ColdFixtureCut::CompleteInitializing
-            | ColdFixtureCut::BeforePin => 0,
-            ColdFixtureCut::EmptyPin => 182,
-            ColdFixtureCut::ShortPin => 183,
-            ColdFixtureCut::EmptyStage => 184,
-            ColdFixtureCut::ShortStage => 185,
-            ColdFixtureCut::CompleteStage => 186,
-        };
-        store
-            .critical_namespace_fault
-            .store(metadata_fault, Ordering::SeqCst);
-        let mut saved_head = false;
-        let result = store.finish_v2_genesis_current(
-            scope,
-            &source_ref,
-            &task,
-            &buffers,
-            &mut rng,
-            |admission, _| {
-                let mut owner = task.lock_initializing_owner_namespace(admission)?;
-                owner.install_writer(&mut writer)?;
-                let guard = owner.lock_archive_root_for_writer(&writer)?;
-                if matches!(cut, ColdFixtureCut::BeforePin) {
-                    // Real durable scope1 and installed writer, before the first pin open.
-                    return Err(crate::store::critical_namespaces::refused());
+                |admission, _| {
+                    let mut owner = task.lock_initializing_owner_namespace(admission)?;
+                    owner.install_writer(&mut writer)?;
+                    let guard = owner.lock_archive_root_for_writer(&writer)?;
+                    #[cfg(windows)]
+                    if matches!(cut, ColdFixtureCut::BeforePin) {
+                        // Real durable scope1 and installed writer, before the first pin open.
+                        return Err(crate::store::critical_namespaces::refused());
+                    }
+                    let saved = activation.save_head(&guard)?;
+                    saved_head = true;
+                    if matches!(cut, ColdFixtureCut::CompleteInitializing) {
+                        // The complete real pin/head exists, but the disk still has the real
+                        // earlier Initializing1 row. Warm Runtime2 is intentionally discarded.
+                        store
+                            .chat_fence_pre_rename_failure
+                            .store(true, Ordering::SeqCst);
+                    }
+                    Ok(saved)
+                },
+            );
+            match cut {
+                ColdFixtureCut::CompleteSeedBeforeScope => {
+                    unreachable!("pre-row fixture never enters the scope producer")
                 }
-                let saved = activation.save_head(&guard)?;
-                saved_head = true;
-                if matches!(cut, ColdFixtureCut::CompleteInitializing) {
-                    // The complete real pin/head exists, but the disk still has the real
-                    // earlier Initializing1 row. Warm Runtime2 is intentionally discarded.
-                    store
-                        .chat_fence_pre_rename_failure
-                        .store(true, Ordering::SeqCst);
+                ColdFixtureCut::Current => {
+                    assert!(
+                        saved_head,
+                        "fixture must cross actual complete head barriers"
+                    );
+                    result.unwrap();
                 }
-                Ok(saved)
-            },
-        );
-        match cut {
-            ColdFixtureCut::Current => {
-                assert!(
-                    saved_head,
-                    "fixture must cross actual complete head barriers"
-                );
-                result.unwrap();
-            }
-            ColdFixtureCut::CompleteInitializing => {
-                assert!(
-                    saved_head,
-                    "fixture must cross actual complete head barriers"
-                );
-                assert!(result.is_err());
-            }
-            ColdFixtureCut::BeforePin
-            | ColdFixtureCut::EmptyPin
-            | ColdFixtureCut::ShortPin
-            | ColdFixtureCut::EmptyStage
-            | ColdFixtureCut::ShortStage
-            | ColdFixtureCut::CompleteStage => {
-                assert!(
-                    !saved_head,
-                    "fault must precede the actual saved-head receipt"
-                );
-                assert!(result.is_err());
+                ColdFixtureCut::CompleteInitializing => {
+                    assert!(
+                        saved_head,
+                        "fixture must cross actual complete head barriers"
+                    );
+                    assert!(result.is_err());
+                }
+                #[cfg(windows)]
+                ColdFixtureCut::BeforePin
+                | ColdFixtureCut::EmptyPin
+                | ColdFixtureCut::ShortPin
+                | ColdFixtureCut::EmptyStage
+                | ColdFixtureCut::ShortStage
+                | ColdFixtureCut::CompleteStage => {
+                    assert!(
+                        !saved_head,
+                        "fault must precede the actual saved-head receipt"
+                    );
+                    assert!(result.is_err());
+                }
             }
         }
         // Every warm owner/writer/task/SDK/read and temporary credit drains before remount.

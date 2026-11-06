@@ -147,7 +147,7 @@ enum CleanupPhase {
 }
 
 /// Test-only DATA observation, never a phase setter or admission constructor.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum GenesisSeedSettlementProgressData {
     OriginalPresent,
@@ -317,7 +317,7 @@ impl PreparedGenesisSeedSettlement {
         self.body.require_same_owner(store, owner)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(in crate::store) fn progress_data_for_test(&self) -> GenesisSeedSettlementProgressData {
         match self.phase {
             CleanupPhase::OriginalPresent => GenesisSeedSettlementProgressData::OriginalPresent,
@@ -646,7 +646,7 @@ std::thread_local! {
     static AFTER_LAST_SEED_COMPARISON: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) fn after_last_seed_comparison_for_test(hook: Box<dyn FnOnce()>) {
     AFTER_LAST_SEED_COMPARISON.with(|slot| {
         assert!(slot.borrow_mut().replace(hook).is_none());
