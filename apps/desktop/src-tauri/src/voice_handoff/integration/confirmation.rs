@@ -1602,179 +1602,182 @@ enum ConfirmationMode {
     Pc(u8),
     Fence(u8),
 }
-async fn confirmation_round_trip_inner(
-    low_state: &AppState,
-    low: &Arc<SelectedHandoffOwner>,
-    low_parent: &DerivationParent,
-    high_state: &AppState,
-    high: &Arc<SelectedHandoffOwner>,
-    high_parent: &DerivationParent,
+fn confirmation_round_trip_inner<'a>(
+    low_state: &'a AppState,
+    low: &'a Arc<SelectedHandoffOwner>,
+    low_parent: &'a DerivationParent,
+    high_state: &'a AppState,
+    high: &'a Arc<SelectedHandoffOwner>,
+    high_parent: &'a DerivationParent,
     mode: ConfirmationMode,
-) {
-    let framed_results = !matches!(mode, ConfirmationMode::Legacy);
-    let hello = outgoing(
-        low_state,
-        low,
-        low_parent,
-        ledger::ConfirmationPurpose::Start(None),
-    )
-    .await;
-    assert!(matches!(
-        crypto_and_return(
+) -> std::pin::Pin<Box<impl std::future::Future<Output = ()> + 'a>> {
+    // Mode-specific futures (including the separate fenced path) must not be embedded
+    // repeatedly by framed/legacy/TCP fixture wrappers. This preserves their real owners
+    // and polling order while giving every enclosing caller a bounded retained child.
+    Box::pin(async move {
+        let framed_results = !matches!(mode, ConfirmationMode::Legacy);
+        let hello = outgoing(
             low_state,
             low,
-            &hello,
             low_parent,
             ledger::ConfirmationPurpose::Start(None),
-            framed_results,
-            false
         )
-        .await,
-        CryptoOutcome::Sealed { .. }
-    ));
-    let opened_hello = incoming(high_state, high, high_parent, 1).await;
-    assert_eq!(
-        crypto_and_return(
-            high_state,
-            high,
-            &opened_hello,
-            high_parent,
-            ledger::ConfirmationPurpose::Incoming(1),
-            framed_results,
-            false
-        )
-        .await,
-        CryptoOutcome::Opened
-    );
-    assert!(
-        opened_hello
-            .status()
-            .unwrap()
-            .engine
-            .receipt
-            .unwrap()
-            .retired,
-        "native local history compacted before FIRST response"
-    );
-    let proof = outgoing(
-        high_state,
-        high,
-        high_parent,
-        ledger::ConfirmationPurpose::Respond(opened_hello.id()),
-    )
-    .await;
-    assert!(matches!(
-        crypto_and_return(
-            high_state,
-            high,
-            &proof,
-            high_parent,
-            ledger::ConfirmationPurpose::Respond(opened_hello.id()),
-            framed_results,
-            false
-        )
-        .await,
-        CryptoOutcome::Sealed { .. }
-    ));
-    let opened_proof = incoming(low_state, low, low_parent, 2).await;
-    assert_eq!(
-        crypto_and_return(
-            low_state,
-            low,
-            &opened_proof,
-            low_parent,
-            ledger::ConfirmationPurpose::Incoming(2),
-            framed_results,
-            false
-        )
-        .await,
-        CryptoOutcome::Opened
-    );
-    let finish = outgoing(
-        low_state,
-        low,
-        low_parent,
-        ledger::ConfirmationPurpose::Respond(opened_proof.id()),
-    )
-    .await;
-    assert!(matches!(
-        crypto_and_return(
-            low_state,
-            low,
-            &finish,
-            low_parent,
-            ledger::ConfirmationPurpose::Respond(opened_proof.id()),
-            framed_results,
-            false
-        )
-        .await,
-        CryptoOutcome::Sealed { .. }
-    ));
-    let opened_finish = incoming(high_state, high, high_parent, 3).await;
-    assert_eq!(
-        crypto_and_return(
-            high_state,
-            high,
-            &opened_finish,
-            high_parent,
-            ledger::ConfirmationPurpose::Incoming(3),
-            framed_results,
-            false
-        )
-        .await,
-        CryptoOutcome::Opened
-    );
-    let route = route(high_state, high).await;
-    let impossible = ledger::Purpose::Confirmation {
-        parent: high_parent.id(),
-        request: ledger::ConfirmationPurpose::Respond(opened_finish.id()),
-    };
-    assert!(
-        matches!(
-            factory::ensure_confirmation_row(
-                &context::Context::new(high_state),
-                &route,
-                high_parent,
-                ledger::ConfirmationPurpose::Respond(opened_finish.id()),
-                factory::tests::physical(&route),
+        .await;
+        assert!(matches!(
+            crypto_and_return(
+                low_state,
+                low,
+                &hello,
+                low_parent,
+                ledger::ConfirmationPurpose::Start(None),
+                framed_results,
+                false
             )
             .await,
-            Err(factory::Refused::Protocol(VoiceError::Unauthorized))
-        ),
-        "terminal Finish has no response"
-    );
-    assert!(
-        high_state
-            .voice_handoff
-            .lookup_original(high, impossible)
-            .is_none(),
-        "terminal Finish must refuse before reserving uncertain native history"
-    );
-    if framed_results {
-        // Only actual application-framed Finish results arm native custody. The legacy
-        // test-only result path deliberately cannot manufacture this transition proof.
-        let peer_ready = tokio::sync::Barrier::new(2);
-        if let ConfirmationMode::Fence(case) = mode {
-            tokio::join!(
-                super::transition::fenced_custody_cycle(
-                    high_state,
-                    high,
+            CryptoOutcome::Sealed { .. }
+        ));
+        let opened_hello = incoming(high_state, high, high_parent, 1).await;
+        assert_eq!(
+            crypto_and_return(
+                high_state,
+                high,
+                &opened_hello,
+                high_parent,
+                ledger::ConfirmationPurpose::Incoming(1),
+                framed_results,
+                false
+            )
+            .await,
+            CryptoOutcome::Opened
+        );
+        assert!(
+            opened_hello
+                .status()
+                .unwrap()
+                .engine
+                .receipt
+                .unwrap()
+                .retired,
+            "native local history compacted before FIRST response"
+        );
+        let proof = outgoing(
+            high_state,
+            high,
+            high_parent,
+            ledger::ConfirmationPurpose::Respond(opened_hello.id()),
+        )
+        .await;
+        assert!(matches!(
+            crypto_and_return(
+                high_state,
+                high,
+                &proof,
+                high_parent,
+                ledger::ConfirmationPurpose::Respond(opened_hello.id()),
+                framed_results,
+                false
+            )
+            .await,
+            CryptoOutcome::Sealed { .. }
+        ));
+        let opened_proof = incoming(low_state, low, low_parent, 2).await;
+        assert_eq!(
+            crypto_and_return(
+                low_state,
+                low,
+                &opened_proof,
+                low_parent,
+                ledger::ConfirmationPurpose::Incoming(2),
+                framed_results,
+                false
+            )
+            .await,
+            CryptoOutcome::Opened
+        );
+        let finish = outgoing(
+            low_state,
+            low,
+            low_parent,
+            ledger::ConfirmationPurpose::Respond(opened_proof.id()),
+        )
+        .await;
+        assert!(matches!(
+            crypto_and_return(
+                low_state,
+                low,
+                &finish,
+                low_parent,
+                ledger::ConfirmationPurpose::Respond(opened_proof.id()),
+                framed_results,
+                false
+            )
+            .await,
+            CryptoOutcome::Sealed { .. }
+        ));
+        let opened_finish = incoming(high_state, high, high_parent, 3).await;
+        assert_eq!(
+            crypto_and_return(
+                high_state,
+                high,
+                &opened_finish,
+                high_parent,
+                ledger::ConfirmationPurpose::Incoming(3),
+                framed_results,
+                false
+            )
+            .await,
+            CryptoOutcome::Opened
+        );
+        let route = route(high_state, high).await;
+        let impossible = ledger::Purpose::Confirmation {
+            parent: high_parent.id(),
+            request: ledger::ConfirmationPurpose::Respond(opened_finish.id()),
+        };
+        assert!(
+            matches!(
+                factory::ensure_confirmation_row(
+                    &context::Context::new(high_state),
+                    &route,
                     high_parent,
-                    case * 2,
-                    &peer_ready
-                ),
-                super::transition::fenced_custody_cycle(
-                    low_state,
-                    low,
-                    low_parent,
-                    case * 2 + 1,
-                    &peer_ready
+                    ledger::ConfirmationPurpose::Respond(opened_finish.id()),
+                    factory::tests::physical(&route),
                 )
-            );
-            return;
-        }
-        tokio::join!(
-            super::transition::custody_cycle(
+                .await,
+                Err(factory::Refused::Protocol(VoiceError::Unauthorized))
+            ),
+            "terminal Finish has no response"
+        );
+        assert!(
+            high_state
+                .voice_handoff
+                .lookup_original(high, impossible)
+                .is_none(),
+            "terminal Finish must refuse before reserving uncertain native history"
+        );
+        if framed_results {
+            // Only actual application-framed Finish results arm native custody. The legacy
+            // test-only result path deliberately cannot manufacture this transition proof.
+            let peer_ready = tokio::sync::Barrier::new(2);
+            if let ConfirmationMode::Fence(case) = mode {
+                tokio::join!(
+                    super::transition::fenced_custody_cycle(
+                        high_state,
+                        high,
+                        high_parent,
+                        case * 2,
+                        &peer_ready
+                    ),
+                    super::transition::fenced_custody_cycle(
+                        low_state,
+                        low,
+                        low_parent,
+                        case * 2 + 1,
+                        &peer_ready
+                    )
+                );
+                return;
+            }
+            let high_work = super::transition::custody_cycle(
                 high_state,
                 high,
                 high_parent,
@@ -1792,8 +1795,8 @@ async fn confirmation_round_trip_inner(
                     super::transition::Cleanup::Live
                 },
                 &peer_ready,
-            ),
-            super::transition::custody_cycle(
+            );
+            let low_work = super::transition::custody_cycle(
                 low_state,
                 low,
                 low_parent,
@@ -1811,7 +1814,12 @@ async fn confirmation_round_trip_inner(
                     super::transition::Cleanup::Ended
                 },
                 &peer_ready,
-            )
-        );
-    }
+            );
+            // Assert the actual two retained children, after genuine native setup. The
+            // synchronous constructors must heap them before join embeds their storage.
+            assert!(std::mem::size_of_val(&high_work) <= 256);
+            assert!(std::mem::size_of_val(&low_work) <= 256);
+            tokio::join!(high_work, low_work);
+        }
+    })
 }
