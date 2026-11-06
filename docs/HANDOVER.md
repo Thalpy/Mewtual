@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Native infrastructure reservation (6 November; focused tests pass)
+
+Linux CI at `4cb7f43a` passes the three-bubble, channel/membership and both six-client restart
+scenarios, along with the admin reader and cleanup fixes. Its full native result remains
+failing (964 pass, 77 fail): the service's actual weak-retained graph is49,040B against a32KiB
+reservation, causing start refusals and subsequent fixture quarantine/capacity failures.
+The same unchanged layout regression fails locally at49,120B. The service now prepays64KiB
+before bind within its unchanged2MiB process cap; runtime actual-layout checks and all group/
+engine limits remain. All 30 unchanged service tests pass in 7.08s, and the actual blocked-TCP
+native/browser confirmation regression passes in 17.43s. The measured Windows layout remains
+49,120B and now fits its real reservation. Actual-diff adversarial review clears payment,
+start/refusal and running/uncollected-output ownership. Formatting and whitespace pass;
+strict native all-target/all-feature Clippy passes in 1m56s. Fresh full CI confirmation
+remains pending.
+
 ## Complete activation journal/no-row continuation (6 November; focused tests pass)
 
 The A cohort adds actual complete-seed/no-row capture, same16 task claim, funded new owner

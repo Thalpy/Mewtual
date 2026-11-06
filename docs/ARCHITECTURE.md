@@ -1414,9 +1414,10 @@ no cached authorization snapshot or second commit mutex is introduced. The detac
 worker retains only its actual actor, original selection/grant/commit and paid work owners.
 
 Weak references retain the original inline Arc allocations after their values drop. The fixed
-listener payment remains32KiB, up8KiB from24KiB. The original weak-context Windows native
-peak was32,256 bytes; retaining one fixed header allocation across stages reduces the current
-measured peak to19,984 bytes, including context allocations/control blocks and wrappers. This spends more of the
+listener payment is now64KiB: the complete retained graph measures49,120 bytes on Windows
+and49,040 bytes in Linux CI after inline Store/claim growth. The earlier32KiB class no
+longer covers those weak-retained allocations. The unchanged actual-layout check remains.
+This spends more of the
 same2MiB process cap, without changing group or engine limits. Context drops before the IO
 credit; completed/uncollected native output retains that same original payment. Other platform
 layouts still fail closed if their measured peak does not fit.

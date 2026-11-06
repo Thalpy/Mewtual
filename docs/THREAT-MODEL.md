@@ -2812,8 +2812,9 @@ AppState/AppHandle or registry/store/Coordinator owner in the process host. Ever
 is all-or-nothing before factory admission; partial upgrades drain outside native fences. This
 is lifetime access, not revocation. The same borrowed UI gate as ordinary IPC checks actual store
 presence, original flags and generations after awaits. Weak references still retain inline Arc
-allocations/control blocks; the measured32,256-byte Windows peak is prepaid by32KiB instead of
-24KiB, reducing other available bytes within the unchanged2MiB process cap. Context fields drop
+allocations/control blocks. The current complete graph measures49,120B on Windows and49,040B
+on Linux after Store growth; its64KiB payment reduces other available bytes within the
+unchanged2MiB process cap. The actual-layout refusal remains. Context fields drop
 before the original IO payment; uncollected task output retains its payment as before.
 
 Factories accept the original native-selected Arc and use pure early/final checks of actual

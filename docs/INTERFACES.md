@@ -2453,8 +2453,9 @@ gate; it accepts no cached unlocked flag, serialized grant or alternate mutex. I
 query is shared with ordinary native commands. Early/final supplied-selection checks are pure,
 including when no local selected snapshot exists. Broad upgraded context drops outside guards
 before the admitted worker spawns. The worker retains original actor/grant/commit/work/payment.
-The IO state's weak context and retained inline allocations are included in a32KiB process
-payment (8KiB more than before) within the same2MiB process ceiling. No command or opcode was
+The IO state's weak context and retained inline allocations are included in a64KiB process
+payment within the same2MiB process ceiling. The measured complete graph is49,120B on Windows
+and49,040B on Linux; runtime still rejects a graph exceeding its actual payment. No command or opcode was
 added for this private factory. Final channel-closure, action delivery and browser drainage
 remain separate preconditions.
 

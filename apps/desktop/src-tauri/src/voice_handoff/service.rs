@@ -16,8 +16,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-// Keep the existing32KiB payment before bind. Admission and tests measure the complete
+// Prepay64KiB before bind. Admission and tests measure the complete
 // concrete task/owner/weak-retained graph, including dispatch and concurrent maintenance.
+// Weak Store references retain its growing inline allocation even after the value drops:
+// the complete November layout is49,120B on Windows and49,040B on Linux. A32KiB payment
+// therefore refuses every start, rather than merely leaving less room for another action.
 // This reduces available bytes within the SAME 2 MiB process cap, never increasing that cap
 // or any group/engine limit. Other layouts still refuse if their actual peak cannot fit.
 // Both runtime admission and the regression below measure the actual nested future.
@@ -28,7 +31,7 @@ pub(in crate::voice_handoff) use maintenance::tests::{
     defer_first_maintenance, discovery_after_local_refusal,
 };
 
-const INFRASTRUCTURE_BYTES: usize = 32 * 1024;
+const INFRASTRUCTURE_BYTES: usize = 64 * 1024;
 // Pinned Tokio task/oneshot/Arc overhead and two boxed production Clock sleeps (one socket
 // deadline plus the independent maintenance cadence). This is not a
 // claim about arbitrary Clock providers, OS socket buffers, thread stacks or allocator RSS.
