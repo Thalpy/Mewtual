@@ -2,6 +2,21 @@
 //! descriptor nor this wrapper grants a Current scope, group writer or runnable SDK/server.
 use super::*;
 mod declaration;
+// Genuine cold DATA/capture fixtures only. Production cold owner/writer activation is a
+// separate joint consumer; this declaration cannot make an ordinary Store cold-capable.
+#[cfg(test)]
+pub(in crate::store) mod cold_read;
+#[cfg(test)]
+pub(in crate::store) use cold_read::{
+    ColdV2CurrentGroupReadGuard, ColdV2InitializingGroupReadGuard, COLD_V2_GROUP_READ_GUARD_BYTES,
+};
+
+pub(in crate::store) mod group_task;
+pub(in crate::store) use group_task::{
+    CreatingV2GenesisDirectoryGuard, InitializingV2GenesisGroupGuard,
+    OriginalV2GenesisGroupObservation, PreparedV2GenesisGroupNamespace, SavedV2GroupDirectory,
+    VacantV2GenesisGroupGuard,
+};
 
 pub(in crate::store) use super::current_group::{
     DECLARATION_SEED as CURRENT_DECLARATION_SEED, MARKER as CURRENT_MARKER,

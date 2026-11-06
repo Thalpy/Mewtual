@@ -69,6 +69,26 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/current_layout.rs|write_current_layout_declaration|fs::remove_file(&seed_path).map_err(current_io)?;']=1
   ['crates/catcoms-app/src/store/persistence/current_layout.rs|read_verified_current_seed|file.sync_all().map_err(current_io)?;']=1
   ['crates/catcoms-app/src/store/persistence/current_layout.rs|sync_current_namespace_root|root.directory.sync_all().map_err(current_io)']=1
+  # Original negative V2 group directory only. The concrete creating admission/task guard
+  # fixes its g- destination under the same held Root; no epoch/source/page file is written.
+  ['crates/catcoms-app/src/store/persistence/v2_group_directory.rs|write_v2_genesis_group_directory|fs::create_dir(&output.path).map_err(directory_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_group_directory.rs|write_v2_genesis_group_directory|file.sync_all().map_err(directory_io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_group_directory.rs|write_v2_genesis_group_directory|.sync_all()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_group_directory.rs|open_created_group_directory|OpenOptions::new()']=1
+  # Original V2 genesis head promotion only: the distinct actual Initializing1 group guard
+  # holds admission/pins/canonical/Root, and the complete activation seed plus SAME held
+  # stage are verified before promotion. Both names are closed local-source destinations,
+  # outside epoch inventories. The warm worker is paired with its actual unexposed caller.
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation.rs|save_head|fs::rename(&stage_path, &head_path).map_err(io)?;']=1
+  # New cold genesis closure, test-only until actual cold ownership/caller is connected. The
+  # concrete Initializing1/Current2 read guard holds admission/pins/canonical/Root and lends
+  # these SAME existing non-epoch fixed objects; no creation, rename, removal or user path.
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.seed.object.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.pin.object.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.head.object.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.group_directory.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.target_directory.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|root.directory.sync_all().map_err(io)?;']=1
 )
 
 # Print `file<TAB>line<TAB>enclosing fn<TAB>trimmed text` for every match in non-test code. The

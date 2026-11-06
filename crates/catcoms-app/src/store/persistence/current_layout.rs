@@ -568,6 +568,42 @@ pub(in crate::store) struct CurrentCanonicalFilenameAssociation {
     negative: catcoms_rt::RequestCancellation,
 }
 impl CurrentCanonicalFilenameAssociation {
+    pub(in crate::store) fn validate_original_directory(
+        &self,
+        index: &LineageIndex,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        if !self.matches_index(index, store) {
+            return Err(critical_namespaces::refused());
+        }
+        let path = old_directory_path(store)?;
+        let directory = self
+            .directory
+            .try_borrow()
+            .map_err(|_| critical_namespaces::refused())?;
+        match directory.as_ref() {
+            Some((held, id)) => {
+                let metadata = fs::symlink_metadata(&path).map_err(current_io)?;
+                // SessionAt is file-only. A fixed directory needs the actual opened named
+                // handle plus held/named IDs, with the existing no-reparse directory helper.
+                let named = open_archive_directory(&path)?;
+                if !real_current_directory(&metadata)
+                    || catcoms_storage::kept::session_id(held).map_err(current_io)? != *id
+                    || catcoms_storage::kept::session_id(&named).map_err(current_io)? != *id
+                {
+                    return Err(critical_namespaces::refused());
+                }
+                Ok(())
+            }
+            None => match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                // The actual known-key file writer may adopt a cooperative configure-created
+                // directory before its first file. A vacancy guard itself never adopts one.
+                _ => Err(critical_namespaces::refused()),
+            },
+        }
+    }
+
     pub(in crate::store) fn belongs_to_index(
         &self,
         index: &LineageIndex,
@@ -579,7 +615,6 @@ impl CurrentCanonicalFilenameAssociation {
             && Arc::ptr_eq(&self.index, index.identity_data())
             && self.generation.get() == index.generation_data()
     }
-    #[cfg(test)] // actual positive group constructor is a separately reviewed consumer
     pub(in crate::store) fn matches_index(
         &self,
         index: &LineageIndex,

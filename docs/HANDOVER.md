@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Focused execution checkpoint (5 November; Chat V2 still incomplete)
+## Focused execution checkpoint (6 November; Chat V2 still incomplete)
 
 The user permits tests again; defer only
 `cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations` to the end.
@@ -29,16 +29,32 @@ standalone manifest under `target/vendor-owner-restore-check`, pointing to the A
 source, retaining its dependency/features, with an empty workspace and the root lock copied
 before offline resolution. No production manifest or dependency version was changed for it.
 
-Local paid activation, scope, writer and cold-read workers remain undeclared, uncommitted
-integration drafts; they are not supplied by the pushed runtime checkpoints yet.
-Cold read roles are distinct Initializing1/Current2 borrowers with no owner/Some1 effects.
-The new Root capture accepts only complete seed-present pin/genesis-head closures; partial
-activation repair, seed-settled Current and later-head restoration remain unfinished. Its
-early static review is clear after original-object caching and post-allocation proof fixes;
-genuine paired guard/receipt/crash tests have not run. The writer classifier's foreign-Weak
-upgrade was removed so concurrent last-owner cleanup cannot move under canonical.
+The warm group task, paid activation, scope, writer and unexposed owning caller are now
+declared together in the local integration draft. Focused execution passed all **8 pre-seed/
+custody scope tests**, **11 writer-lifetime tests**, **6 activation-candidate tests**, all **10 genuine
+owning-caller tests**, **6 funded-owner lifecycle tests** and **3 revocation tests**. This
+includes exact wrapper-fee lifetime, both scope-write failure orderings, cached head/owner
+identity and unrelated dirty-table preservation. All **12 shorter group-task tests** also
+passed; its seventeen-origin capacity case remains deferred until the end. The two borrowed
+directory-attribution regressions and the whole-group predecessor query regression also pass.
+These checks cover connected bootstrap/recovery code, not operational Chat V2.
 
-Actual Current/node assembly, operational SDK admission, governing/append/index transactions,
+Cold Initializing1/Current2 read roles and their actual capture are declared together under
+`cfg(test)` only. All **8 fresh-mount guard tests** and **6 capture tests** pass, including late
+marker/pin replacement, post-allocation cancellation, incomplete reads and independent metadata
+payment. The concrete combined invoice requires a distinct cold-only **1 MiB** charge; the
+warm **512 KiB** charge is unchanged. This changes no wire/content cap or source/SDK allowance.
+Cold task ownership, binding and writer drafts remain undeclared pending joint guards/caller.
+Review found and is closing retry gaps when another group's failed write dirties the latest
+scope table: completed handoff must precede installation, and an Unbound owner needs a separate
+head-only paid resync before it has an installed receipt. No publication/binding bypass is used.
+
+Partial activation repair, seed-settled Current and later-head restoration remain unfinished.
+The writer classifier/installed-generation checks use paid weak pointer identity, never a
+temporary strong upgrade which could move final sender cleanup under canonical.
+
+The warm caller moves the same SDK seed into an unbound node; it exposes no runnable node,
+authoring, projection or native result. Cold Current/node recovery, operational SDK admission, governing/append/index transactions,
 ingress/catch-up and native/UI routing are still required. Chat V2 remains disabled. Complete
 root/native/frontend suites, clippy/build/native gates and the slow test remain outstanding.
 

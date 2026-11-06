@@ -106,6 +106,8 @@ impl CriticalCatalogReadPool {
         Ok(CatalogReadReservation {
             original: self.inner.clone(),
             bytes,
+            #[cfg(test)]
+            drop_notice: None,
         })
     }
 }
@@ -115,8 +117,19 @@ impl CriticalCatalogReadPool {
 pub(in crate::store) struct CatalogReadReservation {
     original: Arc<Inner>,
     bytes: usize,
+    #[cfg(test)]
+    drop_notice: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 impl CatalogReadReservation {
+    /// Observe this EXACT reservation's destruction; unrelated payments cannot satisfy the
+    /// assertion. The preallocated flag supplies no credit, lease, pool or authority.
+    #[cfg(test)]
+    pub(in crate::store) fn observe_drop_for_test(
+        &mut self,
+        notice: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.drop_notice = Some(notice);
+    }
     pub(in crate::store) fn validate(
         &self,
         pool: &CriticalCatalogReadPool,
@@ -162,6 +175,10 @@ impl Drop for CatalogReadReservation {
         }
         // Poison also remains unavailable: future lock attempts refuse. The strong Arc is
         // released only after the mutex guard above has gone, never recursively inside it.
+        #[cfg(test)]
+        if let Some(notice) = &self.drop_notice {
+            notice.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 

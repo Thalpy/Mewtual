@@ -41,6 +41,46 @@ pub(in crate::store) struct LineageIndex {
     // LAST: requested vector/metadata and any directory observation drain before refund.
     _fee: CatalogReadReservation,
 }
+
+/// Negative borrowed attribution tied to the SAME actual admission writer. It cannot escape
+/// that Runtime borrow, create an index, decode a row or grant Current. The separate concrete
+/// namespace guard must repeat the fixed old-directory identity check after subordinate waits.
+/// Issued only to the actual typed group namespace consumer under this same Runtime.
+pub(in crate::store) struct CurrentFilenameAssociation<'writer> {
+    runtime: &'writer Runtime,
+    store: &'writer ServerStore,
+    generation: u64,
+}
+impl CurrentFilenameAssociation<'_> {
+    /// Cache/source comparison only: no lock, filesystem, SDK, account operation or allocation.
+    pub(in crate::store) fn require_original_data(&self) -> Result<(), AppError> {
+        let index = self.runtime.current_lineage.as_ref().ok_or_else(refused)?;
+        if !self.runtime.managed
+            || self
+                .runtime
+                .table
+                .as_ref()
+                .is_none_or(|table| table.len() != index.keys.len())
+            || index.generation_data() != self.generation
+        {
+            return Err(refused());
+        }
+        index.require_complete(self.store)
+    }
+
+    /// Called under already-held admission/pins/canonical and task-prepaid fixed path scratch.
+    /// Directory presence/replacement cannot be reinterpreted as a new empty complete walk.
+    pub(in crate::store) fn validate_original_directory(&self) -> Result<(), AppError> {
+        self.require_original_data()?;
+        let index = self.runtime.current_lineage.as_ref().ok_or_else(refused)?;
+        index
+            .association
+            .as_ref()
+            .ok_or_else(refused)?
+            .validate_original_directory(index, self.store)?;
+        self.require_original_data()
+    }
+}
 impl LineageIndex {
     pub(in crate::store) fn contains_key_data(&self, key: &[u8; 32]) -> bool {
         !self.invalid.get() && self.keys.binary_search(key).is_ok()
@@ -107,7 +147,6 @@ impl LineageIndex {
         Ok(())
     }
 
-    #[cfg(test)] // positive group constructor must land with its own concrete consumer
     fn require_complete(&self, store: &ServerStore) -> Result<(), AppError> {
         if !self.same_original(store)
             || !self
@@ -142,6 +181,20 @@ impl LineageIndex {
 }
 
 impl Runtime {
+    pub(super) fn current_filename_association<'writer>(
+        &'writer self,
+        store: &'writer ServerStore,
+    ) -> Result<CurrentFilenameAssociation<'writer>, AppError> {
+        let index = self.current_lineage.as_ref().ok_or_else(refused)?;
+        let observation = CurrentFilenameAssociation {
+            runtime: self,
+            store,
+            generation: index.generation_data(),
+        };
+        observation.require_original_data()?;
+        Ok(observation)
+    }
+
     /// Table replacement is not an index refresh. Retain old resource/keys and latch only new
     /// V2 vacancy closed; a newly loaded empty table must never erase old complete-walk debt.
     pub(super) fn invalidate_current_lineage(&self) {

@@ -12,10 +12,12 @@ use tokio::sync::watch;
 
 pub(in crate::store) mod archive_vacancy;
 mod budget;
+pub(in crate::store) mod current_vacancy;
 mod head;
 mod initialize;
 mod inventory;
 mod joined;
+pub(in crate::store) mod v2_registration;
 pub use joined::{
     OwnerCheckpointJoinAttempt, OwnerDirectCheckpointJoinAttempt, OwnerJoinedInitialization,
 };
@@ -54,6 +56,8 @@ pub(super) struct Runtime {
     // An inconsistent typed graph refund permanently closes future SDK admissions.
     sdk_unavailable: bool,
     pending_creations: usize,
+    // Independent paid V2 writer identities; checkpoint HeadCells/budgets grant no V2 role.
+    v2_writers: v2_registration::Runtime,
 }
 
 fn refused() -> AppError {

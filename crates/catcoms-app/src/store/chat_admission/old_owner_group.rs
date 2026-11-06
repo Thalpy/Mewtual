@@ -62,6 +62,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<OldOwnerPinAdmission<'writer>, AppError> {
         let runtime = self.chat_mount.locked()?;
+        self.require_no_pending_v2_group(original.key.group())?;
         // Before pins/Root only: every real source admission uses this same admission writer,
         // so a matching JOIN cannot appear during the later synchronous pin transaction.
         self.require_no_pending_checkpoint_join_source(

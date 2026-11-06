@@ -23,9 +23,8 @@ pub(in crate::store) mod archive_bootstrap;
 // The concrete physical Current handler consumes this closed DATA codec. Other constructors
 // retain their own strict parsers and refuse current/stage/seed/marker3 before older cleaners.
 pub(in crate::store) mod archive_current_namespace_codec;
-// DRAFT metadata grammar only. Production declaration waits for the actual ID3 opener and
-// source/scope/head consumer; this test module cannot enable a Current handler or issuer.
-#[cfg(test)]
+// Closed metadata DATA used by the real seed-present Current2 storage/owning consumer.
+// Decoding alone still issues no source/fee/writer or operational protocol authority.
 pub(in crate::store) mod archive_current_codec;
 mod catalog_envelope;
 pub(in crate::store) mod current_group;

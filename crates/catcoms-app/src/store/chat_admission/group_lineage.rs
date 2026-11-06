@@ -65,9 +65,8 @@ impl ChatAdmissionGroupBounds {
     /// matches any snapshot/phase, is saved or authorizes an effect. Actual callers must make
     /// those stronger checks. There can be only one own key, so two observations suffice to
     /// detect ANY foreign key without scanning a group's lifetime member history.
-    // Future positive scope consumer is still undeclared. Keep this negative DATA query in
-    // tests until that actual consumer lands with its own original/phase/barrier gates.
-    #[cfg(test)]
+    // The connected scope consumer adds its own exact original, phase and barrier gates;
+    // this negative-only companion query never substitutes for those positive checks.
     pub(super) fn require_no_foreign(
         &self,
         runtime: &Runtime,

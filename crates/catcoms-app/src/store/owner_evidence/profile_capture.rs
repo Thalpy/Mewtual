@@ -58,7 +58,7 @@ impl CapturedOwnerProfilePin {
             .pins
             .lock()
             .map_err(|_| pins::refused())?;
-        if roots.dirty {
+        if roots.dirty || roots.pending_groups.excludes_group(group) {
             return Err(pins::refused());
         }
         // Keep pins held through Root: actual new-group registration/mkdir takes the same

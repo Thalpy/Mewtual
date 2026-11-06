@@ -1,15 +1,15 @@
 # V2 genesis Current: exact metadata format and invoice
 
 Exact-format design review is CLEAR after the path-capacity, PRE-DEK and original-representation
-corrections. A private, **test-only DRAFT** pin/head/activation DATA codec and eleven authored **UNRUN**
-regressions now follow this format. Its production module is deliberately not declared until
-the actual consuming opener/writer is connected. The shared namespace descriptor/marker/seed
-codec and physical opener are a separate Factory-owned dependency. No parser issues Current,
-Saved, source, quota or writer authority; actual consumer/invoice review remains required.
-Static actual-diff review of the metadata draft is CLEAR after the raw-cap/declared-length
-matrix was added; this does not establish compilation, test execution or namespace support.
-This refines `CHAT-OWNER-V2-GENESIS-CURRENT.md`; Root owns the connected physical writer and
-Factory owns the unbound SDK seed. Compilation/tests/builds remain paused.
+corrections. The private DATA codec is now declared with its actual physical opener and
+genesis writer; all **eleven codec regressions pass**, including raw-cap/declared-length and
+original-representation controls. Actual-diff adversarial review is clear for this connected
+warm boundary. No parser issues Current, Saved, source, quota or writer authority.
+
+The caller currently produces an unbound, unexposed genesis node. It does not enable native
+Chat V2, ordinary chat operations or later-head recovery. Cold-only DATA capture is separately
+test-declared; actual cold task/writer/ownership is still being connected. This refines
+`CHAT-OWNER-V2-GENESIS-CURRENT.md`; complete-suite and native evidence remain outstanding.
 
 ## Mandatory handler before first exposure
 
@@ -187,9 +187,19 @@ call, retaining actual row preparation on dirty/error. Then Initializing, exact 
 head-current/parent, and scope Current LAST. New concrete phase guards replace neither old
 VACANT nor old arm-current-only validators with a mode flag. Exact repair accepts its own
 known objects; Current read requires complete existing closure. Unknown objects remain held.
-Retire group RAM pending/source registry and unlink seed only through actual SavedCurrent/
-owned-node handoff, with real parent barriers. Permanent group directory/pin prevents reopening
-root vacancy. Drop payloads before fees and outside writers. Native registration stays separate.
+There are separate handoffs. The WARM first-directory RAM slot may retire immediately after
+the SAME original directory and parent barriers have produced its actual immutable receipt:
+every warm first constructor refuses any permanent group-path presence, so that disk fence
+already takes over negative exclusion before activation Seed/row/Current. This retires no
+source custody, SDK unit, activation debt or seed, and preserves the SAME task life. In contrast,
+a COLD existing-directory task claim MUST remain until the actual new scope owner/writer
+handoff; the preexisting directory alone cannot prevent two unowned cold tasks from claiming it.
+Source custody/activation completion and eventual seed unlink remain separate actual SavedCurrent/
+owned-node handoffs with their own parent barriers. The first Current caller retains the seed
+and unbound output; it does not claim settlement or operational live chat. Unknown first mkdir/
+no-handle/no-seed states remain preserved/refused, not automatic cold recovery. Permanent group
+directory/pin prevents reopening root vacancy. Drop payloads before fees and outside writers.
+Native registration stays separate.
 
 ## Explicit invoice and finite scheduling
 

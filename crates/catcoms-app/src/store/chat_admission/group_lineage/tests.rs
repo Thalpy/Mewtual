@@ -26,6 +26,7 @@ fn owner() -> AdmissionOwner {
         nonce: [1; 32],
         revision: 1,
         life: revocation::Owner::new(),
+        custody: None,
     }
 }
 

@@ -24,6 +24,9 @@ pub(super) struct Runtime {
     pub(super) table: Option<BTreeMap<Vec<u8>, Pin>>,
     pub(super) dirty: bool,
     pub(super) managed: bool,
+    // Strong inert debt for admitted group mkdir. Expiry of its weak task is never absence;
+    // actual permanent directory/parent custody alone takes over this bounded exclusion.
+    pub(super) pending_groups: super::canonical::current_vacancy::PendingGroupRegistry,
 }
 pub(super) fn refused() -> AppError {
     AppError::Invalid("owner evidence configuration is unavailable or unsupported".into())
@@ -120,6 +123,21 @@ fn decode(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Pin>, AppError> {
 }
 
 impl ServerStore {
+    /// Negative-only query BEFORE Root/subordinate writers. A caller already holding pins
+    /// must inspect its own actual Runtime.pending_groups instead, never reenter this mutex.
+    /// Every registration shares admission->pins, so an old admission owner can retain this
+    /// exclusion through its later synchronous pin/Root checks without a recursive pin lock.
+    pub(in crate::store) fn require_no_pending_v2_group(
+        &self,
+        group: &[u8],
+    ) -> Result<(), AppError> {
+        let roots = self.owner_evidence.pins.lock().map_err(|_| refused())?;
+        if roots.pending_groups.excludes_group(group) {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     /// Constructor-only load from the same authenticated vault-format result. Even a legacy
     /// wrapper cannot discard a previously installed nonempty owner registry after partial rollback.
     pub(in crate::store) fn open_owner_evidence_inventory(

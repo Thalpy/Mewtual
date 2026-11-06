@@ -547,8 +547,8 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 pub use persistence::RetainedBootstrapSourceData;
 pub use persistence::{
-    GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
-    ReturnedBootstrapSourceData,
+    GenesisSeedBudget, GenesisSeedRefusal, PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed,
+    ReturnedBootstrapSourceData, UnexposedV2GenesisCurrent,
 };
 mod persistence {
     use super::*;
@@ -556,10 +556,12 @@ mod persistence {
     mod cold_source_read;
     mod current_group;
     mod current_layout;
+    mod v2_group_directory;
+    pub(in crate::store) use cold_source_read::v2_genesis_activation;
     pub use cold_source_read::RetainedBootstrapSourceData;
     pub use cold_source_read::{
-        GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
-        ReturnedBootstrapSourceData,
+        GenesisSeedBudget, GenesisSeedRefusal, PreparedV2GenesisCurrent,
+        RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData, UnexposedV2GenesisCurrent,
     };
     pub(super) use cold_source_read::{
         GenesisSourceDataRef, OriginalBootstrapReadObservation,
@@ -567,6 +569,14 @@ mod persistence {
     };
     pub(in crate::store) use current_layout::{
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,
+    };
+    #[cfg(test)]
+    pub(in crate::store) use v2_group_directory::{
+        cold_group_read_entries_for_test, OpenedColdV2GroupDirectory,
+        COLD_V2_GROUP_DIRECTORY_READ_BYTES,
+    };
+    pub(in crate::store) use v2_group_directory::{
+        SavedV2GroupDirectory, V2GenesisDirectoryCustody, V2_GROUP_DIRECTORY_METADATA_BYTES,
     };
     mod bootstrap_source_work;
     pub(super) use bootstrap_source_work::{OriginalSourceWriteWork, SavedBootstrapSourceFiles};

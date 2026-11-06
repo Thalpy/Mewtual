@@ -36,6 +36,7 @@ impl ServerStore {
         &self,
         identity: &ChatAdmissionKey,
     ) -> Result<Option<OwnerUnexposedInitialization>, AppError> {
+        let mut retired_custody = None;
         let mut runtime = self.chat_mount.locked()?;
         if !runtime.managed
             || runtime.dirty
@@ -54,7 +55,8 @@ impl ServerStore {
             return Ok(None);
         };
         self.with_unexposed_owner_head(identity, || {
-            let preparation = self.reservation_locked(&mut runtime, identity, &record)?;
+            let preparation =
+                self.reservation_locked(&mut runtime, identity, &record, &mut retired_custody)?;
             Ok(UnexposedHeadAction::Observe(OwnerUnexposedInitialization {
                 preparation,
             }))
@@ -73,6 +75,7 @@ impl OwnerUnexposedInitialization {
         rng: &mut impl CryptoRngCore,
     ) -> Result<OwnerUnexposedRetirement, AppError> {
         let original = &self.preparation;
+        let mut retired_custody = None;
         let mut runtime = store.chat_mount.locked()?;
         if !Arc::ptr_eq(&original.mount_identity, &store.chat_mount.identity)
             || original.mount.is_cancelled()
@@ -108,6 +111,7 @@ impl OwnerUnexposedInitialization {
                 original.record.nonce,
                 original.record.revision,
                 rng,
+                &mut retired_custody,
             )?;
             Ok(UnexposedHeadAction::Retired(()))
         })?;

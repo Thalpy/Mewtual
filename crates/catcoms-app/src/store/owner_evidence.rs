@@ -46,6 +46,10 @@ pub(super) struct StoreOwnerState {
     #[cfg(test)]
     pub(super) current_after_namespace_seed_verification: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
+    pub(super) before_v2_group_final_directory_proof: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    pub(super) before_v2_saved_group_final_directory_proof: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     pub(super) operations_marker_fault: std::sync::atomic::AtomicU8,
 }
 
@@ -130,10 +134,12 @@ impl ServerStore {
             return Err(pins::refused());
         }
         let signer: &[u8; 32] = signer.try_into().map_err(|_| pins::refused())?;
-        // A V2 intent/source can reserve this target before any v1 pin exists. Drop the pin
-        // guard before root I/O; this path also runs inside an already-held admission save
-        // callback, so the archive fence must never recursively acquire admission.
-        drop(roots);
+        // A registered original group operation reserves ALL signers even before mkdir.
+        // Keep pins through Root so registration cannot overtake this final negative check.
+        // This path may already own admission; it never recursively acquires that writer.
+        if roots.pending_groups.excludes_group(group) {
+            return Err(pins::refused());
+        }
         self.require_no_archive_bootstrap_target(group, signer)?;
         Ok(())
     }

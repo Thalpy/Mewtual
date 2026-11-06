@@ -5,12 +5,15 @@
 //! keep a retired mount/admission alive. All inventory and final storage admissions share one
 //! synchronous owner, so an older positive lease cannot write across a completed retirement.
 use super::*;
-use catcoms_rt::{RequestAuthority, RequestCancellation};
+use catcoms_rt::{RequestAuthority, RequestCancellation, SharedRequestKeepalive};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 pub(in crate::store) mod current_lineage;
 mod custody;
+use custody::detach_retired_owner;
 pub(crate) mod fresh;
+#[cfg(test)]
+mod funded_custody_tests;
 pub(in crate::store) mod group_lineage;
 pub(in crate::store) mod journal_basis;
 mod old_owner_group;
@@ -22,6 +25,7 @@ pub(crate) mod restore;
 pub(crate) mod retired;
 mod revocation;
 mod storage;
+pub(in crate::store) mod v2_current;
 pub(crate) use storage::ChatAdmissionStoragePermit;
 
 const DOMAIN: &str = "catcoms/chat-admission-inventory/v1";
@@ -315,6 +319,11 @@ struct AdmissionOwner {
     nonce: [u8; 32],
     revision: u64,
     life: Arc<revocation::Owner>,
+    // LAST: Runtime can retain this life/watch after the caller's preparation disappears.
+    // Funded observations/revokers must be made through custody_from_owner, never bare life
+    // observer/handle helpers. Removal detaches ONLY this custody for outside-writer Drop;
+    // the original life/Sender still revoke/drop at their old point. Old owners use None.
+    custody: Option<SharedRequestKeepalive>,
 }
 #[derive(Default)]
 struct Runtime {
@@ -374,6 +383,17 @@ impl MountOwner {
                 Err(std::sync::TryLockError::WouldBlock)
             ));
         }));
+    }
+    /// Run a bounded harness callback while holding the REAL admission writer. The callback
+    /// receives no Runtime, guard or permission and must not re-enter admission APIs. Returning
+    /// only its owned harness values keeps private writer state inside this module.
+    #[cfg(test)]
+    pub(in crate::store) fn with_writer_gate_for_test<T>(
+        &self,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, AppError> {
+        let _writer = self.locked()?;
+        Ok(action())
     }
     fn locked(&self) -> Result<std::sync::MutexGuard<'_, Runtime>, AppError> {
         if !self.life.live() {
@@ -743,12 +763,15 @@ impl ServerStore {
         &self,
         key: ChatAdmissionKey,
     ) -> Result<ChatAdmissionCapture, AppError> {
+        // Must outlive the admission guard on EVERY return, including a later I/O error.
+        let mut retired_custody = None;
         let mut runtime = self.chat_mount.locked()?;
         if !runtime.managed || runtime.dirty {
             return Err(refused());
         }
         // Capturing a legacy lineage is already too late once a group-wide V2 reservation
         // exists. Never mint an inert old capture that a later path could mistake for vacancy.
+        self.require_no_pending_v2_group(key.group())?;
         self.require_no_v2_group_directory(key.group())?;
         let original = runtime
             .table
@@ -758,7 +781,7 @@ impl ServerStore {
             .cloned();
         let admission = match &original {
             Some(record) if record.phase != Phase::Retired => Some(
-                self.reservation_locked(&mut runtime, &key, record)?
+                self.reservation_locked(&mut runtime, &key, record, &mut retired_custody)?
                     .admission,
             ),
             _ => None,
@@ -783,6 +806,7 @@ impl ServerStore {
         origin: Origin,
         rng: &mut impl CryptoRngCore,
     ) -> Result<ChatAdmissionPreparation, AppError> {
+        let mut retired_custody = None;
         let mut runtime = self.chat_mount.locked()?;
         if !runtime.managed
             || capture.mount.is_cancelled()
@@ -803,6 +827,7 @@ impl ServerStore {
         // Cold/paused JOIN source has no runtime task yet but still owns this exact basis.
         // Check BEFORE both issued retry/dirty flush and pre-RNG admission. Keep catalog before
         // any subordinate pins/head/Root; admission remains held through the eventual effect.
+        self.require_no_pending_v2_group(capture.key.group())?;
         self.require_no_pending_checkpoint_join_source(capture.key.group(), capture.key.signer())?;
         self.require_no_archive_bootstrap_target(capture.key.group(), capture.key.signer())?;
         // Lock order is Store writer -> brief issued-slot access. No slot guard is held while
@@ -894,7 +919,7 @@ impl ServerStore {
             .is_some_and(|old| old.nonce == record.nonce && old.revision == record.revision);
         let (preparation, new_owner) = if unchanged {
             (
-                self.reservation_locked(&mut runtime, &capture.key, &record)?,
+                self.reservation_locked(&mut runtime, &capture.key, &record, &mut retired_custody)?,
                 None,
             )
         } else {
@@ -912,6 +937,9 @@ impl ServerStore {
         {
             return Err(refused());
         }
+        if new_owner.is_some() && retired_custody.is_some() {
+            return Err(refused());
+        }
         // Cache BEFORE revoking the previous nonce or touching disk. A failed rename can retry
         // exactly this candidate, even though issuing it already invalidated the old observer.
         *capture.issued.lock().map_err(|_| refused())? = Some(preparation.clone());
@@ -925,7 +953,7 @@ impl ServerStore {
                 .predecessors
                 .before_row_change(&capture.key, current.as_ref());
             if let Some(old) = runtime.owners.insert(capture.key.clone(), owner) {
-                old.life.revoke();
+                detach_retired_owner(old, &mut retired_custody);
             }
             runtime
                 .table
@@ -1002,6 +1030,7 @@ impl ServerStore {
             &mut R,
         ) -> Result<(), AppError>,
     ) -> Result<ChatAdmissionFinish, AppError> {
+        let mut retired_custody = None;
         let mut runtime = self.chat_mount.locked()?;
         if !runtime.managed
             || preparation.domain != self.chat_vault_domain()?
@@ -1013,6 +1042,7 @@ impl ServerStore {
         }
         // An old preparation may predate a newly saved JOIN source. It cannot advance that
         // source's captured Initializing row or flush/rebind an old Current result afterward.
+        self.require_no_pending_v2_group(preparation.key.group())?;
         self.require_no_pending_checkpoint_join_source(
             preparation.key.group(),
             preparation.key.signer(),
@@ -1048,6 +1078,7 @@ impl ServerStore {
                     &mut runtime,
                     &preparation.key,
                     preparation.record.nonce,
+                    &mut retired_custody,
                 )
                 .map(ChatAdmissionFinish::AlreadyCurrent);
         }
@@ -1072,8 +1103,13 @@ impl ServerStore {
             .ok_or_else(refused)?
             .phase = Phase::Current;
         self.flush_chat_admissions(&mut runtime, rng)?;
-        self.bind_chat_admission_locked(&mut runtime, &preparation.key, preparation.record.nonce)
-            .map(ChatAdmissionFinish::Saved)
+        self.bind_chat_admission_locked(
+            &mut runtime,
+            &preparation.key,
+            preparation.record.nonce,
+            &mut retired_custody,
+        )
+        .map(ChatAdmissionFinish::Saved)
     }
 
     fn bind_chat_admission_locked(
@@ -1081,6 +1117,7 @@ impl ServerStore {
         runtime: &mut Runtime,
         key: &ChatAdmissionKey,
         nonce: [u8; 32],
+        retired_custody: &mut Option<SharedRequestKeepalive>,
     ) -> Result<ChatAdmissionBinding, AppError> {
         if !runtime.managed || runtime.dirty || !self.chat_mount.life.live() {
             return Err(refused());
@@ -1095,7 +1132,7 @@ impl ServerStore {
         if row.phase != Phase::Current || row.nonce != nonce {
             return Err(refused());
         }
-        let custody = self.reservation_locked(runtime, key, &row)?;
+        let custody = self.reservation_locked(runtime, key, &row, retired_custody)?;
         Ok(ChatAdmissionBinding {
             key: key.clone(),
             nonce,
@@ -1117,6 +1154,7 @@ impl ServerStore {
         key: &ChatAdmissionKey,
         nonce: [u8; 32],
     ) -> Result<ChatAdmissionResolution, AppError> {
+        let mut retired_custody = None;
         let mut runtime = self.chat_mount.locked()?;
         if !runtime.managed || runtime.dirty {
             return Err(refused());
@@ -1134,14 +1172,15 @@ impl ServerStore {
         }
         // Retired above remains a negative result. Positive Initializing/Current resolution
         // must not reopen an older generic owner over a retained private JOIN source.
+        self.require_no_pending_v2_group(key.group())?;
         self.require_no_pending_checkpoint_join_source(key.group(), key.signer())?;
         self.require_no_archive_bootstrap_target(key.group(), key.signer())?;
         match row.phase {
             Phase::Current => self
-                .bind_chat_admission_locked(&mut runtime, key, nonce)
+                .bind_chat_admission_locked(&mut runtime, key, nonce, &mut retired_custody)
                 .map(ChatAdmissionResolution::Current),
             Phase::Initializing => self
-                .reservation_locked(&mut runtime, key, &row)
+                .reservation_locked(&mut runtime, key, &row, &mut retired_custody)
                 .map(ChatAdmissionResolution::Initializing),
             Phase::Retired => Ok(ChatAdmissionResolution::Retired),
         }
@@ -1182,6 +1221,7 @@ impl ServerStore {
         }
         // Fence even bindings captured before source save. Check while admission is held and
         // BEFORE a subordinate saver/head lock; source admission cannot race this later write.
+        self.require_no_pending_v2_group(binding.key.group())?;
         self.require_no_pending_checkpoint_join_source(binding.key.group(), binding.key.signer())?;
         self.require_no_archive_bootstrap_target(binding.key.group(), binding.key.signer())?;
         let row = runtime
@@ -1240,6 +1280,7 @@ impl ServerStore {
         binding: &ChatAdmissionBinding,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        let mut retired_custody = None;
         let mut runtime = self.chat_mount.locked()?;
         self.original_chat_store(binding)?;
         self.retire_chat_row(
@@ -1248,6 +1289,7 @@ impl ServerStore {
             binding.nonce,
             binding.revision,
             rng,
+            &mut retired_custody,
         )
     }
 
@@ -1258,6 +1300,7 @@ impl ServerStore {
         preparation: &ChatAdmissionPreparation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        let mut retired_custody = None;
         let mut runtime = self.chat_mount.locked()?;
         if preparation.mount.is_cancelled()
             || !Arc::ptr_eq(&preparation.mount_identity, &self.chat_mount.identity)
@@ -1271,6 +1314,7 @@ impl ServerStore {
             preparation.record.nonce,
             preparation.record.revision,
             rng,
+            &mut retired_custody,
         )
     }
 
@@ -1281,7 +1325,13 @@ impl ServerStore {
         nonce: [u8; 32],
         revision: u64,
         rng: &mut impl CryptoRngCore,
+        retired_custody: &mut Option<SharedRequestKeepalive>,
     ) -> Result<(), AppError> {
+        if retired_custody.is_some() {
+            // Before ANY predecessor/row/owner mutation, not after detaching an unparkable
+            // last metadata payer. Actual top-level transactions retire at most one owner.
+            return Err(refused());
+        }
         let original = runtime
             .table
             .as_ref()
@@ -1308,7 +1358,7 @@ impl ServerStore {
             row.revision = row.revision.saturating_add(1);
         }
         if let Some(owner) = runtime.owners.remove(key) {
-            owner.life.revoke();
+            detach_retired_owner(owner, retired_custody);
         }
         self.flush_chat_admissions(runtime, rng)
     }

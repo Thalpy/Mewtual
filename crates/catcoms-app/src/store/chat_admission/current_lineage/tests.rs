@@ -234,3 +234,67 @@ fn loaded_table_replacement_and_overflow_never_refresh_the_same_index_to_empty()
         .require_complete(store)
         .is_err());
 }
+
+#[test]
+fn borrowed_attribution_rechecks_original_directory_and_never_adopts_replacement_or_late_presence()
+{
+    for initially_present in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x3a41 + u64::from(initially_present));
+        drop(old(directory.path(), &mut rng));
+        let parent = directory.path().join("owner-state");
+        if initially_present {
+            fs::create_dir(&parent).unwrap();
+        }
+        let pool = CriticalCatalogReadPool::new(1024 * 1024 * 1024).unwrap();
+        let ready = ready(directory.path(), &pool, &mut rng, 8, 1024);
+        let store = ready.checked_store().unwrap();
+        let runtime = store.chat_mount.locked().unwrap();
+        let association = runtime.current_filename_association(store).unwrap();
+        association.validate_original_directory().unwrap();
+        // These are intentionally negative external mutations. Real app writers must use
+        // actual known-key hooks; a cached generation cannot attest a new directory object.
+        if initially_present {
+            fs::rename(&parent, directory.path().join("old-owner-state-held")).unwrap();
+        }
+        fs::create_dir(&parent).unwrap();
+        association.require_original_data().unwrap();
+        assert!(association.validate_original_directory().is_err());
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn borrowed_attribution_allows_same_dirty_table_negatively_but_refuses_untracked_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x3a43);
+    let old = old(directory.path(), &mut rng);
+    let captured = old.capture_chat_admission(key(b"original", 1)).unwrap();
+    old.prepare_legacy_chat_admission(&captured, b"same original", &mut rng)
+        .unwrap();
+    drop(old);
+    let pool = CriticalCatalogReadPool::new(1024 * 1024 * 1024).unwrap();
+    let ready = ready(directory.path(), &pool, &mut rng, 8, 1024);
+    let store = ready.checked_store().unwrap();
+    let mut runtime = store.chat_mount.locked().unwrap();
+    runtime.dirty = true; // negative comparison of SAME table; no durability/Current granted
+    runtime
+        .current_filename_association(store)
+        .unwrap()
+        .validate_original_directory()
+        .unwrap();
+    let row = runtime
+        .table
+        .as_ref()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    runtime
+        .table
+        .as_mut()
+        .unwrap()
+        .insert(key(b"untracked", 2), row);
+    assert!(runtime.current_filename_association(store).is_err());
+}

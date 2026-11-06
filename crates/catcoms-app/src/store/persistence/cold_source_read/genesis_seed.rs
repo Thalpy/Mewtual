@@ -2,6 +2,7 @@
 //! owning DATA capsule cannot expose a raw owned seed while silently releasing those fees.
 //! All decode/partial cleanup occurs outside admission/pin/Root/SDK host writers.
 use super::*;
+mod current;
 use catcoms_mls::persist::{
     OwnerSdkGraphReservation, OwnerSdkRestoreAdmission, OwnerSdkRestoreLimits,
 };
@@ -9,6 +10,7 @@ use catcoms_sync::owner_v2::{
     prepare_v2_genesis_seed, FounderSnapshotLimits, OriginalV2GenesisSeedObservation,
     UnboundV2GenesisSeed, V2GenesisSeedData, V2GenesisSeedLimits, V2_GENESIS_SEED_METADATA_BYTES,
 };
+pub use current::{PreparedV2GenesisCurrent, UnexposedV2GenesisCurrent};
 #[cfg(test)]
 thread_local! { static SDK_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 

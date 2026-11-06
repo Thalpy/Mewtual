@@ -10,10 +10,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Weak;
 mod genesis_seed;
+pub(in crate::store) mod v2_genesis_activation;
 pub(in crate::store) use genesis_seed::GenesisSourceDataRef;
 pub use genesis_seed::{
-    GenesisSeedBudget, GenesisSeedRefusal, RetainedBootstrapGenesisSeed,
-    ReturnedBootstrapSourceData,
+    GenesisSeedBudget, GenesisSeedRefusal, PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed,
+    ReturnedBootstrapSourceData, UnexposedV2GenesisCurrent,
 };
 
 const MAX_PATH: usize = 32 * 1024;
