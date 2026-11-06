@@ -517,7 +517,7 @@ impl ServerStore {
     ) -> Result<OriginalSourceWriteWork, AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         use critical_namespaces::refused;
         registered.validate_original(self, captured, guard)?;
@@ -678,7 +678,7 @@ impl ServerStore {
     ) -> Result<Option<SavedBootstrapSourceFiles>, AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         use critical_namespaces::refused;
         registered.validate_original(self, captured, guard)?;
@@ -714,7 +714,7 @@ impl SavedBootstrapSourceFiles {
     ) -> Result<(), AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         use critical_namespaces::refused;
         if !Arc::ptr_eq(&self.cell, &registered.cell) {

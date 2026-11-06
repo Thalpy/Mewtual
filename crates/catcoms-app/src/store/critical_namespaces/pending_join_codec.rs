@@ -4,7 +4,9 @@
 use super::*;
 use crate::store::chat_admission::journal_basis::{JournalBasis, MAX_ENCODED_BASIS};
 
-pub(super) use super::catalog_envelope::{catalog_digest, TAG_V2};
+#[cfg(test)]
+pub(super) use super::catalog_envelope::catalog_digest;
+pub(super) use super::catalog_envelope::TAG_V2;
 pub(super) const JOIN_TAG: &str = "catcoms/destination-join-journal/v1";
 pub(super) const IMMUTABLE_TAG: &str = "catcoms/destination-join-source-binding/v1";
 pub(super) const JOIN_ID: u32 = 1;

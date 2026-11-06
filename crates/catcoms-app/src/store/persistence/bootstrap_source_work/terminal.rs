@@ -110,7 +110,7 @@ impl ServerStore {
     ) -> Result<PreparedBootstrapSourceTerminal, AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         use critical_namespaces::refused;
         saved.validate_original(self, captured, guard, registered)?;
@@ -224,7 +224,7 @@ impl ServerStore {
     ) -> Result<Option<PreparedBootstrapSourceTerminal>, AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         use critical_namespaces::refused;
         registered.validate_original(self, captured, guard)?;
@@ -257,7 +257,7 @@ impl ServerStore {
     ) -> Result<SavedBootstrapSourceTerminal, AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         prepared.validate_original(self, captured, guard, registered)?;
         self.save_original_source_prepared(captured, guard, registered, rng)?;
@@ -280,7 +280,7 @@ impl PreparedBootstrapSourceTerminal {
     ) -> Result<(), AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         validate_terminal_capture(
             store,
@@ -303,7 +303,7 @@ impl SavedBootstrapSourceTerminal {
     ) -> Result<(), AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         validate_terminal_capture(
             store,
@@ -334,7 +334,7 @@ fn validate_terminal_capture<T, R>(
 ) -> Result<(), AppError>
 where
     T: catcoms_rt::MeshTransport,
-    R: rand_core::CryptoRngCore,
+    R: catcoms_rt::CryptoRngCore,
 {
     use critical_namespaces::refused;
     if !Arc::ptr_eq(cell, &registered.cell) {

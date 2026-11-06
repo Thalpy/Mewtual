@@ -125,6 +125,7 @@ impl DebitData {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(in crate::store) fn request_binding(&self) -> [u8; 32] {
         let mut h = blake3::Hasher::new();
         h.update(b"catcoms/private-chat-founder-request/v1\0");

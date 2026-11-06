@@ -4,8 +4,8 @@
 use crate::store::{frame, unframe};
 use crate::AppError;
 use catcoms_crypto::keystore::{seal, unseal};
+use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, Encoder};
-use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
 pub(in crate::store) const NAMESPACE_ID: u32 = 3;

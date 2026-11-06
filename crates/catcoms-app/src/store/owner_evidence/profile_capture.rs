@@ -83,6 +83,7 @@ impl ServerStore {
     /// this method does not authenticate transport distribution or silently trust an invite's
     /// non-founder inviter. Managed3 may capture inert expectations during setup; positive
     /// canonical activation requires the separately authenticated critical OwnerEvidence mode.
+    #[cfg(test)]
     pub(crate) fn capture_trusted_owner_profile(
         &self,
         prepared: &PreparedOwnerEvidence,

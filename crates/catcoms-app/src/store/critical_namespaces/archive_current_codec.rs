@@ -16,9 +16,9 @@ use catcoms_replication::chat::{
     owner_profile::{AdmissionBody, AdmissionOrigin, SignedOwnerProfile},
     owner_state::StateFrame,
 };
+use catcoms_rt::CryptoRngCore;
 use catcoms_sync::owner_v2::{BootstrapSourceContextData, BootstrapSourceId};
 use catcoms_wire::{Decoder, Encoder};
-use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
 pub(in crate::store) const MAX_PIN_PLAIN: usize = 1024;
@@ -148,10 +148,14 @@ macro_rules! frame_id {
     };
 }
 frame_id!(V2GroupPinId, b"catcoms/private-chat-v2-group-pin-id/v1\0");
+// These labels follow the cold reader's current test-only declaration. The warm writer
+// compares its actual original Arc/File owners, not reconstructed head/seed DATA labels.
+#[cfg(test)]
 frame_id!(
     V2GenesisHeadId,
     b"catcoms/private-chat-v2-genesis-head-id/v1\0"
 );
+#[cfg(test)]
 frame_id!(
     V2ActivationSeedId,
     b"catcoms/private-chat-v2-genesis-activation-id/v1\0"
@@ -639,12 +643,14 @@ pub(in crate::store) fn open_head_data(
 
 /// Complete original cipher references plus validated content DATA. The source-free parser
 /// cannot create original mount/source/writer custody, select a Current head or authorize I/O.
+#[cfg(test)]
 pub(in crate::store) struct ActivationSeedData<'a> {
     pub(in crate::store) pin_frame: &'a [u8],
     pub(in crate::store) head_frame: &'a [u8],
     pub(in crate::store) pin: GroupPinData,
     pub(in crate::store) head: GenesisHeadData,
 }
+#[cfg(test)]
 impl std::fmt::Debug for ActivationSeedData<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActivationSeedData").finish_non_exhaustive()
@@ -683,6 +689,8 @@ pub(in crate::store) fn encode_activation_seed_data(
     put(&mut e, head_frame)?;
     finish(e, MAX_ACTIVATION_PLAIN)
 }
+// Move this cold DATA decoder with its real cold consumer when that subtree is activated.
+#[cfg(test)]
 pub(in crate::store) fn parse_activation_seed_data<'a>(
     key: &[u8; 32],
     expected: &SavedSourceExpectationData,
@@ -728,6 +736,7 @@ pub(in crate::store) fn seal_activation_seed_data(
         rng,
     )
 }
+#[cfg(test)]
 pub(in crate::store) fn open_activation_seed_data(
     key: &[u8; 32],
     raw: &[u8],

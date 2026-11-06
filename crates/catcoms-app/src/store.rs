@@ -815,7 +815,7 @@ mod persistence {
         ) -> Result<(), AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::refused;
             if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
@@ -838,7 +838,7 @@ mod persistence {
         ) -> Result<(), AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::refused;
             self.validate_origin_under_root(store, captured, guard, root)?;
@@ -883,7 +883,7 @@ mod persistence {
         ) -> Result<(), AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::refused;
             if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
@@ -998,7 +998,7 @@ mod persistence {
         ) -> Result<(), AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::refused;
             if !std::sync::Arc::ptr_eq(&self.cell, &registered.cell) {
@@ -1069,7 +1069,7 @@ mod persistence {
         ) -> Result<(), AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::refused;
             let root_guard = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
@@ -1270,7 +1270,7 @@ mod persistence {
         ) -> Result<RegisteredBootstrapSource, AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
             let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
@@ -1390,7 +1390,7 @@ mod persistence {
         ) -> Result<RegisteredBootstrapSource, AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::refused;
             guard.validate_transferred_source(captured, context, source_id)?;
@@ -1436,7 +1436,7 @@ mod persistence {
         ) -> Result<(), AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::refused;
             registered.validate_original(self, captured, guard)?;
@@ -1532,7 +1532,7 @@ mod persistence {
         ) -> Result<SavedBootstrapSourcePrepared, AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::{refused, ARCHIVE_BOOTSTRAP_ROOT};
             self.cache_original_source_prepared(captured, guard, registered, rng)?;
@@ -2140,7 +2140,7 @@ mod persistence {
         ) -> Result<PreparedFoundingIntent, AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::refused;
             guard.require_founding_phase()?;
@@ -2245,7 +2245,7 @@ mod persistence {
         ) -> Result<SavedFoundingIntent, AppError>
         where
             T: catcoms_rt::MeshTransport,
-            R: rand_core::CryptoRngCore,
+            R: catcoms_rt::CryptoRngCore,
         {
             use critical_namespaces::{refused, ARCHIVE_BOOTSTRAP_ROOT};
             guard.require_founding_phase()?;
@@ -3263,7 +3263,7 @@ mod persistence {
     ) -> Result<(), AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         use critical_namespaces::{archive_bootstrap::BOOTSTRAP_SOURCE_CUSTODY_FEE, refused};
         if !std::sync::Arc::ptr_eq(&actual.original, &captured.original) {
@@ -3307,7 +3307,7 @@ mod persistence {
     ) -> Result<(), AppError>
     where
         T: catcoms_rt::MeshTransport,
-        R: rand_core::CryptoRngCore,
+        R: catcoms_rt::CryptoRngCore,
     {
         actual
             .founding

@@ -192,6 +192,8 @@ impl RetainedBootstrapGenesisSeed {
     }
     /// Closed original-read lifetime checks for an ALREADY-held host writer. This grants no
     /// Saved/Current authority and never acquires Root/pool/SDK locks or touches the filesystem.
+    /// Runtime consumers use the same check through their concrete borrowed source view.
+    #[cfg(test)]
     pub(in crate::store) fn require_original_negative(
         &self,
         store: &ServerStore,

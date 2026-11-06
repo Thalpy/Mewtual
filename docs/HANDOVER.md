@@ -7,6 +7,13 @@ The user permits tests again; defer only
 One primary-owned serial Cargo pipeline uses `-j1`, two test threads, debug0/incremental0 and
 `target/chat-v2-production-check-target`. No other agent builds.
 
+The separate production `cargo check --locked -p catcoms-app --all-features -j1` now passes
+without warnings. Its first run exposed `rand_core` references supplied only by dev-dependencies;
+production paths now name the SAME trait through the existing `catcoms-rt` reexport. Cold-only
+DATA decoders/labels and three test-only convenience helpers follow their actual consumers'
+test gates; warm verification and the concrete runtime source validator remain enabled.
+No dependency, wire format or RNG algorithm changed. The eleven codec tests pass again.
+
 Actual results so far: **9 MLS bounded-restore tests**, **11 vendor owner-restore tests**,
 the earlier **16 Sync genesis tests**, **3 App save-barrier tests** and **12 App Current-layout
 tests** passed. The initial App cold-reader run passed18/19; the remaining test's10s hold
