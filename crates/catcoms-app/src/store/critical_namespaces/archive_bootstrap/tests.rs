@@ -355,11 +355,20 @@ fn archive_current_declaration_with_missing_root_is_never_recreated_from_its_see
     assert!(owner.retry(&mut rng).is_err());
     let root = directory.path().join(ARCHIVE_BOOTSTRAP_ROOT);
     let retained = directory.path().join("retained-original-archive-root");
-    fs::rename(&root, &retained).unwrap();
-    fault(&owner, 0);
-    assert!(owner.retry(&mut rng).is_err());
-    assert!(!root.exists());
+    #[cfg(not(windows))]
+    {
+        fs::rename(&root, &retained).unwrap();
+        fault(&owner, 0);
+        assert!(owner.retry(&mut rng).is_err());
+        assert!(!root.exists());
+    }
+    #[cfg(windows)]
+    assert_windows_held_root_move_is_denied(&root, &retained);
     drop(owner);
+    // Windows prevents a directory move while its marker is held open. After the real
+    // owner drains, perform the SAME actual missing-root cold-reopen attack on both OSes.
+    #[cfg(windows)]
+    fs::rename(&root, &retained).unwrap();
     assert!(PreparedArchiveBootstrapStore::open(
         directory.path(),
         SECRET,
@@ -369,6 +378,45 @@ fn archive_current_declaration_with_missing_root_is_never_recreated_from_its_see
     .is_err());
     assert!(!root.exists());
     assert!(retained.join(ROOT_MARKER).is_file());
+}
+
+/// Windows prevents directory renames while descendants have open Files, even with
+/// delete sharing. Prove that real OS boundary explicitly; never call a failed injection
+/// a successful application rejection. See FILE_RENAME_INFORMATION's directory rules:
+/// https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+#[cfg(windows)]
+fn assert_windows_held_root_move_is_denied(root: &Path, retained: &Path) {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    // Read-only test probes are short-lived. They must not themselves keep the child
+    // files open and cause the exclusion this helper is supposed to observe.
+    let directory_id = || {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(root)
+            .unwrap();
+        catcoms_storage::kept::session_id(&file).unwrap()
+    };
+    let marker = root.join(ROOT_MARKER);
+    let bytes = fs::read(&marker).unwrap();
+    let marker_id = {
+        let file = File::open(&marker).unwrap();
+        catcoms_storage::kept::session_id(&file).unwrap()
+    };
+    let original_directory = directory_id();
+    let error =
+        fs::rename(root, retained).expect_err("actual held child prevents a directory move");
+    assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}");
+    assert!(!retained.exists());
+    assert_eq!(fs::read(&marker).unwrap(), bytes);
+    assert_eq!(
+        catcoms_storage::kept::session_id(&File::open(marker).unwrap()).unwrap(),
+        marker_id
+    );
+    assert_eq!(directory_id(), original_directory);
 }
 
 #[test]
@@ -391,9 +439,23 @@ fn archive_target_notfound_requires_the_same_held_root_and_marker_objects() {
             fs::rename(root.join(ROOT_MARKER), root.join("retained-marker")).unwrap();
             fs::write(root.join(ROOT_MARKER), &marker).unwrap();
         } else if replacement == 0 {
-            fs::rename(&root, directory.path().join("retained-root")).unwrap();
-            fs::create_dir(&root).unwrap();
-            fs::write(root.join(ROOT_MARKER), &marker).unwrap();
+            #[cfg(not(windows))]
+            {
+                fs::rename(&root, directory.path().join("retained-root")).unwrap();
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join(ROOT_MARKER), &marker).unwrap();
+            }
+            #[cfg(windows)]
+            {
+                assert_windows_held_root_move_is_denied(
+                    &root,
+                    &directory.path().join("retained-root"),
+                );
+                // The directory attack was OS-prevented. Still require application
+                // rejection of a REAL equal-byte replacement of its held marker.
+                fs::rename(root.join(ROOT_MARKER), root.join("retained-marker")).unwrap();
+                fs::write(root.join(ROOT_MARKER), &marker).unwrap();
+            }
         } else {
             let identity = {
                 store
@@ -481,9 +543,24 @@ fn archive_replacement_after_target_notfound_is_rejected_before_old_issuance() {
     *store.archive_after_target_lookup.lock().unwrap() = Some(Box::new(move || {
         // The real first lookup just saw target NotFound under the original root. A second
         // root with byte-identical marker must not turn that observation into admission.
-        fs::rename(&root, &retained).unwrap();
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join(ROOT_MARKER), marker).unwrap();
+        #[cfg(not(windows))]
+        {
+            fs::rename(&root, &retained).unwrap();
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join(ROOT_MARKER), marker).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            assert_windows_held_root_move_is_denied(&root, &retained);
+            // Windows protects the directory itself. Exercise the SAME post-lookup
+            // enforcement with a real held-marker identity substitution instead.
+            fs::rename(
+                root.join(ROOT_MARKER),
+                root.join("retained-marker-after-lookup"),
+            )
+            .unwrap();
+            fs::write(root.join(ROOT_MARKER), marker).unwrap();
+        }
     }));
     let admissions = fs::read(directory.path().join("chat-admissions.bin")).unwrap();
     let mut unchanged = rng.clone();

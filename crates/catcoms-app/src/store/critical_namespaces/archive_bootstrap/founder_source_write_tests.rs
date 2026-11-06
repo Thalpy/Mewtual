@@ -309,14 +309,18 @@ impl BlockedIo {
 fn other_group_actual_admission_progresses_while_source_a_holds_file_io_mutex() {
     let (_path, store, mut rng) = fixture(0xff70);
     let mut a = owner(&store, &mut rng, 86);
+    // Key/MLS construction is unrelated to the guard-release property. Finish that
+    // independent setup before parking A, rather than spending its bounded barrier wait
+    // on cryptography when a full suite has many expensive fixtures running in parallel.
+    let mut b = owner(&store, &mut rng, 87);
     let running = BlockedIo::start(prepare(&store, &mut a, &mut rng));
     assert!(
         target(&store, &a).join("source.seed").exists(),
         "actual file work preceded barrier"
     );
-    // This performs real original debit, SDK creation and the actual FI writer for B. The
-    // regression deadlocks/times out if any of A's global admission/Root guards leaked.
-    let mut b = owner(&store, &mut rng, 87);
+    // B still performs its real source preparation and journal admission while A holds
+    // its output mutex. Those actual AD/pins/canonical/Root acquisitions would deadlock
+    // if A had retained a global guard across physical I/O; no stand-in permit is used.
     b.save_source_prepared(&store, &mut rng).unwrap();
     assert_eq!(decode(&store, &b).io_spent, 0);
     running.drain().unwrap();
@@ -374,11 +378,15 @@ fn cancelled_original_before_io_cannot_publish_or_revive_across_a_new_generation
     let (_path, store, mut rng) = fixture(0xff90);
     let mut source = owner(&store, &mut rng, 89);
     source.save_source_prepared(&store, &mut rng).unwrap();
+    // Cache only the pathname used for the negative filesystem assertion. Asking the
+    // revoked plan for authoritative DATA must fail, so doing that AFTER cancellation
+    // would make this regression panic in its helper instead of checking the real I/O.
+    let original_target = target(&store, &source);
     let revoke = source.original.creator.original.revoker();
     source.before_source_io = Some(Box::new(move || revoke.revoke()));
     assert!(source.save_source_files(&store, &mut rng).is_err());
     assert_eq!(decode(&store, &source).io_spent, 1);
-    assert!(!target(&store, &source).join("source.seed").exists());
+    assert!(!original_target.join("source.seed").exists());
     assert!(source.save_source_files(&store, &mut NeverRng).is_err());
 }
 
@@ -427,8 +435,26 @@ fn source_open_wait_cannot_lend_stale_authority_to_the_first_page_effect() {
             let actual_target = target.clone();
             let moved = path.path().join("held-original-target-after-source-open");
             work.set_before_pages(Box::new(move || {
-                fs::rename(&actual_target, moved).unwrap();
-                fs::create_dir(&actual_target).unwrap();
+                #[cfg(not(windows))]
+                {
+                    fs::rename(&actual_target, moved).unwrap();
+                    fs::create_dir(&actual_target).unwrap();
+                }
+                #[cfg(windows)]
+                {
+                    // Held source Files prevent this directory move on Windows. Do
+                    // not weaken the original owner to force an impossible injection.
+                    let error = fs::rename(&actual_target, &moved).unwrap_err();
+                    assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}");
+                    assert!(actual_target.is_dir());
+                    assert!(!moved.exists());
+                    // Exercise the actual final-source proof at this SAME hook with
+                    // a real equal-byte replacement of the held immutable origin File.
+                    let origin = actual_target.join("origin");
+                    let original = fs::read(&origin).unwrap();
+                    fs::rename(&origin, actual_target.join("held-origin-after-open")).unwrap();
+                    fs::write(origin, original).unwrap();
+                }
             }));
         } else {
             let revoker = source.original.creator.original.revoker();

@@ -38,6 +38,18 @@ jobs:
       # complete workspace run. A failure still fails this job; no full-suite gate is replaced.
       - name: File transfer actor boundaries
         run: cargo test -p catcoms-app --all-features --lib actor::file_transfers::tests
+      # Run these original-source races separately so their assertion output survives a
+      # later process-level abort in the full test binary. These are real production-path
+      # tests on both platforms; this neither retries a failure nor replaces the full gate.
+      - name: Original source and retained-root boundaries
+        run: >-
+          cargo test -p catcoms-app --all-features --lib -- --test-threads=1
+          other_group_actual_admission_progresses_while_source_a_holds_file_io_mutex
+          cancelled_original_before_io_cannot_publish_or_revive_across_a_new_generation
+          source_open_wait_cannot_lend_stale_authority_to_the_first_page_effect
+          archive_current_declaration_with_missing_root_is_never_recreated_from_its_seed
+          archive_replacement_after_target_notfound_is_rejected_before_old_issuance
+          archive_target_notfound_requires_the_same_held_root_and_marker_objects
       - name: Test
         run: cargo test --all --all-features
       # WMI accepts independent broad windows/windows-core ranges. A valid lock resolution

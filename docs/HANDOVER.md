@@ -1,5 +1,25 @@
 # Mewtual; Handover
 
+## Root regression corrections (6 November; eight focused checks pass)
+
+The original Studio repair test now constructs and retains its same two-Server fixtures on
+the heap; its default-stack two-actor scenario and actual future-size regression pass.
+The previous constructor measured 43,904 bytes before boxing. Source cancellation now
+caches the pathname before revoking the plan, so its negative filesystem assertion no
+longer requests authority from the deliberately revoked owner. Independent cryptographic
+setup precedes the parked-source barrier, while the other group's actual admission remains
+inside it; the timeout and real guard acquisitions are unchanged.
+
+Four Windows tamper fixtures had attempted directory moves that the OS blocks while child
+Files are open. They now prove that exclusion, then perform a real equal-byte marker/origin
+substitution at the same hook and retain the application rejection assertions. Unix keeps
+the successful directory-replacement attacks. The missing-root case also drops its owner,
+actually moves the directory and verifies cold reopening refuses to recreate it. No
+production check or test gate was weakened. All eight focused regressions pass in 155.39s;
+actual-diff adversarial review is clear. CI runs the six source/root cases separately before
+the full suite so a later process abort cannot hide their failure details. Full current
+suites and fresh cross-platform CI remain pending.
+
 ## Historical policy validation after real restore (6 November; focused checks pass)
 
 Restoring a saved nonempty policy increments the new node's process-local revision.
@@ -9,7 +29,8 @@ while retaining all signed parent, MLS, routing, wrapping-key, durable scope and
 Live prepared-operation fencing still uses the policy revision; it is not reset or removed.
 All nine Sync initial-operation tests pass, including a new exact-policy/changed-policy
 regression. Both previously failing actual App Add stage/save/reopen tests also pass in the
-focused run. Adversarial inspection found no remaining blocker/high in this correction.
+focused run. Strict all-target/all-feature Sync Clippy passes in 1m25s. Adversarial inspection
+found no remaining blocker/high in this correction.
 These results do not close the other root-suite failures or activate Chat V2.
 
 ## Operational Chat V2 integration (6 November; in progress)
@@ -24,6 +45,12 @@ full membership and epoch governance, transport/native and audit composition rem
 This is not text Chat V2 activation. App owner/kernel and persistence bodies are being
 paired in the operational worktree; DATA and OS leases cannot substitute for new effect
 admission. [Exact boundary and evidence](communication-recovery/CHAT-V2-FOUNDER-PROJECTION-ISSUER.md).
+
+The uncommitted connected read-only Current/capture cohort now compiles and all 34 focused
+tests pass in 456.29s, including genuine three-family source/pin/context and final-ID3 checks,
+original cancellation and exact resource-release tests. Its unused effect-consumer warnings
+remain during integration; it is not a strict-lint or production write-path pass. Promotion,
+ordinary posting and later-head cold recovery still need their actual paired consumers.
 
 Fresh `6f8c7c6f` CI progresses beyond the earlier service reservation failure but Linux
 native aborts on stack overflow in abandoned voice custody. Its actual wrapper-size
