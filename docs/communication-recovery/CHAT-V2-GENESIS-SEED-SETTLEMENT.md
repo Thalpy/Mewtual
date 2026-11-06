@@ -1,7 +1,19 @@
 # Genesis activation-seed settlement and settled cold Current2
 
+## Repaired-owner extension (6 November; focused checks pass)
+
+The actual `UnexposedRepairedV2GenesisCurrent` now joins this same physical worker through a
+third closed owner/read/canonical branch. It retains its original repaired scope2/head/task/
+writer and paid node/read/SDK. Its file loan borrows already-filled IDs and original candidate
+frames without path reopening, identity queries or conversion to an older receipt family.
+Cleanup phase dispatch precedes mandatory-seed validation. Five new Windows regressions pass
+in244.05s, including all six physical cuts, both scope cuts, same owners, exact read-fee
+retirement, cancellation and fresh absent recovery. Two existing warm/cold controls pass
+in38.65s. The same checked1MiB class covers the actual three-kind layouts; full-suite and
+operational/native acceptance remain open. [Latest evidence](../HANDOVER.md).
+
 Status (6 November): connected library implementation passed actual-diff adversarial review,
-production compilation and13 genuine Windows regressions. The actual warm/cold owning wrappers retain one private cleanup worker
+production compilation and13 genuine Windows regressions. The original warm/cold owning wrappers retain one private cleanup worker
 and expose one finite `retry_seed_settlement` operation. Scope supplies the even-clean
 covering barrier; Factory supplies distinct existing-owner cleanup/read guards; the physical
 worker removes only its original activation seed and retains ambiguous progress. The separate

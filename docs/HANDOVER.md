@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## Same-owner cleanup after Init1 recovery (6 November; focused tests pass)
+
+The repaired owning output now has a concrete third settlement branch alongside the real
+warm and independently cold owners. It retains the same node/read/SDK, repaired Head, task,
+scope2 owner/nonce and installed writer; no close/remount or proof conversion is used.
+Original file/candidate loans use only already-filled identities. The existing covering
+scope2 barrier, immutable payment, phase-dispatched unlink worker and settled reader remain
+shared. Validation selects admitted cleanup BEFORE the old mandatory-seed proof.
+
+All **5 new Windows tests pass in244.05s**: six210–215 cleanup cuts, both even-clean scope
+write cuts, foreign/staged/unknown/reappearing files, pressure and pre/post-unlink cancellation,
+same-node/read/SDK/owner/head/writer/nonce, exact source-read fee retirement while saved
+metadata remains, replay with NeverRng, and a genuine new paid seed-absent mount. The existing
+warm and cold original-node cleanup regressions also pass (**2 in38.65s**). Their filters
+overlap older evidence; they are compatibility checks, not full-suite results. Actual-diff
+adversarial review clears the paired third-owner/read/guard/physical slice. Production App
+checking, strict all-target/all-feature root Clippy (1m02s) and separate native checking
+(1m06s) pass. Formatting and ambient/raw-FS checks pass. No dependencies or raw filesystem
+mutation sites changed, and the separately checked actual three-kind invoice still uses the
+same1MiB settlement class with independent original source/SDK/repair payments.
+
+This closes repaired-owner seed cleanup only. Complete-seed/no-row recovery, torn/missing
+first-journal handling, operational transactions/indexes/governing/transport/native routing
+and full mandatory acceptance remain open. SourceSaved cannot reconstruct three lost random
+ciphertexts. The no-row complete-journal continuation is the next supported recovery packet;
+unknown first-write replacement needs its own reviewed negative-closure/compatibility rules.
+
 ## Interrupted Initializing1 repair (6 November; focused checks pass, Chat V2 incomplete)
 
 The new physical capture/prefix worker, shared16 claim, same-owner handoff, distinct installed

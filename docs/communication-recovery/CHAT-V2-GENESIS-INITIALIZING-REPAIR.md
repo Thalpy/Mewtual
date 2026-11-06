@@ -175,13 +175,15 @@ errors. No SDK/group/transport/run getter exists. Runtime parts are cold DATA (n
 Fresh life); after actual binding, checked same-source pairing then final infallible moves
 retain all supporting fees. A real third private ownership-family case may later join
 `GenesisCurrentOwnerRef`/settlement with its actual repaired receipt; do not fabricate the old
-Warm Saved or Current2-unowned capture just to reuse an output type. Retaining this seed until
-that actual adapter or a NEW complete Current2 mount is safe and does not block recovery.
+Warm Saved or Current2-unowned capture just to reuse an output type. That closed third-family
+adapter is now implemented and passes focused Windows checks, allowing same-node cleanup
+without requiring a new mount. Its explicit retry retains the seed until actual settlement.
 
 ## Invoice, ordering, failures and precise remaining limits
 
-Use an independently acquired cold repair metadata class with checked complete live layout;
-1MiB is a proposed ceiling, not yet a proved payment. Include complete seed/raw/copy/open
+Use the independently acquired cold repair metadata class with its checked complete live
+layout. Its1MiB charge passes the actual combined-layout assertion in genuine execution.
+Include complete seed/raw/copy/open
 overlap, embedded pin/head candidate copies, both original and selected/repaired Files,
 prefix scans, return/capture/receipt/claim/OnceLock/watch layouts, all selector/native walk
 scratch and any outliving weak control blocks. Source/read/provider/SDK graphs, original

@@ -447,3 +447,14 @@ proof_parts!(
     ColdRepairedV2GenesisCurrentNamespace,
     ColdRepairedGenesisCurrentAdmission
 );
+
+impl ColdRepairedV2GenesisCurrentNamespace<'_, '_> {
+    /// Existing-generation cleanup proof only, confined to canonical's own family. This
+    /// does not validate a mandatory seed, install/renew a writer, upgrade a weak Life or
+    /// expose a mutable slot. The shared settlement kernel repeats actual source negatives.
+    pub(in crate::store::owner_evidence::canonical) fn settlement_registration_runtime(
+        &self,
+    ) -> &super::super::v2_registration::Runtime {
+        &self.inner.pool.v2_writers
+    }
+}

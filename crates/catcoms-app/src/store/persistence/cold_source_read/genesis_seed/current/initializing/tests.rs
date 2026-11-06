@@ -291,3 +291,5 @@ fn saved_repaired_head_survives_lost_return_and_reuses_original_after_marker_res
 }
 
 mod lifecycle;
+
+mod settlement;

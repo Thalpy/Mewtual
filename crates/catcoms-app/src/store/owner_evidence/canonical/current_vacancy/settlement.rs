@@ -2,6 +2,7 @@
 //! row transition or raw Runtime escapes this family. The real scope borrow holds admission
 //! continuously from its covering barrier through pins/canonical and the later Root guard.
 use super::cold_current::ColdOwnedV2CurrentOwnerNamespace;
+use super::cold_initializing::ColdRepairedV2GenesisCurrentNamespace;
 use super::*;
 use crate::store::chat_admission::v2_current::{
     DurableGenesisCurrent2SettlementAdmission, GenesisCurrent2SettlementReadAdmission,
@@ -11,6 +12,7 @@ use crate::store::chat_admission::v2_current::{
 enum ExistingOwnerCore<'guard, 'writer> {
     Warm(CurrentV2OwnerNamespace<'guard, 'writer>),
     Cold(ColdOwnedV2CurrentOwnerNamespace<'guard, 'writer>),
+    Repaired(ColdRepairedV2GenesisCurrentNamespace<'guard, 'writer>),
 }
 struct ExistingOwner<'guard, 'writer> {
     core: ExistingOwnerCore<'guard, 'writer>,
@@ -23,6 +25,7 @@ impl ExistingOwner<'_, '_> {
         match &self.core {
             ExistingOwnerCore::Warm(n) => n.validate_source_only()?,
             ExistingOwnerCore::Cold(n) => n.validate_source_only()?,
+            ExistingOwnerCore::Repaired(n) => n.validate_source_only()?,
         }
         if self.identifier != key(self.admission.group(), self.admission.signer()) {
             return Err(refused());
@@ -34,6 +37,7 @@ impl ExistingOwner<'_, '_> {
         match &self.core {
             ExistingOwnerCore::Warm(n) => n.validate_old_files()?,
             ExistingOwnerCore::Cold(n) => n.validate_old_files()?,
+            ExistingOwnerCore::Repaired(n) => n.validate_old_files()?,
         }
         self.validate_source_only()
     }
@@ -41,6 +45,7 @@ impl ExistingOwner<'_, '_> {
         let runtime = match &self.core {
             ExistingOwnerCore::Warm(n) => &n.inner.pool.v2_writers,
             ExistingOwnerCore::Cold(n) => n.settlement_registration_runtime(),
+            ExistingOwnerCore::Repaired(n) => n.settlement_registration_runtime(),
         };
         (runtime, &self.identifier)
     }
@@ -95,12 +100,25 @@ fn lock_existing<'guard, 'writer>(
     admission.validate_source_only()?;
     let store = admission.store();
     let task = admission.task();
-    let core = if let Some(warm) = admission.warm_admission() {
-        ExistingOwnerCore::Warm(store.lock_current_v2_group_namespace(warm, task)?)
-    } else {
-        let cold = admission.cold_admission().ok_or_else(refused)?;
-        task.require_cold_owned_handoff(cold)?;
-        ExistingOwnerCore::Cold(store.lock_cold_owned_v2_current_namespace(cold, task)?)
+    let core = match (
+        admission.warm_admission(),
+        admission.cold_admission(),
+        admission.repaired_admission(),
+    ) {
+        (Some(warm), None, None) => {
+            ExistingOwnerCore::Warm(store.lock_current_v2_group_namespace(warm, task)?)
+        }
+        (None, Some(cold), None) => {
+            task.require_cold_owned_handoff(cold)?;
+            ExistingOwnerCore::Cold(store.lock_cold_owned_v2_current_namespace(cold, task)?)
+        }
+        (None, None, Some(repaired)) => {
+            task.require_cold_initializing_owned_handoff(repaired.owner_admission())?;
+            // This acquires only the actual existing canonical/pins closure. Do NOT call
+            // the old Root-bearing repaired guard: it still mandates activation.seed.
+            ExistingOwnerCore::Repaired(store.lock_cold_repaired_current_namespace(repaired, task)?)
+        }
+        _ => return Err(refused()),
     };
     let inner = ExistingOwner {
         core,

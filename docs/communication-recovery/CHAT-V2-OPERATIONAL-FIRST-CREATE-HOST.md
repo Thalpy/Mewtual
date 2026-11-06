@@ -58,12 +58,12 @@ owner type. Its operational admission is a third concrete private branch preserv
 same source/task/owner/nonce and kernel observation; a caller-selected kind/boolean or
 generic adopting trait is not the issuer.
 
-Before first operational effects, this same cohort must also add the concrete Repaired
-settlement/read branch: the present repaired wrapper intentionally retains `activation.seed`
-and currently has no cleanup adapter. Extend the closed original-owner/physical-evidence
-family using the actual repaired scope2/head/task/writer, its fresh covering barrier and
-original-seed cleanup. Cache/dispatch the same admitted unlink/parent-sync and settled-read
-phases before the mandatory-seed validators, preserving the original node/nonce/generation.
+Before first operational effects, require the concrete Repaired settlement/read branch.
+That adapter is now implemented and passes focused Windows checks: it retains the actual
+repaired scope2/head/task/writer through its fresh covering barrier and original-seed cleanup.
+It caches/dispatches admitted unlink/parent-sync and settled-read phases before mandatory-seed
+validators, preserving the original node/nonce/generation. Operational code must consume
+its actual result rather than assume cleanup from file absence.
 Only that actual settled Repaired proof may enter promotion. Do not turn an older Warm/Cold
 conversion, close/remount, or an optional missing-seed check into this issuer. Seed-present
 operational promotion is not an alternative supported by this first design.

@@ -8,7 +8,11 @@ writer through every refusal. `retry` repairs only the authenticated original ca
 and persists Current2 after their barriers. `take_current` repeats the final concrete proof
 before returning `UnexposedRepairedV2GenesisCurrent<T,R>`, whose public surface is immutable
 `data` and `validate_original`. It exposes no Store, SDK, raw node, authoring or runnable
-handle. This distinct family keeps its recovery seed; it has no cleanup adapter yet. The
+handle. This distinct family retains its recovery seed until its same-owner
+`retry_seed_settlement(layout, rng)` completes the existing paid covering/unlink/settled
+reader path. The actual repaired scope/writer/head remain distinct; cleanup has no conversion
+to an older warm or unowned-cold receipt. Five focused Windows tests and two existing-family
+compatibility tests pass; full gates remain open. The
 complete historical Initializing1 capture remains test-only, while the actual task-free
 read role now also serves this new partial-repair consumer. The profile is Windows-only;
 focused tests, strict root lint and native compilation pass. Complete suites and larger
@@ -17,7 +21,8 @@ capacity cases remain open, and live/native Chat V2 remains disabled.
 
 ## Retained genesis cleanup (6 November; library only)
 
-Both actual `UnexposedV2GenesisCurrent` and `UnexposedColdV2GenesisCurrent` add
+Actual `UnexposedV2GenesisCurrent`, `UnexposedColdV2GenesisCurrent` and
+`UnexposedRepairedV2GenesisCurrent` provide
 `retry_seed_settlement(layout, rng)`. It retains the same node/source/SDK, scope/task/writer
 and exact cleanup state on refusal. Only original seed-present owners can start it; already
 absent cold recovery remains independently valid and does not fabricate a cleanup receipt.

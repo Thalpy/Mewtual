@@ -39,13 +39,27 @@ fn require_original_group_name(
     admission: &GenesisCurrent2SettlementReadAdmission<'_>,
 ) -> Result<(), AppError> {
     let task = admission.task();
-    if admission.warm_admission().is_some() {
-        let (path, file, id) = task.saved_directory()?.directory_data();
-        crate::store::persistence::v2_genesis_activation::require_directory_name(path, file, id)
-    } else {
-        let cold = admission.cold_admission().ok_or_else(refused)?;
-        task.require_cold_owned_handoff(cold)?;
-        crate::store::persistence::require_cold_head_group_directory(cold.head())
+    match (
+        admission.warm_admission(),
+        admission.cold_admission(),
+        admission.repaired_admission(),
+    ) {
+        (Some(_), None, None) => {
+            let (path, file, id) = task.saved_directory()?.directory_data();
+            crate::store::persistence::v2_genesis_activation::require_directory_name(path, file, id)
+        }
+        (None, Some(cold), None) => {
+            task.require_cold_owned_handoff(cold)?;
+            crate::store::persistence::require_cold_head_group_directory(cold.head())
+        }
+        (None, None, Some(repaired)) => {
+            task.require_cold_initializing_owned_handoff(repaired.owner_admission())?;
+            // Pure original held/named group proof after source/ID3 waits. The separate
+            // settlement body owns the seed phase; the old repaired Head proof stays strict.
+            let (path, file, id) = repaired.head().seed().directory_data();
+            crate::store::persistence::v2_genesis_activation::require_directory_name(path, file, id)
+        }
+        _ => Err(refused()),
     }
 }
 macro_rules! settlement_group_guard {

@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Repaired owners keep their actual cleanup identity (6 November; library only)
+
+Repaired Current2 cleanup uses a third closed owner/Scope/canonical branch, never a fabricated
+warm or unowned-cold proof. Its file loan only borrows the original already-selected Files,
+filled identities and candidate frames. It cannot reopen a path, initialize an identity or
+keep a source/SDK graph alive. The same actual scope2 binding and installed kernel generation
+guard the existing covering/unlink/settled worker. Admitted cleanup dispatch precedes all
+old named-seed checks, preserving recovery after an uncertain unlink or parent barrier.
+Five focused Windows regressions and two existing-family controls pass; native activation,
+full suites and earlier-cut/operational recovery remain separate gates.
+
 ## Cold prefix completion needs authenticated journal AND actual Init1 ownership (6 November)
 
 An empty or matching file does not grant repair permission. The new closed library path

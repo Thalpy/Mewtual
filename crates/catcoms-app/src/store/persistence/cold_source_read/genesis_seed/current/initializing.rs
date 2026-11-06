@@ -1,6 +1,7 @@
 //! Actual partial-genesis Init1 recovery owner. No warm Saved receipt or Current2 cold
 //! capture is reconstructed. The same graph/read/T/R/clock survives every refused attempt.
 use super::*;
+mod settlement;
 use crate::store::chat_admission::v2_current::ColdV2InitializingPreparation;
 use crate::store::owner_evidence::canonical::current_vacancy::RetiredGroupEntry;
 use crate::store::owner_evidence::canonical::v2_registration::cold_initializing::PreparedColdV2InitializingWriterRegistration;
@@ -29,8 +30,9 @@ pub struct PreparedColdV2GenesisInitializing<T, R> {
     fee: Option<CatalogReadReservation>,
 }
 /// Saved repaired genesis with exact same original resources; still no runnable/SDK/raw
-/// node/authoring extractor. The seed remains present for subsequent independently paid
-/// Current2 recovery. Cleanup of this new family requires its own settlement adapter.
+/// node/authoring extractor. Initialization retains the original activation seed. Its
+/// separate same-owner settlement adapter may remove only that seed after a fresh
+/// covering Current2 barrier; a new mount uses its independent absent-seed reader.
 pub struct UnexposedRepairedV2GenesisCurrent<T, R> {
     node: UnboundV2GenesisNode<T, R>,
     resources: BootstrapGenesisResources,
@@ -39,6 +41,11 @@ pub struct UnexposedRepairedV2GenesisCurrent<T, R> {
     scope: ColdV2InitializingPreparation,
     writer: PreparedColdV2InitializingWriterRegistration,
     repair: PreparedColdV2GenesisRepair,
+    // Cleanup history is independent of the original repaired Head. The old physical
+    // validator stays strict and is never invoked after this worker admits unlink.
+    seed_settlement: Option<
+        crate::store::persistence::v2_genesis_activation::settlement::PreparedGenesisSeedSettlement,
+    >,
     fee: CatalogReadReservation,
 }
 opaque_debug!(
@@ -379,6 +386,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedColdV2GenesisInitializing<T, R>
             scope: self.scope.take().expect("checked scope"),
             writer: self.writer.take().expect("checked writer"),
             repair: self.repair.take().expect("checked worker"),
+            seed_settlement: None,
             fee: self.fee.take().expect("checked fee"),
         }))
     }
@@ -395,6 +403,13 @@ impl<T, R> UnexposedRepairedV2GenesisCurrent<T, R> {
         self.source().data()
     }
     pub fn validate_original(&self, layout: &V2CurrentLayoutStore) -> Result<(), AppError> {
+        if let Some(result) = super::settlement::validate_after_cleanup(
+            &self.settlement_owner_ref()?,
+            self.seed_settlement.as_ref(),
+            layout,
+        ) {
+            return result;
+        }
         let store = layout.checked_store()?;
         if !Arc::ptr_eq(&self.repair_seed, self.scope.seed()) {
             return Err(critical_namespaces::refused());

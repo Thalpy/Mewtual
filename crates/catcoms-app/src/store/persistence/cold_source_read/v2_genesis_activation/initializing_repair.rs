@@ -17,6 +17,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::OnceLock;
 
 mod inventory;
+// Only actual repaired SavedHead may lend its existing identities/candidates to the
+// independent settlement worker; this child cannot select another File or mint a receipt.
+mod settlement;
 
 #[cfg(test)]
 std::thread_local! {

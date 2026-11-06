@@ -18,6 +18,7 @@ use crate::store::persistence::GenesisCurrentOwnerRef;
 enum ReadScope<'writer> {
     Warm(V2CurrentAdmission<'writer>),
     Cold(ColdOwnedCurrentAdmission<'writer>),
+    Repaired(ColdRepairedGenesisCurrentAdmission<'writer>),
 }
 
 /// Brief read-only Root verification before/after the scope write. It is not a covering
@@ -74,19 +75,28 @@ impl<'writer> GenesisCurrent2SettlementReadAdmission<'writer> {
     pub(in crate::store) fn warm_admission(&self) -> Option<&V2CurrentAdmission<'writer>> {
         match &self.scope {
             ReadScope::Warm(admission) => Some(admission),
-            ReadScope::Cold(_) => None,
+            ReadScope::Cold(_) | ReadScope::Repaired(_) => None,
         }
     }
     pub(in crate::store) fn cold_admission(&self) -> Option<&ColdOwnedCurrentAdmission<'writer>> {
         match &self.scope {
             ReadScope::Cold(admission) => Some(admission),
-            ReadScope::Warm(_) => None,
+            ReadScope::Warm(_) | ReadScope::Repaired(_) => None,
+        }
+    }
+    pub(in crate::store) fn repaired_admission(
+        &self,
+    ) -> Option<&ColdRepairedGenesisCurrentAdmission<'writer>> {
+        match &self.scope {
+            ReadScope::Repaired(admission) => Some(admission),
+            ReadScope::Warm(_) | ReadScope::Cold(_) => None,
         }
     }
     pub(in crate::store) fn store(&self) -> &ServerStore {
         match &self.scope {
             ReadScope::Warm(admission) => admission.store(),
             ReadScope::Cold(admission) => admission.store(),
+            ReadScope::Repaired(admission) => admission.store(),
         }
     }
     pub(in crate::store) fn source(&self) -> &GenesisSourceDataRef<'writer> {
@@ -103,6 +113,11 @@ impl<'writer> GenesisCurrent2SettlementReadAdmission<'writer> {
                 .cold_scope()
                 .ok_or_else(refused)?
                 .current_binding(),
+            ReadScope::Repaired(_) => self
+                .owner
+                .repaired_scope()
+                .ok_or_else(refused)?
+                .current_binding(),
         }
     }
     pub(in crate::store) fn writer_observation(&self) -> Result<&V2WriterObservation, AppError> {
@@ -113,18 +128,21 @@ impl<'writer> GenesisCurrent2SettlementReadAdmission<'writer> {
         match &self.scope {
             ReadScope::Warm(admission) => &admission.preparation.inner.admission,
             ReadScope::Cold(admission) => admission.owner_observer(),
+            ReadScope::Repaired(admission) => admission.owner_admission().owner_observer(),
         }
     }
     pub(in crate::store) fn group(&self) -> &[u8] {
         match &self.scope {
             ReadScope::Warm(admission) => admission.group(),
             ReadScope::Cold(admission) => admission.group(),
+            ReadScope::Repaired(admission) => admission.group(),
         }
     }
     pub(in crate::store) fn signer(&self) -> &[u8; 32] {
         match &self.scope {
             ReadScope::Warm(admission) => admission.signer(),
             ReadScope::Cold(admission) => admission.signer(),
+            ReadScope::Repaired(admission) => admission.signer(),
         }
     }
     /// Closed cached negatives only: no lock, file/pool operation, SDK or allocating owner
@@ -138,6 +156,9 @@ impl<'writer> GenesisCurrent2SettlementReadAdmission<'writer> {
             }
             ReadScope::Cold(admission) => {
                 admission.require_owned_current_lineage_for_own_group_task(self.task())?;
+            }
+            ReadScope::Repaired(admission) => {
+                admission.require_current_lineage_for_own_group_task(self.task())?;
             }
         };
         if self.runtime.dirty {
@@ -191,8 +212,12 @@ fn read<'writer>(
         // substitutes for this new even-clean covering write or renews a cancelled owner.
         return Err(refused());
     }
-    let scope = match (owner.warm_scope(), owner.cold_scope()) {
-        (Some(preparation), None) => ReadScope::Warm(V2CurrentAdmission {
+    let scope = match (
+        owner.warm_scope(),
+        owner.cold_scope(),
+        owner.repaired_scope(),
+    ) {
+        (Some(preparation), None, None) => ReadScope::Warm(V2CurrentAdmission {
             store,
             runtime,
             source: owner.source(),
@@ -200,12 +225,15 @@ fn read<'writer>(
             preparation,
             _not_send: PhantomData,
         }),
-        (None, Some(preparation)) => ReadScope::Cold(preparation.borrow_current2_admission(
+        (None, Some(preparation), None) => ReadScope::Cold(preparation.borrow_current2_admission(
             store,
             runtime,
             owner.source(),
             owner.task(),
         )?),
+        (None, None, Some(preparation)) => ReadScope::Repaired(
+            preparation.borrow_current2_admission(store, runtime, owner.source(), owner.task())?,
+        ),
         _ => return Err(refused()),
     };
     let admission = GenesisCurrent2SettlementReadAdmission {

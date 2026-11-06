@@ -5,6 +5,7 @@
 use super::genesis_inventory::{
     require_fixed_genesis_inventory, GenesisSeedInventoryRole, GENESIS_FIXED_INVENTORY_BYTES,
 };
+use super::initializing_repair::SavedColdV2GenesisRepairedHead;
 use super::*;
 use crate::store::chat_admission::v2_current::{
     DurableGenesisCurrent2SettlementAdmission, GenesisCurrent2SettlementReadAdmission,
@@ -23,7 +24,7 @@ const PATH_LIMIT: usize =
     crate::store::critical_namespaces::current_layout::MAX_OPEN_BASE_PATH + 1024;
 
 /// Borrowed original held objects/frames, NEVER a raw caller-selected path or parsed proof.
-/// Only the actual paid warm/cold receipt's private methods construct these views. Their
+/// Only the actual paid warm/cold/repaired receipt's private methods construct these views. Their
 /// original Arc stays retained in SettlementBody throughout every effect/result/refusal.
 pub(super) struct SeedPresentFiles<'original> {
     pub(super) directory: (
@@ -45,12 +46,14 @@ pub(super) struct SelectedControl<'original> {
 enum OriginalSeedPresent {
     Warm(Arc<SavedV2GenesisHead>),
     Cold(Arc<ColdV2GenesisCurrentHead>),
+    Repaired(Arc<SavedColdV2GenesisRepairedHead>),
 }
 impl OriginalSeedPresent {
     fn files(&self) -> Result<SeedPresentFiles<'_>, AppError> {
         match self {
             Self::Warm(head) => head.settlement_files(),
             Self::Cold(head) => head.settlement_files(),
+            Self::Repaired(head) => head.settlement_files(),
         }
     }
     fn require_same_owner(&self, owner: &GenesisCurrentOwnerRef<'_>) -> Result<(), AppError> {
@@ -60,6 +63,9 @@ impl OriginalSeedPresent {
                 .is_some_and(|head| Arc::ptr_eq(original, head)),
             Self::Cold(original) => owner
                 .cold_head()
+                .is_some_and(|head| Arc::ptr_eq(original, head)),
+            Self::Repaired(original) => owner
+                .repaired_head()
                 .is_some_and(|head| Arc::ptr_eq(original, head)),
         };
         if same {
@@ -257,10 +263,12 @@ impl PreparedGenesisSeedSettlement {
         owner.validate_resources(store, &writer)?;
         let original = if let Some(head) = owner.warm_head() {
             OriginalSeedPresent::Warm(head.clone())
+        } else if let Some(head) = owner.cold_head() {
+            OriginalSeedPresent::Cold(head.clone())
         } else {
-            OriginalSeedPresent::Cold(
+            OriginalSeedPresent::Repaired(
                 owner
-                    .cold_head()
+                    .repaired_head()
                     .ok_or_else(critical_namespaces::refused)?
                     .clone(),
             )

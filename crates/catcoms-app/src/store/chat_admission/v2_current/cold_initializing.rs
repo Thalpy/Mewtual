@@ -84,6 +84,24 @@ impl ManagedChatScopeReservation for ColdV2InitializingPreparation {
 }
 
 impl ColdV2InitializingPreparation {
+    /// Borrow only this actual CLEAN bound Current2 under the SAME held Runtime. This
+    /// cached owner/Head/binding check intentionally performs no mandatory-seed physical
+    /// validation: an admitted cleanup may already have removed that original name.
+    /// The distinct settlement body proves the complete phase-selected files separately.
+    pub(super) fn borrow_current2_admission<'writer>(
+        &'writer self,
+        store: &'writer ServerStore,
+        runtime: &'writer Runtime,
+        source: &'writer GenesisSourceDataRef<'writer>,
+        task: &'writer PreparedV2GenesisGroupNamespace,
+    ) -> Result<ColdRepairedGenesisCurrentAdmission<'writer>, AppError> {
+        let admission = ColdRepairedGenesisCurrentAdmission {
+            original: owned(store, runtime, source, task, self),
+        };
+        admission.require_current_lineage_for_own_group_task(task)?;
+        Ok(admission)
+    }
+
     pub(in crate::store) fn seed(&self) -> &Arc<ColdV2GenesisRepairSeed> {
         &self.seed
     }

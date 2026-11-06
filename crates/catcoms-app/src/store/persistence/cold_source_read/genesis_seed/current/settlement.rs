@@ -2,10 +2,14 @@
 //! barrier, namespace, physical worker and settled reader. No code may unlink a seed merely by constructing one of these
 //! loans, and no public trait or caller-supplied snapshot can construct the loan.
 use super::*;
-use crate::store::chat_admission::v2_current::ColdV2CurrentPreparation;
-use crate::store::owner_evidence::canonical::v2_registration::{
-    cold_current::PreparedColdV2WriterRegistration, V2WriterObservation,
+use crate::store::chat_admission::v2_current::{
+    ColdV2CurrentPreparation, ColdV2InitializingPreparation,
 };
+use crate::store::owner_evidence::canonical::v2_registration::{
+    cold_current::PreparedColdV2WriterRegistration,
+    cold_initializing::PreparedColdV2InitializingWriterRegistration, V2WriterObservation,
+};
+use crate::store::persistence::v2_genesis_activation::initializing_repair::SavedColdV2GenesisRepairedHead;
 use crate::store::persistence::v2_genesis_activation::settlement::PreparedGenesisSeedSettlement;
 use crate::store::persistence::v2_genesis_activation::{
     cold_writer::PreparedColdV2CurrentWriterReceipt, ColdV2GenesisCurrentHead, SavedV2GenesisHead,
@@ -27,10 +31,17 @@ pub(super) enum GenesisCurrentOwnerRole<'owner> {
         writer: &'owner PreparedColdV2WriterRegistration,
         receipt: &'owner PreparedColdV2CurrentWriterReceipt,
     },
+    // This is the actual row1-repaired output with its original distinct scope and
+    // registration. Neither an unowned Current2 capture nor a warm Saved is reconstructed.
+    Repaired {
+        scope: &'owner ColdV2InitializingPreparation,
+        head: &'owner Arc<SavedColdV2GenesisRepairedHead>,
+        writer: &'owner PreparedColdV2InitializingWriterRegistration,
+    },
 }
 
 /// Borrow the original node-backed source AND actual scope/task/writer/resource owners.
-/// Only the two real unexposed output wrappers below construct this non-generic view.
+/// Only the three real unexposed output wrappers construct this non-generic view.
 /// There is no SDK, transport, RNG or Clock getter, no owned graph extraction and no raw
 /// constructor. The original caller cannot drop/move any of these owners during the loan.
 pub(in crate::store) struct GenesisCurrentOwnerRef<'owner> {
@@ -59,25 +70,41 @@ impl<'owner> GenesisCurrentOwnerRef<'owner> {
     pub(in crate::store) fn warm_scope(&self) -> Option<&'owner V2CurrentPreparation> {
         match self.role {
             GenesisCurrentOwnerRole::Warm { scope, .. } => Some(scope),
-            GenesisCurrentOwnerRole::Cold { .. } => None,
+            GenesisCurrentOwnerRole::Cold { .. } | GenesisCurrentOwnerRole::Repaired { .. } => None,
         }
     }
     pub(in crate::store) fn cold_scope(&self) -> Option<&'owner ColdV2CurrentPreparation> {
         match self.role {
             GenesisCurrentOwnerRole::Cold { scope, .. } => Some(scope),
-            GenesisCurrentOwnerRole::Warm { .. } => None,
+            GenesisCurrentOwnerRole::Warm { .. } | GenesisCurrentOwnerRole::Repaired { .. } => None,
         }
     }
     pub(in crate::store) fn warm_head(&self) -> Option<&'owner Arc<SavedV2GenesisHead>> {
         match self.role {
             GenesisCurrentOwnerRole::Warm { head, .. } => Some(head),
-            GenesisCurrentOwnerRole::Cold { .. } => None,
+            GenesisCurrentOwnerRole::Cold { .. } | GenesisCurrentOwnerRole::Repaired { .. } => None,
         }
     }
     pub(in crate::store) fn cold_head(&self) -> Option<&'owner Arc<ColdV2GenesisCurrentHead>> {
         match self.role {
             GenesisCurrentOwnerRole::Cold { head, .. } => Some(head),
-            GenesisCurrentOwnerRole::Warm { .. } => None,
+            GenesisCurrentOwnerRole::Warm { .. } | GenesisCurrentOwnerRole::Repaired { .. } => None,
+        }
+    }
+
+    pub(in crate::store) fn repaired_scope(&self) -> Option<&'owner ColdV2InitializingPreparation> {
+        match self.role {
+            GenesisCurrentOwnerRole::Repaired { scope, .. } => Some(scope),
+            GenesisCurrentOwnerRole::Warm { .. } | GenesisCurrentOwnerRole::Cold { .. } => None,
+        }
+    }
+
+    pub(in crate::store) fn repaired_head(
+        &self,
+    ) -> Option<&'owner Arc<SavedColdV2GenesisRepairedHead>> {
+        match self.role {
+            GenesisCurrentOwnerRole::Repaired { head, .. } => Some(head),
+            GenesisCurrentOwnerRole::Warm { .. } | GenesisCurrentOwnerRole::Cold { .. } => None,
         }
     }
 
@@ -88,6 +115,7 @@ impl<'owner> GenesisCurrentOwnerRef<'owner> {
         match self.role {
             GenesisCurrentOwnerRole::Warm { writer, .. } => writer.observe_original(),
             GenesisCurrentOwnerRole::Cold { writer, .. } => writer.observe_original(),
+            GenesisCurrentOwnerRole::Repaired { writer, .. } => writer.observe_original(),
         }
     }
 
@@ -136,6 +164,25 @@ impl<'owner> GenesisCurrentOwnerRef<'owner> {
                 let current = scope.current_writer_receipt()?;
                 receipt.require_same_saved_current(current)?;
                 writer.require_same_observation(current.writer_observation())?;
+                writer.require_same_observation(original_writer)
+            }
+            GenesisCurrentOwnerRole::Repaired {
+                scope,
+                head,
+                writer,
+            } => {
+                scope.require_original_source_negative(store, &self.source, self.task)?;
+                scope.current_binding()?;
+                let actual = scope
+                    .saved_head()
+                    .ok_or_else(critical_namespaces::refused)?;
+                if !Arc::ptr_eq(actual, head) {
+                    return Err(critical_namespaces::refused());
+                }
+                // Deliberately cached identities/negatives only. After unlink admission,
+                // independent settlement proof replaces mandatory seed-name validation.
+                head.retains_original(store, &self.source, self.task)?;
+                writer.require_same_observation(head.writer_observation())?;
                 writer.require_same_observation(original_writer)
             }
         }

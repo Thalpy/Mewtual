@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Cleanup after actual repaired genesis (6 November; library only)
+
+The repaired output can settle its original recovery seed without replacing its node or
+closing the store. A closed third owner/read/namespace branch preserves its actual repaired
+scope2/head/task/writer. The shared covering barrier and physical worker retain the same
+fee and admitted progress across unlink/parent-sync errors; settled validation runs before
+old mandatory-seed validation. Five new Windows tests and two existing warm/cold compatibility
+tests pass. This supplies a recovery prerequisite, not operational posting or native routing.
+[Current evidence and open cuts](HANDOVER.md).
+
 ## Cold interrupted-initialization repair (6 November; focused checks pass)
 
 A distinct library caller can retain a new paid SourceSaved/SDK read, authenticate its
