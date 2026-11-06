@@ -2,6 +2,11 @@
 
 ## Founder-only operational verifier (6 November; integration in progress)
 
+Cold historical replay can now run without prematurely acquiring an effect owner. Its
+opaque cursor verifies genuine genesis and every signed Append, then binds once to the
+exact selected target under new live group/source ownership. Historical math alone issues
+no authority. The actual cold physical/Scope adapter remains unfinished.
+
 The new bounded V2 prefix verifier replays complete genesis and signed Append under an
 explicit independent HOST expectation. Semantic Create authority is exact and separate
 from accepted projection; retained results observe original source/group cancellation.

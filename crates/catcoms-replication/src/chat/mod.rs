@@ -35,8 +35,8 @@ pub use projection_admission::{
     ProjectionAdmissionToken, ProjectionCertainty, ProjectionCloseCompletion, ProjectionGroup,
     ProjectionGroupCloseCompletion, ProjectionGroupView, ProjectionGroupViewRevoker,
     ProjectionOpenAdmission, ProjectionView, ProjectionViewRevoker, V2FounderExpectation,
-    V2FounderPrefixVerifier, V2HostSelectionExpectation, V2OriginNegative, V2ProjectionOrigin,
-    V2RetiredAppendData, V2VerifiedAppendCandidate,
+    V2FounderPrefixVerifier, V2FounderReplayCursor, V2HostSelectionExpectation, V2OriginNegative,
+    V2ProjectionOrigin, V2RetiredAppendData, V2VerifiedAppendCandidate,
 };
 pub use storage::{ChatSnapshot, Page, PageCursor, MAX_PAGE_BYTES, MAX_PAGE_RECORDS};
 

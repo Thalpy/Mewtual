@@ -19,7 +19,7 @@ pub use group::{
 };
 pub use guarded::{GuardedCausalHeads, GuardedMessageProjection, GuardedProjection};
 pub use v2_founder::{
-    FounderGenesisAnchorData, V2FounderExpectation, V2FounderPrefixVerifier,
+    FounderGenesisAnchorData, V2FounderExpectation, V2FounderPrefixVerifier, V2FounderReplayCursor,
     V2HostSelectionExpectation, V2RetiredAppendData, V2VerifiedAppendCandidate,
 };
 pub use v2_origin::{V2OriginNegative, V2ProjectionOrigin};

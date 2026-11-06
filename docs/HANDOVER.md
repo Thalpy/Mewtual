@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Nonissuing cold history replay (6 November; focused checks pass)
+
+Core now separates mathematical cold replay from live effect ownership. The new opaque
+cursor verifies genuine genesis and every Append using the same signature/lineage/image
+checks as the active verifier. It cannot issue authority or adopt a snapshot/model. Its
+one-time bind preserves the same cursor on refusal, matches the exact selected Header/state
+and original live group/source, and never rebinds an old token or candidate. The borrowed
+origin also avoids last-payment destruction on a refused bind under a host writer.
+
+All 231 Core chat tests pass in 87.29s, including the four new cold-cursor regressions,
+existing 20/50-writer partition/restart cases and all existing issuer tests. The focused
+14 issuer/cursor cases pass in 1.07s; strict all-target/all-feature Core Clippy passes in
+21.65s. Actual-diff adversarial review has no blocker/high/medium. This removes a cold-start
+dependency cycle; actual App cold physical capture, ownership/binding and native integration
+remain unfinished. Full workspace/native/frontend validation is still open.
+
 ## Root regression corrections (6 November; eight focused checks pass)
 
 The original Studio repair test now constructs and retains its same two-Server fixtures on

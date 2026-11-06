@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Nonissuing founder replay and live binding (6 November)
+
+`V2FounderReplayCursor::from_genesis` verifies complete historical genesis against an
+independently selected HOST expectation. `replay_append` checks the same actual signatures,
+parent, context and derived image as the active verifier; failure leaves its original
+model unchanged and success returns old-model debt for destruction outside host writers.
+It has no snapshot/model initializer or effect-producing API. Host read/cancellation and
+actual resource payments remain separate obligations.
+
+`V2FounderPrefixVerifier::bind_replayed` borrows an outside-owned cursor Option, selected
+Header/state expectation, live group and origin. It checks every fallible predicate before
+consuming the same cursor, using an already paid private identity. Failure preserves the
+cursor and cannot destroy the caller's last origin payment. Root must independently prove
+the exact selected physical lineage and fresh original Current ownership first. This API
+does not establish that the actual App cold adapter or multi-member protocol is complete.
+
 ## V2 founder acceptance and raw-signature interface (6 November; library only)
 
 Core exposes explicit trusted-HOST genesis/selection expectations, one opaque owning

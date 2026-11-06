@@ -2,6 +2,14 @@
 
 ## Exact V2 founder acceptance is not root acquisition (6 November)
 
+The nonissuing cold replay cursor contains verified historical facts, no live permission.
+It has no raw-model initializer or effect-producing API. A one-time bind requires the exact
+selected Header/state and new original group/source negatives before consuming the same
+model. Old tokens/candidates cannot enter that path. The actual App must independently
+prove its physical selected lineage and new Current ownership; parsed labels or matching
+hashes alone are not that proof. Cold reader cancellation and resource bounds remain the
+host's responsibility, and its actual cold adapter is still unfinished.
+
 The bounded founder verifier requires independent HOST pin/genesis expectations; incoming
 self-signed records must not choose that trust. Full signed lineage/image replay, exact
 delegation and authenticated count/context/root inclusion precede Create support. Other

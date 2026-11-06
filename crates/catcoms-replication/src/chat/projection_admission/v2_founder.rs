@@ -3,8 +3,9 @@
 //! This is a crypto/lineage verifier, not the App's storage or native authorization boundary.
 //! HOST trust inputs must come from the original root pin and actual selected save receipts,
 //! independently of the records checked here. There is no initializer from a hot snapshot,
-//! no automatic fork winner and no externally supplied next-model setter. A cold source must
-//! replay the complete signed lineage under its newly paid original source/group lifetime.
+//! no automatic fork winner and no externally supplied next-model setter. Cold readers can
+//! verify complete signed history without an effect owner; the host funds/bounds/cancels
+//! that read/replay, then binds once under actual new Current/group/source ownership.
 use super::*;
 use crate::chat::acceptance_tree::{
     verify_inclusion, PreparedAppend, TreeContext, TreeHash, TreeTip,
@@ -75,6 +76,99 @@ impl std::fmt::Debug for V2HostSelectionExpectation {
 impl V2HostSelectionExpectation {
     pub fn from_trusted_host(header: OwnerHeaderId, state: OwnerStateCommitment) -> Self {
         Self { header, state }
+    }
+}
+
+/// Nonissuing, complete historical founder replay. It starts at authenticated genesis;
+/// there is no constructor from a model, hot snapshot, arbitrary image or old verifier.
+///
+/// This breaks the cold-start cycle: mathematical verification does not need a live
+/// writer/Scope before the host has acquired one. The cold reader must independently
+/// bound/cancel its IO and fund this cursor plus overlapping retired models. The cursor
+/// cannot issue semantic authority, projection support, signing or active candidates.
+pub struct V2FounderReplayCursor {
+    math: ReplayMath,
+    founder: AdmissionBody,
+    // Paid before final owner binding. No allocation occurs after taking the cursor.
+    identity: Arc<()>,
+}
+impl std::fmt::Debug for V2FounderReplayCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("V2FounderReplayCursor")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Shared complete-genesis verification for active and nonissuing replay. Keeping one
+/// enforcement path prevents a cold reader from accepting a weaker root or signature.
+fn verified_genesis_math(
+    expectation: &V2FounderExpectation,
+    profile: &SignedOwnerProfile,
+    founder: &AdmissionBody,
+    header: &SignedOwnerHeader,
+    image: &[u8],
+) -> Result<ReplayMath, ChatError> {
+    let a = &expectation.anchor;
+    if profile.spec().group != a.group
+        || profile.spec().founder != a.founder
+        || profile.id() != a.profile
+        || founder.admission_id() != a.admission
+        || profile.tenure() != a.tenure
+        || header.id() != a.header
+        || header.spec().state != a.state
+    {
+        return Err(ChatError::Scope);
+    }
+    ReplayMath::from_genesis(profile, founder, header, image)
+}
+
+impl V2FounderReplayCursor {
+    /// Verify actual complete genesis against an independently selected HOST pin. A
+    /// matching self-signed incoming profile cannot select its own trust expectation.
+    pub fn from_genesis(
+        expectation: V2FounderExpectation,
+        profile: &SignedOwnerProfile,
+        founder: &AdmissionBody,
+        header: &SignedOwnerHeader,
+        image: &[u8],
+    ) -> Result<Self, ChatError> {
+        let math = verified_genesis_math(&expectation, profile, founder, header, image)?;
+        Ok(Self {
+            math,
+            founder: founder.clone(),
+            identity: Arc::new(()),
+        })
+    }
+
+    /// Borrowed mathematical DATA only, never an adopting or mutable-model interface.
+    pub fn replay_data(&self) -> &ReplayMath {
+        &self.math
+    }
+
+    /// Verify exactly the next founder Append without selecting a live source. Failed,
+    /// skipped, reordered or incompatible steps leave the same cursor unchanged. The
+    /// caller destroys returned old-model debt outside all host writers.
+    pub fn replay_append(
+        &mut self,
+        header: &SignedOwnerHeader,
+        body: &AppendBody,
+        image: &[u8],
+    ) -> Result<V2RetiredAppendData, ChatError> {
+        let context = TreeContext {
+            profile: self.math.profile().id(),
+            admission: self.founder.admission_id(),
+        };
+        if body.spec().old_tip.context != context {
+            return Err(ChatError::Scope);
+        }
+        let step = self
+            .math
+            .derive_successor(header, ReplayBody::Append(body), image)?;
+        let parent = std::mem::replace(&mut self.math, step.next);
+        Ok(V2RetiredAppendData {
+            parent,
+            append: step.append,
+        })
     }
 }
 
@@ -162,23 +256,15 @@ impl V2FounderPrefixVerifier {
         group: &ProjectionGroupView,
         origin: V2ProjectionOrigin,
     ) -> Result<Self, ChatError> {
-        let a = &expectation.anchor;
         if !origin.live()
             || !group.life.live()
-            || group.life.group.as_ref() != a.group.as_slice()
-            || profile.spec().group != a.group
-            || profile.spec().founder != a.founder
-            || profile.id() != a.profile
-            || founder.admission_id() != a.admission
-            || profile.tenure() != a.tenure
-            || header.id() != a.header
-            || header.spec().state != a.state
+            || group.life.group.as_ref() != expectation.anchor.group.as_slice()
         {
             return Err(ChatError::Scope);
         }
         // This checks each actual signature, exact founder/genesis bindings, epoch zero,
         // empty acceptance tree, complete result image and the single original founder slot.
-        let math = ReplayMath::from_genesis(profile, founder, header, image)?;
+        let math = verified_genesis_math(&expectation, profile, founder, header, image)?;
         if !origin.live() || !group.life.live() {
             return Err(ChatError::Scope);
         }
@@ -188,6 +274,47 @@ impl V2FounderPrefixVerifier {
             group: group.life.clone(),
             origin,
             identity: Arc::new(()),
+        })
+    }
+
+    /// Bind ONE fully replayed historical cursor to a genuine new live owner. The actual
+    /// Root must first prove this exact physical selected header/state and its original
+    /// source/pin/lineage under newly acquired Current; hashes alone are not that proof.
+    /// Header identity commits its full group/Profile/issuer/tenure/sequence, and the
+    /// cursor's only construction/advance path verifies the actual signatures and image.
+    ///
+    /// All fallible predicates precede take. On refusal the same cursor/model/payment
+    /// remains in its Option. Previously issued verifiers, candidates and tokens cannot
+    /// enter this path or be rebound; its private identity was paid at cursor creation.
+    /// The origin is borrowed so a refusal cannot destroy its last budget-owning alias
+    /// inside a host writer. Keep both original input owners outside the admission callback.
+    pub fn bind_replayed(
+        cursor: &mut Option<V2FounderReplayCursor>,
+        selected: &V2HostSelectionExpectation,
+        group: &ProjectionGroupView,
+        origin: &V2ProjectionOrigin,
+    ) -> Result<Self, ChatError> {
+        let replayed = cursor.as_ref().ok_or(ChatError::Dependency)?;
+        if !origin.live()
+            || !group.life.live()
+            || group.life.group.as_ref() != replayed.math.profile().spec().group.as_slice()
+            || selected.header != replayed.math.header().id()
+            || selected.state != replayed.math.header().spec().state
+        {
+            return Err(ChatError::Scope);
+        }
+        // Repeat cached original negatives after every preceding predicate. From take
+        // through installation only infallible moves/Arc increments remain.
+        if !origin.live() || !group.life.live() {
+            return Err(ChatError::Scope);
+        }
+        let replayed = cursor.take().expect("checked original replay cursor");
+        Ok(Self {
+            math: replayed.math,
+            founder: replayed.founder,
+            identity: replayed.identity,
+            group: group.life.clone(),
+            origin: origin.clone(),
         })
     }
 

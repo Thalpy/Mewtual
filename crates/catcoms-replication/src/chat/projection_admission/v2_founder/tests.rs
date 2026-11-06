@@ -11,6 +11,8 @@ use crate::chat::owner_state::{
 use catcoms_crypto::DeviceKeypair;
 use std::sync::atomic::AtomicUsize;
 
+mod cold;
+
 const GROUP: &[u8] = b"actual-v2-founder-projection-issuer";
 
 #[derive(Debug)]

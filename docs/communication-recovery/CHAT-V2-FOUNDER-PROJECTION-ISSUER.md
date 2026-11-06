@@ -10,6 +10,18 @@ independent root pin and covering source receipt. Incoming self-signed records m
 select their own expectation. Core verifies each actual signature and complete genesis
 body/image, retaining a bounded `ReplayMath` cursor; no hot-snapshot initializer exists.
 
+Cold verification has a separate opaque, nonissuing `V2FounderReplayCursor`. It starts
+at that same fully authenticated genesis and verifies each Append with the existing
+signature/lineage/image/math checks. It cannot issue semantic authority, projection
+support, a signing permit or an active candidate. It needs no premature writer/Scope
+owner; the physical host still funds, bounds and cancels its actual reads and replay.
+`bind_replayed` consumes that exact cursor once only after matching the full selected
+Header/state and original live group/source. Refusal preserves the same cursor/model and
+preallocated identity. The origin is borrowed, so a refused bind cannot drop its last
+payment under a host writer. No snapshot/model adopter or old-token rebinding exists.
+Actual App frozen-H capture, new cold ownership and final Current proof are still
+unfinished; this mathematical boundary does not establish production restart recovery.
+
 `derive_verified_append` verifies the original founder's signed Append and full result image
 once. Its opaque candidate owns that exact next model and tree output. After actual SavedB/
 current proof, the private Root adapter supplies `V2HostSelectionExpectation` independently
