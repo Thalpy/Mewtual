@@ -369,6 +369,53 @@ fn signed_header_binding_checks_exact_fields_and_signature_but_not_owner_provena
 }
 
 #[test]
+fn signed_append_body_binds_both_counts_even_when_their_delta_stays_valid() {
+    let (empty, initial) = append(37);
+    let frontier = initial.prepare_on_frontier(&empty).unwrap().into_frontier();
+    let leaf = AcceptanceLeaf {
+        channel: 100,
+        acceptance: OwnerFactId::from_bytes([0x62; 32]),
+    };
+    let prepared = frontier.prepare_append(&[leaf]).unwrap();
+    let original = AppendBody::new(AppendSpec {
+        group: initial.spec().group.clone(),
+        previous_tip: OwnerHeaderId::from_bytes([0x63; 32]),
+        old_tip: frontier.tip(),
+        new_tip: prepared.new_tip(),
+        leaves: vec![leaf],
+    })
+    .unwrap();
+    original.prepare_on_frontier(&frontier).unwrap();
+    let signed = header(HeaderKind::AcceptanceAppend, original.id());
+    assert!(signed.verify());
+    assert_eq!(original.verify_header_binding(&signed), Ok(()));
+
+    let mut spec = original.spec().clone();
+    spec.old_tip.count = spec.old_tip.count.checked_sub(1).unwrap();
+    spec.new_tip.count = spec.new_tip.count.checked_sub(1).unwrap();
+    // Both nonempty roots and the ordered leaf batch stay unchanged. The count delta is
+    // still one, so this must reach CID/header binding rather than DATA shape rejection.
+    assert_eq!(
+        spec.new_tip.count - spec.old_tip.count,
+        spec.leaves.len() as u64
+    );
+    let altered = AppendBody::new(spec).unwrap();
+    let altered = AppendBody::decode(&altered.encode()).unwrap();
+    assert_eq!(altered.spec().old_tip.root, original.spec().old_tip.root);
+    assert_eq!(altered.spec().new_tip.root, original.spec().new_tip.root);
+    assert_eq!(altered.spec().leaves, original.spec().leaves);
+    assert_ne!(altered.id(), original.id());
+    assert!(signed.verify(), "the original signed header is unchanged");
+    assert_eq!(original.verify_header_binding(&signed), Ok(()));
+    assert_eq!(
+        altered.verify_header_binding(&signed),
+        Err(ChatError::Scope)
+    );
+    // These genuine test-key signatures bind exact body bytes; they do not select an owner,
+    // authenticate the relabelled tree or supply governing/current/finality provenance.
+}
+
+#[test]
 fn every_truncated_body_and_unknown_options_counts_packed_length_order_refuse() {
     let record = maximum_record().encode();
     let (_, body) = append(64);

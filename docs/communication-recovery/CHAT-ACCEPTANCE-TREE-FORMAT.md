@@ -4,7 +4,8 @@ Concrete proposed hashing/proof contract for the scalable owner-evidence/v2 succ
 design and actual-diff reviews cover the implemented prerequisites. These primitives do not sign a tip, select an owner/root,
 prove historical membership, approve an action or perform storage. Actual pinned owner facts and
 covering cold-page/head publication remain required. Existing action/v1 and owner-fact/v1 bytes
-are unchanged. Compilation and compiled tests remain paused by the user.
+are unchanged. The primary owns resumed serial compiled validation; new regressions below
+remain authored/unrun until that pipeline executes them. HANDOVER records actual results.
 
 ## Exact semantics
 
@@ -21,7 +22,8 @@ lengths after their domain, with no implicit native integer encoding:
 
 A nonempty tree of n leaves splits at the largest power of two STRICTLY smaller than n. The tip
 API carries `(context, count_u64, root32)`. A count-zero tip must have the exact context's empty hash. Node
-hashes/tips/context labels are untrusted data until their external signed/current sources verify.
+hashes and the COMPLETE tip tuple are untrusted data until their independently selected external
+signed/current sources verify. Authenticating a root while accepting an unbound count is insufficient.
 
 ## Append and frontier
 
@@ -77,13 +79,26 @@ format, network request, storage reader or active export path and performs no fu
 
 ## Inclusion and historical prefix proofs
 
-Inclusion accepts an exact leaf/index/count and BOTTOM-UP siblings. The index must be less than a
+Inclusion accepts a supplied leaf/index/count and BOTTOM-UP siblings. The index must be less than a
 nonzero count; the exact path is derived from index/count. At most64 siblings, no trailing or short
-path. It must match the supplied expected tip under the same context. It grants no action authority.
+path. It must match the supplied expected tip under the same context. The caller MUST authenticate
+the COMPLETE `(context, count, root)` tuple independently; proof success does not establish the
+supplied count's provenance. Opaque sibling hashes contain no visible subtree-size labels. For
+example, a37-leaf proof for indices0..31 still matches root37 relabelled with count36: both path
+geometries traverse the same complete left32 subtree and treat the right subtree as opaque.
+The independently constructed genuine tip36 has a different root and rejects that proof.
+
+The actual signed Append body binds both counts and roots through its exact body CID, so changing
+both counts while preserving their difference can pass DATA shape checks but fails the original
+header/body binding. Its real signature alone is not governing selection, historical authority or
+finality. The consumer still needs the independently selected signed body/public-state source,
+exact header binding, state/body transition checks and ordinary action authorization. These
+primitive checks grant none of those missing consumers or action rights.
 
 Historical-prefix verification FIRST requires identical tip contexts, then follows the count-aware
 binary consistency construction for that same split rule. Opaque subtree hashes cannot independently
-authenticate those labels: the caller must verify both contexts against their external signed tips.
+authenticate those labels: the caller must authenticate BOTH complete context/count/root tuples
+against their independently selected external signed tips.
 Zero old count requires its canonical empty root and an empty proof; equal counts
 require equal roots and an empty proof. Reversed counts refuse. For unequal nonzero counts, the
 proof is the canonical recursive SUBPROOF(m,n,complete) sequence, not a free node bag. Start with
@@ -100,12 +115,16 @@ codecs, work/memory invoices and tests.
 
 Compare small 0..257 trees against an independent recursive root/proof generator, including every
 leaf and all old/new prefix counts. Test exact/short/extra/swapped/mutated paths, wrong context,
-leaf/channel/acceptance/index/count, empty/equal/reversed tips, frontier occupancy/root mismatch,
+leaf/channel/acceptance/index and independently constructed count/root tips, count-induced range/depth
+refusals, empty/equal/reversed tips, frontier occupancy/root mismatch,
 batch ordering/duplicates/count overflow and byte-order golden vectors. Cover powers of two and
 u64 boundaries without allocating their imagined leaves: synthetic independently folded subtree
 roots pin path shape, proof65 and checked node-count arithmetic. Verify every prepared node's range,
 that a bad batch leaves the original unchanged and that batches partitioning the same ordered
 leaves produce identical final roots. No whole-log scan or caller-supplied success flag is involved.
+Separately pin the legitimate opaque same-geometry count ambiguity rather than asserting every
+untrusted relabel must fail. A genuine signed Append-body test must preserve the old/new count
+delta so altered DATA decodes, then reject its changed CID under the unchanged original header.
 
 The first implementation is a format prerequisite for the upcoming owner log, whose actual consumer
 remains an integration gate. It is not production activation or a claim that cold pages, headers,
@@ -118,12 +137,17 @@ adversarial review found no blocker/high/medium. Ten regressions are authored, i
 small recursive reference paths/prefixes, mutation/reordering/refusal cases, exact append ranges,
 partition invariance, 120 internal carries, 65-hash consistency and 64-hash inclusion at u64 limits,
 and independently enumerated creation ordinals extending beyond u64.
-They have NOT been compiled or executed during the user pause; only source formatting/whitespace
-checks ran. An optional low-priority follow-up remains before format release: independently compute
+The primary's first resumed run passed16/17 tree/planner tests; the remaining pre-existing test
+incorrectly required every root37/count36 relabel to fail. The corrected negative uses the actual
+independently constructed root36 and retains range/depth/short/extra refusals. One new tree test
+pins the opaque ambiguity and one new body test pins genuine signed count/CID binding. Those
+changes are authored/unrun here; the primary owns their serial execution and full-suite gates.
+An optional low-priority follow-up remains before format release: independently compute
 and freeze literal empty/leaf/internal digest outputs alongside the existing frozen exact input-byte
 vector. Do not mistake the currently runtime-hashed expected frame for that independent digest set.
 
-The additional proof planner has seven authored/unrun regressions and clear actual-diff review:
+The additional proof planner has seven regressions and clear actual-diff review:
 independent recursive small-tree plans, complete-node reconstruction into the actual proof verifiers,
 hash substitution, canonical range/fold refusal, exact 64/65 depths and checked near-u64-limit node
-positions. Source formatting and whitespace checks are the only new executed checks during the pause.
+positions. Those seven passed in the primary's resumed tree/planner run. This narrow correction
+changes no planner, hash input, proof shape, wire bytes or public API.

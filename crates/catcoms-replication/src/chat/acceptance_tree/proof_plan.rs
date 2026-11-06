@@ -24,7 +24,7 @@ impl SubtreeRange {
             return Err(TreeError::Node);
         }
         let largest = 1u64 << (63 - count.leading_zeros());
-        if first % largest != 0 || count.count_ones() > 64 {
+        if !first.is_multiple_of(largest) || count.count_ones() > 64 {
             return Err(TreeError::Node);
         }
         Ok(Self { first, count })

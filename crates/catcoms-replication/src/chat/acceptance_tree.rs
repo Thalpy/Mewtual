@@ -159,7 +159,7 @@ impl CreatedNode {
 /// Shared checked geometry for newly created records and cold-proof lookup labels. Neither
 /// caller obtains hash authentication or storage access from a valid sequence position.
 fn creation_ordinal(first: u64, count: u64) -> Result<u128, TreeError> {
-    if !count.is_power_of_two() || first % count != 0 {
+    if !count.is_power_of_two() || !first.is_multiple_of(count) {
         return Err(TreeError::Node);
     }
     let end = first.checked_add(count).ok_or(TreeError::Count)?;
@@ -306,8 +306,11 @@ fn split(count: u64) -> u64 {
     1u64 << (63 - (count - 1).leading_zeros())
 }
 
-/// Check exact bottom-up inclusion siblings. No signature, context provenance, actual body
-/// availability or authority follows from success: independently verify the signed tip too.
+/// Check exact bottom-up inclusion siblings against the supplied tip. The caller MUST
+/// independently authenticate the COMPLETE `(context, count, root)` tuple. Opaque siblings
+/// do not reveal their subtree sizes: relabelling a count can preserve this path's geometry
+/// and still match the unchanged root. Success does not independently authenticate count,
+/// signature, context provenance, actual body availability or authority.
 pub fn verify_inclusion(
     tip: TreeTip,
     leaf: AcceptanceLeaf,

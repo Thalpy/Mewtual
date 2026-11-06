@@ -175,6 +175,10 @@ fn every_small_inclusion_and_prefix_matches_the_recursive_reference() {
 fn inclusion_rejects_wrong_leaf_context_index_count_and_path_shape() {
     let mut reference = Reference::new(37);
     let tip = reference.tip(37);
+    // Use the independently constructed shorter tree, not count36 pasted onto root37.
+    // An inclusion path cannot inspect the leaf count hidden inside an opaque sibling.
+    let shorter = reference.tip(36);
+    assert_ne!(shorter.root, tip.root);
     for index in 0..37 {
         let proof = reference.inclusion(0, 37, index);
         let mut different = leaf(index as u64);
@@ -188,9 +192,7 @@ fn inclusion_rejects_wrong_leaf_context_index_count_and_path_shape() {
         let mut other_context = tip;
         other_context.context.admission = OwnerFactId::from_bytes([3; 32]);
         assert!(verify_inclusion(other_context, leaf(index as u64), index as u64, &proof).is_err());
-        let mut other_count = tip;
-        other_count.count -= 1;
-        assert!(verify_inclusion(other_count, leaf(index as u64), index as u64, &proof).is_err());
+        assert!(verify_inclusion(shorter, leaf(index as u64), index as u64, &proof).is_err());
         for at in 0..proof.len() {
             let mut mutated = proof.clone();
             mutated[at] = TreeHash::from_bytes([0xff; 32]);
@@ -204,6 +206,43 @@ fn inclusion_rejects_wrong_leaf_context_index_count_and_path_shape() {
     assert!(verify_inclusion(reference.tip(0), leaf(0), 0, &[]).is_err());
     assert!(verify_inclusion(tip, leaf(0), 37, &[]).is_err());
     assert!(verify_inclusion(tip, leaf(0), 0, &[tip.root; 65]).is_err());
+    let proof = reference.inclusion(0, 37, 0);
+    // Unlike the opaque same-geometry case below, count32 changes this path's depth.
+    assert_eq!(
+        verify_inclusion(TreeTip { count: 32, ..tip }, leaf(0), 0, &proof),
+        Err(TreeError::Proof)
+    );
+    let last = reference.inclusion(0, 37, 36);
+    assert_eq!(
+        verify_inclusion(TreeTip { count: 36, ..tip }, leaf(36), 36, &last),
+        Err(TreeError::Proof),
+        "the supplied count still bounds the index"
+    );
+}
+
+#[test]
+fn opaque_inclusion_siblings_do_not_authenticate_the_supplied_count() {
+    let mut reference = Reference::new(37);
+    let actual = reference.tip(37);
+    let shorter = reference.tip(36);
+    let relabelled = TreeTip {
+        count: 36,
+        ..actual
+    };
+    assert_ne!(actual.root, shorter.root);
+    for index in 0..32 {
+        let proof = reference.inclusion(0, 37, index);
+        // Both shapes put these leaves below the same complete left32 subtree. Its opaque
+        // right sibling hides whether it has four or five leaves; no sibling-size bytes are
+        // committed by an inclusion path. This untrusted relabel is NOT an authentic tip36.
+        assert_eq!(
+            verify_inclusion(relabelled, leaf(index as u64), index as u64, &proof),
+            Ok(())
+        );
+        assert!(verify_inclusion(shorter, leaf(index as u64), index as u64, &proof).is_err());
+    }
+    // A real consumer must authenticate the full tuple from its independently selected
+    // signed body/state source, rather than interpreting path success as count provenance.
 }
 
 #[test]
