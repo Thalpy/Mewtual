@@ -24,6 +24,13 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 mod association;
+mod cold_initializing;
+pub(in crate::store) use cold_initializing::{
+    ColdInitializingGenesisAdmission, ColdInitializingGenesisHeadAdmission,
+    ColdRepairedGenesisCurrentAdmission, ColdRepairedGenesisCurrentProofAdmission,
+    ColdV2InitializingPreparation, DurableColdGenesisInitializingAdmission,
+    COLD_INITIALIZING_SCOPE_METADATA_BYTES,
+};
 pub(in crate::store) mod cold_owned;
 mod cold_read;
 mod current_validation;
@@ -33,7 +40,6 @@ pub(in crate::store) use cold_owned::{
     ColdCurrentProofAdmission, ColdOwnedCurrentAdmission, ColdV2CurrentPreparation,
     ColdV2CurrentProgressData, COLD_V2_CURRENT_SCOPE_METADATA_BYTES,
 };
-#[cfg(test)]
 pub(in crate::store) use cold_read::ColdV2InitializingReadAdmission;
 pub(in crate::store) use cold_read::{ColdV2CurrentReadAdmission, ColdV2GenesisScopeBasis};
 pub(in crate::store) use settlement::{

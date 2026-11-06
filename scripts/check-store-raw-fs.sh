@@ -89,6 +89,26 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.group_directory.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.target_directory.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|root.directory.sync_all().map_err(io)?;']=1
+  # Authenticated cold Initializing1 repair, under its concrete new original-read capture
+  # and SAME actual AD/pins/canonical/Root owner. Capture synchronizes existing fixed
+  # non-epoch objects only. The distinct installed Init1 writer, after an even-clean scope
+  # barrier, may strict-create/complete only the selected pin and head.stage, promote the
+  # SAME complete stage to absent head.bin, and sync their original parents. No source,
+  # activation seed, private/unknown work or epoch-family file is rewritten or removed.
+  # The readonly selected-target opener has no create/truncate/append option; its handle
+  # is cached before identity queries and can never reopen a failed original selection.
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|capture_initializing|files.seed.object.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|capture_initializing|files.group_directory.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|capture_initializing|files.target_directory.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|capture_initializing|guard.archive_root().directory.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|open_selected_target|let file = std::fs::OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|create_target|let file = std::fs::OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|create_target|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|finish_target|selected.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|repair|files.group_directory.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|repair|fs::rename(&files.stage_path, &files.head_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|repair|.sync_all()']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|repair|files.target_directory.sync_all().map_err(io)?;']=1
   # Actual seed-present Current2 cleanup only, under its SAME successful covering scope
   # admission, concrete pins/canonical/Root guard and retained original selection. The worker
   # can unlink only its fixed original activation.seed and sync that held group directory;

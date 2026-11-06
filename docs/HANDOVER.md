@@ -1,5 +1,46 @@
 # Mewtual; Handover
 
+## Interrupted Initializing1 repair (6 November; focused checks pass, Chat V2 incomplete)
+
+The new physical capture/prefix worker, shared16 claim, same-owner handoff, distinct installed
+writer, covering scope1 barrier and owning caller are composed in the ordinary library build.
+They retain the same restored source/SDK, exact selected files/ciphertext, owner/nonce/writer
+and node; Current2 is last. The12 physical-input/capture regressions pass in233.36s, including
+six genuine original-producer cuts, late source/ID3 replacement, held partial/unknown work,
+exact cached selection and metadata/source lifetime. The combined caller/task/lifecycle run
+passed8/9 in207.90s and found a real retry defect: an outside-writer drain discarded prepaid
+map backing before the first installer after a scope1 write error. All three writer families
+now retain that original backing until an actual slot makes it redundant. No positive proof
+reads the new disposal-only bit. The previously failing both-scope1-cut regression now passes
+in76.51s with the same source/owner/nonce/writer; the strengthened cold-current early-drain
+regression passes in34.16s. Both genuine warm backing/refund tests pass in53.12s, including
+two actual preparations before the shared map exists and exact outside-writer refund only
+after the second original registration installs into that same map.
+Actual-diff adversarial re-review clears the repair, all3 backing fixes and12 exact raw-FS
+allowances. The scanner is unchanged. An early public-retry platform refusal precedes new
+credit/maintenance; its genuine non-Windows body is authored but unrun on this desktop.
+
+All211 typed-chat Core tests pass in90.83s, including20/50-member partition/restart cases.
+Frontend static checking passes with0 errors/warnings; production build passes in39.36s
+with the existing large-chunk advisory. The earlier full frontend3434 pass remains unchanged.
+Strict all-target/all-feature whole-root-workspace Clippy passes after all backing fixes
+and regression additions (56.49s). The separate native workspace check passes (2m24s).
+`cargo deny check` passes advisories/bans/licenses/sources with duplicate/unused-wrapper
+warnings; its initial sandbox cache-lock refusal was resolved by running the required audit
+with cache access. Formatting and ambient/raw-FS gates pass.
+
+The new mixed17-source test
+`initializing_claim_and_warm_share_exact_sixteen_until_actual_owner_handoff` is reserved for
+the end alongside the two older capacity tests and the named slow10,000-operation test.
+Complete root/native suites and remaining native/flow gates are not yet passing
+evidence. This is Windows-only complete-journal/loaded-row1 recovery, not all interrupted
+genesis or operational chat. No-row/partial-first-seed, repaired-owner cleanup, later-head
+transactions/indexes, live SDK/authority/transport and native/UI activation remain open.
+[Repair contract](communication-recovery/CHAT-V2-GENESIS-INITIALIZING-REPAIR.md) and the
+[next connected operational cohort](communication-recovery/CHAT-V2-OPERATIONAL-FIRST-CREATE-HOST.md)
+record those precise boundaries. The separately reviewed Create/Append DATA packet remains
+undeclared until its actual operational storage/caller consumes it.
+
 ## Cold read resource reuse (6 November; internal prerequisite)
 
 The existing cold Current capture now obtains its unchanged paid, read-only metadata loan

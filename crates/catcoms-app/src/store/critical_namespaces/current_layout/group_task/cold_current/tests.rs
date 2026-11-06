@@ -244,6 +244,12 @@ fn install_and_receipt_refuse_before_handoff_then_real_binding_uses_same_writer(
         })
         .unwrap();
     assert!(store.require_no_pending_v2_group(&f.group).is_err());
+    // A refused first installer has not made this original prepaid map redundant.
+    // The caller's ordinary outside-writer epilogue must preserve it for SAME-instance
+    // retry, rather than leave Runtime(None) with no backing on the next installation.
+    let before_drain = f.pool.charged_for_test();
+    writer.drain_unused_outside_writers();
+    assert_eq!(f.pool.charged_for_test(), before_drain);
     let retired = store
         .with_cold_owned_current_admission(&scope, &source, &task, |admission| {
             task.handoff_cold_current_owner(admission)

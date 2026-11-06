@@ -1,63 +1,54 @@
 //! Task-free historical row1/row2 negative owner locks. These roles cannot install a
 //! directory task or writer, and cannot be passed to either warm metadata writer.
 use super::*;
-#[cfg(test)]
 use crate::store::chat_admission::v2_current::ColdV2InitializingReadAdmission;
 use crate::store::chat_admission::v2_current::{
     ColdV2CurrentReadAdmission, ColdV2GenesisScopeBasis,
 };
 
 enum ReadAdmission<'reader, 'writer> {
-    #[cfg(test)]
     Initializing(&'reader ColdV2InitializingReadAdmission<'writer>),
     Current(&'reader ColdV2CurrentReadAdmission<'writer>),
 }
 impl<'reader, 'writer> ReadAdmission<'reader, 'writer> {
     fn store(&self) -> &'reader ServerStore {
         match self {
-            #[cfg(test)]
             Self::Initializing(a) => a.store(),
             Self::Current(a) => a.store(),
         }
     }
     fn source(&self) -> &GenesisSourceDataRef<'_> {
         match self {
-            #[cfg(test)]
             Self::Initializing(a) => a.source(),
             Self::Current(a) => a.source(),
         }
     }
     fn group(&self) -> &[u8] {
         match self {
-            #[cfg(test)]
             Self::Initializing(a) => a.group(),
             Self::Current(a) => a.group(),
         }
     }
     fn signer(&self) -> &[u8; 32] {
         match self {
-            #[cfg(test)]
             Self::Initializing(a) => a.signer(),
             Self::Current(a) => a.signer(),
         }
     }
     fn basis(&self) -> &ColdV2GenesisScopeBasis {
         match self {
-            #[cfg(test)]
             Self::Initializing(a) => a.scope_basis_data(),
             Self::Current(a) => a.scope_basis_data(),
         }
     }
     fn validate_source_only(&self) -> Result<(), AppError> {
         match self {
-            #[cfg(test)]
             Self::Initializing(a) => a.validate_source_only(),
             Self::Current(a) => a.validate_source_only(),
         }
     }
     fn association(&self) -> Result<CurrentFilenameAssociation<'reader>, AppError> {
         match self {
-            #[cfg(test)]
             Self::Initializing(a) => {
                 let admission: &'reader ColdV2InitializingReadAdmission<'writer> = a;
                 admission.current_filename_association()
@@ -112,7 +103,6 @@ impl ColdOwnerReadNamespace<'_, '_> {
 }
 
 /// Read-only historical Initializing1 with no owner. It carries no Init1 storage permit.
-#[cfg(test)]
 pub(in crate::store) struct ColdV2InitializingOwnerReadNamespace<'reader, 'writer> {
     inner: ColdOwnerReadNamespace<'reader, 'writer>,
 }
@@ -142,7 +132,6 @@ macro_rules! accessors {
         }
     };
 }
-#[cfg(test)]
 accessors!(ColdV2InitializingOwnerReadNamespace);
 accessors!(ColdV2CurrentOwnerReadNamespace);
 
@@ -170,7 +159,6 @@ fn lock_read_namespace<'reader, 'writer>(
     Ok(result)
 }
 impl ServerStore {
-    #[cfg(test)]
     pub(in crate::store) fn lock_cold_initializing_v2_owner_namespace<'reader, 'writer>(
         &'reader self,
         admission: &'reader ColdV2InitializingReadAdmission<'writer>,

@@ -79,7 +79,9 @@ pub(super) fn require_fixed_genesis_inventory(
 }
 
 #[cfg(windows)]
-fn require_exact_names(path: &Path, expected: &[&str]) -> Result<(), AppError> {
+// Shared only with the closed Initializing1 inventory. This is a bounded negative name
+// comparison; callers still prove/pay their own platform, directories and concrete role.
+pub(super) fn require_exact_names(path: &Path, expected: &[&str]) -> Result<(), AppError> {
     if expected.len() > 8 {
         return Err(critical_namespaces::refused());
     }

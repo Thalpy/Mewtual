@@ -66,6 +66,31 @@ fn sdk_budget() -> GenesisSeedBudget {
 /// chooses the existing injected scope flush failure AFTER actual save_head, never a row
 /// constructor. Cold role selection must still be made by the actual Runtime on remount.
 pub(in crate::store) fn fixture(number: u64, initializing: bool) -> ColdFixture {
+    fixture_at_cut(
+        number,
+        if initializing {
+            ColdFixtureCut::CompleteInitializing
+        } else {
+            ColdFixtureCut::Current
+        },
+    )
+}
+
+/// Cuts in the ACTUAL original warm producer, not post-hoc file truncation or invented
+/// rows. Root's partial repair tests require a new mount/read/SDK after these owners drain.
+#[derive(Clone, Copy)]
+pub(in crate::store) enum ColdFixtureCut {
+    Current,
+    CompleteInitializing,
+    BeforePin,
+    EmptyPin,
+    ShortPin,
+    EmptyStage,
+    ShortStage,
+    CompleteStage,
+}
+
+pub(in crate::store) fn fixture_at_cut(number: u64, cut: ColdFixtureCut) -> ColdFixture {
     let path = tempfile::tempdir().unwrap();
     let pool = CriticalCatalogReadPool::new(CAPACITY).unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(number);
@@ -155,6 +180,19 @@ pub(in crate::store) fn fixture(number: u64, initializing: bool) -> ColdFixture 
         let scope = scope.as_mut().unwrap();
         let mut writer =
             PreparedV2WriterRegistration::prepare(store, &source_ref, &task, scope).unwrap();
+        let metadata_fault = match cut {
+            ColdFixtureCut::Current
+            | ColdFixtureCut::CompleteInitializing
+            | ColdFixtureCut::BeforePin => 0,
+            ColdFixtureCut::EmptyPin => 182,
+            ColdFixtureCut::ShortPin => 183,
+            ColdFixtureCut::EmptyStage => 184,
+            ColdFixtureCut::ShortStage => 185,
+            ColdFixtureCut::CompleteStage => 186,
+        };
+        store
+            .critical_namespace_fault
+            .store(metadata_fault, Ordering::SeqCst);
         let mut saved_head = false;
         let result = store.finish_v2_genesis_current(
             scope,
@@ -166,9 +204,13 @@ pub(in crate::store) fn fixture(number: u64, initializing: bool) -> ColdFixture 
                 let mut owner = task.lock_initializing_owner_namespace(admission)?;
                 owner.install_writer(&mut writer)?;
                 let guard = owner.lock_archive_root_for_writer(&writer)?;
+                if matches!(cut, ColdFixtureCut::BeforePin) {
+                    // Real durable scope1 and installed writer, before the first pin open.
+                    return Err(crate::store::critical_namespaces::refused());
+                }
                 let saved = activation.save_head(&guard)?;
                 saved_head = true;
-                if initializing {
+                if matches!(cut, ColdFixtureCut::CompleteInitializing) {
                     // The complete real pin/head exists, but the disk still has the real
                     // earlier Initializing1 row. Warm Runtime2 is intentionally discarded.
                     store
@@ -178,14 +220,33 @@ pub(in crate::store) fn fixture(number: u64, initializing: bool) -> ColdFixture 
                 Ok(saved)
             },
         );
-        assert!(
-            saved_head,
-            "fixture must cross actual complete head barriers"
-        );
-        if initializing {
-            assert!(result.is_err());
-        } else {
-            result.unwrap();
+        match cut {
+            ColdFixtureCut::Current => {
+                assert!(
+                    saved_head,
+                    "fixture must cross actual complete head barriers"
+                );
+                result.unwrap();
+            }
+            ColdFixtureCut::CompleteInitializing => {
+                assert!(
+                    saved_head,
+                    "fixture must cross actual complete head barriers"
+                );
+                assert!(result.is_err());
+            }
+            ColdFixtureCut::BeforePin
+            | ColdFixtureCut::EmptyPin
+            | ColdFixtureCut::ShortPin
+            | ColdFixtureCut::EmptyStage
+            | ColdFixtureCut::ShortStage
+            | ColdFixtureCut::CompleteStage => {
+                assert!(
+                    !saved_head,
+                    "fault must precede the actual saved-head receipt"
+                );
+                assert!(result.is_err());
+            }
         }
         // Every warm owner/writer/task/SDK/read and temporary credit drains before remount.
         // The implicit scope above owns the real preparation; no stale sender is retained.

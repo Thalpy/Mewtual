@@ -13,6 +13,7 @@ use crate::store::persistence::{
 };
 use catcoms_rt::RequestAuthority;
 pub(in crate::store) mod cold_current;
+pub(in crate::store) mod cold_initializing;
 
 const MAX_WRITERS: usize = crate::store::MAX_CHAT_ADMISSION_IDENTITIES;
 const WRITER_METADATA_FEE: usize = 8 * 1024;
@@ -170,6 +171,10 @@ pub(in crate::store) struct PreparedV2WriterRegistration {
     // them only outside ALL host writers, never refund the last account lease under a lock.
     retired: Option<Slot>,
     expansion: Option<SlotBuffer>,
+    // Resource disposition ONLY. Set under canonical after this exact generation owns a
+    // real slot; it grants no installation/Current proof. Before then a failed pre-install
+    // scope/file barrier must retain the original backing for this SAME prepared retry.
+    expansion_redundant: bool,
     stamp: ScopeStamp,
     task: OriginalV2GenesisGroupObservation,
     activation: Arc<SavedV2GenesisActivationSeed>,
@@ -343,6 +348,7 @@ impl PreparedV2WriterRegistration {
         Ok(Self {
             retired: None,
             expansion,
+            expansion_redundant: false,
             stamp,
             task: task.observe_original(),
             activation: scope.activation().clone(),
@@ -389,7 +395,9 @@ impl PreparedV2WriterRegistration {
     /// unused/retired metadata accounts without reentering a pool under any host writer.
     pub(in crate::store) fn drain_unused_outside_writers(&mut self) {
         drop(self.retired.take());
-        drop(self.expansion.take());
+        if self.expansion_redundant {
+            drop(self.expansion.take());
+        }
     }
 
     pub(in crate::store) fn observe_original(&self) -> V2WriterObservation {
@@ -438,6 +446,7 @@ impl super::current_vacancy::InitializingV2OwnerNamespace<'_, '_> {
                 if classify_original_owner(&slots[index], &prepared.life)?
                     == ExistingOwner::SameOriginal
                 {
+                    prepared.expansion_redundant = true;
                     return Ok(());
                 }
                 if prepared.retired.is_some() {
@@ -469,6 +478,9 @@ impl super::current_vacancy::InitializingV2OwnerNamespace<'_, '_> {
                 );
             }
         }
+        // Only a real slot/unchanged actual owner proves its unused backing redundant.
+        // Cache before a late negative refusal; the actual Runtime still owns its buffer.
+        prepared.expansion_redundant = true;
         prepared.require_initializing(admission)
     }
 

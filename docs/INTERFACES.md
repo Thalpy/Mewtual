@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Cold Initializing1 continuation (6 November; focused validation passes)
+
+`PreparedColdV2GenesisInitializing<T,R>` owns an actual independently restored source/SDK,
+the caller's runtime inputs, exact cold capture, registered task, scope owner and installed
+writer through every refusal. `retry` repairs only the authenticated original candidates
+and persists Current2 after their barriers. `take_current` repeats the final concrete proof
+before returning `UnexposedRepairedV2GenesisCurrent<T,R>`, whose public surface is immutable
+`data` and `validate_original`. It exposes no Store, SDK, raw node, authoring or runnable
+handle. This distinct family keeps its recovery seed; it has no cleanup adapter yet. The
+complete historical Initializing1 capture remains test-only, while the actual task-free
+read role now also serves this new partial-repair consumer. The profile is Windows-only;
+focused tests, strict root lint and native compilation pass. Complete suites and larger
+capacity cases remain open, and live/native Chat V2 remains disabled.
+[Ownership and refusal contract](communication-recovery/CHAT-V2-GENESIS-INITIALIZING-REPAIR.md).
+
 ## Retained genesis cleanup (6 November; library only)
 
 Both actual `UnexposedV2GenesisCurrent` and `UnexposedColdV2GenesisCurrent` add

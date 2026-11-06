@@ -2,7 +2,6 @@
 //! effects and cannot enter warm Seed/Head writers. Root separately authenticates its NEW
 //! complete cold DATA receipt using the exact same resource loan and actual scope basis.
 use super::*;
-#[cfg(test)]
 use crate::store::chat_admission::v2_current::ColdV2InitializingReadAdmission;
 use crate::store::chat_admission::v2_current::{
     ColdV2CurrentReadAdmission, ColdV2GenesisScopeBasis,
@@ -29,8 +28,8 @@ pub(in crate::store) const COLD_V2_GROUP_READ_GUARD_BYTES: usize =
         + 64
         + 128;
 
-// The historical Initializing1 role has only a test consumer. Its identical layout
-// keeps this conservative four-Current-guard invoice equal to the earlier two+two sum.
+// Both historical roles are consumed. Preserve the conservative four-Current layout
+// invoice, with the actual equal-layout assertion below pinning its two+two coverage.
 #[cfg(test)]
 const _: () = {
     assert!(
@@ -41,7 +40,6 @@ const _: () = {
 
 /// Existing unowned Initializing1 read only. In particular this has neither a scope1 storage
 /// permit nor the original writer/task identities required to write a head.
-#[cfg(test)]
 pub(in crate::store) struct ColdV2InitializingGroupReadGuard<'reader, 'writer> {
     // Directory/path drains before Root/canonical/pins. The borrowed loan was created before
     // admission and cannot become the last paid owner during any guard's destruction.
@@ -154,7 +152,6 @@ macro_rules! read_guard {
         }
     };
 }
-#[cfg(test)]
 read_guard!(
     ColdV2InitializingGroupReadGuard,
     ColdV2InitializingReadAdmission,

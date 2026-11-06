@@ -15,6 +15,9 @@ use catcoms_sync::local_chat_scope::ManagedChatScopeReservation;
 pub(in crate::store) struct PreparedColdV2WriterRegistration {
     retired: Option<Slot>,
     expansion: Option<SlotBuffer>,
+    // Disposal bookkeeping only, never an installed-generation witness. Retain the exact
+    // prepaid backing until this SAME original registration has an actual Runtime slot.
+    expansion_redundant: bool,
     stamp: ScopeStamp,
     task: OriginalV2GenesisGroupObservation,
     head: Arc<ColdV2GenesisCurrentHead>,
@@ -119,6 +122,7 @@ impl PreparedColdV2WriterRegistration {
         Ok(Self {
             retired: None,
             expansion,
+            expansion_redundant: false,
             stamp,
             task: task.observe_original(),
             head: scope.head().clone(),
@@ -172,7 +176,9 @@ impl PreparedColdV2WriterRegistration {
     /// weak generation's final fee or unused map backing must never refund under a writer.
     pub(in crate::store) fn drain_unused_outside_writers(&mut self) {
         drop(self.retired.take());
-        drop(self.expansion.take());
+        if self.expansion_redundant {
+            drop(self.expansion.take());
+        }
     }
 }
 
@@ -202,6 +208,7 @@ impl ColdOwnedV2CurrentOwnerNamespace<'_, '_> {
                 if classify_original_owner(&slots[index], &prepared.life)?
                     == ExistingOwner::SameOriginal
                 {
+                    prepared.expansion_redundant = true;
                     return Ok(());
                 }
                 if prepared.retired.is_some() {
@@ -230,6 +237,7 @@ impl ColdOwnedV2CurrentOwnerNamespace<'_, '_> {
                 );
             }
         }
+        prepared.expansion_redundant = true;
         prepared.require_current(admission)
     }
     pub(in crate::store) fn require_installed_cold_writer(

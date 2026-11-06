@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Cold prefix completion needs authenticated journal AND actual Init1 ownership (6 November)
+
+An empty or matching file does not grant repair permission. The new closed library path
+requires an actual loaded unowned Initializing1 row, independent paid original SourceSaved/
+SDK evidence, the complete authenticated original activation journal and bounded closed
+inventory. Only its registered task, cached same-row owner, installed distinct writer and
+fresh even-clean scope1 barrier may complete the exact pin/stage candidate. A selected File
+is retained before identity/write; retries never reopen a failed object or truncate a suffix.
+Current must be complete, stage/current coexistence refuses, and unknown/private work stays
+preserved. Exact prefix comparisons precede final source/ID3/held-name proofs; the complete
+stage is proved again before promotion. SavedHead is cached before Current2 changes, and
+dirty retries retain the same owner/writer/head rather than replaying initialization.
+This adds no fresh creation grant, SDK, nonce, warm Saved receipt or generic adopter. It
+inherits the cooperative private-directory/session assumptions and only the audited Windows
+native inventory profile. Focused Windows validation passes; full-suite and capacity
+acceptance, no-row/partial first journal,
+later operational heads, native rollout and external rollback anchoring remain open.
+[Full contract and failure matrix](communication-recovery/CHAT-V2-GENESIS-INITIALIZING-REPAIR.md).
+
 ## Original seed deletion requires a covering Current2 barrier (6 November; library only)
 
 A loaded clean scope table alone cannot authorize deletion of its activation recovery seed.

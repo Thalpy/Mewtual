@@ -1,5 +1,20 @@
 # Mewtual; Architecture
 
+## Cold interrupted-initialization repair (6 November; focused checks pass)
+
+A distinct library caller can retain a new paid SourceSaved/SDK read, authenticate its
+original complete activation journal, and select absent or exact-prefix pin/stage files
+for the actual loaded Initializing1 row. Its new task shares the existing16-slot registry;
+the same cached scope owner and distinct installed writer survive failures. A fresh covering
+scope1 write, even when clean, precedes dependent file effects under continuous admission.
+The exact repaired-head receipt is cached before the same owner advances to Current2 LAST.
+The physical worker extends only its original selected handles and never fabricates warm
+Saved or unowned Current2 proof. The first profile is Windows-only. Focused tests, strict
+root lint and separate native compilation pass; full-suite/large-capacity acceptance remains
+open. No operational text dispatch or native activation is supplied. Missing first
+journal/no-row and later-head recovery remain distinct open work.
+[Concrete contract](communication-recovery/CHAT-V2-GENESIS-INITIALIZING-REPAIR.md).
+
 ## Original genesis seed settlement (6 November; library only)
 
 The actual warm/cold unexposed Current wrappers can retain and retry cleanup of their original

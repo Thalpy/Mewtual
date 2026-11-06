@@ -10,13 +10,17 @@ pub(in crate::store) use settlement::{
 // The explicit ID3 wrapper alone admits the connected cold library path. Default/ID2
 // openers still refuse this layout before their older cleanup paths can run.
 pub(in crate::store) mod cold_read;
-#[cfg(test)]
 pub(in crate::store) use cold_read::ColdV2InitializingGroupReadGuard;
 pub(in crate::store) use cold_read::{ColdV2CurrentGroupReadGuard, COLD_V2_GROUP_READ_GUARD_BYTES};
 pub(in crate::store) use group_task::cold_current::{
     ColdOwnedV2CurrentGroupGuard, ColdV2CurrentProofGroupGuard,
 };
 
+pub(in crate::store) use group_task::cold_initializing::{
+    ColdInitializingV2GenesisReadGroupGuard, ColdInitializingV2GenesisRepairGroupGuard,
+    ColdRepairedV2GenesisCurrentGroupGuard, ColdRepairedV2GenesisCurrentProofGroupGuard,
+    COLD_INITIALIZING_GROUP_GUARD_BYTES,
+};
 pub(in crate::store) mod group_task;
 pub(in crate::store) use group_task::{
     CreatingV2GenesisDirectoryGuard, InitializingV2GenesisGroupGuard,

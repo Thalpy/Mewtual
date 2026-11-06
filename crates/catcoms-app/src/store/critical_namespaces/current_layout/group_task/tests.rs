@@ -717,3 +717,5 @@ fn task_cancel_is_one_original_negative_before_source_and_runtime_payload_drain(
         .capture_chat_admission(key(b"unrelated after original task cancel", [0xf1; 32]))
         .is_ok());
 }
+
+mod writer_backing;

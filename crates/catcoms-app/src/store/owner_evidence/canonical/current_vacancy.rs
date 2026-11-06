@@ -17,6 +17,7 @@ use crate::store::persistence::V2GenesisDirectoryCustody;
 // Concrete read and ownership roles share the same fixed pending registry and actual
 // canonical owner; neither a parsed receipt nor the public wrapper can construct them.
 pub(in crate::store) mod cold_current;
+pub(in crate::store) mod cold_initializing;
 pub(in crate::store) mod cold_read;
 pub(in crate::store) mod settlement;
 
@@ -36,6 +37,7 @@ enum PendingGroupCustody {
     Warm(Arc<V2GenesisDirectoryCustody>),
     // Inert actual original metadata/files/payment only, never a sender or source graph.
     ColdCurrent(Arc<crate::store::persistence::v2_genesis_activation::ColdV2GenesisCurrentHead>),
+    ColdInitializing(Arc<crate::store::persistence::v2_genesis_activation::initializing_repair::ColdV2GenesisRepairSeed>),
 }
 
 struct PendingGroupEntry {
@@ -80,6 +82,14 @@ impl PendingGroupEntry {
                     return Err(refused());
                 }
             }
+            PendingGroupCustody::ColdInitializing(seed) => {
+                if !task
+                    .cold_initializing_seed_data()
+                    .is_some_and(|actual| Arc::ptr_eq(actual, seed))
+                {
+                    return Err(refused());
+                }
+            }
         }
         Ok(())
     }
@@ -103,7 +113,14 @@ pub(in crate::store::owner_evidence) struct PendingGroupRegistry {
 pub(in crate::store) struct PreparedGroupRegistration {
     buffer: Option<PendingGroupBuffer>,
     entry: Option<PendingGroupEntry>,
-    cold_witness: Option<cold_current::RegisteredColdCurrentClaim>,
+    cold_witness: Option<PreparedColdGroupWitness>,
+}
+
+// A single prebuilt witness can escape only through its exact family's final slot
+// installation. No independent flag/second registry makes one family adopt another.
+enum PreparedColdGroupWitness {
+    Current(cold_current::RegisteredColdCurrentClaim),
+    Initializing(cold_initializing::RegisteredColdInitializingClaim),
 }
 
 /// Actual retired inert DATA, held by the original task after the permanent fence handoff.
@@ -133,13 +150,25 @@ impl PreparedGroupRegistration {
         }
         let mut group = [0; MAX_GROUP_BYTES];
         group[..task.group().len()].copy_from_slice(task.group());
-        let cold_witness = task
-            .cold_current_head_data()
-            .map(|_| cold_current::RegisteredColdCurrentClaim::prepare(task))
-            .transpose()?;
-        let custody = match task.cold_current_head_data() {
-            Some(head) => PendingGroupCustody::ColdCurrent(head.clone()),
-            None => PendingGroupCustody::Warm(task.directory_output()?.clone()),
+        let (cold_witness, custody) = if let Some(head) = task.cold_current_head_data() {
+            (
+                Some(PreparedColdGroupWitness::Current(
+                    cold_current::RegisteredColdCurrentClaim::prepare(task)?,
+                )),
+                PendingGroupCustody::ColdCurrent(head.clone()),
+            )
+        } else if let Some(seed) = task.cold_initializing_seed_data() {
+            (
+                Some(PreparedColdGroupWitness::Initializing(
+                    cold_initializing::RegisteredColdInitializingClaim::prepare(task)?,
+                )),
+                PendingGroupCustody::ColdInitializing(seed.clone()),
+            )
+        } else {
+            (
+                None,
+                PendingGroupCustody::Warm(task.directory_output()?.clone()),
+            )
         };
         Ok(Self {
             buffer: Some(buffer),

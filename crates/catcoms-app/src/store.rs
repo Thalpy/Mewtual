@@ -547,8 +547,9 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 pub use persistence::RetainedBootstrapSourceData;
 pub use persistence::{
-    GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent, PreparedV2GenesisCurrent,
-    RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent,
+    GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
+    PreparedColdV2GenesisInitializing, PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed,
+    ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
     UnexposedV2GenesisCurrent,
 };
 mod persistence {
@@ -569,8 +570,9 @@ mod persistence {
     };
     pub use cold_source_read::{
         GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
-        PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
-        UnexposedColdV2GenesisCurrent, UnexposedV2GenesisCurrent,
+        PreparedColdV2GenesisInitializing, PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed,
+        ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent,
+        UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
     };
     pub(in crate::store) use current_layout::{
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,

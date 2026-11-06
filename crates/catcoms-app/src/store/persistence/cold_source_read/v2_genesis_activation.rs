@@ -92,6 +92,9 @@ sanitized_debug!(
 // The child uses the parent's sanitized Debug macro. Keep its lexical declaration after
 // that macro; all receipt fields and constructors remain in the private Store family.
 pub(in crate::store) mod settlement;
+// The cold repair has its own authentic capture, Initializing1 owner and installed writer;
+// it must never reconstruct the warm Saved receipts or an unowned Current2 capture.
+pub(in crate::store) mod initializing_repair;
 
 impl PreparedV2GenesisActivation {
     /// Compare the retained callback result, never decoded data or a logical head ID. This
@@ -265,6 +268,8 @@ impl PreparedV2GenesisActivation {
             )?;
             super::require_absent(&head_path)?;
             guard.validate_source_only()?;
+            #[cfg(test)]
+            guard.store().archive_declaration_fault(186)?;
             // This is the only promotion. The actual held stage/File identity is retained
             // across a failed rename or parent barrier; retries classify that SAME object.
             fs::rename(&stage_path, &head_path).map_err(io)?;

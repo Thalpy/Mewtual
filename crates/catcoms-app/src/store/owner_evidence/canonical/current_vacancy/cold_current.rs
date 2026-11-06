@@ -276,7 +276,10 @@ impl RegisteringColdV2CurrentNamespace<'_, '_> {
         self.inner.validate_old_files()?;
         let task = self.inner.task;
         let head = task.cold_current_head_data().ok_or_else(refused)?;
-        let witness = prepared.cold_witness.as_ref().ok_or_else(refused)?;
+        let Some(PreparedColdGroupWitness::Current(witness)) = prepared.cold_witness.as_ref()
+        else {
+            return Err(refused());
+        };
         witness.require_original(task, head)?;
         let store = self.inner.admission.store();
         head.validate_under_archive_root(store, self.inner.admission.source(), root)?;
@@ -285,7 +288,9 @@ impl RegisteringColdV2CurrentNamespace<'_, '_> {
         self.inner.validate_source_only()?;
         // Take the prebuilt observation before the install. On any precommit refusal it
         // returns to the same outside owner; no last fee/data is dropped under the guards.
-        let witness = prepared.cold_witness.take().ok_or_else(refused)?;
+        let Some(PreparedColdGroupWitness::Current(witness)) = prepared.cold_witness.take() else {
+            unreachable!("exact witness family was checked before final proof")
+        };
         match self
             .inner
             .pins
@@ -294,7 +299,7 @@ impl RegisteringColdV2CurrentNamespace<'_, '_> {
         {
             Ok(()) => Ok(witness),
             Err(error) => {
-                prepared.cold_witness = Some(witness);
+                prepared.cold_witness = Some(PreparedColdGroupWitness::Current(witness));
                 Err(error)
             }
         }

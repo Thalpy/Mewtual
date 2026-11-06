@@ -238,9 +238,8 @@ macro_rules! read_admission {
         }
     };
 }
-// Initializing repair is not yet implemented in the production owning caller. Keep its
-// genuine read tests without supplying an unused production entry point for partial state.
-#[cfg(test)]
+// The separate actual cold Init1 repair caller consumes this historical read. It still
+// issues no owner/storage permit; dependent effects require its NEW durable row1 successor.
 read_admission!(
     ColdV2InitializingReadAdmission,
     with_cold_v2_genesis_initializing_read,

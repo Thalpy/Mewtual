@@ -431,7 +431,9 @@ impl PreparedColdV2GenesisCapture {
     }
 }
 
-fn read_cold_control(path: &Path, maximum: usize) -> Result<ReadControl, AppError> {
+// Root-family read helper only. It creates no capture/role and is also used by the distinct
+// authenticated Initializing1 repair capture; its fixed maximum remains caller-checked.
+pub(super) fn read_cold_control(path: &Path, maximum: usize) -> Result<ReadControl, AppError> {
     let (file, frame) = crate::store::persistence::read_archive_object(path, maximum)?
         .ok_or_else(critical_namespaces::refused)?;
     let id = catcoms_storage::kept::session_id(&file).map_err(io)?;
@@ -509,7 +511,7 @@ fn capture_complete(
     Ok(closure)
 }
 
-fn owned_path(path: &Path) -> Result<PathBuf, AppError> {
+pub(super) fn owned_path(path: &Path) -> Result<PathBuf, AppError> {
     if path.as_os_str().len() > MAX_PATH + 256 {
         return Err(critical_namespaces::refused());
     }

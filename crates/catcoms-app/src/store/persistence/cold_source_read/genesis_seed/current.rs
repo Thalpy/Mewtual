@@ -487,3 +487,6 @@ mod tests;
 mod cold;
 pub(super) mod settlement;
 pub use cold::{PreparedColdV2GenesisCurrent, UnexposedColdV2GenesisCurrent};
+
+mod initializing;
+pub use initializing::{PreparedColdV2GenesisInitializing, UnexposedRepairedV2GenesisCurrent};
