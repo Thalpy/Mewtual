@@ -7,11 +7,13 @@ The user permits tests again; defer only
 One primary-owned serial Cargo pipeline uses `-j1`, two test threads, debug0/incremental0 and
 `target/chat-v2-production-check-target`. No other agent builds.
 
-The separate production `cargo check --locked -p catcoms-app --all-features -j1` now passes
-without warnings. Its first run exposed `rand_core` references supplied only by dev-dependencies;
-production paths now name the SAME trait through the existing `catcoms-rt` reexport. Cold-only
-DATA decoders/labels and three test-only convenience helpers follow their actual consumers'
-test gates; warm verification and the concrete runtime source validator remain enabled.
+The separate production `cargo check --locked -p catcoms-app --all-features -j1` passes
+without warnings, including the connected seed-present cold Current2 library path. Its first
+run exposed `rand_core` references supplied only by dev-dependencies; production paths now
+name the SAME trait through the existing `catcoms-rt` reexport. Actual cold DATA decoding moves
+with its owning consumer; Initializing1-only roles, unused scalar ID getters and test
+convenience helpers remain test-gated. Warm verification and the concrete runtime source
+validator remain enabled.
 No dependency, wire format or RNG algorithm changed. The eleven codec tests pass again.
 
 Actual results so far: **9 MLS bounded-restore tests**, **11 vendor owner-restore tests**,
@@ -46,24 +48,42 @@ passed; its seventeen-origin capacity case remains deferred until the end. The t
 directory-attribution regressions and the whole-group predecessor query regression also pass.
 These checks cover connected bootstrap/recovery code, not operational Chat V2.
 
-Cold Initializing1/Current2 read roles and their actual capture are declared together under
-`cfg(test)` only. All **8 fresh-mount guard tests** and **6 capture tests** pass, including late
+The complete seed-present genesis Current2 cold reader, capture, task/owner handoff, scope,
+writer and owning caller are now connected in the ordinary library build. The only public
+additions are `PreparedColdV2GenesisCurrent` and `UnexposedColdV2GenesisCurrent`, with the
+same narrow recovery/DATA boundary as their warm equivalents. Partial Initializing1 has
+only a genuine test consumer and remains test-gated; no partial repair is exposed.
+All **8 fresh-mount guard tests** and **6 capture tests** pass, including late
 marker/pin replacement, post-allocation cancellation, incomplete reads and independent metadata
 payment. The concrete combined invoice requires a distinct cold-only **1 MiB** charge; the
 warm **512 KiB** charge is unchanged. This changes no wire/content cap or source/SDK allowance.
-Cold task ownership, binding and writer drafts remain undeclared pending joint guards/caller.
-Review found and is closing retry gaps when another group's failed write dirties the latest
-scope table: completed handoff must precede installation, and an Unbound owner needs a separate
-head-only paid resync before it has an installed receipt. No publication/binding bypass is used.
+All **5 actual cold owning-caller tests** pass, as do **2 inventory-resync tests** and the
+**11 shorter cold task/handoff tests**. The first handoff-negative fixture attempted to rename
+an actually held directory, which Windows refuses; the corrected regression corrupts the
+original pin bytes, proves unchanged claim/owner/debt on refusal, restores the SAME file and
+then completes the SAME handoff. The corrected focused test passes. The shared seventeen-origin
+cold/warm registry-capacity case is deferred until the end alongside the warm capacity case.
+Completed handoff must precede installation. A separately paid DATA-only inventory resync
+persists only the SAME already-admitted latest table before strict warm/cold entry, including
+before the first Head read or owner exists. It grants no row, owner, binding or source authority.
+Installed dirty retries also retain their stronger exact writer/receipt proof.
 
 Partial activation repair, seed-settled Current and later-head restoration remain unfinished.
 The writer classifier/installed-generation checks use paid weak pointer identity, never a
 temporary strong upgrade which could move final sender cleanup under canonical.
 
-The warm caller moves the same SDK seed into an unbound node; it exposes no runnable node,
-authoring, projection or native result. Cold Current/node recovery, operational SDK admission, governing/append/index transactions,
+The warm and complete-genesis cold callers move the same SDK seed into an unbound node;
+they expose no runnable node, authoring, projection or native result. Operational SDK admission, governing/append/index transactions,
 ingress/catch-up and native/UI routing are still required. Chat V2 remains disabled. Complete
-root/native/frontend suites, clippy/build/native gates and the slow test remain outstanding.
+root/native suites, root-wide lint/build/native gates and the slow test remain outstanding.
+Strict all-target/all-feature App Clippy passes, including its dependencies and test targets. The full
+frontend unit suite passes **3,434/3,434**, with no skips. Ambient-dependency and Store raw-FS
+gates pass. Current focused evidence still does not close Chat V2 acceptance.
+
+Acceptance-tree verification also corrected an older false test assumption: an inclusion
+proof cannot always distinguish counts hidden inside an opaque sibling. The complete signed
+count/root tuple remains mandatory. All **18 tree/planner tests** and the new signed Append-body
+count-binding regression pass; the hash and wire formats did not change.
 
 ## Opaque ID3 physical declaration and historical reader (5 November; focused tests resumed)
 

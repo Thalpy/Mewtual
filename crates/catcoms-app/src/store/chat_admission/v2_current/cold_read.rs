@@ -1,5 +1,5 @@
-//! WIP task-free cold capture admission. Keep UNDECLARED until Factory's existing-directory
-//! guards and Root's actual paid capture consume these methods together. These borrowed
+//! Task-free cold capture admission, consumed by Factory's existing-directory
+//! guards and Root's actual paid capture. These borrowed
 //! roles read an existing unowned row; they issue no reservation, owner, watch or Current.
 use super::*;
 
@@ -27,6 +27,19 @@ impl std::fmt::Debug for ColdV2GenesisScopeBasis {
     }
 }
 impl ColdV2GenesisScopeBasis {
+    /// DATA comparison for the private scope family. This creates no basis or owner and
+    /// cannot replace the concrete caller's actual Runtime/source/receipt admission checks.
+    pub(super) fn require_same_row(
+        &self,
+        key: &ChatAdmissionKey,
+        row: &Record,
+    ) -> Result<(), AppError> {
+        if self == &Self::capture(key, row)? {
+            Ok(())
+        } else {
+            Err(refused())
+        }
+    }
     // PRIVATE: only the actual admission implementation may capture a basis. Root keeps
     // this opaque DATA and compares it at its later cache/insertion edge; it cannot turn
     // caller scalars, a parsed receipt or equal source bytes into an actual read admission.
@@ -69,8 +82,7 @@ const READ_METADATA_BYTES: usize = GROUP_BOUNDS_ALLOCATION_BYTES
     + MAX_GROUP
     + std::mem::size_of::<ChatAdmissionKey>()
     + std::mem::size_of::<ColdV2GenesisScopeBasis>()
-    + std::mem::size_of::<ColdV2InitializingReadAdmission<'static>>()
-    + std::mem::size_of::<ColdV2CurrentReadAdmission<'static>>()
+    + 2 * std::mem::size_of::<ColdV2CurrentReadAdmission<'static>>()
     + 512;
 
 fn actual_row<'runtime>(
@@ -226,6 +238,9 @@ macro_rules! read_admission {
         }
     };
 }
+// Initializing repair is not yet implemented in the production owning caller. Keep its
+// genuine read tests without supplying an unused production entry point for partial state.
+#[cfg(test)]
 read_admission!(
     ColdV2InitializingReadAdmission,
     with_cold_v2_genesis_initializing_read,
@@ -238,3 +253,13 @@ read_admission!(
     Current,
     2
 );
+
+// The same macro gives these roles identical layouts. The conservative invoice above pays
+// both even in production; a future role-layout change must update that inventory explicitly.
+#[cfg(test)]
+const _: () = {
+    assert!(
+        std::mem::size_of::<ColdV2InitializingReadAdmission<'static>>()
+            == std::mem::size_of::<ColdV2CurrentReadAdmission<'static>>()
+    );
+};

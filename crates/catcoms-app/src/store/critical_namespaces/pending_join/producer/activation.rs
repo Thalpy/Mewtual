@@ -88,6 +88,9 @@ impl JournalledCheckpointJoinPreparation {
     /// and this is not production authenticated/indirect routing. No network is performed.
     /// Exact saved source/file/root barriers and original admission→catalog CAS precede task
     /// registration. Ordinary Pending DATA opening never creates a worker automatically.
+    // Preserve the original paid preparation and caller transport inline on every refusal;
+    // allocation is not required to return an owner after failed admission.
+    #[allow(clippy::result_large_err)]
     pub fn activate_original_transport<T: MeshTransport>(
         self,
         store: &ServerStore,

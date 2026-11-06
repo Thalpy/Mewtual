@@ -17,6 +17,11 @@ use catcoms_sync::owner_v2::{UnboundV2GenesisNode, V2GenesisRuntimeParts};
 
 const WRAPPER_FEE: usize = 64 * 1024;
 
+// One-shot test callbacks are owned outside all writers; this alias changes neither their
+// allocation nor their drop order and has no production representation.
+#[cfg(test)]
+type StoreHook = Box<dyn FnOnce(&ServerStore) + Send>;
+
 /// Existing input allocations belong to the host. This inert owner creates no Box, calls no
 /// transport/RNG/clock, and supplies no source/scope/current authority of its own.
 struct RuntimeInputs<T, R> {
@@ -68,7 +73,7 @@ pub struct PreparedV2GenesisCurrent<T, R> {
     // Deterministically stop the NEXT actual scope write after the real head is saved and
     // its subordinate guards drain. This never supplies a replacement writer or receipt.
     #[cfg(test)]
-    after_head: Option<Box<dyn FnOnce(&ServerStore) + Send>>,
+    after_head: Option<StoreHook>,
     #[cfg(test)]
     after_pair: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
@@ -192,6 +197,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
         // a later explicit attempt, but cannot reset any original persistent source allowance.
         let buffers = store.reserve_v2_genesis_scope_buffers()?;
         let result = (|| {
+            // Another group's failed write can precede our first vacant admission. Save
+            // only the already-authorized latest inventory; all own proofs still follow.
+            store.resync_v2_current_scope_inventory(&buffers, rng)?;
             self.advance_storage(layout, store, &buffers, rng)?;
             self.pair_runtime()?;
             let source = self.graph.source()?;
@@ -461,3 +469,7 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
 
 #[cfg(test)]
 mod tests;
+// Declare after opaque_debug so the private child sees that lexical macro. Only the two
+// inert owning wrappers escape; all receipt/guard/registration constructors stay private.
+mod cold;
+pub use cold::{PreparedColdV2GenesisCurrent, UnexposedColdV2GenesisCurrent};

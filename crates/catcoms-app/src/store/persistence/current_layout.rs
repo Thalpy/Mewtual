@@ -58,7 +58,7 @@ impl ServerStore {
     pub(in crate::store) fn read_current_declaration_seed(
         &self,
         fee: &CatalogReadReservation,
-    ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+    ) -> Result<Option<OpenedArchiveObject>, AppError> {
         let policy = self
             .current_layout_policy
             .as_ref()
@@ -727,39 +727,6 @@ fn current_directory_at(
     Ok(catcoms_storage::kept::session_id(&named).map_err(current_io)? == expected)
 }
 
-#[cfg(test)]
-mod directory_identity_tests {
-    use super::*;
-
-    #[test]
-    fn named_directory_proof_accepts_original_and_refuses_identical_empty_replacement() {
-        let fixture = tempfile::tempdir().unwrap();
-        let path = fixture.path().join("original-directory");
-        fs::create_dir(&path).unwrap();
-        let held = open_archive_directory(&path).unwrap();
-        let id = catcoms_storage::kept::session_id(&held).unwrap();
-        assert!(current_directory_at(&path, id).unwrap());
-        // Contents/absence of contents prove nothing: retain the original handle so its
-        // object number cannot be reused, then create another equally empty directory.
-        fs::rename(&path, fixture.path().join("displaced-original")).unwrap();
-        fs::create_dir(&path).unwrap();
-        assert!(!current_directory_at(&path, id).unwrap());
-        assert_eq!(catcoms_storage::kept::session_id(&held).unwrap(), id);
-    }
-
-    #[test]
-    fn missing_or_regular_file_name_never_proves_a_directory() {
-        let fixture = tempfile::tempdir().unwrap();
-        let path = fixture.path().join("original-directory");
-        fs::create_dir(&path).unwrap();
-        let held = open_archive_directory(&path).unwrap();
-        let id = catcoms_storage::kept::session_id(&held).unwrap();
-        fs::rename(&path, fixture.path().join("displaced-original")).unwrap();
-        assert!(current_directory_at(&path, id).is_err());
-        fs::write(&path, b"not a directory").unwrap();
-        assert!(current_directory_at(&path, id).is_err());
-    }
-}
 fn real_current_file(metadata: &fs::Metadata) -> bool {
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         return false;
@@ -941,3 +908,7 @@ impl ServerStore {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "current_layout_directory_identity_tests.rs"]
+mod directory_identity_tests;

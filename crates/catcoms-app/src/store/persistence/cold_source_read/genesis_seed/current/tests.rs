@@ -417,19 +417,21 @@ fn unrelated_failed_write_blocks_extraction_and_current_resync_preserves_its_row
         .unwrap();
 }
 
+type CloseArm = Arc<
+    std::sync::Mutex<
+        Option<(
+            catcoms_rt::RequestCancellation,
+            catcoms_rt::RequestCancellation,
+            Arc<std::sync::atomic::AtomicBool>,
+        )>,
+    >,
+>;
+
 /// Host payload whose destruction observes the ACTUAL installed cancellation objects. This
 /// is an R input, not a fabricated admission or writer; arm it only after real Current2.
 struct ObservedRng {
     rng: ChaCha20Rng,
-    arm: Arc<
-        std::sync::Mutex<
-            Option<(
-                catcoms_rt::RequestCancellation,
-                catcoms_rt::RequestCancellation,
-                Arc<std::sync::atomic::AtomicBool>,
-            )>,
-        >,
-    >,
+    arm: CloseArm,
     notice: Arc<std::sync::atomic::AtomicU8>,
 }
 impl RngCore for ObservedRng {

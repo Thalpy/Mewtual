@@ -134,7 +134,7 @@ fn nested_encoder_preserves_exact_original_v1_and_execution_frames_without_tempo
     reader.finish().unwrap();
 
     let expected = row(1, true, 1);
-    let bytes = payload(&[expected.clone()]);
+    let bytes = payload(std::slice::from_ref(&expected));
     let (rows, _) = parse(&bytes, &DOMAIN).unwrap();
     let row = rows[0].as_ref().unwrap();
     let length = encoded_row_len(

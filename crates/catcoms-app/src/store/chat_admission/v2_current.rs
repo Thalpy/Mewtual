@@ -24,15 +24,19 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 mod association;
-#[cfg(test)]
+pub(in crate::store) mod cold_owned;
 mod cold_read;
 mod current_validation;
-#[cfg(test)]
-pub(in crate::store) use cold_read::{
-    ColdV2CurrentReadAdmission, ColdV2GenesisScopeBasis, ColdV2InitializingReadAdmission,
+mod inventory_resync;
+pub(in crate::store) use cold_owned::{
+    ColdCurrentProofAdmission, ColdOwnedCurrentAdmission, ColdV2CurrentPreparation,
+    ColdV2CurrentProgressData, COLD_V2_CURRENT_SCOPE_METADATA_BYTES,
 };
-// Cold reads are test-only with the actual task-free guards/capture. Cold ownership and
-// writer consumers remain separate undeclared work until the actual caller is paired.
+#[cfg(test)]
+pub(in crate::store) use cold_read::ColdV2InitializingReadAdmission;
+pub(in crate::store) use cold_read::{ColdV2CurrentReadAdmission, ColdV2GenesisScopeBasis};
+// Cold read and ownership roles are consumed together by the complete seed-present
+// Current2 library caller. They do not grant a runnable node or native activation.
 
 /// Original negative scope plus the actual artifact/task identities. Only this implementation
 /// can construct it. The actual SavedSeed Arc also retains the candidate metadata payment;
@@ -45,6 +49,9 @@ pub(in crate::store) struct V2CurrentPreparation {
     progress: Progress,
 }
 
+// The inline binding is covered by the actual activation metadata invoice. Boxing this
+// phase would add an allocation at the scope/head commit edge, after its fallible preflight.
+#[allow(clippy::large_enum_variant)]
 enum Progress {
     // The exact row1 candidate is cached before insertion. A failed global write leaves the
     // SAME latest Runtime table dirty; this phase never certifies a successful scope barrier.

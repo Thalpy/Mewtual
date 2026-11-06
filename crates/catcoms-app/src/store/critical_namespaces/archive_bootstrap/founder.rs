@@ -124,6 +124,9 @@ impl std::fmt::Debug for ArchiveFounderExisting {
             .finish_non_exhaustive()
     }
 }
+// The source/SDK owner is already paid. Keep it inline rather than allocate while handing
+// off the result of the original grant admission or returning unchanged caller inputs.
+#[allow(clippy::large_enum_variant)]
 pub enum ArchiveFounderBegin<T: MeshTransport, R: CryptoRngCore> {
     Original(ArchiveFounderCreation<T, R>),
     Existing {
@@ -180,6 +183,8 @@ impl ServerStore {
     /// Create a PRIVATE owner BEFORE fallible grant I/O, preserving actual inputs on rejection.
     /// Stable invocation32 belongs to the original trusted local request, never a retry-generated
     /// replacement. No native command, arbitrary policy handler or network action is supplied.
+    // Even a payment/admission refusal returns the same inputs without allocating an Err box.
+    #[allow(clippy::result_large_err)]
     pub fn prepare_archive_founder<T: MeshTransport, R: CryptoRngCore>(
         &self,
         invocation: [u8; 32],

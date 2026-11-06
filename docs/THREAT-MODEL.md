@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Seed-present genesis Current recovery (6 November; library only)
+
+The explicit ID3 library opener can recover complete genesis Current2 using a new paid
+source/SDK read plus independently authenticated original pin, head and activation seed.
+An exact pending task excludes competing owners until its actual mounted scope owner is
+recorded; that owner association precedes slot retirement. Binding requires the same installed
+writer, not a matching receipt label. Cancellation and physical replacement remain negative
+fences across retry and final extraction. Paid latest-table resync grants persistence only,
+never a replacement owner or source allowance. The default/native paths remain disabled for
+this protocol. Seed settlement, later-head recovery and live authoring are not established by
+these checks. [Current evidence and remaining gates](HANDOVER.md).
+
 ## ID3 declaration is physical custody, not Current authority (5 November; authored, UNRUN)
 
 The opt-in opener fully classifies current/stage/independent seed before cleaners and preserves

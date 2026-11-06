@@ -143,7 +143,7 @@ fn canonical_path(directory: &std::path::Path, attempt: &Attempt) -> std::path::
         hex::encode(key(prepared.group(), prepared.founder()))
     ))
 }
-fn contained_snapshot<'a>(plain: &'a [u8]) -> &'a [u8] {
+fn contained_snapshot(plain: &[u8]) -> &[u8] {
     let mut decoder = Decoder::new(plain);
     assert_eq!(
         decoder.get_str().unwrap(),

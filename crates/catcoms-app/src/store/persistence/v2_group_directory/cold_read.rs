@@ -78,3 +78,12 @@ std::thread_local! {
 pub(in crate::store) fn cold_group_read_entries_for_test() -> usize {
     OPEN_ENTRIES.with(std::cell::Cell::get)
 }
+
+/// Last actual group-directory proof after all cold source/account/ID3 waits. This is
+/// NEGATIVE object identity only and cannot install a task, owner, writer or Current.
+pub(in crate::store) fn require_cold_head_group_directory(
+    head: &crate::store::persistence::v2_genesis_activation::ColdV2GenesisCurrentHead,
+) -> Result<(), AppError> {
+    let (path, file, identity) = head.directory_data();
+    require_same_directory(path, file, identity)
+}

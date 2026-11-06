@@ -2,13 +2,14 @@
 //! descriptor nor this wrapper grants a Current scope, group writer or runnable SDK/server.
 use super::*;
 mod declaration;
-// Genuine cold DATA/capture fixtures only. Production cold owner/writer activation is a
-// separate joint consumer; this declaration cannot make an ordinary Store cold-capable.
-#[cfg(test)]
+// The explicit ID3 wrapper alone admits the connected cold library path. Default/ID2
+// openers still refuse this layout before their older cleanup paths can run.
 pub(in crate::store) mod cold_read;
 #[cfg(test)]
-pub(in crate::store) use cold_read::{
-    ColdV2CurrentGroupReadGuard, ColdV2InitializingGroupReadGuard, COLD_V2_GROUP_READ_GUARD_BYTES,
+pub(in crate::store) use cold_read::ColdV2InitializingGroupReadGuard;
+pub(in crate::store) use cold_read::{ColdV2CurrentGroupReadGuard, COLD_V2_GROUP_READ_GUARD_BYTES};
+pub(in crate::store) use group_task::cold_current::{
+    ColdOwnedV2CurrentGroupGuard, ColdV2CurrentProofGroupGuard,
 };
 
 pub(in crate::store) mod group_task;
@@ -98,6 +99,9 @@ impl V2CurrentLayoutPolicy {
     }
 }
 
+// The fixed original summary is included in the declaration's metadata debit. Keep its
+// promotion/repair state inline so phase changes do not allocate beneath the writer guards.
+#[allow(clippy::large_enum_variant)]
 pub(in crate::store) enum DeclarationParent {
     Original(super::pending_join_codec::Summary),
     /// Exact candidate already occupies Current. This is repair DATA, not a fabricated old

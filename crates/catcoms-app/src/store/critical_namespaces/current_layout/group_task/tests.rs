@@ -15,7 +15,7 @@ use catcoms_sync::owner_v2::FounderSnapshotLimits;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 
-const SECRET: &[u8] = b"actual original group namespace";
+pub(super) const SECRET: &[u8] = b"actual original group namespace";
 const CAPACITY: usize = 1024 * 1024 * 1024;
 struct Fixture {
     layout: V2CurrentLayoutStore,
@@ -36,7 +36,7 @@ fn sdk_budget() -> GenesisSeedBudget {
     )
     .unwrap()
 }
-fn archive(pool: &CriticalCatalogReadPool) -> ArchiveBootstrapCatalogPolicy {
+pub(super) fn archive(pool: &CriticalCatalogReadPool) -> ArchiveBootstrapCatalogPolicy {
     ArchiveBootstrapCatalogPolicy::new(pool.clone(), 4 * archive_codec::MAX_SEED_FRAMED)
         .unwrap()
         .with_bootstrap_source_data_read()
@@ -148,7 +148,7 @@ fn fault(store: &ServerStore, point: u8) {
 // Real independently saved origins for the bounded-capacity test. A fresh physical reopen
 // between creations drains the older five-entry warm source registry; it does not erase any
 // saved source files, creation debit or SDK attempt. No task/group/source labels are forged.
-fn additional_saved_origin(
+pub(super) fn additional_saved_origin(
     path: &Path,
     pool: &CriticalCatalogReadPool,
     rng: &mut ChaCha20Rng,
@@ -402,7 +402,11 @@ fn directory_changed_during_last_full_proof_cannot_retire_original_negative_slot
             .layout
             .prepare_genesis_group_namespace(&f.seed.borrow_source_data())
             .unwrap();
-        let path = task.directory_output().path_for_test().to_path_buf();
+        let path = task
+            .directory_output()
+            .unwrap()
+            .path_for_test()
+            .to_path_buf();
         // Obtain the genuine engine + collector outcome WITHOUT performing the later slot
         // handoff. No raw file/status/receipt constructor is substituted for a saved result.
         store
@@ -411,11 +415,13 @@ fn directory_changed_during_last_full_proof_cannot_retire_original_negative_slot
                 store.write_v2_genesis_group_directory(&guard)
             })
             .unwrap();
-        task.directory = Some(
+        task.set_warm_saved_directory(
             task.directory_output()
+                .unwrap()
                 .collect_saved_directory(&task)
                 .unwrap(),
-        );
+        )
+        .unwrap();
         let changed = path.clone();
         let retired =
             store.with_vacant_v2_genesis_admission(&f.seed.borrow_source_data(), |admission| {
@@ -468,7 +474,11 @@ fn directory_changed_after_full_id3_proof_cannot_be_recorded_saved() {
         .layout
         .prepare_genesis_group_namespace(&f.seed.borrow_source_data())
         .unwrap();
-    let changed = task.directory_output().path_for_test().to_path_buf();
+    let changed = task
+        .directory_output()
+        .unwrap()
+        .path_for_test()
+        .to_path_buf();
     *store
         .owner_evidence
         .before_v2_group_final_directory_proof
@@ -633,7 +643,11 @@ fn file_captured_before_identity_failure_never_adopts_equal_replacement_director
     assert!(task
         .retry_directory(store, &f.seed.borrow_source_data())
         .is_err());
-    let path = task.directory_output().path_for_test().to_path_buf();
+    let path = task
+        .directory_output()
+        .unwrap()
+        .path_for_test()
+        .to_path_buf();
     let displaced = path.with_file_name("held-before-first-group-identity");
     fs::rename(&path, &displaced).unwrap();
     fs::create_dir(&path).unwrap();
@@ -670,7 +684,7 @@ fn original_cancellation_after_last_full_proof_refuses_saved_handoff_without_era
         .is_err());
     assert!(task.saved_directory().is_err());
     assert!(store.require_no_pending_v2_group(&f.group).is_err());
-    assert!(task.directory_output().path_for_test().is_dir());
+    assert!(task.directory_output().unwrap().path_for_test().is_dir());
     drop(task);
     assert!(store.require_no_pending_v2_group(&f.group).is_err());
 }
@@ -696,7 +710,7 @@ fn task_cancel_is_one_original_negative_before_source_and_runtime_payload_drain(
     assert!(task
         .retry_directory(store, &f.seed.borrow_source_data())
         .is_err());
-    assert!(!task.directory_output().path_for_test().exists());
+    assert!(!task.directory_output().unwrap().path_for_test().exists());
     f.seed.validate_original(store).unwrap(); // independent source/SDK payload still owned
     assert!(store.require_no_pending_v2_group(&f.group).is_err());
     assert!(store

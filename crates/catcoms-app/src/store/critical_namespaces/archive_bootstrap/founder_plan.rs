@@ -223,6 +223,8 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for ReturnedArchiveFoun
 impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderCreation<T, R> {
     /// Consume only the SAME completed creator. Early or stale calls preserve it in the error;
     /// a caller can finish its original debit/SDK work and retry without replacing inputs.
+    // A failed transition returns the same already-paid owner without a new heap allocation.
+    #[allow(clippy::result_large_err)]
     pub fn into_ram_plan(
         self,
         store: &ServerStore,

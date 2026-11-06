@@ -2,8 +2,10 @@
 //! effects and cannot enter warm Seed/Head writers. Root separately authenticates its NEW
 //! complete cold DATA receipt using the exact same resource loan and actual scope basis.
 use super::*;
+#[cfg(test)]
+use crate::store::chat_admission::v2_current::ColdV2InitializingReadAdmission;
 use crate::store::chat_admission::v2_current::{
-    ColdV2CurrentReadAdmission, ColdV2GenesisScopeBasis, ColdV2InitializingReadAdmission,
+    ColdV2CurrentReadAdmission, ColdV2GenesisScopeBasis,
 };
 use crate::store::owner_evidence::canonical::current_vacancy::cold_read as owners;
 use crate::store::persistence::{
@@ -21,15 +23,25 @@ use std::sync::MutexGuard;
 /// used. This covers named buffers/copies, not allocator/RSS or process-global admission.
 pub(in crate::store) const COLD_V2_GROUP_READ_GUARD_BYTES: usize =
     COLD_V2_GROUP_DIRECTORY_READ_BYTES
-        + 2 * std::mem::size_of::<ColdV2InitializingGroupReadGuard<'static, 'static>>()
-        + 2 * std::mem::size_of::<ColdV2CurrentGroupReadGuard<'static, 'static>>()
+        + 4 * std::mem::size_of::<ColdV2CurrentGroupReadGuard<'static, 'static>>()
         + 4 * (MAX_OPEN_BASE_PATH + 256)
         + 2 * std::mem::size_of::<String>()
         + 64
         + 128;
 
+// The historical Initializing1 role has only a test consumer. Its identical layout
+// keeps this conservative four-Current-guard invoice equal to the earlier two+two sum.
+#[cfg(test)]
+const _: () = {
+    assert!(
+        std::mem::size_of::<ColdV2InitializingGroupReadGuard<'static, 'static>>()
+            == std::mem::size_of::<ColdV2CurrentGroupReadGuard<'static, 'static>>()
+    );
+};
+
 /// Existing unowned Initializing1 read only. In particular this has neither a scope1 storage
 /// permit nor the original writer/task identities required to write a head.
+#[cfg(test)]
 pub(in crate::store) struct ColdV2InitializingGroupReadGuard<'reader, 'writer> {
     // Directory/path drains before Root/canonical/pins. The borrowed loan was created before
     // admission and cannot become the last paid owner during any guard's destruction.
@@ -142,6 +154,7 @@ macro_rules! read_guard {
         }
     };
 }
+#[cfg(test)]
 read_guard!(
     ColdV2InitializingGroupReadGuard,
     ColdV2InitializingReadAdmission,

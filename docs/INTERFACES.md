@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Complete genesis Current recovery wrappers (6 November)
+
+`store::PreparedColdV2GenesisCurrent<T,R>` consumes an actual paid restored genesis seed
+and runtime inputs. `retry` uses only the explicit `V2CurrentLayoutStore`; a refusal retains
+the same source, task, mounted owner, writer, receipt and node. `take_current` repeats the
+full original physical/installed-generation proof before moving those owners into
+`UnexposedColdV2GenesisCurrent<T,R>`. Its only public operations are immutable `data` and
+`validate_original`. All task, guard, receipt, resource and raw node constructors stay private.
+This supports complete seed-present genesis Current2 only. Missing/partial seeds, later heads,
+replacement objects or cancellation refuse; they do not fall back to genesis. Initializing1
+read roles remain test-only. These APIs do not activate Chat V2 or expose message sending.
+Current validation is recorded in [HANDOVER](HANDOVER.md); older UNRUN entries below are dated
+implementation history.
+
 ## Opaque physical ID3 opener (5 November; authored, UNRUN)
 
 `PreparedV2CurrentLayoutStore` owns the original private physical declaration and returns

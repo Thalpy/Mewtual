@@ -547,11 +547,15 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 pub use persistence::RetainedBootstrapSourceData;
 pub use persistence::{
-    GenesisSeedBudget, GenesisSeedRefusal, PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed,
-    ReturnedBootstrapSourceData, UnexposedV2GenesisCurrent,
+    GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent, PreparedV2GenesisCurrent,
+    RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent,
+    UnexposedV2GenesisCurrent,
 };
 mod persistence {
     use super::*;
+    /// One existing fixed object's held handle and bounded sealed frame. This is raw DATA;
+    /// format authentication, named-object proof and the parent barrier remain with callers.
+    type OpenedArchiveObject = (File, Zeroizing<Vec<u8>>);
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
     mod cold_source_read;
     mod current_group;
@@ -560,8 +564,9 @@ mod persistence {
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
     pub use cold_source_read::RetainedBootstrapSourceData;
     pub use cold_source_read::{
-        GenesisSeedBudget, GenesisSeedRefusal, PreparedV2GenesisCurrent,
-        RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData, UnexposedV2GenesisCurrent,
+        GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
+        PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
+        UnexposedColdV2GenesisCurrent, UnexposedV2GenesisCurrent,
     };
     pub(super) use cold_source_read::{
         GenesisSourceDataRef, OriginalBootstrapReadObservation,
@@ -571,8 +576,9 @@ mod persistence {
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,
     };
     #[cfg(test)]
+    pub(in crate::store) use v2_group_directory::cold_group_read_entries_for_test;
     pub(in crate::store) use v2_group_directory::{
-        cold_group_read_entries_for_test, OpenedColdV2GroupDirectory,
+        require_cold_head_group_directory, OpenedColdV2GroupDirectory,
         COLD_V2_GROUP_DIRECTORY_READ_BYTES,
     };
     pub(in crate::store) use v2_group_directory::{
@@ -2504,7 +2510,7 @@ mod persistence {
         pub(super) fn read_archive_declaration_seed(
             &self,
             fee: &critical_namespaces::read_pool::CatalogReadReservation,
-        ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+        ) -> Result<Option<OpenedArchiveObject>, AppError> {
             use critical_namespaces::archive_bootstrap::{DECLARATION_FEE, MAX_SEED_FRAMED};
             let policy = self
                 .archive_bootstrap_policy
@@ -2837,7 +2843,7 @@ mod persistence {
             &self,
             slot: critical_namespaces::Slot,
             read: Option<&critical_namespaces::read_pool::CatalogReadReservation>,
-        ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+        ) -> Result<Option<OpenedArchiveObject>, AppError> {
             use critical_namespaces::{refused, MAX_FRAMED};
             let path = self.dir.join(slot.name());
             match fs::symlink_metadata(&path) {
@@ -2952,7 +2958,7 @@ mod persistence {
             &self,
             slot: critical_namespaces::Slot,
             read: &critical_namespaces::read_pool::CatalogReadReservation,
-        ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+        ) -> Result<Option<OpenedArchiveObject>, AppError> {
             use critical_namespaces::pending_join::READ_FEE;
             use critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED;
             use critical_namespaces::refused;
@@ -3536,7 +3542,7 @@ mod persistence {
     fn read_archive_object(
         path: &Path,
         limit: usize,
-    ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+    ) -> Result<Option<OpenedArchiveObject>, AppError> {
         use critical_namespaces::refused;
         match fs::symlink_metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -4778,7 +4784,7 @@ mod persistence {
         pub(super) fn open_owner_operations_intent_slot(
             &self,
             slot: owner_evidence::operations::IntentSlot,
-        ) -> Result<Option<(File, Zeroizing<Vec<u8>>)>, AppError> {
+        ) -> Result<Option<OpenedArchiveObject>, AppError> {
             let refused = || {
                 AppError::Invalid("owner operation storage is unavailable or unsupported".into())
             };

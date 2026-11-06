@@ -1,5 +1,5 @@
-//! DRAFT, cfg(test)-only private V2 genesis metadata DATA. No production namespace handler,
-//! source/fee/writer witness, Saved result, Server, Current or projection issuer exists here.
+//! Private V2 genesis metadata DATA for the paired warm/cold library consumers. Parsing
+//! issues no source/fee/writer witness, Saved result, Server, Current or projection authority.
 //! Root's actual opener/consumer must select originals and cross the real barriers; a valid
 //! MAC, caller expectation, signature or descriptor cannot substitute for those capabilities.
 
@@ -148,8 +148,8 @@ macro_rules! frame_id {
     };
 }
 frame_id!(V2GroupPinId, b"catcoms/private-chat-v2-group-pin-id/v1\0");
-// These labels follow the cold reader's current test-only declaration. The warm writer
-// compares its actual original Arc/File owners, not reconstructed head/seed DATA labels.
+// DATA-only labels used by the codec tests. The actual warm/cold owning validators compare
+// their held original Arc/File objects and frames rather than granting authority by IDs.
 #[cfg(test)]
 frame_id!(
     V2GenesisHeadId,
@@ -643,14 +643,12 @@ pub(in crate::store) fn open_head_data(
 
 /// Complete original cipher references plus validated content DATA. The source-free parser
 /// cannot create original mount/source/writer custody, select a Current head or authorize I/O.
-#[cfg(test)]
 pub(in crate::store) struct ActivationSeedData<'a> {
     pub(in crate::store) pin_frame: &'a [u8],
     pub(in crate::store) head_frame: &'a [u8],
     pub(in crate::store) pin: GroupPinData,
     pub(in crate::store) head: GenesisHeadData,
 }
-#[cfg(test)]
 impl std::fmt::Debug for ActivationSeedData<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActivationSeedData").finish_non_exhaustive()
@@ -689,8 +687,7 @@ pub(in crate::store) fn encode_activation_seed_data(
     put(&mut e, head_frame)?;
     finish(e, MAX_ACTIVATION_PLAIN)
 }
-// Move this cold DATA decoder with its real cold consumer when that subtree is activated.
-#[cfg(test)]
+// The cold capture authenticates and compares these DATA under its original physical guards.
 pub(in crate::store) fn parse_activation_seed_data<'a>(
     key: &[u8; 32],
     expected: &SavedSourceExpectationData,
@@ -736,7 +733,6 @@ pub(in crate::store) fn seal_activation_seed_data(
         rng,
     )
 }
-#[cfg(test)]
 pub(in crate::store) fn open_activation_seed_data(
     key: &[u8; 32],
     raw: &[u8],

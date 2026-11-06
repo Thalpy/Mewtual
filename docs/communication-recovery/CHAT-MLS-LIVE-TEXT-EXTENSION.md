@@ -1,8 +1,9 @@
 # MLS live text state: extension audit and regression plan
 
 This is a source-backed **design and regression-draft** checkpoint. No live loader extension,
-operation admission, native dispatch or Chat V2 activation is implemented here. Compilation,
-compiled tests and builds remain paused. The proposed tests use genuine SDK groups and the
+operation admission, native dispatch or Chat V2 activation is implemented here. The proposed
+live-loader extension has not been validated by the focused genesis checks recorded in
+`HANDOVER.md`; compilation is permitted again. The proposed tests use genuine SDK groups and the
 unchanged legacy restore path; they do not claim the new closed loader accepts or pays for them.
 
 ## What the live text path actually uses
@@ -36,8 +37,17 @@ its cursor, counted Serde visitor or common restore loader.
 | Remote sender ratchet | `tree/sender_ratchet.rs::DecryptionRatchet` | `VecDeque<Option<RatchetKeyMaterial>>` plus ratchet head. Consumed generations leave nulls. A present entry owns an AEAD key (suite3/32-byte value) plus inline12-byte nonce. |
 | Temporary receive derivation | `DecryptionRatchet::peek/consume`; `SecretTree::prepare_decryption` | A cloned head, a temporary skipped-secret deque, key material and a boxed pending update overlap the retained graph before authenticated consumption. These are operation costs, not restore-deserializer allocations. |
 | Historical epoch trees | `group/mls_group/past_secrets.rs::MessageSecretsStore/EpochTree` | Each epoch would contain another MessageSecrets graph and `Vec<Member>` copies. The product's default SDK policy is zero retained epochs; Sync's exporter-key history is separate. Keep this zero for the first live extension rather than silently admitting nested epoch graphs. |
-| Resumption/proposals/pending commit | `schedule/psk.rs::store::ResumptionPskStore`, `MlsGroupState` | Production defaults retain zero resumption PSKs. Keep these and stored proposal/own-leaf lists empty, and canonical graph Operational, until their actual producer/restore contract is reviewed. A local Add candidate can be merged privately before its covering successor save; that is not permission to discard a persisted pending candidate. |
+| Resumption/proposals/pending commit | `schedule/psk.rs::store::ResumptionPskStore`, `MlsGroupState` | Preserve the actual store: the founder builder uses max32 with one epoch0 secret; its first-Add owner has epochs0,1 and cursor2. Selected Welcome under the zero join configuration has max0/empty/cursor0. Live ring/cursor/epoch behavior needs its own exact supported grammar, not trimming to empty. Stored proposal/own-leaf lists and canonical Operational state remain separate initial restrictions. A privately merged Add candidate does not authorize discarding persisted pending debt. |
 | Serde conversion | `SenderRatchet` uses `#[serde(from = "SerdeSenderRatchet")]` | Validate the exact supported variant before typed decode. Feature-disabled `DualUse` can parse a larger compatibility representation and then throw fields away; do not admit it merely because the resulting enum is small. |
+
+The pinned SDK's `group/mls_group/builder.rs` constructs the founder store with
+`ResumptionPskStore::new(32)` and adds the initial secret; the Welcome path in `creation.rs`
+uses the join configuration. `schedule/psk.rs::store::ResumptionPskStore::add` has bounded
+replacement/cursor behavior after filling. The genuine producers in
+`catcoms-mls/src/persist/owner_restore/resumption_tests.rs` pin founder/max32/count1,
+owner-first-Add/max32/count2 and selected-Welcome/max0/count0, preserving exact serialized
+secret/epoch/cursor bytes through bounded restore. Neither the zero config scalar nor the
+current initial loader authorizes deleting secrets or assuming later ring slots are sorted.
 
 Default ratchet policy is out-of-order tolerance5 and maximum forward distance1000. Retained
 remote queue lengths are bounded by tolerance after a successful consume. An admitted forward
@@ -64,10 +74,13 @@ constructor. The actual new loader entry chooses its policy from its original ho
    encryption ratchets; other initialized slots must be decryption ratchets. Bound generations
    to u32, every queue to the configured tolerance, all secrets/keys/nonces and option shapes.
    Never serialize a ratchet backward to make an old source fit.
-4. Retain zero SDK past epochs/resumption/proposals and Operational canonical state initially.
-   First verify genuine stable sources after real Add/Remove have that shape; unsupported states
-   stay reachable and closed. Separate private transaction candidates must retain their exact
-   source, Welcome/commit and debt rather than relying on this canonical-current grammar.
+4. Retain the configured zero SDK past epochs/proposals and Operational canonical state initially,
+   but preserve the actual max32/nonempty founder-owner or max0/empty Welcome resumption store.
+   The join-config scalar `number_of_resumption_psks=0` does not describe the founder builder's
+   store. The initial closed loader supports only the genuine epoch0/1 subset; live Add/Remove
+   needs reviewed actual max32 ring/cursor/epoch-wrap handling and its secret allocations.
+   Unsupported states stay reachable and closed, never trimmed or rewritten. Separate private
+   candidates must retain their exact source, Welcome/commit and debt.
 5. Keep the graph's actual resource lease in both MlsDevice and ServerGroup through all transfers
    and Drop orderings. Repeated member/catalog/credential observations need their own bounded
    scratch; successful restore is not payment for those later API calls.

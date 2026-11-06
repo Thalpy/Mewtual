@@ -1,5 +1,5 @@
-//! WIP role-specific cold genesis closure. The parent stays UNDECLARED until the actual
-//! Factory guards, scope read roles and owning Current caller are compiled and tested.
+//! Role-specific cold genesis closure, paired with the actual Factory guards, scope
+//! read roles and seed-present Current2 owning caller. Initializing1 remains test-only.
 //!
 //! These are NEW cold receipts, never reconstructed warm SavedSeed/SavedHead capabilities.
 //! The first packet accepts only a complete independently seeded pin/genesis-head closure,
@@ -7,10 +7,11 @@
 //! remain unsupported and untouched. Their repair/read roles must be implemented separately.
 use super::*;
 use crate::store::chat_admission::v2_current::ColdV2GenesisScopeBasis;
-use crate::store::critical_namespaces::current_layout::{
-    ColdV2CurrentGroupReadGuard, ColdV2InitializingGroupReadGuard,
-};
+use crate::store::critical_namespaces::current_layout::ColdV2CurrentGroupReadGuard;
+#[cfg(test)]
+use crate::store::critical_namespaces::current_layout::ColdV2InitializingGroupReadGuard;
 use catcoms_sync::owner_v2::OriginalV2GenesisSeedObservation;
+#[cfg(test)]
 use codec::{V2ActivationSeedId, V2GenesisHeadId, V2GroupPinId};
 
 // Cold selection and Factory's path/directory guards coexist. Their named invoice exceeds
@@ -118,6 +119,7 @@ struct CompleteColdClosure {
 
 /// Complete seed-present cold Initializing1 proof. It neither repairs partial objects nor
 /// installs an owner; Scope needs its distinct cold preparation before an exact continuation.
+#[cfg(test)]
 pub(in crate::store) struct ColdV2GenesisActivationSeed {
     closure: Arc<CompleteColdClosure>,
 }
@@ -130,6 +132,7 @@ pub(in crate::store) struct ColdV2GenesisCurrentHead {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
+    #[cfg(test)]
     Initializing,
     Current,
 }
@@ -145,6 +148,7 @@ pub(in crate::store) struct PreparedColdV2GenesisCapture {
     // Partial read failures occur before a complete original selection exists. This attempt
     // stays closed; a separate paid cold read may start again, never this old object's retry.
     partial_read_failed: bool,
+    #[cfg(test)]
     initializing: Option<Arc<ColdV2GenesisActivationSeed>>,
     current: Option<Arc<ColdV2GenesisCurrentHead>>,
     #[cfg(test)]
@@ -164,57 +168,66 @@ macro_rules! sanitized_cold_debug {
 }
 sanitized_cold_debug!(
     ColdV2GenesisReadResources,
-    ColdV2GenesisActivationSeed,
     ColdV2GenesisCurrentHead,
     PreparedColdV2GenesisCapture
 );
+#[cfg(test)]
+sanitized_cold_debug!(ColdV2GenesisActivationSeed);
 
 /// Internal sum of the TWO real borrowed guard types, not a caller-selected role/boolean.
 /// Keeping the concrete type here prevents a trait adopter or arbitrary callback from
 /// replacing the original scope/namespace/Root validation at the final admission edge.
 enum ReadGuard<'guard, 'reader, 'writer> {
+    #[cfg(test)]
     Initializing(&'guard ColdV2InitializingGroupReadGuard<'reader, 'writer>),
     Current(&'guard ColdV2CurrentGroupReadGuard<'reader, 'writer>),
 }
 impl ReadGuard<'_, '_, '_> {
     fn store(&self) -> &ServerStore {
         match self {
+            #[cfg(test)]
             Self::Initializing(g) => g.store(),
             Self::Current(g) => g.store(),
         }
     }
     fn source(&self) -> &GenesisSourceDataRef<'_> {
         match self {
+            #[cfg(test)]
             Self::Initializing(g) => g.source(),
             Self::Current(g) => g.source(),
         }
     }
     fn root(&self) -> &critical_namespaces::archive_bootstrap::MountedRoot {
         match self {
+            #[cfg(test)]
             Self::Initializing(g) => g.archive_root(),
             Self::Current(g) => g.archive_root(),
         }
     }
     fn directory_data(&self) -> (&Path, &File, catcoms_storage::kept::SessionId) {
         match self {
+            #[cfg(test)]
             Self::Initializing(g) => g.directory_data(),
             Self::Current(g) => g.directory_data(),
         }
     }
     fn resources(&self) -> &ColdV2GenesisReadResources {
         match self {
+            #[cfg(test)]
             Self::Initializing(g) => g.resources(),
             Self::Current(g) => g.resources(),
         }
     }
     fn basis(&self) -> &ColdV2GenesisScopeBasis {
         match self {
+            #[cfg(test)]
             Self::Initializing(g) => g.scope_basis_data(),
             Self::Current(g) => g.scope_basis_data(),
         }
     }
     fn validate_source_only(&self) -> Result<(), AppError> {
         match self {
+            #[cfg(test)]
             Self::Initializing(g) => g.validate_source_only(),
             Self::Current(g) => g.validate_source_only(),
         }
@@ -266,6 +279,7 @@ impl PreparedColdV2GenesisCapture {
             role: None,
             captured: None,
             partial_read_failed: false,
+            #[cfg(test)]
             initializing: None,
             current: None,
             #[cfg(test)]
@@ -317,6 +331,7 @@ impl PreparedColdV2GenesisCapture {
         Ok(closure.clone())
     }
 
+    #[cfg(test)]
     pub(in crate::store) fn capture_initializing(
         &mut self,
         guard: &ColdV2InitializingGroupReadGuard<'_, '_>,
@@ -555,12 +570,15 @@ macro_rules! cold_receipt_methods {
                     self.closure.group_id,
                 )
             }
+            #[cfg(test)]
             pub(in crate::store) fn activation_id_data(&self) -> V2ActivationSeedId {
                 V2ActivationSeedId::of(&self.closure.seed.frame)
             }
+            #[cfg(test)]
             pub(in crate::store) fn head_id_data(&self) -> V2GenesisHeadId {
                 V2GenesisHeadId::of(&self.closure.head.frame)
             }
+            #[cfg(test)]
             pub(in crate::store) fn pin_id_data(&self) -> V2GroupPinId {
                 V2GroupPinId::of(&self.closure.pin.frame)
             }
@@ -585,6 +603,7 @@ macro_rules! cold_receipt_methods {
         }
     };
 }
+#[cfg(test)]
 cold_receipt_methods!(ColdV2GenesisActivationSeed);
 cold_receipt_methods!(ColdV2GenesisCurrentHead);
 
@@ -604,18 +623,29 @@ fn validate_cold_invoice() -> Result<(), AppError> {
         + std::mem::size_of::<ResourceBody>()
         + 2 * std::mem::size_of::<CompleteColdClosure>()
         + std::mem::size_of::<PreparedColdV2GenesisCapture>()
-        + std::mem::size_of::<ColdV2GenesisActivationSeed>()
-        + std::mem::size_of::<ColdV2GenesisCurrentHead>()
+        + 2 * std::mem::size_of::<ColdV2GenesisCurrentHead>()
         + std::mem::size_of::<ColdV2GenesisScopeBasis>()
         + 2 * crate::store::persistence::ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES
         + 2 * (std::mem::size_of::<OriginalV2GenesisSeedObservation>() + 64)
         + crate::store::critical_namespaces::current_layout::COLD_V2_GROUP_READ_GUARD_BYTES
+        + crate::store::chat_admission::v2_current::COLD_V2_CURRENT_SCOPE_METADATA_BYTES
+        + super::cold_writer::COLD_WRITER_RECEIPT_METADATA_BYTES
         + 32 * 1024;
     if bytes > COLD_CAPTURE_METADATA_FEE {
         return Err(critical_namespaces::refused());
     }
     Ok(())
 }
+
+// Both receipts own exactly one closure Arc. Keep the same conservative two-receipt
+// allowance after removing the unused Initializing1 production entry point.
+#[cfg(test)]
+const _: () = {
+    assert!(
+        std::mem::size_of::<ColdV2GenesisActivationSeed>()
+            == std::mem::size_of::<ColdV2GenesisCurrentHead>()
+    );
+};
 
 #[cfg(test)]
 mod tests;

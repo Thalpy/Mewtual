@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Connected genesis Current recovery (6 November; Chat V2 still disabled)
+
+Warm activation and complete seed-present genesis Current2 cold recovery now have actual
+owning library callers. Cold recovery retains the same paid restored SDK/source, separately
+authenticated original files, bounded group claim, exact mounted scope owner and installed
+writer. It never reconstructs a warm Saved receipt. Only recovery and immutable DATA escape
+the public wrappers; no live text dispatch, authoring or native activation is supplied.
+Initializing1 repair, seed-settled and later-head recovery remain separate open work. The
+current [handover](HANDOVER.md#focused-execution-checkpoint-6-november-chat-v2-still-incomplete)
+supersedes the earlier authored/UNRUN checkpoints below.
+
 ## Private physical Current layout (5 November; authored, UNRUN)
 
 The explicit ID3 opener declares the fixed layout over the same original ID2 root and exposes

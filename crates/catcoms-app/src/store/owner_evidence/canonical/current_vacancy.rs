@@ -14,12 +14,28 @@ use crate::store::critical_namespaces::{
 use crate::store::persistence::GenesisSourceDataRef;
 use crate::store::persistence::V2GenesisDirectoryCustody;
 
-// The real task-free cold capture is test-only until its separate owner/writer caller lands.
-#[cfg(test)]
+// Concrete read and ownership roles share the same fixed pending registry and actual
+// canonical owner; neither a parsed receipt nor the public wrapper can construct them.
+pub(in crate::store) mod cold_current;
 pub(in crate::store) mod cold_read;
 
 const MAX_PENDING_GROUPS: usize = 16;
 const MAX_GROUP_BYTES: usize = 256;
+
+#[cfg(test)]
+pub(in crate::store) fn pending_group_registration_fee_data_for_test() -> (usize, usize) {
+    (
+        std::mem::size_of::<[Option<PendingGroupEntry>; MAX_PENDING_GROUPS]>()
+            + std::mem::size_of::<PendingGroupBuffer>(),
+        2 * std::mem::size_of::<PendingGroupEntry>(),
+    )
+}
+
+enum PendingGroupCustody {
+    Warm(Arc<V2GenesisDirectoryCustody>),
+    // Inert actual original metadata/files/payment only, never a sender or source graph.
+    ColdCurrent(Arc<crate::store::persistence::v2_genesis_activation::ColdV2GenesisCurrentHead>),
+}
 
 struct PendingGroupEntry {
     group: [u8; MAX_GROUP_BYTES],
@@ -28,7 +44,7 @@ struct PendingGroupEntry {
     source: catcoms_sync::owner_v2::BootstrapSourceId,
     mount: Arc<()>,
     original: Weak<GroupTaskLife>,
-    custody: Arc<V2GenesisDirectoryCustody>,
+    custody: PendingGroupCustody,
     // LAST: fixed binding/control references drain before the independent slot payment.
     _fee: CatalogReadReservation,
 }
@@ -46,9 +62,23 @@ impl PendingGroupEntry {
             || self.layout != task.layout_data()
             || self.source != task.source_id_data()
             || !Weak::ptr_eq(&self.original, &task.original_life())
-            || !Arc::ptr_eq(&self.custody, task.directory_output())
         {
             return Err(refused());
+        }
+        match &self.custody {
+            PendingGroupCustody::Warm(output) => {
+                if !Arc::ptr_eq(output, task.directory_output()?) {
+                    return Err(refused());
+                }
+            }
+            PendingGroupCustody::ColdCurrent(head) => {
+                if !task
+                    .cold_current_head_data()
+                    .is_some_and(|actual| Arc::ptr_eq(actual, head))
+                {
+                    return Err(refused());
+                }
+            }
         }
         Ok(())
     }
@@ -72,10 +102,12 @@ pub(in crate::store::owner_evidence) struct PendingGroupRegistry {
 pub(in crate::store) struct PreparedGroupRegistration {
     buffer: Option<PendingGroupBuffer>,
     entry: Option<PendingGroupEntry>,
+    cold_witness: Option<cold_current::RegisteredColdCurrentClaim>,
 }
 
 /// Actual retired inert DATA, held by the original task after the permanent fence handoff.
 /// Drop this only outside admission/pins/canonical/Root; it can refund actual pool payments.
+#[must_use = "retain and drop the paid retired entry only outside all host writers"]
 pub(in crate::store) struct RetiredGroupEntry {
     _entry: PendingGroupEntry,
 }
@@ -100,6 +132,14 @@ impl PreparedGroupRegistration {
         }
         let mut group = [0; MAX_GROUP_BYTES];
         group[..task.group().len()].copy_from_slice(task.group());
+        let cold_witness = task
+            .cold_current_head_data()
+            .map(|_| cold_current::RegisteredColdCurrentClaim::prepare(task))
+            .transpose()?;
+        let custody = match task.cold_current_head_data() {
+            Some(head) => PendingGroupCustody::ColdCurrent(head.clone()),
+            None => PendingGroupCustody::Warm(task.directory_output()?.clone()),
+        };
         Ok(Self {
             buffer: Some(buffer),
             entry: Some(PendingGroupEntry {
@@ -109,9 +149,10 @@ impl PreparedGroupRegistration {
                 source: task.source_id_data(),
                 mount: store.registry_mount(),
                 original: task.original_life(),
-                custody: task.directory_output().clone(),
+                custody,
                 _fee: entry_fee,
             }),
+            cold_witness,
         })
     }
 }
@@ -446,6 +487,8 @@ impl VacantV2OwnerNamespace<'_, '_> {
         directory: &crate::store::critical_namespaces::current_layout::SavedV2GroupDirectory,
         root: &crate::store::critical_namespaces::archive_bootstrap::MountedRoot,
     ) -> Result<Option<RetiredGroupEntry>, AppError> {
+        // A complete old cold directory is NOT a handoff to the new scope owner.
+        self.inner.task.directory_output()?;
         self.validate_source_only()?;
         let store = self.admission.store();
         let task = self.inner.task;

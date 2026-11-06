@@ -373,6 +373,8 @@ enum LargeOutputMode {
 /// Closed bootstrap destinations only. First source seed uses strict create_new, even for
 /// equal foreign bytes. A verified complete original seed permits destination/page prefixes.
 /// A held handle is installed BEFORE identity or writing can fail, including a zero-byte file.
+// The three extra arguments exist only for deterministic zero/short-write test injection.
+#[cfg_attr(test, allow(clippy::too_many_arguments))]
 fn ensure_large_source_output(
     work: &OriginalSourceWriteWork,
     path: &Path,

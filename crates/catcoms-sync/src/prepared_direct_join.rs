@@ -316,7 +316,7 @@ impl PreparedDirectJoin {
                 response.remove(0);
                 Ok(response)
             }
-            Some((&JOIN_PENDING, pending)) if pending.is_empty() => {
+            Some((&JOIN_PENDING, [])) => {
                 let mut dispatched = 0;
                 loop {
                     if dispatched == 16 {

@@ -106,6 +106,9 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for ReturnedArchiveFoun
 impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
     /// Early refusal still has an untouched node and returns the SAME complete Planning
     /// owner. Once this succeeds all private stage errors stay in SourcePreparation instead.
+    // Return ownership inline: a refusal must not allocate to preserve the original owner,
+    // especially when the phase's separate metadata payment itself was refused.
+    #[allow(clippy::result_large_err)]
     pub fn into_source_preparation(
         self,
         store: &ServerStore,

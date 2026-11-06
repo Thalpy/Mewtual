@@ -132,10 +132,12 @@ fn fixture(seed: u64) -> Fixture {
     }
 }
 
+type ObservedOwner = (ChatAdmissionKey, [u8; 32], u64, Arc<()>, bool);
+
 struct State {
     table: BTreeMap<ChatAdmissionKey, Record>,
     dirty: bool,
-    owners: Vec<(ChatAdmissionKey, [u8; 32], u64, Arc<()>, bool)>,
+    owners: Vec<ObservedOwner>,
 }
 fn state(store: &ServerStore) -> State {
     // Test-only observation, including AFTER the real mount is revoked. This directly reads

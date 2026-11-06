@@ -16,6 +16,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::MutexGuard;
 use std::sync::{Arc, Weak};
 
+pub(in crate::store) mod cold_current;
+
+/// Warm directory work and cold complete-Current custody have different origins. In
+/// particular a cold task never owns a synthetic DirectoryProgress/SavedDirectory.
+// The distinct task invoices cover their inline custody. In particular ColdCurrent's
+// preallocated OnceLock must not require an allocation at the canonical handoff edge.
+#[allow(clippy::large_enum_variant)]
+enum GroupTaskCustody {
+    Warm {
+        output: Arc<crate::store::persistence::V2GenesisDirectoryCustody>,
+        directory: Option<Arc<SavedV2GroupDirectory>>,
+    },
+    ColdCurrent(cold_current::ColdCurrentClaim),
+}
+
 /// Tiny original lifetime only. Its weak allocations can outlive the task, so every actual
 /// observation carries the SAME task metadata payment; no weak pointer pins a source graph.
 pub(in crate::store) struct GroupTaskLife {
@@ -92,8 +107,7 @@ impl std::fmt::Debug for OriginalV2GenesisGroupObservation {
 pub(in crate::store) struct PreparedV2GenesisGroupNamespace {
     source: OriginalGroupSource,
     layout: super::super::archive_current_namespace_codec::CurrentLayoutData,
-    output: Arc<crate::store::persistence::V2GenesisDirectoryCustody>,
-    directory: Option<Arc<SavedV2GroupDirectory>>,
+    custody: GroupTaskCustody,
     // Retired slot resources must remain outside guarded code until the real permanent fence
     // has taken over. They never contain a task sender or support a replacement registration.
     retired: Option<crate::store::owner_evidence::canonical::current_vacancy::RetiredGroupEntry>,
@@ -128,18 +142,20 @@ impl PreparedV2GenesisGroupNamespace {
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,
     ) -> Result<(), AppError> {
+        // Cold complete-file custody has no warm mkdir/receipt state to retry.
+        self.directory_output()?;
         // Retired fee owners can be last; drain only here, before acquiring any host writer.
         drop(self.retired.take());
         self.retains_original(store, source)?;
-        if self.directory.is_none() {
+        if self.saved_directory().is_err() {
             store.with_vacant_v2_genesis_admission(source, |admission| {
                 let guard = self.lock_creating(admission)?;
                 store.write_v2_genesis_group_directory(&guard)
             })?;
             // This can fail (e.g. File duplication) without losing the Store-retained saved
             // output. No global writer is held during its path/Arc allocation or cleanup.
-            let directory = self.output.collect_saved_directory(self)?;
-            self.directory = Some(directory);
+            let directory = self.directory_output()?.collect_saved_directory(self)?;
+            self.set_warm_saved_directory(directory)?;
         }
         let retired = store.with_vacant_v2_genesis_admission(source, |admission| {
             let mut guard = self.lock_vacant(admission)?;
@@ -178,7 +194,22 @@ impl PreparedV2GenesisGroupNamespace {
     pub(in crate::store) fn saved_directory(
         &self,
     ) -> Result<&Arc<SavedV2GroupDirectory>, AppError> {
-        self.directory.as_ref().ok_or_else(refused)
+        match &self.custody {
+            GroupTaskCustody::Warm { directory, .. } => directory.as_ref().ok_or_else(refused),
+            GroupTaskCustody::ColdCurrent(_) => Err(refused()),
+        }
+    }
+    fn set_warm_saved_directory(
+        &mut self,
+        saved: Arc<SavedV2GroupDirectory>,
+    ) -> Result<(), AppError> {
+        match &mut self.custody {
+            GroupTaskCustody::Warm { directory, .. } => {
+                *directory = Some(saved);
+                Ok(())
+            }
+            GroupTaskCustody::ColdCurrent(_) => Err(refused()),
+        }
     }
     pub(in crate::store) fn group(&self) -> &[u8] {
         self.source.context.spec_data().group
@@ -199,8 +230,11 @@ impl PreparedV2GenesisGroupNamespace {
     }
     pub(in crate::store) fn directory_output(
         &self,
-    ) -> &Arc<crate::store::persistence::V2GenesisDirectoryCustody> {
-        &self.output
+    ) -> Result<&Arc<crate::store::persistence::V2GenesisDirectoryCustody>, AppError> {
+        match &self.custody {
+            GroupTaskCustody::Warm { output, .. } => Ok(output),
+            GroupTaskCustody::ColdCurrent(_) => Err(refused()),
+        }
     }
 }
 
@@ -215,8 +249,7 @@ pub(in crate::store) use crate::store::persistence::SavedV2GroupDirectory;
 /// Named requested buffers/metadata only; existing SourceData, SDK graph, global scope map
 /// and native/runtime allocations keep their separate real payments. Context owns one <=256B
 /// group copy. Tiny original read/SDK/life controls and actual Arc headers are explicit.
-const GROUP_TASK_FEE: usize = crate::store::persistence::V2_GROUP_DIRECTORY_METADATA_BYTES
-    + std::mem::size_of::<PreparedV2GenesisGroupNamespace>()
+const GROUP_TASK_STAMP_FEE: usize = std::mem::size_of::<PreparedV2GenesisGroupNamespace>()
     + std::mem::size_of::<OriginalGroupSource>()
     + std::mem::size_of::<GroupTaskLife>()
     + std::mem::size_of::<OriginalV2GenesisGroupObservation>()
@@ -227,6 +260,8 @@ const GROUP_TASK_FEE: usize = crate::store::persistence::V2_GROUP_DIRECTORY_META
     + std::mem::size_of::<OriginalV2GenesisSeedObservation>()
     + 64
     + 3 * (2 * std::mem::size_of::<usize>()); // task life, shared fee and source-owning body
+const GROUP_TASK_FEE: usize =
+    crate::store::persistence::V2_GROUP_DIRECTORY_METADATA_BYTES + GROUP_TASK_STAMP_FEE;
 
 impl V2CurrentLayoutStore {
     pub(in crate::store) fn prepare_genesis_group_namespace(
@@ -264,8 +299,10 @@ impl V2CurrentLayoutStore {
         let task = PreparedV2GenesisGroupNamespace {
             source: original,
             layout,
-            output,
-            directory: None,
+            custody: GroupTaskCustody::Warm {
+                output,
+                directory: None,
+            },
             retired: None,
             life: Arc::new(GroupTaskLife {
                 cancelled: AtomicBool::new(false),

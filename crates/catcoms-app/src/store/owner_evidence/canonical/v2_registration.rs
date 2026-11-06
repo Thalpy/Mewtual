@@ -11,6 +11,7 @@ use crate::store::persistence::{
     v2_genesis_activation::SavedV2GenesisActivationSeed, GenesisSourceDataRef,
 };
 use catcoms_rt::RequestAuthority;
+pub(in crate::store) mod cold_current;
 
 const MAX_WRITERS: usize = crate::store::MAX_CHAT_ADMISSION_IDENTITIES;
 const WRITER_METADATA_FEE: usize = 8 * 1024;

@@ -10,11 +10,10 @@ use catcoms_storage::kept::SessionId;
 use catcoms_sync::owner_v2::BootstrapSourceId;
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
 mod cold_read;
 #[cfg(test)]
 pub(in crate::store) use cold_read::cold_group_read_entries_for_test;
-#[cfg(test)]
+pub(in crate::store) use cold_read::require_cold_head_group_directory;
 pub(in crate::store) use cold_read::{
     OpenedColdV2GroupDirectory, COLD_V2_GROUP_DIRECTORY_READ_BYTES,
 };
@@ -174,7 +173,7 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         use critical_namespaces::refused;
         let task = guard.task();
-        let output = task.directory_output();
+        let output = task.directory_output()?;
         output.require_same_data(self, guard.source(), task)?;
         guard.validate_source_only()?;
         self.validate_mounted_current_layout_under_archive_root(guard.archive_root())?;
@@ -317,7 +316,7 @@ impl V2GenesisDirectoryCustody {
         if !Arc::ptr_eq(&self.mount, &store.registry_mount())
             || self.layout != task.layout_data()
             || self.source != task.source_id_data()
-            || !std::ptr::eq(self, task.directory_output().as_ref())
+            || !std::ptr::eq(self, task.directory_output()?.as_ref())
         {
             return Err(critical_namespaces::refused());
         }
@@ -332,7 +331,7 @@ impl V2GenesisDirectoryCustody {
         task: &PreparedV2GenesisGroupNamespace,
     ) -> Result<Arc<SavedV2GroupDirectory>, AppError> {
         use critical_namespaces::refused;
-        if !std::ptr::eq(self, task.directory_output().as_ref())
+        if !std::ptr::eq(self, task.directory_output()?.as_ref())
             || self.layout != task.layout_data()
             || self.source != task.source_id_data()
         {
@@ -373,7 +372,7 @@ impl SavedV2GroupDirectory {
         if !Arc::ptr_eq(&self.mount, &store.registry_mount())
             || self.layout != task.layout_data()
             || self.source != task.source_id_data()
-            || self.path != task.directory_output().path
+            || self.path != task.directory_output()?.path
         {
             return Err(critical_namespaces::refused());
         }
