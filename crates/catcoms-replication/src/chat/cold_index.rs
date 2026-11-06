@@ -8,10 +8,15 @@ use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
 mod query;
+mod rewrite;
 mod values;
 pub use query::{
     open_query_data, ChildStepData, DirectoryHitData, DirectoryRouteData, IndexDataError,
     IndexQueryData, MissData, QueryRootData, SearchData,
+};
+pub use rewrite::{
+    rewrite_branch_data, BranchChildData, BranchRewriteData, EncodedBranchData,
+    BRANCH_REWRITE_METADATA_BYTES, BRANCH_REWRITE_TEMPORARY_BYTES,
 };
 pub use values::{
     ActionClaimData, ClaimHint, DirectoryData, DirectoryTreeData, ReceiptDigestData, RetentionData,
@@ -341,6 +346,17 @@ impl<'a> NodeFrame<'a> {
     }
     pub fn row_count(&self) -> usize {
         self.rows
+    }
+    /// Bounded structural claim check shared by query and COW edge descent. It does not
+    /// authenticate the supplied count or source: the actual selected signed tree tip must
+    /// provide that count. Actions require a positive covering bound; Directory uses None.
+    pub fn check_claim_bounds_data(&self, leaves: Option<u64>) -> Result<(), ChatError> {
+        match (self.context.scope, leaves) {
+            (IndexScopeData::Directory, None) => {}
+            (IndexScopeData::Actions(_), Some(n)) if n >= self.summary.keys => {}
+            _ => return Err(ChatError::Scope),
+        }
+        query::check_claim_bounds(self, leaves)
     }
     pub fn leaf_row(&self, index: usize) -> Result<LeafRowData, ChatError> {
         if self.kind != NodeKindData::Leaf || index >= self.rows {

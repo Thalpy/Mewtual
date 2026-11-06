@@ -1,5 +1,18 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Exact V2 founder acceptance is not root acquisition (6 November)
+
+The bounded founder verifier requires independent HOST pin/genesis expectations; incoming
+self-signed records must not choose that trust. Full signed lineage/image replay, exact
+delegation and authenticated count/context/root inclusion precede Create support. Other
+effects and membership/epoch changes refuse in this profile. Candidate installation consumes
+the same derived model only after explicit actual-host selection; it supplies no App save
+or native authorization. Original source negatives latch permanently and are rechecked
+inside publication readers; actual close must still drain admitted readers. Raw signatures
+are retained before late negatives and cannot be replaced during inert handoff. Actual App
+payment/effect/cold/network composition remains an open enforcement boundary.
+[Exact contract](communication-recovery/CHAT-V2-FOUNDER-PROJECTION-ISSUER.md).
+
 ## Complete pre-row journal requires actual birth ownership (6 November)
 
 The no-row recovery reader authenticates the complete original journal under the same paid

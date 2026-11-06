@@ -202,7 +202,7 @@ fn group_close_orders_both_before_and_after_exact_negative_capsule_resolution() 
                 .projection
                 .as_ref()
                 .unwrap()
-                .source
+                .legacy_fixture_source()
                 .clone();
             let resolution = f.resolution(&ledger, delete.id(), &next_channel);
             let revision = next_channel.life.revision.load(Ordering::Acquire);

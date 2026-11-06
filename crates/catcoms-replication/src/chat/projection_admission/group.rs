@@ -1,12 +1,13 @@
 //! One original group-wide NEGATIVE lifetime, shared across otherwise independent channels.
 //!
 //! This is not a governing-state verifier: a caller cannot turn group bytes, a new view or a
-//! completed drain into Profile/root/tenure authority. The future production issuer must bind
-//! its verified original governing source to this lifetime before issuing channel tokens.
+//! completed drain into Profile/root/tenure authority. The V2 founder verifier binds its
+//! explicit HOST-selected genesis and original source to this lifetime before issuing
+//! supported channel tokens. Other governing profiles remain separately gated.
 use super::*;
 
 pub(super) struct GroupViewLife {
-    group: Arc<[u8]>,
+    pub(super) group: Arc<[u8]>,
     pub(super) gate: Arc<RwLock<()>>,
     cancelled: AtomicBool,
     pending: AtomicBool,
@@ -79,7 +80,7 @@ impl Drop for ProjectionGroup {
 /// Negative owner of one original governing-view lifetime. Drop cancels future group admission
 /// in O(1), never waits for publication and never reports that admitted work has finished.
 pub struct ProjectionGroupView {
-    life: Arc<GroupViewLife>,
+    pub(super) life: Arc<GroupViewLife>,
     previous: Option<ProjectionGroupCloseCompletion>,
 }
 impl std::fmt::Debug for ProjectionGroupView {

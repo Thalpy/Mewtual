@@ -109,6 +109,7 @@ impl OwnerProfileExpectation {
             subject: main.subject,
             rights: main.rights,
             covered: verified,
+            constraint: crate::chat::authority::SemanticConstraint::LegacyReusable,
         })
     }
 

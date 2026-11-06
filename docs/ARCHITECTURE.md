@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Founder-only operational verifier (6 November; integration in progress)
+
+The new bounded V2 prefix verifier replays complete genesis and signed Append under an
+explicit independent HOST expectation. Semantic Create authority is exact and separate
+from accepted projection; retained results observe original source/group cancellation.
+Sync caches raw signatures before late negatives and materializes Headers outside writers.
+Actual operational storage, multi-member governance and native activation remain open.
+[Boundary and evidence](communication-recovery/CHAT-V2-FOUNDER-PROJECTION-ISSUER.md).
+
 ## Complete journal before row1 (6 November; focused Windows tests pass)
 
 A distinct owning library adapter now covers the complete authenticated activation journal

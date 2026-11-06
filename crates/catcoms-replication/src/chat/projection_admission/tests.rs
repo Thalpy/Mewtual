@@ -6,6 +6,15 @@ use catcoms_wire::Encoder;
 use std::collections::BTreeSet;
 mod group_work;
 
+impl ProjectionAdmissionToken {
+    fn legacy_fixture_source(&self) -> &Arc<()> {
+        let ProjectionSupport::Legacy { source, .. } = &self.support else {
+            panic!("legacy fixture must not mint V2 support");
+        };
+        source
+    }
+}
+
 struct Fixture {
     owner: DeviceKeypair,
     member: DeviceKeypair,
@@ -18,7 +27,7 @@ impl Fixture {
             owner: DeviceKeypair::from_seed(&[250; 32]),
             member: DeviceKeypair::from_seed(&[1; 32]),
             realm: Realm::new(b"projection-real-signed-fixture", 9).unwrap(),
-            context: EvidenceContext {
+            context: EvidenceContext::LegacyV1 {
                 profile: owner_facts::OwnerFactId::from_bytes([2; 32]),
                 admission: owner_facts::OwnerFactId::from_bytes([3; 32]),
             },
@@ -108,7 +117,7 @@ impl Fixture {
     ) -> ProjectionAdmissionToken {
         assert!(action.verify());
         assert!(self.witness().matches(action));
-        let context = open.map_or(self.context, |open| EvidenceContext {
+        let context = open.map_or(self.context, |open| EvidenceContext::LegacyV1 {
             profile: open.life.profile,
             admission: open.life.admission,
         });
@@ -123,8 +132,8 @@ impl Fixture {
             .put_bytes(b"mewtual/test-only/current-projection/v1\0")
             .unwrap();
         bytes.put_bytes(&action.semantic_bytes()).unwrap();
-        bytes.put_bytes(context.profile.as_bytes()).unwrap();
-        bytes.put_bytes(context.admission.as_bytes()).unwrap();
+        bytes.put_bytes(context.profile().as_bytes()).unwrap();
+        bytes.put_bytes(context.admission().as_bytes()).unwrap();
         bytes.put_u8(u8::from(open.is_some()));
         let signature = self.owner.sign(bytes.as_bytes());
         assert!(verify_with_public_bytes(
@@ -138,14 +147,18 @@ impl Fixture {
             context,
             view: view.life.clone(),
             open: open.map(|scope| scope.life.clone()),
-            proof: owner_facts::OwnerFactId::from_bytes(*blake3::hash(bytes.as_bytes()).as_bytes()),
-            source: Arc::new(()),
+            support: ProjectionSupport::Legacy {
+                proof: owner_facts::OwnerFactId::from_bytes(
+                    *blake3::hash(bytes.as_bytes()).as_bytes(),
+                ),
+                source: Arc::new(()),
+            },
         }
     }
     fn open(&self, view: &ProjectionView) -> ProjectionOpenAdmission {
         view.open_admission(
-            self.context.profile,
-            self.context.admission,
+            self.context.profile(),
+            self.context.admission(),
             self.member.verifying_key().to_bytes(),
         )
         .unwrap()
@@ -1196,7 +1209,10 @@ fn moderation_pending_delete_cannot_preinstall_current_support_or_uncapsuled_lat
     let f = Fixture::new();
     let mut moderator = Fixture::new();
     moderator.member = DeviceKeypair::from_seed(&[2; 32]);
-    moderator.context.admission = owner_facts::OwnerFactId::from_bytes([5; 32]);
+    moderator.context = EvidenceContext::LegacyV1 {
+        profile: moderator.context.profile(),
+        admission: owner_facts::OwnerFactId::from_bytes([5; 32]),
+    };
     let mut ledger = f.ledger();
     let view = ledger.begin_projection_view();
     let create = f.create(1, "retained");
@@ -1379,12 +1395,12 @@ fn equivalent_current_proof_retries_preserve_original_support_and_existing_read_
         .unwrap();
     assert_eq!(view.life.revision.load(Ordering::Acquire), revision);
     assert!(Arc::ptr_eq(
-        &ledger.entries[&create.id()]
+        ledger.entries[&create.id()]
             .projection
             .as_ref()
             .unwrap()
-            .source,
-        &token.source
+            .legacy_fixture_source(),
+        token.legacy_fixture_source()
     ));
     assert!(message.with_publication(|_| ()).is_ok());
 }

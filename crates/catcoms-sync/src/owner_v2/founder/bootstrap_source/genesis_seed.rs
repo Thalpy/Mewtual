@@ -17,6 +17,19 @@ use catcoms_replication::chat::{
 use catcoms_rt::Clock;
 use std::sync::{Arc, Weak};
 
+mod ordinary_append;
+mod ordinary_create;
+pub use ordinary_append::{
+    DetachedV2AppendData, PreparedV2AppendData, V2AppendDataView, V2AppendPlanObservation,
+    V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES,
+};
+pub use ordinary_create::{
+    DetachedV2CreateData, PreparedV2CreateData, V2CreateDataView, V2CreatePacketId,
+    V2CreateRefusal, V2CreateRequest, CREATE_DATA_BUFFER_BYTES, MAX_CREATE_ACTION_BYTES,
+    MAX_CREATE_CIPHERTEXT_BYTES, MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES,
+    MAX_CREATE_PADDED_BYTES,
+};
+
 /// Negative closed-source allowances. These cannot reserve provider/metadata/SDK memory or
 /// authenticate a source. The actual host must retain those separate fees for the node lifetime.
 #[derive(Clone, Copy, Debug)]

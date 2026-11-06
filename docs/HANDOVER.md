@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## Operational Chat V2 integration (6 November; in progress)
+
+Core's founder-only acceptance verifier and Sync's raw-signature/inert-handoff boundary
+are now declared and exercised: all227 Core chat tests pass, including20/50-writer partition/
+restart and existing Add/Remove/Review transition controls; the expanded
+Sync run passes11. Review fixes for unchanged-proof normalization and permanently latched
+source negatives pass in that Core run, as do four packed-preserving branch regressions.
+The durable operational host/COW/WAL/retirement,
+full membership and epoch governance, transport/native and audit composition remain open.
+This is not text Chat V2 activation. App owner/kernel and persistence bodies are being
+paired in the operational worktree; DATA and OS leases cannot substitute for new effect
+admission. [Exact boundary and evidence](communication-recovery/CHAT-V2-FOUNDER-PROJECTION-ISSUER.md).
+
+Fresh `6f8c7c6f` CI progresses beyond the earlier service reservation failure but Linux
+native aborts on stack overflow in abandoned voice custody. Its actual wrapper-size
+regression fails locally at93,936 bytes before the narrow child-future boxing fix. The
+fix retains all actual branches/assertions. All3 focused default-stack tests pass in21.97s,
+and strict native Clippy passes in2m41s after building the unchanged frontend. The separate
+native fixture commit `bd11fe37` is pushed; fresh Linux execution is pending. Full suites are not
+green. Normal test runs are authorized again; the ten-thousand-operation regression stays
+deferred until the end.
+
 ## Native infrastructure reservation (6 November; focused tests pass)
 
 Linux CI at `4cb7f43a` passes the three-bubble, channel/membership and both six-client restart

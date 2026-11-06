@@ -9,6 +9,9 @@ use crate::chat::owner_bodies::{AppendBody, RemovalBody, ReviewDecisionBody};
 use crate::chat::owner_header::{OwnerBodyId, MAX_HEADER_BYTES};
 use crate::chat::owner_profile::{AdmissionOrigin, MAX_ADMISSION_BYTES, MAX_PROFILE_BYTES};
 
+mod append_prepare;
+pub use append_prepare::{UnsignedAppendStepData, UNSIGNED_APPEND_DATA_INVOICE};
+
 const MAX_SLOTS: usize = MAX_CURRENT_MEMBERS as usize;
 const MAX_NODES: usize = crate::chat::acceptance_tree::MAX_APPEND_LEAVES
     + crate::chat::acceptance_tree::MAX_APPEND_INTERNAL_NODES;
@@ -111,6 +114,7 @@ const NAMED_LAYOUT_BYTES: usize = 2 * MAX_SLOTS * std::mem::size_of::<HotSlot>()
     + 2 * std::mem::size_of::<PreparedAppend>()
     + std::mem::size_of::<FrozenCutData>()
     + 2 * std::mem::size_of::<Change>()
+    + 2 * std::mem::size_of::<AppendChange>()
     + 2 * MAX_SLOTS * std::mem::size_of::<AcceptanceLeaf>()
     + crate::chat::owner_bodies::MAX_APPEND_BODY_BYTES
     + 8 * (MAX_PROFILE_BYTES
@@ -259,18 +263,15 @@ impl ReplayMath {
             }
             ReplayBody::Append(body) => {
                 body.verify_header_binding(header)?;
-                let spec = body.spec();
-                let admission = OwnerBodyId::from_bytes(*spec.old_tip.context.admission.as_bytes());
-                let index = self.find(admission)?;
-                let old = &self.slots[index];
-                if old.tip_header != spec.previous_tip || old.frontier.tip() != spec.old_tip {
-                    return Err(dependency());
-                }
-                let prepared = body.prepare_on_frontier(&old.frontier)?;
+                let AppendChange {
+                    index,
+                    image,
+                    prepared,
+                } = self.append_change(body)?;
                 let changed = Change::Append {
                     index,
+                    image,
                     frontier: prepared.frontier().clone(),
-                    body: body.id(),
                     header: header.id(),
                 };
                 append = Some(prepared);
@@ -332,15 +333,14 @@ impl ReplayMath {
             }
             Change::Append {
                 index,
+                image,
                 frontier,
-                body,
                 header,
             } => {
-                let tip = frontier.tip();
                 let changed = &mut slots[index];
-                changed.image.tip_body = body;
-                changed.image.accepted_count = tip.count;
-                changed.image.accepted_root = tip.root;
+                changed.image = image;
+                // The image deliberately excludes a self-CID. ONLY the actual signed
+                // result supplies this changed admission's new tip-header identity.
                 changed.tip_header = header;
                 changed.frontier = frontier;
             }
@@ -349,26 +349,7 @@ impl ReplayMath {
             }
         }
         let image_slots: Vec<_> = slots.iter().map(|slot| slot.image).collect();
-        let image = encode_state(
-            StateMeta {
-                group: &self.profile.spec().group,
-                profile: self.profile.id(),
-                issuer: self.profile.spec().founder,
-                tenure: self.profile.tenure(),
-                parent: self.header.id(),
-                previous: self.header.spec().state,
-                sequence: self
-                    .header
-                    .spec()
-                    .sequence
-                    .checked_add(1)
-                    .ok_or_else(dependency)?,
-                kind,
-                body: body_id,
-                mls_epoch: epoch,
-            },
-            &image_slots,
-        )?;
+        let image = self.result_image(&image_slots, kind, body_id, epoch)?;
         // Exact canonical bytes compare all slots/epoch/metadata, not only changed rows/hash.
         if image.as_slice() != proposed_image {
             return Err(dependency());
@@ -386,17 +367,83 @@ impl ReplayMath {
             removal,
         })
     }
+
+    /// Common unsigned/signed append mathematics. This selects nothing: parent/source
+    /// trust and cross-batch accepted lookup remain the actual governor's responsibility.
+    /// The signed path retains its signature/header/body gates BEFORE reaching this helper.
+    fn append_change(&self, body: &AppendBody) -> Result<AppendChange, ChatError> {
+        let spec = body.spec();
+        if spec.group != self.profile.spec().group
+            || spec.old_tip.context.profile != self.profile.id()
+        {
+            return Err(ChatError::Scope);
+        }
+        let admission = OwnerBodyId::from_bytes(*spec.old_tip.context.admission.as_bytes());
+        let index = self.find(admission)?;
+        let old = &self.slots[index];
+        if old.tip_header != spec.previous_tip || old.frontier.tip() != spec.old_tip {
+            return Err(dependency());
+        }
+        let prepared = body.prepare_on_frontier(&old.frontier)?;
+        let tip = prepared.new_tip();
+        let mut image = old.image;
+        image.tip_body = body.id();
+        image.accepted_count = tip.count;
+        image.accepted_root = tip.root;
+        Ok(AppendChange {
+            index,
+            image,
+            prepared,
+        })
+    }
+
+    /// Result metadata comes exclusively from this mathematical parent plus checked
+    /// operation deltas. In particular NEVER derive expected fields from proposed bytes.
+    fn result_image(
+        &self,
+        image_slots: &[CurrentAdmissionSlot],
+        kind: HeaderKind,
+        body: OwnerBodyId,
+        epoch: u64,
+    ) -> Result<Vec<u8>, ChatError> {
+        encode_state(
+            StateMeta {
+                group: &self.profile.spec().group,
+                profile: self.profile.id(),
+                issuer: self.profile.spec().founder,
+                tenure: self.profile.tenure(),
+                parent: self.header.id(),
+                previous: self.header.spec().state,
+                sequence: self
+                    .header
+                    .spec()
+                    .sequence
+                    .checked_add(1)
+                    .ok_or_else(dependency)?,
+                kind,
+                body,
+                mls_epoch: epoch,
+            },
+            image_slots,
+        )
+    }
 }
 
 enum Change {
     Add(HotSlot),
     Append {
         index: usize,
+        image: CurrentAdmissionSlot,
         frontier: Frontier,
-        body: OwnerBodyId,
         header: OwnerHeaderId,
     },
     Remove(usize),
+}
+
+struct AppendChange {
+    index: usize,
+    image: CurrentAdmissionSlot,
+    prepared: PreparedAppend,
 }
 
 #[cfg(test)]

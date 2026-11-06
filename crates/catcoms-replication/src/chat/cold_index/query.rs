@@ -60,7 +60,7 @@ pub fn open_query_data(
         if node.context() != spec.context || node.summary() != spec.root.summary {
             return Err(ChatError::Scope.into());
         }
-        check_claim_bounds(&node, spec.accepted_leaf_count)?;
+        node.check_claim_bounds_data(spec.accepted_leaf_count)?;
     }
     Ok(IndexQueryData {
         plain,
@@ -193,7 +193,7 @@ impl ChildStepData<'_> {
             {
                 return Err(ChatError::Scope.into());
             }
-            check_claim_bounds(&node, self.accepted_leaf_count)?;
+            node.check_claim_bounds_data(self.accepted_leaf_count)?;
         }
         Ok(IndexQueryData {
             plain,
@@ -292,7 +292,10 @@ fn open_plain(
     }
     Ok(open_private_chat_page(key, expected, frame)?)
 }
-fn check_claim_bounds(node: &NodeFrame<'_>, leaves: Option<u64>) -> Result<(), ChatError> {
+pub(super) fn check_claim_bounds(
+    node: &NodeFrame<'_>,
+    leaves: Option<u64>,
+) -> Result<(), ChatError> {
     if node.kind == NodeKindData::Leaf {
         for index in 0..node.rows {
             if let ValueData::Action(claim) = node.leaf_row(index)?.value {

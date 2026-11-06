@@ -1,6 +1,7 @@
 //! Real creation -> sealed source -> actual closed SDK loader. Authored UNRUN under the
 //! user compilation/test/build pause; resource fixtures are not Saved/Current authorities.
 use super::*;
+mod ordinary_data;
 use crate::local_chat_scope::ManagedChatScopeRevocation;
 use catcoms_mls::persist::{OwnerSdkGraphReservation, OwnerSdkRestoreLimits};
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId, RequestCancellation};

@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## V2 founder acceptance and raw-signature interface (6 November; library only)
+
+Core exposes explicit trusted-HOST genesis/selection expectations, one opaque owning
+Append candidate, exact Create semantics and same-original-group accepted Create tokens.
+Neither HOST constructor certifies its source or storage durability; the real Root adapter
+must supply its independent pin and actual selected receipt. Sync's exact-plan observation
+does not borrow the mutable preparation; only the raw sign occurs under host writers.
+Inert consuming handoff can recover existing bytes after a late negative without keys or
+source callbacks. No wire/dispatcher activation follows.
+[Full contract and limits](communication-recovery/CHAT-V2-FOUNDER-PROJECTION-ISSUER.md).
+
 ## Complete-seed no-row continuation (6 November; focused Windows tests pass)
 
 `PreparedColdV2GenesisPreInitializing<T,R>` provides inert `new`, owning `retry` and checked

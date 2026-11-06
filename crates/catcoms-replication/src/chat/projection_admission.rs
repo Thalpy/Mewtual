@@ -1,20 +1,28 @@
 //! Default-closed current projection custody, separate from monotone historical semantics.
 //!
-//! No production positive issuer exists here. Public owners create only negative lifetimes;
-//! raw labels, snapshots and semantic Valid cannot construct an admission token. The later
-//! governing verifier must own issuance after its actual complete current-evidence checks.
+//! Public lifetime owners create only negative custody. The bounded V2 founder verifier can
+//! issue exact accepted Creates after full replay from an explicitly HOST-selected genesis;
+//! raw labels, snapshots and semantic Valid cannot construct an admission token. Native root
+//! provenance, selected storage receipts and UI authorization remain the actual host's job.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, TryLockError};
 
 mod group;
 mod guarded;
+mod v2_founder;
+mod v2_origin;
 use group::GroupViewLife;
 pub use group::{
     ProjectionGroup, ProjectionGroupCloseCompletion, ProjectionGroupView,
     ProjectionGroupViewRevoker,
 };
 pub use guarded::{GuardedCausalHeads, GuardedMessageProjection, GuardedProjection};
+pub use v2_founder::{
+    FounderGenesisAnchorData, V2FounderExpectation, V2FounderPrefixVerifier,
+    V2HostSelectionExpectation, V2RetiredAppendData, V2VerifiedAppendCandidate,
+};
+pub use v2_origin::{V2OriginNegative, V2ProjectionOrigin};
 
 const OPEN: u8 = 0;
 const PREPARING: u8 = 1;
@@ -452,6 +460,10 @@ pub(super) struct ProjectionLease {
     view: Arc<ViewLife>,
     revision: u64,
     open: Vec<Arc<OpenLife>>,
+    // Original V2 sources survive result computation and are rechecked under the
+    // actual publication readers. Watching only the channel view misses independent
+    // Source/scope/writer revocation while that view object is still alive.
+    v2_origins: Vec<V2ProjectionOrigin>,
 }
 impl ProjectionLease {
     fn capture(view: &Arc<ViewLife>) -> Result<Self, ChatError> {
@@ -459,6 +471,7 @@ impl ProjectionLease {
             view: view.clone(),
             revision: view.revision.load(Ordering::Acquire),
             open: Vec::new(),
+            v2_origins: Vec::new(),
         };
         lease.validate()?;
         Ok(lease)
@@ -467,6 +480,7 @@ impl ProjectionLease {
         if !self.view.live()
             || self.view.revision.load(Ordering::Acquire) != self.revision
             || self.open.iter().any(|scope| !scope.live())
+            || self.v2_origins.iter().any(|origin| !origin.live())
         {
             return Err(ChatError::Scope);
         }
@@ -475,6 +489,15 @@ impl ProjectionLease {
     pub(super) fn observe(&mut self, token: &ProjectionAdmissionToken) {
         if let Some(scope) = &token.open {
             self.open.push(scope.clone());
+        }
+        match &token.support {
+            ProjectionSupport::V2FounderCreate { origin, .. } => {
+                if !self.v2_origins.iter().any(|old| old.same_original(origin)) {
+                    self.v2_origins.push(origin.clone());
+                }
+            }
+            #[cfg(test)]
+            ProjectionSupport::Legacy { .. } => {}
         }
     }
     pub(super) fn publish<T>(&self, callback: impl FnOnce() -> T) -> Result<T, ChatError> {
@@ -509,7 +532,6 @@ struct ActionBinding {
     basis: BasisId,
 }
 impl ActionBinding {
-    #[cfg(test)]
     fn of(id: ActionId, action: &SignedAction) -> Self {
         Self {
             realm: action.spec().realm.id(),
@@ -522,14 +544,104 @@ impl ActionBinding {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct EvidenceContext {
-    profile: owner_facts::OwnerFactId,
-    admission: owner_facts::OwnerFactId,
+enum EvidenceContext {
+    // The old positive projection issuer exists only in private signed fixtures. Keep
+    // that test capability absent from production rather than suppressing dead-code lint.
+    #[cfg(test)]
+    LegacyV1 {
+        profile: owner_facts::OwnerFactId,
+        admission: owner_facts::OwnerFactId,
+    },
+    V2Founder {
+        profile: owner_facts::OwnerFactId,
+        admission: owner_facts::OwnerFactId,
+        tenure: owner_header::OwnerTenureId,
+    },
+}
+impl EvidenceContext {
+    fn profile(self) -> owner_facts::OwnerFactId {
+        match self {
+            #[cfg(test)]
+            Self::LegacyV1 { profile, .. } => profile,
+            Self::V2Founder { profile, .. } => profile,
+        }
+    }
+    fn admission(self) -> owner_facts::OwnerFactId {
+        match self {
+            #[cfg(test)]
+            Self::LegacyV1 { admission, .. } => admission,
+            Self::V2Founder { admission, .. } => admission,
+        }
+    }
+    fn is_legacy(self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::LegacyV1 { .. } => true,
+            Self::V2Founder { .. } => false,
+        }
+    }
 }
 
-/// Opaque exact current-effect permission. There is intentionally NO production constructor,
-/// decoder, public field setter or status-bool adapter. The later current-governance verifier
-/// must construct it inside this chat boundary after checking complete original dependencies.
+/// Versioned support prevents v2 admission labels or acceptance records from being
+/// interpreted as v1 fact proofs. V2's original negative is retained by result leases.
+#[derive(Clone)]
+enum ProjectionSupport {
+    #[cfg(test)]
+    Legacy {
+        proof: owner_facts::OwnerFactId,
+        source: Arc<()>,
+    },
+    V2FounderCreate {
+        // Supporting tip headers can advance without changing this accepted effect.
+        // Exact signed witnesses remain in the real archive, not in effect identity.
+        record: owner_bodies::AcceptanceRecordId,
+        leaf_index: u64,
+        origin: V2ProjectionOrigin,
+    },
+}
+impl ProjectionSupport {
+    fn live(&self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Legacy { .. } => true,
+            Self::V2FounderCreate { origin, .. } => origin.live(),
+        }
+    }
+    fn same_effect(&self, other: &Self) -> bool {
+        match (self, other) {
+            // Preserve v1's normalized effect equivalence across valid fact/signature
+            // representatives. The exact legacy delete capsule keeps its own source.
+            #[cfg(test)]
+            (Self::Legacy { .. }, Self::Legacy { .. }) => true,
+            (
+                Self::V2FounderCreate {
+                    record: ar,
+                    leaf_index: ai,
+                    origin: ao,
+                },
+                Self::V2FounderCreate {
+                    record: br,
+                    leaf_index: bi,
+                    origin: bo,
+                },
+            ) => ar == br && ai == bi && ao.same_original(bo),
+            #[cfg(test)]
+            _ => false,
+        }
+    }
+    fn legacy(&self) -> Option<(&Arc<()>, owner_facts::OwnerFactId)> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy { source, proof } => Some((source, *proof)),
+            Self::V2FounderCreate { .. } => None,
+        }
+    }
+}
+
+/// Opaque exact current-effect permission. There is no decoder, public field setter or
+/// status-bool adapter. The V2 founder verifier issues only accepted Create effects inside
+/// this boundary after checking exact signed lineage, delegated semantics and inclusion.
+/// Other effect kinds still require their separate governing verifier.
 /// Its view binding is identity/support, not issuance revision: unrelated OPEN closure must not
 /// revoke accepted/reviewed support when the next original projection lease is captured.
 #[derive(Clone)]
@@ -538,8 +650,7 @@ pub struct ProjectionAdmissionToken {
     context: EvidenceContext,
     view: Arc<ViewLife>,
     open: Option<Arc<OpenLife>>,
-    proof: owner_facts::OwnerFactId,
-    source: Arc<()>,
+    support: ProjectionSupport,
 }
 impl std::fmt::Debug for ProjectionAdmissionToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -552,6 +663,7 @@ impl ProjectionAdmissionToken {
         self.binding == other.binding
             && self.context == other.context
             && Arc::ptr_eq(&self.view, &other.view)
+            && self.support.same_effect(&other.support)
             && match (&self.open, &other.open) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
@@ -568,6 +680,7 @@ impl ProjectionAdmissionToken {
     fn live_for(&self, view: &Arc<ViewLife>, id: ActionId, action: &SignedAction) -> bool {
         Arc::ptr_eq(&self.view, view)
             && view.live()
+            && self.support.live()
             && self.binding.realm == view.realm
             && self.binding.action == id
             && self.binding.create == action.spec().body.create().unwrap_or(id)
@@ -575,10 +688,11 @@ impl ProjectionAdmissionToken {
             && self.binding.grant == action.spec().grant
             && self.binding.basis == action.spec().basis
             && self.open.as_ref().is_none_or(|open| {
-                open.live()
+                self.support.legacy().is_some()
+                    && open.live()
                     && Arc::ptr_eq(&open.view, view)
-                    && open.profile == self.context.profile
-                    && open.admission == self.context.admission
+                    && open.profile == self.context.profile()
+                    && open.admission == self.context.admission()
                     && open.subject == self.binding.signer
             })
     }
@@ -762,13 +876,20 @@ impl ChatLedger {
         {
             return None;
         }
+        let (source, proof) = delete_token.support.legacy()?;
+        if create_token.support.legacy().is_none()
+            || !delete_token.context.is_legacy()
+            || !create_token.context.is_legacy()
+        {
+            return None;
+        };
         Some(PriorDeleteCapsule {
             delete: delete_token.binding,
             delete_context: delete_token.context,
             create: create_token.binding,
             create_context: create_token.context,
-            source: delete_token.source.clone(),
-            proof: delete_token.proof,
+            source: source.clone(),
+            proof,
         })
     }
 

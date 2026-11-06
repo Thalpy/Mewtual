@@ -10,6 +10,8 @@ use catcoms_storage::private_chat_page::PreparedPrivateChatPage;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod rewrite;
+
 const KEY: [u8; 32] = [90; 32];
 fn context(scope: IndexScopeData) -> IndexContextData<'static> {
     IndexContextData {

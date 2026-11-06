@@ -7,6 +7,8 @@ use crate::chat::owner_header::{HeaderSpec, OwnerTenureId};
 use crate::chat::owner_profile::{AdmissionSpec, ProfileSpec};
 use catcoms_crypto::DeviceKeypair;
 
+mod append_prepare;
+
 const GROUP: &[u8] = b"body-transition-math-real-signatures";
 
 #[test]

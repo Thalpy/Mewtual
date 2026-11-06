@@ -181,24 +181,7 @@ impl SignedOwnerHeader {
     /// Canonical unsigned signing/CID frame, at most520 bytes. Signature variants share these
     /// bytes and ID; their individual validity must still be checked independently.
     pub fn semantic_bytes(&self) -> Vec<u8> {
-        let mut e = Encoder::with_capacity(MAX_HEADER_SEMANTIC_BYTES);
-        e.put_bytes(HEADER_DOMAIN).expect("fixed header domain");
-        e.put_u16(VERSION);
-        e.put_bytes(&self.spec.group).expect("validated group");
-        for digest in [
-            self.spec.profile.as_bytes(),
-            &self.spec.issuer,
-            self.spec.tenure.as_bytes(),
-            self.spec.parent.as_bytes(),
-        ] {
-            e.put_bytes(digest).expect("fixed digest");
-        }
-        e.put_u64(self.spec.sequence).put_u8(self.spec.kind.tag());
-        e.put_bytes(self.spec.body.as_bytes())
-            .expect("fixed body CID");
-        e.put_bytes(self.spec.state.as_bytes())
-            .expect("fixed state");
-        e.finish()
+        semantic_spec(&self.spec)
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -278,6 +261,28 @@ fn semantic_id(semantic: &[u8]) -> OwnerHeaderId {
     hash.update(ID_DOMAIN);
     hash.update(semantic);
     OwnerHeaderId(*hash.finalize().as_bytes())
+}
+
+// One canonical encoder for the existing signed path and the opaque pre-sign plan.
+// This is not public arbitrary-data signing or a HeaderSpec constructor. Callers have
+// already validated the bounded specification; keep all fields here on schema changes.
+pub(super) fn semantic_spec(spec: &HeaderSpec) -> Vec<u8> {
+    let mut e = Encoder::with_capacity(MAX_HEADER_SEMANTIC_BYTES);
+    e.put_bytes(HEADER_DOMAIN).expect("fixed header domain");
+    e.put_u16(VERSION);
+    e.put_bytes(&spec.group).expect("validated group");
+    for digest in [
+        spec.profile.as_bytes(),
+        &spec.issuer,
+        spec.tenure.as_bytes(),
+        spec.parent.as_bytes(),
+    ] {
+        e.put_bytes(digest).expect("fixed digest");
+    }
+    e.put_u64(spec.sequence).put_u8(spec.kind.tag());
+    e.put_bytes(spec.body.as_bytes()).expect("fixed body CID");
+    e.put_bytes(spec.state.as_bytes()).expect("fixed state");
+    e.finish()
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
-//! Inactive typed chat core. This is a separate semantic action DAG, not a legacy
-//! Automerge change adapter. No DocType, network/native/UI producer or authority issuer
-//! is connected. In particular this module does NOT close the production R6 residual.
+//! Typed signed-chat library core, separate from the legacy Automerge change adapter.
+//! No DocType or network/native/UI producer is connected. The founder-only V2 verifier
+//! supports conditional exact Create issuance under explicit trusted HOST configuration;
+//! actual root provenance/storage/transport composition still does NOT close production R6.
 //!
 //! Historical authorization is supplied as an opaque, exact-scope witness. Decoding a
 //! signature, snapshot, context ID or a peer's "verified" flag never creates that witness.
@@ -29,11 +30,13 @@ pub use authority::{Rights, VerifiedAuthorityBasis, VerifiedDeleteApproval};
 pub use ledger::{ActionState, Advance, ChatLedger, ImportOutcome, LedgerLimits, PendingReason};
 pub use projection::{EditAlternative, MessageProjection};
 pub use projection_admission::{
-    CompleteProjectionResolution, GuardedCausalHeads, GuardedMessageProjection, GuardedProjection,
-    ProjectionAdmissionRevoker, ProjectionAdmissionToken, ProjectionCertainty,
-    ProjectionCloseCompletion, ProjectionGroup, ProjectionGroupCloseCompletion,
-    ProjectionGroupView, ProjectionGroupViewRevoker, ProjectionOpenAdmission, ProjectionView,
-    ProjectionViewRevoker,
+    CompleteProjectionResolution, FounderGenesisAnchorData, GuardedCausalHeads,
+    GuardedMessageProjection, GuardedProjection, ProjectionAdmissionRevoker,
+    ProjectionAdmissionToken, ProjectionCertainty, ProjectionCloseCompletion, ProjectionGroup,
+    ProjectionGroupCloseCompletion, ProjectionGroupView, ProjectionGroupViewRevoker,
+    ProjectionOpenAdmission, ProjectionView, ProjectionViewRevoker, V2FounderExpectation,
+    V2FounderPrefixVerifier, V2HostSelectionExpectation, V2OriginNegative, V2ProjectionOrigin,
+    V2RetiredAppendData, V2VerifiedAppendCandidate,
 };
 pub use storage::{ChatSnapshot, Page, PageCursor, MAX_PAGE_BYTES, MAX_PAGE_RECORDS};
 
