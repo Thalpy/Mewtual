@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Source concurrency fixture follow-up (6 November; focused check passes)
+
+Fresh `686bf3e1` CI passes strict root Clippy and five of the six isolated source/root
+regressions on both platforms, but the other-group admission case still exhausts its
+ten-second parked-worker barrier. Constructing the second owner early was insufficient:
+its archive freeze and source ciphertext export still occurred inside that interval.
+The fixture now completes real source registration before parking A, proves B still has
+only its original FI (sequence1/io0) and no saved SP, then requires the real new SP journal
+write (sequence2/io0) while A is paused. All original lock acquisitions and the ten-second
+bound remain. No production path or rejection test is weakened.
+
+The corrected source case and three actual operational-host compatibility regressions all
+pass in 134.23s. Actual-diff adversarial review is clear. The independently composed local
+promotion-recovery cohort also passes all fifteen focused tests in 254.40s, but remains
+uncommitted while ordinary query/write consumers are integrated. Complete suites and
+fresh cross-platform CI are still open; Chat V2 remains disabled and incomplete.
+
 ## Nonissuing cold history replay (6 November; focused checks pass)
 
 Core now separates mathematical cold replay from live effect ownership. The new opaque

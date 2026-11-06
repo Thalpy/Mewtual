@@ -309,20 +309,32 @@ impl BlockedIo {
 fn other_group_actual_admission_progresses_while_source_a_holds_file_io_mutex() {
     let (_path, store, mut rng) = fixture(0xff70);
     let mut a = owner(&store, &mut rng, 86);
-    // Key/MLS construction is unrelated to the guard-release property. Finish that
-    // independent setup before parking A, rather than spending its bounded barrier wait
-    // on cryptography when a full suite has many expensive fixtures running in parallel.
+    // Key/MLS construction AND the original archive freeze/source ciphertext export are
+    // unrelated to the guard-release property. Complete them before parking A. Creating
+    // an owner alone leaves that expensive work inside save_source_prepared, which can
+    // consume the entire barrier even though none of A's global guards is retained.
     let mut b = owner(&store, &mut rng, 87);
+    b.register_private_source(&store, &mut rng).unwrap();
+    assert!(b.registered.is_some());
+    assert!(b.prepared_journal.is_none());
+    assert_eq!(
+        (decode(&store, &b).sequence, decode(&store, &b).io_spent),
+        (1, 0)
+    );
     let running = BlockedIo::start(prepare(&store, &mut a, &mut rng));
     assert!(
         target(&store, &a).join("source.seed").exists(),
         "actual file work preceded barrier"
     );
-    // B still performs its real source preparation and journal admission while A holds
-    // its output mutex. Those actual AD/pins/canonical/Root acquisitions would deadlock
-    // if A had retained a global guard across physical I/O; no stand-in permit is used.
+    // B still reacquires its real source registration proof and saves a NEW journal
+    // successor while A holds its output mutex. Those actual AD/pins/canonical/Root
+    // acquisitions would deadlock if A retained a global guard across physical I/O.
+    // The sequence transition proves this is not merely rechecking an already-saved SP.
     b.save_source_prepared(&store, &mut rng).unwrap();
-    assert_eq!(decode(&store, &b).io_spent, 0);
+    assert_eq!(
+        (decode(&store, &b).sequence, decode(&store, &b).io_spent),
+        (2, 0)
+    );
     running.drain().unwrap();
     a.save_source_files(&store, &mut NeverRng).unwrap();
     assert_eq!(decode(&store, &a).io_spent, 1);
