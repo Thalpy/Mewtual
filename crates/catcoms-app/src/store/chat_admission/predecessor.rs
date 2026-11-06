@@ -81,6 +81,16 @@ impl Registry {
         self.slots.iter().flatten().any(|entry| &entry.key == key)
     }
 
+    /// Sole-founder V2 roles cannot ignore another signer's pre-row source in this group.
+    /// All fixed-five retained entries count, including cancelled/dropped originals and
+    /// either kind: weak expiry proves no durable absence. Old per-key semantics stay intact.
+    pub(super) fn excludes_group(&self, group: &[u8]) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|entry| entry.key.group() == group)
+    }
+
     /// Revoke only the exact basis which an ACTUAL row mutation invalidates. No-op Retired or
     /// AlreadyCurrent retries must not call this; they may be older than a newly registered task.
     pub(super) fn before_row_change(&self, key: &ChatAdmissionKey, original: Option<&Record>) {

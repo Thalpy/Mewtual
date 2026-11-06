@@ -34,6 +34,25 @@ fn register(
         .unwrap();
     prepared.into_task()
 }
+
+#[test]
+fn group_query_covers_other_signers_and_retained_closed_sources_without_prefix_overlap() {
+    let (_directory, store, _rng) = fixture();
+    let original = store.capture_chat_admission(key(8)).unwrap();
+    let task = register(&store, &original, 8, 1);
+    let another_signer = ChatAdmissionKey::new(&[8], [9; 32]).unwrap();
+    {
+        let runtime = store.chat_mount.locked().unwrap();
+        assert!(!runtime.predecessors.excludes_generic(&another_signer));
+        assert!(runtime.predecessors.excludes_group(another_signer.group()));
+        assert!(!runtime.predecessors.excludes_group(&[8, 0]));
+        assert!(!runtime.predecessors.excludes_group(&[7]));
+    }
+    drop(task);
+    let runtime = store.chat_mount.locked().unwrap();
+    assert!(runtime.predecessors.excludes_group(&[8]));
+    assert!(!runtime.predecessors.excludes_generic(&another_signer));
+}
 fn issue(
     store: &ServerStore,
     key: ChatAdmissionKey,
