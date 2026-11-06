@@ -10,6 +10,7 @@ use catcoms_sync::owner_v2::{
     prepare_v2_genesis_seed, FounderSnapshotLimits, OriginalV2GenesisSeedObservation,
     UnboundV2GenesisSeed, V2GenesisSeedData, V2GenesisSeedLimits, V2_GENESIS_SEED_METADATA_BYTES,
 };
+pub(in crate::store) use current::settlement::GenesisCurrentOwnerRef;
 pub use current::{
     PreparedColdV2GenesisCurrent, PreparedV2GenesisCurrent, UnexposedColdV2GenesisCurrent,
     UnexposedV2GenesisCurrent,

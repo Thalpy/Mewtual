@@ -89,6 +89,12 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.group_directory.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.target_directory.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|root.directory.sync_all().map_err(io)?;']=1
+  # Actual seed-present Current2 cleanup only, under its SAME successful covering scope
+  # admission, concrete pins/canonical/Root guard and retained original selection. The worker
+  # can unlink only its fixed original activation.seed and sync that held group directory;
+  # source.seed, source pages, pin/head, epoch files and unknown private work are preserved.
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|fs::remove_file(&self.body.paths.seed).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|files.directory.1.sync_all().map_err(io)?;']=1
 )
 
 # Print `file<TAB>line<TAB>enclosing fn<TAB>trimmed text` for every match in non-test code. The

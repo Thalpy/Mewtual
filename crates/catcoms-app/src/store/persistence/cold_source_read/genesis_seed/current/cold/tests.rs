@@ -380,3 +380,6 @@ fn cold_saved_success_cannot_hide_a_replaced_marker_at_extraction() {
         .validate_original(&layout)
         .unwrap();
 }
+
+#[cfg(windows)]
+mod seed_settlement;

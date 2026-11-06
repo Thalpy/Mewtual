@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Original genesis seed settlement (6 November; library only)
+
+The actual warm/cold unexposed Current wrappers can retain and retry cleanup of their original
+`activation.seed`. A paid covering write of the same latest scope table, EVEN CLEAN, precedes
+unlink under one continuous admission/pins/canonical/Root chain. Independent pin/head/source
+proofs and a distinct settled read role survive ambiguous unlink/parent-sync errors. The
+permanent group directory, source.seed and all source/private artifacts remain. The separately
+implemented Windows seed-absent reader permits a new paid cold mount without warm proof
+reconstruction. All13 Windows regressions and strict root-workspace Clippy pass. The explicit
+other-platform refusal body remains unrun here; complete backend/native suites remain open.
+[Limits and failure states](communication-recovery/CHAT-V2-GENESIS-SEED-SETTLEMENT.md).
+
 ## Connected genesis Current recovery (6 November; Chat V2 still disabled)
 
 Warm activation and complete seed-present genesis Current2 cold recovery now have actual
@@ -9,8 +21,8 @@ writer. It never reconstructs a warm Saved receipt. Only recovery and immutable 
 the public wrappers; no live text dispatch, authoring or native activation is supplied.
 The Windows-only seed-absent continuation independently verifies the complete original
 genesis closure and requires a fresh covering scope write before final output. A present-seed
-failure never selects absence. Actual seed cleanup, Initializing1 repair and later-head
-recovery remain separate open work. The
+failure never selects absence. Seed cleanup has the newer source checkpoint above; Initializing1
+repair and later-head recovery remain open. The
 current [handover](HANDOVER.md#focused-execution-checkpoint-6-november-chat-v2-still-incomplete)
 supersedes the earlier authored/UNRUN checkpoints below.
 

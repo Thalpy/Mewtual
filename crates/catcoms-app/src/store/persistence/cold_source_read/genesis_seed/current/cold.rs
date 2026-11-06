@@ -3,6 +3,7 @@
 //! The seed-absent Windows role additionally requires a new covering scope write; later
 //! operational heads need their own reader and can never fall back to this genesis path.
 use super::*;
+mod settlement;
 use crate::store::chat_admission::v2_current::{
     ColdV2CurrentPreparation, ColdV2CurrentProgressData,
 };
@@ -42,7 +43,8 @@ pub struct PreparedColdV2GenesisCurrent<T, R> {
     fee: Option<CatalogReadReservation>,
 }
 /// Same actual cold node/owner after final physical and installed-generation checks. This
-/// exposes DATA only; there is no run, mutable SDK, raw node, authoring or native extractor.
+/// exposes immutable DATA, validation and the distinct original-seed cleanup operation;
+/// there is no run, mutable SDK, raw node, authoring or native extractor.
 pub struct UnexposedColdV2GenesisCurrent<T, R> {
     node: UnboundV2GenesisNode<T, R>,
     resources: BootstrapGenesisResources,
@@ -51,6 +53,9 @@ pub struct UnexposedColdV2GenesisCurrent<T, R> {
     scope: ColdV2CurrentPreparation,
     writer: PreparedColdV2WriterRegistration,
     receipt: PreparedColdV2CurrentWriterReceipt,
+    seed_settlement: Option<
+        crate::store::persistence::v2_genesis_activation::settlement::PreparedGenesisSeedSettlement,
+    >,
     fee: CatalogReadReservation,
 }
 opaque_debug!(PreparedColdV2GenesisCurrent, UnexposedColdV2GenesisCurrent);
@@ -425,6 +430,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedColdV2GenesisCurrent<T, R> {
             scope: self.scope.take().expect("checked scope"),
             writer: self.writer.take().expect("checked writer"),
             receipt: self.receipt.take().expect("checked receipt cache"),
+            seed_settlement: None,
             fee: self.fee.take().expect("checked fee"),
         }))
     }
@@ -443,6 +449,13 @@ impl<T, R> UnexposedColdV2GenesisCurrent<T, R> {
     /// Repeat the same source, scope, installed writer and original named-file checks.
     /// Cancellation, a different mount or replacement control objects invalidate this owner.
     pub fn validate_original(&self, layout: &V2CurrentLayoutStore) -> Result<(), AppError> {
+        if let Some(result) = super::settlement::validate_after_cleanup(
+            &self.settlement_owner_ref()?,
+            self.seed_settlement.as_ref(),
+            layout,
+        ) {
+            return result;
+        }
         let store = layout.checked_store()?;
         if !Arc::ptr_eq(&self.head, self.scope.head()) {
             return Err(critical_namespaces::refused());

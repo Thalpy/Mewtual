@@ -1,13 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Retained genesis cleanup (6 November; library only)
+
+Both actual `UnexposedV2GenesisCurrent` and `UnexposedColdV2GenesisCurrent` add
+`retry_seed_settlement(layout, rng)`. It retains the same node/source/SDK, scope/task/writer
+and exact cleanup state on refusal. Only original seed-present owners can start it; already
+absent cold recovery remains independently valid and does not fabricate a cleanup receipt.
+After admitted unlink, `validate_original` selects its actual cached settled proof before any
+old mandatory-seed validator. The private non-generic owner loan, paid immutable resources
+loan and distinct covering/settled roles expose no raw Store/node/SDK or runnable authority.
+The first cleanup profile supports the audited Windows native inventory only; unsupported
+platforms refuse before preparation/payment. Production compilation and13 Windows focused
+regressions pass; full-suite and native activation evidence remain separate open gates.
+[Concrete contract](communication-recovery/CHAT-V2-GENESIS-SEED-SETTLEMENT.md).
+
 ## Complete genesis Current recovery wrappers (6 November)
 
 `store::PreparedColdV2GenesisCurrent<T,R>` consumes an actual paid restored genesis seed
 and runtime inputs. `retry` uses only the explicit `V2CurrentLayoutStore`; a refusal retains
 the same source, task, mounted owner, writer, receipt and node. `take_current` repeats the
 full original physical/installed-generation proof before moving those owners into
-`UnexposedColdV2GenesisCurrent<T,R>`. Its only public operations are immutable `data` and
-`validate_original`. All task, guard, receipt, resource and raw node constructors stay private.
+`UnexposedColdV2GenesisCurrent<T,R>`. Its recovery/DATA operations are immutable `data`,
+`validate_original` and the separately described original-seed cleanup retry. All task, guard,
+receipt, resource and raw node constructors stay private.
 This supports complete genesis Current2. The Windows-only seed-absent extension independently
 verifies the original pin/head/source and a closed directory inventory, then completes a new
 covering scope write EVEN CLEAN before final output. Present malformed/partial seeds, later

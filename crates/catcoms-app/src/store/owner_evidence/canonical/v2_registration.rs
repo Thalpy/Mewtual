@@ -2,6 +2,7 @@
 //! owner guards, genuine scope issuer and unexposed caller. No v1 HeadCell, SDK
 //! budget, decoded label or parsed head may create a registration here.
 use super::*;
+mod settlement;
 use crate::store::chat_admission::v2_current::{V2CurrentPreparation, V2InitializingAdmission};
 use crate::store::critical_namespaces::{
     current_layout::{OriginalV2GenesisGroupObservation, PreparedV2GenesisGroupNamespace},

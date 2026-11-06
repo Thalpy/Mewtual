@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original seed deletion requires a covering Current2 barrier (6 November; library only)
+
+A loaded clean scope table alone cannot authorize deletion of its activation recovery seed.
+The actual owning node/source/task/writer must survive a NEW paid SAME-latest-table file and
+vault-parent barrier under continuously held admission, followed by concrete canonical/Root
+proofs. The exact original seed comparison precedes the final source/ID3/name proof; no later
+large comparer can stale that proof before unlink. Private progress caches ambiguous effects;
+retries never invoke the old mandatory-seed validator after admission. Foreign/equal replacement
+objects, stages and unknown/private inventory remain preserved. New metadata retains paid
+original files/observations, not source/SDK graphs or senders. The cooperative private-directory
+and OS-session assumptions remain; this is not unlink-by-handle against a hostile filesystem.
+Windows-only native bounds, full-suite validation, later-head/live/native activation and the
+external rollback anchor remain explicit limits. All13 Windows regressions pass; the explicit
+non-Windows refusal case remains unrun on this desktop.
+
 ## Seed-present genesis Current recovery (6 November; library only)
 
 The explicit ID3 library opener can recover complete genesis Current2 using a new paid
@@ -13,8 +28,8 @@ this protocol. The separate Windows-only seed-absent reader requires genuine abs
 the original directories, independently authenticated genesis pin/head/source, a complete
 bounded inventory and a new covering scope write even when clean. The covering obligation
 survives actual write errors and post-write proof failure; no present-seed error can select
-this branch. Actual seed cleanup, later-head recovery and live authoring are not established
-by these checks. [Current evidence and remaining gates](HANDOVER.md).
+this branch. The newer cleanup source checkpoint above has separate final review/execution
+gates; later-head recovery and live authoring remain open. [Current evidence](HANDOVER.md).
 
 ## ID3 declaration is physical custody, not Current authority (5 November; authored, UNRUN)
 

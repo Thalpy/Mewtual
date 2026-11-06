@@ -89,6 +89,9 @@ sanitized_debug!(
     SavedV2GenesisActivationSeed,
     SavedV2GenesisHead
 );
+// The child uses the parent's sanitized Debug macro. Keep its lexical declaration after
+// that macro; all receipt fields and constructors remain in the private Store family.
+pub(in crate::store) mod settlement;
 
 impl PreparedV2GenesisActivation {
     /// Compare the retained callback result, never decoded data or a logical head ID. This
@@ -473,7 +476,9 @@ impl SavedV2GenesisHead {
     }
 }
 
-fn require_directory_name(
+/// Negative original-object comparison shared by concrete genesis namespace guards. This
+/// opens only for identity checking and returns no File, write permission or Current proof.
+pub(in crate::store) fn require_directory_name(
     path: &Path,
     held: &File,
     expected: catcoms_storage::kept::SessionId,

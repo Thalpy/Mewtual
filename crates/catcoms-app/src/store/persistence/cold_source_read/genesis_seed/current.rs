@@ -3,7 +3,8 @@
 //!
 //! This moves the SAME paid restored graph into an UNBOUND node. It exposes no Server,
 //! authoring/SDK operation, governor, projection issuer or native result. The activation seed
-//! remains present; settlement and seed-settled/later-head cold readers are separate gates.
+//! remains present through initial Current activation. The distinct settlement child can
+//! later remove it under its actual covering barrier; later operational heads remain separate.
 use super::*;
 use crate::store::chat_admission::v2_current::V2CurrentPreparation;
 use crate::store::critical_namespaces::{
@@ -82,7 +83,7 @@ pub struct PreparedV2GenesisCurrent<T, R> {
     fee: Option<CatalogReadReservation>,
 }
 
-/// Actual saved seed-present Current2 plus its SAME graph/runtime/resources. Still unexposed
+/// Actual saved genesis Current2 plus its SAME graph/runtime/resources. Still unexposed
 /// and unbound: there is intentionally no run, mutable SDK, raw node or Server extractor.
 pub struct UnexposedV2GenesisCurrent<T, R> {
     node: UnboundV2GenesisNode<T, R>,
@@ -91,6 +92,10 @@ pub struct UnexposedV2GenesisCurrent<T, R> {
     task: PreparedV2GenesisGroupNamespace,
     scope: V2CurrentPreparation,
     writer: PreparedV2WriterRegistration,
+    // Independent actual cleanup history; no node/source owner moves on a refusal.
+    seed_settlement: Option<
+        crate::store::persistence::v2_genesis_activation::settlement::PreparedGenesisSeedSettlement,
+    >,
     // LAST; actual source/SDK/activation/task/writer payments remain independently retained.
     fee: CatalogReadReservation,
 }
@@ -430,6 +435,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
             task: self.task.take().expect("validated task"),
             scope: self.scope.take().expect("validated scope"),
             writer: self.writer.take().expect("validated writer"),
+            seed_settlement: None,
             fee: self.fee.take().expect("validated wrapper account"),
         }))
     }
@@ -448,6 +454,13 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
     }
 
     pub fn validate_original(&self, layout: &V2CurrentLayoutStore) -> Result<(), AppError> {
+        if let Some(result) = settlement::validate_after_cleanup(
+            &self.settlement_owner_ref()?,
+            self.seed_settlement.as_ref(),
+            layout,
+        ) {
+            return result;
+        }
         let store = layout.checked_store()?;
         let head = self
             .scope
@@ -472,4 +485,5 @@ mod tests;
 // Declare after opaque_debug so the private child sees that lexical macro. Only the two
 // inert owning wrappers escape; all receipt/guard/registration constructors stay private.
 mod cold;
+pub(super) mod settlement;
 pub use cold::{PreparedColdV2GenesisCurrent, UnexposedColdV2GenesisCurrent};

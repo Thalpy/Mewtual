@@ -28,6 +28,7 @@ pub(in crate::store) mod cold_owned;
 mod cold_read;
 mod current_validation;
 mod inventory_resync;
+mod settlement;
 pub(in crate::store) use cold_owned::{
     ColdCurrentProofAdmission, ColdOwnedCurrentAdmission, ColdV2CurrentPreparation,
     ColdV2CurrentProgressData, COLD_V2_CURRENT_SCOPE_METADATA_BYTES,
@@ -35,6 +36,10 @@ pub(in crate::store) use cold_owned::{
 #[cfg(test)]
 pub(in crate::store) use cold_read::ColdV2InitializingReadAdmission;
 pub(in crate::store) use cold_read::{ColdV2CurrentReadAdmission, ColdV2GenesisScopeBasis};
+pub(in crate::store) use settlement::{
+    DurableGenesisCurrent2SettlementAdmission, GenesisCurrent2SettlementReadAdmission,
+    SettledGenesisCurrent2ReadAdmission, GENESIS_SEED_SETTLEMENT_SCOPE_METADATA_BYTES,
+};
 // Cold read and ownership roles are consumed together by the complete seed-present
 // Current2 library caller. They do not grant a runnable node or native activation.
 

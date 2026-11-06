@@ -1,6 +1,7 @@
 //! Actual cold Current claim and distinct owned/proof negative namespaces. Only concrete
 //! original Scope roles enter these locks; no decoded status or namespace callback issues one.
 use super::*;
+mod settlement;
 use crate::store::chat_admission::v2_current::{
     ColdCurrentProofAdmission, ColdOwnedCurrentAdmission, ColdV2CurrentReadAdmission,
     ColdV2GenesisScopeBasis,

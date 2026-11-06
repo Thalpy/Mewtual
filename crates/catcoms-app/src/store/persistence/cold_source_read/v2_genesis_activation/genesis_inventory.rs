@@ -8,7 +8,6 @@ use super::*;
 /// original presence/NotFound and latch its own opaque role; this helper is not that issuer.
 #[derive(Clone, Copy)]
 pub(super) enum GenesisSeedInventoryRole {
-    #[cfg(test)]
     Present,
     Absent,
 }
@@ -56,7 +55,6 @@ pub(super) fn require_fixed_genesis_inventory(
         require_directory_name(group.0, group.1, group.2)?;
         require_directory_name(target.0, target.1, target.2)?;
         let group_names: &[&str] = match role {
-            #[cfg(test)]
             GenesisSeedInventoryRole::Present => &[PIN, SEED],
             GenesisSeedInventoryRole::Absent => &[PIN],
         };

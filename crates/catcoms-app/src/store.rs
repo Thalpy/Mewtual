@@ -563,14 +563,14 @@ mod persistence {
     mod v2_group_directory;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
     pub use cold_source_read::RetainedBootstrapSourceData;
+    pub(super) use cold_source_read::{
+        GenesisCurrentOwnerRef, GenesisSourceDataRef, OriginalBootstrapReadObservation,
+        ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
+    };
     pub use cold_source_read::{
         GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
         PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
         UnexposedColdV2GenesisCurrent, UnexposedV2GenesisCurrent,
-    };
-    pub(super) use cold_source_read::{
-        GenesisSourceDataRef, OriginalBootstrapReadObservation,
-        ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
     };
     pub(in crate::store) use current_layout::{
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,

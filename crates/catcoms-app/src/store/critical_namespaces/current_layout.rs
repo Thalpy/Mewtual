@@ -2,6 +2,11 @@
 //! descriptor nor this wrapper grants a Current scope, group writer or runnable SDK/server.
 use super::*;
 mod declaration;
+mod settlement;
+pub(in crate::store) use settlement::{
+    GenesisSeedSettlementGroupGuard, SettledGenesisCurrentGroupGuard,
+    GENESIS_SEED_SETTLEMENT_GUARD_BYTES,
+};
 // The explicit ID3 wrapper alone admits the connected cold library path. Default/ID2
 // openers still refuse this layout before their older cleanup paths can run.
 pub(in crate::store) mod cold_read;

@@ -86,6 +86,45 @@ impl ManagedChatScopeReservation for ColdV2CurrentPreparation {
     }
 }
 impl ColdV2CurrentPreparation {
+    /// Loan the SAME latched installed-writer receipt to the actual Current owner's
+    /// settlement family. This is cached identity only, never an installed-generation or
+    /// physical proof. Keep WriterValidated/pairing-only preparations out of this path.
+    pub(in crate::store) fn current_writer_receipt(
+        &self,
+    ) -> Result<
+        &Arc<crate::store::persistence::v2_genesis_activation::cold_writer::ValidatedColdV2CurrentWriter>,
+        AppError,
+    >{
+        self.require_scope_covering_satisfied()?;
+        match &self.progress {
+            ColdProgress::CurrentBound { receipt, .. } => Ok(receipt),
+            _ => Err(refused()),
+        }
+    }
+
+    /// Family-only loan for settlement of this already bound Current2. This cannot create
+    /// an owner, install a writer or borrow an Unbound/WriterValidated preparation. Its
+    /// existing clean role repeats exact row/source/task and claim-or-handoff checks.
+    pub(super) fn borrow_current2_admission<'writer>(
+        &'writer self,
+        store: &'writer ServerStore,
+        runtime: &'writer Runtime,
+        source: &'writer GenesisSourceDataRef<'writer>,
+        task: &'writer PreparedV2GenesisGroupNamespace,
+    ) -> Result<ColdOwnedCurrentAdmission<'writer>, AppError> {
+        self.require_scope_covering_satisfied()?;
+        let admission = ColdOwnedCurrentAdmission {
+            store,
+            runtime,
+            source,
+            task,
+            preparation: self,
+            _not_send: PhantomData,
+        };
+        admission.require_owned_current_lineage_for_own_group_task(task)?;
+        Ok(admission)
+    }
+
     pub(in crate::store) fn progress_data(&self) -> ColdV2CurrentProgressData {
         match &self.progress {
             ColdProgress::Unbound => ColdV2CurrentProgressData::Unbound,

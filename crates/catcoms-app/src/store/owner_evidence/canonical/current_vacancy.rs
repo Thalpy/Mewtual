@@ -18,6 +18,7 @@ use crate::store::persistence::V2GenesisDirectoryCustody;
 // canonical owner; neither a parsed receipt nor the public wrapper can construct them.
 pub(in crate::store) mod cold_current;
 pub(in crate::store) mod cold_read;
+pub(in crate::store) mod settlement;
 
 const MAX_PENDING_GROUPS: usize = 16;
 const MAX_GROUP_BYTES: usize = 256;

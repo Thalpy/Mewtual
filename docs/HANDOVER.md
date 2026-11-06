@@ -1,5 +1,26 @@
 # Mewtual; Handover
 
+## Genesis seed settlement (6 November; focused checks pass, Chat V2 incomplete)
+
+The actual warm/cold owning wrappers retain the same node/resources and original cleanup
+phase across errors. An explicit even-clean SAME-latest scope barrier under continuous AD
+precedes original activation.seed unlink; the worker caches outcome/receipt, and distinct
+settled validators avoid the old missing-seed dead end. Source.seed, all source artifacts,
+permanent group directory, pin/head and any unknown/private data remain. The existing Root
+Absent reader supplies NEW paid read/SDK/scope/writer ownership after close/remount; it never
+reconstructs warm Saved proof. All **13 Windows regressions pass**: eight warm cleanup cases,
+two cold cleanup cases and three actual scope-barrier cases. The real cleanup→new mount→new
+paid Source/SDK→Absent node test passes in39.25s; the remaining9 cleanup tests pass in271.97s
+and the3 scope tests in93.86s. One explicit non-Windows refusal body is authored but was not
+executed on this Windows desktop. The shared inventory4 tests passed separately in ad10.
+Read-only actual-diff review and re-review are clear after fixing a late-comparer ordering
+defect and moving unsupported-platform refusal before preparation/payment. The exact source
+read reservation's drop notice verifies its refund while saved metadata remains retained.
+Strict all-target/all-feature root-workspace Clippy, formatting and the ambient/raw-FS gates
+pass on the integration. Complete root/native suites, deferred heavy cases, audits/build and
+native gates remain outstanding; no operational Chat V2/native claim follows.
+[Source contract and fault matrix](communication-recovery/CHAT-V2-GENESIS-SEED-SETTLEMENT.md).
+
 ## Focused execution checkpoint (6 November; Chat V2 still incomplete)
 
 The user permits tests again; defer only
