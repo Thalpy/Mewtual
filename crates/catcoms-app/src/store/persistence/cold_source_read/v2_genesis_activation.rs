@@ -95,6 +95,7 @@ pub(in crate::store) mod settlement;
 // The cold repair has its own authentic capture, Initializing1 owner and installed writer;
 // it must never reconstruct the warm Saved receipts or an unowned Current2 capture.
 pub(in crate::store) mod initializing_repair;
+pub(in crate::store) mod pre_initializing;
 
 impl PreparedV2GenesisActivation {
     /// Compare the retained callback result, never decoded data or a logical head ID. This

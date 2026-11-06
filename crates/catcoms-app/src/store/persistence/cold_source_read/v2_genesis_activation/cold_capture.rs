@@ -53,6 +53,20 @@ pub(in crate::store) struct ColdV2GenesisReadResources {
     body: Arc<ResourceBody>,
 }
 impl ColdV2GenesisReadResources {
+    /// Observe THIS concrete debit's final release. Install before creating guard/body
+    /// clones; this test-only edge never copies a fee or supplies source/read authority.
+    #[cfg(all(test, windows))]
+    pub(super) fn observe_fee_drop_for_test(
+        &mut self,
+        notice: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), AppError> {
+        Arc::get_mut(&mut self.body)
+            .ok_or_else(critical_namespaces::refused)?
+            .fee
+            .observe_drop_for_test(notice);
+        Ok(())
+    }
+
     /// Immutable original expectation DATA only. Neither these labels nor their equality
     /// supplies a read admission; concrete guards still require this SAME live paid loan.
     pub(super) fn expectation_data(&self) -> &SavedSourceExpectationData {

@@ -21,6 +21,30 @@ pub(super) struct ColdInitializingClaim {
     registered: Option<owners::RegisteredColdInitializingClaim>,
     owner: OnceLock<ColdInitializingOwnerAssociation>,
 }
+impl ColdInitializingClaim {
+    // Only the actual complete no-row birth path can build this already-owned successor.
+    // It never mints a new registered witness, sender, owner or scope basis.
+    pub(super) fn from_born(
+        seed: Arc<ColdV2GenesisRepairSeed>,
+        identity: Arc<()>,
+        basis: ColdV2GenesisScopeBasis,
+        negative: RequestCancellation,
+    ) -> Self {
+        let owner = OnceLock::new();
+        let _ = owner.set(ColdInitializingOwnerAssociation {
+            identity,
+            basis,
+            negative,
+        });
+        let resources = seed.read_resources();
+        Self {
+            seed,
+            resources,
+            registered: None,
+            owner,
+        }
+    }
+}
 struct ColdInitializingOwnerAssociation {
     identity: Arc<()>,
     basis: ColdV2GenesisScopeBasis,
@@ -77,9 +101,12 @@ const INITIALIZING_TASK_FEE: usize = GROUP_TASK_STAMP_FEE
     + 128;
 
 impl PreparedV2GenesisGroupNamespace {
-    fn cold_initializing(&self) -> Result<&ColdInitializingClaim, AppError> {
+    pub(super) fn cold_initializing(&self) -> Result<&ColdInitializingClaim, AppError> {
         match &self.custody {
             GroupTaskCustody::ColdInitializing(cold) => Ok(cold),
+            GroupTaskCustody::ColdPreInitializing(_) => {
+                self.initializing_successor().ok_or_else(refused)
+            }
             GroupTaskCustody::Warm { .. } | GroupTaskCustody::ColdCurrent(_) => Err(refused()),
         }
     }
@@ -88,6 +115,9 @@ impl PreparedV2GenesisGroupNamespace {
     ) -> Option<&Arc<ColdV2GenesisRepairSeed>> {
         match &self.custody {
             GroupTaskCustody::ColdInitializing(cold) => Some(&cold.seed),
+            GroupTaskCustody::ColdPreInitializing(_) => {
+                self.initializing_successor().map(|cold| &cold.seed)
+            }
             GroupTaskCustody::Warm { .. } | GroupTaskCustody::ColdCurrent(_) => None,
         }
     }
@@ -117,7 +147,7 @@ impl PreparedV2GenesisGroupNamespace {
     // typed entry point supplies actual source/head/basis/owner/observer loans; no field is
     // optional, and omitting one would let an equal label substitute for original custody.
     #[allow(clippy::too_many_arguments)]
-    fn require_initializing_owner_data(
+    pub(super) fn require_initializing_owner_data(
         &self,
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,

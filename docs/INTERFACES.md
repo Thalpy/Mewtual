@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Complete-seed no-row continuation (6 November; focused Windows tests pass)
+
+`PreparedColdV2GenesisPreInitializing<T,R>` provides inert `new`, owning `retry` and checked
+`take_current`, returning the existing unexposed repaired Current type. It requires the
+complete original activation journal and absent pin/head/stage; its private actual vacancy,
+Born owner and durable row1 roles cannot be constructed from a planned Record. Errors retain
+the same graph/runtime/task/owner; normalization requires the actual converted preparation.
+The first native inventory profile is Windows-only and refuses other platforms before
+new fees or effects. All 15 Windows regressions pass; the two other-platform refusal bodies
+and full acceptance remain open. No raw Store/SDK/node, Fresh grant or operational caller is added.
+[Contract](communication-recovery/CHAT-V2-GENESIS-COMPLETE-PREINIT.md).
+
 ## Cold Initializing1 continuation (6 November; focused validation passes)
 
 `PreparedColdV2GenesisInitializing<T,R>` owns an actual independently restored source/SDK,

@@ -109,6 +109,14 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|repair|fs::rename(&files.stage_path, &files.head_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|repair|.sync_all()']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/initializing_repair.rs|repair|files.target_directory.sync_all().map_err(io)?;']=1
+  # Complete original activation journal on actual group-wide no-row admission. These
+  # barriers touch ONLY the already selected original non-epoch journal/directories under
+  # AD/pins/canonical/Root. There is no create/write/rename/unlink and no row permission;
+  # the distinct Born scope file+parent barrier still precedes the normal repair worker.
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/pre_initializing.rs|capture_vacant|files.seed.object.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/pre_initializing.rs|capture_vacant|files.group_directory.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/pre_initializing.rs|capture_vacant|files.target_directory.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/pre_initializing.rs|capture_vacant|guard.archive_root().directory.sync_all().map_err(io)?;']=1
   # Actual seed-present Current2 cleanup only, under its SAME successful covering scope
   # admission, concrete pins/canonical/Root guard and retained original selection. The worker
   # can unlink only its fixed original activation.seed and sync that held group directory;

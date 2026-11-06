@@ -25,11 +25,17 @@ use std::rc::Rc;
 
 mod association;
 mod cold_initializing;
+mod cold_preinitializing;
 pub(in crate::store) use cold_initializing::{
     ColdInitializingGenesisAdmission, ColdInitializingGenesisHeadAdmission,
     ColdRepairedGenesisCurrentAdmission, ColdRepairedGenesisCurrentProofAdmission,
     ColdV2InitializingPreparation, DurableColdGenesisInitializingAdmission,
     COLD_INITIALIZING_SCOPE_METADATA_BYTES,
+};
+pub(in crate::store) use cold_preinitializing::{
+    BornV2GenesisAdmission, ColdV2GenesisVacancyBasis, ColdV2GenesisVacantReadAdmission,
+    ColdV2PreInitializingPreparation, DurableBornV2GenesisRow1Admission, RetiredBornScopeCustody,
+    COLD_PREINITIALIZING_SCOPE_METADATA_BYTES,
 };
 pub(in crate::store) mod cold_owned;
 mod cold_read;
@@ -582,7 +588,14 @@ impl ServerStore {
             }
             // Source/seed/task are actual original objects, not a presumed vacant filesystem.
             // This proof is READ ONLY. Root is released entirely before global scope writing.
-            validate_saved_seed_read(self, source, task, &activation)?;
+            {
+                // A live warm SavedDirectory is not group vacancy once a new complete-
+                // journal cold task has registered. Hold the actual pending/pins/canonical
+                // guard during the seed proof; AD stays held until owner+row transfer.
+                let guard = task.lock_vacant(&admission)?;
+                activation.validate_under_archive_root(self, source, task, guard.archive_root())?;
+                guard.validate_source_only()?;
+            }
             admission.validate_source_only()?;
             let owner_key = key.clone();
             let table_key = key.clone();
@@ -592,7 +605,11 @@ impl ServerStore {
                 self.new_reservation_with_custody(&key, &candidate, activation.clone())?;
             // Arc/watch/observer setup can outlive the previous proof. Repeat the actual
             // file/source/task and absent-row/owner negatives AFTER those allocations.
-            validate_saved_seed_read(self, source, task, &activation)?;
+            {
+                let guard = task.lock_vacant(&admission)?;
+                activation.validate_under_archive_root(self, source, task, guard.archive_root())?;
+                guard.validate_source_only()?;
+            }
             admission.validate_source_only()?;
             if inner.mount.is_cancelled() || inner.admission.is_cancelled() {
                 return Err(refused());

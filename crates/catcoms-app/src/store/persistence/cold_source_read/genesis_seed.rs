@@ -12,8 +12,9 @@ use catcoms_sync::owner_v2::{
 };
 pub(in crate::store) use current::settlement::GenesisCurrentOwnerRef;
 pub use current::{
-    PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing, PreparedV2GenesisCurrent,
-    UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
+    PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing,
+    PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, UnexposedColdV2GenesisCurrent,
+    UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
 };
 #[cfg(test)]
 thread_local! { static SDK_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }

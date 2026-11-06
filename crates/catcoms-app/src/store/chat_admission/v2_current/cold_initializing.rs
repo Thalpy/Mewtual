@@ -14,9 +14,13 @@ pub(in crate::store) struct ColdV2InitializingPreparation {
     task: OriginalV2GenesisGroupObservation,
     basis: ColdV2GenesisScopeBasis,
     progress: Progress,
-    // LAST. This actual metadata payment funds keys/bounds, scope Life and BOTH observer
-    // tails through source/task/payload drainage. It contains no SDK/source graph or sender.
+    // These final resource fields drain after owned metadata. For an ordinary cold capture
+    // this Seed payment funds the scope Life and both observer tails. A converted birth
+    // additionally retains the SAME small original owner payment in the field below.
     seed: Arc<ColdV2GenesisRepairSeed>,
+    // An actual no-row birth moves its SAME small owner payment here. Ordinary mounted
+    // row1 capture leaves this None and retains its independently paid Seed as before.
+    _born_owner_resources: Option<Arc<super::cold_preinitializing::BornScopeOwnerResources>>,
 }
 // Inline binding storage is charged before any writer. Boxing a successor would add a
 // fallible allocation between the physical Head barrier and its irreversible scope latch.
@@ -84,6 +88,26 @@ impl ManagedChatScopeReservation for ColdV2InitializingPreparation {
 }
 
 impl ColdV2InitializingPreparation {
+    /// Private family-only, infallible field moves AFTER the concrete born converter's
+    /// actual row/owner/claim/Root proofs. No raw key/Record factory is exposed to Store.
+    pub(super) fn from_born_parts(
+        inner: ChatAdmissionPreparation,
+        group_bounds: ChatAdmissionGroupBounds,
+        task: OriginalV2GenesisGroupObservation,
+        basis: ColdV2GenesisScopeBasis,
+        seed: Arc<ColdV2GenesisRepairSeed>,
+        resources: Arc<super::cold_preinitializing::BornScopeOwnerResources>,
+    ) -> Self {
+        Self {
+            inner,
+            group_bounds,
+            task,
+            basis,
+            progress: Progress::Initializing,
+            seed,
+            _born_owner_resources: Some(resources),
+        }
+    }
     /// Borrow only this actual CLEAN bound Current2 under the SAME held Runtime. This
     /// cached owner/Head/binding check intentionally performs no mandatory-seed physical
     /// validation: an admitted cleanup may already have removed that original name.
@@ -304,6 +328,7 @@ impl ServerStore {
                 basis: seed.scope_basis_data().clone(),
                 progress: Progress::Initializing,
                 seed: seed.clone(),
+                _born_owner_resources: None,
             });
             runtime.owners.insert(owner_key, owner);
         }

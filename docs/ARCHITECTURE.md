@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Complete journal before row1 (6 November; focused Windows tests pass)
+
+A distinct owning library adapter now covers the complete authenticated activation journal
+before the first scope row. Its actual group-wide no-row read, shared16 preclaim, cached
+same-row owner, new scope1 file/parent barrier and independently paid repair successor move
+into the existing Init1 repair without replacing the task/read/SDK/nonce. Old capture debt
+drains outside writers before final Current2 proof. Torn/missing first journals and pre-seed
+cuts remain open. All 15 Windows regressions pass; unsupported-platform execution and full
+acceptance remain open. Operational/native Chat V2 is still disabled.
+[Exact ownership and limits](communication-recovery/CHAT-V2-GENESIS-COMPLETE-PREINIT.md).
+
 ## Cleanup after actual repaired genesis (6 November; library only)
 
 The repaired output can settle its original recovery seed without replacing its node or
@@ -21,8 +32,8 @@ The exact repaired-head receipt is cached before the same owner advances to Curr
 The physical worker extends only its original selected handles and never fabricates warm
 Saved or unowned Current2 proof. The first profile is Windows-only. Focused tests, strict
 root lint and separate native compilation pass; full-suite/large-capacity acceptance remains
-open. No operational text dispatch or native activation is supplied. Missing first
-journal/no-row and later-head recovery remain distinct open work.
+open. No operational text dispatch or native activation is supplied. The complete-journal/
+no-row continuation is described above; missing/torn first journals and later heads remain open.
 [Concrete contract](communication-recovery/CHAT-V2-GENESIS-INITIALIZING-REPAIR.md).
 
 ## Original genesis seed settlement (6 November; library only)

@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## Complete activation journal/no-row continuation (6 November; focused tests pass)
+
+The A cohort adds actual complete-seed/no-row capture, same16 task claim, funded new owner
+cached before row1, concrete post-barrier basis, second independent repair payment and checked
+same-owner conversion into existing Init1 repair. The owning adapter drains every old capture
+link outside writers before its normal final proof, and dropping emptied A cannot revoke the
+returned Current. Both live-Warm/A admission orderings have genuine regression bodies.
+All 15 Windows regressions pass in 326.59s: eight physical, six owning and the genuine
+two-ordering warm/A race. The two unsupported-platform bodies remain unrun on this desktop.
+The live conversion test proves the exact old metadata fee returns while the same Store,
+read, SDK and successor remain live; losing a reply does not create a new owner or task.
+Primary integration added redacted Debug for the blanket accounting keepalive, removed two
+unused getters and factored the test-hook type; actual-diff review clears these mechanical
+changes. Strict whole-root all-target/all-feature Clippy passes in 58.00s. The five existing
+warm Current/scope-fault/writer-backing compatibility tests pass in 125.94s. Formatting and
+ambient/raw-FS gates pass. The separate native workspace check passes in 51.26s. Complete
+suites and Linux execution remain open.
+Complete source invoices are checked before fees; no wire format or persistent quota changes.
+Torn/missing first journal, pre-seed crash cuts,
+operational transactions and native Chat V2 remain open.
+[Concrete source contract](communication-recovery/CHAT-V2-GENESIS-COMPLETE-PREINIT.md).
+
 ## Admin history native lint cleanup (6 November; focused checks pass)
 
 The detail reply keeps its one bounded row on the heap with transparent Serde encoding.
@@ -59,11 +81,11 @@ checking, strict all-target/all-feature root Clippy (1m02s) and separate native 
 mutation sites changed, and the separately checked actual three-kind invoice still uses the
 same1MiB settlement class with independent original source/SDK/repair payments.
 
-This closes repaired-owner seed cleanup only. Complete-seed/no-row recovery, torn/missing
-first-journal handling, operational transactions/indexes/governing/transport/native routing
-and full mandatory acceptance remain open. SourceSaved cannot reconstruct three lost random
-ciphertexts. The no-row complete-journal continuation is the next supported recovery packet;
-unknown first-write replacement needs its own reviewed negative-closure/compatibility rules.
+This checkpoint closed repaired-owner seed cleanup. Complete-seed/no-row recovery is now
+covered by the newer section above. Torn/missing first-journal handling, operational
+transactions/indexes/governing/transport/native routing and full mandatory acceptance remain
+open. SourceSaved cannot reconstruct three lost random ciphertexts; unknown first-write
+replacement needs its own reviewed negative-closure/compatibility rules.
 
 ## Interrupted Initializing1 repair (6 November; focused checks pass, Chat V2 incomplete)
 
@@ -99,8 +121,9 @@ The new mixed17-source test
 the end alongside the two older capacity tests and the named slow10,000-operation test.
 Complete root/native suites and remaining native/flow gates are not yet passing
 evidence. This is Windows-only complete-journal/loaded-row1 recovery, not all interrupted
-genesis or operational chat. No-row/partial-first-seed, repaired-owner cleanup, later-head
-transactions/indexes, live SDK/authority/transport and native/UI activation remain open.
+genesis or operational chat. Later sections above cover complete-journal/no-row recovery
+and repaired-owner cleanup. Partial first seeds, later-head transactions/indexes, live
+SDK/authority/transport and native/UI activation remain open.
 [Repair contract](communication-recovery/CHAT-V2-GENESIS-INITIALIZING-REPAIR.md) and the
 [next connected operational cohort](communication-recovery/CHAT-V2-OPERATIONAL-FIRST-CREATE-HOST.md)
 record those precise boundaries. The separately reviewed Create/Append DATA packet remains

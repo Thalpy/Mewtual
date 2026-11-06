@@ -18,6 +18,7 @@ use std::sync::{Arc, Weak};
 
 pub(in crate::store) mod cold_current;
 pub(in crate::store) mod cold_initializing;
+pub(in crate::store) mod cold_preinitializing;
 
 /// Warm directory work and cold complete-Current custody have different origins. In
 /// particular a cold task never owns a synthetic DirectoryProgress/SavedDirectory.
@@ -33,6 +34,7 @@ enum GroupTaskCustody {
     // Complete original activation journal with a new cold Initializing1 capture. Never
     // synthesize warm directory output or complete-Current2 provenance for this family.
     ColdInitializing(cold_initializing::ColdInitializingClaim),
+    ColdPreInitializing(cold_preinitializing::ColdPreInitializingClaim),
 }
 
 /// Tiny original lifetime only. Its weak allocations can outlive the task, so every actual
@@ -200,9 +202,9 @@ impl PreparedV2GenesisGroupNamespace {
     ) -> Result<&Arc<SavedV2GroupDirectory>, AppError> {
         match &self.custody {
             GroupTaskCustody::Warm { directory, .. } => directory.as_ref().ok_or_else(refused),
-            GroupTaskCustody::ColdCurrent(_) | GroupTaskCustody::ColdInitializing(_) => {
-                Err(refused())
-            }
+            GroupTaskCustody::ColdCurrent(_)
+            | GroupTaskCustody::ColdInitializing(_)
+            | GroupTaskCustody::ColdPreInitializing(_) => Err(refused()),
         }
     }
     fn set_warm_saved_directory(
@@ -214,9 +216,9 @@ impl PreparedV2GenesisGroupNamespace {
                 *directory = Some(saved);
                 Ok(())
             }
-            GroupTaskCustody::ColdCurrent(_) | GroupTaskCustody::ColdInitializing(_) => {
-                Err(refused())
-            }
+            GroupTaskCustody::ColdCurrent(_)
+            | GroupTaskCustody::ColdInitializing(_)
+            | GroupTaskCustody::ColdPreInitializing(_) => Err(refused()),
         }
     }
     pub(in crate::store) fn group(&self) -> &[u8] {
@@ -241,9 +243,9 @@ impl PreparedV2GenesisGroupNamespace {
     ) -> Result<&Arc<crate::store::persistence::V2GenesisDirectoryCustody>, AppError> {
         match &self.custody {
             GroupTaskCustody::Warm { output, .. } => Ok(output),
-            GroupTaskCustody::ColdCurrent(_) | GroupTaskCustody::ColdInitializing(_) => {
-                Err(refused())
-            }
+            GroupTaskCustody::ColdCurrent(_)
+            | GroupTaskCustody::ColdInitializing(_)
+            | GroupTaskCustody::ColdPreInitializing(_) => Err(refused()),
         }
     }
 }

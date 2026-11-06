@@ -22,6 +22,10 @@ pub(in crate::store) use group_task::cold_initializing::{
     COLD_INITIALIZING_GROUP_GUARD_BYTES,
 };
 pub(in crate::store) mod group_task;
+pub(in crate::store) use group_task::cold_preinitializing::{
+    ColdV2GenesisVacantGroupReadGuard, DurableBornV2GenesisRow1GroupGuard,
+    COLD_PREINITIALIZING_GROUP_GUARD_BYTES,
+};
 pub(in crate::store) use group_task::{
     CreatingV2GenesisDirectoryGuard, InitializingV2GenesisGroupGuard,
     OriginalV2GenesisGroupObservation, PreparedV2GenesisGroupNamespace, SavedV2GroupDirectory,

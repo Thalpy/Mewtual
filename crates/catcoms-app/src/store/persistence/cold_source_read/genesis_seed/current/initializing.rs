@@ -1,6 +1,7 @@
 //! Actual partial-genesis Init1 recovery owner. No warm Saved receipt or Current2 cold
 //! capture is reconstructed. The same graph/read/T/R/clock survives every refused attempt.
 use super::*;
+mod pre_initializing;
 mod settlement;
 use crate::store::chat_admission::v2_current::ColdV2InitializingPreparation;
 use crate::store::owner_evidence::canonical::current_vacancy::RetiredGroupEntry;
@@ -8,6 +9,7 @@ use crate::store::owner_evidence::canonical::v2_registration::cold_initializing:
 use crate::store::persistence::v2_genesis_activation::initializing_repair::{
     ColdV2GenesisRepairSeed, PreparedColdV2GenesisRepair, PreparedColdV2GenesisRepairCapture,
 };
+pub use pre_initializing::PreparedColdV2GenesisPreInitializing;
 
 pub struct PreparedColdV2GenesisInitializing<T, R> {
     graph: Graph<T, R>,

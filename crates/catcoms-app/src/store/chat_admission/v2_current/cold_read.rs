@@ -62,6 +62,16 @@ impl ColdV2GenesisScopeBasis {
     }
 }
 
+/// Only a concrete post-file/parent Born borrower can create this new actual row basis.
+/// The original raw key/Record constructor stays private: a planned candidate, source
+/// label or loaded-clean flag must not masquerade as observed durable row1 provenance.
+pub(super) fn capture_born_scope_basis(
+    admission: &super::cold_preinitializing::DurableBornV2GenesisRow1Admission<'_>,
+) -> Result<ColdV2GenesisScopeBasis, AppError> {
+    let (key, row) = admission.actual_row_for_basis()?;
+    ColdV2GenesisScopeBasis::capture(key, row)
+}
+
 struct ReadCore<'writer> {
     store: &'writer ServerStore,
     runtime: &'writer Runtime,

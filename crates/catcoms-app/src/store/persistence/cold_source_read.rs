@@ -14,9 +14,9 @@ pub(in crate::store) mod v2_genesis_activation;
 pub(in crate::store) use genesis_seed::{GenesisCurrentOwnerRef, GenesisSourceDataRef};
 pub use genesis_seed::{
     GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
-    PreparedColdV2GenesisInitializing, PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed,
-    ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
-    UnexposedV2GenesisCurrent,
+    PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
+    PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
+    UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
 };
 
 const MAX_PATH: usize = 32 * 1024;

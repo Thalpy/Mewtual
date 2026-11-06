@@ -19,6 +19,7 @@ use std::sync::OnceLock;
 mod inventory;
 // Only actual repaired SavedHead may lend its existing identities/candidates to the
 // independent settlement worker; this child cannot select another File or mint a receipt.
+mod pre_initializing;
 mod settlement;
 
 #[cfg(test)]

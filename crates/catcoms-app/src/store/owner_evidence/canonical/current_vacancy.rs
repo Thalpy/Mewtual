@@ -18,6 +18,7 @@ use crate::store::persistence::V2GenesisDirectoryCustody;
 // canonical owner; neither a parsed receipt nor the public wrapper can construct them.
 pub(in crate::store) mod cold_current;
 pub(in crate::store) mod cold_initializing;
+pub(in crate::store) mod cold_preinitializing;
 pub(in crate::store) mod cold_read;
 pub(in crate::store) mod settlement;
 
@@ -34,6 +35,7 @@ pub(in crate::store) fn pending_group_registration_fee_data_for_test() -> (usize
 }
 
 enum PendingGroupCustody {
+    ColdPreInitializing(Arc<crate::store::persistence::v2_genesis_activation::pre_initializing::ColdV2PreInitializingSeed>),
     Warm(Arc<V2GenesisDirectoryCustody>),
     // Inert actual original metadata/files/payment only, never a sender or source graph.
     ColdCurrent(Arc<crate::store::persistence::v2_genesis_activation::ColdV2GenesisCurrentHead>),
@@ -69,6 +71,14 @@ impl PendingGroupEntry {
             return Err(refused());
         }
         match &self.custody {
+            PendingGroupCustody::ColdPreInitializing(seed) => {
+                if !task
+                    .pre_initializing_seed_data()
+                    .is_some_and(|actual| Arc::ptr_eq(actual, seed))
+                {
+                    return Err(refused());
+                }
+            }
             PendingGroupCustody::Warm(output) => {
                 if !Arc::ptr_eq(output, task.directory_output()?) {
                     return Err(refused());
@@ -119,6 +129,7 @@ pub(in crate::store) struct PreparedGroupRegistration {
 // A single prebuilt witness can escape only through its exact family's final slot
 // installation. No independent flag/second registry makes one family adopt another.
 enum PreparedColdGroupWitness {
+    PreInitializing(cold_preinitializing::RegisteredPreInitializingClaim),
     Current(cold_current::RegisteredColdCurrentClaim),
     Initializing(cold_initializing::RegisteredColdInitializingClaim),
 }
@@ -163,6 +174,13 @@ impl PreparedGroupRegistration {
                     cold_initializing::RegisteredColdInitializingClaim::prepare(task)?,
                 )),
                 PendingGroupCustody::ColdInitializing(seed.clone()),
+            )
+        } else if let Some(seed) = task.pre_initializing_seed_data() {
+            (
+                Some(PreparedColdGroupWitness::PreInitializing(
+                    cold_preinitializing::RegisteredPreInitializingClaim::prepare(task)?,
+                )),
+                PendingGroupCustody::ColdPreInitializing(seed.clone()),
             )
         } else {
             (

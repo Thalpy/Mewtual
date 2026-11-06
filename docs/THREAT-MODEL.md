@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Complete pre-row journal requires actual birth ownership (6 November)
+
+The no-row recovery reader authenticates the complete original journal under the same paid
+SourceSaved/SDK, original files and group-wide absence. A new claim shares the fixed16 bound;
+Scope caches its same nonce owner before row effects and captures an actual basis only after
+the file+parent barrier. The successor uses an independent paid resource body and no strong
+old-capture backlink. OnceLock precedes slot retirement; actual two-slot conversion precedes
+outside-writer normalization/drain. A live warm task must now honor foreign group debt before
+first row insertion. Missing/torn journals never fall back or get replaced by this path.
+All 15 Windows regressions pass, including both live claim orderings and exact metadata-fee
+retirement with the original Store/SDK still live. Other-platform execution, complete suites,
+native/operational rollout and later cuts remain open.
+[Failure matrix](communication-recovery/CHAT-V2-GENESIS-COMPLETE-PREINIT.md).
+
 ## Repaired owners keep their actual cleanup identity (6 November; library only)
 
 Repaired Current2 cleanup uses a third closed owner/Scope/canonical branch, never a fabricated
@@ -25,9 +39,9 @@ stage is proved again before promotion. SavedHead is cached before Current2 chan
 dirty retries retain the same owner/writer/head rather than replaying initialization.
 This adds no fresh creation grant, SDK, nonce, warm Saved receipt or generic adopter. It
 inherits the cooperative private-directory/session assumptions and only the audited Windows
-native inventory profile. Focused Windows validation passes; full-suite and capacity
-acceptance, no-row/partial first journal,
-later operational heads, native rollout and external rollback anchoring remain open.
+native inventory profile. The complete-journal/no-row continuation is described above.
+Full-suite and capacity acceptance, missing/torn first journals, later operational heads,
+native rollout and external rollback anchoring remain open.
 [Full contract and failure matrix](communication-recovery/CHAT-V2-GENESIS-INITIALIZING-REPAIR.md).
 
 ## Original seed deletion requires a covering Current2 barrier (6 November; library only)

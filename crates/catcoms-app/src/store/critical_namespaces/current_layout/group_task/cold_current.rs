@@ -76,7 +76,9 @@ impl PreparedV2GenesisGroupNamespace {
     fn cold(&self) -> Result<&ColdCurrentClaim, AppError> {
         match &self.custody {
             GroupTaskCustody::ColdCurrent(cold) => Ok(cold),
-            GroupTaskCustody::Warm { .. } | GroupTaskCustody::ColdInitializing(_) => Err(refused()),
+            GroupTaskCustody::Warm { .. }
+            | GroupTaskCustody::ColdInitializing(_)
+            | GroupTaskCustody::ColdPreInitializing(_) => Err(refused()),
         }
     }
     pub(in crate::store) fn cold_current_head_data(
@@ -84,7 +86,9 @@ impl PreparedV2GenesisGroupNamespace {
     ) -> Option<&Arc<ColdV2GenesisCurrentHead>> {
         match &self.custody {
             GroupTaskCustody::ColdCurrent(cold) => Some(&cold.head),
-            GroupTaskCustody::Warm { .. } | GroupTaskCustody::ColdInitializing(_) => None,
+            GroupTaskCustody::Warm { .. }
+            | GroupTaskCustody::ColdInitializing(_)
+            | GroupTaskCustody::ColdPreInitializing(_) => None,
         }
     }
     pub(in crate::store) fn cold_current_resources(

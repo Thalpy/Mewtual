@@ -719,3 +719,6 @@ fn task_cancel_is_one_original_negative_before_source_and_runtime_payload_drain(
 }
 
 mod writer_backing;
+
+#[cfg(windows)]
+mod pre_initializing_race;
