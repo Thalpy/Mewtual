@@ -24,7 +24,9 @@ pub(super) enum Reply {
     Detail {
         availability: &'static str,
         revision: String,
-        row: LegacyRow,
+        // One fixed-size row stays off every pending Reply's inline frame. Serde
+        // serializes this Box transparently, preserving the existing IPC object.
+        row: Box<LegacyRow>,
         original: Original,
         #[serde(rename = "typedBody")]
         typed_body: Option<()>,
@@ -395,7 +397,7 @@ pub(super) fn detail(source: AdminLedgerDetail) -> Result<Reply, AdminLedgerErro
     Ok(Reply::Detail {
         availability: "incomplete",
         revision: source.revision,
-        row: row(source.row)?,
+        row: Box::new(row(source.row)?),
         original: Original {
             encoding: "hex",
             bytes: hex::encode(source.frame_bytes),

@@ -390,35 +390,36 @@ fn router_with_spawn<R: tauri::Runtime>(
             return true;
         }
         let app = invoke.message.webview_ref().app_handle().clone();
-        let state = app.state::<AppState>();
-        // Capture before even bounded argument inspection: a concurrent lock/unlock during
-        // parsing cannot authorize the original invocation with the subsequently current epoch.
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
-        let request = arguments(command, invoke.message.payload());
-        let captured = request
-            .as_ref()
-            .map_err(|code| *code)
-            .and_then(|request| capture(&state, request.server(), generation));
-        let (request, captured) = match (request, captured) {
-            (Ok(request), Ok(captured)) => (request, captured),
-            (_, Err(code)) => {
-                invoke
-                    .resolver
-                    .resolve(Response::new(InvokeResponseBody::Json(dto::encode(
-                        dto::Reply::Unavailable { code },
-                    ))));
-                return true;
-            }
-            (Err(code), _) => {
-                invoke
-                    .resolver
-                    .resolve(Response::new(InvokeResponseBody::Json(dto::encode(
-                        dto::Reply::Unavailable { code },
-                    ))));
-                return true;
+        let (request, captured) = {
+            let state = app.state::<AppState>();
+            // Capture before even bounded argument inspection: a concurrent lock/unlock during
+            // parsing cannot authorize the original invocation with the subsequently current epoch.
+            let generation = state.ui_session_generation.load(Ordering::Acquire);
+            let request = arguments(command, invoke.message.payload());
+            let captured = request
+                .as_ref()
+                .map_err(|code| *code)
+                .and_then(|request| capture(&state, request.server(), generation));
+            match (request, captured) {
+                (Ok(request), Ok(captured)) => (request, captured),
+                (_, Err(code)) => {
+                    invoke
+                        .resolver
+                        .resolve(Response::new(InvokeResponseBody::Json(dto::encode(
+                            dto::Reply::Unavailable { code },
+                        ))));
+                    return true;
+                }
+                (Err(code), _) => {
+                    invoke
+                        .resolver
+                        .resolve(Response::new(InvokeResponseBody::Json(dto::encode(
+                            dto::Reply::Unavailable { code },
+                        ))));
+                    return true;
+                }
             }
         };
-        drop(state);
         let resolver = invoke.resolver;
         drop(invoke.message); // do not retain the caller's arbitrary JSON allocation across awaits
         spawn(Box::pin(async move {

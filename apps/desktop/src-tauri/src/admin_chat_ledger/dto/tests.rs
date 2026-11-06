@@ -30,7 +30,7 @@ fn sample_detail() -> Reply {
     Reply::Detail {
         availability: "incomplete",
         revision: "00112233445566778899aabbccddeeff".into(),
-        row: sample_row(),
+        row: Box::new(sample_row()),
         original: Original {
             encoding: "hex",
             bytes: "0001".into(),

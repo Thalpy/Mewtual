@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Admin history native lint cleanup (6 November; focused checks pass)
+
+The detail reply keeps its one bounded row on the heap with transparent Serde encoding.
+The router's borrowed AppState lookup now ends in an explicit synchronous scope, still
+capturing the UI generation before argument inspection and retaining original custody
+through final publication. Actual-diff adversarial review is clear. All 18 native DTO,
+ACL, cancellation, actor-lifetime and lock/publication tests pass in 2.72s. The three
+frontend admin-history/security/fixture files pass all 34 tests in 30.26s. Strict native
+all-target/all-feature Clippy passes in 1m02s; strict whole-root Clippy passes in 57.87s.
+Formatting, whitespace and ambient/raw-FS gates pass. These are focused checks; complete
+suites and cross-platform CI confirmation remain open. The real complete-seed/no-row
+fixture also passes again in 31.98s. The slow 10,000-operation test has not run locally.
+
 ## Cross-platform validation failures (6 November; fixes in progress)
 
 The pushed `81d3a162` checkpoint is **not CI-green**. Linux strict Clippy rejects eight
