@@ -299,7 +299,9 @@ fn genuine_genesis_retains_exact_header_and_complete_state() {
             row.payload.len()
         )
     );
-    assert!(MAX_HEADER_ROW_BYTES < MAX_RECORD_BATCH_BYTES);
+    // Pin the fixed format relationship at compile time, separately from the actual
+    // decoded page/backing-size assertion below.
+    const { assert!(MAX_HEADER_ROW_BYTES < MAX_RECORD_BATCH_BYTES) };
     assert!(RECORD_BATCH_METADATA_BYTES >= std::mem::size_of_val(&page.rows));
 }
 

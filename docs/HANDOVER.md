@@ -95,8 +95,11 @@ temporary strong upgrade which could move final sender cleanup under canonical.
 The warm and complete-genesis cold callers move the same SDK seed into an unbound node;
 they expose no runnable node, authoring, projection or native result. Operational SDK admission, governing/append/index transactions,
 ingress/catch-up and native/UI routing are still required. Chat V2 remains disabled. Complete
-root/native suites, root-wide lint/build/native gates and the slow test remain outstanding.
-Strict all-target/all-feature App Clippy passes, including its dependencies and test targets. The full
+root/native suites, audit/build/native gates and the slow test remain outstanding.
+Strict all-target/all-feature **root-workspace Clippy passes**, including every crate's test
+targets. The last fixes preserve two fixed format/invoice comparisons as compile-time
+assertions and end a non-Drop test closure's borrow at its last use; dynamic assertions and
+the malformed-input matrix are unchanged. All three affected focused tests pass. The full
 frontend unit suite passes **3,434/3,434**, with no skips. Ambient-dependency and Store raw-FS
 gates pass. Current focused evidence still does not close Chat V2 acceptance.
 

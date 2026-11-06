@@ -546,7 +546,9 @@ fn replay_math_current_64_limit_is_not_a_lifetime_admission_limit() {
         assert_eq!(source.slots().len(), 64);
         assert_eq!(source.slots.capacity(), MAX_SLOTS);
     }
-    assert!(NAMED_LAYOUT_BYTES <= REPLAY_MATH_PRIVATE_INVOICE);
+    // The actual repeated slot/capacity checks above are dynamic; this named ABI invoice
+    // relationship is fixed for the build and must hold before any test can execute.
+    const { assert!(NAMED_LAYOUT_BYTES <= REPLAY_MATH_PRIVATE_INVOICE) };
 }
 
 #[test]

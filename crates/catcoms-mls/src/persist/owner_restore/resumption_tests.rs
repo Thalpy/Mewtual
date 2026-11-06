@@ -325,7 +325,8 @@ fn negative_rows(
     let mut unknown = row(32, source.epoch + 1, history.clone());
     unknown["unknown"] = json!(0);
     add("unknown field", unknown);
-    drop(add);
+    // This is the closure's final use; its mutable cases borrow ends here without any
+    // resource destructor. The following raw-encoding cases can append directly.
     let valid = encoded(&row(32, source.epoch + 1, history));
     let mut duplicate = valid.clone();
     assert_eq!(duplicate.pop(), Some(b'}'));
