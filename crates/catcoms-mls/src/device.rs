@@ -12,11 +12,35 @@ use crate::config::{capabilities, CIPHERSUITE};
 use crate::invite::{InviteError, MembershipCredential};
 use crate::{proto, MlsError};
 
+pub(crate) mod key_package_identity;
+pub use key_package_identity::KeyPackageIdentity;
+mod founder_input;
+
 /// Serialize a KeyPackage for transport (so a joiner can send it to an inviter).
 pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsError> {
     MlsMessageOut::from(key_package.clone())
         .tls_serialize_detached()
         .map_err(proto)
+}
+
+/// Bound the canonical encoded size BEFORE cloning/serializing this already constructed SDK
+/// object. This does not meter the SDK's typed heap or admit a received KeyPackage.
+pub fn serialize_key_package_bounded(
+    key_package: &KeyPackage,
+    max_bytes: usize,
+) -> Result<Vec<u8>, MlsError> {
+    use tls_codec::Size;
+    // MLSMessage's version/wire-format prefix is four bytes; the KP contains its own version.
+    if key_package
+        .tls_serialized_len()
+        .checked_add(4)
+        .is_none_or(|length| length > max_bytes)
+    {
+        return Err(MlsError::Internal(
+            "KeyPackage encoding exceeds explicit budget",
+        ));
+    }
+    serialize_key_package(key_package)
 }
 
 /// The shortest time a joiner's KeyPackage must remain valid after it is admitted: 30 days.
@@ -79,9 +103,22 @@ pub struct MlsDevice {
     signer: SignatureKeyPair,
     credential: CredentialWithKey,
     device_id: DeviceId,
+    // LAST: provider, signer and credential drop before the SAME graph lease shared with group.
+    pub(crate) sdk_graph_lease: Option<crate::persist::OwnerSdkGraphLease>,
 }
 
 impl MlsDevice {
+    /// A completed initial load pays its graph, not a later mutative SDK operation. Refuse
+    /// BEFORE SDK/key-builder/duplication work; a storage-write refusal would be too late.
+    pub(crate) fn require_sdk_operation_admission(&self) -> Result<(), MlsError> {
+        if self.sdk_graph_lease.is_some() {
+            return Err(MlsError::Internal(
+                "closed SDK graph needs explicit operation admission",
+            ));
+        }
+        Ok(())
+    }
+
     /// Generate a fresh device identity.
     pub fn generate() -> Result<Self, MlsError> {
         let provider = OpenMlsRustCrypto::default();
@@ -98,6 +135,7 @@ impl MlsDevice {
             signer,
             credential,
             device_id,
+            sdk_graph_lease: None,
         })
     }
 
@@ -125,6 +163,7 @@ impl MlsDevice {
             signer,
             credential,
             device_id,
+            sdk_graph_lease: None,
         })
     }
 
@@ -147,6 +186,7 @@ impl MlsDevice {
     /// serializes a key to disk or to the wire (the design's hard "no device key is ever
     /// exported" rule is about crossing the process boundary, which this does not).
     pub fn duplicate(&self) -> Result<Self, MlsError> {
+        self.require_sdk_operation_admission()?;
         let provider = OpenMlsRustCrypto::default();
         {
             let src = self
@@ -169,6 +209,7 @@ impl MlsDevice {
     /// The private bundle is stored in this device's provider so it can later
     /// process the resulting Welcome.
     pub fn key_package(&self) -> Result<KeyPackage, MlsError> {
+        self.require_sdk_operation_admission()?;
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(capabilities())
             .build(
@@ -189,6 +230,7 @@ impl MlsDevice {
         group_id: &[u8],
         invite_nonce: [u8; 16],
     ) -> Result<KeyPackage, MlsError> {
+        self.require_sdk_operation_admission()?;
         let membership = MembershipCredential {
             device_id: self.device_id,
             group_id: group_id.to_vec(),
@@ -209,6 +251,23 @@ impl MlsDevice {
     /// verify this device's signatures against it.
     pub fn public_key_bytes(&self) -> Vec<u8> {
         self.signer.public().to_vec()
+    }
+
+    /// Borrow for bounded private persistence preflight; no label clone precedes its budget.
+    pub(crate) fn public_key_ref(&self) -> &[u8] {
+        self.signer.public()
+    }
+
+    /// The MLS reference selected by a Welcome for this exact newly minted KeyPackage.
+    /// Callers retain it across every direct/pushed/helper completion of the same join attempt;
+    /// the signing-device key alone cannot distinguish an older init key in a restored provider.
+    pub fn key_package_reference(&self, package: &KeyPackage) -> Result<[u8; 32], MlsError> {
+        package
+            .hash_ref(self.provider.crypto())
+            .map_err(proto)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| MlsError::Internal("unexpected KeyPackage reference length"))
     }
 
     /// Sign arbitrary bytes with this device's MLS leaf key (e.g. inner-signing a

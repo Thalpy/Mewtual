@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ChatAdminLedger from "./ChatAdminLedger.svelte";
+  import type { LedgerReads } from "./chat-admin-ledger.ts";
   import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
   import { fileAvailability, keptCopyLabel, keptTransferLabel, keptAllocationCount, keptTransferRows, fileInventoryRequests, mutateFileInventory, type KeptFiles, type KeptTransfer } from "./file-availability";
@@ -379,6 +381,10 @@
   // never paint over the one you moved to. Channel-scoped reads pair this with the channel id,
   // which switchTo changes without changing the group.
   let viewGeneration = 0;
+  // Only this pane's mount key is reactive. Making the shared async correlation counter
+  // reactive would also subscribe older effects that intentionally read it just once.
+  // Lock and unlock already unmount the pane through locked/uiStateReady below.
+  let chatLedgerMount = $state(0);
   // True from the moment a group's panes are emptied until its first batch of reads lands. Panes
   // whose empty state makes a CLAIM ("No messages yet", "No matching members") must consult this:
   // an empty collection mid-switch means "not read yet", not "there is nothing".
@@ -417,6 +423,7 @@
     }, MESSAGES_STALL_MS);
   }
   function beginViewSwitch(): number {
+    untrack(() => { chatLedgerMount += 1; });
     return ++viewGeneration;
   }
   // Is the captured context still the one on screen? Both halves matter: the generation catches
@@ -4473,6 +4480,8 @@
   let storageRepairNote = $state("");
   let storageCategoryMax = $derived(Math.max(1, ...(storageHealth?.categories ?? []).map((row) => row.local_estimated_bytes)));
   let moderation = $state<ModerationState>({ events: [], votes: [] });
+  let moderationTab = $state<"activity" | "history">("activity");
+  let moderationHistoryRefresh = $state(0);
   let moderationMessages = $state<TimelineMessage[]>([]);
   let moderationLoading = $state(false);
   let moderationReason = $state("");
@@ -4527,7 +4536,7 @@
   // message corpus behind the privileged timeline is every message in every channel, and only the
   // moderation surface reads it, so it loads with that surface. `withCorpus` defaults to whether
   // the surface is actually open, which is the right answer at every existing call site.
-  async function refreshModeration(withCorpus = moderationSurfaceOpen(view, inboxView, spaceOpen)) {
+  async function refreshModeration(withCorpus = moderationSurfaceOpen(view, inboxView, spaceOpen) && moderationTab === "activity") {
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null || cur?.isDm) {
@@ -4563,6 +4572,31 @@
       // A stale call must not clear the flag for the live one; clearServerView resets it on switch.
       if (viewCurrent(gen, server)) moderationLoading = false;
     }
+  }
+  function chatLedgerReads(server: number): LedgerReads {
+    // Capture the ORIGINAL scalar scope, never consult a later server as the target of a
+    // deferred callback. Native separately fences its actual generation/Actor/reader policy.
+    const session = uiStateLoadGeneration, generation = viewGeneration;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && canModerate
+      && activeServerId === server && uiStateLoadGeneration === session && viewGeneration === generation
+      && view === "moderation" && moderationTab === "history";
+    const retired = () => ({ status: "unavailable", code: "session-unavailable" });
+    return {
+      page: async (cursor) => {
+        if (!current()) return retired();
+        try {
+          const reply = await invoke<unknown>("get_admin_chat_ledger", { server, cursor, limit: 32 });
+          return current() ? reply : retired();
+        } catch (reason) { if (!current()) return retired(); throw reason; }
+      },
+      detail: async (rowId, expectedRevision, frameOffset) => {
+        if (!current()) return retired();
+        try {
+          const reply = await invoke<unknown>("get_admin_chat_ledger_detail", { server, rowId, expectedRevision, frameOffset });
+          return current() ? reply : retired();
+        } catch (reason) { if (!current()) return retired(); throw reason; }
+      },
+    };
   }
   async function warnModerationSelection() {
     // Captured once, not re-read per iteration: the channel and message ids come from THIS
@@ -22878,7 +22912,10 @@
         if (e.payload.server === activeServerId) refreshRoles();
       }),
       listen<{ server: number }>("moderation-updated", (e) => {
-        if (e.payload.server === activeServerId) refreshModeration();
+        if (e.payload.server === activeServerId) {
+          moderationHistoryRefresh += 1;
+          refreshModeration();
+        }
       }),
       listen<{ server: number }>("livery-changed", (e) => {
         refreshServerIconFor(e.payload.server); // rail icon may have changed for any server
@@ -28457,11 +28494,24 @@
             <header class="ops-head">
               <div>
                 <span class="stx-crumb">SERVER // SAFETY // MODERATION</span>
-                <h2>Moderation plane</h2>
-                <p class="muted small">A public, signed history. Warnings preserve what was seen; kick votes advise the owner and never bypass MLS authorization.</p>
+                <h2>Moderation</h2>
+                <p class="muted small">Warnings, member reviews and chat history.</p>
               </div>
-              <button class="ghost small" disabled={moderationLoading} onclick={() => refreshModeration(true)}>{moderationLoading ? "Loading…" : "Refresh"}</button>
+              {#if moderationTab === "activity"}<button class="ghost small" disabled={moderationLoading} onclick={() => refreshModeration(true)}>{moderationLoading ? "Loading…" : "Refresh"}</button>{/if}
             </header>
+            <nav class="history-admin-tabs" aria-label="Moderation views">
+              <button class="ghost small" aria-pressed={moderationTab === "activity"} onclick={() => { moderationTab = "activity"; void refreshModeration(true); }}>Warnings &amp; reviews</button>
+              <button class="ghost small" aria-pressed={moderationTab === "history"} onclick={() => { moderationTab = "history"; }}>Chat history</button>
+            </nav>
+            {#if moderationTab === "history"}
+              {#if uiStateReady && !windowCloseInFlight && activeServerId !== null}
+                {#key `${activeServerId}:${chatLedgerMount}:${myRole}`}
+                  {@const reads = chatLedgerReads(activeServerId)}
+                  <ChatAdminLedger {reads} refreshTick={moderationHistoryRefresh} {nameOfIdentity}
+                    channelName={(id) => cur?.channels.find((channel) => channel.id === id)?.name ?? id} />
+                {/key}
+              {:else}<p role="status">Opening history…</p>{/if}
+            {:else}
             {#if canModerate}
               <section class="mod-batch">
                 <div><strong>{selectedModerationMessages().length} message{selectedModerationMessages().length === 1 ? "" : "s"} selected</strong><span class="muted small">Click a box; Shift-click extends the range.</span></div>
@@ -28577,6 +28627,7 @@
                 {/if}
               </aside>
             </div>
+            {/if}
           </div>
         {:else if view === "storage"}
           <div class="operations-pane tab-pane">

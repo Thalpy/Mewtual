@@ -21,6 +21,9 @@ members = [
 exclude = [
     "crates/catcoms-wire/fuzz",
     "apps/desktop/src-tauri",
+    # Temporary pinned upstream observer patch; not a Mewtual workspace member.
+    "vendor/automerge",
+    "vendor/openmls_memory_storage",
 ]
 
 [workspace.package]
@@ -46,3 +49,10 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Both workspaces must use this exact source so native and core document types agree.
+# See vendor/automerge/MEWTUAL-PATCH.md for provenance and the narrow readonly API patch.
+[patch.crates-io]
+automerge = { path = "vendor/automerge" }
+# Both workspaces also use the same reviewed provider backing-map observation.
+openmls_memory_storage = { path = "vendor/openmls_memory_storage" }

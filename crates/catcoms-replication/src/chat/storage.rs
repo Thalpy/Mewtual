@@ -7,7 +7,10 @@ const PAGE_DOMAIN: &[u8] = b"mewtual/chat/page/v1\0";
 pub const MAX_PAGE_RECORDS: usize = 64;
 pub const MAX_PAGE_BYTES: usize = 256 * 1024;
 
-/// Immutable evidence snapshot. It contains no verified authority tokens/status bits.
+/// Immutable evidence snapshot. It contains no verified authority tokens/status bits, current
+/// projection admissions or trusted prior-Delete flags. Restore creates a fresh default-closed
+/// projection instance even when matching historical semantic witnesses are resupplied. Durable
+/// negative-capsule closure requires a separate critical journal before active native rollout.
 /// This is plaintext and MUST be sealed by any future durable native storage adapter.
 /// Capture/decode scans the configured retained evidence, not a bounded network turn.
 pub struct ChatSnapshot {

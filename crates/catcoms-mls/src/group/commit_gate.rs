@@ -133,6 +133,7 @@ impl ServerGroup {
         bytes: &[u8],
         expected_epoch: u64,
     ) -> Result<AppliedCommit, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         check_commit_header(bytes, &self.group_id(), expected_epoch, self.epoch())?;
         match self.process_incoming(device, bytes)? {
             Incoming::CommitApplied { removed } => {
@@ -161,6 +162,7 @@ impl ServerGroup {
     /// this group would carry it: use it on a group whose further commits the test does not need.
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_self_update_proposal(&mut self, device: &MlsDevice) -> Result<Vec<u8>, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let (message, _reference) = self
             .group
             .propose_self_update(
@@ -181,6 +183,8 @@ impl ServerGroup {
         member: &MlsDevice,
         outsider: &MlsDevice,
     ) -> Result<Vec<u8>, MlsError> {
+        self.require_sdk_operation_admission(member)?;
+        outsider.require_sdk_operation_admission()?;
         let info = self
             .group
             .export_group_info(member.provider().crypto(), member.signer(), true)

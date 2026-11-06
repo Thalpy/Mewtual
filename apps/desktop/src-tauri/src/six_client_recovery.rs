@@ -70,25 +70,35 @@ impl History {
 }
 const ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
 
-async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
-    tokio::select! {
-        result = future => result,
-        _ = SystemClock.sleep(Duration::from_secs(30)) => panic!("six-client operation exceeded its bound: {label}"),
-    }
+fn bounded<'a, F: Future + 'a>(label: &'a str, future: F) -> impl Future<Output = F::Output> + 'a {
+    // This must be a synchronous constructor: boxing inside an async fn would leave
+    // its initial state containing the entire child future. Composed native restore/
+    // admission futures otherwise multiply across nested select and poll frames.
+    let future = Box::pin(future);
+    Box::pin(async move {
+        tokio::select! {
+            result = future => result,
+            _ = SystemClock.sleep(Duration::from_secs(30)) => panic!("six-client operation exceeded its bound: {label}"),
+        }
+    })
 }
 
 /// Keep ownership outside select's branches: on timeout, unwind starts before the unfinished
 /// Scenario drops. Otherwise its strict teardown assertion would hide the original timeout.
-async fn scenario_bounded<F: Future>(
+fn scenario_bounded<'a, F: Future + 'a>(
     future: F,
-    timeout: impl Future<Output = ()>,
-    failure: &str,
-) -> F::Output {
-    tokio::pin!(future);
-    tokio::select! {
-        result = &mut future => result,
-        _ = timeout => panic!("{failure}"),
-    }
+    timeout: impl Future<Output = ()> + 'a,
+    failure: &'a str,
+) -> impl Future<Output = F::Output> + 'a {
+    // Keep the original ownership outside select's branches while placing the
+    // complete scenario on the heap before any caller embeds this wrapper.
+    let mut future = Box::pin(future);
+    Box::pin(async move {
+        tokio::select! {
+            result = &mut future => result,
+            _ = timeout => panic!("{failure}"),
+        }
+    })
 }
 
 async fn close_driver(driver: &mut Option<watch::Receiver<MeshObservationSnapshot>>) {

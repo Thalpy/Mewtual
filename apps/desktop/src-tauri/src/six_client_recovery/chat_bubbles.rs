@@ -425,3 +425,33 @@ async fn three_chat_bubbles_merge_edits_deletes_and_removed_author_history_throu
     )
     .await;
 }
+
+#[test]
+fn three_bubble_future_has_bounded_inline_storage() {
+    fn inline_bytes<F: Future>(_: impl FnOnce(FixtureAdmission) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let bytes = inline_bytes(three_bubbles);
+    assert!(
+        bytes <= 64 * 1024,
+        "three-bubble future retains {bytes} inline bytes; large scenario futures must be boxed at their call boundaries"
+    );
+    // The raw scenario remains finite, but placing it inline in each generic
+    // timeout wrapper still overflows the default test stack during admission.
+    // Pinning on the stack alone must not replace these heap construction cuts.
+    fn large_child() -> impl Future<Output = ()> {
+        let retained = [0_u8; 64 * 1024];
+        async move {
+            std::future::pending::<()>().await;
+            std::hint::black_box(retained);
+        }
+    }
+    let bounded_future = bounded("future layout only", large_child());
+    let scenario_future = scenario_bounded(
+        large_child(),
+        std::future::pending::<()>(),
+        "future layout only",
+    );
+    assert!(std::mem::size_of_val(&bounded_future) <= 256);
+    assert!(std::mem::size_of_val(&scenario_future) <= 256);
+}

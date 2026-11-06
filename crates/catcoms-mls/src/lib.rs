@@ -25,10 +25,10 @@ pub mod policy;
 use thiserror::Error;
 
 pub use config::CIPHERSUITE;
-pub use device::{key_package_signature_key, serialize_key_package, MlsDevice};
+pub use device::{key_package_signature_key, serialize_key_package, KeyPackageIdentity, MlsDevice};
 pub use group::{
     check_commit_header, commit_header, AddOutcome, AppliedCommit, CommitHeader, CommitRefusal,
-    Incoming, ServerGroup, StagedOutcome,
+    Incoming, LocalMembershipChange, LocalMembershipChangeKind, ServerGroup, StagedOutcome,
 };
 pub use invite::{InviteError, InviteLedger, InviteToken, MembershipCredential};
 pub use persist::{restore_server, snapshot_server};

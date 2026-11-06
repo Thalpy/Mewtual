@@ -26,6 +26,7 @@ pub mod chat;
 pub mod checkpoint;
 pub mod doc;
 pub mod epoch;
+pub mod history_inspection;
 pub mod op;
 pub mod registry;
 pub mod registry_epoch;

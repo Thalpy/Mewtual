@@ -23,7 +23,7 @@
 //! be tested in-tree, because both openmls lines cannot share one lockfile; it is checked out of
 //! tree and recorded in `docs/design-crypto-bigint-upgrade.md`.
 
-use std::collections::HashMap;
+use openmls_memory_storage::StorageMap;
 
 use catcoms_wire::{Decoder, DocType, Encoder};
 use openmls::prelude::{KeyPackage, Lifetime};
@@ -132,7 +132,7 @@ fn encode_prejoin(device: &MlsDevice) -> Vec<u8> {
 
 fn decode_prejoin(bytes: &[u8]) -> MlsDevice {
     let mut d = Decoder::new(bytes);
-    let map: HashMap<Vec<u8>, Vec<u8>> = deserialize_map(d.get_bytes().unwrap()).unwrap();
+    let map: StorageMap = deserialize_map(d.get_bytes().unwrap()).unwrap();
     let public_key = d.get_bytes().unwrap().to_vec();
     d.finish().unwrap();
     let provider = OpenMlsRustCrypto::default();
