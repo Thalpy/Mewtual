@@ -49,6 +49,154 @@ fn caller(
     (preparation, layout, rng, directory)
 }
 
+#[cfg(windows)]
+fn remove_activation_seed(prepared: &Preparation, layout: &V2CurrentLayoutStore) {
+    let store = layout.checked_store().unwrap();
+    let source = prepared.graph.source().unwrap();
+    let capture = PreparedColdV2GenesisCapture::prepare(store, &source).unwrap();
+    let resources = capture.read_resources();
+    let path = store
+        .with_cold_v2_genesis_current_read(&source, |admission| {
+            let guard = store.lock_cold_current_genesis_group(admission, &resources)?;
+            Ok(guard.directory_data().0.join("activation.seed"))
+        })
+        .unwrap();
+    // Explicit missing-seed fixture. The final owner still has to perform its own actual
+    // covering scope write; deleting a file in a test never supplies that receipt.
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn cold_seed_absent_owner_requires_clean_scope_cover_and_retains_node_across_both_write_faults() {
+    for after_rename in [false, true] {
+        let (mut prepared, layout, mut rng, _directory) = caller(0xcf10 + u64::from(after_rename));
+        remove_activation_seed(&prepared, &layout);
+        prepared.after_pair = Some(Box::new(move |store| {
+            if after_rename {
+                store.chat_parent_sync_failure.store(true, Ordering::SeqCst);
+            } else {
+                store
+                    .chat_fence_pre_rename_failure
+                    .store(true, Ordering::SeqCst);
+            }
+        }));
+        // The mounted scope starts clean. Only a real unconditional covering write can
+        // consume these faults; skipping clean would incorrectly report success here.
+        assert!(prepared.retry(&layout, &mut rng).is_err());
+        assert!(matches!(prepared.graph, Graph::Node { .. }));
+        assert!(prepared.head.as_ref().unwrap().requires_scope_covering());
+        assert!(prepared.take_current(&layout).is_err());
+        let source = prepared.graph.source().unwrap().data().source;
+        let owner = prepared.scope.as_ref().unwrap().owner_identity();
+        let writer = prepared.writer.as_ref().unwrap().observe_original();
+        let head = prepared.head.as_ref().unwrap().clone();
+        let nonce = prepared.scope.as_ref().unwrap().nonce();
+        prepared.retry(&layout, &mut rng).unwrap();
+        assert_eq!(prepared.graph.source().unwrap().data().source, source);
+        assert!(Arc::ptr_eq(
+            &owner,
+            &prepared.scope.as_ref().unwrap().owner_identity()
+        ));
+        assert!(Arc::ptr_eq(&head, prepared.head.as_ref().unwrap()));
+        assert_eq!(nonce, prepared.scope.as_ref().unwrap().nonce());
+        prepared
+            .writer
+            .as_ref()
+            .unwrap()
+            .require_same_observation(&writer)
+            .unwrap();
+        prepared.retry(&layout, &mut NeverRng).unwrap();
+        prepared
+            .take_current(&layout)
+            .unwrap()
+            .unwrap()
+            .validate_original(&layout)
+            .unwrap();
+    }
+}
+
+#[cfg(windows)]
+struct DuringCoverRng {
+    rng: ChaCha20Rng,
+    fills: usize,
+    hook: Option<Box<dyn FnOnce()>>,
+}
+#[cfg(windows)]
+impl RngCore for DuringCoverRng {
+    fn next_u32(&mut self) -> u32 {
+        self.rng.next_u32()
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.rng.next_u64()
+    }
+    fn fill_bytes(&mut self, bytes: &mut [u8]) {
+        self.rng.fill_bytes(bytes);
+        self.fills += 1;
+        if let Some(hook) = self.hook.take() {
+            hook();
+        }
+    }
+    fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(bytes);
+        Ok(())
+    }
+}
+#[cfg(windows)]
+impl CryptoRng for DuringCoverRng {}
+
+#[cfg(windows)]
+#[test]
+fn cold_seed_absent_cover_post_write_proof_failure_stays_pending_when_inventory_is_clean() {
+    let (mut prepared, layout, rng, directory) = caller(0xcf12);
+    remove_activation_seed(&prepared, &layout);
+    let store = layout.checked_store().unwrap();
+    let marker = store
+        .dir
+        .join(crate::store::critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
+        .join(crate::store::critical_namespaces::current_layout::CURRENT_MARKER);
+    let original = std::fs::read(&marker).unwrap();
+    let displaced = directory.path().join("held-during-cold-cover-marker");
+    let changed = marker.clone();
+    let held = displaced.clone();
+    let mut rng = DuringCoverRng {
+        rng,
+        fills: 0,
+        hook: Some(Box::new(move || {
+            // The injected RNG seam runs after the pre-write proofs and before the actual
+            // covering write. Equal replacement still invalidates the final physical proof.
+            std::fs::rename(&changed, &held).unwrap();
+            std::fs::write(&changed, original).unwrap();
+        })),
+    };
+    assert!(prepared.retry(&layout, &mut rng).is_err());
+    assert!(rng.fills > 0 && rng.hook.is_none());
+    assert!(prepared.take_current(&layout).is_err());
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::rename(&displaced, &marker).unwrap();
+    // DATA maintenance must consume no RNG: the actual write succeeded and the loaded
+    // inventory is already clean. This cannot satisfy the still-pending owner obligation.
+    let buffers = store.reserve_v2_genesis_scope_buffers().unwrap();
+    store
+        .resync_v2_current_scope_inventory(&buffers, &mut NeverRng)
+        .unwrap();
+    drop(buffers);
+    assert!(prepared.take_current(&layout).is_err());
+    let before = rng.fills;
+    prepared.retry(&layout, &mut rng).unwrap();
+    assert!(
+        rng.fills > before,
+        "the failed post-write proof must force a new covering write"
+    );
+    prepared.retry(&layout, &mut NeverRng).unwrap();
+    prepared
+        .take_current(&layout)
+        .unwrap()
+        .unwrap()
+        .validate_original(&layout)
+        .unwrap();
+}
+
 #[test]
 fn complete_cold_owner_binds_and_moves_the_same_original_seed_once() {
     let (mut prepared, layout, mut rng, _directory) = caller(0xcf01);

@@ -1,18 +1,21 @@
 //! Role-specific cold genesis closure, paired with the actual Factory guards, scope
-//! read roles and seed-present Current2 owning caller. Initializing1 remains test-only.
+//! read roles and Current2 owning caller. Initializing1 remains test-only.
 //!
 //! These are NEW cold receipts, never reconstructed warm SavedSeed/SavedHead capabilities.
-//! The first packet accepts only a complete independently seeded pin/genesis-head closure,
-//! even for Initializing1. Missing/partial outputs, successor heads and seed-settled Current
-//! remain unsupported and untouched. Their repair/read roles must be implemented separately.
+//! Present seeds must authenticate the complete pin/genesis-head closure. On the audited
+//! Windows path only, an unowned Current2 may independently prove a complete genesis closure
+//! after genuine seed absence. Partial/unknown/successor state never falls back to genesis.
+//! Seed unlink/settlement and later-head selection are distinct owning operations.
 use super::*;
 use crate::store::chat_admission::v2_current::ColdV2GenesisScopeBasis;
 use crate::store::critical_namespaces::current_layout::ColdV2CurrentGroupReadGuard;
 #[cfg(test)]
 use crate::store::critical_namespaces::current_layout::ColdV2InitializingGroupReadGuard;
 use catcoms_sync::owner_v2::OriginalV2GenesisSeedObservation;
+use codec::V2GroupPinId;
 #[cfg(test)]
-use codec::{V2ActivationSeedId, V2GenesisHeadId, V2GroupPinId};
+use codec::{V2ActivationSeedId, V2GenesisHeadId};
+mod settled;
 
 // Cold selection and Factory's path/directory guards coexist. Their named invoice exceeds
 // the warm 512KiB class. This separate debit changes no wire/content limit, SDK or source
@@ -99,6 +102,24 @@ impl ColdV2GenesisReadResources {
 
 /// Captured SAME physical objects plus bounded exact ciphertext. Basis is historical DATA;
 /// its equality never authenticates a file or substitutes for a scope owner's live guard.
+/// A capture selects exactly one physical role. An absent seed is selected only by the
+/// actual unowned Current2 reader after genuine NotFound under the original directories.
+/// Once selected, neither a later seed appearance nor a failed present-seed read changes it.
+enum ColdSeedSelection {
+    Present(ReadControl),
+    Absent,
+}
+impl ColdSeedSelection {
+    /// The cleanup borrower may use only a real retained original seed, never a synthetic
+    /// frame/id after settlement. Descendant settlement code cannot turn absence into bytes.
+    fn present(&self) -> Result<&ReadControl, AppError> {
+        match self {
+            Self::Present(seed) => Ok(seed),
+            Self::Absent => Err(critical_namespaces::refused()),
+        }
+    }
+}
+
 struct CompleteColdClosure {
     basis: ColdV2GenesisScopeBasis,
     group_path: PathBuf,
@@ -110,7 +131,7 @@ struct CompleteColdClosure {
     group_id: catcoms_storage::kept::SessionId,
     target_directory: File,
     target_id: catcoms_storage::kept::SessionId,
-    seed: ReadControl,
+    seed: ColdSeedSelection,
     pin: ReadControl,
     head: ReadControl,
     // LAST: the SAME prepaid loan covers every original file, frame, path and basis copy.
@@ -124,8 +145,9 @@ pub(in crate::store) struct ColdV2GenesisActivationSeed {
     closure: Arc<CompleteColdClosure>,
 }
 
-/// Complete seed-present cold Current2 proof. Missing pin/head/seed or ANY head.stage refuses;
-/// no failed read falls back to bootstrap genesis or reconstructs the old warm SavedHead.
+/// Complete cold genesis Current2 proof. The private selection retains either its actual
+/// seed or genuine absence plus the complete strict inventory. Missing pin/head, a malformed
+/// present seed or ANY head.stage refuses; no failed read reconstructs a warm SavedHead.
 pub(in crate::store) struct ColdV2GenesisCurrentHead {
     closure: Arc<CompleteColdClosure>,
 }
@@ -183,6 +205,14 @@ enum ReadGuard<'guard, 'reader, 'writer> {
     Current(&'guard ColdV2CurrentGroupReadGuard<'reader, 'writer>),
 }
 impl ReadGuard<'_, '_, '_> {
+    fn permits_settled_seed_selection(&self) -> bool {
+        // This is a closed concrete role match, not a caller-provided fallback option.
+        match self {
+            #[cfg(test)]
+            Self::Initializing(_) => false,
+            Self::Current(_) => true,
+        }
+    }
     fn store(&self) -> &ServerStore {
         match self {
             #[cfg(test)]
@@ -406,18 +436,35 @@ fn capture_complete(
         .store()
         .validate_mounted_current_layout_under_archive_root(guard.root())?;
     let (base, directory, group_id) = guard.directory_data();
-    let target = &guard.source().source().capture.target;
+    let capture = &guard.source().source().capture;
+    let target = &capture.target;
     let group_path = owned_path(base)?;
     let seed_path = child(base, SEED)?;
     let pin_path = child(base, PIN)?;
     let head_path = child(target, HEAD)?;
     let stage_path = child(target, STAGE)?;
     super::super::require_absent(&stage_path)?;
-    let seed = read_cold_control(&seed_path, codec::MAX_ACTIVATION_FRAME)?;
+    let seed = match fs::symlink_metadata(&seed_path) {
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && guard.permits_settled_seed_selection() =>
+        {
+            // NotFound alone could mean a missing ancestor. Compare both original held
+            // directory objects BEFORE selecting absence; the complete closure repeats them.
+            require_directory_name(base, directory, group_id)?;
+            require_directory_name(target, &capture.target_directory, capture.target_id)?;
+            ColdSeedSelection::Absent
+        }
+        Err(_) => return Err(critical_namespaces::refused()),
+        Ok(_) => {
+            // Every present object takes the original strict reader. Partial/authentication/
+            // barrier failures are never caught and reinterpreted as a settled seed.
+            ColdSeedSelection::Present(read_cold_control(&seed_path, codec::MAX_ACTIVATION_FRAME)?)
+        }
+    };
     let pin = read_cold_control(&pin_path, codec::MAX_PIN_FRAME)?;
     let head = read_cold_control(&head_path, codec::MAX_HEAD_FRAME)?;
     let group_directory = directory.try_clone().map_err(io)?;
-    let capture = &guard.source().source().capture;
     let target_directory = capture.target_directory.try_clone().map_err(io)?;
     let closure = CompleteColdClosure {
         basis: guard.basis().clone(),
@@ -458,8 +505,14 @@ impl CompleteColdClosure {
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,
     ) -> Result<(), AppError> {
+        if matches!(self.seed, ColdSeedSelection::Absent) {
+            // The settled branch independently authenticates the selected pin/head against
+            // the actual source; it never reconstructs a warm activation receipt or S0 head.
+            return settled::require_original_genesis_content(self, store, source);
+        }
+        let seed = self.seed.present()?;
         let key = Zeroizing::new(store.keys.db_key()?);
-        let plain = codec::open_activation_seed_data(&key, &self.seed.frame)?;
+        let plain = codec::open_activation_seed_data(&key, &seed.frame)?;
         let decoded =
             codec::parse_activation_seed_data(&key, &self.resources.body.expected, &plain)?;
         let public = source.data();
@@ -512,7 +565,10 @@ impl CompleteColdClosure {
         source.source().validate_under_archive_root(store, root)?;
         self.require_original_content(store, source)?;
         super::super::require_absent(&self.stage_path)?;
-        verify_control(&self.seed_path, &self.seed)?;
+        match &self.seed {
+            ColdSeedSelection::Present(seed) => verify_control(&self.seed_path, seed)?,
+            ColdSeedSelection::Absent => settled::require_absent_inventory(self)?,
+        }
         verify_control(&self.pin_path, &self.pin)?;
         verify_control(&self.head_path, &self.head)?;
         // All bounded content comparers/account waits precede these final original proofs.
@@ -521,6 +577,11 @@ impl CompleteColdClosure {
         if let Some(hook) = AFTER_FINAL_SOURCE.with(|slot| slot.borrow_mut().take()) {
             hook();
         }
+        if matches!(self.seed, ColdSeedSelection::Absent) {
+            // Source reads may wait while an incomplete newer operation creates a private
+            // object. Repeat the full closed inventory after that wait, then repeat ID3.
+            settled::require_absent_inventory(self)?;
+        }
         // Source-control reads can wait. The last ID3 proof must follow them, so a layout
         // marker replaced during that work cannot reuse a positive proof from beforehand.
         store.validate_mounted_current_layout_under_archive_root(root)?;
@@ -528,7 +589,10 @@ impl CompleteColdClosure {
         require_directory_name(&capture.root, &capture.root_directory, capture.root_id)?;
         require_directory_name(&capture.target, &self.target_directory, self.target_id)?;
         require_directory_name(&self.group_path, &self.group_directory, self.group_id)?;
-        verify_read_name(&self.seed_path, &self.seed.object)?;
+        match &self.seed {
+            ColdSeedSelection::Present(seed) => verify_read_name(&self.seed_path, &seed.object)?,
+            ColdSeedSelection::Absent => super::super::require_absent(&self.seed_path)?,
+        }
         verify_read_name(&self.pin_path, &self.pin.object)?;
         verify_read_name(&self.head_path, &self.head.object)?;
         super::super::require_absent(&self.stage_path)?;
@@ -542,7 +606,9 @@ impl CompleteColdClosure {
     ) -> Result<(), AppError> {
         // Files were opened R/W without create/truncate so Windows can actually flush them.
         // These fixed metadata destinations are outside all epoch inventory families.
-        self.seed.object.file.sync_all().map_err(io)?;
+        if let ColdSeedSelection::Present(seed) = &self.seed {
+            seed.object.file.sync_all().map_err(io)?;
+        }
         self.pin.object.file.sync_all().map_err(io)?;
         self.head.object.file.sync_all().map_err(io)?;
         self.group_directory.sync_all().map_err(io)?;
@@ -571,8 +637,11 @@ macro_rules! cold_receipt_methods {
                 )
             }
             #[cfg(test)]
-            pub(in crate::store) fn activation_id_data(&self) -> V2ActivationSeedId {
-                V2ActivationSeedId::of(&self.closure.seed.frame)
+            pub(in crate::store) fn activation_id_data(&self) -> Option<V2ActivationSeedId> {
+                match &self.closure.seed {
+                    ColdSeedSelection::Present(seed) => Some(V2ActivationSeedId::of(&seed.frame)),
+                    ColdSeedSelection::Absent => None,
+                }
             }
             #[cfg(test)]
             pub(in crate::store) fn head_id_data(&self) -> V2GenesisHeadId {
@@ -608,6 +677,11 @@ cold_receipt_methods!(ColdV2GenesisActivationSeed);
 cold_receipt_methods!(ColdV2GenesisCurrentHead);
 
 impl ColdV2GenesisCurrentHead {
+    /// DATA classification of the actual cached selection, not a durability receipt. Scope
+    /// must pay and complete a new covering write before final output for the absent role.
+    pub(in crate::store) fn requires_scope_covering(&self) -> bool {
+        matches!(self.closure.seed, ColdSeedSelection::Absent)
+    }
     /// Clone this SAME paid loan outside admission before borrowing the actual cold guard.
     /// No new body, source capture or authority is created by the Arc clone.
     pub(in crate::store) fn read_resources(&self) -> ColdV2GenesisReadResources {
@@ -630,6 +704,7 @@ fn validate_cold_invoice() -> Result<(), AppError> {
         + crate::store::critical_namespaces::current_layout::COLD_V2_GROUP_READ_GUARD_BYTES
         + crate::store::chat_admission::v2_current::COLD_V2_CURRENT_SCOPE_METADATA_BYTES
         + super::cold_writer::COLD_WRITER_RECEIPT_METADATA_BYTES
+        + super::genesis_inventory::GENESIS_FIXED_INVENTORY_BYTES
         + 32 * 1024;
     if bytes > COLD_CAPTURE_METADATA_FEE {
         return Err(critical_namespaces::refused());

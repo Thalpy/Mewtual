@@ -2,9 +2,10 @@
 
 Status: actual implementation and connected regressions are statically cleared; all eight
 guard tests and six Root capture tests pass.
-This packet supplies no cold owner, task claim, writer, scope mutation or Current completion.
-Primary owns the single build/test pipeline. The guards/capture are jointly declared under
-`cfg(test)` until the actual cold caller is connected; they do not activate a production path.
+These read roles themselves issue no cold owner, task claim, writer or Current completion.
+Their concrete Current2 guard/capture now has the owning library consumer recorded in
+`HANDOVER.md`; Initializing1-only roles remain test-gated. Primary owns the single build/test
+pipeline. This does not activate Chat V2 message sending or a native/UI path.
 
 The actual inputs are Authority's `ColdV2InitializingReadAdmission` (unowned historical
 Initializing1) or `ColdV2CurrentReadAdmission` (unowned historical Current2), the actual

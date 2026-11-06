@@ -9,8 +9,12 @@ recorded; that owner association precedes slot retirement. Binding requires the 
 writer, not a matching receipt label. Cancellation and physical replacement remain negative
 fences across retry and final extraction. Paid latest-table resync grants persistence only,
 never a replacement owner or source allowance. The default/native paths remain disabled for
-this protocol. Seed settlement, later-head recovery and live authoring are not established by
-these checks. [Current evidence and remaining gates](HANDOVER.md).
+this protocol. The separate Windows-only seed-absent reader requires genuine absence under
+the original directories, independently authenticated genesis pin/head/source, a complete
+bounded inventory and a new covering scope write even when clean. The covering obligation
+survives actual write errors and post-write proof failure; no present-seed error can select
+this branch. Actual seed cleanup, later-head recovery and live authoring are not established
+by these checks. [Current evidence and remaining gates](HANDOVER.md).
 
 ## ID3 declaration is physical custody, not Current authority (5 November; authored, UNRUN)
 

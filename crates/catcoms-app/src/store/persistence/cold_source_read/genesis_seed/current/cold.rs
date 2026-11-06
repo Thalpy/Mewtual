@@ -1,6 +1,7 @@
 //! Same-graph cold Current2 owning caller, paired with the task/owner/writer guards,
-//! combined invoices and genuine fault tests. This restores only a
-//! complete seed-present GENESIS head; later heads/settled seeds are separate readers.
+//! combined invoices and genuine fault tests. This restores only a complete GENESIS head.
+//! The seed-absent Windows role additionally requires a new covering scope write; later
+//! operational heads need their own reader and can never fall back to this genesis path.
 use super::*;
 use crate::store::chat_admission::v2_current::{
     ColdV2CurrentPreparation, ColdV2CurrentProgressData,
@@ -14,8 +15,9 @@ use crate::store::persistence::v2_genesis_activation::{
 use std::cell::RefCell;
 
 /// Retains the actual paid restored graph and every original recovery owner across a
-/// finite retry. This handles a complete, seed-present genesis Current2 only; unknown,
-/// partial, settled or later heads refuse instead of being replaced with genesis state.
+/// finite retry. This handles complete genesis Current2 with its actual seed, or on Windows
+/// with independently verified seed absence and a new durable scope barrier. Unknown,
+/// partial or later heads refuse instead of being replaced with genesis state.
 /// No constructor or successful retry exposes authoring, SDK mutation or a runnable node.
 pub struct PreparedColdV2GenesisCurrent<T, R> {
     graph: Graph<T, R>,
@@ -307,7 +309,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedColdV2GenesisCurrent<T, R> {
         }
     }
     fn resync_bound(
-        &self,
+        &mut self,
         store: &ServerStore,
         buffers: &CatalogReadReservation,
         rng: &mut impl CryptoRngCore,
@@ -315,7 +317,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedColdV2GenesisCurrent<T, R> {
         let source = self.graph.source()?;
         let scope = self
             .scope
-            .as_ref()
+            .as_mut()
             .ok_or_else(critical_namespaces::refused)?;
         let task = self
             .task

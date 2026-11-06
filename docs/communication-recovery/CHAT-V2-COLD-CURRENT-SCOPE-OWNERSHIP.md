@@ -2,7 +2,7 @@
 
 ## Integrated checkpoint (6 November; Chat V2 remains disabled)
 
-The complete seed-present genesis Current2 scope, task/owner handoff, distinct installed
+The complete genesis Current2 scope, task/owner handoff, distinct installed
 writer and owning cold caller are now connected in the ordinary library build. The public
 `PreparedColdV2GenesisCurrent` / `UnexposedColdV2GenesisCurrent` wrappers retain the same paid
 source, SDK, mounted owner, writer, receipt and node across retry; only recovery and immutable
@@ -16,8 +16,14 @@ results. Separately, the full frontend suite passes3,434 tests with no skips. Co
 suites remain outstanding; primary owns the serial validation pipeline. See
 [HANDOVER](../HANDOVER.md) for the current ledger.
 
-This milestone retains complete activation.seed. Initializing1 repair, seed settlement and
-seed-absent recovery, later operational heads, governor issuance, runnable/native activation
+The original milestone retained complete activation.seed. Its Windows-only seed-absent
+extension now independently verifies exact genesis metadata and a closed two-folder inventory,
+then requires a new covering scope write EVEN CLEAN. The private NeedsCovering state survives
+both actual write cuts and final physical-proof failure, even when the loaded table is now
+clean. It clears only under the same admission writer after the actual write and full final
+proof; read-only validation/extraction refuses it while pending. All4 new actual capture/owner
+tests and4 inventory-helper tests pass. Initializing1 repair, actual seed cleanup,
+later operational heads, governor issuance, runnable/native activation
 and live20/50-writer text SDK admission remain unfinished. The implementation below does not
 establish those capabilities or upgrade a decoded receipt into a mounted owner.
 
@@ -25,7 +31,7 @@ establish those capabilities or upgrade a decoded receipt into a mounted owner.
 
 The inputs are one actual `GenesisSourceDataRef`, Root's new
 `Arc<ColdV2GenesisCurrentHead>`, and Factory's actual newly registered cold group task. The
-receipt proves complete matching seed + immutable group pin + exact genesis head + no stage,
+receipt proves complete matching seed (or the separate strict Windows absence role) + immutable group pin + exact genesis head + no stage,
 same source/read/SDK/mount and file/parent barriers. It carries the opaque full
 `ColdV2GenesisScopeBasis`; decoding labels never constructs this receipt or the scope owner.
 

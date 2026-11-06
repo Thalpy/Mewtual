@@ -7,6 +7,90 @@ use crate::store::persistence::v2_genesis_activation::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(windows)]
+fn seed_path(f: &ColdFixture, capture: &PreparedColdV2GenesisCapture) -> PathBuf {
+    let store = f.layout.checked_store().unwrap();
+    let source = f.source.borrow_source_data();
+    let resources = capture.read_resources();
+    store
+        .with_cold_v2_genesis_current_read(&source, |admission| {
+            let guard = store.lock_cold_current_genesis_group(admission, &resources)?;
+            Ok(guard.directory_data().0.join(SEED))
+        })
+        .unwrap()
+}
+
+#[cfg(windows)]
+#[test]
+fn cold_seed_absent_capture_keeps_same_selection_without_inventing_an_activation_id() {
+    let f = fixture(0xcd50, false);
+    let store = f.layout.checked_store().unwrap();
+    let source = f.source.borrow_source_data();
+    let mut capture = PreparedColdV2GenesisCapture::prepare(store, &source).unwrap();
+    let seed = seed_path(&f, &capture);
+    // Hostile/missing-seed fixture only. This does not claim the actual settlement writer
+    // has run: the separate owning tests also require the new real covering scope write.
+    fs::remove_file(&seed).unwrap();
+    let head = read_current(&f, &mut capture).unwrap();
+    assert!(head.requires_scope_covering());
+    assert!(head.activation_id_data().is_none());
+    assert!(Arc::ptr_eq(&head, &read_current(&f, &mut capture).unwrap()));
+    head.retains_original(store, &source).unwrap();
+    assert!(!seed.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn cold_seed_absent_selection_rejects_present_seed_failure_and_preserves_unknown_work() {
+    let f = fixture(0xcd51, false);
+    let store = f.layout.checked_store().unwrap();
+    let source = f.source.borrow_source_data();
+    let mut present = PreparedColdV2GenesisCapture::prepare(store, &source).unwrap();
+    let seed = seed_path(&f, &present);
+    let original = fs::read(&seed).unwrap();
+    let mut corrupted = original.clone();
+    *corrupted.last_mut().unwrap() ^= 1;
+    fs::write(&seed, corrupted).unwrap();
+    assert!(read_current(&f, &mut present).is_err());
+    assert!(matches!(
+        present.captured.as_ref().unwrap().seed,
+        ColdSeedSelection::Present(_)
+    ));
+    fs::remove_file(&seed).unwrap();
+    assert!(read_current(&f, &mut present).is_err());
+    let mut absent = PreparedColdV2GenesisCapture::prepare(store, &source).unwrap();
+    let saved = read_current(&f, &mut absent).unwrap();
+    let target = &source.source().capture.target;
+    for path in [
+        seed.clone(),
+        target.join("head.stage"),
+        target.join("operation.pending"),
+        seed.parent().unwrap().join("private-head.bin"),
+    ] {
+        // Even equal seed bytes must not change this already-selected Absent role.
+        fs::write(&path, &original).unwrap();
+        assert!(read_current(&f, &mut absent).is_err());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original,
+            "never clean unknown work"
+        );
+        assert!(Arc::ptr_eq(&saved, absent.current.as_ref().unwrap()));
+        fs::remove_file(&path).unwrap();
+        assert!(Arc::ptr_eq(&saved, &read_current(&f, &mut absent).unwrap()));
+    }
+    // The independent pin/head decoder must authenticate the actual original objects too.
+    for path in [&saved.closure.pin_path, &saved.closure.head_path] {
+        let original = fs::read(path).unwrap();
+        let mut corrupted = original.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        fs::write(path, corrupted).unwrap();
+        assert!(read_current(&f, &mut absent).is_err());
+        fs::write(path, original).unwrap();
+        assert!(Arc::ptr_eq(&saved, &read_current(&f, &mut absent).unwrap()));
+    }
+}
+
 fn read_current(
     f: &ColdFixture,
     capture: &mut PreparedColdV2GenesisCapture,
@@ -52,7 +136,9 @@ fn complete_cold_roles_return_original_typed_receipts_and_exact_artifact_ids() {
                 assert_eq!(saved.scope_basis_data(), &saved.closure.basis);
                 assert_eq!(
                     saved.activation_id_data(),
-                    V2ActivationSeedId::of(&saved.closure.seed.frame)
+                    Some(V2ActivationSeedId::of(
+                        &saved.closure.seed.present().unwrap().frame
+                    ))
                 );
                 assert_eq!(
                     saved.head_id_data(),

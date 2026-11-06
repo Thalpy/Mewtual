@@ -5,6 +5,15 @@
 use super::*;
 use crate::store::persistence::v2_genesis_activation::cold_writer::ValidatedColdV2CurrentWriter;
 
+/// A local obligation derived ONLY from the actual immutable cold closure selection.
+/// Satisfied for seed-present means no NEW obligation on that branch, not a fresh scope
+/// fsync receipt. Seed settlement still forces its own even-clean barrier for both branches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScopeDurability {
+    NeedsCovering,
+    Satisfied,
+}
+
 // The actual cold metadata debit includes this inline binding. Keep phase changes free of
 // a new Box allocation after writer validation or at the owner-binding commit edge.
 #[allow(clippy::large_enum_variant)]
@@ -15,10 +24,28 @@ pub(super) enum ColdProgress {
     CurrentBound {
         receipt: Arc<ValidatedColdV2CurrentWriter>,
         binding: V2CurrentBinding,
+        durability: ScopeDurability,
     },
 }
 
 impl ColdV2CurrentPreparation {
+    /// Pairing may borrow the real binding before the scope covering obligation completes.
+    /// Outward Current validation and settlement's already-Current borrower additionally
+    /// require this gate. No scalar caller or later filesystem observation can clear it.
+    pub(super) fn require_scope_covering_satisfied(&self) -> Result<(), AppError> {
+        if matches!(
+            &self.progress,
+            ColdProgress::CurrentBound {
+                durability: ScopeDurability::Satisfied,
+                ..
+            }
+        ) {
+            Ok(())
+        } else {
+            Err(refused())
+        }
+    }
+
     pub(in crate::store) fn current_binding(&self) -> Result<&V2CurrentBinding, AppError> {
         match &self.progress {
             ColdProgress::CurrentBound { binding, .. } => Ok(binding),
@@ -248,7 +275,16 @@ impl ServerStore {
             require_receipt(self, source, task, preparation, &receipt)?;
             require_binding(self, preparation, &binding)?;
             admission.validate_source_only()?;
-            preparation.progress = ColdProgress::CurrentBound { receipt, binding };
+            let durability = if preparation.head.requires_scope_covering() {
+                ScopeDurability::NeedsCovering
+            } else {
+                ScopeDurability::Satisfied
+            };
+            preparation.progress = ColdProgress::CurrentBound {
+                receipt,
+                binding,
+                durability,
+            };
         } else {
             require_binding(self, preparation, preparation.current_binding()?)?;
             require_receipt(self, source, task, preparation, &receipt)?;
@@ -257,12 +293,14 @@ impl ServerStore {
     }
 
     /// Existing installed proof only: WriterValidated OR CurrentBound may resync the SAME
-    /// dirty latest table with actual temporary credit. Unbound cannot enter, and no install
+    /// dirty latest table with actual temporary credit. An actual seed-absent CurrentBound
+    /// also needs one covering write EVEN CLEAN: cold table authentication is no new parent
+    /// durability barrier. Unbound cannot enter, and no install
     /// callback/binder/row revision/new owner exists in this path. Root owns the concrete
     /// proof guard callback; it must call validate_under_proof_guard, not return a status.
     pub(in crate::store) fn resync_cold_v2_genesis_current(
         &self,
-        preparation: &ColdV2CurrentPreparation,
+        preparation: &mut ColdV2CurrentPreparation,
         source: &GenesisSourceDataRef<'_>,
         task: &PreparedV2GenesisGroupNamespace,
         scope_buffers: &CatalogReadReservation,
@@ -272,7 +310,16 @@ impl ServerStore {
             &Arc<ValidatedColdV2CurrentWriter>,
         ) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let receipt = preparation.writer_receipt()?;
+        // Clone the SAME paid receipt before admission to end the immutable prep borrow.
+        // It has no sender/Store/graph backedge and stays funded across every error path.
+        let receipt = preparation.writer_receipt()?.clone();
+        let needs_covering = matches!(
+            &preparation.progress,
+            ColdProgress::CurrentBound {
+                durability: ScopeDurability::NeedsCovering,
+                ..
+            }
+        );
         require_buffers(self, scope_buffers)?;
         preparation.require_original_source_negative(self, source, task)?;
         let mut runtime = self.chat_mount.locked()?;
@@ -280,22 +327,37 @@ impl ServerStore {
         self.require_no_pending_checkpoint_join_group(preparation.inner.group())?;
         {
             let admission = proof(self, &runtime, source, task, preparation)?;
-            verify(&admission, receipt)?;
+            verify(&admission, &receipt)?;
             admission.validate_source_only()?;
         }
-        if runtime.dirty {
+        if runtime.dirty || needs_covering {
             require_buffers(self, scope_buffers)?;
             {
                 // Account validation can wait; actual installed/source proofs follow it.
                 let admission = proof(self, &runtime, source, task, preparation)?;
-                verify(&admission, receipt)?;
+                verify(&admission, &receipt)?;
                 admission.validate_source_only()?;
             }
             self.flush_chat_admissions(&mut runtime, rng)?;
         }
-        let admission = proof(self, &runtime, source, task, preparation)?;
-        verify(&admission, receipt)?;
-        admission.validate_source_only()
+        {
+            let admission = proof(self, &runtime, source, task, preparation)?;
+            verify(&admission, &receipt)?;
+            if let ColdProgress::CurrentBound { binding, .. } = &preparation.progress {
+                require_binding(self, preparation, binding)?;
+            }
+            admission.validate_source_only()?;
+        }
+        // Only after the actual write AND complete final installed/source/binding proof.
+        // A post-write proof failure retains NeedsCovering even if Runtime is now clean.
+        // No further allocation, callback or recoverable fallible work follows this latch.
+        if needs_covering {
+            let ColdProgress::CurrentBound { durability, .. } = &mut preparation.progress else {
+                unreachable!("the exclusive preparation remains CurrentBound through resync")
+            };
+            *durability = ScopeDurability::Satisfied;
+        }
+        Ok(())
     }
 
     /// FINAL read-only clean proof after the caller has dropped temporary scope credits and
@@ -311,6 +373,7 @@ impl ServerStore {
             &Arc<ValidatedColdV2CurrentWriter>,
         ) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
+        preparation.require_scope_covering_satisfied()?;
         let binding = preparation.current_binding()?;
         let receipt = preparation.writer_receipt()?;
         preparation.require_original_source_negative(self, source, task)?;

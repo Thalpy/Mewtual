@@ -7,7 +7,10 @@ owning library callers. Cold recovery retains the same paid restored SDK/source,
 authenticated original files, bounded group claim, exact mounted scope owner and installed
 writer. It never reconstructs a warm Saved receipt. Only recovery and immutable DATA escape
 the public wrappers; no live text dispatch, authoring or native activation is supplied.
-Initializing1 repair, seed-settled and later-head recovery remain separate open work. The
+The Windows-only seed-absent continuation independently verifies the complete original
+genesis closure and requires a fresh covering scope write before final output. A present-seed
+failure never selects absence. Actual seed cleanup, Initializing1 repair and later-head
+recovery remain separate open work. The
 current [handover](HANDOVER.md#focused-execution-checkpoint-6-november-chat-v2-still-incomplete)
 supersedes the earlier authored/UNRUN checkpoints below.
 

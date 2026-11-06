@@ -8,8 +8,10 @@ the same source, task, mounted owner, writer, receipt and node. `take_current` r
 full original physical/installed-generation proof before moving those owners into
 `UnexposedColdV2GenesisCurrent<T,R>`. Its only public operations are immutable `data` and
 `validate_original`. All task, guard, receipt, resource and raw node constructors stay private.
-This supports complete seed-present genesis Current2 only. Missing/partial seeds, later heads,
-replacement objects or cancellation refuse; they do not fall back to genesis. Initializing1
+This supports complete genesis Current2. The Windows-only seed-absent extension independently
+verifies the original pin/head/source and a closed directory inventory, then completes a new
+covering scope write EVEN CLEAN before final output. Present malformed/partial seeds, later
+heads, replacement objects or cancellation refuse; they do not fall back to genesis. Initializing1
 read roles remain test-only. These APIs do not activate Chat V2 or expose message sending.
 Current validation is recorded in [HANDOVER](HANDOVER.md); older UNRUN entries below are dated
 implementation history.

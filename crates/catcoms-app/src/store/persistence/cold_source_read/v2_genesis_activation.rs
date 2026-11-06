@@ -14,10 +14,11 @@ use crate::store::owner_evidence::canonical::v2_registration::V2WriterObservatio
 use crate::store::persistence::{ensure_new_founder_control, verify_archive_held_name};
 use codec::{SavedSourceExpectationData, V2GroupPinId};
 
-// Paired with the complete seed-present cold Current2 caller. The cold receipt remains
+// Paired with the complete cold genesis Current2 caller. The cold receipt remains
 // private and independently authenticated; a warm Saved receipt is never reconstructed.
 mod cold_capture;
 pub(in crate::store) mod cold_writer;
+mod genesis_inventory;
 #[cfg(test)]
 pub(in crate::store) use cold_capture::{ColdV2GenesisActivationSeed, COLD_CAPTURE_METADATA_FEE};
 pub(in crate::store) use cold_capture::{

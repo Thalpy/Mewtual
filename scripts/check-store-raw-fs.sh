@@ -80,10 +80,10 @@ declare -A allowed=(
   # stage are verified before promotion. Both names are closed local-source destinations,
   # outside epoch inventories. The warm worker is paired with its actual unexposed caller.
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation.rs|save_head|fs::rename(&stage_path, &head_path).map_err(io)?;']=1
-  # New cold genesis closure, test-only until actual cold ownership/caller is connected. The
-  # concrete Initializing1/Current2 read guard holds admission/pins/canonical/Root and lends
+  # Connected cold genesis Current2 closure; Initializing1-only entry points stay test-only.
+  # Its concrete read guard holds admission/pins/canonical/Root and lends
   # these SAME existing non-epoch fixed objects; no creation, rename, removal or user path.
-  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.seed.object.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|seed.object.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.pin.object.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.head.object.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/cold_capture.rs|sync_existing|self.group_directory.sync_all().map_err(io)?;']=1

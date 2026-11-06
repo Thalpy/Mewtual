@@ -68,7 +68,27 @@ persists only the SAME already-admitted latest table before strict warm/cold ent
 before the first Head read or owner exists. It grants no row, owner, binding or source authority.
 Installed dirty retries also retain their stronger exact writer/receipt proof.
 
-Partial activation repair, seed-settled Current and later-head restoration remain unfinished.
+The new seed-ABSENT cold capture/owner continuation is implemented for **Windows only**,
+with a bounded complete two-folder inventory and independently authenticated exact genesis
+pin/head/source. Only a genuine NotFound under both original held directories can select it.
+Errors from present seeds never fall back. The SAME private owner retains a covering-write
+obligation until an actual latest-table write EVEN CLEAN and final installed/physical proof
+both succeed. A post-write proof failure stays pending even when the table is now clean;
+ordinary DATA maintenance cannot clear it. Successful replay uses no new RNG/write.
+All **4 new capture/owner tests** pass in107.47s and all **4 inventory-helper tests** pass.
+The existing seed-present owning-node and exact Initializing1/Current2 capture regressions
+also pass together (2 tests,64.55s) on this same combined source.
+This includes both actual scope-write cuts, equal marker replacement during the real sealing
+step, unknown later-work preservation, strict corruption refusal and exact same-owner replay.
+The combined actual cold metadata invoice, including the new iterator/path/native scratch,
+still fits its unchanged1MiB debit. The production App check passes without warnings.
+
+The new absence/inventory profile is audited against pinned Rust1.94 Windows internals;
+unsupported platforms refuse it before directory iteration. Existing seed-present recovery
+is unchanged on other platforms. The direct test unlink is explicitly a missing-seed fixture,
+not proof of actual settlement→remount. The real cleanup caller and that connected test remain
+in progress in isolated worktrees; production still has no seed-unlink path.
+Partial activation repair and later-head restoration remain unfinished.
 The writer classifier/installed-generation checks use paid weak pointer identity, never a
 temporary strong upgrade which could move final sender cleanup under canonical.
 
@@ -79,6 +99,11 @@ root/native suites, root-wide lint/build/native gates and the slow test remain o
 Strict all-target/all-feature App Clippy passes, including its dependencies and test targets. The full
 frontend unit suite passes **3,434/3,434**, with no skips. Ambient-dependency and Store raw-FS
 gates pass. Current focused evidence still does not close Chat V2 acceptance.
+
+The broader replication-crate attempt was deliberately stopped during unit tests before its
+integration targets, because its command would otherwise include the deferred ten-thousand-
+operation test. It has no complete result and is not counted as a pass. The eight focused
+`prepared_direct_join::tests` cases pass after the equivalent slice-pattern lint correction.
 
 Acceptance-tree verification also corrected an older false test assumption: an inclusion
 proof cannot always distinguish counts hidden inside an opaque sibling. The complete signed

@@ -1,8 +1,8 @@
 //! Actual cold Current2 scope owner, jointly consumed by Factory's registered-claim/owner-
 //! handoff roles and Root's cold canonical writer and owning library caller. The nested
 //! private binding supplies no runnable node or native activation. No row rewrite,
-//! head callback, fresh nonce or old warm proof exists here. Cold requires full seed+pin+head
-//! and no stage.
+//! head callback, fresh nonce or old warm proof exists here. Cold requires exact pin/head,
+//! no stage and either its actual seed or the separate strict Windows absence/covering role.
 use super::cold_read::ColdV2GenesisScopeBasis;
 use super::*;
 use crate::store::persistence::v2_genesis_activation::ColdV2GenesisCurrentHead;

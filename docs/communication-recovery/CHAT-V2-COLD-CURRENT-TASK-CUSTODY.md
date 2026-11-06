@@ -2,17 +2,20 @@
 
 Status (6 November): actual implementation and owning library consumer passed static
 adversarial review. Eleven shorter genuine Factory regressions pass; the shared seventeen-origin
-capacity case is deferred until the end. The complete seed-present Current2 subtree is compiled
+capacity case is deferred until the end. The complete genesis Current2 subtree is compiled
 in the ordinary library build; Initializing1-only readers remain test-gated. This adds no wire format, persistent grant,
 new scope row, SDK creation, live SDK operation, public runnable node or native activation.
 
 ## Actual inputs and closed custody flavors
 
-The first role is seed-present complete Current2 only: actual new paid source/SDK pair,
+The role is complete genesis Current2: actual new paid source/SDK pair,
 `Arc<ColdV2GenesisCurrentHead>` from Root's real independently authenticated and synchronized
 metadata capture, and the SAME mounted ID3 Store. A matching SourceId/basis/ciphertext by itself
 is insufficient. Root receipt validation repeats original read/SDK/resource identities and
-actual directory/control objects. Initializing1 and seed-settled Current remain separate work.
+actual directory/control objects. The Windows-only seed-absent extension uses the SAME opaque
+Head/task/owner interfaces, independently verified metadata and a newly completed covering
+scope write before final output. It cannot adopt a missing ancestor or a present-seed error.
+Initializing1 repair, actual seed cleanup and later-head recovery remain separate work.
 
 `PreparedV2GenesisGroupNamespace` owns a private closed custody enum rather than an
 optional fake warm output: Warm contains its existing original DirectoryCustody, SavedDirectory

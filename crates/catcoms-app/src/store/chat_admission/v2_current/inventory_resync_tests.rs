@@ -153,7 +153,7 @@ fn real_inventory_debt_resyncs_before_cold_head_claim_and_owner_without_renewal(
     assert!(store
         .prepare_cold_v2_current_scope(&source, &task, head.clone(), &mut slot)
         .is_err());
-    let preparation = slot.as_ref().unwrap();
+    let preparation = slot.as_mut().unwrap();
     assert!(store
         .with_cold_owned_current_admission(preparation, &source, &task, |_| {
             calls.set(calls.get() + 1);
