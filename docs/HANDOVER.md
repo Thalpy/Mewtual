@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Cold read resource reuse (6 November; internal prerequisite)
+
+The existing cold Current capture now obtains its unchanged paid, read-only metadata loan
+through one private Root-family factory. The factory retains the same original read/SDK
+observers, complete source expectation and mount negatives; it issues no capture, task,
+scope, writer or Current permission. Each concrete consumer must still check its own full
+simultaneous invoice before using the fixed cold class. The original complete Initializing1/
+Current2 typed-receipt regression passes (1 test, 69.86s), strict App all-target/all-feature
+Clippy and formatting pass, and actual-diff adversarial review is clear. This prepares the
+separate interrupted-Initializing1 repair; that repair is not connected or complete yet.
+Full-suite/native validation remains outstanding as recorded below.
+
 ## Genesis seed settlement (6 November; focused checks pass, Chat V2 incomplete)
 
 The actual warm/cold owning wrappers retain the same node/resources and original cleanup

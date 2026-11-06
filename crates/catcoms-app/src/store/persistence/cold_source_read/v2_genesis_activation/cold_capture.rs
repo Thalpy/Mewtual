@@ -41,6 +41,10 @@ struct ResourceBody {
     fee: critical_namespaces::read_pool::CatalogReadReservation,
 }
 
+/// Actual shared allocation layout, not an invoice for a capture or writer. Every concrete
+/// caller must additionally account for its OWN receipts, paths, guards and scratch buffers.
+pub(super) const COLD_READ_RESOURCE_BODY_BYTES: usize = std::mem::size_of::<ResourceBody>();
+
 /// Clone this SAME concrete loan before entering the scope callback. Factory guards borrow
 /// it through all held File/path cleanup; the mutable capture remains independently usable.
 /// Arc cloning allocates no new body and grants no scope, file, writer or Current authority.
@@ -49,6 +53,55 @@ pub(in crate::store) struct ColdV2GenesisReadResources {
     body: Arc<ResourceBody>,
 }
 impl ColdV2GenesisReadResources {
+    /// Immutable original expectation DATA only. Neither these labels nor their equality
+    /// supplies a read admission; concrete guards still require this SAME live paid loan.
+    pub(super) fn expectation_data(&self) -> &SavedSourceExpectationData {
+        &self.body.expected
+    }
+
+    /// Root-family resource construction only. Callers first validate their own complete
+    /// simultaneous metadata invoice against the fixed cold class. This creates no capture,
+    /// scope basis, task, owner, writer or file permission; those concrete roles stay separate.
+    pub(super) fn prepare_paid(
+        store: &ServerStore,
+        source: &GenesisSourceDataRef<'_>,
+    ) -> Result<Self, AppError> {
+        source.validate_original(store)?;
+        store.validate_mounted_current_layout()?;
+        let policy = store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(critical_namespaces::refused)?;
+        let fee = policy.pending.pool.try_reserve(COLD_CAPTURE_METADATA_FEE)?;
+        source.validate_original(store)?;
+        store.validate_mounted_current_layout()?;
+        let capture = &source.source().capture;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let debit = founder::open_debit_data(&key, capture.invocation, &capture.debit.frame)?;
+        let resources = Self {
+            body: Arc::new(ResourceBody {
+                original_read: source.source().observe_original(),
+                original_seed: source.seed().observe_original_seed_data(),
+                mount: store.registry_mount(),
+                negative: store.chat_mount.observer(),
+                expected: SavedSourceExpectationData {
+                    invocation: capture.invocation,
+                    debit_id: founder::DebitId::of(&capture.debit.frame),
+                    terminal_id: founder::IntentId::of(&capture.terminal.frame),
+                    source_id: capture.source_id,
+                    marker_id: founder::TargetMarkerId::of(&capture.origin.frame),
+                    context: capture.context.clone(),
+                    debit_display_name: debit.name,
+                },
+                fee,
+            }),
+        };
+        resources.validate_original(store, source)?;
+        source.validate_original(store)?;
+        store.validate_mounted_current_layout()?;
+        Ok(resources)
+    }
+
     pub(in crate::store) fn require_same_original(&self, other: &Self) -> Result<(), AppError> {
         if Arc::ptr_eq(&self.body, &other.body) {
             Ok(())
@@ -272,40 +325,8 @@ impl PreparedColdV2GenesisCapture {
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,
     ) -> Result<Self, AppError> {
-        source.validate_original(store)?;
-        store.validate_mounted_current_layout()?;
         validate_cold_invoice()?;
-        let policy = store
-            .archive_bootstrap_policy
-            .as_ref()
-            .ok_or_else(critical_namespaces::refused)?;
-        let fee = policy.pending.pool.try_reserve(COLD_CAPTURE_METADATA_FEE)?;
-        source.validate_original(store)?;
-        store.validate_mounted_current_layout()?;
-        let capture = &source.source().capture;
-        let key = Zeroizing::new(store.keys.db_key()?);
-        let debit = founder::open_debit_data(&key, capture.invocation, &capture.debit.frame)?;
-        let resources = ColdV2GenesisReadResources {
-            body: Arc::new(ResourceBody {
-                original_read: source.source().observe_original(),
-                original_seed: source.seed().observe_original_seed_data(),
-                mount: store.registry_mount(),
-                negative: store.chat_mount.observer(),
-                expected: SavedSourceExpectationData {
-                    invocation: capture.invocation,
-                    debit_id: founder::DebitId::of(&capture.debit.frame),
-                    terminal_id: founder::IntentId::of(&capture.terminal.frame),
-                    source_id: capture.source_id,
-                    marker_id: founder::TargetMarkerId::of(&capture.origin.frame),
-                    context: capture.context.clone(),
-                    debit_display_name: debit.name,
-                },
-                fee,
-            }),
-        };
-        resources.validate_original(store, source)?;
-        source.validate_original(store)?;
-        store.validate_mounted_current_layout()?;
+        let resources = ColdV2GenesisReadResources::prepare_paid(store, source)?;
         Ok(Self {
             role: None,
             captured: None,
@@ -515,7 +536,7 @@ impl CompleteColdClosure {
         let key = Zeroizing::new(store.keys.db_key()?);
         let plain = codec::open_activation_seed_data(&key, &seed.frame)?;
         let decoded =
-            codec::parse_activation_seed_data(&key, &self.resources.body.expected, &plain)?;
+            codec::parse_activation_seed_data(&key, self.resources.expectation_data(), &plain)?;
         let public = source.data();
         decoded.head.require_original_public_data(
             &decoded.pin,
@@ -626,7 +647,7 @@ macro_rules! cold_receipt_methods {
                 &self.closure.basis
             }
             pub(in crate::store) fn expectation_data(&self) -> &SavedSourceExpectationData {
-                &self.closure.resources.body.expected
+                self.closure.resources.expectation_data()
             }
             pub(in crate::store) fn directory_data(
                 &self,
@@ -695,7 +716,7 @@ fn validate_cold_invoice() -> Result<(), AppError> {
     // closure's own paths; there is no overlap credit in this bounded concrete invoice.
     let bytes = 8 * (MAX_PATH + 256)
         + 12 * (codec::MAX_ACTIVATION_FRAME + codec::MAX_PIN_FRAME + codec::MAX_HEAD_FRAME)
-        + std::mem::size_of::<ResourceBody>()
+        + COLD_READ_RESOURCE_BODY_BYTES
         + 2 * std::mem::size_of::<CompleteColdClosure>()
         + std::mem::size_of::<PreparedColdV2GenesisCapture>()
         + 2 * std::mem::size_of::<ColdV2GenesisCurrentHead>()
