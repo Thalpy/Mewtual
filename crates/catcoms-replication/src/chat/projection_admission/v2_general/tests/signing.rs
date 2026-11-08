@@ -42,6 +42,32 @@ fn create_draft(key: &DeviceKeypair, a: &V2AuthenticatedAdmission, n: u8) -> Act
 }
 
 #[test]
+fn original_admission_id_remains_historical_data_after_remove_and_source_stop() {
+    let mut f = Fixture::new();
+    let key = DeviceKeypair::from_seed(&[175; 32]);
+    let admission = f.add(&key, 75);
+    let draft = create_draft(&key, &admission, 1);
+    let (_ledger, view) = f.ledger();
+    let mut plan = f
+        .verifier
+        .prepare_ordinary_signing_plan(&draft, &admission, &[], &view)
+        .unwrap();
+    let expected = admission.admission_data().admission_id();
+    assert_eq!(plan.admission_id_data(), expected);
+    let mut removed = f.remove(&admission);
+    assert!(removed.take_close_completion().unwrap().try_complete());
+    assert_eq!(plan.admission_id_data(), expected);
+    assert!(plan
+        .admit_signing(&draft, &key.verifying_key().to_bytes())
+        .is_err());
+    f.negative.0.store(false, Ordering::Release);
+    assert_eq!(plan.admission_id_data(), expected);
+    assert!(plan
+        .admit_signing(&draft, &key.verifying_key().to_bytes())
+        .is_err());
+}
+
+#[test]
 fn actual_general_prekey_issuer_supports_reply_own_edit_delete_and_join_with_real_dependencies() {
     let mut f = Fixture::new();
     let key = DeviceKeypair::from_seed(&[130; 32]);

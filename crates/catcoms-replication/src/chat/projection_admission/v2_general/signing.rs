@@ -160,6 +160,11 @@ impl V2GeneralPrefixVerifier {
     }
 }
 impl V2OrdinarySigningPlan {
+    /// Original selected Admission DATA, including after closure. This does not
+    /// establish current OPEN, native/source custody, save or publication rights.
+    pub fn admission_id_data(&self) -> crate::chat::owner_facts::OwnerFactId {
+        self.facts.admission
+    }
     pub fn observe_original(&self) -> OriginalV2OrdinarySigningPlanObservation {
         OriginalV2OrdinarySigningPlanObservation {
             identity: Arc::downgrade(&self.identity),

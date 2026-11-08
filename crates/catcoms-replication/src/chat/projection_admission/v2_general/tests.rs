@@ -4,6 +4,7 @@
 use super::*;
 
 mod admission_prepare;
+mod review_regressions;
 mod signing;
 use crate::chat::owner_bodies::{AcceptanceSpec, AppendBody, AppendSpec, RemovalBody, RemovalSpec};
 use crate::chat::owner_header::{HeaderKind, HeaderSpec, OwnerBodyId};

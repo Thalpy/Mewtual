@@ -143,6 +143,13 @@ impl V2AdmissionCloseCompletion {
         if !self.life.closed.load(Ordering::Acquire) {
             return false;
         }
+        // A completed drain of the SAME original group already covers all of
+        // this Admission's readers. Re-probing the shared flat gate would make
+        // old debt wait forever behind unrelated replacement-view traffic.
+        if self.group.has_completed_drain() {
+            self.complete = true;
+            return true;
+        }
         self.complete = match self.group.gate.try_write() {
             Ok(_writer) => true,
             Err(TryLockError::WouldBlock) => false,
