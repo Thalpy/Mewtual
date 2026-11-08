@@ -245,6 +245,26 @@ declare -A allowed=(
   # can unlink only its fixed original activation.seed and sync that held group directory;
   # source.seed, source pages, pin/head, epoch files and unknown private work are preserved.
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|fs::remove_file(&self.body.paths.seed).map_err(io)?;']=1
+  # Chat V2 ordinary-member outbox (docs/communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+  # Its own separately versioned `mo-<context>` namespace only, never an epoch, founder or
+  # group inventory file. Every caller holds the exclusive per-context owner claim and the
+  # actual VaultPhysicalWorkLease through all of these Files and barriers.
+  # ensure_exact: create_new, or append ONLY the missing suffix of an existing exact prefix
+  # of authenticated expected bytes (our presealed output or an authenticated WAL's frame);
+  # never truncate, never adopt other content.
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|file.sync_all().map_err(io)?;']=1
+  # rename_fixed: WAL stage -> WAL MAIN, and head stage -> head.bin (the selector CAS), each
+  # after re-verifying the source's exact bytes and the parent still selected.
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|rename_fixed|fs::rename(from, to).map_err(io)']=1
+  # remove_listed: a WAL-listed retiree proven unreachable, the retired WAL after its cleanup,
+  # or a demonstrably owned torn pre-commit stage (exact rebuildable preamble prefix bound to
+  # the authenticated selected head). Unknown or foreign state is preserved instead.
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|remove_listed|match fs::remove_file(path) {']=1
+  # create_namespace: one new `mo-<context>` directory under the separately held parent.
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|create_namespace|fs::create_dir(path).map_err(io)']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|files.directory.1.sync_all().map_err(io)?;']=1
 )
 
