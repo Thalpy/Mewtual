@@ -87,6 +87,7 @@ impl ServerStore {
             initial_current_frame,
             seed_file: None,
             stage_file: None,
+            captured_duplicate_stage: None,
             marker_file: None,
             #[cfg(test)]
             _tail_drop: DeclarationTailDrop,
@@ -186,6 +187,13 @@ impl ServerStore {
                 None if promoted => return Err(refused()),
                 None => None,
             };
+            let (stage_file, captured_duplicate_stage) = if promoted {
+                (None, stage_file)
+            } else {
+                (stage_file, None)
+            };
+            #[cfg(test)]
+            after_declaration_capture_for_test();
             // BOTH fixed candidates and the complete compound source classified
             // before the first old marker sync or metadata installation.
             self.mount_settled_governance_parent(layout, archive, &inventory.directory, &fee)?;
@@ -214,6 +222,7 @@ impl ServerStore {
                     identity: Some(identity),
                 }),
                 stage_file,
+                captured_duplicate_stage,
                 marker_file,
                 #[cfg(test)]
                 _tail_drop: DeclarationTailDrop,

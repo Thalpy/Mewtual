@@ -3,8 +3,19 @@
 Owner-offline text is a separate required path: the fixed Profile founder signs
 certification Headers, while members sign their own ordinary actions. The local
 first-founder storage tests do not establish member send/outbox availability.
-The general OPEN issuer, durable member outbox and native integration remain
+The general Core OPEN issuer and separate member-outbox storage now have focused
+test coverage. Actual member source/signing and native integration remain
 incomplete; Chat V2 stays disabled. [Current boundaries](HANDOVER.md).
+
+The inactive member-outbox engine assumes the existing cooperative private-directory
+and whole-component rollback model. Context/role-authenticated records, exact
+request lookup, bounded WAL recovery and retained originals do not establish
+membership authority. Unknown/foreign/corrupt state is preserved; IO failure never
+means absence. After same-context removal/rejoin, A1 receipts remain historical
+while A2 cannot adopt A1 publication debt. Submission checkpoints do not attest peer
+receipt. Append reserves bounded checkpoint quota before admission and never evicts;
+external ENOSPC, lowered policy or finite trie exhaustion can still stop progress.
+Production source/UI admission and sender-state persistence remain required.
 
 ## First operational A/I/S does not grant accepted history (7 November)
 

@@ -33,6 +33,11 @@ pattern='fs::(write|rename|remove_file|remove_dir|remove_dir_all|copy|hard_link|
 # a hit in an initializer after a function's body is charged to that function: never to an
 # allowance, unless its text is also exactly a reviewed line of that function.
 declare -A allowed=(
+  # Namespace4 declaration first creates/syncs the SAME empty legacy stage so
+  # actual older readers refuse before any governance-only recovery debt exists.
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|original.file.sync_all().map_err(io)?;']=1
   # Private offline Current4 metadata declaration only. Complete authenticated TWO-frame
   # seed and exact original native objects precede promotion; no arbitrary path, Source,
   # SDK/key entry or epoch-family effect. Preserve partial/foreign evidence on refusal.
@@ -43,9 +48,9 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|sync_marker_parent|root.directory.sync_all().map_err(io)']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|verify_seed|file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|actual.sync_all().map_err(io)?;']=1
-  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|stage.file.sync_all().map_err(io)?;']=1
+  # Separate original selection-stage sync and exact captured cold-duplicate sync.
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|stage.file.sync_all().map_err(io)?;']=2
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::rename(&stage_path, &current_path).map_err(io)?;']=1
-  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|stage.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::remove_file(&stage_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|current.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|selected.sync_all().map_err(io)?;']=1

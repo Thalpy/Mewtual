@@ -1,10 +1,11 @@
 # Reserved Global Governance capability4/version1
 
-This is a negative compatibility and catalog DATA prerequisite, not an enabled
-Current4 opener, Source factory, durable Add request, MLS operation or signer.
-The new codec remains test-declared. Existing concrete Pending/Archive/Current3
-parsers and physical inspectors remain unchanged and refuse namespace4 in either
-fixed catalog before settlement or old cleanup. No namespace3 grammar is widened.
+Current status, 8 November: the namespace4 codec and concrete private metadata
+mount are declared in production modules. The mount grants historical DATA only,
+not Source4, durable Add request, MLS operation, signer or publication authority.
+Configured namespace4 handling preserves existing JOIN/ARCHIVE/CURRENT entries;
+older configured readers refuse unsupported catalogs. No namespace3 grammar is
+widened. Chat V2 activation and the subsequent source factory remain incomplete.
 
 Repository-local assigned IDs are JOIN1, ARCHIVE2 and CURRENT3. ID4/version1 is now
 reserved for a distinct immutable Global Governance capability. It binds the SAME
@@ -36,23 +37,32 @@ stage4 without current, preserving both fixed sources and using no new RNG.
 The nested JOIN syntax fixtures are DATA only, not fabricated source authority.
 The primary ran all five App tests matching `governance`: PASS in 36.44 seconds
 after a 2m37s compile. Workspace formatting also passed. The implementing child
-ran no Cargo commands; broader suites and the positive Current4 slice remain open.
+ran no Cargo commands. This paragraph records the initial negative codec slice;
+the subsequently integrated metadata mount is described below.
 
-## Authored Current4 physical packet (undeclared and unrun)
+## Integrated Current4 metadata mount
 
 `governance_layout` now contains a separate opaque metadata mount preparation and
-completed wrapper. Its parent patch is intentionally unapplied. It accepts only an
+completed wrapper. Its parent module wiring is applied. It accepts only an
 already settled Current3 vault, with actual existing ID2 root and ID3 marker and
 no old declaration seed; new vaults and ID2-only catalogs refuse. The policy is
 installed before common opening. The default and older configured openers gain
 only a negative fence for either new fixed seed/marker, before their old gates.
+To fence binaries that predate those names, declaration first creates and syncs
+an owned empty legacy catalog stage and its parent, before either governance-only
+output. The predecessor already rejects that stage's invalid framing. The same
+owned stage is later filled from the complete authenticated seed. A cold empty
+fence without a complete seed is preserved and refused, never treated as absence.
 
 The new inspector reads both fixed catalogs, the compound declaration seed and
 marker, and rejects conflicting old ID2/ID3 declaration debts before invoking
 older inspectors or settlement. A complete seed authenticates BOTH exact catalog
 frames, their whole-plaintext ancestry relation, immutable capability4 and marker.
 Before promotion it can finish only a matching listed prefix; after promotion
-the marker must already be complete. An existing4 mount without a seed requires
+the marker must already be complete. A warm promoted owner cannot adopt a new
+stage name for cleanup, even with identical bytes. Only an independently captured
+cold duplicate has that role, retaining its original File through all waits and
+comparing its complete exact bytes again before unlinking. An existing4 mount without a seed requires
 an already complete authenticated marker and holds its original native object
 across older gate/account waits. Byte-equal replacement does not renew that owner.
 
@@ -63,8 +73,11 @@ capacity includes current + stage + the TWO-catalog seed + marker (approximately
 four maximum catalogs), not the older Current3 three-frame class. These are
 requested logical allocations, not allocator/RSS or a process-global pool claim.
 The large declaration account and original copies drain outside writers before
-separately paid old gates/canonical inventory work. Actual compiler/layout gates
-and runtime evidence for this new packet remain pending primary integration.
+separately paid old gates/canonical inventory work. The integrated pre-review
+cohort passed all19 governance tests (14new plus five initial compatibility tests)
+in207.17s; native compilation and the named layout assertions passed. The later
+independent-review corrections have additional regressions; their results belong
+in HANDOVER rather than being inferred from that earlier run. Full suites remain open.
 The prepared owner's field order also drains declaration Files/data before its
 Store releases the actual vault session on ordinary failure/Drop; fees remain
 last. A genuine tail-destruction test observes that vault exclusion is still Busy.
@@ -86,6 +99,18 @@ work before overall Chat V2 completion; user-visible self-resolution needs a
 later evidence-backed birth/scratch role. Unknown/foreign preservation must not
 be weakened to hide that gap. Ordinary member sends/outboxes must remain
 independent of owner/governance debt.
+
+The separate `scripts/check-chat-v2-predecessor.py --target-dir <shared-target>`
+gate builds an example public Current3 opener against the complete archived
+`f5ef22a3688a1272edb418da8b02efe945c3008d` production sources. Each run uses a
+fresh source tree; no modern fence is backported. It checks a clean positive
+control and cuts229/232/234 after all original owners drop, accepting only the
+predecessor's exact empty-stage framing refusal. The new-writer test compares
+the complete small fixture tree's names, file lengths and content hashes, then
+proves supported new-reader recovery. The script requires exactly one executed
+test and all four probe markers. Ordinary tests without the supplied predecessor
+binary establish writer fences/recovery only. Record an actual successful
+dedicated gate before claiming two-version public-open acceptance.
 
 ## Subsequent Current4 source admission
 

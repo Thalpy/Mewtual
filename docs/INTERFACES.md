@@ -9,9 +9,31 @@ this entry to a whole-catalog successor, preserving every prior entry byte for b
 Existing Current3/default readers refuse4 in either fixed catalog before settlement
 or cleanup. A separate concrete private Current4 opener now declares and validates
 that metadata, preserving all prior payloads and both complete catalog frames in
-its recovery seed. Its19 focused tests pass. It supplies historical DATA; a Source4
+its recovery seed. Its25 current focused tests pass. It supplies historical DATA; a Source4
 owner, governance request writer and effect authority remain separate unfinished
 consumers. [Format and recovery boundary](communication-recovery/CHAT-V2-GOVERNANCE-CAPABILITY.md).
+
+Declaration first syncs an owned empty legacy fixed stage and its parent before
+new-only seed/marker outputs. Warm promotion owns no replacement-stage cleanup;
+only a cold independently captured exact duplicate has that role. Actual older-
+binary acceptance is the separate predecessor gate, not a modern-reader unit result.
+
+## Ordinary member outbox (8 November; storage-only)
+
+`store::persistence::v2_member_outbox` is store-private and inactive. Its exclusive
+owner exposes exact token lookup, prepaid append preparation, finite admitted
+save/recovery and bounded debt/checkpoint operations. Existing-token receipts and
+conflicts precede pending pressure. Debt batches bind context, front and exact
+immutable entries so unrelated appends need not invalidate submission in flight.
+Only a contiguous submitted/Held prefix advances; audit and request receipts stay.
+
+Signed-original DATA and final save admission are distinct. Their production
+constructors, held parent provisioning and native/member-source guard are absent;
+test fixtures grant storage durability only. Final admission must compare original
+member-source/UI generations and exact prepared facts. Work retains the actual
+vault lease and payments through IO/cleanup. Append additionally commits bounded
+quota for future checkpoints; this is not disk preallocation or peer durability.
+[Methods, invoices and recovery rules](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
 ## Operational private text byte codes (6 November; implementation in progress)
 

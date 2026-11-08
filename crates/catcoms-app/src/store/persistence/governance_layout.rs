@@ -75,6 +75,49 @@ fn absent(path: &Path) -> Result<(), AppError> {
         _ => Err(denied()),
     }
 }
+
+/// Fence readers that predate namespace4 using a slot they already inspect.
+/// Empty stage framing is deliberately invalid to those readers. The SAME File
+/// later becomes the exact candidate stage; no replacement is adopted. Cache
+/// ownership before metadata/sync failures so a warm retry can finish its own
+/// fence. A cold fence without a complete seed stays preserved and closed.
+fn ensure_legacy_stage_fence(
+    path: &Path,
+    original: &mut Option<critical_namespaces::pending_join::CreatedStage>,
+    candidate: &[u8],
+) -> Result<(), AppError> {
+    if original.is_none() {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(io)?;
+        *original = Some(critical_namespaces::pending_join::CreatedStage {
+            file,
+            identity: None,
+        });
+    }
+    let original = original.as_mut().ok_or_else(denied)?;
+    let id = match original.identity {
+        Some(id) => id,
+        None => {
+            let id = session_id(&original.file).map_err(io)?;
+            original.identity = Some(id);
+            id
+        }
+    };
+    held(path, &original.file, id)?;
+    let (named, raw) = read(path, candidate.len())?.ok_or_else(denied)?;
+    if session_id(&named).map_err(io)? != id
+        || raw.len() > candidate.len()
+        || raw.as_slice() != &candidate[..raw.len()]
+    {
+        return Err(denied());
+    }
+    original.file.sync_all().map_err(io)?;
+    held(path, &original.file, id)
+}
 fn held(path: &Path, file: &File, id: SessionId) -> Result<(), AppError> {
     if !real_file(&file.metadata().map_err(io)?)
         || session_id(file).map_err(io)? != id
@@ -459,6 +502,15 @@ impl ServerStore {
                 return Err(denied());
             }
             let original_id = session_id(&current).map_err(io)?;
+            // The durable old-slot refusal MUST precede every governance-only
+            // output. Patching current readers cannot fence an older binary.
+            ensure_legacy_stage_fence(
+                &stage_path,
+                &mut declaration.stage_file,
+                &declaration.candidate,
+            )?;
+            sync_directory(&self.dir).map_err(io)?;
+            self.governance_fault(229)?;
             ensure(
                 &seed_path,
                 &declaration.seed,
@@ -550,14 +602,19 @@ impl ServerStore {
                 0,
             )?;
             sync_marker_parent(root)?;
-            if let Some((stage, staged)) = read(&stage_path, governance::codec::MAX_CATALOG_FRAME)?
-            {
-                if staged.as_slice() != declaration.candidate.as_slice() {
-                    return Err(denied());
-                }
-                stage.sync_all().map_err(io)?;
-                held(&stage_path, &stage, session_id(&stage).map_err(io)?)?;
+            if let Some(stage) = declaration.captured_duplicate_stage.as_ref() {
+                exact_retained(&stage_path, stage, &declaration.candidate)?;
+                stage.file.sync_all().map_err(io)?;
+                exact_retained(&stage_path, stage, &declaration.candidate)?;
                 fs::remove_file(&stage_path).map_err(io)?;
+                // Cache the completed unlink before any later barrier/refusal.
+                // A retry owns no duplicate after this exact name was retired.
+                declaration.captured_duplicate_stage = None;
+            } else {
+                // Warm promotion owned only the name moved into current. Even
+                // byte equality (or a hard-link alias) cannot confer a second
+                // cleanup role over a newly appearing fixed stage.
+                absent(&stage_path)?;
             }
             current.sync_all().map_err(io)?;
             sync_directory(&self.dir).map_err(io)?;

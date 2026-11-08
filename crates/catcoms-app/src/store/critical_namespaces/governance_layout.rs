@@ -27,6 +27,15 @@ thread_local! {
         std::cell::RefCell::new(None);
     static AT_DECLARATION_TAIL_DROP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    static AFTER_DECLARATION_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+#[cfg(test)]
+pub(in crate::store) fn after_declaration_capture_for_test() {
+    let hook = AFTER_DECLARATION_CAPTURE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 #[cfg(test)]
 fn after_marker_capture_for_test() {
@@ -126,6 +135,10 @@ pub(in crate::store) struct Declaration {
     pub(in crate::store) initial_current_frame: [u8; 32],
     pub(in crate::store) seed_file: Option<pending_join::CreatedStage>,
     pub(in crate::store) stage_file: Option<pending_join::CreatedStage>,
+    // A warm stage becomes current after rename and grants no authority over a
+    // new stage name. Only cold AlreadyPromoted inventory may capture a separate
+    // exact duplicate for cleanup, retaining its original File across all waits.
+    pub(in crate::store) captured_duplicate_stage: Option<pending_join::CreatedStage>,
     pub(in crate::store) marker_file: Option<pending_join::CreatedStage>,
     #[cfg(test)]
     pub(in crate::store) _tail_drop: DeclarationTailDrop,

@@ -6,6 +6,8 @@ use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
+mod review_regressions;
+
 const SECRET: &[u8] = b"actual private governance metadata mount";
 fn pool() -> CriticalCatalogReadPool {
     CriticalCatalogReadPool::new(1024 * 1024 * 1024).unwrap()
@@ -98,6 +100,9 @@ impl Drop for ResetHooks {
             slot.borrow_mut().take();
         });
         AT_DECLARATION_TAIL_DROP.with(|slot| {
+            slot.borrow_mut().take();
+        });
+        AFTER_DECLARATION_CAPTURE.with(|slot| {
             slot.borrow_mut().take();
         });
     }

@@ -3,8 +3,17 @@
 Owner-offline text is a separate required path: the fixed Profile founder signs
 certification Headers, while members sign their own ordinary actions. The local
 first-founder storage tests do not establish member send/outbox availability.
-The general OPEN issuer, durable member outbox and native integration remain
+The general Core OPEN issuer and separate member-outbox storage now have focused
+test coverage. Actual member source/signing and native integration remain
 incomplete; Chat V2 stays disabled. [Current boundaries](HANDOVER.md).
+
+The store-private `persistence::v2_member_outbox` owns independently durable signed
+originals, exact request receipts and publication debt. It is separate from the
+founder's certification journal and legacy Automerge outbox. Epoch changes affect
+transport envelopes, not stored action identities. Its registry/physical-work
+lease isolates finite IO; its storage types supply no membership or native authority.
+Production save admission, parent provisioning and sender-state export remain
+separate integration work. [Outbox contract](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
 ## First operational text signing/storage path (7 November; disabled)
 

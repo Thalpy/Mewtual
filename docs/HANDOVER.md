@@ -1,5 +1,54 @@
 # Mewtual; Handover
 
+## Independent review corrections (8 November; acceptance still open)
+
+Core fixes are published in `dc08cce17a9d1b851e50b4372d3ec30ca794c2ec`
+on `chat-v2-operational-implementation`. Review F1 now observes every live edit
+that contributes to body selection, including an unselected provisional descendant
+which suppresses an accepted ancestor. Review F4 reuses only the exact original
+group's completed drain, so replacement traffic cannot retain an old Admission's
+completion. Both genuine new regressions failed before the corrections; all77
+projection/admission tests pass afterward in28.44s. The historical Plan Admission
+getter is also implemented and tested after Remove and Source Stop; it grants no
+fresh signing, native, source, save or publication authority.
+
+The separately authored member-outbox storage engine compiled without type fixes
+and initially passed25 tests in4.94s. Independent review found full pending pressure
+masking existing-token outcomes, now corrected. Its potential quota-progress issue
+was then reproduced: an admitted Append could leave its checkpoint refused for
+Bytes pressure. Append now reserves conservative per-pending checkpoint quota
+using existing node-output caps plus one WAL/head overlap, with checked arithmetic
+and the existing exact-operation peak check. All27 corrected outbox tests pass
+in5.23s. This is storage-only evidence: production signed-input/save admissions,
+parent provisioning and live sender-state/export integration remain absent.
+
+The reviewed member outbox is published in
+`c6fcd710b9a9953dffcb534bdb11892126e7cd58` on the same operational branch.
+
+Governance review F2 has a separate cold captured-duplicate cleanup role and refuses
+an unexpected byte-equal stage after warm promotion. F3 writes and syncs an owned
+empty legacy catalog stage before any governance-only seed/marker output. The new
+recovery cohort passes all25 governance tests in318.50s. The actual-predecessor
+public-open probe is still being validated; the older19-test evidence below must
+not be credited as testing these corrections. The first helper build succeeded,
+but using a shared Cargo artifact directory across revisions reused incompatible
+path-crate outputs when rebuilding the new writer. Only16 local-package caches
+were invalidated (6.5GiB); no source or registry dependency cache was removed.
+The harness now builds the predecessor into a distinct child target while keeping
+both builds serial. That failed build is not compatibility acceptance.
+The dedicated governance document now describes the declared metadata mount and
+retains its historical-DATA-only and incomplete first-seed-recovery boundaries.
+Independent actual-source re-review found no remaining BLOCKER/HIGH/MEDIUM in
+the inspected Core, storage corrections or predecessor harness. Runtime results
+remain separate from that read-only assessment.
+
+The full frontend unit suite passes3434 tests in117.45s; Svelte reports zero
+errors/warnings and the production build passes in1m. Ambient-dependency and store
+raw-filesystem gates pass. Complete
+current root/native suites, strict root lint and Chat V2 production integration
+remain open. Nothing in this checkpoint enables Chat V2 or establishes physical
+multi-device acceptance.
+
 ## Remote review checkpoint (8 November; integration continuing)
 
 This implementation is being published on `chat-v2-operational-implementation` for
