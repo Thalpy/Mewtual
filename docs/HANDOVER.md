@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Published integration and current validation (8 November)
+
+The current integration is available in draft PR #85, stacked on #84:
+<https://github.com/Thalpy/Mewtual/pull/85>. The branch is
+`chat-v2-operational-implementation`. Merge `2c5d8e85` records the earlier
+source-race correction's ancestry; its only tree change from `7cbb40ea` is the
+preserved historical handover section. Runtime code under validation is unchanged.
+
+All five findings from the independent `d9e3b8d8` review are corrected, as are the
+two member-outbox pressure issues found during the subsequent review. The actual
+predecessor gate has passed again under the optimized writer profile: exactly one
+test in 25.90 seconds, including clean open and all three crash-cut refusals.
+The ordinary broad suite does not replace that explicit two-version gate.
+
+The complete frontend suite passes all 3,434 tests. Static checking and the
+production build also pass. The browser-flow gate passes outside the restricted
+sandbox, including message sending, search, pending-send recovery, friend
+requests and the boot-failure panel. Its first attempt lost Edge's debugger
+connection before fixture execution and supplied no flow evidence. Formatting,
+ambient-dependency and raw-filesystem checks pass again on the current tree.
+
+The dedicated admin-history browser scenario also passes after correcting its
+obsolete expectation that the DM sidebar has no `.server-title`. It now requires
+the exact selected DM to be active and connected, the old history pane to be
+unmounted, and the actual "Direct messages" title before releasing the held
+positive old-server reply. Original/edit/delete visibility, exact native
+command/revision identity, response-disposal and fresh-pane reopen checks are
+unchanged. Independent read-only review is clear. One intervening browser attempt
+timed out at navigation before executing the scenario; the traced rerun passes.
+The full frontend suite passes again: 3,434 tests, zero failures/skips, 77.40 seconds.
+This is renderer lifetime evidence, not native authorization or V2 source evidence.
+
+The broad root suite is still running, with full native tests and strict root
+lint queued in the same serial pipeline. These are not recorded as passes.
+The user's named ten-thousand-operation test remains deferred until the end.
+Chat V2 is still disabled: production ordinary-member signing/save, native
+routing and transport integration remain implementation work, not testing alone.
+
 ## Independent review corrections (8 November; acceptance still open)
 
 Validation build update: the first broader root run was deliberately interrupted
