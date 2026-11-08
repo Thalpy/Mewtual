@@ -11,6 +11,9 @@ use crate::chat::owner_profile::{AdmissionOrigin, MAX_ADMISSION_BYTES, MAX_PROFI
 
 mod append_prepare;
 pub use append_prepare::{UnsignedAppendStepData, UNSIGNED_APPEND_DATA_INVOICE};
+mod admission_prepare;
+use admission_prepare::AdmissionChange;
+pub use admission_prepare::{UnsignedAdmissionStepData, UNSIGNED_ADMISSION_DATA_INVOICE};
 
 const MAX_SLOTS: usize = MAX_CURRENT_MEMBERS as usize;
 const MAX_NODES: usize = crate::chat::acceptance_tree::MAX_APPEND_LEAVES
@@ -115,6 +118,7 @@ const NAMED_LAYOUT_BYTES: usize = 2 * MAX_SLOTS * std::mem::size_of::<HotSlot>()
     + std::mem::size_of::<FrozenCutData>()
     + 2 * std::mem::size_of::<Change>()
     + 2 * std::mem::size_of::<AppendChange>()
+    + 2 * std::mem::size_of::<AdmissionChange>()
     + 2 * MAX_SLOTS * std::mem::size_of::<AcceptanceLeaf>()
     + crate::chat::owner_bodies::MAX_APPEND_BODY_BYTES
     + 8 * (MAX_PROFILE_BYTES
@@ -216,50 +220,23 @@ impl ReplayMath {
         // Public inputs/body bounds are validated before cloning either frontier inventory.
         let (changed, epoch, body_id, kind) = match body {
             ReplayBody::Admission(admission) => {
+                // Keep every signed Profile/header/body gate BEFORE sharing the unsigned
+                // fixed Add change. No dummy signature or raw proposed image selects it.
                 admission.verify_profile_binding(&self.profile, header)?;
-                let AdmissionOrigin::Add {
-                    before_epoch,
-                    after_epoch,
-                    ..
-                } = admission.spec().origin
-                else {
-                    return Err(dependency());
-                };
-                if before_epoch != self.epoch || self.epoch.checked_add(1) != Some(after_epoch) {
-                    return Err(dependency());
-                }
-                if self.slots.len() >= MAX_SLOTS {
-                    return Err(ChatError::Bound);
-                }
-                if self
-                    .slots
-                    .iter()
-                    .any(|slot| slot.image.subject == admission.spec().subject)
-                {
-                    return Err(ChatError::AuthorityConflict);
-                }
-                let context = TreeContext {
-                    profile: self.profile.id(),
-                    admission: admission.admission_id(),
-                };
-                let tip = context.empty_hash();
+                let AdmissionChange {
+                    image,
+                    context,
+                    epoch,
+                } = self.admission_change(admission)?;
+                let body = image.admission;
                 let hot = HotSlot {
-                    image: CurrentAdmissionSlot {
-                        admission: admission.id(),
-                        subject: admission.spec().subject,
-                        tip_body: admission.id(),
-                        accepted_count: 0,
-                        accepted_root: tip,
-                    },
+                    image,
+                    // Only the genuine signed Header supplies this provenance; its CID
+                    // deliberately never appears recursively in the resulting state image.
                     tip_header: header.id(),
                     frontier: Frontier::empty(context),
                 };
-                (
-                    Change::Add(hot),
-                    after_epoch,
-                    admission.id(),
-                    HeaderKind::Admission,
-                )
+                (Change::Add(hot), epoch, body, HeaderKind::Admission)
             }
             ReplayBody::Append(body) => {
                 body.verify_header_binding(header)?;

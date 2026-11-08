@@ -23,10 +23,17 @@ use catcoms_wire::{Decoder, Encoder};
 use crate::{MlsDevice, MlsError, ServerGroup};
 
 mod owner_restore;
+mod text_current;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod text_current_add;
 pub(crate) use owner_restore::OwnerSdkGraphLease;
 pub use owner_restore::{
     restore_server_owner_checkpoint_bounded, OwnerSdkGraphReservation, OwnerSdkRestoreAdmission,
     OwnerSdkRestoreLimits,
+};
+pub use text_current::{
+    restore_server_text_current_bounded, TextCurrentSdkGraphReservation,
+    TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
 };
 mod provider_restore;
 pub use provider_restore::restore_server_provider_bounded;

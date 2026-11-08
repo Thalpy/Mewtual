@@ -2,6 +2,8 @@
 //! certificate may attest these facts under its independently pinned trust profile; this
 //! token itself is neither portable historical proof nor permission to publish before save.
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
+mod private_text_add;
 
 /// Which actual operation produced this observation. Unsupported staged/remote operations
 /// do not acquire a local owner observation merely because today's roster looks plausible.

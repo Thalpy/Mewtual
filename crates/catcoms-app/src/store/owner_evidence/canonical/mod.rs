@@ -17,6 +17,7 @@ mod head;
 mod initialize;
 mod inventory;
 mod joined;
+pub(in crate::store) mod text_lane;
 pub(in crate::store) mod v2_registration;
 pub use joined::{
     OwnerCheckpointJoinAttempt, OwnerDirectCheckpointJoinAttempt, OwnerJoinedInitialization,
@@ -58,6 +59,8 @@ pub(super) struct Runtime {
     pending_creations: usize,
     // Independent paid V2 writer identities; checkpoint HeadCells/budgets grant no V2 role.
     v2_writers: v2_registration::Runtime,
+    // Separately paid sixteen ACTIVE text exclusions, never genesis claims/history cap.
+    text_lanes: text_lane::TextLaneRuntime,
 }
 
 fn refused() -> AppError {

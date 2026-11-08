@@ -178,6 +178,8 @@ fn summary(
         join_version: Some(version),
         current_layout: None,
         current_payload_digest: None,
+        governance: None,
+        governance_payload_digest: None,
     }
 }
 fn original_metadata(n: u8, active: bool) -> codec::Metadata {

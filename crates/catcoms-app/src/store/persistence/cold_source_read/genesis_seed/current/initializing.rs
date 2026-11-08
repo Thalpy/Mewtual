@@ -3,6 +3,7 @@
 use super::*;
 mod pre_initializing;
 mod settlement;
+mod text;
 use crate::store::chat_admission::v2_current::ColdV2InitializingPreparation;
 use crate::store::owner_evidence::canonical::current_vacancy::RetiredGroupEntry;
 use crate::store::owner_evidence::canonical::v2_registration::cold_initializing::PreparedColdV2InitializingWriterRegistration;

@@ -1,11 +1,73 @@
 //! Original physical namespace3 declaration and opaque historical DATA reader. Neither the
 //! descriptor nor this wrapper grants a Current scope, group writer or runnable SDK/server.
 use super::*;
+pub(in crate::store) use text::{
+    AdmittedV2TextCompletedWorkspaceRead, BoundV2TextCompletedCreatePredecessor,
+    PreparedV2TextCompletedWorkspaceReadCapture, V2TextCompletedWorkspaceSourceSlot,
+    V2_TEXT_COMPLETED_WORKSPACE_ADMISSION_LAYOUT_BYTES,
+};
+
+pub(in crate::store) use text::{
+    AdmittedV2TextAcceptedCreateCommit, AdmittedV2TextAcceptedCreateStage,
+    SavedAcceptedV2TextAdvanceGuard, SavedAcceptedV2TextFinalGuard,
+    V2_TEXT_ACCEPTED_ADVANCE_GUARD_LAYOUT_BYTES, V2_TEXT_ACCEPTED_CREATE_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextAcceptedQuery, PreparedV2TextAcceptedQueryCapture, V2TextAcceptedQuerySourceSlot,
+    V2_TEXT_ACCEPTED_QUERY_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextAcceptedRetirementCompletion, AdmittedV2TextAcceptedRetirementDeletion,
+    V2_TEXT_RETIREMENT_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextIntentCommit, AdmittedV2TextIntentStage, V2_TEXT_INTENT_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextPromotionScratch, AdmittedV2TextPromotionSeedRepair,
+    PreparedV2TextPromotionScratchCapture, PreparedV2TextPromotionSeedRepairCapture,
+    V2TextPromotionScratchSourceSlot, V2TextPromotionSeedRepairSourceSlot,
+    V2_TEXT_PROMOTION_REPAIR_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextRawSignatureCommit, AdmittedV2TextRawSignatureStage,
+    V2_TEXT_RAW_SIGNATURE_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextRetainRecoveryRead, AdmittedV2TextRetainRepair, AdmittedV2TextRetainScratch,
+    PreparedV2TextRetainRecoveryCapture, PreparedV2TextRetainRepairLease,
+    PreparedV2TextRetainScratchLease, V2TextRetainRecoverySourceSlot,
+    V2_TEXT_RETAIN_RECOVERY_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{PreparedV2TextAcceptedQueryLease, V2TextAcceptedQueryLease};
+pub(in crate::store) use text::{
+    SavedCompletedV2TextFinishGuard, V2_TEXT_COMPLETED_FINISH_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    SavedUnsignedV2TextSigningGuard, V2_TEXT_SIGNING_GUARD_LAYOUT_BYTES,
+};
 mod declaration;
 mod settlement;
+mod text;
 pub(in crate::store) use settlement::{
     GenesisSeedSettlementGroupGuard, SettledGenesisCurrentGroupGuard,
     GENESIS_SEED_SETTLEMENT_GUARD_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextPromotionCommit, AdmittedV2TextPromotionStage, PreparedV2TextPhysicalLease,
+    V2TextCurrentGroupGuard, V2_TEXT_CURRENT_GROUP_GUARD_BYTES,
+    V2_TEXT_PROMOTION_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextRetainCommit, AdmittedV2TextRetainStage, V2_TEXT_RETAIN_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextTokenQuery, PreparedV2TextQueryLease, PreparedV2TextTokenQueryCapture,
+    V2TextQueryLease, V2TextTokenQuerySourceSlot, V2_TEXT_TOKEN_QUERY_ADMISSION_LAYOUT_BYTES,
+};
+pub(in crate::store) use text::{
+    AdmittedV2TextWorkspaceRead, BoundV2TextCreatePredecessor, PreparedV2TextWorkspaceReadCapture,
+    V2TextWorkspaceSourceSlot, V2_TEXT_WORKSPACE_ADMISSION_LAYOUT_BYTES,
 };
 // The explicit ID3 wrapper alone admits the connected cold library path. Default/ID2
 // openers still refuse this layout before their older cleanup paths can run.

@@ -12,6 +12,12 @@ use std::sync::{
 mod cursor;
 mod decode;
 mod shape;
+pub(crate) mod text_add;
+mod text_current;
+pub use text_add::{TextAddCandidateGuard, TextAddOperationLimits};
+#[cfg(any(test, feature = "test-utils"))]
+pub use text_add::test_support::{TextAddTestEvent, TextAddTestObservation};
+pub use text_current::{TextCurrentRestoreGuard, TextCurrentRestoreLimits};
 
 /// Negative limits for ONE audited initial founder/first-Add load. Not payment or authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +51,7 @@ struct Account {
     work: usize,
     seen: u16,
     facts: shape::Facts,
+    text_facts: Option<text_current::shape::Facts>,
 }
 impl Account {
     fn new(limits: OwnerCheckpointRestoreLimits) -> Result<Self, Error> {
@@ -59,6 +66,7 @@ impl Account {
             work: limits.max_work,
             seen: 0,
             facts: shape::Facts::default(),
+            text_facts: None,
         })
     }
     fn bytes(&mut self, amount: usize) -> Result<(), Error> {
@@ -268,7 +276,7 @@ pub struct OwnerCheckpointRestoreGuard {
 impl OwnerCheckpointRestoreGuard {
     pub fn complete(mut self) -> Result<(), MemoryStorageError> {
         {
-            let account = self
+            let mut account = self
                 .attempt
                 .account
                 .lock()
@@ -276,7 +284,7 @@ impl OwnerCheckpointRestoreGuard {
             if account.seen != (1 << ROWS.len()) - 1 {
                 return Err(Error.into());
             }
-            account.facts.finish()?;
+            account.finish_shape()?;
             self.attempt
                 .phase
                 .compare_exchange(ACTIVE, COMPLETE, Ordering::AcqRel, Ordering::Acquire)
@@ -320,88 +328,7 @@ impl MemoryStorage {
         signer: &[u8],
         limits: OwnerCheckpointRestoreLimits,
     ) -> Result<OwnerCheckpointRestoreGuard, MemoryStorageError> {
-        let group: [u8; 16] = group.try_into().map_err(|_| Error)?;
-        let signer: [u8; 32] = signer.try_into().map_err(|_| Error)?;
-        let mut account = Account::new(limits)?;
-        account.bytes(
-            std::mem::size_of::<Attempt>()
-                .checked_add(2 * std::mem::size_of::<usize>())
-                .and_then(|n| n.checked_add(SDK_FIXED_REQUESTS))
-                .ok_or(Error)?,
-        )?;
-        // Explicit fixed setup-work ceiling: sixteen512-byte slot passes per key cover
-        // zeroing, decimal emission, bounded key/header work and fixed custody moves through
-        // Result/array/Attempt/Arc. Independent of input length and charged BEFORE that work.
-        account.work(ROWS.len().checked_mul(512 * 16).ok_or(Error)?)?;
-        // Fallible fixed-key construction has no heap. No SDK calls occur before installation.
-        let mut built = ROWS.map(|row| Key::new(row, &group, &signer));
-        let keys = [
-            built[0].take_key()?,
-            built[1].take_key()?,
-            built[2].take_key()?,
-            built[3].take_key()?,
-            built[4].take_key()?,
-            built[5].take_key()?,
-            built[6].take_key()?,
-            built[7].take_key()?,
-            built[8].take_key()?,
-            built[9].take_key()?,
-            built[10].take_key()?,
-            built[11].take_key()?,
-            built[12].take_key()?,
-        ];
-        let attempt = Arc::new(Attempt {
-            phase: AtomicU8::new(ACTIVE),
-            account: Mutex::new(account),
-            keys,
-            group,
-            signer,
-        });
-        let values = self.values.read().map_err(|_| Error)?;
-        {
-            let mut original = self.owner_restore.lock().map_err(|_| Error)?;
-            if original.is_some() {
-                return Err(Error.into());
-            }
-            *original = Some(attempt.clone());
-        }
-        let guard = OwnerCheckpointRestoreGuard {
-            attempt: attempt.clone(),
-            complete: false,
-        };
-        // Unsupported feature graphs still close THIS installed attempt. Returning before
-        // installation would leave a legacy None fallback on the same caller-owned provider.
-        if cfg!(any(
-            feature = "extensions-draft",
-            feature = "virtual-clients-draft",
-            feature = "draft-ietf-mls-pq-ciphersuites"
-        )) {
-            return Err(Error.into());
-        }
-        {
-            let mut account = attempt.account.lock().map_err(|_| Error)?;
-            let mut facts = shape::Facts::default();
-            for row in ROWS {
-                let key = attempt.keys[row as usize].bytes();
-                account.lookup(values.allocation_size(), key.len())?;
-                let bytes = match values.get(key) {
-                    Some(bytes) => bytes.as_slice(),
-                    None if row.empty_list() => b"[]",
-                    None => return Err(Error.into()),
-                };
-                shape::check(
-                    row,
-                    bytes,
-                    &attempt.group,
-                    &attempt.signer,
-                    &mut facts,
-                    &mut account,
-                )?;
-            }
-            facts.finish()?;
-            account.facts = facts;
-        }
-        Ok(guard)
+        self.begin_closed_restore(group, signer, limits, text_current::Family::Initial)
     }
     /// Preserve legacy diagnostics only on the unrestricted path. Backtrace formatting and
     /// host loggers are opaque allocation/work/callbacks, so they must never run under a
@@ -460,18 +387,7 @@ impl MemoryStorage {
             None if row.empty_list() => b"[]",
             None => return Ok(None),
         };
-        let mut facts = account.facts;
-        shape::check(
-            row,
-            bytes,
-            &attempt.group,
-            &attempt.signer,
-            &mut facts,
-            &mut account,
-        )?;
-        if facts != account.facts {
-            return Err(Error.into());
-        }
+        account.check_shape(row, bytes, &attempt.group, &attempt.signer, true)?;
         let decoded = decode::from_slice(bytes, &mut account)?;
         account.seen |= row.bit();
         if attempt.phase.load(Ordering::Acquire) != ACTIVE {

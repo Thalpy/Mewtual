@@ -5,6 +5,41 @@ use super::super::settlement::{GenesisCurrentOwnerRef, GenesisCurrentOwnerRole};
 use super::*;
 
 impl<T, R> UnexposedColdV2GenesisCurrent<T, R> {
+    /// Absent is the original actual cold selection, never a failed seed-present proof.
+    /// current_writer_receipt requires the real Bound2 covering obligation satisfied.
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn text_owner_ref(
+        &self,
+    ) -> Result<GenesisCurrentOwnerRef<'_>, AppError> {
+        self.scope.current_writer_receipt()?;
+        if !self.head.requires_scope_covering() {
+            self.seed_settlement
+                .as_ref()
+                .and_then(|worker| worker.saved_outcome())
+                .ok_or_else(critical_namespaces::refused)?;
+        }
+        self.settlement_owner_ref()
+    }
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn cancel_for_text(
+        &self,
+    ) {
+        self.writer.cancel_original();
+        self.scope.cancel_original();
+        self.task.cancel_original();
+    }
+    /// Root calls only before promotion. Dispatch actual immutable seed selection first.
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn retry_text_seed_settlement(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if self.head.requires_scope_covering() {
+            self.scope.current_writer_receipt()?;
+            self.validate_original(layout)
+        } else {
+            self.retry_seed_settlement(layout, rng)
+        }
+    }
+
     pub(in crate::store) fn settlement_owner_ref(
         &self,
     ) -> Result<GenesisCurrentOwnerRef<'_>, AppError> {

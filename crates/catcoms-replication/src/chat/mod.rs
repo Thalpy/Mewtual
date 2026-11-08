@@ -1,6 +1,8 @@
 //! Typed signed-chat library core, separate from the legacy Automerge change adapter.
 //! No DocType or network/native/UI producer is connected. The founder-only V2 verifier
-//! supports conditional exact Create issuance under explicit trusted HOST configuration;
+//! supports conditional exact Create issuance under explicit trusted HOST configuration.
+//! The separate general V2 verifier adds exact ordinary OPEN issuance from fully verified
+//! governing Admission/dependency provenance, independently of per-action owner certification;
 //! actual root provenance/storage/transport composition still does NOT close production R6.
 //!
 //! Historical authorization is supplied as an opaque, exact-scope witness. Decoding a
@@ -25,17 +27,23 @@ mod projection;
 mod projection_admission;
 mod storage;
 
-pub use action::{ActionSpec, Body, Realm, SignedAction};
+pub use action::{
+    ActionDraft, ActionSpec, Body, OriginalActionDraftObservation, Realm, SignedAction,
+};
 pub use authority::{Rights, VerifiedAuthorityBasis, VerifiedDeleteApproval};
 pub use ledger::{ActionState, Advance, ChatLedger, ImportOutcome, LedgerLimits, PendingReason};
 pub use projection::{EditAlternative, MessageProjection};
 pub use projection_admission::{
     CompleteProjectionResolution, FounderGenesisAnchorData, GuardedCausalHeads,
-    GuardedMessageProjection, GuardedProjection, ProjectionAdmissionRevoker,
-    ProjectionAdmissionToken, ProjectionCertainty, ProjectionCloseCompletion, ProjectionGroup,
-    ProjectionGroupCloseCompletion, ProjectionGroupView, ProjectionGroupViewRevoker,
-    ProjectionOpenAdmission, ProjectionView, ProjectionViewRevoker, V2FounderExpectation,
-    V2FounderPrefixVerifier, V2FounderReplayCursor, V2HostSelectionExpectation, V2OriginNegative,
+    GuardedMessageProjection, GuardedProjection, OriginalV2OrdinarySigningPlanObservation,
+    ProjectionAdmissionRevoker, ProjectionAdmissionToken, ProjectionCertainty,
+    ProjectionCloseCompletion, ProjectionGroup, ProjectionGroupCloseCompletion,
+    ProjectionGroupView, ProjectionGroupViewRevoker, ProjectionOpenAdmission, ProjectionView,
+    ProjectionViewRevoker, V2AdmissionCloseCompletion, V2AuthenticatedAdmission,
+    V2FounderExpectation, V2FounderPrefixVerifier, V2FounderReplayCursor, V2FrozenAdmission,
+    V2GeneralAcceptanceSource, V2GeneralCandidate, V2GeneralExpectation, V2GeneralPrefixVerifier,
+    V2GeneralRetiredData, V2HostSelectionExpectation, V2KnownGoverningParent, V2OrdinaryDependency,
+    V2OrdinaryKeyCall, V2OrdinarySigningGuard, V2OrdinarySigningPlan, V2OriginNegative,
     V2ProjectionOrigin, V2RetiredAppendData, V2VerifiedAppendCandidate,
 };
 pub use storage::{ChatSnapshot, Page, PageCursor, MAX_PAGE_BYTES, MAX_PAGE_RECORDS};

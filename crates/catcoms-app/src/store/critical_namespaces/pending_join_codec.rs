@@ -91,6 +91,9 @@ pub(super) struct Parsed<'a> {
     pub(super) join_version: Option<u32>,
     pub(super) current_layout: Option<super::archive_current_namespace_codec::CurrentLayoutData>,
     pub(super) current_payload: Option<&'a [u8]>,
+    pub(in crate::store) governance:
+        Option<super::governance_namespace_codec::capability::GovernanceCapabilityData>,
+    pub(super) governance_payload: Option<&'a [u8]>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -108,6 +111,9 @@ pub(in crate::store) struct Summary {
     pub(in crate::store) current_layout:
         Option<super::archive_current_namespace_codec::CurrentLayoutData>,
     pub(super) current_payload_digest: Option<[u8; 32]>,
+    pub(in crate::store) governance:
+        Option<super::governance_namespace_codec::capability::GovernanceCapabilityData>,
+    pub(super) governance_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -125,6 +131,10 @@ impl Parsed<'_> {
             current_layout: self.current_layout,
             current_payload_digest: self
                 .current_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            governance: self.governance,
+            governance_payload_digest: self
+                .governance_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
@@ -159,6 +169,8 @@ enum SupportedLayout {
     ArchiveBootstrapExecuting,
     CurrentLayout,
     CurrentLayoutExecuting,
+    GovernanceLayout,
+    GovernanceLayoutExecuting,
 }
 
 /// Only the concrete Current-layout physical inspector may select this grammar. The default,
@@ -178,6 +190,18 @@ pub(super) fn parse_current_layout<'a>(
             SupportedLayout::CurrentLayout
         },
     )
+}
+
+pub(super) fn parse_governance_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    policy: &super::governance_layout::V2GovernanceLayoutPolicy,
+) -> Result<Parsed<'a>, AppError> {
+    let layout = match policy.current.archive.pending.execution.as_ref() {
+        None => SupportedLayout::GovernanceLayout,
+        Some(_) => SupportedLayout::GovernanceLayoutExecuting,
+    };
+    parse_known(plain, domain, layout)
 }
 
 pub(super) fn parse_executing<'a>(
@@ -212,6 +236,8 @@ fn parse_known<'a>(
             join_version: None,
             current_layout: None,
             current_payload: None,
+            governance: None,
+            governance_payload: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -221,6 +247,8 @@ fn parse_known<'a>(
     let mut join_version = None;
     let mut current_layout = None;
     let mut current_payload = None;
+    let mut governance = None;
+    let mut governance_payload = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -229,7 +257,8 @@ fn parse_known<'a>(
                     (
                         SupportedLayout::Executing
                         | SupportedLayout::ArchiveBootstrapExecuting
-                        | SupportedLayout::CurrentLayoutExecuting,
+                        | SupportedLayout::CurrentLayoutExecuting
+                        | SupportedLayout::GovernanceLayoutExecuting,
                         super::pending_join::execution_payload::VERSION,
                     ) => super::pending_join::execution_payload::parse(entry.payload, domain)?,
                     _ => parse_join_entry(entry, domain)?,
@@ -243,6 +272,8 @@ fn parse_known<'a>(
                         | SupportedLayout::ArchiveBootstrapExecuting
                         | SupportedLayout::CurrentLayout
                         | SupportedLayout::CurrentLayoutExecuting
+                        | SupportedLayout::GovernanceLayout
+                        | SupportedLayout::GovernanceLayoutExecuting
                 ) && entry.version == super::archive_bootstrap::ARCHIVE_VERSION =>
             {
                 archive = Some(super::archive_bootstrap::Descriptor::parse(
@@ -254,7 +285,10 @@ fn parse_known<'a>(
             super::archive_current_namespace_codec::NAMESPACE_ID
                 if matches!(
                     layout,
-                    SupportedLayout::CurrentLayout | SupportedLayout::CurrentLayoutExecuting
+                    SupportedLayout::CurrentLayout
+                        | SupportedLayout::CurrentLayoutExecuting
+                        | SupportedLayout::GovernanceLayout
+                        | SupportedLayout::GovernanceLayoutExecuting
                 ) && entry.version
                     == super::archive_current_namespace_codec::NAMESPACE_VERSION =>
             {
@@ -273,6 +307,18 @@ fn parse_known<'a>(
                 );
                 current_payload = Some(entry.payload);
             }
+            super::governance_namespace_codec::NAMESPACE_ID
+                if matches!(
+                    layout,
+                    SupportedLayout::GovernanceLayout | SupportedLayout::GovernanceLayoutExecuting
+                ) && entry.version == super::governance_namespace_codec::NAMESPACE_VERSION =>
+            {
+                let current = current_layout.ok_or_else(refused)?;
+                governance = Some(super::governance_namespace_codec::capability::GovernanceCapabilityData::decode_data(
+                    entry.payload, current, current_payload.ok_or_else(refused)?,
+                )?);
+                governance_payload = Some(entry.payload);
+            }
             _ => return Err(refused()),
         }
     }
@@ -287,6 +333,8 @@ fn parse_known<'a>(
         join_version,
         current_layout,
         current_payload,
+        governance,
+        governance_payload,
     })
 }
 
@@ -471,6 +519,17 @@ pub(super) fn encode_original_row(
 /// exact immutable/ciphertext custody; one original add or one scheduling toggle is permitted.
 /// Duplicate same-plaintext files are handled separately by actual source classification.
 pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppError> {
+    // A namespace4 addition is NEVER inferred from Summary fields. The private
+    // declaration owns BOTH whole frames and uses its exact-pair validator.
+    if current.governance != next.governance
+        || current.governance_payload_digest != next.governance_payload_digest
+        || (current.governance.is_some()
+            && (current.current_layout != next.current_layout
+                || current.current_payload_digest != next.current_payload_digest
+                || current.archive != next.archive))
+    {
+        return Err(refused());
+    }
     if current.generation.checked_add(1) != Some(next.generation)
         || next.parent != Some(current.digest)
         || next.count < current.count

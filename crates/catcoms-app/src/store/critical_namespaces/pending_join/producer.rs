@@ -787,7 +787,9 @@ fn encode_schedule(
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
     output.put_u32(
-        1 + u32::from(current.archive.is_some()) + u32::from(current.current_layout.is_some()),
+        1 + u32::from(current.archive.is_some())
+            + u32::from(current.current_layout.is_some())
+            + u32::from(current.governance.is_some()),
     );
     encode_join_entry_header(&mut output, current, payload)?;
     output
@@ -858,7 +860,15 @@ fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError>
         (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
         _ => return Err(refused()),
     };
-    archive.checked_add(current_layout).ok_or_else(refused)
+    let governance = match (current.governance, current.governance_payload) {
+        (None, None) => 0,
+        (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
+        _ => return Err(refused()),
+    };
+    archive
+        .checked_add(current_layout)
+        .and_then(|n| n.checked_add(governance))
+        .ok_or_else(refused)
 }
 
 /// Outer header only; payload version/tag/rows remain the actual JOIN consumer's contract.
@@ -890,6 +900,11 @@ fn append_original_archive(
     if let Some(payload) = current.current_payload {
         output.put_u32(super::super::archive_current_namespace_codec::NAMESPACE_ID);
         output.put_u32(super::super::archive_current_namespace_codec::NAMESPACE_VERSION);
+        output.put_bytes(payload).map_err(|_| refused())?;
+    }
+    if let Some(payload) = current.governance_payload {
+        output.put_u32(super::super::governance_namespace_codec::NAMESPACE_ID);
+        output.put_u32(super::super::governance_namespace_codec::NAMESPACE_VERSION);
         output.put_bytes(payload).map_err(|_| refused())?;
     }
     Ok(())
@@ -949,7 +964,9 @@ fn encode_added(
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
     output.put_u32(
-        1 + u32::from(current.archive.is_some()) + u32::from(current.current_layout.is_some()),
+        1 + u32::from(current.archive.is_some())
+            + u32::from(current.current_layout.is_some())
+            + u32::from(current.governance.is_some()),
     );
     encode_join_entry_header(&mut output, current, payload)?;
     output

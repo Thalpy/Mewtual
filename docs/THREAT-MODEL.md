@@ -1,5 +1,36 @@
 # Threat model; client integrity & enforcement boundaries
 
+Owner-offline text is a separate required path: the fixed Profile founder signs
+certification Headers, while members sign their own ordinary actions. The local
+first-founder storage tests do not establish member send/outbox availability.
+The general OPEN issuer, durable member outbox and native integration remain
+incomplete; Chat V2 stays disabled. [Current boundaries](HANDOVER.md).
+
+## First operational A/I/S does not grant accepted history (7 November)
+
+The disabled Windows library path requires genuine original Current and selected I
+before its actual bounded raw-key call. Its held-file proof compares full original
+W_I before and after the final source check. The returned signature is cached before
+late negatives; retries reuse it. Only genuine selected S permits materializing that
+same Header and deriving one candidate outside writers. A cached signature, historical
+Saved receipt, Header or candidate cannot issue accepted projection or publication.
+Actual first-B selection and same-verifier advance/finalization now pass focused Windows
+tests. Old-reader closure/drain and distinct WD/WC physical retirement also pass their
+kernel, worker and owning-Host regressions. First-request finish into the same flat
+resident also passes focused lifecycle/payment tests; later-message and cold
+operational recovery, multi-member authority and native
+activation remain open.
+
+Direct A/I/S validators reject another runtime's resources before allocating proof
+scratch or opening payloads. The resource invoice keeps retained A/I/S state summed
+and counts the complete serialized Current peak, including S's two nested proof
+bundles. Same-original interrupted S completion requires the real Stage, full W_I or
+own W_S and the original recorded, bounded exact ciphertext prefix. Native identity
+alone grants no repair; missing, unknown and different files are preserved. This
+provides no cold reconstruction, new nonce, repeated signing or fresh execution quota.
+The checks do not address malicious local storage replacement beyond the existing
+cooperative private-directory and whole-component rollback assumptions.
+
 ## Exact V2 founder acceptance is not root acquisition (6 November)
 
 The nonissuing cold replay cursor contains verified historical facts, no live permission.

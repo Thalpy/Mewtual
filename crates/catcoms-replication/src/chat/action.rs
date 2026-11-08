@@ -2,6 +2,10 @@ use super::*;
 use catcoms_crypto::{verify_with_public_bytes, DeviceKeypair};
 use catcoms_wire::{Decoder, Encoder};
 
+mod draft;
+pub(super) use draft::ActionDraftPlanClaim;
+pub use draft::{ActionDraft, OriginalActionDraftObservation};
+
 const ACTION_DOMAIN: &[u8] = b"mewtual/chat/action/v1\0";
 const REALM_DOMAIN: &[u8] = b"mewtual/chat/realm/v1\0";
 const ID_DOMAIN: &[u8] = b"mewtual/chat/action-id/v1\0";
@@ -171,44 +175,7 @@ impl SignedAction {
     /// Canonical unsigned bytes. The semantic ID excludes signature representation, so
     /// two genuinely valid signature variants cannot manufacture a second Create.
     pub fn semantic_bytes(&self) -> Vec<u8> {
-        let mut e = Encoder::new();
-        e.put_bytes(ACTION_DOMAIN).expect("fixed domain");
-        self.spec.realm.encode_into(&mut e);
-        e.put_bytes(&self.signer).expect("fixed signer");
-        e.put_bytes(self.spec.basis.as_bytes())
-            .expect("fixed basis");
-        e.put_bytes(self.spec.grant.as_bytes())
-            .expect("fixed grant");
-        e.put_bytes(&self.spec.nonce).expect("fixed nonce");
-        e.put_u64(self.spec.presented_ms);
-        e.put_u16(self.spec.parents.len() as u16);
-        for parent in &self.spec.parents {
-            e.put_bytes(parent.as_bytes()).expect("fixed parent");
-        }
-        match &self.spec.body {
-            Body::Create { text, reply_to } => {
-                e.put_u8(0);
-                e.put_str(text).expect("bounded text");
-                e.put_u8(u8::from(reply_to.is_some()));
-                if let Some(reply) = reply_to {
-                    e.put_bytes(reply.as_bytes()).expect("fixed reply");
-                }
-            }
-            Body::Edit { create, text } => {
-                e.put_u8(1);
-                e.put_bytes(create.as_bytes()).expect("fixed create");
-                e.put_str(text).expect("bounded text");
-            }
-            Body::Delete { create } => {
-                e.put_u8(2);
-                e.put_bytes(create.as_bytes()).expect("fixed create");
-            }
-            Body::Join { create } => {
-                e.put_u8(3);
-                e.put_bytes(create.as_bytes()).expect("fixed create");
-            }
-        }
-        e.finish()
+        semantic_spec(&self.spec, &self.signer)
     }
     pub fn encode(&self) -> Vec<u8> {
         let mut e = Encoder::new();
@@ -292,37 +259,10 @@ impl SignedAction {
         Ok(action)
     }
     fn validate(&self) -> Result<(), ChatError> {
-        if self.spec.parents.len() > MAX_PARENTS
-            || self.spec.parents.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return Err(ChatError::Bound);
-        }
-        match &self.spec.body {
-            Body::Create { text, reply_to } => {
-                if text.is_empty() || text.len() > MAX_TEXT_BYTES {
-                    return Err(ChatError::Bound);
-                }
-                // A Create has no global chat head frontier: only its exact optional reply.
-                if self.spec.parents.as_slice() != reply_to.as_slice() {
-                    return Err(ChatError::Dependency);
-                }
-            }
-            Body::Edit { text, .. } if text.len() > MAX_TEXT_BYTES => return Err(ChatError::Bound),
-            _ => {}
-        }
-        if !matches!(self.spec.body, Body::Create { .. }) && self.spec.parents.is_empty() {
-            return Err(ChatError::Dependency);
-        }
-        Ok(())
+        validate_spec(&self.spec)
     }
     pub(super) fn dependencies(&self) -> Vec<ActionId> {
-        let mut dependencies = self.spec.parents.clone();
-        if let Some(create) = self.spec.body.create() {
-            if let Err(at) = dependencies.binary_search(&create) {
-                dependencies.insert(at, create);
-            }
-        }
-        dependencies
+        dependencies_spec(&self.spec)
     }
 }
 fn array(d: &mut Decoder<'_>) -> Result<[u8; 32], ChatError> {
@@ -334,4 +274,75 @@ fn text(d: &mut Decoder<'_>) -> Result<String, ChatError> {
         return Err(ChatError::Bound);
     }
     Ok(text.to_owned())
+}
+
+// One unchanged action/v1 grammar for signed evidence and unsigned Draft DATA.
+fn semantic_spec(spec: &ActionSpec, signer: &[u8; 32]) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(ACTION_DOMAIN).expect("fixed domain");
+    spec.realm.encode_into(&mut e);
+    e.put_bytes(signer).expect("fixed signer");
+    e.put_bytes(spec.basis.as_bytes()).expect("fixed basis");
+    e.put_bytes(spec.grant.as_bytes()).expect("fixed grant");
+    e.put_bytes(&spec.nonce).expect("fixed nonce");
+    e.put_u64(spec.presented_ms);
+    e.put_u16(spec.parents.len() as u16);
+    for parent in &spec.parents {
+        e.put_bytes(parent.as_bytes()).expect("fixed parent");
+    }
+    match &spec.body {
+        Body::Create { text, reply_to } => {
+            e.put_u8(0);
+            e.put_str(text).expect("bounded text");
+            e.put_u8(u8::from(reply_to.is_some()));
+            if let Some(reply) = reply_to {
+                e.put_bytes(reply.as_bytes()).expect("fixed reply");
+            }
+        }
+        Body::Edit { create, text } => {
+            e.put_u8(1);
+            e.put_bytes(create.as_bytes()).expect("fixed create");
+            e.put_str(text).expect("bounded text");
+        }
+        Body::Delete { create } => {
+            e.put_u8(2);
+            e.put_bytes(create.as_bytes()).expect("fixed create");
+        }
+        Body::Join { create } => {
+            e.put_u8(3);
+            e.put_bytes(create.as_bytes()).expect("fixed create");
+        }
+    }
+    e.finish()
+}
+pub(super) fn validate_spec(spec: &ActionSpec) -> Result<(), ChatError> {
+    if spec.parents.len() > MAX_PARENTS || spec.parents.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(ChatError::Bound);
+    }
+    match &spec.body {
+        Body::Create { text, reply_to } => {
+            if text.is_empty() || text.len() > MAX_TEXT_BYTES {
+                return Err(ChatError::Bound);
+            }
+            // A Create has no global chat head frontier: only its exact optional reply.
+            if spec.parents.as_slice() != reply_to.as_slice() {
+                return Err(ChatError::Dependency);
+            }
+        }
+        Body::Edit { text, .. } if text.len() > MAX_TEXT_BYTES => return Err(ChatError::Bound),
+        _ => {}
+    }
+    if !matches!(spec.body, Body::Create { .. }) && spec.parents.is_empty() {
+        return Err(ChatError::Dependency);
+    }
+    Ok(())
+}
+pub(super) fn dependencies_spec(spec: &ActionSpec) -> Vec<ActionId> {
+    let mut dependencies = spec.parents.clone();
+    if let Some(create) = spec.body.create() {
+        if let Err(at) = dependencies.binary_search(&create) {
+            dependencies.insert(at, create);
+        }
+    }
+    dependencies
 }

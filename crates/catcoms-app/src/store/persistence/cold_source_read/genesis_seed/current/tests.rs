@@ -538,3 +538,10 @@ fn both_owning_drop_paths_close_actual_authority_before_runtime_payload_and_fee(
 #[cfg(windows)]
 mod seed_settlement;
 mod settlement_scope;
+
+#[cfg(windows)]
+mod text_group_guard;
+#[cfg(windows)]
+mod text_lane_handoff;
+#[cfg(windows)]
+mod text_owner;

@@ -1,5 +1,578 @@
 # Mewtual; Handover
 
+## Remote review checkpoint (8 November; integration continuing)
+
+This implementation is being published on `chat-v2-operational-implementation` for
+remote adversarial review. Chat V2 remains disabled and incomplete. This is a source
+checkpoint, not completed acceptance or a release. The older published checkpoint
+`f609a086` on `communication-chat-v2-production` does not contain this integration.
+Review this branch's actual files, including newly tracked modules; a successful
+focused test or an unreferenced source file does not establish production wiring.
+
+The latest recorded ordinary MLS library run passes 143 tests in 10.97s. Its diagnostic-only fixture
+also passes explicitly under each of backtrace, crypto-debug and content-debug;
+the ordinary run skips that opt-in fixture and the existing fixture generator.
+All19 storage-owner tests and the five namespace4 compatibility tests pass.
+Native compilation passed after the owning Add and Current4 integration in 1m12s.
+The App crate still reports 515 unfinished-integration warnings; this is not a
+strict full-workspace lint pass.
+The private owning Add operation now passes eight focused tests in4.25s after8.90s
+compile, including real20/50-member execution and exact retry/failure/cache custody.
+Its first compile required preserving the final checked-add Option before filter;
+the unused test import was removed. Strict all-target/all-feature MLS lint passes
+in2.86s; the explicit eight-argument package binding has a documented local Clippy
+expectation rather than an unrelated API refactor. The dev-only fault support adds
+only existing hex0.4.3's serde feature/dependency edge to the root lock; no version
+changes or diagnostic dependencies enter the production lockfiles.
+The concrete Current4 metadata mount also passes all19 focused governance tests
+(14new, five existing) in207.17s after2m38s compile, including real cold/warm cut
+recovery, same-object corruption, root redirection, JOIN preservation and actual
+vault-session destruction ordering. It issues historical DATA only; Source4/savedG
+owner and governance request admission are still separate missing producers.
+Formatting, ambient-dependency and store raw-filesystem gates pass on these inputs.
+Dependency audit passes advisories, bans, licenses and sources. No production
+dependency version or advisory-ignore change was needed for this checkpoint.
+The full staged whitespace check reports only three unchanged upstream SDK files
+(`dump.sql`, `public_group/errors.rs`, `kat_tree_operations.rs`); their SHA-256
+values match the upstream provenance manifest. Excluding those exact original
+files, the complete staged diff passes the whitespace check.
+The completed-Add-result child source files are retained for review but their
+parent wiring patch is not yet applied; their new runtime and compile-fail tests
+have not run. They are not part of the 143-test result above.
+Full current root/native test suites, strict root lint,
+member outbox/source, transport/native integration and physical acceptance remain
+open. The separately assigned member-outbox implementation is not included in this
+checkpoint. Detailed commands, timings and boundaries are retained below. Historical
+sections describing this worktree as uncommitted refer to earlier local checkpoints.
+
+## Owner-offline ordinary text remains an implementation gate (7 November)
+
+Chat V2 remains disabled and incomplete. The global governing Header is signed by
+its fixed Profile founder; joined devices have their own keys and never obtain that
+private key. The tested A/I/S/B/WC path certifies owner history. Normal member sends,
+local durability, propagation and Provisional display must work while the owner is
+offline and must not wait for that certification or its single pending lane.
+
+The separate general Core issuer is now declared against real selected Admissions,
+Add/Append/Remove replay and exact action/dependency signatures. All ten focused
+production-verifier tests pass in 27.39s after an 18.92s compile, including 20/50
+independent member keys, same-member concurrent edit/delete/Join forks, removal/rejoin,
+held actions, exact inclusion, publication drain and governing equivocation. The
+three initial test-only private-field accesses are fixed without exposing issuer
+fields. Independent actual-source review has no BLOCKER/HIGH/MEDIUM finding; the
+whole-cut archive and actual action-fork regressions requested by review both pass.
+These are Core tests with explicit trusted HOST selections, not real MLS/native
+or 20/50-network acceptance.
+The independently durable member outbox, actual member source/signing, typed transport,
+native/UI integration and cold recovery are not yet supplied by this issuer.
+Proven Delete custody and Review also remain open. Cold restore must load the selected
+local negative obligations before reopening a known target; action-only snapshots or
+full governing replay do not establish that coverage. This does not require proving no
+unseen remote Delete exists during a partition. [Delete/cold boundary](communication-recovery/CHAT-V2-PROJECTION-ADMISSION.md). No current source in this section
+is a published or complete Chat V2 implementation.
+
+## Operational workspace integration (6–7 November; uncommitted, validation in progress)
+
+The local integration graph now includes actual bounded token lookup, strong generation
+root pins, separate finite-control IO ends, the owning host lookup driver, unused-lane
+conversion, Clear-only workspace reads and fresh guarded predecessor binding. Root's
+ordinary packet/Retain/manifest/archive candidate and unsigned-intent DATA producers are
+also paired. Actual retained-A, unsigned-I and raw-signature-S Stage/Commit admissions
+and owning drivers now pass focused tests. Interrupted S recovery and the original
+Header/candidate bridge also pass their focused cohort. First-B selection, verifier
+advance and distinct finalization pass the focused tests recorded below. Old-reader
+closure/drain and distinct WD/WC physical retirement also pass their focused kernel,
+worker and owning-Host tests. First-request finish into the same flat resident also
+passes its focused tests. Later-message/cold operational recovery and native posting
+remain unfinished.
+
+The query/index slice passes nineteen focused tests in 139.03s. The subsequent finite-IO
+slice and genuine three-family host lookup/negative retries pass ten tests in 216.19s.
+The bounded source-context helper now serves both capture and promotion validation. Its
+fixed-vector and independent-recapture checks pass. The broader workspace/producer run
+then passed 28 of 29 cases; the remaining test exposed missing live Scope cancellation
+checks during page sealing. The fix binds read resources to their original Current Scope
+and checks it before and after each seal, preserving completed outputs before refusal.
+Both the formerly failing mid-seal test and the already-admitted repair/scratch completion
+test pass in 64.37s. The affected 23-case recovery/workspace/conversion/hash rerun also
+passes in 619.03s, including lost replies, cancellation after admission and corrupt controls.
+
+The owning pre-Create host now composes lookup, genuine Clear predecessor binding, SDK
+packet preparation and retained DATA. Its completed handoff carries the actual separate
+SDK payment with the packet; it exposes no mutable producer slot that could separate them.
+Review is clear after that correction. All eleven focused host, payment, deep-index and
+workspace preservation regressions pass in 349.83s. The paired A cohort compiles in 1m53s;
+all 23 focused cases pass in 291.93s. These include genuine three-family A selection/retry,
+full-WAL tamper, query-IO exclusion, vault-busy cleanup, Stop after admission, lost replies,
+selected-file/directory damage and the authenticated-WAL cleanup-entry regression.
+No fake Saved receipt is used. Source-only review
+fixes preserve exact metadata-payment drop order, prove the original pages directory and
+read the newly selected H_A/T_A closure. Root's full owning phase is explicitly charged
+at 32KiB inside the existing new1MiB metadata class; no configured limit was increased.
+
+The next Root slice prepares an independently paid resident genesis math1MiB and original
+unsigned SDK child2MiB after fresh actual SavedA closure proof. The genuine three-family
+regression passes in 109.06s after correcting an initial header-sequence check to protocol
+genesis sequence1 at MLS epoch0. This creates no accepted-index miss, selected I or signing
+admission. Both read paths now use nonextracting DATA operations rather than mutable owning
+Source loans; five focused workspace checks, including actual two-vault custody, pass in
+127.37s. The corresponding ownership review findings are fixed.
+
+Warm same-original A recovery is now paired with explicit clean/staged/MAIN/scratch
+classification, a real Stage/recovery atomic interlock and distinct effect admissions.
+All twelve focused cases pass in 307.77s, including automatic owning-host recovery across
+three genuine families, lost unlink/Ready returns, invalid or missing recorded work,
+wrong/oversized outputs and real File/lease/ScopeStop cleanup. Direct post-proof/pre-CAS
+barrier coverage remains a low follow-up; genuine winner orderings and cleanup-tail
+interleaving are covered. This is same-owner recovery, not new-mount SDK reconstruction.
+
+The raw-filesystem and ambient-dependency gates pass. Strict App lint
+still reports unfinished effect consumers, and complete suites remain open. Later I/S/B,
+accepted-query, verifier and retirement integration evidence is recorded below. New-mount
+operational recovery, multi-member/epoch governance and transport/native/UI integration are unfinished.
+Chat V2 remains disabled. The separate published checkpoint is `f609a086`; this App graph
+is not pushed or represented as complete by its draft PR.
+
+The independent accepted-history query is now paired with the actual saved-A source,
+Current admissions, bounded Directory/Actions paths and owning host retry. Five focused
+lookup/save checks pass in 129.63s; the separate genuine three-family retained-vs-accepted
+check passes in 107.89s. This includes exact query-debit destruction after late constructor
+cancellation, lost replies, finite IO exclusion, file/lease cleanup and source damage.
+A structural Present remains an unverified locator, never a receipt or fallback miss.
+The owning save driver requires a fresh completed same-A Absent lookup before unsigned
+SDK preparation. The new raw-filesystem allowance is readonly and both source gates pass.
+The closed SDK/model custody bridge and its four focused tests pass in 129.27s after a
+1m54s compile. Two genuine prepared SDK children exercise a plan-substitution refusal
+and unchanged owning input; two genuine A owners reject cross-owner/cross-store use.
+Exact resident1MiB/SDK2MiB debits survive ScopeStop and drain with whole custody, while a
+tiny original-plan observation retains neither debit. The host's three-family retry
+also preserves exact unsigned bytes through the owning transfer, source damage and Stop.
+This custody slice alone grants no I/S/B write; their later admission evidence is
+recorded below. Cold operational replay and native posting remain unfinished.
+
+Sync's exact-plan existing-raw64 DATA loan passes both extended real-node regressions
+in 1.74s; strict all-target/all-feature Sync Clippy passes in 49.94s. It preserves the
+whole SDK identity through late cancellation and cannot invoke or repeat a signer.
+The I worker/admissions/owning host cohort is now paired. Its 17 focused cases pass in
+468.73s after a 2m21s compile, including genuine three-family I selection/retries, full
+WI tampering, lost outcomes, Stop after admission, actual File/session cleanup and the
+accepted-query/SDK custody reruns. Review found post-final-proof allocation/IO in Ready-I,
+signing and earlier Ready-A. The shared held-read proof fixes that ordering; two runtime
+regressions genuinely distinguish the old order and reject native-file replacement.
+The signing-specific proof additionally compares full WI bytes before and after final
+Source/ID3; its three guard-only tests remain separate from actual key-call acceptance.
+
+The next paired slice adds recorded-original warm I prefix completion, supported-MAC
+semantic mutation tests and constructor cancellation/ownership tests. Root also replaces
+bare replay DATA with the SAME paid live founder verifier and private projection domain,
+bound to actual original-pin G provenance. These changes are compiling; the initial
+compile exposed an explicit admission-ID wrapper conversion and a custody metadata bound.
+Both are corrected: the combined existing1MiB A/I invoice now includes Root's exact
+compiled custody metadata instead of a fixed16KiB estimate. No configured pool limit was
+increased. All24 focused cases pass in693.67s after a1m54s compile, including warm prefixes,
+unknown-file preservation,13 supported authenticated semantic mutations and2 constructor
+ownership/cancellation regressions. The new four domain provenance/close/payment cases
+also pass in96.06s after1m55s compile. They cover exact same-source domain isolation and
+cross-source refusal, exact16KiB funding through Core verifier tails and independent
+domain cancellation with live Current; they do not claim same-group cold remount or a
+busy accepted-publication callback.
+The actual signing guard/delegate/owning caller is now paired and statically reviewed.
+All3 guard-proof tests pass in65.01s after1m57s compile; all4 actual key-path tests pass
+in167.77s after1m59s compile. They reach the real SDK signer, verify its raw signature,
+reuse it without redispatch and preserve it after post-key domain cancellation. Existing
+SDK raw is reused before another signer dispatch. Native signing activation remains off.
+S storage/host/admissions and genuine mutation/lifecycle tests are paired. Their focused
+build passes after correcting the combined metadata invoice: all retained A/I/S terms
+remain summed, while mutually exclusive Current scratch is counted at its actual peak,
+including S's TWO nested held proof bundles. The configured 1MiB cap is unchanged and
+the temporary diagnostic block is removed. Four direct validators now reject foreign
+runtime resources before any proof allocation or file open. All sixteen focused cases
+pass in 591.82s after a 1m54s compile, including the genuine two-vault regression,
+three-family durable S selection and owning host retry, full authenticated semantic
+mutations, lost outcomes, same-file tamper, ScopeStop, vault/lease cleanup and payment
+destruction. Static adversarial review is clear. Same-original interrupted S recovery
+and the selected-S-to-original-Header/candidate bridge are paired and pass the focused
+cohort below. Complete validation remains pending.
+That bridge measures 38,044 bytes of unsigned custody and a 52,352-byte Root pending
+phase on the Windows test target. The local custody ceiling is now 48KiB, with its
+exact measured layout still charged; the Root phase charges a full 64KiB allowance
+in the persistent transaction inventory. The combined 1MiB cap remains enforced.
+Review is clear and the measurement-only diagnostics are removed; the corrected
+bridge build passes in 1m53s. All nine focused regressions pass in 304.50s, including
+actual same-S partial WAL/signature/head and recorded-empty-file continuation, missing/
+replacement/nonprefix/oversize preservation, pre-MAIN dependent refusal, Stop cleanup,
+genuine selected-S materialization across three families, one cached candidate and
+post-cache domain cancellation. No new key or nonce is used on those recovery retries.
+Cold I/S continuation, multi-member/epoch/native/UI integration and complete validation
+remain open. Later B and retirement execution evidence follows below.
+
+Published checkpoint `f609a086` is not fully green: both root CI jobs abort in the
+Studio two-peer repair test
+`a_fault_is_decided_replaced_and_survives_restart_and_a_newcomer_through_the_actors`
+with a stack overflow (Linux SIGABRT; Windows STATUS_STACK_OVERFLOW). The Linux
+frontend/native job and both supply-chain checks pass. The local correction splits the
+unchanged real-actor scenario into sequential boxed repair/shutdown and restart/newcomer
+phases. Independent review confirms all original assertions and actor lifecycle evidence
+remain. Both the original scenario and the new driver-frame regression pass locally
+on the unchanged default Windows test stack in that nine-case cohort. Linux runtime
+confirmation and full backend validation remain open. No global stack limit is increased.
+All 3,434 frontend tests pass in 96.81s; Svelte reports zero errors and warnings.
+The production frontend build passes in 38.30s, with its existing chunk-size warning.
+Formatting and both source gates pass. The four genuine Sync Header-loan regressions
+pass in 3.53s after a 1m18s test build; strict all-target/all-feature Sync Clippy passes
+in 49.44s. Production App all-feature checking passes in 32.48s, and the separate
+native workspace's locked check passes in 1m29s. The disabled production host graph
+still emits unused-code warnings (327 in the production App build); strict root lint
+and the complete root/native suites remain open. No complete-backend validation or
+native activation follows from these compile checks.
+The root dependency audit also passes (`cargo deny check`); its advisory-cache lock
+requires normal Cargo-cache write permission outside the managed workspace.
+The complete `catcoms-replication` chat subset passes all 231 tests in 89.12s after
+an 18.83s compile. This includes genuine 20/50-writer partition/restart/reordered-page
+ledger tests, causal edit/delete rules, same-signer forks and exact founder-verifier
+refusals. Those core fixtures do not supply the missing production B/native path.
+All 60 physical-format/filesystem unit tests also pass in 1.42s in the built App
+test binary. The subsequent Directory-data/observed-cipher-length seam compiles in
+2m05s and its eight index/actual accepted-query regressions pass in 174.37s. Cipher
+sizes are cached only after full authentication; the borrowed completed path is DATA,
+not a fresh query, complete miss, retirement or Current permission. The real completed-
+query accessor regression and genuine B lifecycle fixtures remain the next checks.
+
+First-B Stage/Commit, flat SavedB, same-verifier advance/final guards and owning host
+dispatch are now declared in the local graph. The build passes in 2m26s; all eight
+genuine B-boundary/completed-Directory tests pass in 269.26s. They include actual
+three-family selection and flat SavedB through real Core advance, outside retired-math
+destruction and distinct final proof, without old private predecessors. Initial
+type/visibility mismatches are fixed. The initial base-B metadata measurement is 1,232,709
+bytes: 772,549 persistent plus 460,160 Current scratch, including the complete named
+artifact proofs and separately preallocated advance cell. It is now funded by a
+separate 2MiB reservation in the same pool, acquired before B allocation and retained
+through its actual observer/fact/advance tails. Original A/I/S1MiB, SDK/model/read/query
+payments, the global pool and persistent disk quotas are unchanged. The full B work
+invoice is 8,941,016 bytes under the unchanged 16MiB class. All measurement-only array
+diagnostics are removed. Static review is clear; a genuine capacity-refusal regression,
+owning Host/late-Core/late-final tests, WD/WC/root drain/resident/second-Create and complete
+validation remain open. No production activation follows from declaration or compilation.
+The expanded 20-case B/Host/lifecycle/constructor/capacity/warm cohort compiles in
+2m01s. Nineteen tests pass in 790.84s, including actual three-family Host finalization,
+preserved capacity refusal, lost Core/final replies, late real domain/Scope closure,
+all five warm-B cases and post-admission same-file WS/WB tamper. The remaining test
+initially failed while constructing a structurally invalid mutation, before reaching
+the original-aware checker. Its test-only correction preserves all fifteen intended
+rejections, explicitly reopens/decodes valid Head and same-length alternate Manifest
+inputs, and passes the focused rerun in 34.10s after a 1m54s build. No production check
+was relaxed. The evidence is nineteen original passes plus the corrected focused pass,
+not a second complete twenty-case run. Root close/WD/WC/resident/second-Create and
+complete backend/native validation remain unfinished.
+The subsequent production App all-feature check also passes in 17.15s. Its inactive
+graph emits 373 unused-code warnings; this is not strict-root-lint sign-off. The
+delegated root-close focused pipeline has now completed and returned Cargo ownership
+to Root. Full suites and final push remain with Root.
+
+The actual original-B root-close/drain library path is now paired through its
+concrete Current guard and canonical 32-slot registry. Its three genuine Windows
+regressions pass in 71.07s after a 1m52s build. They cover both Token and Accepted
+origins from independent paid read bodies, the full 32-generation scan, a deterministic
+entry barrier under the real wait mutex before actual affine-End notification, new-B
+reader preservation, the one-preparation claim through outside Removed tails, and
+Closed/Removed caching before late Scope cancellation returns an error. A negative-only
+outside-writer disposer releases the original B's actual completed-query leases; it
+does not manufacture root drain. Exact closed registry Arcs move into the prepaid
+outside owner before any late source check, without a destructor or fee refund under
+the canonical guard. The complete B invoice, including the claim and both fixed root
+arrays, compiles under the unchanged separate 2MiB reservation; old A/I/S1MiB and
+independent query fees remain additional. The initial compile found a too-narrow claim
+re-export; its intended Store-private forwarding is corrected without exposing a
+public constructor or weakening a check. All eight affected original query regressions
+also pass in 95.40s (0.70s warm build), including selected-parent rejection, completed
+Directory loans, both physical-IO/logical-reader separations and physical-query input
+refusals. The 20 touched Rust files pass their focused formatting check, and the shared
+diff whitespace check passes. Short read-only actual-source re-review is clear after
+the real-wait correction. These focused checks are not complete-suite validation.
+The owning Host now closes, polls and detaches those actual old roots without
+blocking a UI callback or revalidating its closing queries. Its two focused Windows
+regressions pass in 117.61s after a 1m52s compile. They cover all three genuine
+owner families, unchanged selected history across retries, exactly one signer/Core
+advance, changed-request refusal, and actual ScopeStop after close with the Host's
+own reader Ends released while metadata detachment stays pending. The full compiled
+PendingCreate and B resource assertions remain enforced. Actual new WD/deletion and
+distinct WC completion, resident/second-Create/cold operational continuation and
+complete backend/native gates remain open. Chat V2 remains disabled.
+
+The subsequent owning WD/WC dispatch and authenticated-semantic cohort passes all
+four tests in 147.19s after a 1m52s compile. The Host reaches genuine deletion and
+distinct fresh completion admissions across all three owner families; it removes
+exactly the two replaced private index pages and original I/S controls, preserves
+all surviving public-history artifacts and the selected B bytes, and independently
+opens the actual completion journal. Repeated calls use no new signer or Core
+advance, while a stopped Host cannot reuse historical WC as current permission.
+Nine structurally valid, authenticated mutation cases reject incorrect retirement
+bindings. The initial private re-export mismatch is fixed at the exact accepted-
+module ancestor, with no resource assertion removed or configured limit increased.
+Actual-source adversarial review is clear. All eight additional worker/admission
+regressions now pass in 208.43s after a 1m53s compile. They cover a foreign runtime
+refusing before an exclusively held original journal can be opened, independent
+domain cancellation with native Current still live, an unstarted finite gate
+excluding reads, durable WD before any unlink, exact four-object deletion, fresh WC
+absence/quota proof, recorded zero/partial-prefix continuation, lost WD/WC rename
+and cached-output replies, replacement/missing/nonprefix/oversized stage preservation,
+same-file journal tamper after admission, admitted completion after ScopeStop and
+deletion debt when Stop wins between phases. Separate deterministic barriers hold
+the actual named or already-unlinked File while the original Store/owner drops;
+the vault remains busy until the finite worker's actual File/lease/End drain.
+The low coverage finding is resolved and its actual-source re-review is clear.
+The ambient-dependency and raw-filesystem gates pass. The latter uses equivalent
+separate test/Windows attributes on a test-only hook so its existing fail-closed
+scanner recognizes that hook; no production allowance or scanner rule was broadened.
+
+The WC/lane/resident/Host/domain cohort passes all eleven tests in 353.60s after a
+1m52s compile. Actual WC retires the same unique lane before a distinct fresh finish
+guard transfers the same verifier/domain/model payment. Three-family tests preserve
+its installed Header sequence2 and identity, handle lost callbacks and late independent
+Scope/domain cancellation, reject foreign occupied outputs and damaged WC, and observe
+actual old B/read/query/SDK payment destruction while the original model/domain survive.
+The new production Host caller also drops its old request, lookup and promotion Saved
+outside writers, recognizes the last completed request without another signer/Core
+advance, refuses changed token/channel/text and blocks all old genesis/first-request
+entry points. The compiled 64KiB Root phase, 2MiB B and 16KiB domain totals remain
+enforced. Initial import/visibility errors are corrected without exposing work fields:
+a private negative helper checks the same original binding and idle work for the actual
+permanently cancelled retired lane. Actual-source adversarial review and its short
+compile-fix re-review are clear. Production App all-feature checking passes in 13.55s;
+the separate native workspace check passes in 1m08s. The disabled App graph emits 438
+unused-code warnings, so these are not strict-root-lint or complete-suite sign-off.
+Repeated Create/COW, general canonical-hit resolution, cold operational continuation,
+multi-member/epoch governance, transport/native/UI dispatch and complete acceptance
+remain unfinished.
+
+The reviewed next-A v3 source and its Current/Host callers are now declared locally.
+The obsolete prospective `E0AFA71A` parent remains superseded. All three prospective
+review findings are fixed: exact bounded path preallocation, same-held seed/WC bytes
+checked again after the final Source hook, and original-owned warm WA-stage prefix
+continuation while WC is still selected. Generic Clear/complete-WC stage absence
+remains strict. The focused build passes in 1m49s; all 21 tests pass in 415.67s. They include
+genuine three-family next-request preparation, completed-parent resource pressure,
+late cancellation and interrupted zero/partial/complete WA-stage continuation.
+
+Compiled next-request custody exposed a real transaction metadata peak of 1,145,090
+bytes. The shared A/I/S metadata reservation is now 1.25MiB, acquired before producer
+allocation and retained through the same original ownership tails. This intentionally
+replaces the earlier 1MiB class mentioned in the dated evidence above. All actual
+layout assertions remain enabled; temporary measurement diagnostics are removed.
+The global pool, work16MiB, Bmetadata2MiB, completed-parent1MiB and separate
+model/domain/SDK/read/query payments are unchanged. Independent static resource
+review is clear; runtime pressure/refund regressions pass in this cohort. Both source gates pass.
+
+The reviewed root-leaf second-B and original I/S carry/query callers are now declared.
+Their focused build exposed the accepted-query's real full metadata invoice of
+1,082,516 bytes, above its previous 1MiB payment. That SAME independent query class
+now reserves 1.125MiB before any parent/path copies. Its full assertion remains and
+the diagnostic-only array is removed. Static review is clear; the exact-payment Host
+expectation uses the actual class, and a genuine SavedA2 fee-minus-one refusal/retry
+regression passes. All six second-message/payment/semantic tests pass in 230.72s
+after a 1m59s compile, including genuine three-family second Create, same model/SDK
+custody, late domain cancellation, foreign/damaged source refusal and fifteen valid
+outer-WAL semantic mutations. The separate two late-constructor/File/lease/refund
+reruns pass in 32.59s. Token-query/read1MiB, model, SDK, work, B and the global pool
+are unchanged. Both source gates pass. Second WD/WC, general COW and native posting
+are still incomplete; this is not a member outbox. Production App all-feature checking
+passes in 30.07s and the separate locked native check passes in 1m24s against this
+graph. The disabled production App graph reports 515 unused-code warnings; strict
+root lint and complete backend suites remain open. These checks compile the native
+crate but do not start the application or test physical/network behavior.
+
+The agreed next signing/outbox boundary is recorded in
+[ordinary member path](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md).
+The revised Core unsigned draft/exact signing-plan slice is now declared. All 252
+Core chat tests pass in 97.64s after a 19.17s compile, including four canonical Draft
+and seven genuine signing-plan regressions. Independent actual-source re-review is
+clear after rejecting oversized retained Draft capacities and retaining actual test
+ledger/view owners. A separate named temporary authority invoice covers sequential
+signature/ID work, required-ID growth and covered-set backing. Existing signed-action
+wire behavior is unchanged. This does not supply a payer, actual warm-member source,
+MlsDevice caller, native authorization or outbox. Strict all-target/all-feature Core
+Clippy passes in 12.99s after a private, nonserialized enum naming correction; actual-
+source re-review confirms public types, semantics and bytes are unchanged.
+Strict-root/full backend validation is still open.
+
+A broader serial root-workspace pass compiled successfully in 7m47s and recorded
+over420 passing cases with no reported failure. It was intentionally stopped in the
+older multi-minute storage fault matrices so the new membership cohorts could be
+tested promptly. It is NOT complete-suite sign-off. The named10,000-operation test
+and three genuine17-origin capacity cases were deferred and remain unrun. Complete
+root/native suites and strict-root lint are still mandatory before handoff.
+
+Unsigned Admission preparation is now declared. All258 Core chat tests pass in
+101.26s after a19.53s compile, including six new genuine Add math/selection tests.
+The initial max64 fixture used the founder's seed for one member; review caught it
+before execution and the fixture now uses disjoint full keys with an explicit check.
+The pre-sign and signed paths share exact math checks; no owner key or Source is
+issued. Actual MLS Add, mandatory governance intent/save and member factory remain
+unfinished.
+
+The distinct text-CURRENT SDK consumer is also declared. Its four focused tests pass
+in2.16s after8.41s compile. The full MLS library suite passes109 tests in6.49s after
+7.97s compile; its one pre-existing ignored test only regenerates frozen0.8.1 fixtures.
+All14 vendor owner-restore tests pass, including the three new tests (1.47s compile).
+The excluded vendor is tested through an ignored standalone manifest pointing to the
+ACTUAL source with copied root lock and offline resolution; no production manifest or
+dependency version changes. Genuine20/50-member, later-epoch/ring/blank-reuse states,
+full signer/exporter preservation, both payment drop orders, malformed/work refusal,
+initialized-ratchet refusal and old initial-loader compatibility now have runtime
+evidence. This consumer intentionally keeps SDK mutation closed and supplies no
+active whole-Server/source/native owner or production resource configuration.
+Strict all-target/all-feature Core/MLS lint passes in15.83s and standalone vendor
+lint passes in3.26s against these additions.
+
+Both workspaces now resolve the same local OpenMLS0.9.2 copy with the independently
+reviewed explicit-time KeyPackage hook. The original archive/version/dependencies
+are retained; only the shared final lifetime selection changes in the SDK code.
+Legacy validation still samples its clock at the original final check. The explicit
+path retains signature, source, protocol, key-separation, extension and lifetime
+checks; the caller supplies trusted local Clock time, never peer time.
+The first native run exposed a test precision assumption: subtracting1ns from
+Windows SystemTime can leave the same100ns tick. The test now uses1ms and retains
+exact not-before/expiry checks; production code was already correct. Re-review is
+clear. All six focused tests pass in0.11s after6.98s compile, and the full MLS suite
+passes115 tests in6.40s with the same ignored fixture generator. Strict MLS lint
+passes in11.62s; the separate native workspace resolves offline/locked and checks
+successfully in1m12s. App still emits515 inactive-code warnings. Dependency audit passes advisories,
+bans, licenses and sources; complete root/native suites and strict-root lint remain open. The SDK wasm
+API matches existing Lifetime types but wasm compilation has not been run.
+
+The separately reviewed exact numeric SDK layout helper is now declared and its
+ordinary-feature production check passes offline/locked in5.52s. It reports42 actual
+wrapper sizes and three private numeric payload sizes, exposes no SDK objects and
+provides no aggregate-operation invoice. The separate reviewed Add-stage clock hook
+is now applied. Its six genuine SDK build/stage/merge regressions pass in0.12s
+after7.21s compile; the full MLS library suite passes121 tests in6.10s, with the same
+one ignored fixture generator. Strict all-target/all-feature MLS lint passes in6.19s.
+The initial compile caught a missing device lifetime in the test helper; that helper
+now retains the device for the builder's actual lifetime. Production code needed no fix.
+This hook shares the entire Add builder/validation algorithm and preserves legacy
+clock timing and checks. The separate reviewed pending-merge timestamp hook is now
+integrated as well. All three real SDK regressions pass in0.04s after14.33s compile:
+the stored injected timestamp, genuine Welcome/epoch/channel-key agreement, exact
+cold row restoration, unchanged no-pending behavior and actual first-write refusal
+for both legacy and explicit paths. The inherited Pending-to-Operational cut happens
+before that refusal: a later Ok(no-op) is NOT proof of a completed merge. The owning
+private Cell must retain its failed/uncertain phase and never rerun Add on that basis.
+The first merge compile needed an explicit error-type import in its new SDK child.
+Review also corrected two test assumptions before execution: strict restore refuses
+already staged state but leaves its permanent negative fence installed; cold map
+restoration changes hash iteration order, so complete key/raw-value rows and exact
+outer bindings are compared rather than incidental map serialization order.
+The full MLS suite now passes124 tests in6.67s with its existing ignored fixture
+generator, and strict all-target/all-feature MLS lint passes in6.58s.
+The distinct reviewed native serial Add adapter is now integrated. All six
+genuine SDK regressions pass in0.31s after14.65s compile, including real
+Commit/Welcome/channel-key agreement followed by ordinary multi-Add, exact
+preflight refusals, a genuine full64-member tree, real removal/blank reuse, a
+signed queued proposal and restored malformed blank/out-of-subtree unmerged
+targets. The exact unit refusal precedes resolution; no test fabricates Source or
+payment. All three Rayon sites share their original per-element algorithms and
+Legacy still goes through its original wrappers. The new private method refuses
+the backtrace-feature profile before entry; explicit PSK and backtrace-feature
+build fixtures were initial gaps. A seventh actual SDK test now stores a real PSK,
+signs its proposal and successfully loads it before verifying exact private refusal
+with all original rows/proposal preserved; all seven pass in0.31s after8.25s compile.
+The diagnostic-profile coverage gap is now closed for all three unsupported build
+features: backtrace, crypto-debug and content-debug each pass the explicit opt-in
+valid-one-Add refusal test in0.01s after25.33s/16.31s/14.61s compilation. The test is
+ignored in the ordinary cohort solely because it requires one of those dependency
+features; it was explicitly executed in each feature build. An isolated manifest
+points at the actual Mls source and owns the optional test dependency lockfile;
+the production lockfiles were not changed. Source/payer preflight remains a separate
+consumer test obligation. The full ordinary MLS library suite passes135 tests in7.08s
+after that matrix; its two ignored tests are the existing fixture generator and
+the diagnostic-only test explicitly executed in all three feature builds above.
+The independently paid owning SDK Cell and named operation inventory are now
+integrated. All eight constructor/worker tests pass in4.25s after8.90s compile,
+including actual staged-queue serialization, both old own ratchets, sticky provider
+failures, cached-result retries and future table headroom. Strict MLS lint passes
+in2.86s after the compile/style corrections at the top checkpoint. Actual Root
+payment/governance/Source admission, persistence and publication remain missing
+consumers; the SDK payment supplies none of them.
+The separate native workspace checks offline/locked in1m11s after serial integration;
+the ambient-dependency and store raw-filesystem gates also pass. Complete native/root
+test suites and strict root lint remain open. The private package helpers are now
+consumed by the declared Cell; Root/native use remains separate.
+The existing genuine warm/cold/repaired-owner next-packet test also passes in115.78s
+after2m33s compile with the new SDK path dependency.
+The separate native workspace checks offline/locked in1m12s after the Add clock
+patch as well; its515 inactive App warnings remain. This is compilation evidence,
+not native unit/startup or physical acceptance.
+The root workspace all-feature check also passes offline/locked in44.16s.
+Formatting, ambient-dependency and store raw-filesystem gates pass on this slice.
+The reviewed native-only bounded Add package/provider components are now declared.
+Four focused genuine package tests pass in0.04s after9.37s compile. They cover exact
+full-subject/group/nonce/KPref/capability binding, real signatures and the same trusted
+time, malformed framing before TLS allocation, and exact budget/work refusal. The
+first provider compile required restricting its shared shape-check visibility to the
+private owner-restore subtree so the new sibling can repeat that same negative check.
+Provider review also fixed a real pre-serialization temporary-allocation omission in
+OpenMLS's queued-proposal converter; both serialization passes and their error debt
+are now charged before entry. Unused standalone leaf-key write/delete permissions
+were removed from the forced-one-Add profile. Whole operation custody, a full SDK
+invoice and genuine combined staged-queue execution remain separate open work.
+Five focused provider tests pass after a test-only explicit map-type annotation;
+all19 owner-restore tests pass in0.01s through the standalone actual-source manifest.
+The full MLS library suite now passes128 tests in6.69s with the same ignored fixture
+generator after these provider entry-point changes.
+The separate native workspace also checks offline/locked in1m12s after the merge
+and input/provider integration. Its515 inactive App warnings remain, alongside the
+temporarily unconsumed package helpers; this is not strict-root lint or a native
+test/startup acceptance result.
+These pin strict extra epoch-key grammar, table-backing reservation, sticky account
+exhaustion and pre-Serialize temporary/error debt. They do not replace the required
+actual SDK staged-queue/candidate lifecycle test recorded above. The unused package
+budget getter was removed when the owning operation was paired, and strict MLS
+lint passes against that composition. The private one-shot SDK Add consumer is
+now declared and its focused tests pass. These are not a membership
+save, actual member Source, Native command or enabled Chat V2.
+
+The initial namespace4/version1 negative compatibility prerequisite passed five
+focused App tests in36.44s after2m37s compile. They verify a
+whole-catalog generation/parent successor, exact preservation of older JOIN1/2 and
+namespace2/3 payloads, an independently pinned descriptor-hash framing vector and
+strict Current3 refusal when encrypted4 is present in current, stage or both.
+All old ciphertext is preserved on refusal. This adds no supported Current4 opener,
+governance request writer or positive Source. A distinct private metadata mount and
+complete declaration recovery are the next slice; cold torn first journals remain
+preserved/Held until a separate evidence-backed repair role exists.
+
+
+
+Source preservation: the ignored checkpoint
+`logs/chat-v2-source-checkpoints/operational-20261107-094310-288771-source.zip`
+contains 674 source files plus its manifest and passes ZIP integrity and per-file
+SHA-256 validation,
+including the deeply nested warm-B tests and resident handoff source. It is outside the build target because
+the active uncommitted worktree is inside that target. This is an unfinished-source
+backup, not a validated build or published Git checkpoint.
+
+## Operational promotion recovery (6 November; local integration in progress)
+
+The operational worktree now composes the actual whole-owner facade with first empty
+promotion and same-owner partial-write recovery. Four explicit readonly classifications
+choose complete-journal repair, complete-stage retry, first-journal scratch cleanup or
+clean unstarted staging. Arbitrary IO/MAC/decode errors cannot choose another role. Each
+repair/cleanup still needs fresh Current, exact original plan, idle lane and finite physical
+work admission. Captured Files precede their physical lease; independently paid recovery
+metadata survives through actual cleanup. Cached Ready/cleanup results are installed before
+new positive source checks, including after lost returns or cancellation.
+
+The connected recovery cohort compiles. All fifteen focused regressions pass in 254.40s,
+including genuine three-family automatic recovery, preservation of foreign authenticated
+frames and wrong/oversized children, failed post-unlink barriers, cached lost Ready returns
+and cancellation after admission. Actual-diff adversarial review found no remaining
+blocker/high/medium. The raw-filesystem gate passes; these focused results are not
+substitutes for the complete suites. This cohort is
+not yet committed: strict lint still reports the unfinished ordinary-operation consumers.
+Ordinary A/I/S/B transactions, verifier/projection composition, new-mount operational replay,
+membership/epoch integration, transport/native/audit composition and complete validation
+remain open. Chat V2 stays disabled.
+
 ## Nonissuing cold history replay (6 November; focused checks pass)
 
 Core now separates mathematical cold replay from live effect ownership. The new opaque
@@ -65,7 +638,8 @@ admission. [Exact boundary and evidence](communication-recovery/CHAT-V2-FOUNDER-
 The uncommitted connected read-only Current/capture cohort now compiles and all 34 focused
 tests pass in 456.29s, including genuine three-family source/pin/context and final-ID3 checks,
 original cancellation and exact resource-release tests. Its unused effect-consumer warnings
-remain during integration; it is not a strict-lint or production write-path pass. Promotion,
+remain during integration; it is not a strict-lint or production write-path pass. The newer
+first-promotion/recovery section above describes the composed empty-promotion consumer;
 ordinary posting and later-head cold recovery still need their actual paired consumers.
 
 Fresh `6f8c7c6f` CI progresses beyond the earlier service reservation failure but Linux

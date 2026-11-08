@@ -32,7 +32,9 @@ impl Rights {
 ///
 /// The v1 owner-fact verifier requires an explicitly expected root and exact signed chain;
 /// the V2 founder verifier restricts issuance to one exact supported Create under its
-/// independently HOST-selected complete genesis. No Deserialize implementation, wire decoder,
+/// independently HOST-selected complete genesis. The separate general V2 verifier issues
+/// exact ordinary actions only after actual selected Admission/dependency verification.
+/// No Deserialize implementation, wire decoder,
 /// current-peer attestation adapter or "verified" boolean exists. Active mounted-root issuance,
 /// root continuity and governance conflicts remain separately gated. This semantic witness never
 /// establishes projection admission or historical acceptance of an exact late action.
@@ -57,6 +59,12 @@ pub struct VerifiedAuthorityBasis {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SemanticConstraint {
     LegacyReusable,
+    V2OrdinaryAction {
+        action: ActionId,
+        profile: owner_facts::OwnerFactId,
+        admission: owner_facts::OwnerFactId,
+        tenure: owner_header::OwnerTenureId,
+    },
     V2FounderCreate {
         action: ActionId,
         profile: owner_facts::OwnerFactId,
@@ -68,6 +76,9 @@ impl SemanticConstraint {
     fn matches(&self, action: &SignedAction) -> bool {
         match self {
             Self::LegacyReusable => true,
+            Self::V2OrdinaryAction {
+                action: expected, ..
+            } => action.id() == *expected,
             Self::V2FounderCreate {
                 action: expected, ..
             } => {
