@@ -111,6 +111,12 @@ proves supported new-reader recovery. The script requires exactly one executed
 test and all four probe markers. Ordinary tests without the supplied predecessor
 binary establish writer fences/recovery only. Record an actual successful
 dedicated gate before claiming two-version public-open acceptance.
+The dedicated gate passed on8November: clean0 opened, cuts229/232/234 refused with
+the expected predecessor decoder error, complete fixture inventory was preserved,
+and supported new-reader recovery passed. One test executed in58.94s. The helper
+build uses an isolated predecessor target to prevent incompatible same-name path
+crate artifacts being reused by the current writer. See HANDOVER for source/caller
+provenance, the initial cache failure and the broader acceptance still outstanding.
 
 ## Subsequent Current4 source admission
 

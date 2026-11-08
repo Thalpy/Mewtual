@@ -29,24 +29,37 @@ Governance review F2 has a separate cold captured-duplicate cleanup role and ref
 an unexpected byte-equal stage after warm promotion. F3 writes and syncs an owned
 empty legacy catalog stage before any governance-only seed/marker output. The new
 recovery cohort passes all25 governance tests in318.50s. The actual-predecessor
-public-open probe is still being validated; the older19-test evidence below must
-not be credited as testing these corrections. The first helper build succeeded,
+public-open probe now passes: the genuine f5 public opener opens clean Current3
+and rejects cuts229/232/234 with its exact empty-stage framing error. The complete
+fixture names, lengths and content hashes stay unchanged, and supported new-reader
+recovery succeeds afterward. Exactly one test ran in58.94s with all four required
+probe markers. Predecessor source is the complete archived
+`f5ef22a3688a1272edb418da8b02efe945c3008d`; caller SHA256 is
+`2b7dba764de453de2b4e0b8b98626cc63debace597df6bf4a58255a072608fac`.
+The older19-test evidence below must not be credited as testing these corrections.
+The first helper build succeeded,
 but using a shared Cargo artifact directory across revisions reused incompatible
 path-crate outputs when rebuilding the new writer. Only16 local-package caches
 were invalidated (6.5GiB); no source or registry dependency cache was removed.
-The harness now builds the predecessor into a distinct child target while keeping
-both builds serial. That failed build is not compatibility acceptance.
+The successful rerun builds the predecessor into a distinct child target while
+keeping both builds serial. That initial failed build is not compatibility acceptance.
 The dedicated governance document now describes the declared metadata mount and
 retains its historical-DATA-only and incomplete first-seed-recovery boundaries.
 Independent actual-source re-review found no remaining BLOCKER/HIGH/MEDIUM in
 the inspected Core, storage corrections or predecessor harness. Runtime results
 remain separate from that read-only assessment.
 
+Native compilation passes in2m44s (515 existing unfinished-integration warnings);
+strict all-target/all-feature replication lint passes in43.14s. Dependency audit
+passes advisories, bans, licenses and sources after obtaining its required cache
+lock outside the read-only sandbox. Formatting also passes.
 The full frontend unit suite passes3434 tests in117.45s; Svelte reports zero
 errors/warnings and the production build passes in1m. Ambient-dependency and store
 raw-filesystem gates pass. Complete
-current root/native suites, strict root lint and Chat V2 production integration
-remain open. Nothing in this checkpoint enables Chat V2 or establishes physical
+current root/native suites and strict root lint are now running serially. Only
+`cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations`
+is deferred by the user's instruction. These running checks are not passes.
+Chat V2 production integration remains open. Nothing in this checkpoint enables Chat V2 or establishes physical
 multi-device acceptance.
 
 ## Remote review checkpoint (8 November; integration continuing)
