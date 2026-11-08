@@ -2,6 +2,19 @@
 
 ## Independent review corrections (8 November; acceptance still open)
 
+Validation build update: the first broader root run was deliberately interrupted
+after438 passing cases with no observed failure; it is incomplete, and its queued
+native tests/lint never started. Repeated real-vault KDF work dominated that run.
+Both workspace roots now optimize only Argon2/Blake2 dependency arithmetic in
+development and the inherited test profile. Algorithms, parameters, features,
+release profiles and assertions are unchanged; verbose compilation confirms
+`opt-level=3` and `debug-assertions=on`. Independent actual-diff review is clear.
+The unchanged25-test governance benchmark passes in130.95s against its318.50s
+baseline (about2.43x faster) after a one-time4m59s rebuild. This measures that
+cohort, not a promised whole-suite speedup or physical-memory equivalence.
+All backend gates are restarting serially with the new profile; the named
+ten-thousand-operation test remains the sole requested deferred case.
+
 Core fixes are published in `dc08cce17a9d1b851e50b4372d3ec30ca794c2ec`
 on `chat-v2-operational-implementation`. Review F1 now observes every live edit
 that contributes to body selection, including an unselected provisional descendant
@@ -53,12 +66,14 @@ Native compilation passes in2m44s (515 existing unfinished-integration warnings)
 strict all-target/all-feature replication lint passes in43.14s. Dependency audit
 passes advisories, bans, licenses and sources after obtaining its required cache
 lock outside the read-only sandbox. Formatting also passes.
-The full frontend unit suite passes3434 tests in117.45s; Svelte reports zero
-errors/warnings and the production build passes in1m. Ambient-dependency and store
+The repeated full frontend unit suite passes3434 tests in87.95s (earlier117.45s);
+Svelte reports zero errors/warnings and the production build passes in1m.
+Ambient-dependency and store
 raw-filesystem gates pass. Complete
-current root/native suites and strict root lint are now running serially. Only
+current root/native suites and strict root lint are restarting serially after that
+benchmark. Only
 `cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations`
-is deferred by the user's instruction. These running checks are not passes.
+is deferred by the user's instruction. Incomplete or queued checks are not passes.
 Chat V2 production integration remains open. Nothing in this checkpoint enables Chat V2 or establishes physical
 multi-device acceptance.
 

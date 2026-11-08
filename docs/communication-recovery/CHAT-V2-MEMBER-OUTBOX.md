@@ -47,6 +47,8 @@ Profile tenure, original group nonce, full device key and group. Transport epoch
 per-entry Admission are excluded. Consequently a removal and rejoin with the same Profile,
 tenure, group nonce and device reopens the SAME namespace; each entry records the Admission
 it was signed under, and that is what keeps A1's work from being adopted by A2 (below).
+`group_nonce` means the authenticated selected `SignedOwnerProfile.spec().creation`.
+It never means a live local Scope nonce, which changes during cold activation.
 
 ```text
 head.bin               selected local Head
@@ -242,6 +244,11 @@ settlement, stale and foreign batches, and audit after debt clears.
   and tested in Core; it grants no production source/save authority.
 - The production `MemberOutboxSaveAdmission` issuer: the real member-source generation and
   native/UI-session guard at the final edge.
+  Its current facts-plus-vault-lease representation does not own native lock
+  completion. Production must move real native commit ownership and original
+  source completion ownership into the running job through SavedLocal caching
+  and IO/cleanup, including when the IPC receiver disappears. A borrowed guard
+  retained only by that receiver is insufficient.
 - Production `MemberOutboxParentDirectory` provisioning inside a declared critical
   namespace, and registry placement beside the Store's session guard.
 - Pool sizing and the independent pool credits; these invoices are not measured fits.

@@ -57,5 +57,15 @@ all = { level = "warn", priority = -1 }
 automerge = { path = "vendor/automerge" }
 # Both workspaces also use the same reviewed provider backing-map observation.
 openmls_memory_storage = { path = "vendor/openmls_memory_storage" }
-# Same pinned SDK; only the reviewed explicit-time KeyPackage validation hook.
+# Same pinned SDK; reviewed explicit-time and bounded private-Add patches.
 openmls = { path = "vendor/openmls" }
+
+# Real-vault tests retain the same Argon2id algorithm, parameters and assertions.
+# Optimize only dependency arithmetic in development and the inherited test
+# profile; release settings, features and password handling remain unchanged.
+# Repeat these overrides in the separate native workspace below apps/desktop.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

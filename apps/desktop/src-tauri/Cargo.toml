@@ -121,3 +121,11 @@ rand_core = "0.6"
 automerge = { path = "../../../vendor/automerge" }
 openmls_memory_storage = { path = "../../../vendor/openmls_memory_storage" }
 openmls = { path = "../../../vendor/openmls" }
+
+# Match the core workspace: keep the real KDF and all its costs/assertions, but
+# optimize its development/test arithmetic. Release settings are unchanged.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

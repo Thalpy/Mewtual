@@ -56,6 +56,9 @@ Use a separately versioned member namespace. Its stable context binds vault/layo
 trusted pin, Profile/tenure, original group nonce and full device; each immutable entry
 also binds its original Admission. Transport epoch belongs to envelope attempts, never
 to the original action identity or stable request-token namespace.
+The stable `group_nonce` is the authenticated selected
+`SignedOwnerProfile.spec().creation`, not the live local Scope incarnation returned
+by `scope_nonce_data()`. Cold activation and same-Profile rejoin preserve this value.
 
 A selected local Head covers a paged exact-request receipt index, immutable original
 Action chunks and paged publication debt. Lookup exact token/request/context before new
