@@ -83,8 +83,12 @@ impl V2TextProjectionNegative {
     }
 }
 
-/// Max ONE per whole original Host. Future replacement on the same projection target
-/// must preserve this actual flat domain/close debt, rather than making an equal group.
+/// Max ONE per role per whole original Host: the founder certification domain and, when the
+/// ordinary-member lane exists, its own separately paid member domain. A verifier's Drop and
+/// fork fence close the group of the domain that minted it, so each verifier kind is minted
+/// only on its own role (`member`), and the member role mints at most one general verifier.
+/// Future replacement on the same projection target must preserve this actual flat
+/// domain/close debt, rather than making an equal group.
 pub(super) struct V2TextProjectionDomain {
     _group: ProjectionGroup,
     view: ProjectionGroupView,
@@ -93,6 +97,9 @@ pub(super) struct V2TextProjectionDomain {
     // cannot drop its Group/View prematurely. Only explicit outside-writer close
     // touches this small completion cell; Core's negative callback never locks it.
     closing: Mutex<Option<ProjectionGroupCloseCompletion>>,
+    // Fixed at construction: false = founder certification, true = ordinary member.
+    member: bool,
+    general_minted: AtomicBool,
     // LAST: no group/view/actual close-completion tail outlives its original fee.
     negative: V2TextProjectionNegative,
 }
@@ -139,6 +146,22 @@ impl V2TextProjectionDomain {
         store: &ServerStore,
         owner: &V2TextOwnerRef<'_>,
         source: &V2TextSourceNegativeObserver,
+    ) -> Result<Self, AppError> {
+        Self::prepare_role(store, owner, source, false)
+    }
+    /// The ordinary-member lane's OWN domain: same fees and source binding, member role.
+    pub(super) fn prepare_member(
+        store: &ServerStore,
+        owner: &V2TextOwnerRef<'_>,
+        source: &V2TextSourceNegativeObserver,
+    ) -> Result<Self, AppError> {
+        Self::prepare_role(store, owner, source, true)
+    }
+    fn prepare_role(
+        store: &ServerStore,
+        owner: &V2TextOwnerRef<'_>,
+        source: &V2TextSourceNegativeObserver,
+        member: bool,
     ) -> Result<Self, AppError> {
         owner.require_original_negative(store, &owner.observe_writer())?;
         if !source.is_live() {
@@ -190,6 +213,8 @@ impl V2TextProjectionDomain {
             view,
             origin,
             closing: Mutex::new(None),
+            member,
+            general_minted: AtomicBool::new(false),
             negative,
         })
     }
@@ -274,6 +299,9 @@ impl V2TextProjectionDomain {
         header: &SignedOwnerHeader,
         image: &[u8],
     ) -> Result<V2FounderPrefixVerifier, AppError> {
+        if self.member {
+            return Err(refused());
+        }
         self.negative.validate_negative()?;
         self.negative.require_same_original(&anchor.negative)?;
         let data = anchor.anchor.core_data();
@@ -297,6 +325,76 @@ impl V2TextProjectionDomain {
             self.origin.clone(),
         )
         .map_err(|_| refused())
+    }
+
+    /// ORDINARY-member general verifier from the same kind of bound genesis anchor.
+    ///
+    /// Only the member lane calls this, on its OWN separately paid domain instance: the
+    /// general verifier's Drop closes this domain's group view, so it must never share the
+    /// founder certification domain. Same trust rule as [`Self::verifier_from_genesis`]:
+    /// the bound anchor (from the authenticated original pin) chooses the expectation, never
+    /// the Profile/Header being verified. Runs outside all writers under the caller's
+    /// independent model debit. Issues no plan, OPEN, projection or publication by itself.
+    pub(super) fn general_verifier_from_genesis(
+        &self,
+        anchor: &BoundV2TextFounderAnchor,
+        profile: &SignedOwnerProfile,
+        admission: &AdmissionBody,
+        header: &SignedOwnerHeader,
+        image: &[u8],
+    ) -> Result<catcoms_replication::chat::V2GeneralPrefixVerifier, AppError> {
+        if !self.member {
+            return Err(refused());
+        }
+        self.negative.validate_negative()?;
+        self.negative.require_same_original(&anchor.negative)?;
+        // One general verifier per member domain: a second one would close this same group
+        // on Drop. The claim is released only when construction itself failed.
+        self.general_minted
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| refused())?;
+        let data = anchor.anchor.core_data();
+        let verifier = catcoms_replication::chat::V2GeneralExpectation::from_trusted_host(
+            FounderGenesisAnchorData {
+                group: data.group.clone(),
+                founder: data.founder,
+                profile: data.profile,
+                admission: data.admission,
+                tenure: data.tenure,
+                header: data.header,
+                state: data.state,
+            },
+        )
+        .and_then(|expectation| {
+            catcoms_replication::chat::V2GeneralPrefixVerifier::from_genesis(
+                expectation,
+                profile,
+                admission,
+                header,
+                image,
+                &self.view,
+                self.origin.clone(),
+            )
+        });
+        match verifier {
+            Ok(verifier) => Ok(verifier),
+            Err(_) => {
+                self.general_minted.store(false, Ordering::Release);
+                Err(refused())
+            }
+        }
+    }
+
+    /// Bind one channel ledger to THIS domain's exact original group view. Negative custody
+    /// only (Core's `begin_projection_view_in`); the Plan later binds that view's lifetime.
+    pub(super) fn begin_channel_view(
+        &self,
+        ledger: &mut catcoms_replication::chat::ChatLedger,
+    ) -> Result<catcoms_replication::chat::ProjectionView, AppError> {
+        self.negative.validate_negative()?;
+        ledger
+            .begin_projection_view_in(&self.view)
+            .map_err(|_| refused())
     }
 
     /// Cancellation is immediate but is never an acknowledgment of callback drain.

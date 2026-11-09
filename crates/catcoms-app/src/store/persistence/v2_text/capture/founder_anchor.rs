@@ -104,4 +104,72 @@ impl SelectedV2TextHead {
             .validate_selected_under_current_guard(guard)?;
         Ok(result)
     }
+
+    /// Genesis HOST anchor for the ORDINARY-member path, with no founder A/I/S/B coupling.
+    ///
+    /// Same trust source as [`Self::founder_anchor_from_retained_data`]: the independently
+    /// retained original pin and full source expectation authenticated by `original_context`,
+    /// and the exact selected archive G equal to the public source genesis. The difference is
+    /// that it requires THIS selected O to be the empty operational promotion itself
+    /// (generation 1, Genesis parent, no pending transaction, empty token/publication roots),
+    /// and proves that O is still selected under the guard instead of proving a retained A.
+    ///
+    /// Consequence the caller must keep: while O is generation 1 the governing prefix is
+    /// exactly genesis, so a general verifier built from this anchor is current. Once O
+    /// advances (any founder certification), this producer and the caller's per-send
+    /// `validate_under_current_guard` both refuse; later prefixes need a separate replay
+    /// producer. This anchor is DATA; it issues no verifier, signing or publication right.
+    pub(in crate::store) fn genesis_member_anchor_data(
+        &self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+    ) -> Result<V2TextFounderAnchorData, AppError> {
+        self.resources.require_same_original(guard.resources())?;
+        self.resources
+            .validate_original(guard.store(), guard.source())?;
+        let key = Zeroizing::new(guard.store().keys.db_key()?);
+        let context = original_context(guard, &key)?;
+        let (expected, _, _) = guard.original_genesis_context_data()?;
+        let e = expected.context.spec_data();
+        let public = guard.source().data();
+        let g = self.archive.spec_data();
+        if self.head.context != context
+            || self.head.generation != 1
+            || self.head.previous != TextParentData::Genesis(context.spec_data().genesis_parent)
+            || self.head.pending != TextPendingData::None
+            || self.head.tokens != TextRootData::Empty
+            || self.head.publications != TextRootData::Empty
+            || g.context != context.id_data()?
+            || g.operation != TextArchiveOperationData::Genesis
+            || g.previous.is_some()
+            || g.manifest_sequence != 1
+            || g.header != public.header
+            || g.image != public.state
+            || public.header.id() != e.header
+            || public.profile.id() != e.profile
+            || public.admission.id() != e.admission
+            || public.header.spec().sequence != 1
+            || e.group.is_empty()
+            || e.group.len() > MAX_GROUP_ID_BYTES
+        {
+            return Err(refused());
+        }
+        let anchor = FounderGenesisAnchorData {
+            group: e.group.to_vec(),
+            founder: e.signer,
+            profile: e.profile,
+            admission: catcoms_replication::chat::owner_facts::OwnerFactId::from_bytes(
+                *e.admission.as_bytes(),
+            ),
+            tenure: public.profile.tenure(),
+            header: e.header,
+            state: public.header.spec().state,
+        };
+        let result = V2TextFounderAnchorData {
+            anchor,
+            _resources: self.resources.clone(),
+        };
+        // Last: the SAME frames are still the selected O under this guard.
+        self.validate_under_current_guard(guard)?;
+        Ok(result)
+    }
 }

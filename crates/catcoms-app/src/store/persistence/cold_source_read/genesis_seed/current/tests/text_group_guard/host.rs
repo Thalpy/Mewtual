@@ -1,6 +1,8 @@
 //! Actual owning first-promotion facade, separate from ordinary posting or native rollout.
 //! All three inputs are real settled whole owners; no source/node/SDK extractor is used.
 mod create;
+// Founder-as-ordinary-member lane: general verifier, plan and retained-device signing.
+mod member;
 mod recovery;
 use super::*;
 use crate::store::owner_evidence::canonical::text_lane::{
