@@ -13,7 +13,7 @@ dispatch and nonfounder App orchestration are not part of it.
 | Layer | Item | Role |
 |---|---|---|
 | MLS | `MlsDevice::retained_ed25519_key_matches`, `sign_retained_ed25519_bounded` | Allocation-free full-key equality check; bounded sign with the retained `SignatureKeyPair`. No provider, SDK group, export or ratchet. |
-| Core | `V2OrdinarySigningGuard::signer_data` | The admitted Draft's full signer, so a Sync signer can refuse a wrong key BEFORE `begin_key`. DATA only. |
+| Core | `V2OrdinarySigningGuard::{signer_data, spec_data}` | The admitted Draft's full signer and spec, so a Sync signer can refuse a wrong key or a Draft not built from this request's draw BEFORE `begin_key`. DATA only. |
 | Sync | `V2MemberDraftInputs`, `V2MemberSignRefusal` | One request's once-only Clock/nonce cell, bound at first draw to the exact node (founder seed observation or `RegistrySyncInstance`). |
 | Sync | `UnboundV2GenesisNode::{ordinary_member_signer_data, draw_ordinary_draft_inputs, sign_ordinary_admitted}` | Founder vertical. Reuses the founder Create producer's closed source check unchanged; shares nothing with the Append lane. |
 | Sync | `ChannelSync::{ordinary_member_signer_data, draw_ordinary_draft_inputs, sign_ordinary_admitted}` | Joined-member seams on the live node. Consumed by the separate joined-member source (not yet delivered). |
@@ -40,9 +40,12 @@ relabel it as a general source. It is sound only under all of these, each enforc
 - Every key cut repeats `validate_under_current_guard` on the SAME captured O frames
   (byte equality) before Core admission, so an advanced O refuses with no key call.
 - The member lane and the founder Create lane are mutually exclusive on one host: the
-  founder token lookup refuses while the lane exists, and the lane refuses while any
-  founder lookup/request/resident state exists. Two token namespaces never author for one
-  request.
+  founder token lookup and the founder next-request entry refuse while the lane exists,
+  and the lane refuses while any founder lookup/request/resident state exists. Two token
+  namespaces never author for one request.
+- The anchor producer refuses while a founder `text.wal` or `text.wal.stage.v1` exists
+  (only a proven NotFound is absence), so a crash-left founder transaction can never be
+  recovered later beside member authoring for the same request.
 
 A later governing prefix (any Add, Append or Remove) needs the separate replay producer
 owned by the joined-member/governance work. This vertical refuses rather than guessing.
@@ -60,27 +63,43 @@ owned by the joined-member/governance work. This vertical refuses rather than gu
 5. One immutable Draft with canonical parents; ONE Plan for it with caller-supplied
    dependency loans sorted into Core's order, each resolved to a current Admission.
 6. Key cut inside `with_v2_text_current` plus the group guard: domain source, selected-O
-   proof (IO) and the node's full source check, all BEFORE `admit_signing`. After it only
-   the node's allocation-free, SDK-free origin/key checks and the one bounded key call.
-   The node caches raw64 in the Plan before returning.
+   proof (IO) and the node's full source check, all BEFORE `admit_signing`. After it, only
+   the node's cut runs: the draw cell must name this exact node, the Draft must carry
+   exactly that cell's drawn time and nonce, the genesis scope reservation must still be
+   live (a cancellation flag read), and the retained key must equal the Draft signer. No
+   IO, allocation, codec or SDK lookup; then the one bounded key call. The node caches
+   raw64 in the Plan before returning.
 7. Completion outside writers into `MemberSignedOriginal`.
 
 ## Request parents and tokens
 
 The lane never derives parents from tips or ledger state. Parents are exactly the request's
-list, canonicalised once (sort, dedup, refuse more than 64) by the function that also
-builds `spec.parents`; a Create must name exactly its reply target. The request composer
-must persist the exact token, channel, body and parent list it sent: a retry after restart
-with different parents is a conflict by design, not a hit (member outbox lookup).
+list: at most 64 entries AS SUPPLIED (bounded before dedup and before any fee), then
+canonicalised once (sort, dedup) by the function that also builds `spec.parents`; a Create
+must name exactly its reply target. Every call, including retries, re-checks those shape
+bounds before any comparison or dependency resolution. The request composer must persist
+the exact token, channel, body and parent list it sent: a retry after restart with
+different parents is a conflict by design, not a hit (member outbox lookup).
 
-One pending request per lane. A finished (saved or abandoned) token cannot author again in
-this host lifetime; the bounded ring keeps the last 64. Cross-restart and older-token
-deduplication is the member outbox's exact token lookup, which must run before authoring.
+One pending request per lane. A finished token (saved, abandoned or forgotten) cannot author
+again in this host lifetime; the bounded ring keeps the last 64. Cross-restart and
+older-token deduplication is the member outbox's exact token lookup, which must run before
+authoring.
 
-`take_member_signed_original` moves the original out and leaves the request Lent with its
-fee. `restore` accepts only the same token, the exact lent ActionId and the Plan's
-Admission. `finish_member_request_saved` releases the request after SavedLocal or
-AlreadySaved. `abandon` refuses while a completed original exists.
+- `take_member_signed_original` moves the original out and leaves the request Lent with its
+  fee.
+- `restore_member_signed_original` accepts only the same token, the exact lent ActionId,
+  the Plan's Admission and the Plan's own cached signature bytes.
+- `finish_member_request_saved(token, receipt ActionId)` releases the request after
+  SavedLocal or AlreadySaved and returns whether the saved original is the lent one. When it
+  is not (AlreadySaved naming an earlier signing of the same request), the caller must drop
+  its lent copy and never publish it; the outbox's stored entry is the only published one.
+- `abandon_member_request` retires a request that was never handed out: Pending (refused,
+  terminal or uncertain key work) or Complete (an original the outbox permanently
+  refused). Nothing left the process, so nothing is published. A raw cached by an
+  interrupted cut is completed first, so abandonment never hides it.
+- `forget_lent_member_request` retires a Lent request whose value was lost, and only after
+  the outbox's exact lookup proved Absent. It exists so a lost value cannot wedge the lane.
 
 ## Lifecycle and close
 
@@ -115,6 +134,7 @@ These do not establish that the configured pools fit activation.
   outbox's job after save.
 - The per-channel ledgers are empty view anchors; the Plan's channel binding does not follow
   the real chat projection.
-- A crash-left founder A WAL at generation 1 is not excluded by the anchor producer; it
-  cannot change the governing Header (that needs B), and the founder lane cannot resume on a
-  host whose member lane exists. Cross-host interplay is a follow-up.
+- A founder WAL that appears AFTER a lane already holds its anchor is excluded only by lane
+  exclusivity on this host (the founder lane cannot run here). The founder next-request
+  exclusion has no direct regression yet: reaching it needs a completed founder resident.
+- Eight channels per host lifetime; beyond that new channels refuse.

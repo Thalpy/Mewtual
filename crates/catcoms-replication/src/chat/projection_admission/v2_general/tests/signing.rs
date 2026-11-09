@@ -511,6 +511,7 @@ fn admitted_guard_names_the_exact_draft_signer_and_dropping_it_keeps_the_key_ent
         let guard = plan.admit_signing(&draft, &full).unwrap();
         assert_eq!(guard.signer_data(), &full);
         assert_eq!(guard.signer_data(), draft.signer_data());
+        assert!(guard.spec_data() == draft.spec_data());
         assert!(guard.cached_raw64_data().is_none());
     }
     let call = plan

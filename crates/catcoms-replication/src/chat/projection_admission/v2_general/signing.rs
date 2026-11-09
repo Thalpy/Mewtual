@@ -274,6 +274,12 @@ impl<'a> V2OrdinarySigningGuard<'a> {
     pub fn signer_data(&self) -> &[u8; 32] {
         self.draft.signer_data()
     }
+    /// The admitted Draft's immutable spec, as DATA. A Sync signer compares its presented
+    /// time and nonce with the request's once-only draw cell BEFORE `begin_key`, so a Draft
+    /// that did not come from that exact draw refuses without consuming the key entry.
+    pub fn spec_data(&self) -> &crate::chat::ActionSpec {
+        self.draft.spec_data()
+    }
     pub fn cached_raw64_data(&self) -> Option<&[u8; 64]> {
         match &*self.work {
             PlanWork::RawCached(raw) => Some(raw),

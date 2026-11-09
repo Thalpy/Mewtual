@@ -200,14 +200,22 @@ impl std::fmt::Debug for V2MemberDraftInputs {
 }
 
 /// Shared key-cut tail for both node families, run under the held Core reader after the
-/// caller's allocation-free, SDK-free origin negatives. Order is fixed: compare the Draft
-/// signer with the device's RETAINED key (allocation-free), reuse an already cached raw (no
-/// key), mark key entry, make the ONE bounded key call, cache raw immediately. No hook, check,
-/// allocation or callback runs between the key call and `cache_raw64`.
+/// caller's allocation-free, SDK-free origin negatives. Order is fixed: require that the
+/// admitted Draft carries exactly this request's drawn time and nonce (so a draw cell can
+/// never serve a second Draft), compare the Draft signer with the device's RETAINED key
+/// (allocation-free), reuse an already cached raw (no key), mark key entry, make the ONE
+/// bounded key call, cache raw immediately. No hook, check, allocation or callback runs
+/// between the key call and `cache_raw64`.
 pub(crate) fn sign_admitted_with_device<'a>(
     device: &MlsDevice,
+    inputs: &V2MemberDraftInputs,
     guard: V2OrdinarySigningGuard<'a>,
 ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
+    let spec = guard.spec_data();
+    if inputs.drawn_data() != Some((spec.presented_ms, spec.nonce)) {
+        // Not this request's draw. The Plan stays Prepared; nothing was consumed.
+        return Err(V2MemberSignRefusal::Source);
+    }
     let signer = *guard.signer_data();
     if !device.retained_ed25519_key_matches(&signer) {
         // Dropping the guard releases the reader; the Plan stays Prepared for a retry
@@ -297,7 +305,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         guard: V2OrdinarySigningGuard<'a>,
     ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
         inputs.require_joined_origin(self)?;
-        sign_admitted_with_device(&self.device, guard)
+        sign_admitted_with_device(&self.device, inputs, guard)
     }
 }
 

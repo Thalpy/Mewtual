@@ -90,6 +90,7 @@ pub(super) const V2_MEMBER_REQUEST_BYTES: usize = ActionDraft::private_layout_by
     + V2OrdinarySigningPlan::metadata_layout_bytes()
     + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
     + std::mem::size_of::<PendingMemberRequest>()
+    + std::mem::size_of::<MemberSignedOriginal>()
     + MAX_TEXT_BYTES
     + (MAX_PARENTS + 1)
         * (std::mem::size_of::<ActionId>()
@@ -161,12 +162,30 @@ fn same_parent_set(canonical: &[ActionId], given: &[ActionId]) -> bool {
         && canonical.iter().all(|p| given.contains(p))
 }
 
+/// Shape bounds on the BORROWED request, applied on every call (first and retry) before any
+/// copy, hash, fee or dependency resolution. Parents are bounded as supplied, before dedup:
+/// at most 64 entries. Dependencies: at most the 64 parents plus one target.
+fn require_request_shape(request: &V2MemberSignRequest<'_>) -> Result<(), AppError> {
+    let text = match request.body {
+        Body::Create { text, .. } | Body::Edit { text, .. } => text.len(),
+        Body::Delete { .. } | Body::Join { .. } => 0,
+    };
+    if text > MAX_TEXT_BYTES
+        || request.parents.len() > MAX_PARENTS
+        || request.dependencies.len() > MAX_PARENTS + 1
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 /// What the request has produced so far. Never serialized; never authority.
 enum SignedState {
     /// No completed original yet (draw/Draft/Plan/key work may be in progress).
     Pending,
-    /// The exact original, completed outside writers from the Plan's cached raw64.
-    Complete(MemberSignedOriginal),
+    /// The exact original, completed outside writers from the Plan's cached raw64. Boxed:
+    /// the custody is large next to the other states.
+    Complete(Box<MemberSignedOriginal>),
     /// Moved to the outbox caller; only this exact ActionId under this Plan's Admission may
     /// come back. The request (and its fee) stays until SavedLocal or explicit abandonment.
     Lent(ActionId),
@@ -190,16 +209,7 @@ struct PendingMemberRequest {
 impl PendingMemberRequest {
     fn prepare(store: &ServerStore, request: &V2MemberSignRequest<'_>) -> Result<Self, AppError> {
         // Shape checks on borrowed DATA: nothing is copied or hashed before the fee.
-        let text = match request.body {
-            Body::Create { text, .. } | Body::Edit { text, .. } => text.len(),
-            Body::Delete { .. } | Body::Join { .. } => 0,
-        };
-        if text > MAX_TEXT_BYTES
-            || request.parents.len() > MAX_PARENTS
-            || request.dependencies.len() > MAX_PARENTS + 1
-        {
-            return Err(refused());
-        }
+        require_request_shape(request)?;
         let pool = &store
             .archive_bootstrap_policy
             .as_ref()
@@ -250,7 +260,7 @@ impl PendingMemberRequest {
             return;
         }
         if let Ok(value) = MemberSignedOriginal::from_completed_plan(plan, original, draft) {
-            self.signed = SignedState::Complete(value);
+            self.signed = SignedState::Complete(Box::new(value));
         }
     }
 
@@ -438,6 +448,9 @@ impl V2MemberLane {
     /// Pure DATA completion plus exact-retry classification, with no positive gate.
     /// `Ok(true)`: this same request already holds (or lent) its completed original.
     fn retry_completed(&mut self, request: &V2MemberSignRequest<'_>) -> Result<bool, AppError> {
+        // Every call, including retries of an existing request, bounds the borrowed input
+        // before any comparison, copy or dependency resolution.
+        require_request_shape(request)?;
         let Some(pending) = self.request.as_deref_mut() else {
             if self.finished.contains(&request.token) {
                 return Err(refused());
@@ -533,7 +546,8 @@ impl V2MemberLane {
                         .map_err(|_| refused())?,
                 ));
             }
-            resolved.sort_by_key(|(action, _)| action.id());
+            // `SignedAction::id` re-encodes and hashes; compute each key once.
+            resolved.sort_by_cached_key(|(action, _)| action.id());
             let dependencies: Vec<V2OrdinaryDependency<'_>> = resolved
                 .iter()
                 .map(|(action, admission)| V2OrdinaryDependency::new(action, admission))
@@ -578,7 +592,7 @@ impl V2MemberLane {
                 #[cfg(all(test, windows))]
                 note_member_sign_dispatch();
                 let signed = shared
-                    .sign_ordinary_admitted(store, inputs, signing)
+                    .sign_ordinary_admitted(inputs, signing)
                     .map_err(|_| refused())?;
                 // The raw64 is already in the Plan. A close requested here (lock/Remove)
                 // must still wait for this admitted reader; see the regression cut.
@@ -614,7 +628,7 @@ impl V2MemberLane {
         match std::mem::replace(&mut pending.signed, SignedState::Pending) {
             SignedState::Complete(value) => {
                 pending.signed = SignedState::Lent(value.action().id());
-                Ok(value)
+                Ok(*value)
             }
             other => {
                 pending.signed = other;
@@ -623,6 +637,8 @@ impl V2MemberLane {
         }
     }
 
+    /// Byte-exact: the same token, the exact lent ActionId, the Plan's Admission AND the
+    /// Plan's own cached raw64 signature. An ActionId alone does not cover the signature.
     fn restore_signed(
         &mut self,
         token: [u8; 32],
@@ -636,40 +652,65 @@ impl V2MemberLane {
             return Err((value, refused()));
         };
         let admission = pending.plan.as_ref().map(|plan| plan.admission_id_data());
+        let raw = match (&pending.plan, &pending.original, &pending.draft) {
+            (Some(plan), Some(original), Some(draft)) => plan
+                .borrow_cached_raw64_data(original, draft)
+                .ok()
+                .flatten()
+                .copied(),
+            _ => None,
+        };
         match pending.signed {
             SignedState::Lent(id)
-                if id == value.action().id() && admission == Some(value.admission()) =>
+                if id == value.action().id()
+                    && admission == Some(value.admission())
+                    && raw.as_ref() == Some(value.action().signature()) =>
             {
-                pending.signed = SignedState::Complete(value);
+                pending.signed = SignedState::Complete(Box::new(value));
                 Ok(())
             }
             _ => Err((value, refused())),
         }
     }
 
-    fn finish(&mut self, token: [u8; 32], require_lent: bool) -> Result<(), AppError> {
+    /// Retire the request and its fee; the token cannot author again in this host lifetime.
+    /// Returns, for `Saved`, whether the outbox's saved original is the one this lane lent.
+    fn finish(&mut self, token: [u8; 32], mode: FinishMode) -> Result<bool, AppError> {
         let pending = self
             .request
-            .as_deref()
+            .as_deref_mut()
             .filter(|pending| pending.token == token)
             .ok_or_else(refused)?;
-        let allowed = match pending.signed {
-            SignedState::Lent(_) => require_lent,
-            // Abandonment never discards a completed signed original by accident.
-            SignedState::Pending => !require_lent,
-            SignedState::Complete(_) => false,
+        // A raw cached by an interrupted cut becomes Complete before classification, so the
+        // state below never hides a completed original behind `Pending`.
+        pending.complete_cached();
+        let same = match (&pending.signed, mode) {
+            (SignedState::Lent(lent), FinishMode::Saved(saved)) => *lent == saved,
+            (SignedState::Lent(_), FinishMode::ForgetLent) => false,
+            // Discarding an original that never left process memory publishes nothing. A
+            // Pending request may hold a terminal unverifiable raw; that is dropped too.
+            (SignedState::Pending | SignedState::Complete(_), FinishMode::Abandon) => false,
+            _ => return Err(refused()),
         };
-        if !allowed {
-            return Err(refused());
-        }
         if self.finished.len() == MAX_FINISHED_TOKENS {
             self.finished.pop_front();
         }
         self.finished.push_back(token);
         // Outside every writer: the Plan, Draft, cells and request fee drain here.
         drop(self.request.take());
-        Ok(())
+        Ok(same)
     }
+}
+
+/// How a request leaves the lane. Never serialized.
+#[derive(Clone, Copy)]
+enum FinishMode {
+    /// The outbox reported SavedLocal/AlreadySaved; the receipt's ActionId.
+    Saved(ActionId),
+    /// No original was handed out (Pending) or it never left this lane (Complete).
+    Abandon,
+    /// The lent value was lost and the outbox lookup proved Absent.
+    ForgetLent,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
@@ -741,20 +782,26 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         }
     }
 
-    /// The outbox reported SavedLocal (or AlreadySaved) for the lent original: release the
-    /// request and its fee; the token cannot author again in this host lifetime.
+    /// The outbox reported SavedLocal or AlreadySaved for this token: release the request and
+    /// its fee; the token cannot author again in this host lifetime. `saved_action` is the
+    /// receipt's ActionId. Returns `true` when that is the original this lane lent. `false`
+    /// means AlreadySaved named an EARLIER original (for example the same request signed
+    /// under another nonce before a restart): the caller must drop its lent copy and never
+    /// publish it; the outbox's stored entry is the only original that will be published.
     pub(in crate::store) fn finish_member_request_saved(
         &mut self,
         token: [u8; 32],
-    ) -> Result<(), AppError> {
+        saved_action: ActionId,
+    ) -> Result<bool, AppError> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
-            .finish(token, true)
+            .finish(token, FinishMode::Saved(saved_action))
     }
 
-    /// Drop a request that has no completed original (refused, terminal or uncertain key
-    /// work). The token is retired for this host lifetime; it is never re-authored here.
+    /// Drop a request that was never handed out: refused, terminal or uncertain key work, or
+    /// a completed original the outbox permanently refused. Nothing left process memory, so
+    /// nothing is published. The token is retired for this host lifetime.
     pub(in crate::store) fn abandon_member_request(
         &mut self,
         token: [u8; 32],
@@ -762,7 +809,22 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
-            .finish(token, false)
+            .finish(token, FinishMode::Abandon)
+            .map(|_| ())
+    }
+
+    /// The lent original was lost (a dropped outbox preparation or an unwind) AND the member
+    /// outbox's exact token lookup proved Absent: retire the request so the lane is not
+    /// wedged. Without that Absent proof the caller must not call this; the token is retired.
+    pub(in crate::store) fn forget_lent_member_request(
+        &mut self,
+        token: [u8; 32],
+    ) -> Result<(), AppError> {
+        self.member
+            .as_deref_mut()
+            .ok_or_else(refused)?
+            .finish(token, FinishMode::ForgetLent)
+            .map(|_| ())
     }
 }
 

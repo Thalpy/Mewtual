@@ -244,6 +244,12 @@ fn after_stop_completion_still_returns_the_same_original_as_data() {
     let draft = draft(&f, 5);
     let (mut plan, original) = signed_plan(&f, &draft);
     let before = MemberSignedOriginal::from_completed_plan(&plan, &original, &draft).unwrap();
+    // While live, a RawCached Plan is still admitted (cached-raw retries rely on it), so the
+    // refusal below is caused by Stop and nothing else.
+    drop(
+        plan.admit_signing(&draft, &f.key.verifying_key().to_bytes())
+            .unwrap(),
+    );
     f.live.0.store(false, Ordering::Release);
     // Stop refuses every fresh admission...
     assert!(plan

@@ -9,7 +9,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
 
 fn member_node(
-    hub: &Hub,
+    hub: &Arc<Hub>,
     seed: u64,
     peer: u64,
 ) -> (
@@ -157,7 +157,7 @@ fn another_incarnation_or_device_refuses_before_the_key_entry() {
     let stranger = MlsDevice::generate().unwrap();
     let guard = plan.admit_signing(&draft, &signer).unwrap();
     assert_eq!(
-        sign_admitted_with_device(&stranger, guard).unwrap_err(),
+        sign_admitted_with_device(&stranger, &slot, guard).unwrap_err(),
         V2MemberSignRefusal::Key
     );
     assert_eq!(key_calls_for_test(), calls);
@@ -193,12 +193,53 @@ fn closed_origin_refuses_admission_but_cached_raw_completes_as_historical_data()
     let original = plan.observe_original();
     let guard = plan.admit_signing(&draft, &signer).unwrap();
     drop(node.sign_ordinary_admitted(&slot, guard).unwrap());
+    // Live: a RawCached Plan is still admitted (that is how cached-raw retries work), so the
+    // refusal below is caused by Stop and nothing else.
+    drop(plan.admit_signing(&draft, &signer).unwrap());
     // Source Stop: no fresh admission, but the original raw is still exact DATA.
     g.live.0.store(false, std::sync::atomic::Ordering::Release);
     assert!(plan.admit_signing(&draft, &signer).is_err());
     let signed = plan.complete_cached_raw64_data(&original, &draft).unwrap();
     assert!(signed.verify());
     assert!(signed.id() == draft.action_id_data());
+}
+
+#[test]
+fn a_draft_not_built_from_this_requests_draw_refuses_before_the_key_entry() {
+    let hub = Hub::new();
+    let (mut node, _clock, g) = member_node(&hub, 907, 1);
+    let instance = node.registry_instance();
+    let signer = node.ordinary_member_signer_data(&instance).unwrap();
+    let mut slot = V2MemberDraftInputs::new();
+    let (time, mut nonce) = node
+        .draw_ordinary_draft_inputs(&instance, &mut slot)
+        .unwrap();
+    // Same node, same bound cell, but the Draft carries another nonce (a second Draft
+    // reusing one draw). The cut must refuse and leave the Plan unconsumed.
+    nonce[0] ^= 1;
+    let other = create_draft(
+        &g,
+        &g.founder,
+        signer,
+        (time, nonce),
+        "second draft, one draw",
+    );
+    let mut plan = g
+        .verifier
+        .prepare_ordinary_signing_plan(&other, &g.founder, &[], &g.view)
+        .unwrap();
+    let original = plan.observe_original();
+    let calls = key_calls_for_test();
+    let guard = plan.admit_signing(&other, &signer).unwrap();
+    assert_eq!(
+        node.sign_ordinary_admitted(&slot, guard).unwrap_err(),
+        V2MemberSignRefusal::Source
+    );
+    assert_eq!(key_calls_for_test(), calls);
+    assert!(plan
+        .borrow_cached_raw64_data(&original, &other)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

@@ -53,7 +53,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         {
             return Err(V2MemberSignRefusal::Source);
         }
-        let result = sign_admitted_with_device(&s.device, guard);
+        let result = sign_admitted_with_device(&s.device, inputs, guard);
         // Test-only cancellation cut AFTER the raw was cached in the Plan, never before.
         #[cfg(test)]
         after_member_sign();

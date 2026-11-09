@@ -257,7 +257,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         if let Some(next) = self.next_request_preparation.as_mut() {
             next.drain_originals()?;
         }
-        if self.request_preparation.is_some() || self.selected.is_some() {
+        // An ordinary-member lane excludes every founder Create entry on this host, not only
+        // through the first-request token lookup: one token never authors in two namespaces.
+        if self.request_preparation.is_some() || self.selected.is_some() || self.member.is_some() {
             return Err(refused());
         }
         let resident = self.resident.as_ref().ok_or_else(refused)?;

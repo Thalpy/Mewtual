@@ -143,22 +143,20 @@ macro_rules! node_call_throughs {
             }
 
             /// Inside the host's Current/group guard, with Core's original reader held by
-            /// `guard`. Cached negatives only before the node's key cut; raw64 is cached in
-            /// the Plan by the node itself, so no late check here can lose it. `inputs` is
+            /// `guard`. The caller ran the full original-owner negatives (via
+            /// `text_ordinary_member_signer`) inside this SAME Current callback just before
+            /// Core admission, so nothing but the node's own key cut runs here. raw64 is
+            /// cached in the Plan by the node itself, so no late check can lose it. `inputs` is
             /// the request's draw cell: the node refuses a request drawn on another seed.
             pub(in crate::store::persistence::cold_source_read::genesis_seed::current)
             fn sign_text_ordinary_admitted<'a>(
                 &self,
-                store: &crate::store::ServerStore,
                 inputs: &catcoms_sync::owner_v2::V2MemberDraftInputs,
                 guard: catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
             ) -> Result<
                 catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
                 catcoms_sync::owner_v2::V2MemberSignRefusal,
             > {
-                use catcoms_sync::owner_v2::V2MemberSignRefusal;
-                self.require_text_original_data(store)
-                    .map_err(|_| V2MemberSignRefusal::Source)?;
                 self.node.sign_ordinary_admitted(inputs, guard)
             }
         }

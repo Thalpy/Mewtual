@@ -218,7 +218,6 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
     /// reader held by `guard`. The node caches raw64 in the Plan before returning.
     pub(super) fn sign_ordinary_admitted<'a>(
         &self,
-        store: &ServerStore,
         inputs: &catcoms_sync::owner_v2::V2MemberDraftInputs,
         guard: catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
     ) -> Result<
@@ -226,9 +225,9 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         catcoms_sync::owner_v2::V2MemberSignRefusal,
     > {
         match &self.core {
-            OwnedCurrent::Warm(c) => c.sign_text_ordinary_admitted(store, inputs, guard),
-            OwnedCurrent::Cold(c) => c.sign_text_ordinary_admitted(store, inputs, guard),
-            OwnedCurrent::Repaired(c) => c.sign_text_ordinary_admitted(store, inputs, guard),
+            OwnedCurrent::Warm(c) => c.sign_text_ordinary_admitted(inputs, guard),
+            OwnedCurrent::Cold(c) => c.sign_text_ordinary_admitted(inputs, guard),
+            OwnedCurrent::Repaired(c) => c.sign_text_ordinary_admitted(inputs, guard),
         }
     }
     pub(super) fn borrow_unsigned_append<'a>(

@@ -51,7 +51,10 @@ impl MemberFixture {
         assert!(signed.action().verify());
         assert!(signed.admission() == self.admission);
         let action = signed.action().clone();
-        self.host.finish_member_request_saved(token).unwrap();
+        assert!(self
+            .host
+            .finish_member_request_saved(token, action.id())
+            .unwrap());
         action
     }
 }
@@ -78,6 +81,10 @@ fn promoted(family: usize, number: u64) -> MemberFixture {
     );
     host.retry_empty_promotion(&layout, &mut ChaCha20Rng::seed_from_u64(number ^ 0x55))
         .unwrap();
+    // The empty promotion leaves no founder WAL: the "no WAL" assertions below and the
+    // member anchor's crash-left-WAL refusal both start from that proven state.
+    assert!(!target.join("text.wal").exists());
+    assert!(!target.join("text.wal.stage.v1").exists());
     MemberFixture {
         host,
         target,
@@ -103,6 +110,12 @@ fn plain(token: [u8; 32], body: &Body) -> V2MemberSignRequest<'_> {
         parents: &[],
         dependencies: &[],
     }
+}
+
+fn join_token(index: usize) -> [u8; 32] {
+    let mut token = [0x60; 32];
+    token[..8].copy_from_slice(&(index as u64).to_be_bytes());
+    token
 }
 
 #[test]
@@ -133,7 +146,10 @@ fn actual_three_family_founder_signs_successive_ordinary_sends_without_header_or
             assert!(f.host.take_member_signed_original(token).is_err());
             assert_eq!(member_sign_dispatches_for_test(), dispatches + index + 1);
             encoded.push(signed.action().encode());
-            f.host.finish_member_request_saved(token).unwrap();
+            assert!(f
+                .host
+                .finish_member_request_saved(token, signed.action().id())
+                .unwrap());
             // A finished token can never author again in this host lifetime.
             assert!(f
                 .host
@@ -201,15 +217,13 @@ fn actual_reply_own_edit_delete_join_and_the_maximum_dependency_set_sign_in_any_
         assert!(action.spec().body == body);
         assert!(action.spec().parents == vec![target.id()]);
     }
-    // MAX_PARENTS Joins, then one Edit naming all of them: 64 parents plus the target is the
-    // maximum 65-dependency grammar. Dependencies are supplied in REVERSE order and the
-    // parents unsorted with a duplicate; the host canonicalises both.
+    // MAX_PARENTS Joins, then one Edit naming all of them: 64 distinct parents plus the
+    // target is the maximum 65-dependency grammar. Parents and dependencies are supplied in
+    // REVERSE order; the host canonicalises both.
     let mut joins = Vec::with_capacity(MAX_PARENTS);
     for index in 0..MAX_PARENTS {
-        let mut token = [0x60; 32];
-        token[..8].copy_from_slice(&(index as u64).to_be_bytes());
         joins.push(f.send(
-            token,
+            join_token(index),
             &Body::Join {
                 create: target.id(),
             },
@@ -217,8 +231,7 @@ fn actual_reply_own_edit_delete_join_and_the_maximum_dependency_set_sign_in_any_
             &on_target,
         ));
     }
-    let mut parents: Vec<ActionId> = joins.iter().map(SignedAction::id).rev().collect();
-    parents.push(parents[0]);
+    let parents: Vec<ActionId> = joins.iter().map(SignedAction::id).rev().collect();
     let mut dependencies: Vec<V2MemberDependency<'_>> = joins
         .iter()
         .map(|action| V2MemberDependency { action, admission })
@@ -239,6 +252,27 @@ fn actual_reply_own_edit_delete_join_and_the_maximum_dependency_set_sign_in_any_
     );
     assert_eq!(edit.spec().parents.len(), MAX_PARENTS);
     assert!(edit.spec().parents.windows(2).all(|pair| pair[0] < pair[1]));
+    // A supplied duplicate (63 distinct + 1 repeat, 64 entries) dedups to 63 parents.
+    let mut repeated: Vec<ActionId> = parents[..MAX_PARENTS - 1].to_vec();
+    repeated.push(repeated[0]);
+    let deduped: Vec<V2MemberDependency<'_>> = joins[1..]
+        .iter()
+        .map(|action| V2MemberDependency { action, admission })
+        .chain(std::iter::once(V2MemberDependency {
+            action: &target,
+            admission,
+        }))
+        .collect();
+    let smaller = f.send(
+        [0x72; 32],
+        &Body::Edit {
+            create: target.id(),
+            text: "deduplicated".into(),
+        },
+        &repeated,
+        &deduped,
+    );
+    assert_eq!(smaller.spec().parents.len(), MAX_PARENTS - 1);
     // A full-size Create also signs.
     f.send(
         [0x71; 32],
@@ -247,6 +281,36 @@ fn actual_reply_own_edit_delete_join_and_the_maximum_dependency_set_sign_in_any_
         &[],
     );
     assert_eq!(f.head(), head);
+}
+
+#[test]
+fn sixty_five_supplied_parents_refuse_before_any_fee_draw_or_key() {
+    let mut f = promoted(0, 0x7fa15);
+    let target = f.send([1; 32], &create("target", None), &[], &[]);
+    let dispatches = member_sign_dispatches_for_test();
+    // 64 distinct entries plus one repeat: 65 as supplied. Bounded BEFORE dedup.
+    let mut parents: Vec<ActionId> = (0..MAX_PARENTS)
+        .map(|index| ActionId::from_bytes([index as u8; 32]))
+        .collect();
+    parents.push(parents[0]);
+    let body = Body::Join {
+        create: target.id(),
+    };
+    let request = V2MemberSignRequest {
+        token: [2; 32],
+        channel: 7,
+        body: &body,
+        parents: &parents,
+        dependencies: &[],
+    };
+    assert!(f
+        .host
+        .retry_sign_member_request(&f.layout, request)
+        .is_err());
+    assert_eq!(member_sign_dispatches_for_test(), dispatches);
+    // No request was created and no token retired: a valid request authors next.
+    f.send([2; 32], &create("after a refused shape", None), &[], &[]);
+    assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
 }
 
 #[test]
@@ -348,6 +412,52 @@ fn founder_lane_state_excludes_the_member_lane_before_any_key_call() {
 }
 
 #[test]
+fn a_crash_left_founder_wal_keeps_the_member_lane_closed_until_it_is_gone() {
+    let mut f = promoted(0, 0x7fa35);
+    let dispatches = member_sign_dispatches_for_test();
+    let body = create("member beside an uncertain founder transaction", None);
+    for name in ["text.wal", "text.wal.stage.v1"] {
+        // An uncertain founder transaction (for example a retained A) may still recover.
+        std::fs::write(f.target.join(name), b"crash-left founder work").unwrap();
+        assert!(f
+            .host
+            .retry_sign_member_request(&f.layout, plain([0x52; 32], &body))
+            .is_err());
+        assert_eq!(member_sign_dispatches_for_test(), dispatches);
+        std::fs::remove_file(f.target.join(name)).unwrap();
+    }
+    // With the founder work gone, the SAME pending request completes.
+    f.host
+        .retry_sign_member_request(&f.layout, plain([0x52; 32], &body))
+        .unwrap();
+    assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
+}
+
+#[test]
+fn a_changed_selected_head_under_an_existing_lane_refuses_before_the_key() {
+    let mut f = promoted(0, 0x7fa38);
+    f.send([1; 32], &create("lane established", None), &[], &[]);
+    let dispatches = member_sign_dispatches_for_test();
+    let original_head = f.head();
+    // The selected O is no longer the exact frame the anchor and verifier were built on.
+    let mut changed = original_head.clone();
+    changed.push(0);
+    std::fs::write(f.target.join("head.bin"), &changed).unwrap();
+    let body = create("after the head moved", None);
+    assert!(f
+        .host
+        .retry_sign_member_request(&f.layout, plain([2; 32], &body))
+        .is_err());
+    assert_eq!(member_sign_dispatches_for_test(), dispatches);
+    // Restoring the exact frame lets the SAME pending request finish with one key call.
+    std::fs::write(f.target.join("head.bin"), &original_head).unwrap();
+    f.host
+        .retry_sign_member_request(&f.layout, plain([2; 32], &body))
+        .unwrap();
+    assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
+}
+
+#[test]
 fn close_during_the_admitted_key_operation_waits_for_its_reader_and_keeps_the_original() {
     let mut f = promoted(0, 0x7fa40);
     let dispatches = member_sign_dispatches_for_test();
@@ -362,7 +472,10 @@ fn close_during_the_admitted_key_operation_waits_for_its_reader_and_keeps_the_or
     // The already admitted operation still produced its exact original.
     let signed = f.host.take_member_signed_original([0x61; 32]).unwrap();
     assert!(signed.action().verify());
-    f.host.finish_member_request_saved([0x61; 32]).unwrap();
+    assert!(f
+        .host
+        .finish_member_request_saved([0x61; 32], signed.action().id())
+        .unwrap());
     // No fresh signing after the close; the real drain now completes.
     let next = create("after close", None);
     assert!(f
@@ -396,7 +509,10 @@ fn a_late_source_negative_after_the_cached_raw_still_completes_without_resigning
         assert!(signed.action().verify());
         assert!(signed.admission() == f.admission);
         // Nothing new can be authored after the revocation.
-        f.host.finish_member_request_saved([0x71; 32]).unwrap();
+        assert!(f
+            .host
+            .finish_member_request_saved([0x71; 32], signed.action().id())
+            .unwrap());
         let next = create("after the revocation", None);
         assert!(f
             .host
@@ -415,6 +531,7 @@ fn restore_accepts_only_the_exact_original_it_lent() {
         .unwrap();
     let first = f.host.take_member_signed_original([0x81; 32]).unwrap();
     let first_bytes = first.action().encode();
+    let first_id = first.action().id();
     // Wrong token: the value comes back whole.
     let (first, _) = f
         .host
@@ -426,7 +543,10 @@ fn restore_accepts_only_the_exact_original_it_lent() {
         .unwrap();
     let first = f.host.take_member_signed_original([0x81; 32]).unwrap();
     assert_eq!(first.action().encode(), first_bytes);
-    f.host.finish_member_request_saved([0x81; 32]).unwrap();
+    assert!(f
+        .host
+        .finish_member_request_saved([0x81; 32], first_id)
+        .unwrap());
     let second_body = create("second", None);
     f.host
         .retry_sign_member_request(&f.layout, plain([0x82; 32], &second_body))
@@ -441,7 +561,57 @@ fn restore_accepts_only_the_exact_original_it_lent() {
     f.host
         .restore_member_signed_original([0x82; 32], second)
         .unwrap();
-    // A completed, unlent original is never discarded by abandonment.
-    assert!(f.host.abandon_member_request([0x82; 32]).is_err());
-    assert!(f.host.take_member_signed_original([0x82; 32]).is_ok());
+    // A completed original the outbox permanently refused can be abandoned: it never left
+    // this process, so nothing is published, and the lane is not wedged.
+    f.host.abandon_member_request([0x82; 32]).unwrap();
+    assert!(f.host.take_member_signed_original([0x82; 32]).is_err());
+    f.send([0x83; 32], &create("after abandonment", None), &[], &[]);
+}
+
+#[test]
+fn a_lost_lent_original_is_forgotten_only_explicitly_and_the_lane_continues() {
+    let mut f = promoted(0, 0x7fa70);
+    let body = create("lent then lost", None);
+    f.host
+        .retry_sign_member_request(&f.layout, plain([0x91; 32], &body))
+        .unwrap();
+    // The outbox preparation holding the lent value is dropped (or unwinds).
+    drop(f.host.take_member_signed_original([0x91; 32]).unwrap());
+    // Lent: neither abandonment nor another token can proceed.
+    assert!(f.host.abandon_member_request([0x91; 32]).is_err());
+    let next = create("next request", None);
+    assert!(f
+        .host
+        .retry_sign_member_request(&f.layout, plain([0x92; 32], &next))
+        .is_err());
+    // After the outbox lookup proved Absent, the caller forgets it explicitly.
+    f.host.forget_lent_member_request([0x91; 32]).unwrap();
+    assert!(f
+        .host
+        .retry_sign_member_request(&f.layout, plain([0x91; 32], &body))
+        .is_err());
+    f.send([0x92; 32], &next, &[], &[]);
+}
+
+#[test]
+fn already_saved_naming_an_earlier_original_is_reported_and_retires_the_token() {
+    let mut f = promoted(0, 0x7fa80);
+    let earlier = f.send([0xa1; 32], &create("an earlier original", None), &[], &[]);
+    let body = create("signed again before a restart", None);
+    f.host
+        .retry_sign_member_request(&f.layout, plain([0xa2; 32], &body))
+        .unwrap();
+    let lent = f.host.take_member_signed_original([0xa2; 32]).unwrap();
+    assert!(lent.action().id() != earlier.id());
+    // AlreadySaved's receipt names a different ActionId: the lent copy must be dropped by
+    // the caller and never published; the host reports the difference and retires the token.
+    assert!(!f
+        .host
+        .finish_member_request_saved([0xa2; 32], earlier.id())
+        .unwrap());
+    drop(lent);
+    assert!(f
+        .host
+        .retry_sign_member_request(&f.layout, plain([0xa2; 32], &body))
+        .is_err());
 }

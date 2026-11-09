@@ -25,10 +25,12 @@ export or ratchet. The verifier's HOST anchor comes from the authenticated origi
 and the lane requires the selected O to be the empty generation-1 promotion, re-proved by
 byte comparison under the Current guard before every Core admission. While it holds the
 governing prefix is exactly genesis; when it stops holding, signing refuses. The lane
-excludes founder Create on the same host, so one token cannot be authored in two
-namespaces. Under Core's held reader only allocation-free, SDK-free checks run: the
-request's draw cell must name the exact node it was drawn on (seed Weak or sync
-incarnation), and the retained key must equal the Draft signer, before the one key entry.
+excludes founder Create on the same host, and the anchor refuses while a crash-left founder
+WAL or WAL stage exists, so one token cannot be authored in two namespaces. Under Core's
+held reader no IO, allocation, codec or SDK lookup runs: the request's draw cell must name
+the exact node it was drawn on (seed Weak or sync incarnation), the Draft must carry that
+cell's exact drawn time and nonce, the genesis scope cancellation flag must be clear, and
+the retained key must equal the Draft signer, before the one key entry.
 Raw64 is cached in the Plan before any late check; a completed original stays retrievable
 as DATA after lock and grants no save or publication right. Not covered: nonfounder
 sources, later governing prefixes, removal/rejoin in App, native command credentials,
