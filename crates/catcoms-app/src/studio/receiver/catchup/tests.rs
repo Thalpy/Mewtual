@@ -2469,7 +2469,11 @@ struct SigningOwner {
     operations: usize,
 }
 
-async fn signing_owner(seed: u64, permits: usize) -> SigningOwner {
+// Keep both original Servers and the Store on the heap across setup and test
+// awaits. Returning the whole fixture by value also nests it in each caller's
+// future; the captured-preparation join then exceeds the default debug test
+// stack even though production spawns that bounded work separately.
+async fn signing_owner(seed: u64, permits: usize) -> Box<SigningOwner> {
     let clock = ManualClock::new(1000);
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let hub = Hub::new();
@@ -2531,7 +2535,7 @@ async fn signing_owner(seed: u64, permits: usize) -> SigningOwner {
     for _ in 0..30 {
         receiver.run(&mut server, &mut store, 83, None).unwrap();
         if let Some(work) = receiver.detach(&mut server) {
-            receiver.complete(&mut server, work.run(None).await);
+            receiver.complete(&mut server, Box::pin(work.run(None)).await);
         }
         if receiver.handoff.stage_for_test() == Some("signing") {
             break;
@@ -2543,7 +2547,7 @@ async fn signing_owner(seed: u64, permits: usize) -> SigningOwner {
         "the fixture never reached H3, so this proves nothing"
     );
     assert_eq!(receiver.handoff.remaining_for_test(), Some(operations));
-    SigningOwner {
+    Box::new(SigningOwner {
         _hub: hub,
         _root: root,
         server,
@@ -2552,7 +2556,7 @@ async fn signing_owner(seed: u64, permits: usize) -> SigningOwner {
         receiver,
         target,
         operations,
-    }
+    })
 }
 
 /// Displace the target's warm graph by reading another document, so serving the target needs a
@@ -2627,7 +2631,7 @@ async fn deliver_head_request(
 /// source, and Bob's request was dropped unanswered (`Transport(NoResponse)`).
 #[tokio::test]
 async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served() {
-    let mut o = signing_owner(1409, 4).await;
+    let mut o = Box::pin(signing_owner(1409, 4)).await;
     let operations = o.operations;
 
     // 1. The observed visit. Nothing the priority gate answers is pending at its entry, so the
@@ -2751,7 +2755,7 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
 /// from signing past it. The worker barrier holds that exact state across a real receiver visit.
 #[tokio::test]
 async fn a_running_captured_checkpoint_preparation_alone_makes_a_signing_slice_yield() {
-    let mut o = signing_owner(1417, 4).await;
+    let mut o = Box::pin(signing_owner(1417, 4)).await;
 
     // Leave enough H3 work for a later visit to expose an erroneous slice, then make serving the
     // target require the detached preparation whose lifetime this regression isolates.
@@ -2799,7 +2803,9 @@ async fn a_running_captured_checkpoint_preparation_alone_makes_a_signing_slice_y
         .expect("the captured source preparation did not detach");
     assert_eq!(work.kind_for_test(), "prepare");
     let (work, entered, release) = work.pause_preparation_for_test();
-    let (result, ()) = tokio::join!(work.run(None), async {
+    // Mirror the heap residence of the production spawned job without adding a
+    // task or changing the barrier/receiver interleaving this test isolates.
+    let (result, ()) = tokio::join!(Box::pin(work.run(None)), async {
         tokio::time::timeout(std::time::Duration::from_secs(60), entered)
             .await
             .expect("the source preparation worker never reached its barrier")
@@ -2870,7 +2876,8 @@ async fn drive_transfer_to_completion(o: &mut SigningOwner) -> bool {
             .run(&mut o.server, &mut o.store, 83, None)
             .unwrap();
         if let Some(work) = o.receiver.detach(&mut o.server) {
-            o.receiver.complete(&mut o.server, work.run(None).await);
+            o.receiver
+                .complete(&mut o.server, Box::pin(work.run(None)).await);
         }
         if changed == Some(o.target) {
             assert!(
@@ -2898,7 +2905,7 @@ async fn drive_transfer_to_completion(o: &mut SigningOwner) -> bool {
 /// releases the permit, and the still-current request captures and is served.
 #[tokio::test]
 async fn a_request_waiting_for_the_signing_jobs_permit_does_not_stall_signing() {
-    let mut o = signing_owner(1419, 1).await;
+    let mut o = Box::pin(signing_owner(1419, 1)).await;
     displace_warm_graph(&mut o);
     let fetch = deliver_head_request(&mut o).await;
 

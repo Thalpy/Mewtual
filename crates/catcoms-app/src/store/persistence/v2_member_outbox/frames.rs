@@ -698,12 +698,12 @@ pub(super) fn encode_chunk_page(
 }
 
 /// Unwrap a chunk page, returning the borrowed general chunk bytes for `ActionChunk::decode`.
-pub(super) fn decode_chunk_page<'a>(
+pub(super) fn decode_chunk_page(
     context: MemberOutboxContextId,
     ordinal: u64,
     index: usize,
-    raw: &'a [u8],
-) -> Result<&'a [u8], AppError> {
+    raw: &[u8],
+) -> Result<&[u8], AppError> {
     let mut d = input(raw, CHUNK_PLAIN_CAP, CHUNK_DOMAIN)?;
     if b32(&mut d)? != *context.as_bytes()
         || u64_of(&mut d)? != ordinal

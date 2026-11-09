@@ -3,6 +3,44 @@ use catcoms_rt::{Hub, ManualClock};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+/// Cold SDK restore recreates an unordered storage map. Compare every row and
+/// all surrounding bindings without mistaking a new map's iteration order for
+/// a state change. Deliberately omit Debug so an assertion cannot print secret
+/// signer/provider contents.
+#[derive(PartialEq, Eq)]
+struct SnapshotContents<'a> {
+    rows: std::collections::BTreeMap<&'a [u8], &'a [u8]>,
+    signer: &'a [u8],
+    group: &'a [u8],
+    non_mls_suffix: &'a [u8],
+}
+
+fn snapshot_contents(raw: &[u8]) -> SnapshotContents<'_> {
+    let mut outer = catcoms_wire::Decoder::new(raw);
+    let mut mls = catcoms_wire::Decoder::new(outer.get_bytes().unwrap());
+    let non_mls_suffix = &raw[raw.len() - outer.remaining()..];
+    let mut storage = catcoms_wire::Decoder::new(mls.get_bytes().unwrap());
+    let mut rows = std::collections::BTreeMap::new();
+    for _ in 0..storage.get_u32().unwrap() {
+        let key = storage.get_bytes().unwrap();
+        let value = storage.get_bytes().unwrap();
+        assert!(
+            rows.insert(key, value).is_none(),
+            "duplicate SDK fixture row"
+        );
+    }
+    storage.finish().unwrap();
+    let signer = mls.get_bytes().unwrap();
+    let group = mls.get_bytes().unwrap();
+    mls.finish().unwrap();
+    SnapshotContents {
+        rows,
+        signer,
+        group,
+        non_mls_suffix,
+    }
+}
+
 #[test]
 fn owner_evidence_private_profile_comes_from_actual_found_and_never_mutates_or_exports() {
     let mut owner = ChannelSync::found(
@@ -277,6 +315,11 @@ async fn owner_evidence_raw_tail_is_strict_unbound_and_refuses_positive_owner_co
     )
     .unwrap();
     assert!(restored.owner_evidence_unbound());
+    let before_refusals = restored.snapshot().unwrap();
+    assert!(
+        snapshot_contents(&before_refusals) == snapshot_contents(&bytes),
+        "cold restore must preserve every SDK row, signer, group and non-MLS field"
+    );
     assert!(restored.durable_send_context().is_err());
     let epoch = restored.group.epoch();
     let admin = restored.device.device_id();
@@ -301,7 +344,10 @@ async fn owner_evidence_raw_tail_is_strict_unbound_and_refuses_positive_owner_co
     assert!(restored.docs.is_empty());
     assert!(restored.admin_roster.is_empty());
     assert!(restored.outbox.is_empty());
-    assert_eq!(restored.snapshot().unwrap().as_slice(), bytes.as_slice());
+    assert!(
+        restored.snapshot().unwrap().as_slice() == before_refusals.as_slice(),
+        "refused controls must leave the same restored node byte-for-byte unchanged"
+    );
     let mut trailing = bytes.to_vec();
     trailing.extend_from_slice(&0u32.to_be_bytes());
     assert!(ChannelSync::restore(

@@ -278,7 +278,7 @@ impl Row {
 
 fn nibble(path: &[u8; 32], depth: usize) -> u8 {
     let byte = path[depth / 2];
-    if depth % 2 == 0 {
+    if depth.is_multiple_of(2) {
         byte >> 4
     } else {
         byte & 15

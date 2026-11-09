@@ -1,6 +1,49 @@
 # Mewtual; Handover
 
-## Published integration and current validation (8 November)
+## Runtime regression corrections (9 November; broad retry still required)
+
+The serial backend pipeline finished with root exit 101, native exit 0 and strict
+root lint exit 101. The root run recorded 4,935 individual passes but failed two
+targets: the App unit process overflowed its test-thread stack, and four Sync
+tests failed. The interrupted App target is not a complete pass. The full native
+suite passes all 1,048 tests, including six command-ACL cases and the actual
+six-client chat/restart scenarios. Strict App lint still rejects unfinished unused
+integration and additional scope/style/API-shape findings; CI remains red.
+
+The five newly exposed runtime failures now pass their focused checks:
+
+- The captured-preparation fairness test retains its original two Servers/Store
+  in a boxed fixture and pins setup/worker futures on the heap. It passes in
+  129.50 seconds with the default stack and the existing profile. Its real
+  receiver calls, permit, 60-second barrier, release-before-assert order,
+  authenticated reply and completion assertions are unchanged. Both shared
+  signing-priority/single-permit siblings also pass. Production already spawns
+  bounded detached work separately; this failure did not establish a production
+  preparation-worker overflow.
+- Cold owner-evidence restore compares every exact SDK provider row, signer,
+  group and non-MLS suffix while rejecting duplicate rows. It ignores only the
+  unordered provider map's iteration order. Every refused control must still
+  leave the SAME restored node byte-for-byte unchanged. All refusal, unknown-tag
+  and trailing-byte assertions remain; private bytes are not printed on failure.
+- Three staged-join tests now have the real inviter answer the actual transmitted
+  KeyPackage. Their old precomputed Welcomes belonged to different attempts and
+  were correctly rejected. The hostile-contact case now sends the SAME valid
+  signed Welcome first from the attacker, then the approved helper, and still
+  requires the helper and its original live-path evidence. Production join
+  checks are unchanged.
+
+Read-only actual-diff reviews found no BLOCKER/HIGH/MEDIUM in these corrections.
+All 36 focused checks pass: nine exact single-test regressions (including the
+five exposed failures, both signing siblings, paused-worker custody and actor
+restart) plus all 27 outbox tests in 9.51 seconds. Every invocation checks its
+nonzero expected count; an empty filter cannot count as success.
+The two mechanical outbox lints (decoder lifetime elision and trie parity) are
+corrected without changing their contract. An exact original workspace-feature
+stack rerun and complete App/root retry remain required. The named 10,000-operation
+test remains deferred until the end. No additional build-profile experiment has
+been applied; the default-stack green result predates any proposed curve override.
+
+## Published integration and browser validation (8 November checkpoint)
 
 The current integration is available in draft PR #85, stacked on #84:
 <https://github.com/Thalpy/Mewtual/pull/85>. The branch is
@@ -32,11 +75,20 @@ timed out at navigation before executing the scenario; the traced rerun passes.
 The full frontend suite passes again: 3,434 tests, zero failures/skips, 77.40 seconds.
 This is renderer lifetime evidence, not native authorization or V2 source evidence.
 
-The broad root suite is still running, with full native tests and strict root
-lint queued in the same serial pipeline. These are not recorded as passes.
+The subsequent backend pipeline results and corrections are recorded above.
+Root runtime and strict-lint acceptance remain open.
 The user's named ten-thousand-operation test remains deferred until the end.
 Chat V2 is still disabled: production ordinary-member signing/save, native
 routing and transport integration remain implementation work, not testing alone.
+
+Hosted CI for `d472d17c` is not green. The main Windows/Linux jobs reject the
+inactive App integration's unused imports/dead code under strict warnings; root
+Clippy also reports ownership-view scope/style and enum/API-shape findings.
+Several repair/overlay mutation jobs fail before reaching their intended mutated
+assertion because the same compile warnings are errors. That is not evidence that
+the mutations were detected. The two member-outbox mechanical style corrections
+are recorded above; they do not clear the other strict-lint failures.
+The local runtime pipeline remains separate evidence and does not clear CI.
 
 ## Independent review corrections (8 November; acceptance still open)
 
