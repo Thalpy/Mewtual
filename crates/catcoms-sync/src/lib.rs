@@ -23751,7 +23751,7 @@ mod tests {
         let joiner_peer = PeerId::from_u64(4);
         let inviter_device = MlsDevice::generate().unwrap();
         let inviter_group = ServerGroup::create(&inviter_device).unwrap();
-        let mut inviter = ChannelSync::new(
+        let inviter = ChannelSync::new(
             hub.join(inviter_peer),
             inviter_group,
             inviter_device,
@@ -23820,7 +23820,7 @@ mod tests {
         let joiner_peer = PeerId::from_u64(42);
         let inviter_device = MlsDevice::generate().unwrap();
         let inviter_group = ServerGroup::create(&inviter_device).unwrap();
-        let mut inviter = ChannelSync::new(
+        let inviter = ChannelSync::new(
             Hub::new().join(inviter_peer),
             inviter_group,
             inviter_device,
@@ -23879,7 +23879,7 @@ mod tests {
         let joiner_peer = PeerId::from_u64(53);
         let inviter_device = MlsDevice::generate().unwrap();
         let inviter_group = ServerGroup::create(&inviter_device).unwrap();
-        let mut inviter = ChannelSync::new(
+        let inviter = ChannelSync::new(
             Hub::new().join(inviter_peer),
             inviter_group,
             inviter_device,

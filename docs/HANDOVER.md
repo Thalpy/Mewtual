@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Bounded development-profile validation (9 November)
+
+Both Cargo roots now additionally optimize only the locked development/test
+versions of `curve25519-dalek:4.1.3`, `sha2:0.10.9`, `sha2:0.11.0` and
+`poly1305:0.8.0`. These are the concrete MLS/Noise arithmetic, signed-payload
+digest, raw Automerge-change digest and bulk AEAD authentication implementations.
+No dependency, feature, algorithm, security parameter, wire/persistence format,
+assertion, overflow-check, release-profile or stack-size setting changes.
+Verbose compiler commands confirm `opt-level=3` with `debug-assertions=on`.
+
+The unchanged projection/admission cohort passes all 77 tests in 0.47 seconds
+against 28.44 seconds before the curve override. The same 25 governance test
+names pass in 81.23 seconds against the prior optimized-KDF result of 130.95
+seconds. The captured-preparation fairness regression passes with the default
+stack in 117.63 seconds after the curve override, 89.10 seconds after SHA-2 0.10,
+56.96 seconds after SHA-2 0.11 and 49.88 seconds after Poly1305. These are local
+cohort measurements, not whole-suite performance or physical-memory guarantees.
+All 51 existing post-profile checks pass: the complete 44-test crypto library
+(including seal/open, wrong-key and tamper rejection), both exact whole-raw/typed
+Studio golden-vector tests and all five Studio epoch tests. Each invocation
+requires its expected nonzero count. Independent actual-diff review found no
+BLOCKER/HIGH/MEDIUM in the narrow profile changes or fixture cleanup.
+No further build-profile experiment is queued; broad root/native validation is
+next. Chat V2 remains disabled and production integration remains unfinished.
+
 ## Runtime regression corrections (9 November; broad retry still required)
 
 The serial backend pipeline finished with root exit 101, native exit 0 and strict
@@ -38,10 +63,12 @@ five exposed failures, both signing siblings, paused-worker custody and actor
 restart) plus all 27 outbox tests in 9.51 seconds. Every invocation checks its
 nonzero expected count; an empty filter cannot count as success.
 The two mechanical outbox lints (decoder lifetime elision and trie parity) are
-corrected without changing their contract. An exact original workspace-feature
-stack rerun and complete App/root retry remain required. The named 10,000-operation
-test remains deferred until the end. No additional build-profile experiment has
-been applied; the default-stack green result predates any proposed curve override.
+corrected without changing their contract. The captured-preparation regression
+also passes in the original all-workspace/all-feature test binary: exactly one
+filtered test, default stack, 130.05 seconds, before any curve/SHA/Poly1305 override.
+This independently pins the stack fix;
+optimization is not its substitute. The complete App/root retry remains required.
+The named 10,000-operation test remains deferred until the end.
 
 ## Published integration and browser validation (8 November checkpoint)
 

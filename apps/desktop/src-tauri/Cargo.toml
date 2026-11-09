@@ -129,3 +129,21 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# Match the MLS/Noise arithmetic version selected by the core workspace; curve5
+# belongs to another dependency branch. Assertions/release settings are unchanged.
+[profile.dev.package."curve25519-dalek:4.1.3"]
+opt-level = 3
+
+# Match the exact digest version used for full-payload Ed25519 verification.
+# Release settings, parameters, features and assertions are unchanged.
+[profile.dev.package."sha2:0.10.9"]
+opt-level = 3
+
+# Match the raw Automerge-change digest version in the core workspace.
+[profile.dev.package."sha2:0.11.0"]
+opt-level = 3
+
+# Match the locked bulk-AEAD authentication kernels used by the core workspace.
+[profile.dev.package."poly1305:0.8.0"]
+opt-level = 3

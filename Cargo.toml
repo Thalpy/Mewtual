@@ -69,3 +69,25 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# This locked version serves MLS Ed25519/X25519 and Noise arithmetic.
+# Another dependency branch uses curve5; leave that branch and release profiles
+# alone. Development/test debug assertions and overflow checks still apply.
+[profile.dev.package."curve25519-dalek:4.1.3"]
+opt-level = 3
+
+# Ed25519 verifies the full signed payload with this locked digest version.
+# Optimize development/test digest loops without changing SHA-2, its parameters,
+# features or assertions.
+[profile.dev.package."sha2:0.10.9"]
+opt-level = 3
+
+# Automerge hashes complete raw change bodies through this separate version.
+# Keep its algorithm/features and all assertions; change development arithmetic only.
+[profile.dev.package."sha2:0.11.0"]
+opt-level = 3
+
+# Bulk AEAD authentication uses these concrete kernels during seal and open.
+# Keep the cipher, nonce/tag formats, verification and release settings unchanged.
+[profile.dev.package."poly1305:0.8.0"]
+opt-level = 3
