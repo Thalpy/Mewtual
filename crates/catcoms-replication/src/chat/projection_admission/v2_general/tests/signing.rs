@@ -491,3 +491,40 @@ fn actual_lost_key_return_is_terminal_and_fork_close_waits_for_existing_key_cach
         .admit_signing(&next, &key.verifying_key().to_bytes())
         .is_err());
 }
+
+#[test]
+fn admitted_guard_names_the_exact_draft_signer_and_dropping_it_keeps_the_key_entry_unused() {
+    let mut f = Fixture::new();
+    let key = DeviceKeypair::from_seed(&[176; 32]);
+    let admission = f.add(&key, 76);
+    let (_ledger, view) = f.ledger();
+    let draft = create_draft(&key, &admission, 9);
+    let mut plan = f
+        .verifier
+        .prepare_ordinary_signing_plan(&draft, &admission, &[], &view)
+        .unwrap();
+    let original = plan.observe_original();
+    let full = key.verifying_key().to_bytes();
+    {
+        // A Sync signer compares this getter with its retained key before begin_key. A
+        // refusal at that point drops the guard; the Plan must remain Prepared.
+        let guard = plan.admit_signing(&draft, &full).unwrap();
+        assert_eq!(guard.signer_data(), &full);
+        assert_eq!(guard.signer_data(), draft.signer_data());
+        assert!(guard.cached_raw64_data().is_none());
+    }
+    let call = plan
+        .admit_signing(&draft, &full)
+        .unwrap()
+        .begin_key()
+        .unwrap();
+    let cached = call.cache_raw64(key.sign(draft.signing_bytes_data()));
+    // After caching, the same getter is still the original signer and raw is present.
+    assert_eq!(cached.signer_data(), &full);
+    assert!(cached.cached_raw64_data().is_some());
+    drop(cached);
+    assert!(plan
+        .complete_cached_raw64_data(&original, &draft)
+        .unwrap()
+        .verify());
+}

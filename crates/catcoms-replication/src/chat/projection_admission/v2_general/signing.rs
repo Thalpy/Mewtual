@@ -267,6 +267,13 @@ impl OriginalV2OrdinarySigningPlanObservation {
     }
 }
 impl<'a> V2OrdinarySigningGuard<'a> {
+    /// Full signer of the exact admitted Draft, already compared with the caller's full
+    /// device key by `admit_signing`. DATA only: a Sync signer compares it with its retained
+    /// key BEFORE `begin_key`, so a wrong-key/replacement device refuses while the Plan is
+    /// still Prepared instead of consuming the one key entry. Grants no authority.
+    pub fn signer_data(&self) -> &[u8; 32] {
+        self.draft.signer_data()
+    }
     pub fn cached_raw64_data(&self) -> Option<&[u8; 64]> {
         match &*self.work {
             PlanWork::RawCached(raw) => Some(raw),
