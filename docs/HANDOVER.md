@@ -1,6 +1,46 @@
 # Mewtual; Handover
 
-## Later default-stack page fixture correction (9 November; retry pending)
+## Current validation checkpoint (9 November)
+
+Runtime code is published through `6cc42548` on
+`chat-v2-operational-implementation` / draft PR #85. **Chat V2 remains disabled and
+incomplete.** These results establish the corrected library/test boundary, not
+production ordinary-member sending or physical two-device acceptance.
+
+The full root retry passes 5,383 tests with zero failures or process aborts, using
+one compiler and four test threads with the default stack. Only the user-named
+10,000-operation test was deferred; its separate exact-one run passes in 401.54
+seconds. Reuse verification confirms the same actual executable SHA-256
+`2479f249d7bb7b596f3da6011b5ac6df1a73cfe03e481f277f4dcebe14071c8c`,
+all four source/manifest pins, unchanged production tree/dependencies/features/
+profile and the original runtime arguments. This is **complete default root
+coverage across two batches**, not one successful unfiltered invocation. The root
+run records 26 pre-existing ignored tests; no ignore attribute changed. Its App
+unit target completes with 2,190 passed and 22 existing ignored in 2,126.18 seconds.
+
+The complete Studio exchange family also passes separately: 158 ordinary cases
+in 161.98 seconds, then each of its two global-pool diagnostics alone with exact-one
+guards. All 21 succession cases pass in 127.53 seconds on the default stack.
+The full native suite passes 1,048 tests and the separate native compile check
+passes. The unchanged frontend passes all 3,434 unit tests, static checking,
+production build, default browser flows and the admin-history browser scenario.
+Current formatting, ambient-dependency and raw-filesystem gates pass; the recorded
+dependency audit remains applicable to the unchanged locked dependencies.
+
+Strict root Clippy still fails with 534 App library errors: unfinished unused
+integration plus remaining style/API findings. CI/sign-off is not green and no
+blanket suppression has been added. Actual-diff adversarial reviews of the Core,
+storage and fixture corrections found no remaining BLOCKER/HIGH/MEDIUM within
+those scopes. Historical aborted attempts below are not counted as passing runs.
+
+Remaining implementation includes actual ordinary-member source/signing/save
+and export, joined-member/governance producers, cold deletion/review and first
+torn-seed recovery, native/UI/transport integration and measured resource fit.
+Only one physical desktop is available. The next production slice remains the
+independent member path described in
+[CHAT-V2-ORDINARY-MEMBER-PATH](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md).
+
+## Historical fixture corrections (9 November; successful retry recorded above)
 
 The subsequent full root attempt records 5,108 individual passing cases and one
 failed target: the App unit process overflows in
