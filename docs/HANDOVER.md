@@ -51,13 +51,23 @@ future over the same four owned parameters and original async body. Its eight
 ordinary and four interrupted tests retain all sixteen scenario executions,
 including before/after-write cuts. Actual-diff reviews preserve every old-store
 drop, actor shutdown and journal/reopen boundary. The complete 21-test succession
-group is being checked before returning to the full fixture family.
+group now passes in 127.53 seconds on the default stack.
 Its joined-owner and repeated-tenure fixtures likewise now pin their complete
 original scenario/setup futures; both reproduced isolated default-stack failures
 before correction. Their actual identities, key-generation paths, policy and
 receipt checks, original `Returned` transfers and shutdown/reopen boundaries are
-unchanged. Read-only actual-diff review is clear. These are test-only residence
-corrections; the full succession/family/root results remain pending.
+unchanged. Read-only actual-diff review is clear.
+
+The ordinary fixture family then passes all 158 active tests in 162.52 seconds,
+with its two existing global-pool diagnostics excluded by their unchanged
+attributes. The scheduling diagnostic passes alone. The newcomer diagnostic
+exposed one final nested scenario frame when run alone; its shared factory now
+returns the same lazy, pinned scenario for all five ordinary variants and three
+diagnostic invocations. That isolated diagnostic passes exactly one test in
+3.93 seconds afterward, keeping its global-pool holders and every actor, restart,
+PIX and persistence check. Actual-diff review is clear. A fresh complete family
+batch and the root retry are running next. These are test-only residence
+corrections; full root acceptance remains pending.
 
 The separately deferred 10,000-operation replication test passes exactly one case
 in 401.54 seconds. Its executable digest, source/manifest hashes and exact result
