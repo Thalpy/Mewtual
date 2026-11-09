@@ -108,99 +108,108 @@ async fn studio_ready_page_saves_before_due_owner_prepares_another_source() {
 
 /// Build a real fetched `PageReady` pass, then displace the exact local graph it must use to
 /// persist. Both full-pool ordering regressions need this same expensive authenticated boundary.
-async fn cold_held_page_fixture(
+fn cold_held_page_fixture(
     shared: std::sync::Arc<tokio::sync::Semaphore>,
-) -> (Pair, crate::studio::StudioReceiver) {
-    let mut p = proven_pair().await;
-    let (proof, tick) = tokio::join!(
-        p.alice
-            .sync
-            .request_catchup(p.bob.local_peer(), catcoms_wire::DocType::Wiki, 43),
-        p.bob.sync_once(),
-    );
-    proof.unwrap();
-    tick.unwrap();
+) -> impl std::future::Future<Output = Box<(crate::studio::StudioReceiver, Box<Pair>)>> {
+    // The authenticated fixture owns two whole Servers and Stores. Keep both its setup
+    // future and final owner on the heap: nesting another by-value Pair/receiver return
+    // inside these tests overflows the default test-thread stack. Callers must borrow the
+    // boxed tuple, never move it back out. Receiver-first tuple order preserves the old
+    // receiver-before-Pair teardown. This changes residence, not owners or test limits.
+    Box::pin(async move {
+        let mut p = Box::pin(proven_pair()).await;
+        let (proof, tick) = tokio::join!(
+            p.alice
+                .sync
+                .request_catchup(p.bob.local_peer(), catcoms_wire::DocType::Wiki, 43),
+            p.bob.sync_once(),
+        );
+        proof.unwrap();
+        tick.unwrap();
 
-    let other = StudioTarget::Flipnote {
-        channel: channel(),
-        object: [0xA8; 16],
-    };
-    p.alice.sync.with_registry_context(|g, d, _, _| {
-        crate::store::save_studio_source_fixture(&mut p.a_store, SERVER, g, d, other)
-    });
-    let op = title(181, "held while pool full");
-    let logical = target().document(&p.bob.group_id()).unwrap();
-    p.bob
-        .studio_transaction(
-            &mut p.b_store,
-            SERVER,
-            StudioRequest::Apply {
-                target: target(),
-                epoch_id: epoch_zero_id(logical.doc_type, &logical.logical_key),
-                nonce: op.nonce,
-                body: op.body,
-            },
-        )
-        .unwrap();
-    p.save(&title(182, "local source"));
-
-    let mut receiver = crate::studio::StudioReceiver::default();
-    receiver
-        .preparation_pools_for_test(shared, std::sync::Arc::new(tokio::sync::Semaphore::new(3)));
-    receiver
-        .run(
-            &mut p.alice,
-            &mut p.a_store,
-            SERVER,
-            Some(StudioRequest::Read { target: target() }),
-        )
-        .unwrap();
-    let watch = p
-        .alice
-        .watch_studio_epoch(&p.a_store, SERVER, target())
-        .unwrap();
-    let mut b = budget(&mut p.alice, &mut p.a_store);
-    let mut pass = p
-        .alice
-        .begin_studio_receive(&mut p.a_store, &watch, p.bob.local_peer(), &mut b)
-        .unwrap();
-    let mut provider = p.bob.studio_page_provider(&p.b_store, SERVER);
-    for _ in 0..2 {
-        let job = p
-            .alice
-            .prepare_studio_receive_step(&mut pass)
-            .unwrap()
-            .unwrap();
-        let (result, ()) = tokio::join!(job.fetch(), async {
-            p.bob.sync_once().await.unwrap();
-            p.bob
-                .serve_studio_request_step(&mut p.b_store, &mut provider, &p.watch)
-                .unwrap();
+        let other = StudioTarget::Flipnote {
+            channel: channel(),
+            object: [0xA8; 16],
+        };
+        p.alice.sync.with_registry_context(|g, d, _, _| {
+            crate::store::save_studio_source_fixture(&mut p.a_store, SERVER, g, d, other)
         });
-        if p.alice
-            .complete_studio_receive_step(&mut pass, result)
-            .unwrap()
-            == StudioReceiveState::PageReady
-        {
-            break;
+        let op = title(181, "held while pool full");
+        let logical = target().document(&p.bob.group_id()).unwrap();
+        p.bob
+            .studio_transaction(
+                &mut p.b_store,
+                SERVER,
+                StudioRequest::Apply {
+                    target: target(),
+                    epoch_id: epoch_zero_id(logical.doc_type, &logical.logical_key),
+                    nonce: op.nonce,
+                    body: op.body,
+                },
+            )
+            .unwrap();
+        p.save(&title(182, "local source"));
+
+        let mut receiver = crate::studio::StudioReceiver::default();
+        receiver.preparation_pools_for_test(
+            shared,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
+        );
+        receiver
+            .run(
+                &mut p.alice,
+                &mut p.a_store,
+                SERVER,
+                Some(StudioRequest::Read { target: target() }),
+            )
+            .unwrap();
+        let watch = p
+            .alice
+            .watch_studio_epoch(&p.a_store, SERVER, target())
+            .unwrap();
+        let mut b = budget(&mut p.alice, &mut p.a_store);
+        let mut pass = p
+            .alice
+            .begin_studio_receive(&mut p.a_store, &watch, p.bob.local_peer(), &mut b)
+            .unwrap();
+        let mut provider = p.bob.studio_page_provider(&p.b_store, SERVER);
+        for _ in 0..2 {
+            let job = p
+                .alice
+                .prepare_studio_receive_step(&mut pass)
+                .unwrap()
+                .unwrap();
+            let (result, ()) = tokio::join!(Box::pin(job.fetch()), async {
+                p.bob.sync_once().await.unwrap();
+                p.bob
+                    .serve_studio_request_step(&mut p.b_store, &mut provider, &p.watch)
+                    .unwrap();
+            });
+            if p.alice
+                .complete_studio_receive_step(&mut pass, result)
+                .unwrap()
+                == StudioReceiveState::PageReady
+            {
+                break;
+            }
+            p.clock.advance_ms(1000);
         }
-        p.clock.advance_ms(1000);
-    }
-    assert_eq!(pass.state(), StudioReceiveState::PageReady);
-    receiver.hold_page_for_test(target(), pass);
+        assert_eq!(pass.state(), StudioReceiveState::PageReady);
+        receiver.hold_page_for_test(target(), pass);
 
-    // Displace the target's sole prepared graph after the page is ready, then make the shared pool
-    // deterministically full. Persisting the page and capturing a cold service request both need a
-    // permit, so the ordering—not eventual completion—is the property under test.
-    p.alice
-        .studio_transaction(
-            &mut p.a_store,
-            SERVER,
-            StudioRequest::Read { target: other },
-        )
-        .unwrap();
+        // Displace the target's sole prepared graph after the page is ready, then make the shared pool
+        // deterministically full. Persisting the page and capturing a cold service request both need a
+        // permit, so the ordering—not eventual completion—is the property under test.
+        p.alice
+            .studio_transaction(
+                &mut p.a_store,
+                SERVER,
+                StudioRequest::Read { target: other },
+            )
+            .unwrap();
 
-    (p, receiver)
+        Box::new((receiver, p))
+    })
 }
 
 /// A cold held page has priority over new client work, but when the shared preparation pool is
@@ -209,8 +218,9 @@ async fn cold_held_page_fixture(
 /// uncaptured and H3 is then allowed to sign past it until capacity returns.
 #[tokio::test]
 async fn a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service() {
-    let (mut p, mut receiver) =
+    let mut fixture =
         cold_held_page_fixture(std::sync::Arc::new(tokio::sync::Semaphore::new(4))).await;
+    let (receiver, p) = &mut *fixture;
     let pool = receiver.inject_overlay_pool_for_test(0);
     let request = p
         .bob
@@ -261,12 +271,13 @@ async fn a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service() {
 #[tokio::test]
 async fn a_retained_registry_permit_released_for_a_held_page_cannot_be_recaptured_by_service() {
     let shared = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
-    let (mut p, mut receiver) = cold_held_page_fixture(shared.clone()).await;
+    let mut fixture = cold_held_page_fixture(shared.clone()).await;
+    let (receiver, p) = &mut *fixture;
 
     // This real prepared Registry provider owns one of the same four permits the receiver uses.
     // Three unrelated holders consume the rest, making provider eviction the only way the held
     // Studio page can make progress in this visit.
-    let bucket = super::unopened::prepared_registry(&mut p, target(), false);
+    let bucket = super::unopened::prepared_registry(p, target(), false);
     let mut provider = p
         .alice
         .begin_registry_page_provider(&p.a_store, SERVER, bucket)
@@ -277,7 +288,7 @@ async fn a_retained_registry_permit_released_for_a_held_page_cannot_be_recapture
         .begin_registry_page_preparation_reserved(&p.a_store, &mut provider, permit)
         .unwrap()
         .expect("the saved Registry bucket needs preparation");
-    let prepared = preparation.rebuild().await.unwrap();
+    let prepared = Box::pin(preparation.rebuild()).await.unwrap();
     p.alice
         .finish_registry_page_preparation(&p.a_store, &mut provider, prepared)
         .unwrap();
@@ -322,7 +333,7 @@ async fn a_retained_registry_permit_released_for_a_held_page_cannot_be_recapture
         .detach(&mut p.alice)
         .expect("the waiting Studio page did not capture the released permit");
     assert_eq!(work.kind_for_test(), "prepare");
-    receiver.complete(&mut p.alice, work.run(None).await);
+    receiver.complete(&mut p.alice, Box::pin(work.run(None)).await);
 
     let (_, updated) = receiver
         .run(&mut p.alice, &mut p.a_store, SERVER, None)
@@ -347,7 +358,7 @@ async fn a_retained_registry_permit_released_for_a_held_page_cannot_be_recapture
         })
         .expect("Registry service did not resume after the Studio page persisted");
     assert_eq!(registry_work.kind_for_test(), "prepare-registry");
-    receiver.complete(&mut p.alice, registry_work.run(None).await);
+    receiver.complete(&mut p.alice, Box::pin(registry_work.run(None)).await);
     receiver
         .run(&mut p.alice, &mut p.a_store, SERVER, None)
         .unwrap();
@@ -362,17 +373,23 @@ async fn a_retained_registry_permit_released_for_a_held_page_cannot_be_recapture
     drop(held);
 }
 
-pub(super) async fn proven_pair() -> Pair {
-    let mut p = Pair::new().await;
-    let (proof, tick) = tokio::join!(
-        p.bob
-            .sync
-            .request_catchup(p.alice.local_peer(), catcoms_wire::DocType::Wiki, 43),
-        p.alice.sync_once()
-    );
-    proof.unwrap();
-    tick.unwrap();
-    p
+/// Retain both complete Servers and Stores on the heap through every nested test phase.
+/// Boxing only setup still returned the large Pair into each caller's async state. Move this
+/// same Box through owning adapters and borrow it for existing `&mut Pair` helpers; never
+/// reconstruct the pair or move its whole graph back into a suspended test future.
+pub(super) fn proven_pair() -> impl std::future::Future<Output = Box<Pair>> {
+    Box::pin(async {
+        let mut p = Box::new(Box::pin(Pair::new()).await);
+        let (proof, tick) = tokio::join!(
+            p.bob
+                .sync
+                .request_catchup(p.alice.local_peer(), catcoms_wire::DocType::Wiki, 43),
+            p.alice.sync_once()
+        );
+        proof.unwrap();
+        tick.unwrap();
+        p
+    })
 }
 
 async fn transfer_page(

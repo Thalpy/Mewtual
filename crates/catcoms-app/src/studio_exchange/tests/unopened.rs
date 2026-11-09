@@ -552,7 +552,7 @@ async fn studio_receiver_large_registry_cold_provider_and_reopened_receiver_do_n
     };
     assert_eq!(art.title.unwrap().selected.value, "large registry tail");
 }
-fn reopen_with_large_registry(mut p: Pair, bucket: u8) -> Pair {
+fn reopen_with_large_registry(mut p: Box<Pair>, bucket: u8) -> Box<Pair> {
     // Give the newcomer a legitimate large Registry checkpoint, then reopen both mounts
     // so neither receiver nor provider can rely on a previously warmed footprint LRU.
     let mut b = budget(&mut p.bob, &mut p.b_store);

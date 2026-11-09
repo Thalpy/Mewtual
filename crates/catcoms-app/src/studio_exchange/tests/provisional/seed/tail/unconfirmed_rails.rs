@@ -175,7 +175,7 @@ fn recorded(p: &mut Pair, target: StudioTarget) -> Option<(Option<StudioOverlayP
     Some((facts.provenance(), facts.charged_bytes()))
 }
 
-async fn preview_pair() -> (Pair, StudioTarget, ServerPreparedProvisionalStudioSeed) {
+async fn preview_pair() -> (Box<Pair>, StudioTarget, ServerPreparedProvisionalStudioSeed) {
     let mut p = pages::proven_pair().await;
     let target = StudioTarget::Index { channel: channel() };
     p.watch = p

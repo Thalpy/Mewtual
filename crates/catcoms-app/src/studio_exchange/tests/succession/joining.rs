@@ -35,8 +35,19 @@ async fn studio_actor_join_born_owner_starts_fresh_and_receiver_preserves_the_ol
     newcomer(true, true, true).await;
 }
 
-async fn newcomer(closing: bool, require_preview: bool, supersede: bool) {
-    let mut p = Pair::new_legacy().await;
+fn newcomer(
+    closing: bool,
+    require_preview: bool,
+    supersede: bool,
+) -> impl std::future::Future<Output = ()> {
+    // Every legacy variant keeps several real peers, actors and retained previews across
+    // phases. Box that one original scenario before a registered test embeds its future.
+    // The body remains lazy and its transfer/shutdown/reopen ordering stays unchanged.
+    Box::pin(run_newcomer(closing, require_preview, supersede))
+}
+
+async fn run_newcomer(closing: bool, require_preview: bool, supersede: bool) {
+    let mut p = Box::pin(Pair::new_legacy()).await;
     assert_eq!(p.alice.group_mode(), crate::GroupMode::LegacyUnverified);
     assert_eq!(p.bob.group_mode(), crate::GroupMode::LegacyUnverified);
     let logical = target().document(&p.bob.group_id()).unwrap();
@@ -317,7 +328,7 @@ async fn newcomer(closing: bool, require_preview: bool, supersede: bool) {
         "legacy admission establishes no P2P pin"
     );
     let (joined, tick) = tokio::join!(
-        Node::join(
+        Box::pin(Node::join(
             Net::new(hub.join(PeerId::from_u64(3))),
             MlsDevice::generate().unwrap(),
             rng(),
@@ -325,7 +336,7 @@ async fn newcomer(closing: bool, require_preview: bool, supersede: bool) {
             "post-succession newcomer",
             provider.local_peer(),
             &invite
-        ),
+        )),
         provider.sync_once()
     );
     tick.unwrap();

@@ -1,5 +1,71 @@
 # Mewtual; Handover
 
+## Later default-stack page fixture correction (9 November; retry pending)
+
+The subsequent full root attempt records 5,108 individual passing cases and one
+failed target: the App unit process overflows in
+`studio_exchange::tests::pages::a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service`.
+The earlier captured-preparation overflow regression and all four corrected Sync
+tests pass in this same run. Other completed root targets contribute 3,193 passes;
+the aborted App target is not a complete pass. The full native retry passes all
+1,048 tests: 1,042 library cases in 1,722.39 seconds plus six command-ACL cases,
+with zero failures/skips. This includes onward channel discovery, authenticated
+automatic notifications and the actual multi-client restart/partition scenarios.
+The separate native compile check also passes. Strict root Clippy still fails:
+534 App library errors, dominated by unfinished unused integration plus remaining
+style/API findings. No blanket suppression has been added.
+
+The shared cold-page helper now heap-pins setup and retains its same two Servers,
+two Stores and receiver in one boxed owner. Both affected callers borrow that
+owner; receiver-first teardown is preserved. Its nested setup/fetch and detached
+preparation futures are pinned without changing requests, pool limits, assertions
+or production code. Actual-diff review is clear after correcting one reborrow and
+preserving teardown order. All six page tests pass in 46.55 seconds in the original
+workspace feature graph, with two test threads and the default stack.
+
+Expanded Studio exchange runs exposed the same large fixture residence in two
+provisional-tail tests: the mount/server/channel/watch matrix and volatile preview
+checks. Both exact regressions also overflowed with two threads. The authenticated
+`proven_pair` factory now pins setup and returns the same boxed Pair through its
+five owning adapters. Global `Pair::new` and legacy APIs are unchanged; partial
+mount replacement and actual actor transfers preserve their original boundaries.
+Each complete matrix case also stays heap-pinned, with the same sequential
+four-stage/four-mutation order, preparation timing and negative/absence checks.
+Both exact regressions pass together in 1.67 seconds with the original workspace
+features, two test threads and the default stack. Actual-diff re-review is clear,
+including actor capture and teardown ordering. The entire 160-test fixture family
+is being retried before another full root run. Its later three-peer pressure
+scenario also reproduced a default-stack overflow; the complete scenario and
+nested setup futures are now pinned inside its unchanged 90-second timeout.
+All three active pressure modes pass in 8.89 seconds with two threads. The family
+inventory contains 158 ordinary tests and two existing diagnostics that deliberately
+occupy global pools; each diagnostic is run separately after the ordinary cases.
+No ignored attribute is removed or added. Neither aborted target is counted as a
+complete pass. No global stack increase or production code change is used.
+
+Further fixture-only checks exposed the same residence issue in hidden-tenure and
+interrupted-successor scenarios. The complete hidden-history future is pinned;
+its exact regression passes in 6.94 seconds after a controlled default-stack failure.
+The shared normal/interrupted succession helper now returns an already-pinned
+future over the same four owned parameters and original async body. Its eight
+ordinary and four interrupted tests retain all sixteen scenario executions,
+including before/after-write cuts. Actual-diff reviews preserve every old-store
+drop, actor shutdown and journal/reopen boundary. The complete 21-test succession
+group is being checked before returning to the full fixture family.
+Its joined-owner and repeated-tenure fixtures likewise now pin their complete
+original scenario/setup futures; both reproduced isolated default-stack failures
+before correction. Their actual identities, key-generation paths, policy and
+receipt checks, original `Returned` transfers and shutdown/reopen boundaries are
+unchanged. Read-only actual-diff review is clear. These are test-only residence
+corrections; the full succession/family/root results remain pending.
+
+The separately deferred 10,000-operation replication test passes exactly one case
+in 401.54 seconds. Its executable digest, source/manifest hashes and exact result
+are retained. Because it is the sole test in a separate executable and these App
+test-only corrections cannot affect it, the root retry may reuse that result only
+if its executable and relevant inputs remain identical. Report combined root
+coverage across batches after verification, never a successful unfiltered run.
+
 ## Bounded development-profile validation (9 November)
 
 Both Cargo roots now additionally optimize only the locked development/test
@@ -22,8 +88,9 @@ All 51 existing post-profile checks pass: the complete 44-test crypto library
 Studio golden-vector tests and all five Studio epoch tests. Each invocation
 requires its expected nonzero count. Independent actual-diff review found no
 BLOCKER/HIGH/MEDIUM in the narrow profile changes or fixture cleanup.
-No further build-profile experiment is queued; broad root/native validation is
-next. Chat V2 remains disabled and production integration remains unfinished.
+No further build-profile experiment is queued; broad root/native validation and
+the later fixture correction are recorded above. Chat V2 remains disabled and
+production integration remains unfinished.
 
 ## Runtime regression corrections (9 November; broad retry still required)
 
