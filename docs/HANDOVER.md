@@ -1,5 +1,26 @@
 # Mewtual; Handover
 
+## Ordinary-member signer, founder vertical (9 November; authored, NOT compiled)
+
+Branch `chat-v2-ordinary-member-signing` (from `b24fd196`) adds the production signing
+path for the Profile founder acting as an ordinary member, plus the Sync seams for a
+joined member's `ChannelSync`. Nothing here has been compiled or run yet: the primary
+owns the Cargo queue. Chat V2 stays disabled.
+
+- MLS: narrow retained-device signer with an exact full-key check and payload bound.
+- Core: `V2OrdinarySigningGuard::signer_data` (DATA getter).
+- Sync: once-only draw cell bound to the exact node; founder-node and `ChannelSync` seams.
+- App: member lane in `operational/host/member.rs`, member-role projection domain, a
+  pin-authenticated genesis anchor producer that requires the selected O to be the empty
+  generation-1 promotion, lane exclusivity with founder Create, and the agreed
+  `MemberSignedOriginal::from_completed_plan`.
+
+Open: nonfounder App orchestration (needs the joined-member source), later governing
+prefixes, removal/rejoin in App, save admission and outbox context getter, native
+command credential, pre-raw crash uncertainty. The new store-private methods add to the
+existing unused-integration lint debt; no suppression was added.
+[Contract and gaps](communication-recovery/CHAT-V2-ORDINARY-MEMBER-SIGNER.md).
+
 ## Current validation checkpoint (9 November)
 
 Runtime code is published through `6cc42548` on

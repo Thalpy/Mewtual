@@ -18,6 +18,19 @@ new-only seed/marker outputs. Warm promotion owns no replacement-stage cleanup;
 only a cold independently captured exact duplicate has that role. Actual older-
 binary acceptance is the separate predecessor gate, not a modern-reader unit result.
 
+## Ordinary-member signer (9 November; authored, unrun)
+
+Store-private and inactive. `PreparedV2TextHost::retry_sign_member_request` authors one
+`V2MemberSignRequest { token, channel, body, parents, dependencies }` as the founder acting
+as an ordinary member and caches a `MemberSignedOriginal`; `take_member_signed_original`,
+`restore_member_signed_original`, `finish_member_request_saved` and
+`abandon_member_request` hand it to and from the member outbox. Parents are the request's
+exact list (sorted, deduped, at most 64; a Create names exactly its reply target); the
+composer must persist what it sent. Sync exposes `V2MemberDraftInputs` and three seams on
+both `UnboundV2GenesisNode` and `ChannelSync`; MLS exposes
+`MlsDevice::sign_retained_ed25519_bounded`. No wire or persistence format changes.
+[Contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-SIGNER.md).
+
 ## Ordinary member outbox (8 November; storage-only)
 
 `store::persistence::v2_member_outbox` is store-private and inactive. Its exclusive

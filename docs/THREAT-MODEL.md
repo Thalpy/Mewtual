@@ -17,6 +17,24 @@ receipt. Append reserves bounded checkpoint quota before admission and never evi
 external ENOSPC, lowered policy or finite trie exhaustion can still stop progress.
 Production source/UI admission and sender-state persistence remain required.
 
+## Ordinary-member signer (9 November; authored, unrun)
+
+The founder acting as an ordinary member signs with the SAME retained device of its whole
+genesis node under a Core plan from a general verifier, with no founder Header, Append,
+export or ratchet. The verifier's HOST anchor comes from the authenticated original pin,
+and the lane requires the selected O to be the empty generation-1 promotion, re-proved by
+byte comparison under the Current guard before every Core admission. While it holds the
+governing prefix is exactly genesis; when it stops holding, signing refuses. The lane
+excludes founder Create on the same host, so one token cannot be authored in two
+namespaces. Under Core's held reader only allocation-free, SDK-free checks run: the
+request's draw cell must name the exact node it was drawn on (seed Weak or sync
+incarnation), and the retained key must equal the Draft signer, before the one key entry.
+Raw64 is cached in the Plan before any late check; a completed original stays retrievable
+as DATA after lock and grants no save or publication right. Not covered: nonfounder
+sources, later governing prefixes, removal/rejoin in App, native command credentials,
+save admission and pre-raw crash uncertainty.
+[Contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-SIGNER.md).
+
 ## First operational A/I/S does not grant accepted history (7 November)
 
 The disabled Windows library path requires genuine original Current and selected I
