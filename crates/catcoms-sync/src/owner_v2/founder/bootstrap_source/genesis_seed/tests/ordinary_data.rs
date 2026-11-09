@@ -7,6 +7,7 @@ use super::super::ordinary_append::{self as append, *};
 use super::super::ordinary_create::{self as create, *};
 use super::*;
 mod materialized;
+mod member_signing;
 use catcoms_crypto::{unseal, SealedBlob};
 use catcoms_replication::chat::owner_state::transition::{ReplayBody, ReplayMath};
 use catcoms_replication::chat::{Body, SignedAction};
