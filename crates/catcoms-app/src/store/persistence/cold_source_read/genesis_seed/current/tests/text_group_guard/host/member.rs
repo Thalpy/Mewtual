@@ -426,11 +426,61 @@ fn a_crash_left_founder_wal_keeps_the_member_lane_closed_until_it_is_gone() {
         assert_eq!(member_sign_dispatches_for_test(), dispatches);
         std::fs::remove_file(f.target.join(name)).unwrap();
     }
-    // With the founder work gone, the SAME pending request completes.
+    // With the founder work gone, the same request now authors (nothing was drawn or
+    // retired by the refused attempts).
     f.host
         .retry_sign_member_request(&f.layout, plain([0x52; 32], &body))
         .unwrap();
     assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
+}
+
+#[test]
+fn a_refused_unbound_lane_is_not_kept_so_the_founder_lane_stays_available() {
+    let mut f = promoted(0, 0x7fa36);
+    let dispatches = member_sign_dispatches_for_test();
+    let body = create("refused beside founder work", None);
+    std::fs::write(f.target.join("text.wal"), b"crash-left founder work").unwrap();
+    assert!(f
+        .host
+        .retry_sign_member_request(&f.layout, plain([0x53; 32], &body))
+        .is_err());
+    assert_eq!(member_sign_dispatches_for_test(), dispatches);
+    std::fs::remove_file(f.target.join("text.wal")).unwrap();
+    // No lane was installed: the founder lane's first step is still available here, so the
+    // host is not wedged with neither lane able to proceed.
+    f.host.retry_token_lookup(&f.layout, [0x54; 32]).unwrap();
+    // And from now on the founder state excludes the member lane.
+    assert!(f
+        .host
+        .retry_sign_member_request(&f.layout, plain([0x53; 32], &body))
+        .is_err());
+    assert_eq!(member_sign_dispatches_for_test(), dispatches);
+}
+
+#[test]
+fn a_malformed_first_request_creates_no_lane() {
+    let mut f = promoted(0, 0x7fa37);
+    let body = Body::Join {
+        create: ActionId::from_bytes([1; 32]),
+    };
+    let parents: Vec<ActionId> = (0..=MAX_PARENTS)
+        .map(|index| ActionId::from_bytes([index as u8; 32]))
+        .collect();
+    assert!(f
+        .host
+        .retry_sign_member_request(
+            &f.layout,
+            V2MemberSignRequest {
+                token: [0x55; 32],
+                channel: 7,
+                body: &body,
+                parents: &parents,
+                dependencies: &[],
+            },
+        )
+        .is_err());
+    // The founder lane was not excluded by a lane the refused request would have created.
+    f.host.retry_token_lookup(&f.layout, [0x56; 32]).unwrap();
 }
 
 #[test]

@@ -57,7 +57,10 @@ owned by the joined-member/governance work. This vertical refuses rather than gu
 2. Shape checks on borrowed input, then the request fee, then the owned copy.
 3. Lane, once: lane fee, member domain (own fee), paid parent capture; under the Current
    group guard, capture the selected O, produce and bind the anchor; outside writers,
-   build the general verifier.
+   build the general verifier. A new lane is installed in the host only once its verifier
+   exists. If it fails earlier (a malformed request, or the anchor refusing beside a
+   crash-left founder WAL) it is dropped: nothing was drawn or signed, and the founder lane
+   stays available, so the host is never wedged with neither lane able to proceed.
 4. One Clock read and one nonce through the original node's own seams into the request's
    draw cell, which binds the request to that node. Retries never draw again.
 5. One immutable Draft with canonical parents; ONE Plan for it with caller-supplied
@@ -94,10 +97,21 @@ authoring.
   SavedLocal or AlreadySaved and returns whether the saved original is the lent one. When it
   is not (AlreadySaved naming an earlier signing of the same request), the caller must drop
   its lent copy and never publish it; the outbox's stored entry is the only published one.
-- `abandon_member_request` retires a request that was never handed out: Pending (refused,
-  terminal or uncertain key work) or Complete (an original the outbox permanently
-  refused). Nothing left the process, so nothing is published. A raw cached by an
-  interrupted cut is completed first, so abandonment never hides it.
+- `abandon_member_request` retires a request whose original the outbox never wrote. A
+  Pending request (refused, terminal or uncertain key work) may always be abandoned. A raw
+  cached by an interrupted cut is completed first, so abandonment never hides it. A
+  Complete (restored) original may be abandoned ONLY after the caller (the primary's
+  outbox integration) has one of these, because the host cannot see outbox outcomes:
+
+  | Outbox outcome | Caller action |
+  |---|---|
+  | `prepare_append` TokenConflict, Foreign, IndexExhausted | abandon (nothing written) |
+  | Exact lookup with the original request DATA returns Absent | restore and retry, or abandon |
+  | `run()` Uncertain | recover, then look up: Hit means finish with the receipt ActionId, Absent as above |
+  | AlreadySaved | finish with the receipt ActionId, never abandon |
+  | DuplicateAction | report a host invariant breach (that ActionId WILL be published); never abandon as "not sent" |
+  | Busy, Stale (including admit refusal), NeedsRecovery, Incomplete, Payment, `prepare_append` Failed (read error, nothing stored) | keep the original, retry later |
+  | Pressure | keep it and retry; if the product drops it, the UI must say "not saved" |
 - `forget_lent_member_request` retires a Lent request whose value was lost, and only after
   the outbox's exact lookup proved Absent. It exists so a lost value cannot wedge the lane.
 
@@ -138,3 +152,8 @@ These do not establish that the configured pools fit activation.
   exclusivity on this host (the founder lane cannot run here). The founder next-request
   exclusion has no direct regression yet: reaching it needs a completed founder resident.
 - Eight channels per host lifetime; beyond that new channels refuse.
+- The preconditions for abandoning a Complete original and for forgetting a Lent one (an
+  outbox refusal that stored nothing, or an exact Absent lookup) are asserted by the caller,
+  not proven to the host. A caller that breaks them can only provoke an outbox
+  AlreadySaved/TokenConflict later, not a second publication; a typed Absent receipt
+  argument is a possible later tightening.

@@ -728,6 +728,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         layout: &V2CurrentLayoutStore,
         request: V2MemberSignRequest<'_>,
     ) -> Result<(), AppError> {
+        // A malformed request never creates a lane (which would exclude founder Create).
+        require_request_shape(&request)?;
         // Pure DATA completion and exact retry BEFORE any positive gate.
         if let Some(lane) = self.member.as_deref_mut() {
             if lane.retry_completed(&request)? {
@@ -743,18 +745,24 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             return Err(refused());
         }
         let store = layout.checked_store()?;
-        if self.member.is_none() {
-            let lane = {
-                let owner = self.owner.borrow_current()?;
-                let observer = self.observer.as_ref().ok_or_else(refused)?;
-                V2MemberLane::prepare(store, &owner, observer)?
-            };
+        if let Some(lane) = self.member.as_deref_mut() {
+            return lane.retry_request(store, &mut self.owner, &request);
+        }
+        // A NEW lane is installed only once its anchor is bound and its verifier exists. If
+        // it fails earlier (for example the anchor refuses beside a crash-left founder WAL),
+        // nothing was drawn or signed: the draw follows the verifier. Dropping it here keeps
+        // the founder lane available, so this host is not wedged with neither lane able to
+        // make progress. The dropped domain minted no verifier and closes on Drop.
+        let mut lane = {
+            let owner = self.owner.borrow_current()?;
+            let observer = self.observer.as_ref().ok_or_else(refused)?;
+            V2MemberLane::prepare(store, &owner, observer)?
+        };
+        let result = lane.retry_request(store, &mut self.owner, &request);
+        if lane.verifier.is_some() {
             self.member = Some(Box::new(lane));
         }
-        self.member
-            .as_deref_mut()
-            .ok_or_else(refused)?
-            .retry_request(store, &mut self.owner, &request)
+        result
     }
 
     /// Move the exact completed original out for the member outbox's `prepare_append`. The
@@ -799,9 +807,21 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             .finish(token, FinishMode::Saved(saved_action))
     }
 
-    /// Drop a request that was never handed out: refused, terminal or uncertain key work, or
-    /// a completed original the outbox permanently refused. Nothing left process memory, so
-    /// nothing is published. The token is retired for this host lifetime.
+    /// Drop a request whose original was never written by the outbox, retiring the token
+    /// for this host lifetime. The host cannot see outbox outcomes, so the CALLER must only
+    /// abandon a Complete (restored) original after one of these:
+    /// - `prepare_append` refused with TokenConflict, Foreign or IndexExhausted; or
+    /// - an exact outbox lookup with the original request DATA returned Absent.
+    ///
+    /// It must NOT abandon after: `run()` Uncertain (recover, then look up: Hit means
+    /// `finish_member_request_saved(receipt.action)`, Absent means restore or abandon);
+    /// DuplicateAction (that ActionId is already stored and WILL be published; report a host
+    /// invariant breach, never "not sent"); AlreadySaved (use finish); Busy, Stale (including
+    /// an admit refusal), NeedsRecovery, Incomplete, Payment or a `prepare_append` Failed read
+    /// error (nothing stored; keep the original, retry);
+    /// Pressure (keep it and retry; dropping it instead discards the user's message and the
+    /// UI must then say "not saved"). A Pending request (refused, terminal or uncertain key
+    /// work, nothing completed) may always be abandoned.
     pub(in crate::store) fn abandon_member_request(
         &mut self,
         token: [u8; 32],
