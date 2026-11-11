@@ -49,23 +49,16 @@ use catcoms_rt::{CryptoRngCore, RequestCancellation};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use zeroize::Zeroizing;
 
-/// Domain of the member-outbox page/control key, derived from the vault database key so no
-/// other private-chat page family can open or forge a member-outbox object.
-///
-/// PERSISTENCE FORMAT: every member-outbox page, entry, node, head and WAL is sealed under the
-/// derived key. Changing this string makes every existing member outbox unreadable (refused as
-/// `Incomplete`, never silently treated as empty).
-const PAGE_KEY_DOMAIN: &str = "catcoms/private-chat-v2-member-outbox-pages/v1";
-
-/// The member-outbox sealing key of this Store's vault.
+/// The key the member-outbox engine is given: this vault's database key, exactly as the
+/// documented format specifies (`CHAT-V2-MEMBER-OUTBOX.md`, Formats). Control files derive
+/// their own member-outbox keys from it inside the engine; immutable objects use the shared
+/// private chat page crypto, separated from other page families by their role tag and context
+/// ID. PERSISTENCE FORMAT: passing any other key makes existing outboxes unreadable (refused
+/// as `Incomplete`, never treated as empty).
 pub(in crate::store) fn member_outbox_key(
     store: &ServerStore,
 ) -> Result<Zeroizing<[u8; 32]>, AppError> {
-    let database = Zeroizing::new(store.keys.db_key()?);
-    Ok(Zeroizing::new(blake3::derive_key(
-        PAGE_KEY_DOMAIN,
-        database.as_slice(),
-    )))
+    Ok(Zeroizing::new(store.keys.db_key()?))
 }
 
 /// Retained per-mount metadata on the member pool: the mount itself, its bounded cell table

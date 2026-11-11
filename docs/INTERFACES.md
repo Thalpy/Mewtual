@@ -45,6 +45,30 @@ ID5; every other opener refuses it and its fixed artifacts before cleanup. JOIN
 re-encoders preserve ID5 exactly. The mount grants no member source, save or governance
 authority. [Format and recovery](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
+## Member save (11 November; root implemented, not yet executed, no native caller)
+
+Public root API for the native consumer (no Tauri types in root):
+
+- `PreparedV2TextHost::prepare_member_save(layout, V2MemberSignRequest, &session, rng)`
+  -> `Result<V2MemberSaveOutcome, V2MemberSaveRefusal>`. Phase 1, on the blocking pool
+  WITHOUT the UI commit guard: lookup before signing, sign, preseal. `Saved { action,
+  ordinal }` or `Ready`. `session` is a negative only.
+- `PreparedV2TextHost::admit_member_save(layout, token, MemberSaveNativeAdmission)` ->
+  `Result<MemberSaveJob, (MemberSaveNativeAdmission, V2MemberSaveRefusal)>`. Phase 2,
+  under the UI commit guard: no IO, no wait, native authority checked last.
+- `MemberSaveNativeAdmission::new(custody: impl Send + 'static, session)`: `custody` is
+  the native checked custody (owned UI commit guard plus row/persistence custody), erased
+  and dropped LAST after the job's IO; it is not authentication.
+- `MemberSaveJob::run(self) -> MemberSaveJobReport { SavedLocal | Uncertain }`; `Send +
+  'static`, moved into `spawn_blocking` with no await after admission. Dropping it unrun
+  de-admits without IO.
+- `V2MemberSignRequest` and `V2MemberDependency` are now public borrowed DATA.
+
+`V2MemberSaveRefusal`: `Unavailable`, `Busy`, `Conflict`, `Pressure`, `Signing`,
+`Unresolved`, `Incomplete`, `Failed`, `Cancelled`, `Stale`; none means a write happened or
+"absent". The outbox engine key is the vault database key (unchanged format). No wire or
+persistence format changes. [Save path](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
 ## Ordinary member outbox (8 November; storage-only)
 
 `store::persistence::v2_member_outbox` is store-private and inactive. Its exclusive
@@ -54,12 +78,11 @@ conflicts precede pending pressure. Debt batches bind context, front and exact
 immutable entries so unrelated appends need not invalidate submission in flight.
 Only a contiguous submitted/Held prefix advances; audit and request receipts stay.
 
-Signed-original DATA and final save admission are distinct. Their production
-constructors, held parent provisioning and native/member-source guard are absent;
-test fixtures grant storage durability only. Final admission must compare original
-member-source/UI generations and exact prepared facts. Work retains the actual
-vault lease and payments through IO/cleanup. Append additionally commits bounded
-quota for future checkpoints; this is not disk preallocation or peer durability.
+Signed-original DATA and final save admission are distinct. The production parent
+(`from_mount`) and the final-edge admission issuer are now the member-save path above;
+test fixtures still grant storage durability only. Work retains the actual vault lease
+and payments through IO/cleanup. Append additionally commits bounded quota for future
+checkpoints; this is not disk preallocation or peer durability.
 [Methods, invoices and recovery rules](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
 ## Operational private text byte codes (6 November; implementation in progress)

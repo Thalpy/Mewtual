@@ -26,6 +26,20 @@ rewrites the private directory. A torn first declaration seed stays preserved an
 which can leave a vault unopenable until first-torn-seed recovery exists. Declaring ID5
 grants no governance, member-source or save authority.
 
+Member saves (root implemented, not yet executed; no native caller). The only issuer of a
+save admission is the host's final edge: the member lane's own save-source end for the exact
+prepared facts (bound context, token Lent with the ActionId, the request's historical
+Admission), then cached mount negatives, then the native session authority as the
+linearization point. Historical Admission labels are not present authority; the
+joined-member source must still enforce the original Admission's current lifetime there.
+The erased native custody is ownership, not authentication: root cannot verify it, so native
+authorization rests on the native consumer's checked factory. Lookup runs before any signing
+and a read failure is never absence. Store-scoped custody cells hold DATA only (never a
+source end, lease or native guard); an uncertain, unwound or unrun save keeps its exact
+original there and is resolved by recovery and lookup, never by signing again. A residual
+panic inside pure DATA sealing can lose an in-hand original; the token is then retired after
+an exact Absent lookup rather than re-signed.
+
 ## Ordinary-member signer (11 November; focused checks passed, inactive)
 
 The founder acting as an ordinary member signs with the SAME retained device of its whole
