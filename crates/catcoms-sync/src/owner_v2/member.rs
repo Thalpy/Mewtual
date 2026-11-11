@@ -201,8 +201,10 @@ impl std::fmt::Debug for V2MemberDraftInputs {
 
 /// Shared key-cut tail for both node families, run under the held Core reader after the
 /// caller's allocation-free, SDK-free origin negatives. Order is fixed: require that the
-/// admitted Draft carries exactly this request's drawn time and nonce (so a draw cell can
-/// never serve a second Draft), compare the Draft signer with the device's RETAINED key
+/// admitted Draft carries exactly this request's drawn time and nonce. This seam binds those
+/// drawn fields and the original source, not the complete Draft: the owning App host retains
+/// one immutable Draft and rejects changes to that request. Compare the Draft signer with
+/// the device's RETAINED key
 /// (allocation-free), reuse an already cached raw (no key), mark key entry, make the ONE
 /// bounded key call, cache raw immediately. No hook, check, allocation or callback runs
 /// between the key call and `cache_raw64`.
