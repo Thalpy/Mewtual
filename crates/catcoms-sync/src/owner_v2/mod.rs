@@ -2,6 +2,9 @@
 //! No production dispatcher, publisher, root acquisition, archive saver or positive issuer is
 //! enabled here. Public codec frames remain DATA until the actual host covers their originals.
 mod founder;
+// Ordinary-member signing seams (founder genesis node and joined ChannelSync). No owner
+// certification, Append lane, export or publication is reachable through them.
+mod member;
 pub use founder::{
     open_bootstrap_source_data, prepare_v2_genesis_seed, ArchiveSourceRefusal,
     BootstrapSourceContextData, BootstrapSourceContextSpec, BootstrapSourceDataView,
@@ -21,3 +24,4 @@ pub use founder::{
     MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES, MAX_CREATE_PADDED_BYTES,
     V2_GENESIS_SEED_METADATA_BYTES,
 };
+pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};

@@ -495,6 +495,12 @@ pub(in crate::store) use operational::negative::{
     PreparedV2TextSourceObserver, V2TextSourceNegativeObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
 };
 pub(in crate::store) use operational::owner::{V2TextOwnedCurrent, V2TextOwnerRef};
+#[cfg(all(test, windows))]
+use operational::{
+    arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
+    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test, V2MemberDependency,
+    V2MemberSignRequest,
+};
 pub use operational::{PreparedV2TextHost, PreparedV2TextRead, V2TextHostPolicy};
 mod cold;
 pub(super) mod settlement;

@@ -190,6 +190,46 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
             OwnedCurrent::Repaired(c) => c.materialize_text_append(store, model, prepared),
         }
     }
+    /// ORDINARY-member seams (never the founder Append/Header lane). Pre-admission: the
+    /// SAME original node's full retained device key after its full source negatives.
+    pub(super) fn ordinary_member_signer_data(
+        &self,
+        store: &ServerStore,
+    ) -> Result<[u8; 32], catcoms_sync::owner_v2::V2MemberSignRefusal> {
+        match &self.core {
+            OwnedCurrent::Warm(c) => c.text_ordinary_member_signer(store),
+            OwnedCurrent::Cold(c) => c.text_ordinary_member_signer(store),
+            OwnedCurrent::Repaired(c) => c.text_ordinary_member_signer(store),
+        }
+    }
+    /// Outside every writer: the request's one Clock/RNG draw through this node's seams.
+    pub(super) fn draw_ordinary_draft_inputs(
+        &mut self,
+        store: &ServerStore,
+        slot: &mut catcoms_sync::owner_v2::V2MemberDraftInputs,
+    ) -> Result<(u64, [u8; 16]), catcoms_sync::owner_v2::V2MemberSignRefusal> {
+        match &mut self.core {
+            OwnedCurrent::Warm(c) => c.draw_text_ordinary_inputs(store, slot),
+            OwnedCurrent::Cold(c) => c.draw_text_ordinary_inputs(store, slot),
+            OwnedCurrent::Repaired(c) => c.draw_text_ordinary_inputs(store, slot),
+        }
+    }
+    /// Only the member lane calls this, inside its Current/group guard with Core's original
+    /// reader held by `guard`. The node caches raw64 in the Plan before returning.
+    pub(super) fn sign_ordinary_admitted<'a>(
+        &self,
+        inputs: &catcoms_sync::owner_v2::V2MemberDraftInputs,
+        guard: catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+    ) -> Result<
+        catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+        catcoms_sync::owner_v2::V2MemberSignRefusal,
+    > {
+        match &self.core {
+            OwnedCurrent::Warm(c) => c.sign_text_ordinary_admitted(inputs, guard),
+            OwnedCurrent::Cold(c) => c.sign_text_ordinary_admitted(inputs, guard),
+            OwnedCurrent::Repaired(c) => c.sign_text_ordinary_admitted(inputs, guard),
+        }
+    }
     pub(super) fn borrow_unsigned_append<'a>(
         &'a self,
         store: &ServerStore,

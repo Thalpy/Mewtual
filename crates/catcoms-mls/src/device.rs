@@ -17,6 +17,8 @@ pub use key_package_identity::KeyPackageIdentity;
 mod founder_input;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod key_package_time;
+// Chat V2 ordinary member signing: exact full-key check plus explicit payload bound.
+mod ordinary_signer;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod text_add_package;
 

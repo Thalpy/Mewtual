@@ -8,7 +8,8 @@ use crate::AppError;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_header::OwnerTenureId;
 use catcoms_replication::chat::{
-    ActionId, ActionSpec, Body, SignedAction, MAX_GROUP_ID_BYTES, MAX_PARENTS, MAX_TEXT_BYTES,
+    ActionDraft, ActionId, ActionSpec, Body, ChatError, OriginalV2OrdinarySigningPlanObservation,
+    SignedAction, V2OrdinarySigningPlan, MAX_GROUP_ID_BYTES, MAX_PARENTS, MAX_TEXT_BYTES,
 };
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
@@ -325,12 +326,12 @@ fn request_digest(
 
 /// Custody of one exact signed original plus the Admission it was signed under.
 ///
-/// Not Clone. Production construction belongs to the primary's warm-member owner, from the
-/// actual original Draft, V2 ordinary signing Plan, its observation and cached raw64
-/// (`complete_cached_raw64_data`) plus the Plan's historical Admission ID. That constructor is
-/// deliberately NOT in this module. Holding this value is DATA custody only: completing a
-/// cached signature after cancellation renews no signing or publication authority, and saving
-/// it still needs a separate [`super::transaction::MemberOutboxSaveAdmission`].
+/// Not Clone. The only production constructor is [`Self::from_completed_plan`], called by the
+/// operational host's ordinary-member lane (its only caller) from the actual original Draft,
+/// V2 ordinary signing Plan, its observation and the Plan's cached raw64, plus the Plan's
+/// historical Admission ID. Holding this value is DATA custody only: completing a cached
+/// signature after cancellation renews no signing or publication authority, and saving it
+/// still needs a separate [`super::transaction::MemberOutboxSaveAdmission`].
 pub(in crate::store) struct MemberSignedOriginal {
     action: SignedAction,
     admission: OwnerFactId,
@@ -342,6 +343,20 @@ impl std::fmt::Debug for MemberSignedOriginal {
     }
 }
 impl MemberSignedOriginal {
+    /// Custody from the SAME actual Plan, its original observation and Draft. The
+    /// completion re-verifies Plan identity, Draft, full key and the cached raw64
+    /// signature; it renews no authority. Call outside writers, after caching raw64.
+    pub(in crate::store) fn from_completed_plan(
+        plan: &V2OrdinarySigningPlan,
+        original: &OriginalV2OrdinarySigningPlanObservation,
+        draft: &ActionDraft,
+    ) -> Result<Self, ChatError> {
+        let action = plan.complete_cached_raw64_data(original, draft)?;
+        Ok(Self {
+            action,
+            admission: plan.admission_id_data(),
+        })
+    }
     /// Durability-only fixture. It wraps a genuinely signed action for storage tests; it is
     /// cfg(test) and supplies no membership, Admission or signing authority of any kind.
     #[cfg(test)]
@@ -360,6 +375,10 @@ impl MemberSignedOriginal {
         self.admission
     }
 }
+
+// The production constructor's tests (agreed with the outbox owner): real Core plan issuer.
+#[cfg(test)]
+mod signed_original_tests;
 
 /// What a successful save returns and what lookup recovers: the exact receipt of one entry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

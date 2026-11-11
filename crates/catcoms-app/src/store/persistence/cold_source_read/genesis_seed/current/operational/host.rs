@@ -27,13 +27,24 @@ use recovery::PromotionRecovery;
 mod lookup;
 use lookup::PendingTokenLookup;
 mod create;
+// ORDINARY-member lane (founder-as-member vertical): general verifier + signing plan,
+// never the founder A/I/S/B certification lane. Mutually exclusive with founder Create.
+mod member;
 mod projection;
+// Request DATA types travel to the regression tests only until the primary's native
+// dispatcher exists; that dispatcher must re-export them without this gate.
 pub(in crate::store) use create::{
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
     PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
 };
 use create::{PendingCompletedCreate, PendingCreate};
+#[cfg(all(test, windows))]
+pub(in crate::store) use member::{
+    arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
+    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test, V2MemberDependency,
+    V2MemberSignRequest,
+};
 
 /// Trusted local immutable-history limits, separate from memory reservations and fixed
 /// control-file capacity. This is no promise that the filesystem has that space free.
@@ -56,6 +67,9 @@ impl V2TextHostPolicy {
 /// adopting constructor is exposed. This still cannot post or issue a projection token.
 pub struct PreparedV2TextHost<T, R> {
     projection: Option<Arc<projection::V2TextProjectionDomain>>,
+    // The ordinary-member lane owns its OWN member-role domain, verifier, request and fees.
+    // Drops before `owner`; Drop below cancels its domain first. Exclusive with founder Create.
+    member: Option<Box<member::V2MemberLane>>,
     resident: Option<PreparedV2TextResidentProjection>,
     capture: Option<PreparedV2TextPromotionCapture>,
     prepared: Option<PreparedV2TextPromotion>,
@@ -87,6 +101,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
     pub fn from_read(read: PreparedV2TextRead<T, R>, policy: V2TextHostPolicy) -> Self {
         Self {
             projection: None,
+            member: None,
             resident: None,
             capture: None,
             prepared: None,
@@ -275,6 +290,9 @@ impl<T, R> PreparedV2TextHost<T, R> {
         if let Some(domain) = &self.projection {
             domain.cancel();
         }
+        if let Some(member) = &self.member {
+            member.cancel();
+        }
         if let Some(request) = self.request_preparation.as_mut() {
             request.drain_retained()?;
         }
@@ -290,6 +308,10 @@ impl<T, R> PreparedV2TextHost<T, R> {
             .projection
             .as_ref()
             .is_some_and(|domain| !domain.try_closed())
+            || self
+                .member
+                .as_ref()
+                .is_some_and(|member| !member.try_closed())
         {
             return Err(AppError::Invalid("Chat is still closing.".into()));
         }
@@ -307,9 +329,12 @@ impl<T, R> PreparedV2TextHost<T, R> {
         if let Some(lookup) = self.lookup.as_mut() {
             lookup.drain_admitted()?;
         }
+        // A live ordinary-member lane excludes the founder Create lane on this host: two
+        // token namespaces must never both author for one request (no second Draft).
         if self.resident.is_some()
             || self.next_request_preparation.is_some()
             || self.selected.is_none()
+            || self.member.is_some()
         {
             return Err(refused());
         }
@@ -407,6 +432,9 @@ impl<T, R> Drop for PreparedV2TextHost<T, R> {
         self.owner.cancel_original();
         if let Some(domain) = &self.projection {
             domain.cancel();
+        }
+        if let Some(member) = &self.member {
+            member.cancel();
         }
     }
 }

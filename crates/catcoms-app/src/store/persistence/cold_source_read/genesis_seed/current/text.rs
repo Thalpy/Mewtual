@@ -111,6 +111,54 @@ macro_rules! node_call_throughs {
                 self.require_text_original_data(store)?;
                 prepared.borrow_unsigned_data(&self.node, model)
             }
+
+            /// ORDINARY-member seams on the SAME original node. None reaches the founder
+            /// Append/Header lane. Pre-admission: the full retained device key.
+            pub(in crate::store::persistence::cold_source_read::genesis_seed::current)
+            fn text_ordinary_member_signer(
+                &self,
+                store: &crate::store::ServerStore,
+            ) -> Result<[u8; 32], catcoms_sync::owner_v2::V2MemberSignRefusal> {
+                use catcoms_sync::owner_v2::V2MemberSignRefusal;
+                self.require_text_original_data(store)
+                    .map_err(|_| V2MemberSignRefusal::Source)?;
+                self.node.ordinary_member_signer_data()
+            }
+
+            /// Outside every writer: the request's one Clock/RNG draw through this node's
+            /// retained seams. The caller's slot caches each value before late checks.
+            pub(in crate::store::persistence::cold_source_read::genesis_seed::current)
+            fn draw_text_ordinary_inputs(
+                &mut self,
+                store: &crate::store::ServerStore,
+                slot: &mut catcoms_sync::owner_v2::V2MemberDraftInputs,
+            ) -> Result<(u64, [u8; 16]), catcoms_sync::owner_v2::V2MemberSignRefusal> {
+                use catcoms_sync::owner_v2::V2MemberSignRefusal;
+                self.require_text_original_data(store)
+                    .map_err(|_| V2MemberSignRefusal::Source)?;
+                let result = self.node.draw_ordinary_draft_inputs(slot);
+                self.require_text_original_data(store)
+                    .map_err(|_| V2MemberSignRefusal::Source)?;
+                result
+            }
+
+            /// Inside the host's Current/group guard, with Core's original reader held by
+            /// `guard`. The caller ran the full original-owner negatives (via
+            /// `text_ordinary_member_signer`) inside this SAME Current callback just before
+            /// Core admission, so nothing but the node's own key cut runs here. raw64 is
+            /// cached in the Plan by the node itself, so no late check can lose it. `inputs` is
+            /// the request's draw cell: the node refuses a request drawn on another seed.
+            pub(in crate::store::persistence::cold_source_read::genesis_seed::current)
+            fn sign_text_ordinary_admitted<'a>(
+                &self,
+                inputs: &catcoms_sync::owner_v2::V2MemberDraftInputs,
+                guard: catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+            ) -> Result<
+                catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+                catcoms_sync::owner_v2::V2MemberSignRefusal,
+            > {
+                self.node.sign_ordinary_admitted(inputs, guard)
+            }
         }
     };
 }

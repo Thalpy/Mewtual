@@ -91,3 +91,10 @@ original generation and command/UI credential before passing the admitted plan t
 No owner Header/I/B/WC or channel exporter is needed for signing-only. Existing Genesis-only
 Source and v1 joined checkpoint cannot be relabelled to supply that production boundary.
 Independent durable outbox and current-epoch envelope attempts remain later reviewed slices.
+
+Amendment, 9 November: the founder-as-ordinary-member vertical uses the founder's whole
+genesis node only under the narrow conditions in
+[CHAT-V2-ORDINARY-MEMBER-SIGNER](CHAT-V2-ORDINARY-MEMBER-SIGNER.md): unchanged founder
+`source()` check, pin-authenticated genesis anchor, selected O still the empty
+generation-1 promotion (re-proved at every key cut), and lane exclusivity with founder
+Create. That is not a general relabelling; any later governing prefix refuses.

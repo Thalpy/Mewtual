@@ -4,6 +4,11 @@ Design checkpoint, 7 November. This is the next integration boundary, not an ena
 feature or a completed implementation. The general Core verifier's ten focused tests
 pass; member source/signing, independently durable outbox and native routing remain open.
 
+Update, 9 November: the signing boundary below is authored (unrun) for the founder acting
+as an ordinary member, plus the Sync seams for a joined member's `ChannelSync`. See
+[CHAT-V2-ORDINARY-MEMBER-SIGNER](CHAT-V2-ORDINARY-MEMBER-SIGNER.md). Nonfounder App
+orchestration still waits for the joined-member source.
+
 ## Two independent paths
 
 The Profile founder owns the governing Header key. Other devices retain their own
