@@ -177,11 +177,7 @@ fn encode_execution_change(
     output.put_bytes(domain).map_err(|_| refused())?;
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
-    output.put_u32(
-        1 + u32::from(current.archive.is_some())
-            + u32::from(current.current_layout.is_some())
-            + u32::from(current.governance.is_some()),
-    );
+    output.put_u32(preserved_entry_count(current));
     // The actual execution producer chooses this known version only after configured parsing;
     // outer descriptor/source preservation remains the shared writer's exact contract.
     output.put_u32(codec::JOIN_ID);

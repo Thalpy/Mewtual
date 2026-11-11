@@ -27,10 +27,17 @@ pub(in crate::store) mod archive_current_namespace_codec;
 // Decoding alone still issues no source/fee/writer or operational protocol authority.
 pub(in crate::store) mod archive_current_codec;
 mod catalog_envelope;
+// Shared exact sorted-insert declaration DATA for independently declared namespaces (4, 5).
+mod catalog_declaration;
 pub(in crate::store) mod current_group;
 pub(in crate::store) mod current_layout;
 pub(in crate::store) mod governance_layout;
 pub(in crate::store) mod governance_namespace_codec;
+// Namespace5: the ordinary-member outbox layout. Its descriptor codec is DATA only; the
+// configured handler in `member_outbox_layout` is the only physical interpreter.
+pub(in crate::store) mod member_outbox_layout;
+pub(in crate::store) mod member_outbox_namespace_codec;
+pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
     ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,

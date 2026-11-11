@@ -61,7 +61,7 @@ pub use critical_namespaces::{
     PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore, PreparedV2CurrentLayoutStore,
     PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
     ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
-    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
+    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
 };
 mod owner_evidence;
 pub use chat_admission::{

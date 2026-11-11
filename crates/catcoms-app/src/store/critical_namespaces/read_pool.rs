@@ -72,6 +72,16 @@ impl CriticalCatalogReadPool {
         })
     }
 
+    /// The trusted configured hard capacity, for a policy's own sizing check at configuration
+    /// time. DATA only: it grants no credit, and an account that already lost accounting
+    /// (`unavailable`) or is poisoned reports zero so no policy can be sized against it.
+    pub(in crate::store) fn capacity(&self) -> usize {
+        match self.inner.state.lock() {
+            Ok(state) if !state.unavailable => state.capacity,
+            _ => 0,
+        }
+    }
+
     pub(in crate::store) fn try_reserve(
         &self,
         bytes: usize,

@@ -59,7 +59,12 @@ impl ServerStore {
         let mut next = self
             .parse_configured_join_catalog(&next_plain)?
             .summary([0; 32]);
-        if next.governance != Some(capability) {
+        // An existing member-outbox ID5 is carried over byte for byte (the codec inserts
+        // 4 before it); this second, Summary-level check never lets 4 alter or drop it.
+        if next.governance != Some(capability)
+            || next.member_outbox != before.member_outbox
+            || next.member_outbox_payload_digest != before.member_outbox_payload_digest
+        {
             return Err(refused());
         }
         self.require_no_prior_governance_declaration_debts()?;
@@ -144,6 +149,8 @@ impl ServerStore {
                 || next.governance != Some(saved.capability)
                 || before.current_layout != Some(layout)
                 || next.current_layout != Some(layout)
+                || before.member_outbox != next.member_outbox
+                || before.member_outbox_payload_digest != next.member_outbox_payload_digest
             {
                 return Err(refused());
             }

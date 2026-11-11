@@ -133,6 +133,10 @@ pub struct V2CurrentLayoutPolicy {
     pub(in crate::store) archive: ArchiveBootstrapCatalogPolicy,
     pub(in crate::store) canonical: CanonicalFilenameInventoryPolicy,
     pub(in crate::store) persistent_capacity: usize,
+    /// The concrete namespace5 (ordinary-member outbox) handler. `None` keeps this opener's
+    /// grammar exactly as before: an ID5 entry or member-outbox fixed artifact refuses before
+    /// any old cleaner. Trusted Rust configuration only, never decoded from storage.
+    pub(in crate::store) member_outbox: Option<super::member_outbox_layout::V2MemberOutboxPolicy>,
 }
 impl std::fmt::Debug for V2CurrentLayoutPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -152,9 +156,24 @@ impl V2CurrentLayoutPolicy {
             archive,
             canonical,
             persistent_capacity,
+            member_outbox: None,
         };
         policy.require_persistent_capacity()?;
         Ok(policy)
+    }
+
+    /// Install the concrete namespace5 handler for ordinary-member outbox storage. Opening
+    /// with it declares and mounts ID5 (independently of governance4) and admits ID5 in this
+    /// opener's catalog grammar. Its separate member pool and quotas never share credit with
+    /// the archive/JOIN pool; the declaration's own transient fee stays on that pool.
+    pub fn with_member_outbox(
+        mut self,
+        member_outbox: super::member_outbox_layout::V2MemberOutboxPolicy,
+    ) -> Result<Self, AppError> {
+        member_outbox.require_capacity()?;
+        self.member_outbox = Some(member_outbox);
+        self.require_persistent_capacity()?;
+        Ok(self)
     }
     /// Repeat this trusted negative policy check at actual opening/writing, not only while
     /// constructing a cloneable configuration. It is logical fixed-file capacity, not disk
