@@ -45,12 +45,12 @@ ID5; every other opener refuses it and its fixed artifacts before cleanup. JOIN
 re-encoders preserve ID5 exactly. The mount grants no member source, save or governance
 authority. [Format and recovery](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
-## Member save (11 November; root implemented, initial Windows execution 17/18, no native caller)
+## Member save (11 November; focused root cases passed, no native caller)
 
 Public root API for the native consumer (no Tauri types in root):
 
-The initial CI run found a no-prepared-work refusal mismatch; its correction is
-queued for CI. [Current execution evidence](HANDOVER.md).
+All 18 Windows save cases pass after correcting the no-prepared-work refusal
+mismatch. [Current evidence and incomplete native/restart boundaries](HANDOVER.md).
 
 - `PreparedV2TextHost::prepare_member_save(layout, V2MemberSignRequest, &session, rng)`
   -> `Result<V2MemberSaveOutcome, V2MemberSaveRefusal>`. Phase 1, on the blocking pool

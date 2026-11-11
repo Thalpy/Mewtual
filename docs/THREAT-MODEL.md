@@ -27,8 +27,8 @@ rewrites the private directory. A torn first declaration seed stays preserved an
 which can leave a vault unopenable until first-torn-seed recovery exists. Declaring ID5
 grants no governance, member-source or save authority.
 
-Member saves (root implemented, initial Windows execution 17/18; no native caller).
-The no-prepared-work refusal correction awaits CI; see HANDOVER. The only issuer of a
+Member saves (18 focused Windows save cases passed; no native caller).
+See HANDOVER for the separate incomplete native/restart boundaries. The only issuer of a
 save admission is the host's final edge: the member lane's own save-source end for the exact
 prepared facts (bound context, token Lent with the ActionId, the request's historical
 Admission), then cached mount negatives, then the native session authority as the

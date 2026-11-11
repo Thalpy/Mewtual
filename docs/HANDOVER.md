@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Primary member-save follow-up (11 November; focused execution, one correction queued)
+## Primary member-save follow-up (11 November; focused tests passed, full sign-off open)
 
 The primary's fresh actual-diff review of `ae5a0837` found four MEDIUM issues: an
 invocation cancelled during lookup could still start signing; retryable preseal
@@ -17,14 +17,14 @@ sealing before authoring, post-sign append-credit refusal followed by lane
 replacement with the exact retained original/no new key, and retiring an unrun
 job's source end while its actual issuance mutex is held. The source inventory
 contains 15 earlier Windows save cases, now 18; B's two new mount cases are separate.
-CI at `57676fd2` passes all 57 Linux storage/catalog executions and the same 57
-Windows executions. Windows also passes 17 of 18 save cases, including all three
-primary regressions. Its existing no-prepared-work case fails deterministically:
-the final edge checks the not-yet-installed mount before checking for a lane and
-returns Busy instead of Stale. The correction checks the lane/context first,
-without changing any positive admission check. The strengthened case retains its
-Stale assertion for both absent and installed mounts, plus unchanged files/sign
-count and whole returned native custody. Its execution awaits the next CI run.
+CI at `5960b177` passes all 57 Linux storage/catalog executions and all 75 Windows
+executions (the same 57 plus 18 save cases). No cases are ignored. The first run
+at `57676fd2` exposed a deterministic Busy-versus-Stale mismatch for a never-prepared
+host. The correction checks the lane/context before the lazy mount, without
+changing any positive admission check. Its now-passing strengthened case retains
+the Stale assertion for both absent and installed mounts, plus unchanged files/sign
+count and whole returned native custody.
+[Focused run and artifacts](https://github.com/Thalpy/Mewtual/actions/runs/43093078523).
 Local Cargo remains paused by user request. Earlier "none run" entries below
 describe their original checkpoints, not this subsequent execution evidence.
 
@@ -41,13 +41,23 @@ The same head's ordinary CI passes all 3,434 frontend tests, Svelte checking
 the strict-Clippy jobs; native compilation stops on existing App warning debt.
 The root supply-chain audit still fails on the five advisories named below, and
 its native audit step is skipped. This checkpoint is not full-suite sign-off.
-The follow-up removes an unattached test-macro rustdoc comment introduced by the
-primary; it changes no runtime or test body. PR #86 remains draft and unmerged.
+An unattached test-macro rustdoc comment introduced by the primary was also
+converted to ordinary comments. PR #86 remains draft and unmerged.
 
 M4 is decided: retain bounded exact signed-original DATA across a UI lock. Do not
 discard the only unsaved copy to implement lock. No save/publication authority
 survives that lock; a later invocation needs fresh native generation/row and
 actual source admission. No lock-time plaintext-erasure claim is made.
+
+Neither C nor F is running externally; the primary owns the next native slice.
+The actual native/source audit confirms that a new IPC handler is insufficient:
+typed vault/bootstrap custody, genuine durable backend/source binding, a distinct
+cold-operational owner factory and actual native key admission are still absent.
+Cold genesis explicitly rejects a promoted operational head, including an empty
+promotion. A warm-save/cold-reopen result therefore needs implementation, not
+only another test. The reviewed next-slice design is
+[Native member saves: production prerequisites](communication-recovery/CHAT-V2-NATIVE-MEMBER-SAVE-NEXT.md).
+No native or root-factory code was changed during that audit.
 
 The read-only dependency survey identified a published remediation route; no
 dependency changes are mixed into this save checkpoint. First update rustix to

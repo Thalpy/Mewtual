@@ -12,8 +12,9 @@ originals, exact request receipts and publication debt. It is separate from the
 founder's certification journal and legacy Automerge outbox. Epoch changes affect
 transport envelopes, not stored action identities. Its registry/physical-work
 lease isolates finite IO; its storage types supply no membership or native authority.
-Production save admission, parent provisioning and sender-state export remain
-separate integration work. [Outbox contract](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+Production parent provisioning and root save admission now have focused execution
+evidence. Native dispatch, operational reopen, joined-member sources and sender-state
+export remain incomplete. [Outbox contract](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
 ## First operational text signing/storage path (7 November; disabled)
 

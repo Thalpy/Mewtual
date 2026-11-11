@@ -387,7 +387,9 @@ settlement, stale and foreign batches, and audit after debt clears.
 
 The primary's approved A/B/F implementation boundary is recorded in
 [CHAT-V2-MEMBER-SAVE-HANDOFF](CHAT-V2-MEMBER-SAVE-HANDOFF.md). Root now implements the save
-path above; it has not executed anywhere yet (CI is red on base lint debt before tests run).
+path above; all 18 focused Windows save cases now pass in the independent CI lane,
+alongside 57 storage/catalog executions on both Linux and Windows. Strict/full/native
+gates remain incomplete. [Current evidence](../HANDOVER.md).
 
 - The native producer (F): the checked factory that builds `MemberSaveNativeAdmission`
   from the actual owned UI commit guard and row custody, the per-server-incarnation entry,
@@ -398,8 +400,11 @@ path above; it has not executed anywhere yet (CI is red on base lint debt before
   (never recomputed from tips), so the request composer must persist the exact parent list it
   sent; a retry after restart with different parents is a conflict by design, not a hit.
 - True host replacement on one Store (a second whole original owner) is not exercised; the
-  regressions replace the member lane under the same owner. Process restart is
-  crash-equivalent: the cell is memory, and lookup decides from the durable outbox.
+  regressions replace the member lane under the same owner. The cell is memory and the
+  engine's restart-equivalent cases resolve lookup from the durable outbox; they do not
+  establish whole-Host reopen. The actual cold-genesis factory rejects a promoted
+  operational head. A distinct cold-operational factory and genuine native bootstrap
+  are still required. [Native prerequisites](CHAT-V2-NATIVE-MEMBER-SAVE-NEXT.md).
 - Nonfounder sends and the joined-member source (C), including enforcing the original
   Admission's actual current lifetime at `admit_save_source`.
 - Member saves on a governance4 vault: the governance wrapper yields no Store or host, so
