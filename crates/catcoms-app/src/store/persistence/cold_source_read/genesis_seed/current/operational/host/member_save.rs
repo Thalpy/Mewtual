@@ -110,10 +110,15 @@ pub enum V2MemberSaveOutcome {
 pub enum V2MemberSaveRefusal {
     /// No namespace5 handler or mount, or the Store, mount or original source closed.
     Unavailable,
-    /// Another request or a running job holds this context, or a logical payment is not
-    /// available right now. Retry later; nothing was lost.
+    /// A running job holds this context, or a logical payment is not available right now.
+    /// Retry later; nothing was lost.
     Busy,
-    /// The token holds a DIFFERENT saved request (or the original does not belong here).
+    /// The Store retains ANOTHER request's exact original for this context (presealed or
+    /// unresolved). Finish that token first (retry it with its own persisted request DATA);
+    /// one request per context at a time. `token` names it so a composer can resume it.
+    Retained { token: [u8; 32] },
+    /// The token holds a DIFFERENT request (saved, presealed or retained), or the original
+    /// does not belong here. A same-token retry with changed DATA always lands here.
     Conflict,
     /// A persistent quota or index bound would be exceeded. Nothing was evicted; the exact
     /// original is kept for a retry.
@@ -204,7 +209,22 @@ struct SaveEnvironment<'a> {
     signer: [u8; 32],
     /// The derived context, consumed by the first owner open of this call (if any).
     context: Option<MemberOutboxContextData>,
+    /// The call's ONE lookup payment, reserved before any derivation or copy. Lookups in one
+    /// call are sequential (a hit's payment drains before the next), so a second is paid only
+    /// after the first was consumed and released.
+    lookup_fee: Option<CatalogReadReservation>,
     rng: &'a mut dyn CryptoRngCore,
+}
+impl SaveEnvironment<'_> {
+    fn lookup_payment(&mut self) -> Result<CatalogReadReservation, V2MemberSaveRefusal> {
+        match self.lookup_fee.take() {
+            Some(fee) => Ok(fee),
+            None => self
+                .mount
+                .pay(MEMBER_OUTBOX_LOOKUP_FEE)
+                .map_err(|_| V2MemberSaveRefusal::Busy),
+        }
+    }
 }
 
 /// Open the context's owner if this mount has none, then require it to be THIS context and
@@ -274,8 +294,21 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             (context, owner.source().data().context.spec_data().signer)
         };
         let id = context.id();
+        let token = MemberRequestToken::from_bytes(request.token);
+        // The caller's exact request, canonicalised and digested ONCE (funded above). Every
+        // shortcut below compares it, so a same-token retry with changed DATA is a Conflict.
+        let canonical = canonical_member_parents(request.body, request.parents)
+            .map_err(|_| V2MemberSaveRefusal::Signing)?;
+        let digest = MemberRequestData {
+            token,
+            channel: request.channel,
+            parents: &canonical,
+            body: request.body,
+        }
+        .digest(id)
+        .map_err(|_| V2MemberSaveRefusal::Signing)?;
         let cell = mount.cell(id).map_err(|_| V2MemberSaveRefusal::Busy)?;
-        let mut guard = cell.lock().map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        let mut guard = cell.lock_recovering();
         let state: &mut MemberContextState = &mut guard;
         let mut env = SaveEnvironment {
             layout,
@@ -285,33 +318,51 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             id,
             signer,
             context: Some(context),
+            lookup_fee: Some(lookup_fee),
             rng,
         };
-        let token = MemberRequestToken::from_bytes(request.token);
 
-        // 1. Settle earlier custody, of any token, without signing.
-        if let Some(receipt) = self.settle_member_custody(&mut env, state)? {
+        // 1. Settle earlier custody, of any token, without signing. A settled receipt for
+        // this token is reported only when it IS this request and the lane accepted it;
+        // otherwise the exact lookup below decides (with the stored spec).
+        if let Some((receipt, reconciled)) = self.settle_member_custody(&mut env, state)? {
             if receipt.token == token {
-                return Ok(V2MemberSaveOutcome::Saved {
-                    action: receipt.action,
-                    ordinal: receipt.ordinal,
-                });
+                if receipt.request != digest {
+                    return Err(V2MemberSaveRefusal::Conflict);
+                }
+                if reconciled {
+                    return Ok(V2MemberSaveOutcome::Saved {
+                        action: receipt.action,
+                        ordinal: receipt.ordinal,
+                    });
+                }
             }
         }
         match state.custody.as_ref() {
             Some(MemberOriginalCustody::Prepared(prepared))
                 if prepared.admission_facts().token == token =>
             {
+                if prepared.admission_facts().request != digest {
+                    return Err(V2MemberSaveRefusal::Conflict);
+                }
+                self.refresh_prepared(&mut env, state)?;
                 return Ok(V2MemberSaveOutcome::Ready);
             }
-            // One request per context: another token (or a running job) holds it.
-            Some(_) => return Err(V2MemberSaveRefusal::Busy),
+            Some(MemberOriginalCustody::Running { .. }) => return Err(V2MemberSaveRefusal::Busy),
+            Some(retained) if retained.token() == token => {
+                return Err(V2MemberSaveRefusal::Unresolved);
+            }
+            // One request per context: another token's exact original is retained.
+            Some(retained) => {
+                return Err(V2MemberSaveRefusal::Retained {
+                    token: *retained.token().as_bytes(),
+                });
+            }
             None => {}
         }
 
         // 2. Exact lookup BEFORE any authoring. IO/decode failures are errors, never Absent.
-        let canonical = canonical_member_parents(request.body, request.parents)
-            .map_err(|_| V2MemberSaveRefusal::Signing)?;
+        let payment = env.lookup_payment()?;
         let lookup = ensure_owner(&mut env, &mut state.owner)?
             .lookup(
                 env.key,
@@ -321,7 +372,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     parents: &canonical,
                     body: request.body,
                 },
-                lookup_fee,
+                payment,
             )
             .map_err(|error| refusal_of(&error))?;
         drop(canonical);
@@ -342,7 +393,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             MemberLookup::Absent => {}
         }
 
-        // 3. Author and sign (a retry reuses the cached original), then take it.
+        // 3. Bind an existing lane BEFORE signing, so a binding refusal can never strand a
+        // fresh signature; a lane this call creates has no binding and is bound right after.
+        // Then author and sign (a retry reuses the cached original) and take it.
+        if let Some(lane) = self.member.as_deref_mut() {
+            lane.bind_outbox_context(id)
+                .map_err(|_| V2MemberSaveRefusal::Stale)?;
+        }
         self.retry_sign_member_request(layout, request)
             .map_err(|_| V2MemberSaveRefusal::Signing)?;
         self.member
@@ -507,120 +564,173 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         }
     }
 
-    /// Settle the cell's earlier custody without signing. Returns the receipt when a Saved
-    /// outcome was settled here. A Running job is Busy; Prepared custody stays (adopted into
-    /// this host's lane if a replaced host lent it).
+    /// Settle the cell's earlier custody without signing. Custody stays IN the cell across
+    /// every lane and IO call made here, so a panic in one of them loses nothing; an original
+    /// leaves the cell only for the pure DATA sealing of a re-preseal. Returns a receipt
+    /// settled here and whether the lane accepted it. A Running job is Busy; Prepared custody
+    /// stays (adopted into this host's lane if a replaced host lent it).
     fn settle_member_custody(
         &mut self,
         env: &mut SaveEnvironment<'_>,
         state: &mut MemberContextState,
-    ) -> Result<Option<MemberReceiptData>, V2MemberSaveRefusal> {
-        match state.custody.take() {
+    ) -> Result<Option<(MemberReceiptData, bool)>, V2MemberSaveRefusal> {
+        match &state.custody {
             None => Ok(None),
+            Some(MemberOriginalCustody::Running { .. }) => Err(V2MemberSaveRefusal::Busy),
             Some(MemberOriginalCustody::Saved(receipt)) => {
-                if let Err(refusal) =
-                    self.reconcile_saved_member_request(receipt.token, receipt.action, None)
-                {
-                    state.custody = Some(MemberOriginalCustody::Saved(receipt));
-                    return Err(refusal);
-                }
-                Ok(Some(receipt))
-            }
-            Some(running @ MemberOriginalCustody::Running { .. }) => {
-                state.custody = Some(running);
-                Err(V2MemberSaveRefusal::Busy)
+                let receipt = *receipt;
+                // The durable entry is authoritative, so the cached outcome is consumed whether
+                // or not the lane accepts it here. A lane holding the token Pending or Complete
+                // needs the stored spec, which that token's next exact lookup supplies.
+                let reconciled = self
+                    .reconcile_saved_member_request(receipt.token, receipt.action, None)
+                    .is_ok();
+                state.custody = None;
+                Ok(Some((receipt, reconciled)))
             }
             Some(MemberOriginalCustody::Prepared(prepared)) => {
                 let token = prepared.admission_facts().token;
-                let adopted = self.ensure_lane_holds(env, token, prepared.signed_original());
-                state.custody = Some(MemberOriginalCustody::Prepared(prepared));
-                adopted.map(|()| None)
+                self.ensure_lane_holds(env, token, prepared.signed_original())?;
+                Ok(None)
             }
-            Some(MemberOriginalCustody::Unresolved {
-                token,
-                original,
-                lost,
-            }) => self.resolve_unresolved(env, state, token, original, lost),
+            Some(MemberOriginalCustody::Unresolved { token, .. }) => {
+                let token = *token;
+                self.resolve_unresolved(env, state, token)
+            }
         }
     }
 
-    /// Recover the owner, then look the token up with the original's OWN signed request. Hit
-    /// settles it (the stored entry is authoritative); Absent re-preseals THE SAME original;
-    /// anything else keeps it Unresolved. Never signs.
+    /// Recover the owner, then look the token up with the original's OWN signed request while
+    /// the original stays in the cell. Hit settles it (the stored entry is authoritative);
+    /// Absent re-preseals THE SAME original; anything else keeps it Unresolved. Never signs.
     fn resolve_unresolved(
         &mut self,
         env: &mut SaveEnvironment<'_>,
         state: &mut MemberContextState,
         token: MemberRequestToken,
-        original: MemberSignedOriginal,
-        lost: bool,
-    ) -> Result<Option<MemberReceiptData>, V2MemberSaveRefusal> {
-        let keep = |custody: &mut Option<MemberOriginalCustody>, original| {
-            *custody = Some(MemberOriginalCustody::Unresolved {
-                token,
-                original,
-                lost,
-            });
+    ) -> Result<Option<(MemberReceiptData, bool)>, V2MemberSaveRefusal> {
+        let payment = env.lookup_payment()?;
+        let outbox = ensure_owner(env, &mut state.owner)?;
+        let Some(MemberOriginalCustody::Unresolved { original, .. }) = state.custody.as_ref()
+        else {
+            return Err(V2MemberSaveRefusal::Stale);
         };
-        let payment = match env.mount.pay(MEMBER_OUTBOX_LOOKUP_FEE) {
-            Ok(payment) => payment,
-            Err(_) => {
-                keep(&mut state.custody, original);
-                return Err(V2MemberSaveRefusal::Busy);
-            }
-        };
-        let lookup = match ensure_owner(env, &mut state.owner) {
-            Ok(outbox) => outbox.lookup(
+        let lookup = outbox
+            .lookup(
                 env.key,
                 &request_of_spec(token, original.action().spec()),
                 payment,
-            ),
-            Err(refusal) => {
-                keep(&mut state.custody, original);
-                return Err(refusal);
-            }
-        };
+            )
+            .map_err(|error| refusal_of(&error))?;
         match lookup {
-            Ok(MemberLookup::Hit(hit)) => {
+            MemberLookup::Hit(hit) => {
                 let receipt = *hit.receipt();
-                let settled = self.reconcile_saved_member_request(
-                    receipt.token,
-                    receipt.action,
-                    Some(hit.action().spec()),
-                );
-                // The stored entry is authoritative; the retained copy is retired either way.
-                drop(original);
-                settled.map(|()| Some(receipt))
+                let reconciled = self
+                    .reconcile_saved_member_request(
+                        receipt.token,
+                        receipt.action,
+                        Some(hit.action().spec()),
+                    )
+                    .is_ok();
+                // The stored entry is authoritative; the retained copy is retired.
+                state.custody = None;
+                Ok(Some((receipt, reconciled)))
             }
-            Ok(MemberLookup::Absent) => {
-                let Ok(fee) = env.mount.pay(MEMBER_OUTBOX_APPEND_FEE) else {
-                    keep(&mut state.custody, original);
-                    return Err(V2MemberSaveRefusal::Busy);
-                };
+            MemberLookup::Absent => {
+                let fee = env
+                    .mount
+                    .pay(MEMBER_OUTBOX_APPEND_FEE)
+                    .map_err(|_| V2MemberSaveRefusal::Busy)?;
                 let Some(outbox) = state.owner.as_mut() else {
-                    keep(&mut state.custody, original);
                     return Err(V2MemberSaveRefusal::Stale);
+                };
+                // Only now does the exact original leave the cell, for pure DATA sealing.
+                let (original, lost) = match state.custody.take() {
+                    Some(MemberOriginalCustody::Unresolved { original, lost, .. }) => {
+                        (original, lost)
+                    }
+                    other => {
+                        state.custody = other;
+                        return Err(V2MemberSaveRefusal::Stale);
+                    }
                 };
                 match outbox.prepare_append(env.key, token, original, &mut *env.rng, fee) {
                     Ok(prepared) => {
-                        let adopted =
-                            self.ensure_lane_holds(env, token, prepared.signed_original());
                         state.custody = Some(MemberOriginalCustody::Prepared(Box::new(prepared)));
-                        adopted.map(|()| None)
+                        // Adopt into this host's lane only once the custody is back in the cell.
+                        if let Some(MemberOriginalCustody::Prepared(prepared)) =
+                            state.custody.as_ref()
+                        {
+                            self.ensure_lane_holds(env, token, prepared.signed_original())?;
+                        }
+                        Ok(None)
                     }
                     Err(returned) => {
                         let ReturnedMemberOriginal { original, error } = *returned;
-                        keep(&mut state.custody, original);
+                        state.custody = Some(MemberOriginalCustody::Unresolved {
+                            token,
+                            original,
+                            lost,
+                        });
                         Err(refusal_of(&error))
                     }
                 }
             }
-            Ok(MemberLookup::Conflict(_)) => {
-                keep(&mut state.custody, original);
-                Err(V2MemberSaveRefusal::Conflict)
+            MemberLookup::Conflict(_) => Err(V2MemberSaveRefusal::Conflict),
+        }
+    }
+
+    /// Keep presealed custody admissible. When the owner is gone, needs recovery or no longer
+    /// selects the prepared parent (a later transaction moved the head), re-preseal THE SAME
+    /// original from the recovered head; a refusal keeps it Unresolved. Never signs.
+    fn refresh_prepared(
+        &mut self,
+        env: &mut SaveEnvironment<'_>,
+        state: &mut MemberContextState,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        let admissible = match (state.owner.as_ref(), state.custody.as_ref()) {
+            (Some(owner), Some(MemberOriginalCustody::Prepared(prepared))) => {
+                !owner.needs_recovery() && prepared.admissible_by(owner)
             }
-            Err(error) => {
-                keep(&mut state.custody, original);
+            _ => false,
+        };
+        if admissible {
+            return Ok(());
+        }
+        ensure_owner(env, &mut state.owner)?;
+        let fee = env
+            .mount
+            .pay(MEMBER_OUTBOX_APPEND_FEE)
+            .map_err(|_| V2MemberSaveRefusal::Busy)?;
+        let prepared = match state.custody.take() {
+            Some(MemberOriginalCustody::Prepared(prepared)) => prepared,
+            other => {
+                state.custody = other;
+                return Err(V2MemberSaveRefusal::Stale);
+            }
+        };
+        let token = prepared.admission_facts().token;
+        let original = (*prepared).abandon();
+        let Some(outbox) = state.owner.as_mut() else {
+            state.custody = Some(MemberOriginalCustody::Unresolved {
+                token,
+                original,
+                lost: false,
+            });
+            return Err(V2MemberSaveRefusal::Stale);
+        };
+        match outbox.prepare_append(env.key, token, original, &mut *env.rng, fee) {
+            Ok(prepared) => {
+                state.custody = Some(MemberOriginalCustody::Prepared(Box::new(prepared)));
+                Ok(())
+            }
+            Err(returned) => {
+                let ReturnedMemberOriginal { original, error } = *returned;
+                state.custody = Some(MemberOriginalCustody::Unresolved {
+                    token,
+                    original,
+                    lost: false,
+                });
                 Err(refusal_of(&error))
             }
         }
@@ -628,7 +738,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
 
     /// The lane must hold the retained original's token as Lent with exactly its ActionId
     /// before a final edge can issue a source end. A replacement host adopts it (bound to the
-    /// same context); a lane busy with another request refuses (Busy).
+    /// same context). A cancelled lane is Unavailable, so phase 1 never reports Ready for work
+    /// no final edge could admit; a lane busy with another request refuses (Busy).
     fn ensure_lane_holds(
         &mut self,
         env: &SaveEnvironment<'_>,
@@ -637,6 +748,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     ) -> Result<(), V2MemberSaveRefusal> {
         let lane = self
             .ensure_member_lane(env.layout)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        lane.require_live_source()
             .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
         lane.bind_outbox_context(env.id)
             .map_err(|_| V2MemberSaveRefusal::Stale)?;
@@ -916,9 +1029,13 @@ impl V2MemberSaveSource {
     }
 
     /// Issue one end. Refuses after close, while the member domain's original negative is not
-    /// live, at the active bound, and when the lifecycle is poisoned. No IO, no allocation.
+    /// live, at the active bound, when the lifecycle is poisoned, and while another holder has
+    /// the lifecycle lock: issuance runs at the final edge under the native commit guard and
+    /// never waits there. No IO, no allocation.
     pub(super) fn issue(&self) -> Result<V2MemberSaveSourceEnd, AppError> {
-        let mut state = self.body.state.lock().map_err(|_| refused())?;
+        let Ok(mut state) = self.body.state.try_lock() else {
+            return Err(refused());
+        };
         if state.closed {
             return Err(refused());
         }

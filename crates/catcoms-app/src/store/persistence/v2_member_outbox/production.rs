@@ -32,7 +32,8 @@ use super::data::{
 };
 use super::engine::{
     MemberOutbox, MemberOutboxError, MemberOutboxOpen, MemberOutboxParentDirectory,
-    MemberOutboxQuota, MemberOutboxRegistry, MEMBER_OUTBOX_OWNER_FEE, MEMBER_OUTBOX_RECOVERY_FEE,
+    MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry, MEMBER_OUTBOX_OWNER_FEE,
+    MEMBER_OUTBOX_RECOVERY_FEE,
 };
 use super::transaction::PreparedMemberAppend;
 use crate::store::critical_namespaces::member_outbox_layout::{
@@ -142,12 +143,23 @@ impl std::fmt::Debug for MemberContextCell {
     }
 }
 impl MemberContextCell {
-    pub(in crate::store) fn context(&self) -> MemberOutboxContextId {
-        self.context
-    }
-    /// Positive use (phase 1). A poisoned cell cannot prove its state, so it refuses.
+    /// Strict read: a poisoned cell refuses. Diagnostics only.
     pub(in crate::store) fn lock(&self) -> Result<MutexGuard<'_, MemberContextState>, AppError> {
         self.state.lock().map_err(|_| refused())
+    }
+    /// Phase 1 (which may block): recover a poisoned cell instead of disabling the context for
+    /// the Store's life. Every write to the state is a single assignment and phase 1 keeps
+    /// custody in place across lane and IO calls, so a panic that poisoned the cell left it
+    /// either intact or with one in-hand original gone (crash-equivalent). The lane then still
+    /// holds that token Lent with no custody, and the next call retires the token after an
+    /// exact Absent lookup instead of signing again.
+    pub(in crate::store) fn lock_recovering(&self) -> MutexGuard<'_, MemberContextState> {
+        let guard = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.state.clear_poison();
+        guard
     }
     /// The final edge never waits: `Ok(None)` means another holder (Busy).
     pub(in crate::store) fn try_lock(
@@ -160,8 +172,8 @@ impl MemberContextCell {
         }
     }
     /// Completion and de-admission ONLY: depositing a job's exact DATA is never refused, even
-    /// into a poisoned cell. Never used to admit; a poisoned cell still refuses [`Self::lock`],
-    /// so a deposited outcome stays preserved (unread) until the Store is remounted.
+    /// into a poisoned cell. Never used to admit: the final edge's [`Self::try_lock`] refuses a
+    /// poisoned cell, and the next phase-1 call ([`Self::lock_recovering`]) reads the outcome.
     pub(in crate::store) fn lock_for_completion(&self) -> MutexGuard<'_, MemberContextState> {
         self.state
             .lock()
@@ -261,8 +273,13 @@ impl MemberOutboxMount {
         key: &[u8; 32],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<MemberOutbox, MemberOutboxError> {
-        let metadata = self.pay(MEMBER_OUTBOX_OWNER_FEE)?;
-        let work = self.pay(MEMBER_OUTBOX_RECOVERY_FEE)?;
+        // A logical payment shortfall is a retryable Payment refusal, never an IO failure.
+        let metadata = self
+            .pay(MEMBER_OUTBOX_OWNER_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        let work = self
+            .pay(MEMBER_OUTBOX_RECOVERY_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
         let lease = store._session.retain_for_physical_work();
         MemberOutbox::open(
             MemberOutboxOpen {
@@ -289,7 +306,9 @@ impl MemberOutboxMount {
         key: &[u8; 32],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), MemberOutboxError> {
-        let work = self.pay(MEMBER_OUTBOX_RECOVERY_FEE)?;
+        let work = self
+            .pay(MEMBER_OUTBOX_RECOVERY_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
         owner.recover(key, rng, store._session.retain_for_physical_work(), work)
     }
 }

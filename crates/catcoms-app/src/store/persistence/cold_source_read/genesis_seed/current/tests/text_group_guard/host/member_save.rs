@@ -579,3 +579,199 @@ fn a_lookup_read_failure_refuses_before_signing_and_is_never_absence() {
     assert_eq!(f.custody(), None);
     assert_eq!(f.outbox_files(), files);
 }
+
+#[test]
+fn a_same_token_retry_with_changed_data_is_a_conflict_in_every_custody_state() {
+    let mut f = saving(0x7fba0);
+    let live = session();
+    let first = create("the request as first sent");
+    let edited = create("the request edited before a retry");
+    // Presealed: the edited retry conflicts and the presealed original is untouched.
+    assert_eq!(
+        f.prepare([0xc1; 32], &first, &live),
+        Ok(V2MemberSaveOutcome::Ready)
+    );
+    assert_eq!(
+        f.prepare([0xc1; 32], &edited, &live),
+        Err(V2MemberSaveRefusal::Conflict)
+    );
+    assert_eq!(f.custody().as_deref(), Some("Prepared"));
+    let (admission, _) = native(&live);
+    let job = f
+        .host
+        .admit_member_save(&f.layout, [0xc1; 32], admission)
+        .unwrap();
+    assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+    // A cached SavedLocal of the first request never reports the edited one as saved.
+    assert_eq!(
+        f.prepare([0xc1; 32], &edited, &live),
+        Err(V2MemberSaveRefusal::Conflict)
+    );
+    assert!(matches!(
+        f.prepare([0xc1; 32], &first, &live),
+        Ok(V2MemberSaveOutcome::Saved { ordinal: 0, .. })
+    ));
+    // Durable: the exact lookup conflicts too.
+    assert_eq!(
+        f.prepare([0xc1; 32], &edited, &live),
+        Err(V2MemberSaveRefusal::Conflict)
+    );
+
+    // Unresolved: an uncertain commit of the first request, then an edited retry.
+    let second = create("second request as first sent");
+    assert_eq!(
+        f.prepare([0xc2; 32], &second, &live),
+        Ok(V2MemberSaveOutcome::Ready)
+    );
+    member_outbox_crash_at_for_test(MemberOutboxTestCut::FirstOutputWritten);
+    let (admission, _) = native(&live);
+    let job = f
+        .host
+        .admit_member_save(&f.layout, [0xc2; 32], admission)
+        .unwrap();
+    assert_eq!(job.run(), MemberSaveJobReport::Uncertain);
+    member_outbox_disarm_for_test();
+    assert_eq!(
+        f.prepare([0xc2; 32], &create("second request, edited"), &live),
+        Err(V2MemberSaveRefusal::Conflict)
+    );
+    assert!(matches!(
+        f.prepare([0xc2; 32], &second, &live),
+        Ok(V2MemberSaveOutcome::Saved { ordinal: 1, .. })
+    ));
+}
+
+#[test]
+fn another_tokens_retained_original_is_named_rather_than_reported_busy() {
+    let mut f = saving(0x7fbb0);
+    let live = session();
+    let first = create("retained while another request arrives");
+    assert_eq!(
+        f.prepare([0xd1; 32], &first, &live),
+        Ok(V2MemberSaveOutcome::Ready)
+    );
+    let dispatches = member_sign_dispatches_for_test();
+    let other = create("the other request");
+    assert_eq!(
+        f.prepare([0xd2; 32], &other, &live),
+        Err(V2MemberSaveRefusal::Retained { token: [0xd1; 32] })
+    );
+    assert_eq!(member_sign_dispatches_for_test(), dispatches);
+    let (admission, _) = native(&live);
+    let job = f
+        .host
+        .admit_member_save(&f.layout, [0xd1; 32], admission)
+        .unwrap();
+    assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+    // The cached outcome settles the lane on the other token's call, which then proceeds.
+    assert_eq!(
+        f.prepare([0xd2; 32], &other, &live),
+        Ok(V2MemberSaveOutcome::Ready)
+    );
+    assert!(matches!(
+        f.prepare([0xd1; 32], &first, &live),
+        Err(V2MemberSaveRefusal::Retained { token: [0xd2; 32] })
+    ));
+}
+
+#[test]
+fn an_unwind_before_the_commit_point_re_presealing_the_same_original_after_an_absent_lookup() {
+    let mut f = saving(0x7fbc0);
+    let live = session();
+    let body = create("torn before it became the WAL");
+    assert_eq!(
+        f.prepare([0xe1; 32], &body, &live),
+        Ok(V2MemberSaveOutcome::Ready)
+    );
+    let dispatches = member_sign_dispatches_for_test();
+    let parent = f.vault.join("chat-owner-v2").join("member-outbox-v1");
+    member_outbox_call_at_for_test(
+        MemberOutboxTestCut::WalStageWritten,
+        Box::new(move || {
+            // Tear the pre-commit WAL stage as an interrupted write would, then die before it
+            // is renamed onto the WAL: nothing was ever committed.
+            let namespace = std::fs::read_dir(&parent)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let stage = namespace.join("outbox.wal.stage.v1");
+            let length = std::fs::metadata(&stage).unwrap().len();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&stage)
+                .unwrap()
+                .set_len(length / 2)
+                .unwrap();
+            panic!("injected unwind before the commit point");
+        }),
+    );
+    let (admission, released) = native(&live);
+    let job = f
+        .host
+        .admit_member_save(&f.layout, [0xe1; 32], admission)
+        .unwrap();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()));
+    member_outbox_disarm_for_test();
+    assert!(unwound.is_err());
+    assert!(released.load(Ordering::SeqCst));
+    assert_eq!(f.custody().as_deref(), Some("Unresolved { lost: true }"));
+    // Recovery removes the torn stage, the exact lookup is Absent, and THE SAME original is
+    // presealed again: no new signature.
+    assert_eq!(
+        f.prepare([0xe1; 32], &body, &live),
+        Ok(V2MemberSaveOutcome::Ready)
+    );
+    assert_eq!(f.custody().as_deref(), Some("Prepared"));
+    let (admission, _) = native(&live);
+    let job = f
+        .host
+        .admit_member_save(&f.layout, [0xe1; 32], admission)
+        .unwrap();
+    assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+    assert!(matches!(
+        f.prepare([0xe1; 32], &body, &live),
+        Ok(V2MemberSaveOutcome::Saved { ordinal: 0, .. })
+    ));
+    assert_eq!(member_sign_dispatches_for_test(), dispatches);
+}
+
+/// Every regular file named `pin.bin` below `root`.
+fn pin_files(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() && entry.file_name() == "pin.bin" {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn the_member_context_pin_identity_is_the_on_disk_pin_ciphertext_in_every_family() {
+    use crate::store::critical_namespaces::archive_current_codec::V2GroupPinId;
+    // The stable context's pin component comes from the EXACT authenticated pin ciphertext,
+    // which every family (warm, cold, repaired) retains from the same file a restart reads.
+    // So a receipt saved under one family's host is found under another's after restart.
+    for family in 0..3 {
+        let original = text_fixture(family, 0x7fbd0 + family as u64);
+        let owner = original.owner.borrow_current().unwrap();
+        let id = owner.original_pin_id_data().unwrap();
+        assert!(owner.original_pin_id_data().unwrap() == id);
+        let pins = pin_files(original._directory.path());
+        assert!(
+            pins.iter()
+                .any(|pin| V2GroupPinId::of(&std::fs::read(pin).unwrap()) == id),
+            "family {family}: the pin identity must name an on-disk pin ciphertext"
+        );
+        drop(owner);
+    }
+}

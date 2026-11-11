@@ -547,11 +547,19 @@ impl V2MemberLane {
         self.finish(token, FinishMode::SavedHit(saved)).map(Some)
     }
 
+    /// Whether this lane's member source can still admit anything: the member domain's
+    /// original source negative is live and the lane was not cancelled. Cached negatives only.
+    pub(super) fn require_live_source(&self) -> Result<(), AppError> {
+        self.domain.validate_negative()
+    }
+
     /// Recovered-DATA custody across host replacement: adopt a retained original from the
     /// Store's member-outbox cell as this lane's Lent request, so the next final edge can issue
     /// a source end for it without signing again. Idempotent for the request it already holds.
     /// Refuses while another request is pending, for a token this lane already finished, and
-    /// for an original that is not this lane's own device and group or does not verify.
+    /// for an original that is not this lane's own device, group and source Admission or does
+    /// not verify. Requiring the lane's OWN Admission keeps the final-edge Admission check from
+    /// being circular: the adopted label must equal this source's Admission, not merely itself.
     pub(super) fn adopt_retained_original(
         &mut self,
         store: &ServerStore,
@@ -569,6 +577,7 @@ impl V2MemberLane {
         if self.finished.contains(&token)
             || action.signer() != &signer
             || action.spec().realm.group() != self.group.as_slice()
+            || original.admission() != self.admission
             || !action.verify()
         {
             return Err(refused());

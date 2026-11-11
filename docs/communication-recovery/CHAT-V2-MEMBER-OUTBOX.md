@@ -204,7 +204,17 @@ request's custody DATA:
 | `Saved` | SavedLocal cached by the job before it released anything | tells the lane, reports the receipt |
 
 A cell never holds a save-source end, physical lease or native commit guard; those move with
-the job. A poisoned cell refuses positive use; completion still deposits into it.
+the job. Phase 1 keeps custody in the cell across every lane and IO call (an original leaves
+it only for pure DATA sealing) and recovers a poisoned cell, since every state write is a
+single assignment; the final edge refuses a poisoned cell. Every phase-1 shortcut compares
+the caller's request digest, so a same-token retry with changed DATA is `Conflict` whether
+the request is presealed, cached Saved, Unresolved or durable. Another token's retained
+original is reported as `Retained { token }` so a composer can resume it.
+
+Design decision for the primary: the Store outlives a UI lock (lock does not unmount), so
+Prepared, Running and Unresolved originals stay in memory across a lock until saved or the
+Store drops, as the member lane's own completed original already does. A lock-time hook could
+drop non-running custody instead, at the cost of losing that message.
 
 ### Phases
 

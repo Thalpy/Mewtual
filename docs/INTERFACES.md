@@ -64,9 +64,10 @@ Public root API for the native consumer (no Tauri types in root):
   de-admits without IO.
 - `V2MemberSignRequest` and `V2MemberDependency` are now public borrowed DATA.
 
-`V2MemberSaveRefusal`: `Unavailable`, `Busy`, `Conflict`, `Pressure`, `Signing`,
-`Unresolved`, `Incomplete`, `Failed`, `Cancelled`, `Stale`; none means a write happened or
-"absent". The outbox engine key is the vault database key (unchanged format). No wire or
+`V2MemberSaveRefusal`: `Unavailable`, `Busy`, `Retained { token }` (another request's
+original is retained for this context; resume that token), `Conflict` (including any
+same-token retry with changed DATA), `Pressure`, `Signing`, `Unresolved`, `Incomplete`,
+`Failed`, `Cancelled`, `Stale`; none means a write happened or "absent". The outbox engine key is the vault database key (unchanged format). No wire or
 persistence format changes. [Save path](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
 ## Ordinary member outbox (8 November; storage-only)

@@ -13,14 +13,22 @@ reconciliation, recovered-DATA adoption) and the public two-phase driver
 `MemberSaveJob`). It also fixes the one strict-lint finding namespace5 had introduced
 (`result_large_err` on the Current3 owning refusal).
 
-Thirteen new regressions: eleven Windows-only save cases on the real warm whole-owner
+Seventeen new regressions: fifteen Windows-only save cases on the real warm whole-owner
 fixture with namespace5 mounted (SavedLocal and exact retries without signing, refusal
 without presealed work, a cancelled session at the edge, close before and after admission,
-unrun de-admission, an uncertain commit, an unwind mid-commit, cancellation and receiver loss
-during paused IO, lane replacement adoption, an exact hit in every lane state with an
-unrelated token untouched, a lookup read failure before signing) and two cross-platform
+unrun de-admission, an uncertain commit, an unwind mid-commit, an unwind before the commit
+point that re-preseals the same original after an Absent lookup, cancellation and receiver
+loss during paused IO, lane replacement adoption, an exact hit in every lane state with an
+unrelated token untouched, a lookup read failure before signing, same-token changed DATA as
+a conflict in every custody state, another token's retained original named, and the pin
+identity matching the on-disk pin ciphertext in all three families) and two cross-platform
 mount cases. None has run: local Cargo is paused and CI stops at the base branch's strict
-Clippy debt before tests. CI's Clippy pass does type-check the library and test library.
+Clippy debt before tests. CI's Clippy pass type-checked `0371efbe` (library and test
+library, Linux and Windows) with no compile error and no new lint in the changed files.
+
+The read-only adversarial review of `0371efbe` found no BLOCKER. Its HIGH (a same-token retry
+with changed DATA reported Ready or Saved) and its MEDIUM/LOW code findings are fixed in the
+follow-up; one MEDIUM is a recorded primary decision (retained plaintext across UI lock).
 
 Not done: F's native producer and barrier tests (root fixtures use a test custody box and
 establish no native authorization); true host replacement with a second whole owner (the

@@ -89,6 +89,8 @@ thread_local! {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(in crate::store) enum MemberOutboxTestCut {
+    /// After the complete WAL stage is written, BEFORE it becomes MAIN (pre-commit).
+    WalStageWritten,
     /// After the WAL is MAIN and the first immutable output exists (commit point passed).
     FirstOutputWritten,
     /// After the head stage is complete, before the selector CAS.
@@ -98,6 +100,7 @@ pub(in crate::store) enum MemberOutboxTestCut {
 impl MemberOutboxTestCut {
     fn cut(self) -> Cut {
         match self {
+            Self::WalStageWritten => Cut::WalStageWritten,
             Self::FirstOutputWritten => Cut::OutputWritten(0),
             Self::HeadStageWritten => Cut::HeadStageWritten,
         }
@@ -876,11 +879,6 @@ pub(in crate::store) struct MemberCommitRun {
 }
 
 impl AdmittedMemberCommit {
-    /// The exact receipt this commit saves when it succeeds. DATA only.
-    pub(in crate::store) fn receipt(&self) -> &MemberReceiptData {
-        &self.receipt
-    }
-
     pub(in crate::store) fn run(self) -> MemberCommitRun {
         let Self {
             transition,
@@ -921,7 +919,9 @@ impl AdmittedMemberCommit {
 
     /// De-admit an UNRUN commit: no IO happened, so the lease is released and the exact
     /// presealed append is rebuilt around the SAME original for a later, fresh final edge.
-    /// Refuses (returning both) unless `original` is the one this commit was admitted for.
+    /// Refuses (returning both) unless `original` is byte-for-byte the one this commit was
+    /// admitted for: its ActionId, its Admission and its original-byte digest (which covers
+    /// the signature an ActionId alone does not).
     pub(in crate::store) fn de_admit(
         self,
         original: MemberSignedOriginal,
@@ -934,8 +934,14 @@ impl AdmittedMemberCommit {
             owner,
             lease,
         } = self;
-        let same =
-            original.action().id() == receipt.action && original.admission() == receipt.admission;
+        let same = original.action().id() == receipt.action
+            && original.admission() == receipt.admission
+            && PreparedActionPages::prepare(
+                owner.context.vault,
+                owner.context.profile,
+                original.action(),
+            )
+            .is_ok_and(|pages| pages.original_digest() == receipt.original);
         let result = if same {
             Ok((
                 owner,

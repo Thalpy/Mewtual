@@ -87,10 +87,13 @@ pub(in crate::store) fn refuse_unsupported_storage(dir: &Path) -> Result<(), App
 }
 
 /// Per-context resident slot invoice beside the owner's own retained metadata fee: the owner
-/// value itself (moved between the Store's slot table and a running job) plus fixed slot,
-/// map-node and completion-cell overhead. A logical inventory, not an allocator/RSS figure.
-pub(in crate::store) const MEMBER_OUTBOX_SLOT_FEE: usize =
-    2 * std::mem::size_of::<MemberOutbox>() + 8 * 1024;
+/// value itself (moved between the Store's slot table and a running job), fixed slot,
+/// map-node and completion-cell overhead, and the heap of ONE retained signed original. The
+/// cell keeps a Running or Unresolved original after its append payment has drained, so that
+/// copy is paid here. A logical inventory, not an allocator/RSS figure.
+pub(in crate::store) const MEMBER_OUTBOX_SLOT_FEE: usize = 2 * std::mem::size_of::<MemberOutbox>()
+    + 2 * catcoms_replication::chat::MAX_ACTION_BYTES
+    + 8 * 1024;
 
 /// Hard ceiling on member contexts per Store mount. The founder-as-member vertical needs one;
 /// joined-member sources add one per joined group. Bounded so the slot table and its pool

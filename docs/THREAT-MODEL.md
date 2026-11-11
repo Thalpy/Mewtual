@@ -38,7 +38,10 @@ and a read failure is never absence. Store-scoped custody cells hold DATA only (
 source end, lease or native guard); an uncertain, unwound or unrun save keeps its exact
 original there and is resolved by recovery and lookup, never by signing again. A residual
 panic inside pure DATA sealing can lose an in-hand original; the token is then retired after
-an exact Absent lookup rather than re-signed.
+an exact Absent lookup rather than re-signed. A same-token retry with changed DATA is always a
+conflict, never reported as saved. Retained plaintext originals stay in memory across a UI
+lock, because lock does not unmount the Store; whether lock should drop non-running custody
+is an open primary decision.
 
 ## Ordinary-member signer (11 November; focused checks passed, inactive)
 
