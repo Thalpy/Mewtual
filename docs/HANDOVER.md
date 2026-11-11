@@ -27,7 +27,9 @@ Clippy debt before tests. CI's Clippy pass type-checks the library and test libr
 and Windows: `0371efbe` had no compile error and no new lint in the changed files; the
 review-fix commit `00c8b32d` introduced one Windows test compile error (an array-repeat
 pattern) and two new lints (`enum_variant_names` on the test-cut enum, `drop_non_drop` in a
-test), all fixed in the next commit, whose CI result is pending.
+test), all fixed in `7ff99020`, which type-checks on both platforms with no compile error and
+no lint in the changed files (Linux 531 library / 471 test-library lint errors, Windows 531 /
+188; the base at `ca35f74a` had 556 / 497 and 556 / 189).
 
 The read-only adversarial review of `0371efbe` found no BLOCKER. Its HIGH (a same-token retry
 with changed DATA reported Ready or Saved) and its MEDIUM/LOW code findings are fixed; one
