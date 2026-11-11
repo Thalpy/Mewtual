@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Primary namespace5 review (11 November; full validation queued)
+## Primary namespace5 review (11 November; validation queued, one slow case deferred)
 
 Two fresh read-only actual-diff reviews of `ea7e4ae1..d475ddb1` found no confirmed
 BLOCKER/HIGH/MEDIUM. Three LOWs are corrected: comments now distinguish disposable
@@ -20,13 +20,22 @@ retains exactly `ce4023649b1a2f37f7d8032c950fbefff03daef3` (peeled target verifi
 The gate remains full-SHA pinned and no longer depends on PR history surviving.
 The stale namespace5 gap list in the A/B/F save handoff is updated.
 
-The new `Chat V2 complete test execution` workflow supplies four isolated hosted
-jobs: complete root and native workspaces on Linux and Windows, native checking,
-and frontend tests/checking/build. It uses ordinary Cargo execution independently
+The new `Chat V2 integration test execution` workflow supplies four isolated hosted
+jobs: root tests and complete native workspaces on Linux and Windows, native
+checking, and frontend tests/checking/build. The root command explicitly excludes
+only `cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations`,
+honouring the user's instruction to defer that unusually slow cost case until
+final Chat V2 acceptance. Manual `run_deferred_catchup=true` runs it last on Linux;
+the test is unchanged and root sign-off stays incomplete until it passes. Manual
+scope selection can execute root, native or both. It uses ordinary Cargo execution independently
 of strict Clippy, with one build job, two test threads and the default stack; it
 does not suppress warnings or change `ci.yml` or audit policy. Its workflow-only
 path filter is this integration PR's explicit execution lane, not a permanent
-all-source validation policy after merge. Full results remain pending.
+all-source validation policy after merge. Results remain pending. The first run
+at `3c904440` mistakenly included the deferred case and was cancelled by the
+primary; its unfinished Rust jobs are not passes. Its frontend portion did pass
+3,434 tests, checking and build. This cancellation did not affect the separate
+focused namespace5 workflow.
 
 Local Cargo remains paused. Standalone rustfmt, the Python exact-count guard
 self-check, and the static ambient/raw-filesystem checks pass. The current root

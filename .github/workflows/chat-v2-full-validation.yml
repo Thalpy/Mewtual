@@ -1,4 +1,4 @@
-name: Chat V2 complete test execution
+name: Chat V2 integration test execution
 
 on:
   # An explicit execution lane for this integration PR while its inherited strict-lint
@@ -8,6 +8,16 @@ on:
     paths:
       - '.github/workflows/chat-v2-full-validation.yml'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Workspaces to execute; all is the normal validation run.
+        type: choice
+        options: [all, root, native]
+        default: all
+      run_deferred_catchup:
+        description: Include the slow case at final Chat V2 acceptance (scope all or root).
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,7 +35,8 @@ env:
 
 jobs:
   root:
-    name: Complete root tests (${{ matrix.os }})
+    name: Root tests, slow case deferred (${{ matrix.os }})
+    if: github.event_name != 'workflow_dispatch' || inputs.scope != 'native'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -36,14 +47,48 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
-      # No warning override, stack increase, filter, retry or ignored-test substitution.
+      # No warning override, stack increase, retry or ignored-test substitution.
       # --no-fail-fast collects other crate results after a failure; it still fails the job.
       # Strict Clippy and dependency audits remain separate mandatory gates in ci.yml.
-      - name: Run the complete root workspace
-        run: cargo test --locked --all --all-features --no-fail-fast
+      # The user explicitly deferred this one unusually slow case until final Chat V2
+      # acceptance. Keep the test intact and make the execution exception visible. This
+      # intermediate run cannot claim complete root sign-off until that case also passes.
+      - name: Run root workspace except the explicitly deferred cost case
+        run: >-
+          cargo test --locked --all --all-features --no-fail-fast --
+          --exact --skip cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'workflow_dispatch' && inputs.run_deferred_catchup && runner.os == 'Linux'
+        with:
+          python-version: '3.12'
+      - name: Run exactly one deferred cost case at final acceptance
+        if: github.event_name == 'workflow_dispatch' && inputs.run_deferred_catchup && runner.os == 'Linux'
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import runpy
+
+          guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
+          directory = Path('logs/chat-v2-final-catchup')
+          directory.mkdir(parents=True, exist_ok=True)
+          command = [
+              'cargo', 'test', '--locked', '-p', 'catcoms-replication', '--all-features',
+              '--test', 'catchup_cost',
+              'cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations',
+              '--', '--exact',
+          ]
+          code, summaries, timed_out, _ = guard['run_logged'](
+              'deferred-catchup', command, directory, limit=45 * 60,
+          )
+          if timed_out:
+              raise RuntimeError('deferred catch-up cost case exceeded its deadline')
+          guard['validate'](''.join(summaries), code, 1)
+          PY
 
   native:
     name: Complete native tests (${{ matrix.os }})
+    if: github.event_name != 'workflow_dispatch' || inputs.scope != 'root'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
