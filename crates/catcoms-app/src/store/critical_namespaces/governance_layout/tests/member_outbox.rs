@@ -67,11 +67,13 @@ fn all_files(path: &Path) -> Snapshot {
 
 /// A namespace5 declaration interrupted through the governance+member wrapper on a vault
 /// that already holds 4: the governance gate must settle the member seed FIRST (its stage
-/// owns the catalog slot), then let governance and the Current3 gate re-inspect.
+/// owns the catalog slot), then let governance and the Current3 gate re-inspect. A first
+/// seed that never authenticated (241 claim only, 240 claim + fence, 242 torn) is abandoned
+/// with no RNG and declared afresh by the warm retry; every later cut finishes with no RNG.
 #[test]
 fn member_cuts_through_the_governance_wrapper_settle_before_governance_inspects() {
     let shared = pool();
-    for (cut, finishes) in [
+    for (cut, complete) in [
         (240, false),
         (241, false),
         (242, false),
@@ -87,24 +89,191 @@ fn member_cuts_through_the_governance_wrapper_settle_before_governance_inspects(
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
         let mut rng = ChaCha20Rng::seed_from_u64(0x5560 + u64::from(cut));
-        settled_three(path, &shared, &mut rng);
-        let mut four = open(path, &shared, &mut rng);
-        four.retry(&mut rng).unwrap();
-        let key = private(&four).keys.db_key().unwrap();
-        let domain = private(&four).chat_vault_domain().unwrap();
-        drop(four.into_governance_layout_store().unwrap());
-        let after_four = catalog(&key, &domain, path);
-
-        let mut owner = PreparedV2GovernanceLayoutStore::open(
+        let (key, domain, after_four) = member_cut_over_four(path, &shared, cut, &mut rng);
+        let snapshot = all_files(path);
+        let mut cold = PreparedV2GovernanceLayoutStore::open(
             path,
             SECRET,
-            &mut rng,
+            &mut NeverRng,
             member_governance(&shared),
         )
+        .unwrap_or_else(|error| panic!("cut {cut}: {error:?}"));
+        if complete {
+            cold.retry(&mut NeverRng).unwrap();
+        } else {
+            // Abandoned at open, with no RNG: no member object (seed, fence, marker, parent)
+            // remains, and 4 and the selected catalog are untouched.
+            let (objects, seed, marker, parent) = all_files(path);
+            for name in [
+                Slot::Current.name(),
+                "chat-owner-v2/governance-layout.bin",
+                "chat-owner-v2/current-layout.bin",
+            ] {
+                assert_eq!(objects[name], snapshot.0[name], "cut {cut}: {name}");
+            }
+            assert!(objects[Slot::Stage.name()].is_none(), "cut {cut}");
+            assert!(seed.is_none() && marker.is_none() && !parent, "cut {cut}");
+            cold.retry(&mut ChaCha20Rng::seed_from_u64(0x5600 + u64::from(cut)))
+                .unwrap();
+        }
+        assert_settled_four_and_five(&cold, path, &key, &domain, &after_four, cut);
+        drop(cold.into_governance_layout_store().unwrap());
+    }
+}
+
+/// A vault holding settled 4, then a namespace5 declaration through the governance+member
+/// wrapper cut at `cut`. Returns the key, domain and the catalog right after 4.
+fn member_cut_over_four(
+    path: &Path,
+    pool: &CriticalCatalogReadPool,
+    cut: u8,
+    rng: &mut ChaCha20Rng,
+) -> ([u8; 32], [u8; 32], Vec<(u32, u32, Vec<u8>)>) {
+    settled_three(path, pool, rng);
+    let mut four = open(path, pool, rng);
+    four.retry(rng).unwrap();
+    let key = private(&four).keys.db_key().unwrap();
+    let domain = private(&four).chat_vault_domain().unwrap();
+    drop(four.into_governance_layout_store().unwrap());
+    let after_four = catalog(&key, &domain, path);
+    let mut owner =
+        PreparedV2GovernanceLayoutStore::open(path, SECRET, rng, member_governance(pool)).unwrap();
+    fault(&owner, cut);
+    assert!(owner.retry(rng).is_err(), "cut {cut}");
+    drop(owner);
+    (key, domain, after_four)
+}
+
+/// Both namespaces mounted, 3/4/5 in order with 4 byte-identical, and no seed left.
+fn assert_settled_four_and_five(
+    cold: &PreparedV2GovernanceLayoutStore,
+    path: &Path,
+    key: &[u8; 32],
+    domain: &[u8; 32],
+    after_four: &[(u32, u32, Vec<u8>)],
+    cut: u8,
+) {
+    private(cold)
+        .validate_mounted_member_outbox_layout()
         .unwrap();
-        fault(&owner, cut);
-        assert!(owner.retry(&mut rng).is_err(), "cut {cut}");
-        drop(owner);
+    private(cold).validate_mounted_governance_layout().unwrap();
+    let both = catalog(key, domain, path);
+    assert_eq!(&ids(&both)[ids(&both).len() - 3..], &[3, 4, 5], "cut {cut}");
+    assert_eq!(entry(&both, 4), entry(after_four, 4), "cut {cut}");
+    assert!(
+        fs::read(path.join(MEMBER_OUTBOX_SEED)).is_err(),
+        "cut {cut}"
+    );
+    assert!(fs::read(path.join(GOVERNANCE_SEED)).is_err(), "cut {cut}");
+    assert!(
+        fs::read(path.join(Slot::Stage.name())).is_err(),
+        "cut {cut}"
+    );
+}
+
+/// The cold first-torn disposal interrupted through the governance wrapper. Once the seed is
+/// gone (228) the governance gate no longer runs the member inspector first; the Current3 gate
+/// then sees no member artifact, and the warm retry declares 5.
+#[test]
+fn a_first_torn_disposal_through_the_governance_wrapper_completes_after_each_cold_cut() {
+    use crate::store::critical_namespaces::member_outbox_layout::{
+        arm_member_cold_fault_for_test, member_cold_fault_fired_for_test,
+    };
+    let shared = pool();
+    for cold_cut in [226u8, 227, 228] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5570 + u64::from(cold_cut));
+        let (key, domain, after_four) = member_cut_over_four(path, &shared, 242, &mut rng);
+        arm_member_cold_fault_for_test(cold_cut);
+        let refused = PreparedV2GovernanceLayoutStore::open(
+            path,
+            SECRET,
+            &mut NeverRng,
+            member_governance(&shared),
+        );
+        assert!(refused.is_err(), "cut {cold_cut}");
+        drop(refused);
+        assert!(
+            member_cold_fault_fired_for_test(),
+            "cut {cold_cut}: dead seam"
+        );
+        assert!(fs::read(path.join(Slot::Stage.name())).is_err());
+        assert_eq!(
+            path.join(MEMBER_OUTBOX_SEED).exists(),
+            cold_cut != 228,
+            "cut {cold_cut}"
+        );
+        let mut cold = PreparedV2GovernanceLayoutStore::open(
+            path,
+            SECRET,
+            &mut NeverRng,
+            member_governance(&shared),
+        )
+        .unwrap_or_else(|error| panic!("cut {cold_cut}: {error:?}"));
+        assert!(!path.join(MEMBER_OUTBOX_SEED).exists());
+        cold.retry(&mut rng).unwrap();
+        assert_settled_four_and_five(&cold, path, &key, &domain, &after_four, cold_cut);
+    }
+}
+
+/// Resets the predecessor emulation even if an assertion inside the scope panics.
+struct Predecessor(());
+impl Predecessor {
+    fn on() -> Self {
+        crate::store::critical_namespaces::member_outbox_layout::emulate_pre_namespace5_for_test(
+            true,
+        );
+        Self(())
+    }
+}
+impl Drop for Predecessor {
+    fn drop(&mut self) {
+        crate::store::critical_namespaces::member_outbox_layout::emulate_pre_namespace5_for_test(
+            false,
+        );
+    }
+}
+
+/// A predecessor's governance opener does not know the member seed name, so in the zero-byte
+/// claim window it can begin, and be interrupted inside, a governance4 declaration. The head
+/// then holds BOTH seeds:
+/// - a COMPLETE governance seed (232, 235-237): the claim is disposed without touching the
+///   stage (governance's own), governance finishes cold, and the warm retry declares 5;
+/// - governance already finished (238): an ordinary first-torn claim, disposed;
+/// - only governance's empty fence (229): it looks like the claim's own fence and is unlinked.
+///   This is the documented residual; it holds no bytes, and the retry declares 4 then 5;
+/// - an empty or torn governance FIRST seed (230, 231): governance's own unrecovered state.
+///   The claim is preserved and refused too, rather than disposed in front of that refusal.
+#[test]
+fn a_predecessor_governance_declaration_in_the_claim_window_never_deadlocks_the_member_seed() {
+    let shared = pool();
+    for (governance_cut, recovers) in [
+        (229u8, true),
+        (230, false),
+        (231, false),
+        (232, true),
+        (235, true),
+        (236, true),
+        (237, true),
+        (238, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x55a0 + u64::from(governance_cut));
+        settled_three(path, &shared, &mut rng);
+        // The zero-byte claim alone (a namespace5 declaration cut at 241 leaves exactly this).
+        fs::write(path.join(MEMBER_OUTBOX_SEED), b"").unwrap();
+        let (key, domain) = {
+            let _predecessor = Predecessor::on();
+            let mut owner = open(path, &shared, &mut rng);
+            let key = private(&owner).keys.db_key().unwrap();
+            let domain = private(&owner).chat_vault_domain().unwrap();
+            fault(&owner, governance_cut);
+            assert!(owner.retry(&mut rng).is_err(), "cut {governance_cut}");
+            (key, domain)
+        };
+        assert_eq!(fs::read(path.join(MEMBER_OUTBOX_SEED)).unwrap(), b"");
         let snapshot = all_files(path);
         let reopened = PreparedV2GovernanceLayoutStore::open(
             path,
@@ -112,25 +281,31 @@ fn member_cuts_through_the_governance_wrapper_settle_before_governance_inspects(
             &mut NeverRng,
             member_governance(&shared),
         );
-        if finishes {
-            let mut cold = reopened.unwrap_or_else(|error| panic!("cut {cut}: {error:?}"));
-            cold.retry(&mut NeverRng).unwrap();
-            private(&cold)
-                .validate_mounted_member_outbox_layout()
-                .unwrap();
-            private(&cold).validate_mounted_governance_layout().unwrap();
-            drop(cold.into_governance_layout_store().unwrap());
-            let both = catalog(&key, &domain, path);
-            assert_eq!(&ids(&both)[ids(&both).len() - 3..], &[3, 4, 5], "cut {cut}");
-            assert_eq!(entry(&both, 4), entry(&after_four, 4), "cut {cut}");
-            assert!(
-                fs::read(path.join(MEMBER_OUTBOX_SEED)).is_err(),
-                "cut {cut}"
-            );
-        } else {
-            assert!(reopened.is_err(), "cut {cut}");
-            assert_eq!(all_files(path), snapshot, "cut {cut}");
+        if !recovers {
+            assert!(reopened.is_err(), "cut {governance_cut}");
+            drop(reopened);
+            assert_eq!(all_files(path), snapshot, "cut {governance_cut}");
+            continue;
         }
+        let mut cold = reopened.unwrap_or_else(|error| panic!("cut {governance_cut}: {error:?}"));
+        assert!(
+            !path.join(MEMBER_OUTBOX_SEED).exists(),
+            "cut {governance_cut}"
+        );
+        cold.retry(&mut rng).unwrap();
+        private(&cold).validate_mounted_governance_layout().unwrap();
+        private(&cold)
+            .validate_mounted_member_outbox_layout()
+            .unwrap();
+        drop(cold.into_governance_layout_store().unwrap());
+        let both = catalog(&key, &domain, path);
+        assert_eq!(
+            &ids(&both)[ids(&both).len() - 3..],
+            &[3, 4, 5],
+            "cut {governance_cut}"
+        );
+        assert!(fs::read(path.join(GOVERNANCE_SEED)).is_err());
+        assert!(fs::read(path.join(Slot::Stage.name())).is_err());
     }
 }
 

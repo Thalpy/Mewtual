@@ -2,16 +2,23 @@
 //!
 //! No caller path, Source/Scope, SDK/key or outbox capability. Every path is derived from the
 //! original Store and the closed names in `critical_namespaces::member_outbox_layout`. The
-//! write protocol mirrors governance4's reviewed one (legacy stage fence first, exact-prefix
+//! write protocol mirrors governance4's reviewed one (legacy stage fence, exact-prefix
 //! completion of owned outputs only, same-File re-comparison before selection, seed removal
-//! last) and adds one declared output: the member parent directory, created after the marker
-//! and BEFORE promotion, so a promoted catalog always implies an existing directory.
+//! last) with two differences. A zero-byte CLAIM of the fixed seed name precedes the fence, so
+//! every pre-commit state holding a namespace5-created object holds that name (see
+//! `dispose_first_torn_member_outbox_seed`). And it adds one declared output: the member parent
+//! directory, created after the marker and BEFORE promotion, so a promoted catalog always
+//! implies an existing directory.
 //!
-//! Fault cuts (cfg(test), `critical_namespace_fault`): 240 after the empty stage fence,
-//! 241 empty first seed, 242 torn seed, 243 after the seed, 244 torn marker, 245 after the
-//! marker, 246 after the parent directory, 247 torn candidate stage, 248 after the candidate
-//! stage, 249 after promotion, 250 after seed removal, 255 after the final barrier (251-254
-//! belong to the group-directory family on the same fault atomic).
+//! Warm fault cuts (cfg(test), `critical_namespace_fault`), in write order: 241 after the claim
+//! (claim only, no fence), 240 after the empty stage fence (claim + fence), 242 torn seed
+//! content, 243 after the complete seed, 244 torn marker, 245 after the marker, 246 after the
+//! parent directory, 247 torn candidate stage, 248 after the candidate stage, 249 after
+//! promotion, 250 after seed removal, 255 after the final barrier. 251-254 belong to the
+//! group-directory family on the same atomic. Cold first-torn disposal cuts use a separate
+//! thread-local seam (the Store, and so its atomic, is created inside the open that runs
+//! them): 226 after the fence unlink, 227 after its directory barrier, 228 after the seed
+//! unlink.
 use super::*;
 use crate::store::critical_namespaces::{
     member_outbox_layout::{
@@ -87,6 +94,18 @@ fn absent(path: &Path) -> Result<(), AppError> {
         _ => Err(denied()),
     }
 }
+/// After an unlink, every handle dropped and a directory barrier: the NAME must really be gone.
+/// On Windows a name another process holds open (with delete sharing) can stay delete-pending
+/// under legacy delete semantics, and a power loss before that handle closes brings the file
+/// back. Any result but NotFound (including the delete-pending access error) is therefore a
+/// refusal: the caller must not touch the next object until the previous one is provably gone.
+fn proven_absent(path: &Path) -> Result<(), AppError> {
+    #[cfg(test)]
+    if member::take_name_reported_present_for_test() {
+        return Err(denied());
+    }
+    absent(path)
+}
 fn held(path: &Path, file: &File, id: SessionId) -> Result<(), AppError> {
     if !real_file(&file.metadata().map_err(io)?)
         || session_id(file).map_err(io)? != id
@@ -97,9 +116,49 @@ fn held(path: &Path, file: &File, id: SessionId) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Claim the fixed seed name BEFORE the legacy fence: a zero-byte reservation, synced, followed
+/// by the caller's directory barrier. It carries no content and depends on no catalog, so a
+/// binary that predates namespace5 may ignore it harmlessly. What it buys is attribution: a
+/// fence is never created without this name, so the first-torn role can tell this
+/// declaration's empty fence from another writer's empty stage, which it never touches. The
+/// SAME held File later receives the complete seed; no replacement is adopted. A retry with the
+/// slot already held only re-proves and re-syncs it.
+fn ensure_seed_claim(
+    path: &Path,
+    slot: &mut Option<critical_namespaces::pending_join::CreatedStage>,
+) -> Result<(), AppError> {
+    if slot.is_none() {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(io)?;
+        // Keep the ACTUAL file before the first fallible identity query or sync.
+        *slot = Some(critical_namespaces::pending_join::CreatedStage {
+            file,
+            identity: None,
+        });
+    }
+    let claim = slot.as_mut().ok_or_else(denied)?;
+    let id = match claim.identity {
+        Some(id) => id,
+        None => {
+            let id = session_id(&claim.file).map_err(io)?;
+            claim.identity = Some(id);
+            id
+        }
+    };
+    held(path, &claim.file, id)?;
+    claim.file.sync_all().map_err(io)?;
+    held(path, &claim.file, id)
+}
+
 /// Fence readers that predate namespace5 using a slot they already inspect: an owned EMPTY
 /// legacy catalog stage. The SAME File later becomes the exact candidate stage; no
-/// replacement is adopted. A cold fence without a complete seed stays preserved and closed.
+/// replacement is adopted. It always follows the seed claim. Cold, a fence beside an
+/// unauthenticated seed is disposable first-torn scratch; any other uncommitted fence stays
+/// preserved and refused.
 fn ensure_legacy_stage_fence(
     path: &Path,
     original: &mut Option<critical_namespaces::pending_join::CreatedStage>,
@@ -273,12 +332,6 @@ fn ensure(
             file,
             identity: None,
         });
-        #[cfg(test)]
-        if created && matches!(mode, ArchiveOutputMode::Original) && fault == 241 {
-            return Err(AppError::Io(
-                "injected empty first member-outbox seed".into(),
-            ));
-        }
     }
     let slot = slot.as_mut().ok_or_else(denied)?;
     if slot.identity.is_none() {
@@ -466,10 +519,56 @@ impl ServerStore {
             critical_namespaces::governance_layout::GOVERNANCE_SEED,
         )?)
     }
+    /// The ONE prior debt the first-torn role may sit beside: a governance4 seed (archive and
+    /// Current3 seeds still refuse). Only a binary that predates namespace5 can produce it. Its
+    /// governance opener does not know the member seed name, so during the zero-byte claim
+    /// window (or a disposal intermediate) it can begin, and crash inside, a governance
+    /// declaration. Neither head writer can: each refuses while the other's seed exists.
+    ///
+    /// That governance seed must be COMPLETE and authenticated (so the governance inspector
+    /// will finish it). A torn governance first seed is governance's own unrecovered state,
+    /// refused by its inspector; the member seed beside it is then preserved and refused
+    /// too, rather than disposed in front of that refusal.
+    pub(in crate::store) fn require_member_outbox_debts_beside_governance(
+        &self,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::governance_layout::{codec as governance, GOVERNANCE_SEED};
+        absent(&fixed(
+            self,
+            false,
+            critical_namespaces::ARCHIVE_DECLARATION_SEED,
+        )?)?;
+        absent(&fixed(
+            self,
+            false,
+            critical_namespaces::current_group::DECLARATION_SEED,
+        )?)?;
+        let (_file, raw) = read(
+            &fixed(self, false, GOVERNANCE_SEED)?,
+            governance::MAX_SEED_FRAME,
+        )?
+        .ok_or_else(denied)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let plain = governance::open_seed(&key, &raw)?;
+        governance::parse_seed(&key, &self.chat_vault_domain()?, &plain)?;
+        Ok(())
+    }
     /// Whether a member-outbox declaration seed exists (presence of ANY kind counts). DATA for
     /// gate ordering only: the actual seed is authenticated by the inspector.
     pub(in crate::store) fn member_outbox_seed_present(&self) -> Result<bool, AppError> {
         match fs::symlink_metadata(fixed(self, false, member::MEMBER_OUTBOX_SEED)?) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            _ => Ok(true),
+        }
+    }
+    /// Whether a governance4 declaration seed exists (presence of ANY kind counts). DATA for
+    /// choosing the member inventory's precondition only; governance owns that seed.
+    pub(in crate::store) fn governance_declaration_seed_present(&self) -> Result<bool, AppError> {
+        match fs::symlink_metadata(fixed(
+            self,
+            false,
+            critical_namespaces::governance_layout::GOVERNANCE_SEED,
+        )?) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             _ => Ok(true),
         }
@@ -481,15 +580,23 @@ impl ServerStore {
             fs::read_dir(fixed(self, true, member::MEMBER_OUTBOX_PARENT)?).map_err(io)?;
         Ok(entries.next().is_none())
     }
+    /// `beside_governance`: the cold inspector's first-torn sub-role only (see
+    /// [`Self::require_member_outbox_debts_beside_governance`]); every other reader requires no
+    /// prior declaration debt at all.
     pub(in crate::store) fn read_member_outbox_inventory(
         &self,
         fee: &CatalogReadReservation,
+        beside_governance: bool,
     ) -> Result<MemberOutboxInventory, AppError> {
         fee.validate(
             self.member_outbox_declaration_pool()?,
             member::codec::DECLARATION_FEE,
         )?;
-        self.require_no_prior_member_outbox_declaration_debts()?;
+        if beside_governance {
+            self.require_member_outbox_debts_beside_governance()?;
+        } else {
+            self.require_no_prior_member_outbox_declaration_debts()?;
+        }
         // The leaf no-reparse test does not protect an intermediate directory. Prove and
         // retain the actual real root BEFORE the marker or parent path is opened.
         let root = capture_directory_at(&fixed(self, true, "")?)?;
@@ -540,6 +647,64 @@ impl ServerStore {
         }
         let _ = point;
         Ok(())
+    }
+
+    /// Abandon a namespace5 declaration whose FIRST seed never authenticated: unlink the
+    /// classified zero-byte fence (if any), then the unauthenticated seed, each followed by a
+    /// directory barrier and a NotFound proof of its name. No RNG, no reseal, no other path.
+    ///
+    /// Callers (the cold member inspector only) must already have proven, from the same paid
+    /// inventory: no marker and no parent directory; an authenticated current catalog naming
+    /// the archive and Current3 but not ID5; the settled Current3 layout's marker; the seed
+    /// `Unauthenticated` (`codec::classify_seed`); and the stage's role. Nothing downstream of
+    /// a complete seed exists, so these bytes cannot carry any declaration or authority.
+    ///
+    /// Order: the fence goes FIRST. Every intermediate (an unauthenticated seed with or without
+    /// the fence) is then first-torn again on the next open. Removing the seed first would
+    /// leave a fence with no claim, which no reader can attribute. Each name must be provably
+    /// gone before the next object is touched (see [`proven_absent`]).
+    pub(in crate::store) fn dispose_first_torn_member_outbox_seed(
+        &self,
+        stage: member::FirstTornStage,
+        seed: OpenedArchiveObject,
+        fee: &CatalogReadReservation,
+    ) -> Result<(), AppError> {
+        fee.validate(
+            self.member_outbox_declaration_pool()?,
+            member::codec::DECLARATION_FEE,
+        )?;
+        let stage_path = fixed(self, false, critical_namespaces::Slot::Stage.name())?;
+        let seed_path = fixed(self, false, member::MEMBER_OUTBOX_SEED)?;
+        // Re-proven at the edge: nothing a complete seed precedes has appeared.
+        absent(&fixed(self, true, member::MEMBER_OUTBOX_MARKER)?)?;
+        absent(&fixed(self, true, member::MEMBER_OUTBOX_PARENT)?)?;
+        let (seed_file, seed_raw) = seed;
+        let seed = critical_namespaces::pending_join::CreatedStage {
+            identity: Some(session_id(&seed_file).map_err(io)?),
+            file: seed_file,
+        };
+        exact_retained(&seed_path, &seed, &seed_raw)?;
+        if let member::FirstTornStage::Fence((file, raw)) = stage {
+            let id = session_id(&file).map_err(io)?;
+            held(&stage_path, &file, id)?;
+            if !raw.is_empty() || file.metadata().map_err(io)?.len() != 0 {
+                return Err(denied());
+            }
+            fs::remove_file(&stage_path).map_err(io)?;
+            // Every handle to the stage drops before the barrier and the name proof.
+            drop(file);
+            member::member_cold_fault(226)?;
+            sync_directory(&self.dir).map_err(io)?;
+            member::member_cold_fault(227)?;
+            proven_absent(&stage_path)?;
+        }
+        // The SAME held seed, still exactly the classified bytes.
+        exact_retained(&seed_path, &seed, &seed_raw)?;
+        fs::remove_file(&seed_path).map_err(io)?;
+        drop(seed);
+        member::member_cold_fault(228)?;
+        sync_directory(&self.dir).map_err(io)?;
+        proven_absent(&seed_path)
     }
 
     /// Finish one exact retained declaration, warm or cold. Every retry re-verifies the complete
@@ -599,8 +764,15 @@ impl ServerStore {
                 return Err(denied());
             }
             let original_id = session_id(&current).map_err(io)?;
-            // The durable old-slot refusal MUST precede every member-only output. Patching
-            // current readers cannot fence an older binary.
+            // Claim the seed name first (zero bytes, durable before the fence), so no fence
+            // ever exists without it. A held slot (warm retry, cold complete seed) is only
+            // re-proven here.
+            ensure_seed_claim(&seed_path, &mut declaration.seed_file)?;
+            sync_directory(&self.dir).map_err(io)?;
+            self.member_outbox_fault(241)?;
+            // The durable old-slot refusal MUST precede every CONTENT-BEARING member-only
+            // output (seed bytes, marker, parent, candidate). Patching current readers cannot
+            // fence an older binary. The zero-byte claim above carries nothing it could misuse.
             ensure_legacy_stage_fence(
                 &stage_path,
                 &mut declaration.stage_file,

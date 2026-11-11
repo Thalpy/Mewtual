@@ -57,8 +57,17 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::remove_file(&seed_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|install_governance_layout_marker|original.marker.sync_all().map_err(io)?;']=1
   # Namespace5 (member outbox layout) declaration: the same reviewed protocol as namespace4,
-  # with its own fixed seed/marker names. The empty legacy stage fence precedes every
-  # member-only output so actual older readers refuse first.
+  # with its own fixed seed/marker names. A zero-byte claim of the fixed seed name comes
+  # first (no content, so older readers may ignore it), then the empty legacy stage fence
+  # precedes every content-bearing member-only output so actual older readers refuse first.
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_seed_claim|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_seed_claim|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_seed_claim|claim.file.sync_all().map_err(io)?;']=1
+  # Cold first-torn disposal: only the classified zero-byte fence, then the classified
+  # UNAUTHENTICATED seed at their fixed names, each followed by a barrier and a NotFound proof,
+  # and only with no marker, parent or ID5 (docs/communication-recovery/CHAT-V2-NAMESPACE5-RECOVERY.md).
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|dispose_first_torn_member_outbox_seed|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|dispose_first_torn_member_outbox_seed|fs::remove_file(&seed_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_legacy_stage_fence|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_legacy_stage_fence|original.file.sync_all().map_err(io)?;']=1

@@ -20,12 +20,32 @@ Production source/UI admission and sender-state persistence remain required.
 Its parent is the declared critical namespace5 (focused Linux/Windows storage cases
 executed; see HANDOVER for current evidence). Only an opener
 configured with the member-outbox handler reads ID5 or its seed, marker and parent
-directory; every other opener refuses them before any cleaner, and binaries that predate
-ID5 are fenced by the same empty legacy catalog stage governance4 uses, then by their
-closed grammar. This is fail-closed refusal, not protection against a local process that
-rewrites the private directory. A torn first declaration seed stays preserved and refused,
-which can leave a vault unopenable until first-torn-seed recovery exists. Declaring ID5
-grants no governance, member-source or save authority.
+directory; every other opener refuses them before any cleaner.
+
+Binaries that predate ID5 are fenced in two ways:
+- during the declaration, by the same empty legacy catalog stage governance4 uses;
+- afterwards, by their closed grammar.
+
+The fence precedes every content-bearing member output, until the declaration commits or
+its abandonment starts. A zero-byte claim of the seed name comes before the fence.
+Predecessor refusal is checked in CI against the real `ce402364` code.
+
+This is fail-closed refusal, not protection against a local process that rewrites the
+private directory.
+
+A first declaration seed that never authenticated is abandoned: the zero-byte fence and the
+unauthenticated seed are unlinked, and the namespace is declared afresh. Two conditions
+apply:
+- **Only when nothing downstream exists:** no marker, no parent, and no ID5 in the
+  authenticated current catalog.
+- **Each unlink is proven before the next object is touched:** a barrier follows it, and the
+  name must then read NotFound.
+
+"Undeclared" never rests on the seed, and an authenticated but invalid seed is preserved.
+Residuals are listed in the recovery design: bit rot in a complete seed before its marker
+exists, other writers' zero-byte stages in the claim window, and future seed formats under
+another key domain. Declaring ID5 grants no governance, member-source or save authority.
+[Recovery design](communication-recovery/CHAT-V2-NAMESPACE5-RECOVERY.md).
 
 Member saves (18 focused Windows save cases passed; no native caller).
 See HANDOVER for the separate incomplete native/restart boundaries. The only issuer of a

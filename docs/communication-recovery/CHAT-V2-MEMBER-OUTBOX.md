@@ -61,14 +61,28 @@ descriptor`. Its fixed objects:
   checked generation + 1 and the whole-plaintext parent digest. For a catalog whose IDs
   are all below the new one this equals the earlier append-only bytes.
 - Only an opener whose `V2CurrentLayoutPolicy` carries `with_member_outbox(..)` reads ID5
-  or its artifacts. Every other opener refuses them before any cleaner; binaries that
-  predate ID5 are fenced by an owned empty legacy catalog stage during the declaration and
-  by their closed grammar afterwards. Every JOIN transition preserves ID5 exactly.
+  or its artifacts. Every other opener refuses them before any cleaner.
+- Binaries that predate ID5 are fenced in two ways:
+  - during the declaration, by an owned empty legacy catalog stage. It precedes every
+    content-bearing member output, until the declaration commits or its abandonment starts;
+  - afterwards, by their closed grammar.
+
+  CI checks this against the real predecessor commit `ce402364`. Every JOIN transition
+  preserves ID5 exactly.
 - The declaration follows governance4's protocol (empty stage fence, seed, marker, parent
-  directory, candidate stage, rename, seed removal). Cold recovery finishes it from a
-  complete authenticated seed. Without one, orphan markers or directories, a lost marker and
-  any stage that is not a valid ordinary successor are preserved and refused. A torn FIRST
-  seed is preserved and refused: first-torn-seed recovery is not implemented.
+  directory, candidate stage, rename, seed removal), preceded by a zero-byte claim of the
+  seed name. Every fence therefore has a claim beside it.
+  - **Complete authenticated seed:** cold recovery finishes the declaration.
+  - **First seed that never authenticated:** the declaration is abandoned. The cold
+    inspector unlinks the zero-byte fence, then the seed. Each unlink is followed by a
+    directory barrier and a proof that the name is gone. The warm retry then declares
+    afresh. This happens only when there is no marker, no parent and no ID5 in the
+    authenticated current catalog.
+  - **Anything else without a complete seed** is preserved and refused: orphan markers or
+    directories, a lost marker, an authenticated but invalid seed, and any stage that is not
+    a valid ordinary successor.
+
+  [Recovery design](CHAT-V2-NAMESPACE5-RECOVERY.md).
 - Declared from the Current3 opener after ID3, or from the governance opener after ID4,
   serially after that opener's own declaration debt. Declaring 5 never creates or implies 4.
 - `V2MemberOutboxPolicy` supplies an independent pool (sized by

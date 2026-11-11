@@ -110,8 +110,11 @@ impl ServerStore {
         }
         // An in-progress namespace5 declaration owns the catalog stage slot, which the
         // governance inspector would refuse. With the concrete member handler configured,
-        // finish (or preserve and refuse) it first; the Current3 gate below re-inspects and
-        // installs its marker. Both seeds at once are conflicting debts and refuse there.
+        // finish it, abandon a first seed that never authenticated, or preserve and refuse it
+        // first; the Current3 gate below re-inspects and installs its marker. Both seeds at
+        // once are conflicting debts, except that an unauthenticated member seed beside a
+        // governance seed (a predecessor's governance write during the claim window) is
+        // abandoned without touching the stage, which is governance's own.
         if self.member_outbox_policy().is_some() && self.member_outbox_seed_present()? {
             drop(self.inspect_and_repair_member_outbox_declaration()?);
         }

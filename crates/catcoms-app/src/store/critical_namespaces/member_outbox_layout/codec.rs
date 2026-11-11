@@ -168,6 +168,60 @@ pub(in crate::store) fn open_seed(
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
     open_data(key, SEED_KEY, raw, MAX_SEED_PLAIN)
 }
+
+/// What the bytes at the seed name ARE, before any recovery decision. The frame is
+/// `nonce || ciphertext` with no length header, so a truncated seed and a corrupt
+/// complete-length one are indistinguishable; only opening under the member seed key is
+/// evidence of anything.
+pub(in crate::store) enum SeedEvidence {
+    /// Shorter than one nonce plus tag, or AEAD opening under the member seed key reports an
+    /// authentication failure. Such bytes cannot carry any declaration, capability or
+    /// authority. This is the ONLY class a first-torn disposal may discard, and only together
+    /// with its other classified conditions.
+    Unauthenticated,
+    /// Opens under the member seed key. The caller must still bound and parse the plaintext.
+    /// An authenticated seed whose plaintext is invalid is preserved and refused: it may be a
+    /// future version's seed, and it is not torn scratch.
+    Authenticated(Zeroizing<Vec<u8>>),
+}
+
+/// Classify a seed file's complete bytes. Errors are refusals (a frame larger than any seed
+/// this version writes, or a key-setup failure), never Unauthenticated.
+///
+/// Compatibility: any future writer of the fixed seed name must seal under this same key
+/// domain. A different domain would make its seed Unauthenticated here, and therefore
+/// disposable by this version's first-torn role on a downgrade.
+pub(in crate::store) fn classify_seed(
+    key: &[u8; 32],
+    raw: &[u8],
+) -> Result<SeedEvidence, AppError> {
+    if raw.len() > MAX_SEED_FRAME {
+        return Err(refused());
+    }
+    // 24-byte nonce plus 16-byte tag: anything shorter cannot authenticate. A 40-byte frame is
+    // still opened (an authentic empty seal is Authenticated, then invalid, then preserved).
+    if raw.len() < 40 {
+        return Ok(SeedEvidence::Unauthenticated);
+    }
+    let derived = Zeroizing::new(blake3::derive_key(SEED_KEY, key));
+    match unseal(&derived, &unframe(raw)?) {
+        Ok(plain) => Ok(SeedEvidence::Authenticated(Zeroizing::new(plain))),
+        Err(catcoms_crypto::keystore::KeystoreError::Decrypt) => Ok(SeedEvidence::Unauthenticated),
+        Err(_) => Err(refused()),
+    }
+}
+/// Regression-only: seal arbitrary plaintext under the member SEED key domain, building an
+/// AUTHENTICATED seed whose content is invalid. The first-torn role must preserve it.
+#[cfg(test)]
+pub(in crate::store) fn seal_seed_plain_for_test(
+    key: &[u8; 32],
+    plain: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Zeroizing<Vec<u8>> {
+    let derived = Zeroizing::new(blake3::derive_key(SEED_KEY, key));
+    Zeroizing::new(frame(&seal(&derived, plain, rng).unwrap()))
+}
+
 pub(in crate::store) fn parse_seed<'a>(
     key: &[u8; 32],
     domain: &[u8; 32],

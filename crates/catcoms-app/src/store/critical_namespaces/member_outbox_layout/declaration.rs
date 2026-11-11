@@ -46,7 +46,7 @@ impl ServerStore {
             self.member_outbox_declaration_pool()?,
             codec::DECLARATION_FEE,
         )?;
-        let inventory = self.read_member_outbox_inventory(fee)?;
+        let inventory = self.read_member_outbox_inventory(fee, false)?;
         if inventory.stage.is_some()
             || inventory.seed.is_some()
             || inventory.marker.is_some()
@@ -214,14 +214,49 @@ impl ServerStore {
             }
             return Ok(None);
         }
-        let inventory = self.read_member_outbox_inventory(&fee)?;
+        // The one prior debt a member seed may sit beside is a governance4 seed, reachable only
+        // through a predecessor binary (see `require_member_outbox_debts_beside_governance`).
+        // Only an opener that also owns governance4 reaches here with one; every other opener
+        // refused the governance seed in `open_critical_namespace_gate`.
+        let beside_governance = self.governance_layout_policy.is_some()
+            && self.member_outbox_seed_present()?
+            && self.governance_declaration_seed_present()?;
+        let mut inventory = self.read_member_outbox_inventory(&fee, beside_governance)?;
         let (_current_file, current_raw) = inventory.current.as_ref().ok_or_else(refused)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let current = summary(self, &key, current_raw)?;
         let layout = current.current_layout.ok_or_else(refused)?;
         let archive = current.archive.as_ref().ok_or_else(refused)?;
-        if let Some((seed_file, seed_raw)) = inventory.seed {
-            let plain = codec::open_seed(&key, &seed_raw)?;
+        if let Some((seed_file, seed_raw)) = inventory.seed.take() {
+            let plain = match codec::classify_seed(&key, &seed_raw)? {
+                codec::SeedEvidence::Unauthenticated => {
+                    // Nothing that only follows a complete seed may exist: no marker, no
+                    // parent (ID5 in the current catalog is checked inside).
+                    if inventory.marker.is_some() || inventory.parent.is_some() {
+                        return Err(refused());
+                    }
+                    self.dispose_first_torn_member_seed(
+                        inventory.stage.take(),
+                        &inventory.root,
+                        (seed_file, seed_raw),
+                        &current,
+                        beside_governance,
+                        &fee,
+                    )?;
+                    return Ok(None);
+                }
+                // A complete seed cannot coexist with a governance seed through any writer of
+                // this version or the predecessor: preserved and refused.
+                codec::SeedEvidence::Authenticated(_) if beside_governance => {
+                    return Err(refused());
+                }
+                codec::SeedEvidence::Authenticated(plain) => plain,
+            };
+            // Authenticated but out of bounds or unparseable: possibly a future version's seed,
+            // never torn scratch. Preserved and refused.
+            if plain.is_empty() || plain.len() > codec::MAX_SEED_PLAIN {
+                return Err(refused());
+            }
             let saved = codec::parse_seed(&key, &layout.vault, &plain)?;
             let before = summary(self, &key, saved.original)?;
             let next = summary(self, &key, saved.candidate)?;
@@ -330,8 +365,10 @@ impl ServerStore {
             None => {
                 // Orphan member artifacts without a declared namespace or a seed are preserved
                 // and refused. A stage is left to the older inspectors, which already refuse
-                // anything that is not an authenticated valid ordinary successor (including
-                // an empty legacy fence left by an interrupted first seed).
+                // anything that is not an authenticated valid ordinary successor. That includes
+                // an empty stage with no seed claim, which is never this version's (its fence
+                // always follows the claim): another writer's, or fence-first debris from a
+                // namespace5 build that predates the claim and never shipped.
                 if inventory.marker.is_some() || inventory.parent.is_some() {
                     return Err(refused());
                 }
@@ -366,6 +403,69 @@ impl ServerStore {
                 Ok(Some(captured))
             }
         }
+    }
+
+    /// The first-torn role: classify an UNAUTHENTICATED seed's surroundings and abandon the
+    /// declaration it began, or refuse. Every condition below is checked before the first
+    /// unlink, from the same paid inventory; any deviation preserves everything and refuses.
+    ///
+    /// Why this cannot turn corruption into an assumed-empty namespace: "undeclared" rests on
+    /// the authenticated current catalog lacking ID5, the marker being absent and the parent
+    /// directory being absent. It never rests on the seed, which cannot carry anything without
+    /// authenticating. The exclusive vault session (taken before any catalog work) means this
+    /// is crash debris, never a live writer's work in progress.
+    fn dispose_first_torn_member_seed(
+        &self,
+        stage: Option<(File, Zeroizing<Vec<u8>>)>,
+        root: &MemberOutboxDirectoryCapture,
+        seed: (File, Zeroizing<Vec<u8>>),
+        current: &pending_join_codec::Summary,
+        beside_governance: bool,
+        fee: &CatalogReadReservation,
+    ) -> Result<(), AppError> {
+        // ID5 is the last thing that only follows a complete seed (the caller has proven the
+        // marker and parent absent).
+        if current.member_outbox.is_some() {
+            return Err(refused());
+        }
+        // Prove the settled Current3 layout (root and marker) read-only BEFORE the first
+        // unlink, so a vault the Current3 gate will refuse anyway is never mutated first.
+        let layout = current.current_layout.ok_or_else(refused)?;
+        let archive = current.archive.as_ref().ok_or_else(refused)?;
+        self.mount_existing_current_declaration_root(archive)?;
+        self.require_member_outbox_root_matches(root)?;
+        self.check_current_marker_before_old_gates(layout, fee)?;
+        let stage = if beside_governance {
+            // A governance4 seed exists, so any stage is governance's own: this version never
+            // creates a member fence while a governance seed exists, and the predecessor's
+            // governance opener refuses to begin over an existing stage. Never touched here.
+            FirstTornStage::Untouched
+        } else {
+            match stage {
+                None => FirstTornStage::Absent,
+                Some((file, raw)) if raw.is_empty() => FirstTornStage::Fence((file, raw)),
+                Some((_, raw)) => {
+                    // Non-empty: never this declaration's (its stage bytes follow a complete
+                    // seed, marker and parent, and always name ID5). Only an authenticated
+                    // ordinary successor without ID5 (a predecessor JOIN write during the
+                    // claim window) is left for the Current3/JOIN settlement; a partial or
+                    // foreign stage refuses, as the JOIN policy does.
+                    let key = Zeroizing::new(self.keys.db_key()?);
+                    let staged = summary(self, &key, &raw)?;
+                    if staged.member_outbox.is_some()
+                        || staged.current_layout != current.current_layout
+                        || staged.archive != current.archive
+                    {
+                        return Err(refused());
+                    }
+                    if staged.digest != current.digest {
+                        pending_join_codec::successor(current, &staged)?;
+                    }
+                    FirstTornStage::Untouched
+                }
+            }
+        };
+        self.dispose_first_torn_member_outbox_seed(stage, seed, fee)
     }
 
     /// Whether the authenticated current catalog does NOT name namespace5. Used only when no

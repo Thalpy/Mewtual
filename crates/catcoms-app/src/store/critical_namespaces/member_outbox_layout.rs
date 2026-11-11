@@ -14,16 +14,22 @@
 //! never decoded from storage. Every opener WITHOUT it refuses an ID5 catalog entry and every
 //! fixed artifact above before any old cleaner ([`refuse_unsupported_storage`]). Binaries that
 //! predate namespace5 are fenced the same way governance4 fences them: an owned EMPTY legacy
-//! catalog stage is created and synced before any member-only output, and they already reject
-//! that framing; once promoted, their closed grammars reject ID5 itself.
+//! catalog stage is created and synced before any CONTENT-BEARING member output (seed bytes,
+//! marker, parent, candidate), and they already reject that framing; once promoted, their
+//! closed grammars reject ID5 itself. They are not fenced from a zero-byte seed claim, nor from
+//! an abandoned unauthenticated seed while its disposal runs: neither carries anything.
 //!
 //! Declaration order (warm, one owner, every step idempotent under cold recovery):
-//! empty stage fence -> seed -> marker -> parent directory -> complete candidate stage ->
-//! rename stage onto current (commit point) -> verify -> remove seed. Cold recovery with a
-//! complete authenticated seed finishes exactly that sequence; without one, any stage that is
-//! not a valid ordinary successor, a marker or a directory is preserved and refused. A torn
-//! FIRST seed (crash between the empty fence and a complete seed) therefore stays preserved
-//! and refused: first-torn-seed recovery is not implemented here.
+//! zero-byte seed claim -> empty stage fence -> seed bytes -> marker -> parent directory ->
+//! complete candidate stage -> rename stage onto current (commit point) -> verify -> remove
+//! seed. Cold recovery with a complete authenticated seed finishes exactly that sequence.
+//!
+//! A FIRST seed that never authenticated (a crash before it was complete) is abandoned
+//! instead: the cold inspector's first-torn role unlinks the zero-byte fence, then the seed,
+//! and the warm retry declares afresh. It applies only when nothing a complete seed precedes
+//! exists (no marker, no parent, no ID5 in the authenticated current catalog). Any other
+//! stage, marker or directory without a complete authenticated seed is preserved and refused.
+//! Design and residuals: `docs/communication-recovery/CHAT-V2-NAMESPACE5-RECOVERY.md`.
 //!
 //! Authority boundary. Declaring or mounting this namespace grants no membership, signing,
 //! save or publication right. A member save still needs the actual current member source and
@@ -48,6 +54,47 @@ pub(in crate::store) const MAX_BASE_PATH: usize = current_layout::MAX_OPEN_BASE_
 #[cfg(test)]
 thread_local! {
     static EMULATE_PRE_NAMESPACE5: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static COLD_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static COLD_FAULT_FIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static NAME_REPORTED_PRESENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Regression-only cold cut inside the first-torn disposal (226, 227, 228; see the persistence
+/// module). The Store, and so its fault atomic, is created inside the very `open` that runs
+/// the disposal, so this seam is thread-local and armed before `open`. It is one-shot: it
+/// disarms itself when it fires, and tests assert it fired, so a dead seam cannot make a
+/// "completes on reopen" assertion vacuous.
+#[cfg(test)]
+pub(in crate::store) fn arm_member_cold_fault_for_test(point: u8) {
+    COLD_FAULT.with(|cell| cell.set(point));
+    COLD_FAULT_FIRED.with(|cell| cell.set(false));
+}
+#[cfg(test)]
+pub(in crate::store) fn member_cold_fault_fired_for_test() -> bool {
+    COLD_FAULT_FIRED.with(std::cell::Cell::get)
+}
+/// Regression-only, one-shot: the next post-unlink NotFound proof reports the name as still
+/// present (the Windows delete-pending case a real runner does not reproduce).
+#[cfg(test)]
+pub(in crate::store) fn report_name_present_once_for_test() {
+    NAME_REPORTED_PRESENT.with(|cell| cell.set(true));
+}
+#[cfg(test)]
+pub(in crate::store) fn take_name_reported_present_for_test() -> bool {
+    NAME_REPORTED_PRESENT.with(|cell| cell.replace(false))
+}
+/// The first-torn disposal's cold cut points. Always `Ok` outside regressions.
+pub(in crate::store) fn member_cold_fault(point: u8) -> Result<(), AppError> {
+    #[cfg(test)]
+    if COLD_FAULT.with(std::cell::Cell::get) == point {
+        COLD_FAULT.with(|cell| cell.set(0));
+        COLD_FAULT_FIRED.with(|cell| cell.set(true));
+        return Err(AppError::Io(
+            "injected member-outbox first-torn disposal cut".into(),
+        ));
+    }
+    let _ = point;
+    Ok(())
 }
 /// Regression-only emulation of a binary that predates namespace5: such a binary does not
 /// know the member fixed names, so the name fence and governance's member-seed prior-debt
@@ -243,6 +290,21 @@ pub(in crate::store) struct Declaration {
     pub(in crate::store) marker_file: Option<pending_join::CreatedStage>,
     // The parent directory, once created (warm) or proven (cold) under the held root.
     pub(in crate::store) parent: Option<MemberOutboxDirectoryCapture>,
+}
+
+/// What the cold inspector classified at the catalog stage slot for a first-torn disposal
+/// (`ServerStore::dispose_first_torn_member_outbox_seed`). DATA plus at most one held File;
+/// it grants no write beyond that one classified unlink.
+pub(in crate::store) enum FirstTornStage {
+    /// No stage: nothing to remove there.
+    Absent,
+    /// A real zero-byte file beside the seed claim: this declaration's legacy fence. (In the
+    /// documented downgrade residual it may be another writer's empty stage, which holds no
+    /// bytes either.) Unlinked first.
+    Fence((File, Zeroizing<Vec<u8>>)),
+    /// A stage that is never this declaration's: a complete authenticated ordinary successor
+    /// without ID5, or any stage beside a governance4 seed. Left to its owner's inspector.
+    Untouched,
 }
 
 /// Original installed marker plus the held parent directory. No outbox owner, save or
