@@ -157,6 +157,144 @@ impl SaveFixture {
 }
 
 #[test]
+fn cancellation_during_namespace_initialization_refuses_before_fresh_signing() {
+    struct CancelOnDraw<'a> {
+        rng: &'a mut ChaCha20Rng,
+        signal: &'a watch::Sender<bool>,
+        fired: bool,
+    }
+    impl CancelOnDraw<'_> {
+        fn cancel_once(&mut self) {
+            if !self.fired {
+                self.fired = true;
+                self.signal.send(true).unwrap();
+            }
+        }
+    }
+    impl RngCore for CancelOnDraw<'_> {
+        fn next_u32(&mut self) -> u32 {
+            self.cancel_once();
+            self.rng.next_u32()
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.cancel_once();
+            self.rng.next_u64()
+        }
+        fn fill_bytes(&mut self, bytes: &mut [u8]) {
+            self.cancel_once();
+            self.rng.fill_bytes(bytes);
+        }
+        fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(bytes);
+            Ok(())
+        }
+    }
+    impl CryptoRng for CancelOnDraw<'_> {}
+
+    let mut f = saving(0x7fbd0);
+    let stale = session();
+    let body = create("cancel before authoring after a slow namespace open");
+    let dispatches = member_sign_dispatches_for_test();
+    let result = {
+        let mut rng = CancelOnDraw {
+            rng: &mut f.rng,
+            signal: &stale.tx,
+            fired: false,
+        };
+        let result = f.host.prepare_member_save(
+            &f.layout,
+            plain([0xf1; 32], &body),
+            &stale.cancellation,
+            &mut rng,
+        );
+        assert!(rng.fired, "exercise the real empty-head sealing seam");
+        result
+    };
+    assert_eq!(result, Err(V2MemberSaveRefusal::Cancelled));
+    assert_eq!(member_sign_dispatches_for_test(), dispatches);
+    assert_eq!(f.custody(), None);
+    assert!(f.host.take_member_signed_original([0xf1; 32]).is_err());
+    // Initial namespace metadata is harmless; a fresh invocation can author/save normally.
+    f.save([0xf1; 32], &body);
+    assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
+}
+
+#[test]
+fn append_payment_pressure_retains_the_original_across_lane_replacement() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let mut f = saving(0x7fbd1);
+    let live = session();
+    let body = create("keep the signed original when preseal credit is busy");
+    let pool = f
+        .layout
+        .checked_store()
+        .unwrap()
+        .member_outbox_mount()
+        .unwrap()
+        .pool_for_test();
+    let held = Rc::new(RefCell::new(None));
+    let hold_in_hook = held.clone();
+    let dispatches = member_sign_dispatches_for_test();
+    let result = PreparedV2TextHost::<MemNetwork, ChaCha20Rng>::with_member_preseal_hook_for_test(
+        Box::new(move || {
+            let free = pool.capacity() - pool.charged_for_test();
+            *hold_in_hook.borrow_mut() = Some(pool.try_reserve(free).unwrap());
+        }),
+        || f.prepare([0xf2; 32], &body, &live),
+    );
+    assert_eq!(result, Err(V2MemberSaveRefusal::Busy));
+    assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
+    let original = f.host.member_save_original_for_test(&f.layout).unwrap();
+    assert!(f.custody().unwrap().starts_with("Unresolved"));
+    f.host.drop_member_lane_for_test();
+    assert_eq!(
+        f.host.member_save_original_for_test(&f.layout).unwrap(),
+        original
+    );
+    drop(held.borrow_mut().take());
+    assert_eq!(
+        f.prepare([0xf2; 32], &body, &live),
+        Ok(V2MemberSaveOutcome::Ready)
+    );
+    assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
+    assert_eq!(
+        f.host.member_save_original_for_test(&f.layout).unwrap(),
+        original
+    );
+    f.save([0xf2; 32], &body);
+    assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
+}
+
+#[test]
+fn dropping_a_save_end_does_not_acquire_the_issuance_mutex() {
+    let mut f = saving(0x7fbd2);
+    let live = session();
+    let body = create("retire an admitted end without waiting on its issuer");
+    assert_eq!(
+        f.prepare([0xf3; 32], &body, &live),
+        Ok(V2MemberSaveOutcome::Ready)
+    );
+    let completed = f.host.member_save_ends_completed_for_test().unwrap();
+    let (admission, released) = native(&live);
+    let job = f
+        .host
+        .admit_member_save(&f.layout, [0xf3; 32], admission)
+        .unwrap();
+    assert!(f.host.cancel_and_drain_admitted_promotion().is_err());
+    // Hold the actual issuer mutex on this thread. The previous Drop would deadlock here;
+    // the focused CI subprocess deadline bounds that regression without native authority.
+    f.host.with_member_save_issue_lock_for_test(|| drop(job));
+    assert!(released.load(Ordering::SeqCst));
+    assert_eq!(
+        f.host.member_save_ends_completed_for_test(),
+        Some(completed + 1)
+    );
+    f.host.cancel_and_drain_admitted_promotion().unwrap();
+}
+
+#[test]
 fn a_member_save_reaches_saved_local_and_exact_retries_never_sign_again() {
     let mut f = saving(0x7fb00);
     let live = session();

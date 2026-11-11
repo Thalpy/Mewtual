@@ -39,9 +39,12 @@ source end, lease or native guard); an uncertain, unwound or unrun save keeps it
 original there and is resolved by recovery and lookup, never by signing again. A residual
 panic inside pure DATA sealing can lose an in-hand original; the token is then retired after
 an exact Absent lookup rather than re-signed. A same-token retry with changed DATA is always a
-conflict, never reported as saved. Retained plaintext originals stay in memory across a UI
-lock, because lock does not unmount the Store; whether lock should drop non-running custody
-is an open primary decision.
+conflict, never reported as saved. The primary's M4 decision retains bounded plaintext
+originals across a UI lock rather than discarding the only unsaved copy. This is DATA only:
+lock revokes old native authority, and a later save/publication requires fresh actual native
+generation/row and source checks. Retention never renews an earlier invocation or claims
+RAM erasure at UI lock. Store/cache destruction and process loss remain distinct from local
+durable save; no SavedLocal result is issued for memory-only custody.
 
 ## Ordinary-member signer (11 November; focused checks passed, inactive)
 

@@ -1,5 +1,37 @@
 # Mewtual; Handover
 
+## Primary member-save follow-up (11 November; runtime evidence pending)
+
+The primary's fresh actual-diff review of `ae5a0837` found four MEDIUM issues: an
+invocation cancelled during lookup could still start signing; retryable preseal
+refusal kept its known original only in the replaceable host; temporary lookup
+scratch could outlive its refunded payer; and source-end Drop could wait on its
+issuance mutex. Corrections retain originals in the Store before append payment,
+recheck the native negative before new authoring, explicitly fund serialized
+scratch from the existing slot allowance, and retire issued ends atomically.
+No pool cap is increased. F's actual close/key and native authorization boundaries
+remain required; the negative observation is not a credential substitute.
+
+Three new Windows regressions cover cancellation during real namespace-head
+sealing before authoring, post-sign append-credit refusal followed by lane
+replacement with the exact retained original/no new key, and retiring an unrun
+job's source end while its actual issuance mutex is held. The source inventory
+contains 15 earlier Windows save cases, now 18; B's two new mount cases are separate.
+All Rust execution for these corrections remains pending CI, not a local pass.
+
+The independent `Chat V2 member storage regressions` workflow runs ordinary
+focused Cargo test commands on Linux/Windows, with exact nonzero cohort counts
+(57 storage/catalog executions on either OS plus 18 Windows-only save cases).
+It streams artifacts and bounds each owned subprocess tree, including the
+deadlock regression. It neither changes warning handling nor replaces strict
+Clippy, supply-chain audit, native/frontend or full-suite gates. Standalone
+rustfmt and the Python count-guard self-check passed without invoking Cargo.
+
+M4 is decided: retain bounded exact signed-original DATA across a UI lock. Do not
+discard the only unsaved copy to implement lock. No save/publication authority
+survives that lock; a later invocation needs fresh native generation/row and
+actual source admission. No lock-time plaintext-erasure claim is made.
+
 ## Member save, root path (11 November; B, pushed, nothing executed yet)
 
 Branch `chat-v2-member-outbox-production` (draft PR #86) now connects the member outbox to

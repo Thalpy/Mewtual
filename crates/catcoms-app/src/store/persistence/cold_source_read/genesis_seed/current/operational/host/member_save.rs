@@ -61,6 +61,7 @@ use crate::store::ServerStore;
 use crate::AppError;
 use catcoms_replication::chat::{ActionId, ActionSpec};
 use catcoms_rt::{CryptoRngCore, MeshTransport, RequestCancellation};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 
 /// Native custody for ONE member-save admission.
@@ -309,6 +310,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         .map_err(|_| V2MemberSaveRefusal::Signing)?;
         let cell = mount.cell(id).map_err(|_| V2MemberSaveRefusal::Busy)?;
         let mut guard = cell.lock_recovering();
+        // Move the vector into a binding declared AFTER the lock: all of this call's
+        // slot-funded scratch must drop before unlocking for the next phase-1 caller.
+        let request_parents = canonical;
+        // Before this lock, lookup_fee funds context/canonical scratch. The cell's named
+        // slot invoice now funds this serialized scratch independently of engine lookup
+        // payments. The outer mount Arc retains its non-evicting cell table until AFTER
+        // canonical and env.context drop, including early-return and recovery paths.
         let state: &mut MemberContextState = &mut guard;
         let mut env = SaveEnvironment {
             layout,
@@ -345,6 +353,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 if prepared.admission_facts().request != digest {
                     return Err(V2MemberSaveRefusal::Conflict);
                 }
+                drop(request_parents);
                 self.refresh_prepared(&mut env, state)?;
                 return Ok(V2MemberSaveOutcome::Ready);
             }
@@ -369,13 +378,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 &MemberRequestData {
                     token,
                     channel: request.channel,
-                    parents: &canonical,
+                    parents: &request_parents,
                     body: request.body,
                 },
                 payment,
             )
             .map_err(|error| refusal_of(&error))?;
-        drop(canonical);
+        drop(request_parents);
         match lookup {
             MemberLookup::Hit(hit) => {
                 let receipt = *hit.receipt();
@@ -391,6 +400,14 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             }
             MemberLookup::Conflict(_) => return Err(V2MemberSaveRefusal::Conflict),
             MemberLookup::Absent => {}
+        }
+
+        // Opening/recovering the namespace and exact lookup may have waited or performed
+        // IO since the entry observation. Do not start a fresh draw/key operation for an
+        // invocation already cancelled during that work. This is a negative check, not
+        // F's still-required native close/key admission fence.
+        if negative.is_cancelled() {
+            return Err(V2MemberSaveRefusal::Cancelled);
         }
 
         // 3. Bind an existing lane BEFORE signing, so a binding refusal can never strand a
@@ -420,17 +437,28 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             }
         };
 
-        // 4. Preseal once. The exact original is kept on every retryable refusal.
+        // 4. The Store's independently paid slot owns the known original BEFORE any
+        // fallible preseal payment. Host/lane replacement must not lose it and re-sign.
+        state.custody = Some(MemberOriginalCustody::Unresolved {
+            token,
+            original,
+            lost: false,
+        });
+        #[cfg(all(test, windows))]
+        before_member_preseal_for_test();
         let fee = match mount.pay(MEMBER_OUTBOX_APPEND_FEE) {
             Ok(fee) => fee,
-            Err(_) => {
-                self.restore_after_refusal(token, original);
-                return Err(V2MemberSaveRefusal::Busy);
-            }
+            Err(_) => return Err(V2MemberSaveRefusal::Busy),
         };
         let Some(outbox) = state.owner.as_mut() else {
-            self.restore_after_refusal(token, original);
             return Err(V2MemberSaveRefusal::Stale);
+        };
+        let original = match state.custody.take() {
+            Some(MemberOriginalCustody::Unresolved { original, .. }) => original,
+            other => {
+                state.custody = other;
+                return Err(V2MemberSaveRefusal::Stale);
+            }
         };
         match outbox.prepare_append(env.key, token, original, &mut *env.rng, fee) {
             Ok(prepared) => {
@@ -439,7 +467,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             }
             Err(returned) => {
                 let ReturnedMemberOriginal { original, error } = *returned;
-                self.handle_prepare_refusal(token, original, &error)
+                self.handle_prepare_refusal(state, token, original, &error)
             }
         }
     }
@@ -697,8 +725,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         if admissible {
             return Ok(());
         }
-        // Serial invoices: the unused lookup payment drains before recovery, and the old
-        // presealed append's payment drains before the new one is reserved.
+        // Caller context/canonical scratch has its own named allowance in the held cell's
+        // slot invoice. This engine lookup payment can therefore drain before recovery;
+        // old presealed payload/payment drains before the replacement is reserved.
         drop(env.lookup_fee.take());
         let owner = ensure_owner(env, &mut state.owner)?;
         if matches!(state.custody.as_ref(),
@@ -797,6 +826,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// refusal; it is retired only when the outbox proved it can never be saved.
     fn handle_prepare_refusal(
         &mut self,
+        state: &mut MemberContextState,
         token: MemberRequestToken,
         original: MemberSignedOriginal,
         error: &MemberOutboxError,
@@ -806,6 +836,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 // Saved work under this token (possibly an EARLIER original of the same
                 // request): the stored entry is the only one that may be published.
                 drop(original);
+                state.custody = Some(MemberOriginalCustody::Saved(**receipt));
                 self.finish_member_request_saved(*token.as_bytes(), receipt.action)
                     .map_err(|_| V2MemberSaveRefusal::Stale)?;
                 Ok(V2MemberSaveOutcome::Saved {
@@ -824,7 +855,11 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 Err(refusal_of(error))
             }
             _ => {
-                self.restore_after_refusal(token, original);
+                state.custody = Some(MemberOriginalCustody::Unresolved {
+                    token,
+                    original,
+                    lost: false,
+                });
                 Err(refusal_of(error))
             }
         }
@@ -967,18 +1002,17 @@ const MAX_ACTIVE_SAVE_ENDS: u64 = 1;
 pub(super) const V2_MEMBER_SAVE_SOURCE_BYTES: usize =
     2 * std::mem::size_of::<SaveSourceBody>() + 1024;
 
-/// The ONE serialized lifecycle shared by end issuance and close, under one mutex: a closed
-/// flag and two monotone counters, ends issued and ends completed (dropped). The active count
-/// is their checked difference, bounded at issuance. An issuance that takes the lock before
-/// close is counted before close can observe a full drain; a close that takes it first prevents
-/// every later issuance. Never `Arc::strong_count`.
+/// Issuance and close share one mutex: a closed flag and checked issued counter. End
+/// retirement is independently atomic so Drop never waits for that mutex, including while
+/// native commit custody is held. Acquire observations under the state guard combine the
+/// counters for the bounded active count and final drain. Never `Arc::strong_count`.
 struct SaveSourceState {
     closed: bool,
     issued: u64,
-    completed: u64,
 }
 struct SaveSourceBody {
     state: Mutex<SaveSourceState>,
+    completed: AtomicU64,
     // The member domain's own paid negative: an end keeps that original funding alive, never
     // a Host, Store or SDK backlink.
     negative: V2TextProjectionNegative,
@@ -1003,15 +1037,15 @@ impl V2MemberSaveSource {
                 state: Mutex::new(SaveSourceState {
                     closed: false,
                     issued: 0,
-                    completed: 0,
                 }),
+                completed: AtomicU64::new(0),
                 negative,
                 _fee: fee,
             }),
         })
     }
 
-    /// Refuse every later issuance. Never waits for issued ends.
+    /// Refuse every later issuance under the short state mutex; never joins issued ends.
     pub(super) fn close(&self) {
         let mut state = self
             .body
@@ -1028,17 +1062,13 @@ impl V2MemberSaveSource {
             Err(TryLockError::WouldBlock) => return false,
             Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
         };
-        state.closed && state.completed >= state.issued
+        state.closed && self.body.completed.load(Ordering::Acquire) == state.issued
     }
 
     /// Ends dropped so far (monotone). Regression DATA only; never a permission.
     #[cfg(all(test, windows))]
     pub(super) fn completed_for_test(&self) -> u64 {
-        self.body
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .completed
+        self.body.completed.load(Ordering::Acquire)
     }
 
     /// Issue one end. Refuses after close, while the member domain's original negative is not
@@ -1055,7 +1085,7 @@ impl V2MemberSaveSource {
         self.body.negative.validate_negative()?;
         let active = state
             .issued
-            .checked_sub(state.completed)
+            .checked_sub(self.body.completed.load(Ordering::Acquire))
             .ok_or_else(refused)?;
         if active >= MAX_ACTIVE_SAVE_ENDS {
             return Err(refused());
@@ -1075,20 +1105,71 @@ pub(super) struct V2MemberSaveSourceEnd {
 }
 impl Drop for V2MemberSaveSourceEnd {
     fn drop(&mut self) {
-        let mut state = self
-            .body
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Every end was counted in `issued` first, so this never passes it.
-        state.completed = state.completed.saturating_add(1);
+        // Non-Clone ends were counted by checked issuance before escape. Every end retires
+        // once, so completed cannot exceed issued or overflow, even at u64::MAX. No lock,
+        // wait or callback is permitted here: a refusal can still own native UI custody.
+        self.body.completed.fetch_add(1, Ordering::Release);
     }
 }
 
 /// Regression observations only (`current/tests/text_group_guard/host/member_save.rs`). They
 /// read DATA through the same derivation phase 1 uses and grant nothing.
 #[cfg(all(test, windows))]
+thread_local! {
+    static BEFORE_MEMBER_PRESEAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, windows))]
+fn before_member_preseal_for_test() {
+    let hook = BEFORE_MEMBER_PRESEAL.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(all(test, windows))]
 impl<T, R> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn with_member_preseal_hook_for_test<Output>(
+        hook: Box<dyn FnOnce()>,
+        run: impl FnOnce() -> Output,
+    ) -> Output {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                BEFORE_MEMBER_PRESEAL.with(|slot| drop(slot.borrow_mut().take()));
+            }
+        }
+        BEFORE_MEMBER_PRESEAL.with(|slot| {
+            assert!(slot.borrow().is_none(), "one scoped preseal hook at a time");
+            *slot.borrow_mut() = Some(hook);
+        });
+        let _clear = Clear;
+        run()
+    }
+
+    pub(in crate::store) fn with_member_save_issue_lock_for_test<Output>(
+        &self,
+        run: impl FnOnce() -> Output,
+    ) -> Output {
+        let source = self.member.as_ref().unwrap().save_source_for_test();
+        let _state = source.body.state.lock().unwrap();
+        run()
+    }
+
+    pub(in crate::store) fn member_save_original_for_test(
+        &self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Option<Vec<u8>> {
+        let cell = self.member_cell_for_test(layout)?;
+        let state = cell.lock().ok()?;
+        let original = match state.custody.as_ref()? {
+            MemberOriginalCustody::Prepared(prepared) => prepared.signed_original(),
+            MemberOriginalCustody::Running { original, .. }
+            | MemberOriginalCustody::Unresolved { original, .. } => original,
+            MemberOriginalCustody::Saved(_) => return None,
+        };
+        Some(original.action().encode())
+    }
+
     fn member_cell_for_test(
         &self,
         layout: &V2CurrentLayoutStore,

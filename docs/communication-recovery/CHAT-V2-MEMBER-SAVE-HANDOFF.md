@@ -1,9 +1,10 @@
 # Member save integration: primary decisions
 
 Coordination decision, 11 November. This approves the following implementation
-boundary for Agent B and the native consumer owned by Agent F. The save path is
-not implemented or accepted by this document. Namespace5 source is in draft PR
-#86; local compilation remains paused and CI supplies verification.
+boundary for Agent B and the native consumer owned by Agent F. The root save path
+is now authored in draft PR #86; this document certifies no runtime result and
+supplies no native producer. See HANDOVER for current review and execution evidence.
+Local compilation remains paused and CI supplies verification.
 
 ## A-side hooks owned by B for this increment
 

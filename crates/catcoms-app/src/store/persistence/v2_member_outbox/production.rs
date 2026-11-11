@@ -46,6 +46,7 @@ use crate::store::critical_namespaces::read_pool::{
 use crate::store::critical_namespaces::refused;
 use crate::store::ServerStore;
 use crate::AppError;
+use catcoms_replication::chat::{ActionId, MAX_GROUP_ID_BYTES, MAX_PARENTS};
 use catcoms_rt::{CryptoRngCore, RequestCancellation};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use zeroize::Zeroizing;
@@ -71,8 +72,29 @@ pub(in crate::store) const MEMBER_OUTBOX_MOUNT_FEE: usize =
         + MAX_BASE_PATH
         + 4 * 1024;
 
-// The cell's own layout (owner, custody, lock) must fit the slot invoice it pays.
-const _: () = assert!(std::mem::size_of::<MemberContextCell>() <= MEMBER_OUTBOX_SLOT_FEE);
+/// One serialized phase-1 call's owned context/group and canonical-parent scratch. The
+/// initial lookup invoice funds it before cell creation/locking; after locking, this named
+/// slot allowance funds it independently of any engine lookup/recovery/preseal payment.
+/// Its values must drop BEFORE releasing the cell mutex, so a successor cannot overlap a
+/// second scratch allocation on the same slot allowance.
+const MEMBER_REQUEST_SCRATCH_BYTES: usize = std::mem::size_of::<MemberOutboxContextData>()
+    + MAX_GROUP_ID_BYTES
+    + MAX_PARENTS * std::mem::size_of::<ActionId>()
+    + std::mem::size_of::<Vec<ActionId>>()
+    + 4 * std::mem::size_of::<usize>();
+
+// Keep the existing slot fee unchanged. Account for the actual cell, current lock/Arc
+// control, one bounded table/control allowance and serialized scratch separately from the
+// 2*MAX_ACTION_BYTES allowance that follows its one retained original after Host Drop.
+const MEMBER_CELL_CONTROL_BYTES: usize = std::mem::size_of::<MemberContextCell>()
+    + std::mem::size_of::<MutexGuard<'static, MemberContextState>>()
+    + 4 * std::mem::size_of::<Arc<MemberContextCell>>()
+    + 12 * std::mem::size_of::<usize>()
+    + 1024;
+const _: () = assert!(
+    MEMBER_CELL_CONTROL_BYTES + MEMBER_REQUEST_SCRATCH_BYTES
+        <= MEMBER_OUTBOX_SLOT_FEE - 2 * catcoms_replication::chat::MAX_ACTION_BYTES
+);
 
 /// The one request whose signed original this Store holds for a context.
 pub(in crate::store) enum MemberOriginalCustody {
@@ -204,6 +226,12 @@ impl std::fmt::Debug for MemberOutboxMount {
 }
 
 impl MemberOutboxMount {
+    /// Actual member account for bounded pressure regressions; never a source/native grant.
+    #[cfg(all(test, windows))]
+    pub(in crate::store) fn pool_for_test(&self) -> CriticalCatalogReadPool {
+        self.pool.clone()
+    }
+
     /// The mounted namespace5 capability (vault, Current3 root, descriptor). DATA only.
     pub(in crate::store) fn capability(&self) -> MemberOutboxCapabilityData {
         self.capability

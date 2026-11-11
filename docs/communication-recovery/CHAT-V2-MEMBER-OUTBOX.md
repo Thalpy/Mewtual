@@ -211,10 +211,21 @@ the caller's request digest, so a same-token retry with changed DATA is `Conflic
 the request is presealed, cached Saved, Unresolved or durable. Another token's retained
 original is reported as `Retained { token }` so a composer can resume it.
 
-Design decision for the primary: the Store outlives a UI lock (lock does not unmount), so
-Prepared, Running and Unresolved originals stay in memory across a lock until saved or the
-Store drops, as the member lane's own completed original already does. A lock-time hook could
-drop non-running custody instead, at the cost of losing that message.
+Primary M4 decision: retain bounded exact signed-original DATA across a UI lock;
+do not discard the only unsaved copy. This does not retain save/publication authority:
+a later invocation needs fresh native generation/row and actual source checks.
+No UI-lock plaintext-erasure guarantee is made, and memory-only custody is never
+reported as SavedLocal.
+
+Fresh authoring rechecks the native negative after namespace recovery/lookup IO;
+that negative is not F's actual close/key credential. Before fallible append payment,
+the Store cell owns the known original as Unresolved. A retryable preseal refusal
+cannot leave it solely in a replaceable host. Once its cell is locked, that call's
+bounded context/canonical-parent scratch is funded from a named, checked part of
+the existing slot allowance; it drops before unlock. Engine lookup/recovery fees
+remain separate and may drain without refunding the scratch's payer early.
+Save-source issuance/close stays serialized, while end retirement is atomic and
+does not acquire the issuance mutex under native custody.
 
 ### Phases
 
