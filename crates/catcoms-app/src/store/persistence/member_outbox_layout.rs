@@ -197,9 +197,10 @@ fn ensure_parent_directory(
         *slot = Some(capture_directory_at(&path)?);
     }
     validate_directory_at(&path, slot.as_ref().ok_or_else(denied)?)?;
-    // Only declaration writes call this, and the seed exists throughout them. The mount is
-    // installed only after the seed is removed, so no outbox namespace can exist yet: a
-    // non-empty directory (for example one restored from elsewhere) is never adopted.
+    // Only declaration writes call this, and this Store installs the namespace5 mount only
+    // after such a write fully succeeds (even a warm retry after the seed was removed has no
+    // mount yet). So no outbox namespace can exist under the parent: a non-empty directory
+    // (for example one restored from elsewhere) is never adopted.
     require_empty_directory(&path)?;
     sync_parent_of_marker(root)?;
     validate_directory_at(&path, slot.as_ref().ok_or_else(denied)?)
@@ -472,6 +473,13 @@ impl ServerStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             _ => Ok(true),
         }
+    }
+    /// Whether the fixed member parent directory has no entries. DATA for the cold inspector's
+    /// refusal BEFORE any recovery write; a read failure is an error, never "empty".
+    pub(in crate::store) fn member_outbox_parent_is_empty(&self) -> Result<bool, AppError> {
+        let mut entries =
+            fs::read_dir(fixed(self, true, member::MEMBER_OUTBOX_PARENT)?).map_err(io)?;
+        Ok(entries.next().is_none())
     }
     pub(in crate::store) fn read_member_outbox_inventory(
         &self,

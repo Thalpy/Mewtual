@@ -271,6 +271,12 @@ impl ServerStore {
             {
                 return Err(refused());
             }
+            // While a seed exists no outbox namespace can have been created, so a non-empty
+            // parent (for example a seed replayed after the outbox was used) is refused here,
+            // BEFORE any recovery write touches the stage, seed or marker.
+            if inventory.parent.is_some() && !self.member_outbox_parent_is_empty()? {
+                return Err(refused());
+            }
             let (stage_file, captured_duplicate_stage) = if promoted {
                 (None, stage_file)
             } else {
