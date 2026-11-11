@@ -1,8 +1,10 @@
 # Ordinary-member signer: founder-as-member vertical
 
-Implementation checkpoint, 9 November, branch `chat-v2-ordinary-member-signing`
-(from `b24fd196`). Authored and statically reviewed; **not yet compiled or run** (the
-primary owns the single Cargo queue). Chat V2 stays disabled. This implements the
+Implementation checkpoint, 11 November, branch `chat-v2-ordinary-member-signing`
+(from `b24fd196`), merged into the operational integration branch at `bb5f0290`.
+The primary's ten focused commands pass, including all 33 new cases and neighboring
+regressions; full root/native validation is running. See HANDOVER for exact counts
+and the remaining strict-lint gate. Chat V2 stays disabled. This implements the
 "Signing boundary" of [CHAT-V2-ORDINARY-MEMBER-PATH](CHAT-V2-ORDINARY-MEMBER-PATH.md) for
 one source, the Profile founder acting as an ordinary member, and the Sync seams a
 joined-member source will use. Durable save, publication, projection install, native
@@ -109,7 +111,7 @@ authoring.
   | Exact lookup with the original request DATA returns Absent | restore and retry, or abandon |
   | `run()` Uncertain | recover, then look up: Hit means finish with the receipt ActionId, Absent as above |
   | AlreadySaved | finish with the receipt ActionId, never abandon |
-  | DuplicateAction | report a host invariant breach (that ActionId WILL be published); never abandon as "not sent" |
+  | DuplicateAction | the ActionId is already retained under another token, possibly submitted or Held; reconcile its existing receipt/debt and report the invariant breach, never abandon as a fresh unsaved action |
   | Busy, Stale (including admit refusal), NeedsRecovery, Incomplete, Payment, `prepare_append` Failed (read error, nothing stored) | keep the original, retry later |
   | Pressure | keep it and retry; if the product drops it, the UI must say "not saved" |
 - `forget_lent_member_request` retires a Lent request whose value was lost, and only after

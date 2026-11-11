@@ -17,7 +17,7 @@ receipt. Append reserves bounded checkpoint quota before admission and never evi
 external ENOSPC, lowered policy or finite trie exhaustion can still stop progress.
 Production source/UI admission and sender-state persistence remain required.
 
-## Ordinary-member signer (9 November; authored, unrun)
+## Ordinary-member signer (11 November; focused checks passed, inactive)
 
 The founder acting as an ordinary member signs with the SAME retained device of its whole
 genesis node under a Core plan from a general verifier, with no founder Header, Append,

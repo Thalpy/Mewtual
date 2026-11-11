@@ -1,11 +1,25 @@
 # Mewtual; Handover
 
-## Ordinary-member signer, founder vertical (9 November; authored, NOT compiled)
+## Ordinary-member signer, founder vertical (11 November; focused checks passed)
 
 Branch `chat-v2-ordinary-member-signing` (from `b24fd196`) adds the production signing
 path for the Profile founder acting as an ordinary member, plus the Sync seams for a
-joined member's `ChannelSync`. Nothing here has been compiled or run yet: the primary
-owns the Cargo queue. Chat V2 stays disabled.
+joined member's `ChannelSync`. The reviewed source through `8b003913` is merged at
+`bb5f0290`; its runtime tree is identical to the tested signer branch. Chat V2 stays
+disabled. All ten queued focused commands pass: 4 MLS signer, 1 Core guard, 6 Sync
+member, 4 Sync founder, 4 signed-original constructor, 14 App member-host, 31 outbox,
+22 general-verifier, 19 ordinary-data and 34 complete host-family cases. These are
+139 passing executions with overlap, including 33 new cases, not 139 distinct new
+tests. The primary used the default stack and one Cargo queue.
+
+The unchanged frontend passes all 3,434 tests, static checking with zero errors/
+warnings and its production build. Ambient-dependency and store raw-filesystem
+gates pass. Independent actual-diff review found no BLOCKER/HIGH/MEDIUM; its LOW
+comment overclaim about full-Draft binding was corrected and re-reviewed.
+The full root/native suites, separate native check and strict lint/audit gates are
+running serially; their new results are not yet acceptance evidence. The named
+10,000-operation test remains deferred until the end. The previous 9 November
+results below describe the earlier checkpoint, not this new source.
 
 - MLS: narrow retained-device signer with an exact full-key check and payload bound.
 - Core: `V2OrdinarySigningGuard::signer_data` (DATA getter).
@@ -21,7 +35,7 @@ command credential, pre-raw crash uncertainty. The new store-private methods add
 existing unused-integration lint debt; no suppression was added.
 [Contract and gaps](communication-recovery/CHAT-V2-ORDINARY-MEMBER-SIGNER.md).
 
-## Current validation checkpoint (9 November)
+## Previous full validation checkpoint (9 November; before member-signing integration)
 
 Runtime code is published through `6cc42548` on
 `chat-v2-operational-implementation` / draft PR #85. **Chat V2 remains disabled and

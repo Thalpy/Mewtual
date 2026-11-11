@@ -1,15 +1,14 @@
 # Chat V2 ordinary-member durable outbox
 
-Storage checkpoint, 8 November. The storage engine and its deterministic tests are authored
-in `crates/catcoms-app/src/store/persistence/v2_member_outbox/`. **Production activation is
-incomplete**: the real member-source save admission, parent-directory provisioning, the
-production signed-input constructor and transport wiring belong to the primary integration
-and do not exist yet. Until they do, only cfg(test) fixtures can construct the signed input,
-the parent directory and the save admission, and the module carries an explicit dead-code
-allowance that must be removed with that wiring.
-The initial25 storage tests compiled and passed in4.94s. Independent review then
-found a full-queue retry issue and a reproduced checkpoint-capacity issue; the
-corrections and additional regressions are recorded in HANDOVER as validation finishes.
+Storage integration checkpoint, 11 November. The storage engine in
+`crates/catcoms-app/src/store/persistence/v2_member_outbox/` passes all 31 focused
+tests: 27 storage cases, including both pressure corrections, and four genuine Core
+plan-to-signed-original constructor cases. The production signed-input constructor
+now exists and is consumed by the founder-as-member host. **Production activation
+is incomplete**: the real member-source save admission, parent-directory provisioning
+and transport wiring remain open. Only cfg(test) fixtures can currently construct
+the parent directory and save admission. The module's explicit dead-code allowance
+must be removed when the real wiring is complete. HANDOVER records the broader gates.
 
 This implements the "Independently durable outbox" section of
 [CHAT-V2-ORDINARY-MEMBER-PATH.md](CHAT-V2-ORDINARY-MEMBER-PATH.md). It is independent of
@@ -126,6 +125,24 @@ owns the exclusive owner, the presealed bytes, their payment and the lease; `run
 cancelled and releases nothing until all IO and cleanup have finished. Recovery of an
 already-admitted WAL is not a fresh signing or publication admission.
 
+### What a caller may do with each save outcome
+
+Refusal values are plain enums and prove nothing by themselves, so this is a caller
+contract that the integration code must follow, not something the outbox can enforce:
+
+| Outcome | Was anything stored? | Caller action |
+|---|---|---|
+| `Saved(receipt)` | yes, this original | done; keep the receipt, never sign this token again |
+| `AlreadySaved(receipt)` | yes, possibly an EARLIER original | treat as saved with that receipt; if its ActionId differs from the in-hand original, drop the in-hand copy and never publish it |
+| `TokenConflict`, `Foreign`, `IndexExhausted` | no | permanent for this request; it may be abandoned |
+| `DuplicateAction` | already retained under ANOTHER token; it may already have been submitted or be Held | reconcile its existing receipt/debt; report the duplicate-token invariant breach, never present this as a fresh unsaved action |
+| `Busy`, `Stale`, `NeedsRecovery`, `Incomplete`, `Payment`, or a `Failed` read error from `prepare_append` | no | keep the original; retry later (recover first when asked) |
+| `Pressure(..)` | no | keep the original and retry after debt drains; dropping it is a product choice the UI must report as "not saved" |
+| `run()` → `Uncertain` | unknown | `recover`, then exact `lookup`: `Hit` is saved, `Absent` may be re-saved with the SAME returned original or abandoned; never re-sign |
+
+`lookup` refuses with `NeedsRecovery` until a pending WAL is resolved, so an `Absent` answer
+always comes from a recovered, selected head.
+
 ## Recovery
 
 | Found | Action |
@@ -239,9 +256,13 @@ settlement, stale and foreign batches, and audit after debt clears.
 
 ## Remaining integration gaps
 
-- The production `MemberSignedOriginal` constructor from Draft + V2 ordinary signing Plan +
-  observation + cached raw64. The historical Admission getter is now implemented
-  and tested in Core; it grants no production source/save authority.
+- Production orchestration connecting `MemberSignedOriginal::from_completed_plan`
+  to the real save admission. The constructor and historical Admission getter are
+  implemented and tested; neither grants source, save or publication authority.
+- Request persistence above the host: lookup recovers a save only from the SAME token,
+  channel, body and exact canonical parent list. Parents are the request's explicit list
+  (never recomputed from tips), so the request composer must persist the exact parent list it
+  sent; a retry after restart with different parents is a conflict by design, not a hit.
 - The production `MemberOutboxSaveAdmission` issuer: the real member-source generation and
   native/UI-session guard at the final edge.
   Its current facts-plus-vault-lease representation does not own native lock

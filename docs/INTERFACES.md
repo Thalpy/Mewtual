@@ -18,7 +18,7 @@ new-only seed/marker outputs. Warm promotion owns no replacement-stage cleanup;
 only a cold independently captured exact duplicate has that role. Actual older-
 binary acceptance is the separate predecessor gate, not a modern-reader unit result.
 
-## Ordinary-member signer (9 November; authored, unrun)
+## Ordinary-member signer (11 November; focused checks passed, inactive)
 
 Store-private and inactive. `PreparedV2TextHost::retry_sign_member_request` authors one
 `V2MemberSignRequest { token, channel, body, parents, dependencies }` as the founder acting

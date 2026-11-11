@@ -1,11 +1,11 @@
 # Ordinary member text without the founder online
 
-Design checkpoint, 7 November. This is the next integration boundary, not an enabled
-feature or a completed implementation. The general Core verifier's ten focused tests
-pass; member source/signing, independently durable outbox and native routing remain open.
+Integration checkpoint, 11 November. The founder-as-ordinary-member signing vertical
+and independent outbox storage engine compile and pass focused tests. Production save,
+joined-member sources and native routing remain open; Chat V2 stays disabled.
 
-Update, 9 November: the signing boundary below is authored (unrun) for the founder acting
-as an ordinary member, plus the Sync seams for a joined member's `ChannelSync`. See
+The signing boundary below is tested for the founder acting as an ordinary member,
+plus the Sync seams for a joined member's `ChannelSync`. See
 [CHAT-V2-ORDINARY-MEMBER-SIGNER](CHAT-V2-ORDINARY-MEMBER-SIGNER.md). Nonfounder App
 orchestration still waits for the joined-member source.
 
