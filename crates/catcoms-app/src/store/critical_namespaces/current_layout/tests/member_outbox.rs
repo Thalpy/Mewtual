@@ -244,6 +244,112 @@ fn interrupted_member_declarations_finish_from_a_complete_seed_or_stay_preserved
     }
 }
 
+/// Fixture-only complete inventory: include directory names as well as file contents, so
+/// refusing recovery cannot hide a newly created stage or a changed nested sentinel.
+fn recursive_fixture_files(path: &Path) -> BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+    fn visit(
+        base: &Path,
+        directory: &Path,
+        entries: &mut BTreeMap<std::path::PathBuf, Option<Vec<u8>>>,
+    ) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path.strip_prefix(base).unwrap().to_path_buf();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                entries.insert(relative, None);
+                visit(base, &path, entries);
+            } else {
+                assert!(kind.is_file(), "fixture must contain only regular files");
+                entries.insert(relative, Some(fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut entries = BTreeMap::new();
+    visit(path, path, &mut entries);
+    entries
+}
+
+#[test]
+fn cold_complete_member_seed_with_nonempty_parent_refuses_before_creating_a_stage() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x5540);
+    settled_three(path, &shared, &mut rng);
+    let original = fs::read(path.join(Slot::Current.name())).unwrap();
+    let mut owner =
+        PreparedV2CurrentLayoutStore::open(path, SECRET, &mut rng, member_policy(&shared)).unwrap();
+    // This cut leaves a genuine complete authenticated seed and marker, with the
+    // original catalog still selected and the legacy refusal fence still empty.
+    fault(&owner, 245);
+    assert!(owner.retry(&mut rng).is_err());
+    let key = private(&owner).keys.db_key().unwrap();
+    let domain = private(&owner).chat_vault_domain().unwrap();
+    let seed = fs::read(path.join(MEMBER_OUTBOX_SEED)).unwrap();
+    let plain = member_codec::open_seed(&key, &seed).unwrap();
+    let saved = member_codec::parse_seed(&key, &domain, &plain).unwrap();
+    assert_eq!(saved.original, original.as_slice());
+    assert_eq!(fs::read(path.join(Slot::Current.name())).unwrap(), original);
+    let marker = fs::read(path.join(ARCHIVE_BOOTSTRAP_ROOT).join(MEMBER_OUTBOX_MARKER)).unwrap();
+    assert_eq!(saved.marker, marker.as_slice());
+    drop(owner);
+
+    assert!(fs::read(path.join(Slot::Stage.name())).unwrap().is_empty());
+    fs::remove_file(path.join(Slot::Stage.name())).unwrap();
+    let parent = path.join(ARCHIVE_BOOTSTRAP_ROOT).join(MEMBER_OUTBOX_PARENT);
+    fs::create_dir(&parent).unwrap();
+    fs::write(parent.join("sentinel.bin"), b"preserve this existing child").unwrap();
+    let before = recursive_fixture_files(path);
+
+    // A complete seed cannot justify replay over an already used parent. In particular,
+    // refuse before recreating the missing fixed stage, not only at the later write edge.
+    let cold =
+        PreparedV2CurrentLayoutStore::open(path, SECRET, &mut NeverRng, member_policy(&shared));
+    assert!(cold.is_err());
+    drop(cold);
+    assert_eq!(recursive_fixture_files(path), before);
+    assert!(!path.join(Slot::Stage.name()).exists());
+}
+
+#[test]
+fn settled_member_layout_without_a_seed_remounts_a_nonempty_parent_unchanged() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x5541);
+    settled_three(path, &shared, &mut rng);
+    let mut owner =
+        PreparedV2CurrentLayoutStore::open(path, SECRET, &mut rng, member_policy(&shared)).unwrap();
+    owner.retry(&mut rng).unwrap();
+    let (parent, _) = private(&owner).member_outbox_parent_data().unwrap();
+    drop(owner.into_current_layout_store().unwrap());
+    assert!(!path.join(MEMBER_OUTBOX_SEED).exists());
+    assert!(!path.join(Slot::Stage.name()).exists());
+
+    // Sentinel contents test declaration/mount preservation only; they are not a fabricated
+    // authenticated outbox, request receipt or member-save authority.
+    let child = parent.join("retained-fixture-child");
+    fs::create_dir(&child).unwrap();
+    fs::write(
+        child.join("sentinel.bin"),
+        b"keep retained context contents",
+    )
+    .unwrap();
+    let before = recursive_fixture_files(path);
+
+    let mut cold =
+        PreparedV2CurrentLayoutStore::open(path, SECRET, &mut NeverRng, member_policy(&shared))
+            .unwrap();
+    cold.retry(&mut NeverRng).unwrap();
+    private(&cold)
+        .validate_mounted_member_outbox_layout()
+        .unwrap();
+    drop(cold.into_current_layout_store().unwrap());
+    assert_eq!(recursive_fixture_files(path), before);
+}
+
 #[test]
 fn an_id2_vault_reaches_three_then_five_in_one_member_configured_retry() {
     let directory = tempfile::tempdir().unwrap();

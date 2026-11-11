@@ -290,6 +290,10 @@ settlement, stale and foreign batches, and audit after debt clears.
 
 ## Remaining integration gaps
 
+The primary's approved A/B/F implementation boundary is recorded in
+[CHAT-V2-MEMBER-SAVE-HANDOFF](CHAT-V2-MEMBER-SAVE-HANDOFF.md). It resolves the design
+requests below; it does not supply the missing save/native code or acceptance.
+
 - Production orchestration connecting `MemberSignedOriginal::from_completed_plan`
   to the real save admission. The constructor and historical Admission getter are
   implemented and tested; neither grants source, save or publication authority.

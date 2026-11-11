@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## Primary namespace5 review and save handoff (11 November; CI red, updated tests pending)
+
+The namespace checkpoint is published in draft PR #86 against the inactive Chat V2
+integration branch. Static actual-diff review through `ab5852a1` found no confirmed
+BLOCKER/HIGH/MEDIUM. The remaining LOW coverage gap now has two source regressions:
+complete-seed recovery with a populated parent refuses before recreating a stage,
+and a settled seed-free populated parent remounts unchanged. Both compare recursive
+names and file contents. There are now 24 new namespace cases (22 from B plus two
+from the primary); none has executed successfully for this checkpoint yet.
+
+Standalone rustfmt passes on the added tests. Local Cargo remains paused by user
+request. CI for `ab5852a1` is red: the Linux strict-Clippy job reports 556 App library
+errors and 497 App test-library errors, including unused integration and API-size
+findings. This stops its test steps; source inspection is not compile/test clearance.
+The supply-chain job also fails on the locked `hickory-proto 0.25.2` advisories
+RUSTSEC-2026-0487/0489/0490/0491 and `rustix 1.1.4` RUSTSEC-2026-0486. Bans, licences
+and sources pass that root audit. No ignore or dependency change is made here.
+
+The primary has resolved the A/B/F design requests in
+[the member-save handoff](communication-recovery/CHAT-V2-MEMBER-SAVE-HANDOFF.md).
+B may implement the narrow A-side hooks without waiting for another A session.
+Use the existing exact retained-pin identity before lookup/lane creation, serialize
+source-end admission against close, reconcile saved hits instead of abandoning them,
+and retain known originals across host replacement. The two-phase native contract
+requires real checked UI/row custody and forbids reversed UI/host lock order.
+These are implementation decisions, not implemented save/native producers.
+
 ## Member outbox namespace5 (11 November; source checkpoint, NOT compiled)
 
 Branch `chat-v2-member-outbox-production` (from `ce402364`) declares the member outbox's
@@ -7,8 +34,8 @@ parent as critical namespace5/version1, independent of governance4, in two commi
 `c87f8f84` (catalog DATA: shared sorted-insert declarations, the ID5 codec, ID5 in the
 JOIN grammar, successor and every JOIN re-encoder; governance4 moved onto sorted insert)
 and `94f5290d` (physical declaration, mount, gate ordering and older-reader fences).
-Nothing has been compiled or run; the store raw-fs and ambient-dependency gates pass.
-Twenty-two new focused tests await the primary's queue. An independent read-only
+No successful Cargo compile/test result is recorded; the store raw-fs and ambient-dependency gates pass.
+Twenty-two original focused tests await CI. An independent read-only
 actual-diff review found one compile blocker (a cross-module visibility error) and one
 `-D warnings` dead-code failure; both are fixed in the follow-up commit with the review's
 hardening (empty-parent adoption only, independent member pool, fault cut 255, summary
@@ -16,8 +43,8 @@ ordering) and its requested regressions (both wrappers' cut matrices, pre-namesp
 emulation at every cut, ID2 to 3 to 5 in one retry, frozen governance bytes). Still not
 covered: an interrupted ordinary JOIN stage present at open on an ID5 vault. The member save path itself
 (Store-scoped slot table, production save admission, native job handoff) is not written:
-it waits on the member-source pin identity, source end and canonical parents from Agent A
-and the handoff agreement with Agent F. Unsupported today: member saves on governance4
+its A-side hooks and native handoff now have the primary's contract above, while F's
+actual native producer remains absent. Unsupported today: member saves on governance4
 vaults (that wrapper yields no Store) and first-torn member-seed recovery.
 [Format](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
@@ -37,10 +64,9 @@ The unchanged frontend passes all 3,434 tests, static checking with zero errors/
 warnings and its production build. Ambient-dependency and store raw-filesystem
 gates pass. Independent actual-diff review found no BLOCKER/HIGH/MEDIUM; its LOW
 comment overclaim about full-Draft binding was corrected and re-reviewed.
-The full root/native suites, separate native check and strict lint/audit gates are
-running serially; their new results are not yet acceptance evidence. The named
-10,000-operation test remains deferred until the end. The previous 9 November
-results below describe the earlier checkpoint, not this new source.
+The local broad runner was subsequently stopped at the user's request to pause and
+use CI. Its unfinished root run is not a pass. The previous 9 November results below
+describe the earlier checkpoint, not this new source.
 
 - MLS: narrow retained-device signer with an exact full-key check and payload bound.
 - Core: `V2OrdinarySigningGuard::signer_data` (DATA getter).
@@ -80,8 +106,10 @@ guards. All 21 succession cases pass in 127.53 seconds on the default stack.
 The full native suite passes 1,048 tests and the separate native compile check
 passes. The unchanged frontend passes all 3,434 unit tests, static checking,
 production build, default browser flows and the admin-history browser scenario.
-Current formatting, ambient-dependency and raw-filesystem gates pass; the recorded
-dependency audit remains applicable to the unchanged locked dependencies.
+Formatting, ambient-dependency and raw-filesystem gates passed at that checkpoint.
+The dependency audit passed on 9 November against the advisory data then available;
+the 11 November CI advisory failures above supersede that result despite the
+unchanged locked dependencies.
 
 Strict root Clippy still fails with 534 App library errors: unfinished unused
 integration plus remaining style/API findings. CI/sign-off is not green and no
