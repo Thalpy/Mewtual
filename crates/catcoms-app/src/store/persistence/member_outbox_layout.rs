@@ -10,7 +10,8 @@
 //! Fault cuts (cfg(test), `critical_namespace_fault`): 240 after the empty stage fence,
 //! 241 empty first seed, 242 torn seed, 243 after the seed, 244 torn marker, 245 after the
 //! marker, 246 after the parent directory, 247 torn candidate stage, 248 after the candidate
-//! stage, 249 after promotion, 250 after seed removal, 251 after the final barrier.
+//! stage, 249 after promotion, 250 after seed removal, 255 after the final barrier (251-254
+//! belong to the group-directory family on the same fault atomic).
 use super::*;
 use crate::store::critical_namespaces::{
     member_outbox_layout::{
@@ -196,8 +197,19 @@ fn ensure_parent_directory(
         *slot = Some(capture_directory_at(&path)?);
     }
     validate_directory_at(&path, slot.as_ref().ok_or_else(denied)?)?;
+    // Only declaration writes call this, and the seed exists throughout them. The mount is
+    // installed only after the seed is removed, so no outbox namespace can exist yet: a
+    // non-empty directory (for example one restored from elsewhere) is never adopted.
+    require_empty_directory(&path)?;
     sync_parent_of_marker(root)?;
     validate_directory_at(&path, slot.as_ref().ok_or_else(denied)?)
+}
+fn require_empty_directory(path: &Path) -> Result<(), AppError> {
+    let mut entries = fs::read_dir(path).map_err(io)?;
+    if entries.next().is_some() {
+        return Err(denied());
+    }
+    Ok(())
 }
 fn sync_parent_of_marker(
     root: &critical_namespaces::archive_bootstrap::MountedRoot,
@@ -460,29 +472,6 @@ impl ServerStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             _ => Ok(true),
         }
-    }
-    /// Whether the authenticated current catalog does NOT name namespace5. Used only when no
-    /// member artifact exists. A missing catalog or any decode failure is an error, never
-    /// "undeclared".
-    pub(in crate::store) fn member_outbox_undeclared_current(
-        &self,
-        fee: &CatalogReadReservation,
-    ) -> Result<bool, AppError> {
-        fee.validate(
-            self.member_outbox_declaration_pool()?,
-            member::codec::DECLARATION_FEE,
-        )?;
-        let (_file, raw) = read(
-            &fixed(self, false, critical_namespaces::Slot::Current.name())?,
-            member::codec::MAX_CATALOG_FRAME,
-        )?
-        .ok_or_else(denied)?;
-        let key = Zeroizing::new(self.keys.db_key()?);
-        let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
-        Ok(self
-            .parse_configured_join_catalog(&plain)?
-            .member_outbox
-            .is_none())
     }
     pub(in crate::store) fn read_member_outbox_inventory(
         &self,
@@ -747,7 +736,7 @@ impl ServerStore {
                 .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
         }
         sync_directory(&self.dir).map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
-        self.member_outbox_fault(251)
+        self.member_outbox_fault(255)
     }
 
     /// Capture the SAME marker object the declaration wrote (or the inspector probed) and the
@@ -874,7 +863,10 @@ impl ServerStore {
     }
 
     /// The held member parent directory's fixed path and OS identity, re-proven under the
-    /// mount. The only production source of a `MemberOutboxParentDirectory`.
+    /// mount. It is intended to be the only production input from which a
+    /// `MemberOutboxParentDirectory` is built; that constructor and its save-path caller are
+    /// the next increment (pending the member-source hooks), hence the scoped allowance.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::store) fn member_outbox_parent_data(
         &self,
     ) -> Result<(PathBuf, SessionId), AppError> {

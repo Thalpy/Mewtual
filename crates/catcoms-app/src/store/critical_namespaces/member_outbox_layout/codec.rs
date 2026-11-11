@@ -19,7 +19,9 @@ pub(in crate::store) const MAX_SEED_FRAME: usize = MAX_SEED_PLAIN + 40;
 /// Independent logical class for the whole declaration phase, including the complete
 /// two-frame seed raw/unframe/plain/copy/seal overlap. Wrapper and mounted-marker metadata are
 /// separately funded. Paid from the archive/JOIN pool (it is catalog work), never from the
-/// member pool, and only after the ID3 declaration debt has drained.
+/// member pool, and serially with every other declaration phase: a warm wrapper drains its
+/// ID3/ID4 declaration first, and the cold gate drops this fee before the older inspectors
+/// reserve theirs.
 pub(in crate::store) const DECLARATION_FEE: usize = 12 * MAX_SEED_FRAME + 512 * 1024;
 /// Persistent fixed-file capacity this namespace adds: catalog current + stage, the
 /// two-catalog seed and the marker. The member namespaces themselves are bounded by the

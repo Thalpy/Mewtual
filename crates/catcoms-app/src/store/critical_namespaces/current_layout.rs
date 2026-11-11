@@ -171,6 +171,7 @@ impl V2CurrentLayoutPolicy {
         member_outbox: super::member_outbox_layout::V2MemberOutboxPolicy,
     ) -> Result<Self, AppError> {
         member_outbox.require_capacity()?;
+        member_outbox.require_independent_of(&self.archive.pending.pool)?;
         self.member_outbox = Some(member_outbox);
         self.require_persistent_capacity()?;
         Ok(self)

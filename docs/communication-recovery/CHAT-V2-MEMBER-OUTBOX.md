@@ -38,8 +38,42 @@ model's cooperative-directory assumption).
 
 ## Namespace and context
 
-One namespace `mo-<64 hex context id>` per member context, under a separately held parent
-directory that the primary provisions (never inside a closed founder/group inventory).
+One namespace `mo-<64 hex context id>` per member context, under the parent directory of
+the declared critical namespace5 (below; never inside a closed founder/group inventory).
+
+### Declared namespace5 (member outbox layout)
+
+Critical catalog namespace5/version1 declares the member-outbox layout. Its descriptor is
+the tag `catcoms/private-chat-v2-member-outbox-layout/v1\0`, u16 version1, then three
+length-framed b32 fields: vault, root and BLAKE3 of
+`catcoms/private-chat-v2-member-outbox-current-descriptor/v1\0 || u64 BE length || exact ID3
+descriptor`. Its fixed objects:
+
+```text
+<vault>/chat-critical-namespaces.member-outbox.seed   transient two-catalog declaration seed
+<vault>/chat-owner-v2/member-outbox-layout.bin        sealed marker: the exact descriptor
+<vault>/chat-owner-v2/member-outbox-v1/               parent of every mo-<context> namespace
+```
+
+- Namespace5 is independent of governance4 and either may be declared first. Every
+  declaration (4 or 5) inserts exactly one entry at its sorted position over the whole
+  original catalog (`catalog_declaration`), keeping every other entry byte for byte, with
+  checked generation + 1 and the whole-plaintext parent digest. For a catalog whose IDs
+  are all below the new one this equals the earlier append-only bytes.
+- Only an opener whose `V2CurrentLayoutPolicy` carries `with_member_outbox(..)` reads ID5
+  or its artifacts. Every other opener refuses them before any cleaner; binaries that
+  predate ID5 are fenced by an owned empty legacy catalog stage during the declaration and
+  by their closed grammar afterwards. Every JOIN transition preserves ID5 exactly.
+- The declaration follows governance4's protocol (empty stage fence, seed, marker, parent
+  directory, candidate stage, rename, seed removal). Cold recovery finishes it from a
+  complete authenticated seed. Without one, orphan markers or directories, a lost marker and
+  any stage that is not a valid ordinary successor are preserved and refused. A torn FIRST
+  seed is preserved and refused: first-torn-seed recovery is not implemented.
+- Declared from the Current3 opener after ID3, or from the governance opener after ID4,
+  serially after that opener's own declaration debt. Declaring 5 never creates or implies 4.
+- `V2MemberOutboxPolicy` supplies an independent pool (sized by
+  `V2MemberOutboxPolicy::required_capacity`), the persistent quotas and the per-Store
+  context bound. The declaration's transient fee stays on the catalog/JOIN pool.
 
 The context ID is a domain-separated hash of vault, layout root, trusted pin, Profile,
 Profile tenure, original group nonce, full device key and group. Transport epoch and the
@@ -270,8 +304,11 @@ settlement, stale and foreign batches, and audit after debt clears.
   source completion ownership into the running job through SavedLocal caching
   and IO/cleanup, including when the IPC receiver disappears. A borrowed guard
   retained only by that receiver is insufficient.
-- Production `MemberOutboxParentDirectory` provisioning inside a declared critical
-  namespace, and registry placement beside the Store's session guard.
+- The declared namespace5 and its mounted parent exist (above). Still open: constructing
+  `MemberOutboxParentDirectory` from that mount, the Store-scoped registry/slot table and
+  the save driver that consumes them (pending the member-source hooks and native handoff).
+- Member saves on a governance4 vault: the governance wrapper yields no Store or host, so
+  only the namespace5 declaration and mount work there today.
 - Pool sizing and the independent pool credits; these invoices are not measured fits.
 - Transport: resealing under the current envelope, persisting sender state before export,
   and calling `record_submitted` only after transport accepts an envelope.

@@ -82,6 +82,12 @@ impl CriticalCatalogReadPool {
         }
     }
 
+    /// Whether two handles share ONE account (clones of the same pool). DATA for a policy's
+    /// own independence check; no credit or authority follows.
+    pub(in crate::store) fn same_account(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub(in crate::store) fn try_reserve(
         &self,
         bytes: usize,

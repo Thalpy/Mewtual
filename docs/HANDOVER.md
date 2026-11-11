@@ -1,5 +1,26 @@
 # Mewtual; Handover
 
+## Member outbox namespace5 (11 November; source checkpoint, NOT compiled)
+
+Branch `chat-v2-member-outbox-production` (from `ce402364`) declares the member outbox's
+parent as critical namespace5/version1, independent of governance4, in two commits:
+`c87f8f84` (catalog DATA: shared sorted-insert declarations, the ID5 codec, ID5 in the
+JOIN grammar, successor and every JOIN re-encoder; governance4 moved onto sorted insert)
+and `94f5290d` (physical declaration, mount, gate ordering and older-reader fences).
+Nothing has been compiled or run; the store raw-fs and ambient-dependency gates pass.
+Twenty-two new focused tests await the primary's queue. An independent read-only
+actual-diff review found one compile blocker (a cross-module visibility error) and one
+`-D warnings` dead-code failure; both are fixed in the follow-up commit with the review's
+hardening (empty-parent adoption only, independent member pool, fault cut 255, summary
+ordering) and its requested regressions (both wrappers' cut matrices, pre-namespace5
+emulation at every cut, ID2 to 3 to 5 in one retry, frozen governance bytes). Still not
+covered: an interrupted ordinary JOIN stage present at open on an ID5 vault. The member save path itself
+(Store-scoped slot table, production save admission, native job handoff) is not written:
+it waits on the member-source pin identity, source end and canonical parents from Agent A
+and the handoff agreement with Agent F. Unsupported today: member saves on governance4
+vaults (that wrapper yields no Store) and first-torn member-seed recovery.
+[Format](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
 ## Ordinary-member signer, founder vertical (11 November; focused checks passed)
 
 Branch `chat-v2-ordinary-member-signing` (from `b24fd196`) adds the production signing

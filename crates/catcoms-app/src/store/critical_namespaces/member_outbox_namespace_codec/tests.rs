@@ -176,6 +176,40 @@ fn either_order_with_governance_ends_at_the_same_two_exact_descriptors() {
     assert!(with_member(&five).governance.is_none());
 }
 
+/// Frozen copy of the pre-namespace5 governance builder's encoding (ce402364): the whole
+/// original envelope re-emitted, then ONE appended (4, 1, descriptor).
+fn frozen_governance_append(original: &[u8], descriptor: &[u8]) -> Vec<u8> {
+    let old = outer::parse(original, &VAULT, outer::MAX_ENVELOPE_PLAIN).unwrap();
+    let mut e = Encoder::new();
+    e.put_str(outer::TAG_V2).unwrap();
+    e.put_bytes(&VAULT).unwrap();
+    e.put_u64(old.generation + 1);
+    e.put_bytes(&old.digest).unwrap();
+    e.put_u32((old.count + 1) as u32);
+    for index in 0..old.count {
+        let entry = old.entry(index).unwrap();
+        e.put_u32(entry.id).put_u32(entry.version);
+        e.put_bytes(entry.payload).unwrap();
+    }
+    e.put_u32(4).put_u32(1);
+    e.put_bytes(descriptor).unwrap();
+    e.finish()
+}
+
+#[test]
+fn governance_declarations_without_five_are_byte_identical_to_the_older_builder() {
+    for join in [None, Some(join_v1(3, true)), Some(join_v1(9, false))] {
+        let old = current3(join, 21);
+        let new = governance_namespace_codec::prepare_declaration_data(&old, &VAULT).unwrap();
+        let descriptor = entries(&new).pop().unwrap();
+        assert_eq!((descriptor.0, descriptor.1), (4, 1));
+        assert_eq!(
+            new.as_slice(),
+            frozen_governance_append(&old, &descriptor.2).as_slice()
+        );
+    }
+}
+
 #[test]
 fn descriptor_binds_vault_root_and_exact_three_with_its_own_domain() {
     let old = current3(None, 2);

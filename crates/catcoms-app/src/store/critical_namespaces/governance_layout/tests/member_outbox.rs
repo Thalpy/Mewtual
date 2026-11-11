@@ -1,7 +1,9 @@
 //! Namespace4 and namespace5 declared in either order on real files, and real JOIN
 //! lifecycle writes preserving both descriptors exactly. Declaring ID5 grants nothing to
 //! governance and needs nothing from it; no Source4, member source or save is exercised.
-use super::super::super::member_outbox_layout::{codec as member_codec, MEMBER_OUTBOX_PARENT};
+use super::super::super::member_outbox_layout::{
+    codec as member_codec, MEMBER_OUTBOX_MARKER, MEMBER_OUTBOX_PARENT, MEMBER_OUTBOX_SEED,
+};
 use super::super::super::{catalog_envelope as outer, V2MemberOutboxPolicy};
 use super::*;
 
@@ -46,6 +48,163 @@ fn entry(entries: &[(u32, u32, Vec<u8>)], id: u32) -> Vec<u8> {
 fn ids(entries: &[(u32, u32, Vec<u8>)]) -> Vec<u32> {
     entries.iter().map(|e| e.0).collect()
 }
+type Snapshot = (
+    std::collections::BTreeMap<&'static str, Option<Vec<u8>>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    bool,
+);
+/// The governance fixture's objects plus every namespace5 artifact.
+fn all_files(path: &Path) -> Snapshot {
+    let root = path.join(ARCHIVE_BOOTSTRAP_ROOT);
+    (
+        files(path),
+        fs::read(path.join(MEMBER_OUTBOX_SEED)).ok(),
+        fs::read(root.join(MEMBER_OUTBOX_MARKER)).ok(),
+        root.join(MEMBER_OUTBOX_PARENT).is_dir(),
+    )
+}
+
+/// A namespace5 declaration interrupted through the governance+member wrapper on a vault
+/// that already holds 4: the governance gate must settle the member seed FIRST (its stage
+/// owns the catalog slot), then let governance and the Current3 gate re-inspect.
+#[test]
+fn member_cuts_through_the_governance_wrapper_settle_before_governance_inspects() {
+    let shared = pool();
+    for (cut, finishes) in [
+        (240, false),
+        (241, false),
+        (242, false),
+        (243, true),
+        (245, true),
+        (246, true),
+        (247, true),
+        (248, true),
+        (249, true),
+        (250, true),
+        (255, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5560 + u64::from(cut));
+        settled_three(path, &shared, &mut rng);
+        let mut four = open(path, &shared, &mut rng);
+        four.retry(&mut rng).unwrap();
+        let key = private(&four).keys.db_key().unwrap();
+        let domain = private(&four).chat_vault_domain().unwrap();
+        drop(four.into_governance_layout_store().unwrap());
+        let after_four = catalog(&key, &domain, path);
+
+        let mut owner = PreparedV2GovernanceLayoutStore::open(
+            path,
+            SECRET,
+            &mut rng,
+            member_governance(&shared),
+        )
+        .unwrap();
+        fault(&owner, cut);
+        assert!(owner.retry(&mut rng).is_err(), "cut {cut}");
+        drop(owner);
+        let snapshot = all_files(path);
+        let reopened = PreparedV2GovernanceLayoutStore::open(
+            path,
+            SECRET,
+            &mut NeverRng,
+            member_governance(&shared),
+        );
+        if finishes {
+            let mut cold = reopened.unwrap_or_else(|error| panic!("cut {cut}: {error:?}"));
+            cold.retry(&mut NeverRng).unwrap();
+            private(&cold)
+                .validate_mounted_member_outbox_layout()
+                .unwrap();
+            private(&cold).validate_mounted_governance_layout().unwrap();
+            drop(cold.into_governance_layout_store().unwrap());
+            let both = catalog(&key, &domain, path);
+            assert_eq!(&ids(&both)[ids(&both).len() - 3..], &[3, 4, 5], "cut {cut}");
+            assert_eq!(entry(&both, 4), entry(&after_four, 4), "cut {cut}");
+            assert!(
+                fs::read(path.join(MEMBER_OUTBOX_SEED)).is_err(),
+                "cut {cut}"
+            );
+        } else {
+            assert!(reopened.is_err(), "cut {cut}");
+            assert_eq!(all_files(path), snapshot, "cut {cut}");
+        }
+    }
+}
+
+/// Governance's own interrupted declaration over a vault that already holds 5: recovery
+/// inserts 4 before 5 and keeps 5 byte for byte. Cuts 229-231 are governance's own
+/// first-torn-seed states, preserved and refused (their recovery is not this module's).
+#[test]
+fn governance_cuts_over_an_existing_five_recover_and_keep_five_exactly() {
+    let shared = pool();
+    for (cut, finishes) in [
+        (229, false),
+        (230, false),
+        (231, false),
+        (232, true),
+        (233, true),
+        (234, true),
+        (235, true),
+        (236, true),
+        (237, true),
+        (238, true),
+        (239, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5580 + u64::from(cut));
+        settled_three(path, &shared, &mut rng);
+        let mut five = current_layout::PreparedV2CurrentLayoutStore::open(
+            path,
+            SECRET,
+            &mut rng,
+            with_member(current_policy(&shared)),
+        )
+        .unwrap();
+        five.retry(&mut rng).unwrap();
+        let five = five.into_current_layout_store().unwrap();
+        let key = five.checked_store().unwrap().keys.db_key().unwrap();
+        let domain = five.checked_store().unwrap().chat_vault_domain().unwrap();
+        drop(five);
+        let after_five = catalog(&key, &domain, path);
+
+        let mut owner = PreparedV2GovernanceLayoutStore::open(
+            path,
+            SECRET,
+            &mut rng,
+            member_governance(&shared),
+        )
+        .unwrap();
+        fault(&owner, cut);
+        assert!(owner.retry(&mut rng).is_err(), "cut {cut}");
+        drop(owner);
+        let snapshot = all_files(path);
+        let reopened = PreparedV2GovernanceLayoutStore::open(
+            path,
+            SECRET,
+            &mut NeverRng,
+            member_governance(&shared),
+        );
+        if finishes {
+            let mut cold = reopened.unwrap_or_else(|error| panic!("cut {cut}: {error:?}"));
+            cold.retry(&mut NeverRng).unwrap();
+            private(&cold).validate_mounted_governance_layout().unwrap();
+            private(&cold)
+                .validate_mounted_member_outbox_layout()
+                .unwrap();
+            drop(cold.into_governance_layout_store().unwrap());
+            let both = catalog(&key, &domain, path);
+            assert_eq!(&ids(&both)[ids(&both).len() - 3..], &[3, 4, 5], "cut {cut}");
+            assert_eq!(entry(&both, 5), entry(&after_five, 5), "cut {cut}");
+        } else {
+            assert!(reopened.is_err(), "cut {cut}");
+            assert_eq!(all_files(path), snapshot, "cut {cut}");
+        }
+    }
+}
 
 #[test]
 fn declare_five_close_reopen_then_declare_four_inserts_four_before_five() {
@@ -74,12 +233,12 @@ fn declare_five_close_reopen_then_declare_four_inserts_four_before_five() {
     assert_eq!(&ids(&after_five)[ids(&after_five).len() - 2..], &[3, 5]);
 
     // A governance opener WITHOUT the member handler refuses the ID5 vault before cleanup.
-    let snapshot = files(path);
+    let snapshot = all_files(path);
     assert!(
         PreparedV2GovernanceLayoutStore::open(path, SECRET, &mut NeverRng, policy(&shared))
             .is_err()
     );
-    assert_eq!(files(path), snapshot);
+    assert_eq!(all_files(path), snapshot);
 
     // With both handlers: 4 is inserted BEFORE the existing 5, which is kept byte for byte.
     let mut owner =
@@ -100,7 +259,7 @@ fn declare_five_close_reopen_then_declare_four_inserts_four_before_five() {
 
     // The Current3 opener (even with the member handler) cannot read governance4, and the
     // governance opener without the member handler cannot read namespace5.
-    let snapshot = files(path);
+    let snapshot = all_files(path);
     assert!(current_layout::PreparedV2CurrentLayoutStore::open(
         path,
         SECRET,
@@ -112,7 +271,7 @@ fn declare_five_close_reopen_then_declare_four_inserts_four_before_five() {
         PreparedV2GovernanceLayoutStore::open(path, SECRET, &mut NeverRng, policy(&shared))
             .is_err()
     );
-    assert_eq!(files(path), snapshot);
+    assert_eq!(all_files(path), snapshot);
     let mut cold = PreparedV2GovernanceLayoutStore::open(
         path,
         SECRET,
@@ -122,7 +281,7 @@ fn declare_five_close_reopen_then_declare_four_inserts_four_before_five() {
     .unwrap();
     cold.retry(&mut NeverRng).unwrap();
     drop(cold.into_governance_layout_store().unwrap());
-    assert_eq!(files(path), snapshot);
+    assert_eq!(all_files(path), snapshot);
 }
 
 #[test]

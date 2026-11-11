@@ -17,6 +17,15 @@ receipt. Append reserves bounded checkpoint quota before admission and never evi
 external ENOSPC, lowered policy or finite trie exhaustion can still stop progress.
 Production source/UI admission and sender-state persistence remain required.
 
+Its parent is the declared critical namespace5 (not yet compiled). Only an opener
+configured with the member-outbox handler reads ID5 or its seed, marker and parent
+directory; every other opener refuses them before any cleaner, and binaries that predate
+ID5 are fenced by the same empty legacy catalog stage governance4 uses, then by their
+closed grammar. This is fail-closed refusal, not protection against a local process that
+rewrites the private directory. A torn first declaration seed stays preserved and refused,
+which can leave a vault unopenable until first-torn-seed recovery exists. Declaring ID5
+grants no governance, member-source or save authority.
+
 ## Ordinary-member signer (11 November; focused checks passed, inactive)
 
 The founder acting as an ordinary member signs with the SAME retained device of its whole

@@ -33,6 +33,18 @@ both `UnboundV2GenesisNode` and `ChannelSync`; MLS exposes
 `MlsDevice::sign_retained_ed25519_bounded`. No wire or persistence format changes.
 [Contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-SIGNER.md).
 
+## Critical namespace5: member outbox layout (11 November; not yet compiled)
+
+Namespace5/version1 declares the ordinary-member outbox layout, independently of
+governance4. Both declarations now insert one entry at its sorted position, so either
+order works ([.., 3, 4, 5] in both cases) and existing ID4 declaration bytes are
+unchanged. `V2MemberOutboxPolicy::new(pool, max_pending, max_live_bytes,
+max_live_objects, max_contexts, persistent_capacity)` and
+`V2CurrentLayoutPolicy::with_member_outbox(policy)` install the only handler that reads
+ID5; every other opener refuses it and its fixed artifacts before cleanup. JOIN
+re-encoders preserve ID5 exactly. The mount grants no member source, save or governance
+authority. [Format and recovery](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
 ## Ordinary member outbox (8 November; storage-only)
 
 `store::persistence::v2_member_outbox` is store-private and inactive. Its exclusive

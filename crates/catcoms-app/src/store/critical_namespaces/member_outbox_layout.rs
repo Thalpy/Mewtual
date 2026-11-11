@@ -45,10 +45,33 @@ pub(in crate::store) const MEMBER_OUTBOX_MARKER: &str = "member-outbox-layout.bi
 pub(in crate::store) const MEMBER_OUTBOX_PARENT: &str = "member-outbox-v1";
 pub(in crate::store) const MAX_BASE_PATH: usize = current_layout::MAX_OPEN_BASE_PATH;
 
+#[cfg(test)]
+thread_local! {
+    static EMULATE_PRE_NAMESPACE5: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Regression-only emulation of a binary that predates namespace5: such a binary does not
+/// know the member fixed names, so the name fence and governance's member-seed prior-debt
+/// check are skipped. Grammar and every other gate are unchanged. Always off in production.
+#[cfg(test)]
+pub(in crate::store) fn emulate_pre_namespace5_for_test(on: bool) {
+    EMULATE_PRE_NAMESPACE5.with(|cell| cell.set(on));
+}
+#[cfg(test)]
+pub(in crate::store) fn pre_namespace5_emulated() -> bool {
+    EMULATE_PRE_NAMESPACE5.with(std::cell::Cell::get)
+}
+#[cfg(not(test))]
+pub(in crate::store) const fn pre_namespace5_emulated() -> bool {
+    false
+}
+
 /// Negative fixed-name fence for every opener WITHOUT the concrete member-outbox handler.
 /// Presence of any kind (file, directory, dangling link, unreadable entry) refuses: none can
 /// be discarded, cleaned or interpreted as an empty namespace by an older gate.
 pub(in crate::store) fn refuse_unsupported_storage(dir: &Path) -> Result<(), AppError> {
+    if pre_namespace5_emulated() {
+        return Ok(());
+    }
     let root = dir.join(ARCHIVE_BOOTSTRAP_ROOT);
     for path in [
         dir.join(MEMBER_OUTBOX_SEED),
@@ -147,6 +170,23 @@ impl V2MemberOutboxPolicy {
         per_context_requirement().checked_mul(max_contexts)
     }
 
+    /// Installation check against the opener's catalog/JOIN pool: the member pool must be a
+    /// DIFFERENT account (independent credits), and the catalog pool must be able to fund the
+    /// namespace5 declaration phase and its retained marker at once (both are held together
+    /// while the cold inspector captures the marker).
+    pub(in crate::store) fn require_independent_of(
+        &self,
+        catalog: &CriticalCatalogReadPool,
+    ) -> Result<(), AppError> {
+        let declaration = codec::DECLARATION_FEE
+            .checked_add(MOUNTED_FEE)
+            .ok_or_else(refused)?;
+        if self.pool.same_account(catalog) || catalog.capacity() < declaration {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     /// Repeated at configuration, before declaration and at mount: nonzero quotas, a bounded
     /// context count, a pool whose configured capacity covers every context's simultaneous
     /// invoices, and the declaration's fixed-file capacity.
@@ -225,8 +265,9 @@ pub(in crate::store) struct MemberOutboxMarkerCapture {
     pub(in crate::store) fee: CatalogReadReservation,
 }
 
-/// Retained marker/parent metadata, paid separately from the archive pool for the private
-/// Store lifetime. Named buffers and handles only; not allocator/RSS evidence.
+/// Retained marker/parent metadata: its own debit on the catalog/JOIN pool, separate from the
+/// transient declaration fee, held for the private Store lifetime. Named buffers and handles
+/// only; not allocator/RSS evidence.
 pub(in crate::store) const MOUNTED_FEE: usize =
     2 * std::mem::size_of::<MountedMemberOutboxLayout>()
         + 2 * std::mem::size_of::<MemberOutboxMarkerCapture>()

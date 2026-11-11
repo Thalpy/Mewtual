@@ -160,6 +160,19 @@ impl ServerStore {
                 owned,
                 declaration_fee.as_ref().ok_or_else(refused)?,
             )?;
+            // The durable catalog now IS the candidate: move the in-memory summary first, so a
+            // later capture/install failure cannot leave it stale once the mount exists.
+            {
+                let mut current = self.pending_join_catalog.lock().map_err(|_| refused())?;
+                let current = current.as_mut().ok_or_else(refused)?;
+                if current.pending.is_some()
+                    || (current.current.framed != owned.before.framed
+                        && current.current.framed != owned.next.framed)
+                {
+                    return Err(refused());
+                }
+                current.current = owned.next.clone();
+            }
             // The parent capture moves into the marker capture. If that fails, a retry
             // re-proves the existing directory; it never re-creates it because the catalog
             // is already promoted.
@@ -170,15 +183,6 @@ impl ServerStore {
                 parent,
             )?;
             self.install_member_outbox_layout_marker(marker)?;
-            let mut current = self.pending_join_catalog.lock().map_err(|_| refused())?;
-            let current = current.as_mut().ok_or_else(refused)?;
-            if current.pending.is_some()
-                || (current.current.framed != owned.before.framed
-                    && current.current.framed != owned.next.framed)
-            {
-                return Err(refused());
-            }
-            current.current = owned.next.clone();
         }
         self.validate_mounted_member_outbox_layout()?;
         // Exact selection/marker/parent barriers are complete. The large original/candidate/
@@ -245,6 +249,7 @@ impl ServerStore {
                 }
                 None => None,
             };
+            let mut marker_complete = false;
             let marker_file = match inventory.marker {
                 Some((file, marker)) => {
                     if marker.len() > saved.marker.len()
@@ -253,13 +258,17 @@ impl ServerStore {
                     {
                         return Err(refused());
                     }
+                    marker_complete = marker.as_slice() == saved.marker;
                     Some(stage_of(file)?)
                 }
                 None if promoted => return Err(refused()),
                 None => None,
             };
-            // After the commit point the directory must already exist.
-            if promoted && inventory.parent.is_none() {
+            // The parent is created only after a complete marker, and after the commit point
+            // it must already exist. Any other combination is not this declaration's state.
+            if (promoted && inventory.parent.is_none())
+                || (inventory.parent.is_some() && !marker_complete)
+            {
                 return Err(refused());
             }
             let (stage_file, captured_duplicate_stage) = if promoted {
@@ -351,6 +360,25 @@ impl ServerStore {
                 Ok(Some(captured))
             }
         }
+    }
+
+    /// Whether the authenticated current catalog does NOT name namespace5. Used only when no
+    /// member artifact exists. A missing catalog or any decode failure is an error, never
+    /// "undeclared". Reads through the same fixed-slot reader as the ID3 inspector; the
+    /// member declaration fee is on that same pool and covers its read invoice.
+    fn member_outbox_undeclared_current(
+        &self,
+        fee: &CatalogReadReservation,
+    ) -> Result<bool, AppError> {
+        let (_file, raw) = self
+            .open_pending_join_catalog_slot(Slot::Current, fee)?
+            .ok_or_else(refused)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
+        Ok(self
+            .parse_configured_join_catalog(&plain)?
+            .member_outbox
+            .is_none())
     }
 
     fn mount_settled_member_outbox_parent(

@@ -55,6 +55,46 @@ fn files(path: &Path) -> (BTreeMap<&'static str, Option<Vec<u8>>>, bool) {
     (objects, parent)
 }
 
+/// Resets the emulation even if an assertion inside the scope panics.
+struct PreNamespace5(());
+impl PreNamespace5 {
+    fn on() -> Self {
+        crate::store::critical_namespaces::member_outbox_layout::emulate_pre_namespace5_for_test(
+            true,
+        );
+        Self(())
+    }
+}
+impl Drop for PreNamespace5 {
+    fn drop(&mut self) {
+        crate::store::critical_namespaces::member_outbox_layout::emulate_pre_namespace5_for_test(
+            false,
+        );
+    }
+}
+
+/// The default, Current3 and governance openers of a binary without namespace5 support all
+/// refuse this vault before any cleaner.
+fn refuses_as_pre_namespace5(path: &Path, pool: &CriticalCatalogReadPool, cut: u8) {
+    use crate::store::critical_namespaces::governance_layout::{
+        codec::PERSISTENT_MINIMUM, PreparedV2GovernanceLayoutStore, V2GovernanceLayoutPolicy,
+    };
+    let _emulated = PreNamespace5::on();
+    assert!(
+        ServerStore::open(path, SECRET, &mut NeverRng).is_err(),
+        "cut {cut}"
+    );
+    assert!(
+        PreparedV2CurrentLayoutStore::open(path, SECRET, &mut NeverRng, policy(pool)).is_err(),
+        "cut {cut}"
+    );
+    let governance = V2GovernanceLayoutPolicy::new(policy(pool), PERSISTENT_MINIMUM).unwrap();
+    assert!(
+        PreparedV2GovernanceLayoutStore::open(path, SECRET, &mut NeverRng, governance).is_err(),
+        "cut {cut}"
+    );
+}
+
 fn ids(key: &[u8; 32], domain: &[u8; 32], path: &Path) -> Vec<u32> {
     let raw = fs::read(path.join(Slot::Current.name())).unwrap();
     let plain = unseal(key, &unframe(&raw).unwrap()).unwrap();
@@ -154,7 +194,7 @@ fn interrupted_member_declarations_finish_from_a_complete_seed_or_stay_preserved
         (248, true),
         (249, true),
         (250, true),
-        (251, true),
+        (255, true),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
@@ -174,6 +214,10 @@ fn interrupted_member_declarations_finish_from_a_complete_seed_or_stay_preserved
                 .is_err(),
             "cut {cut}"
         );
+        assert_eq!(files(path), snapshot, "cut {cut}");
+        // So does a binary that predates namespace5 entirely (it does not even know the
+        // member names): it is fenced only by the stage slot and its closed grammar.
+        refuses_as_pre_namespace5(path, &shared, cut);
         assert_eq!(files(path), snapshot, "cut {cut}");
 
         let reopened =
@@ -198,6 +242,56 @@ fn interrupted_member_declarations_finish_from_a_complete_seed_or_stay_preserved
             assert_eq!(files(path), snapshot, "cut {cut}");
         }
     }
+}
+
+#[test]
+fn an_id2_vault_reaches_three_then_five_in_one_member_configured_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x5520);
+    // ID2 only: no ID3, no member artifact. The configured member handler must not refuse
+    // the first Current3 declaration; it declares 5 serially after 3.
+    prepare_two(path, &shared, &mut rng);
+    let mut owner =
+        PreparedV2CurrentLayoutStore::open(path, SECRET, &mut rng, member_policy(&shared)).unwrap();
+    owner.retry(&mut rng).unwrap();
+    let key = private(&owner).keys.db_key().unwrap();
+    let domain = private(&owner).chat_vault_domain().unwrap();
+    private(&owner).validate_mounted_current_layout().unwrap();
+    private(&owner)
+        .validate_mounted_member_outbox_layout()
+        .unwrap();
+    drop(owner.into_current_layout_store().unwrap());
+    let ordered = ids(&key, &domain, path);
+    assert_eq!(&ordered[ordered.len() - 2..], &[3, 5]);
+    assert!(!ordered.contains(&4));
+}
+
+#[test]
+fn member_policy_must_use_an_independent_pool() {
+    let shared = pool();
+    let same = V2MemberOutboxPolicy::new(
+        shared.clone(),
+        256,
+        256 * 1024 * 1024,
+        1 << 20,
+        1,
+        member_codec::PERSISTENT_MINIMUM,
+    )
+    .unwrap();
+    assert!(policy(&shared).with_member_outbox(same).is_err());
+    // A pool too small for every simultaneous per-context invoice refuses at configuration.
+    let small = CriticalCatalogReadPool::new(1024 * 1024).unwrap();
+    assert!(V2MemberOutboxPolicy::new(
+        small,
+        256,
+        256 * 1024 * 1024,
+        1 << 20,
+        1,
+        member_codec::PERSISTENT_MINIMUM
+    )
+    .is_err());
 }
 
 #[test]
