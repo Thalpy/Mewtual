@@ -815,8 +815,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     ///
     /// It must NOT abandon after: `run()` Uncertain (recover, then look up: Hit means
     /// `finish_member_request_saved(receipt.action)`, Absent means restore or abandon);
-    /// DuplicateAction (that ActionId is already stored and WILL be published; report a host
-    /// invariant breach, never "not sent"); AlreadySaved (use finish); Busy, Stale (including
+    /// DuplicateAction (that ActionId is retained under another token, possibly submitted or
+    /// Held; reconcile its existing receipt/debt and report the invariant breach, never a
+    /// fresh unsaved action); AlreadySaved (use finish); Busy, Stale (including
     /// an admit refusal), NeedsRecovery, Incomplete, Payment or a `prepare_append` Failed read
     /// error (nothing stored; keep the original, retry);
     /// Pressure (keep it and retry; dropping it instead discards the user's message and the
