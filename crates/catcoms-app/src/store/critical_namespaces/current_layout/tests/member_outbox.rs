@@ -439,7 +439,7 @@ fn interrupted_member_declarations_finish_from_a_complete_seed_or_abandon_a_firs
 #[test]
 fn an_interrupted_first_torn_disposal_completes_on_the_next_open() {
     use crate::store::critical_namespaces::member_outbox_layout::{
-        arm_member_cold_fault_for_test, member_cold_fault_fired_for_test,
+        arm_member_cold_fault_for_test, take_member_cold_fault_fired_for_test,
     };
     let shared = pool();
     for cold_cut in [226u8, 227, 228] {
@@ -456,7 +456,7 @@ fn an_interrupted_first_torn_disposal_completes_on_the_next_open() {
         assert!(refused.is_err(), "cut {cold_cut}");
         drop(refused);
         assert!(
-            member_cold_fault_fired_for_test(),
+            take_member_cold_fault_fired_for_test(),
             "cut {cold_cut}: dead seam"
         );
         let (objects, _) = files(path);
@@ -472,7 +472,7 @@ fn an_interrupted_first_torn_disposal_completes_on_the_next_open() {
             PreparedV2CurrentLayoutStore::open(path, SECRET, &mut NeverRng, member_policy(&shared))
                 .unwrap_or_else(|error| panic!("cut {cold_cut}: {error:?}"));
         assert!(
-            !member_cold_fault_fired_for_test(),
+            !take_member_cold_fault_fired_for_test(),
             "one-shot seam fired again"
         );
         assert_abandoned(path, &before, cold_cut);
@@ -972,6 +972,11 @@ fn actual_join_lifecycle_on_current3_preserves_five_exactly_without_four() {
     assert_eq!(rows, 0);
     let declared = ids(&key, &domain, path);
     assert_eq!(&declared[declared.len() - 2..], &[3, 5]);
+    // The first saved row adds the JOIN entry itself (ID1, sorted first); every other entry,
+    // and their order, must stay exactly as declared through the whole lifecycle.
+    assert!(!declared.contains(&catalog::JOIN_ID));
+    let mut joined = vec![catalog::JOIN_ID];
+    joined.extend_from_slice(&declared);
 
     let mut prepared = store
         .prepare_journalled_owner_checkpoint_join(
@@ -989,7 +994,7 @@ fn actual_join_lifecycle_on_current3_preserves_five_exactly_without_four() {
         assert_eq!(rows, 1, "{step}");
         assert_eq!(
             ids(&key, &domain, path),
-            declared,
+            joined,
             "{step}: entry set or order"
         );
         store.validate_mounted_member_outbox_layout().unwrap();

@@ -69,9 +69,11 @@ pub(in crate::store) fn arm_member_cold_fault_for_test(point: u8) {
     COLD_FAULT.with(|cell| cell.set(point));
     COLD_FAULT_FIRED.with(|cell| cell.set(false));
 }
+/// Whether the armed cut fired since it was armed or last taken; resets the observation, so a
+/// later call reports only a NEW firing.
 #[cfg(test)]
-pub(in crate::store) fn member_cold_fault_fired_for_test() -> bool {
-    COLD_FAULT_FIRED.with(std::cell::Cell::get)
+pub(in crate::store) fn take_member_cold_fault_fired_for_test() -> bool {
+    COLD_FAULT_FIRED.with(|cell| cell.replace(false))
 }
 /// Regression-only, one-shot: the next post-unlink NotFound proof reports the name as still
 /// present (the Windows delete-pending case a real runner does not reproduce).

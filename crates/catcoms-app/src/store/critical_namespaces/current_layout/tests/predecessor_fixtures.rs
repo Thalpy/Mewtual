@@ -24,7 +24,7 @@ use crate::store::critical_namespaces::governance_layout::{
     V2GovernanceLayoutPolicy, GOVERNANCE_MARKER, GOVERNANCE_SEED,
 };
 use crate::store::critical_namespaces::member_outbox_layout::{
-    arm_member_cold_fault_for_test, member_cold_fault_fired_for_test, MEMBER_OUTBOX_MARKER,
+    arm_member_cold_fault_for_test, take_member_cold_fault_fired_for_test, MEMBER_OUTBOX_MARKER,
     MEMBER_OUTBOX_PARENT, MEMBER_OUTBOX_SEED,
 };
 use std::path::PathBuf;
@@ -206,7 +206,7 @@ fn generate_namespace5_predecessor_fixtures() {
         member_policy(&shared)
     )
     .is_err());
-    assert!(member_cold_fault_fired_for_test());
+    assert!(take_member_cold_fault_fired_for_test());
     assert!(!path.join(Slot::Stage.name()).exists());
     assert!(!fs::read(path.join(MEMBER_OUTBOX_SEED)).unwrap().is_empty());
 

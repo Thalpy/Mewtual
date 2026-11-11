@@ -177,7 +177,7 @@ fn assert_settled_four_and_five(
 #[test]
 fn a_first_torn_disposal_through_the_governance_wrapper_completes_after_each_cold_cut() {
     use crate::store::critical_namespaces::member_outbox_layout::{
-        arm_member_cold_fault_for_test, member_cold_fault_fired_for_test,
+        arm_member_cold_fault_for_test, take_member_cold_fault_fired_for_test,
     };
     let shared = pool();
     for cold_cut in [226u8, 227, 228] {
@@ -195,7 +195,7 @@ fn a_first_torn_disposal_through_the_governance_wrapper_completes_after_each_col
         assert!(refused.is_err(), "cut {cold_cut}");
         drop(refused);
         assert!(
-            member_cold_fault_fired_for_test(),
+            take_member_cold_fault_fired_for_test(),
             "cut {cold_cut}: dead seam"
         );
         assert!(fs::read(path.join(Slot::Stage.name())).is_err());
