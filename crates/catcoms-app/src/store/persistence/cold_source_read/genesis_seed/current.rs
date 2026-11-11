@@ -498,10 +498,13 @@ pub(in crate::store) use operational::owner::{V2TextOwnedCurrent, V2TextOwnerRef
 #[cfg(all(test, windows))]
 use operational::{
     arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
-    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test, V2MemberDependency,
-    V2MemberSignRequest,
+    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test,
 };
-pub use operational::{PreparedV2TextHost, PreparedV2TextRead, V2TextHostPolicy};
+pub use operational::{
+    MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, PreparedV2TextHost,
+    PreparedV2TextRead, V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal,
+    V2MemberSignRequest, V2TextHostPolicy,
+};
 mod cold;
 pub(super) mod settlement;
 pub use cold::{PreparedColdV2GenesisCurrent, UnexposedColdV2GenesisCurrent};

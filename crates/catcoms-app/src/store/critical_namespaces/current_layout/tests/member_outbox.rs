@@ -438,3 +438,87 @@ fn orphan_member_artifacts_without_a_declaration_are_preserved_and_refused() {
     .is_err());
     assert_eq!(files(path), snapshot);
 }
+
+#[test]
+fn the_store_member_outbox_mount_installs_once_from_the_declared_parent_and_bounds_contexts() {
+    use crate::store::persistence::v2_member_outbox::{
+        member_outbox_key, MemberOutboxContextData, MemberOutboxContextId, MemberOutboxContextSpec,
+    };
+    use catcoms_replication::chat::owner_facts::OwnerFactId;
+    use catcoms_replication::chat::owner_header::OwnerTenureId;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x5550);
+    settled_three(path, &shared, &mut rng);
+    let mut owner =
+        PreparedV2CurrentLayoutStore::open(path, SECRET, &mut rng, member_policy(&shared)).unwrap();
+    owner.retry(&mut rng).unwrap();
+    let layout = owner.into_current_layout_store().unwrap();
+    let store = layout.checked_store().unwrap();
+    // Not installed until first use; the install re-proves the declared parent. Later calls
+    // (and the no-IO final-edge accessor) return the SAME table.
+    assert!(store.installed_member_outbox_mount().unwrap().is_none());
+    let mount = store.member_outbox_mount().unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &mount,
+        &store.member_outbox_mount().unwrap()
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &mount,
+        &store.installed_member_outbox_mount().unwrap().unwrap()
+    ));
+    // A real owner opens under the declared parent, in the namespace its context names.
+    let layout_data = mount.capability().current_layout_data();
+    let context = MemberOutboxContextData::from_spec(MemberOutboxContextSpec {
+        vault: layout_data.vault,
+        layout: layout_data.root,
+        pin: [3; 32],
+        profile: OwnerFactId::from_bytes([4; 32]),
+        tenure: OwnerTenureId::from_bytes([5; 32]),
+        group_nonce: [6; 32],
+        device: [7; 32],
+        group: b"member mount regression group",
+    })
+    .unwrap();
+    let id = context.id();
+    let key = member_outbox_key(store).unwrap();
+    let cell = mount.cell(id).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&cell, &mount.cell(id).unwrap()));
+    let outbox = mount.open_owner(store, context, &key, &mut rng).unwrap();
+    assert!(outbox.context_id() == id);
+    let parent = path.join(ARCHIVE_BOOTSTRAP_ROOT).join(MEMBER_OUTBOX_PARENT);
+    let namespaces: Vec<String> = fs::read_dir(&parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(namespaces.len(), 1);
+    assert!(namespaces[0].starts_with("mo-") && namespaces[0].len() == 67);
+    // The configured policy bounds contexts per mount (one here): another context refuses.
+    assert!(mount
+        .cell(MemberOutboxContextId::from_bytes([9; 32]))
+        .is_err());
+    drop(outbox);
+    drop(cell);
+    drop(mount);
+    drop(layout);
+}
+
+#[test]
+fn an_opener_without_the_member_handler_installs_no_member_outbox_mount() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x5551);
+    settled_three(path, &shared, &mut rng);
+    let mut owner = open(path, &shared, &mut rng);
+    owner.retry(&mut rng).unwrap();
+    let layout = owner.into_current_layout_store().unwrap();
+    let store = layout.checked_store().unwrap();
+    assert!(store.member_outbox_mount().is_err());
+    assert!(store.installed_member_outbox_mount().unwrap().is_none());
+    assert!(!path
+        .join(ARCHIVE_BOOTSTRAP_ROOT)
+        .join(MEMBER_OUTBOX_PARENT)
+        .exists());
+}

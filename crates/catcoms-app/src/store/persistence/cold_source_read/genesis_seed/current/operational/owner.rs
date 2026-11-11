@@ -8,6 +8,7 @@
 use crate::store::chat_admission::v2_current::{
     ColdV2CurrentPreparation, ColdV2InitializingPreparation, V2CurrentPreparation,
 };
+use crate::store::critical_namespaces::archive_current_codec::V2GroupPinId;
 use crate::store::critical_namespaces::current_layout::PreparedV2GenesisGroupNamespace;
 use crate::store::critical_namespaces::current_layout::V2CurrentLayoutStore;
 use crate::store::critical_namespaces::refused;
@@ -315,6 +316,25 @@ impl<'owner> V2TextOwnerRef<'owner> {
         writer: &V2WriterObservation,
     ) -> Result<(), AppError> {
         self.original.require_original_negative(store, writer)
+    }
+    /// Historical DATA: the canonical `V2GroupPinId` of the EXACT authenticated original pin
+    /// ciphertext retained by this owner's single real family (warm, cold or repaired). The
+    /// existing typed capture labels the pin with this same identity. It stays computable for
+    /// the whole owner life, after O advances beyond generation 1, so member-outbox receipts
+    /// remain readable. Nothing is reopened, resealed or re-derived from the public Profile, and
+    /// it grants no current OPEN, signing or save right.
+    pub(in crate::store) fn original_pin_id_data(&self) -> Result<V2GroupPinId, AppError> {
+        let pin = match (
+            self.original.warm_head(),
+            self.original.cold_head(),
+            self.original.repaired_head(),
+        ) {
+            (Some(head), None, None) => head.text_pin_data()?.2,
+            (None, Some(head), None) => head.text_pin_data()?.2,
+            (None, None, Some(head)) => head.text_pin_data()?.2,
+            _ => return Err(refused()),
+        };
+        Ok(V2GroupPinId::of(pin))
     }
     /// Recheck that exactly one real original family is present. Scope must not interpret
     /// optional family loans as a caller-selected role or fall through to another family.

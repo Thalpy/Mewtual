@@ -871,10 +871,7 @@ impl ServerStore {
     }
 
     /// The held member parent directory's fixed path and OS identity, re-proven under the
-    /// mount. It is intended to be the only production input from which a
-    /// `MemberOutboxParentDirectory` is built; that constructor and its save-path caller are
-    /// the next increment (pending the member-source hooks), hence the scoped allowance.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// mount. The only production input of `MemberOutboxParentDirectory::from_mount`.
     pub(in crate::store) fn member_outbox_parent_data(
         &self,
     ) -> Result<(PathBuf, SessionId), AppError> {

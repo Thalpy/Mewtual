@@ -11,16 +11,18 @@ use catcoms_sync::owner_v2::{
     UnboundV2GenesisSeed, V2GenesisSeedData, V2GenesisSeedLimits, V2_GENESIS_SEED_METADATA_BYTES,
 };
 pub(in crate::store) use current::settlement::GenesisCurrentOwnerRef;
+pub use current::{
+    MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent,
+    PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
+    PreparedV2GenesisCurrent, PreparedV2TextHost, PreparedV2TextRead,
+    UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
+    V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
+    V2TextHostPolicy,
+};
 pub(in crate::store) use current::{
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
     PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
-};
-pub use current::{
-    PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing,
-    PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, PreparedV2TextHost,
-    PreparedV2TextRead, UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
-    UnexposedV2GenesisCurrent, V2TextHostPolicy,
 };
 pub(in crate::store) use current::{
     PreparedV2TextSourceObserver, V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,

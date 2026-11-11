@@ -549,11 +549,13 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 pub use persistence::RetainedBootstrapSourceData;
 pub use persistence::{
-    GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
-    PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
-    PreparedV2GenesisCurrent, PreparedV2TextHost, PreparedV2TextRead, RetainedBootstrapGenesisSeed,
-    ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
-    UnexposedV2GenesisCurrent, V2TextHostPolicy,
+    GenesisSeedBudget, GenesisSeedRefusal, MemberSaveJob, MemberSaveJobReport,
+    MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing,
+    PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, PreparedV2TextHost,
+    PreparedV2TextRead, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
+    UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
+    V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
+    V2TextHostPolicy,
 };
 mod persistence {
     use super::*;
@@ -585,11 +587,13 @@ mod persistence {
         V2_TEXT_SOURCE_OBSERVER_BYTES,
     };
     pub use cold_source_read::{
-        GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
-        PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
-        PreparedV2GenesisCurrent, PreparedV2TextHost, PreparedV2TextRead,
-        RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent,
-        UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent, V2TextHostPolicy,
+        GenesisSeedBudget, GenesisSeedRefusal, MemberSaveJob, MemberSaveJobReport,
+        MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing,
+        PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, PreparedV2TextHost,
+        PreparedV2TextRead, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
+        UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
+        UnexposedV2GenesisCurrent, V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal,
+        V2MemberSignRequest, V2TextHostPolicy,
     };
     pub(in crate::store) use current_layout::{
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,
@@ -5668,6 +5672,11 @@ pub struct ServerStore {
     member_outbox_layout: std::sync::Mutex<
         Option<critical_namespaces::member_outbox_layout::MountedMemberOutboxLayout>,
     >,
+    // Member-outbox production owners of THIS physical mount (registry, production parent,
+    // per-context custody cells), installed lazily from the namespace5 mount above. Custody and
+    // exclusion only; never a member-source, save or publication permission.
+    member_outbox_mount:
+        std::sync::Mutex<Option<std::sync::Arc<persistence::v2_member_outbox::MemberOutboxMount>>>,
     current_layout:
         std::sync::Mutex<Option<critical_namespaces::current_layout::MountedCurrentLayout>>,
     archive_bootstrap_root: critical_namespaces::archive_bootstrap::SharedRoot,
@@ -5854,6 +5863,7 @@ impl ServerStore {
             governance_layout_policy,
             governance_layout: Default::default(),
             member_outbox_layout: Default::default(),
+            member_outbox_mount: Default::default(),
             current_layout: Default::default(),
             archive_bootstrap_root: Default::default(),
             founder_invocations: Default::default(),

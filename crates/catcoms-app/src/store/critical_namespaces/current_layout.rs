@@ -487,6 +487,16 @@ impl V2CurrentLayoutStore {
         self.store.validate_mounted_current_layout()?;
         Ok(&self.store)
     }
+    /// Cached negatives ONLY, for a final edge that must perform no IO (the member-save
+    /// admission under the native commit guard): the physical chat mount is not revoked. Work
+    /// that may do IO uses [`Self::checked_store`], which re-proves the marker files; the edge's
+    /// own consumers check their cached mount identities separately.
+    pub(in crate::store) fn cached_store(&self) -> Result<&ServerStore, AppError> {
+        if self.store.chat_mount.observer().is_cancelled() {
+            return Err(refused());
+        }
+        Ok(&self.store)
+    }
 }
 
 #[cfg(test)]

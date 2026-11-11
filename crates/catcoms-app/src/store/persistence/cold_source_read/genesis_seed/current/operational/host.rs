@@ -30,6 +30,8 @@ mod create;
 // ORDINARY-member lane (founder-as-member vertical): general verifier + signing plan,
 // never the founder A/I/S/B certification lane. Mutually exclusive with founder Create.
 mod member;
+// Member save: the two-phase production path into the Store's member outbox.
+mod member_save;
 mod projection;
 // Request DATA types travel to the regression tests only until the primary's native
 // dispatcher exists; that dispatcher must re-export them without this gate.
@@ -42,8 +44,14 @@ use create::{PendingCompletedCreate, PendingCreate};
 #[cfg(all(test, windows))]
 pub(in crate::store) use member::{
     arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
-    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test, V2MemberDependency,
-    V2MemberSignRequest,
+    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test,
+};
+// The member-save API the native consumer calls: borrowed request DATA in, advisory outcome
+// DATA and an owned admitted job out. None of these types is authority by itself.
+pub use member::{V2MemberDependency, V2MemberSignRequest};
+pub use member_save::{
+    MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, V2MemberSaveOutcome,
+    V2MemberSaveRefusal,
 };
 
 /// Trusted local immutable-history limits, separate from memory reservations and fixed

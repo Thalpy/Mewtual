@@ -33,8 +33,8 @@ use super::read_pool::CatalogReadReservation;
 use super::*;
 use crate::store::persistence::v2_member_outbox::{
     MemberOutbox, MemberOutboxQuota, MEMBER_OUTBOX_APPEND_FEE, MEMBER_OUTBOX_CHECKPOINT_FEE,
-    MEMBER_OUTBOX_DEBT_FEE, MEMBER_OUTBOX_LOOKUP_FEE, MEMBER_OUTBOX_OWNER_FEE,
-    MEMBER_OUTBOX_RECOVERY_FEE,
+    MEMBER_OUTBOX_DEBT_FEE, MEMBER_OUTBOX_LOOKUP_FEE, MEMBER_OUTBOX_MOUNT_FEE,
+    MEMBER_OUTBOX_OWNER_FEE, MEMBER_OUTBOX_RECOVERY_FEE,
 };
 
 pub(in crate::store) mod codec;
@@ -165,9 +165,12 @@ impl V2MemberOutboxPolicy {
         Ok(policy)
     }
 
-    /// Exact checked logical pool requirement for `max_contexts` contexts.
+    /// Exact checked logical pool requirement for `max_contexts` contexts, plus the Store
+    /// mount's own retained table metadata (`MEMBER_OUTBOX_MOUNT_FEE`).
     pub fn required_capacity(max_contexts: usize) -> Option<usize> {
-        per_context_requirement().checked_mul(max_contexts)
+        per_context_requirement()
+            .checked_mul(max_contexts)?
+            .checked_add(MEMBER_OUTBOX_MOUNT_FEE)
     }
 
     /// Installation check against the opener's catalog/JOIN pool: the member pool must be a
