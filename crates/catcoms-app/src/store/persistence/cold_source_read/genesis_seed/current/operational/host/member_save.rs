@@ -487,16 +487,19 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         let Ok(store) = layout.cached_store() else {
             return Err((native, V2MemberSaveRefusal::Unavailable));
         };
-        let mount = match store.installed_member_outbox_mount() {
-            Ok(Some(mount)) => mount,
-            Ok(None) => return Err((native, V2MemberSaveRefusal::Busy)),
-            Err(_) => return Err((native, V2MemberSaveRefusal::Unavailable)),
-        };
+        // No lane/context conclusively means this host has no phase-1 work. Check that
+        // before the lazy mount lookup: its None also covers contention, and would otherwise
+        // misreport a never-prepared request as Busy solely because no mount was installed.
         let Some(lane) = self.member.as_deref() else {
             return Err((native, V2MemberSaveRefusal::Stale));
         };
         let Some(context) = lane.outbox_context() else {
             return Err((native, V2MemberSaveRefusal::Stale));
+        };
+        let mount = match store.installed_member_outbox_mount() {
+            Ok(Some(mount)) => mount,
+            Ok(None) => return Err((native, V2MemberSaveRefusal::Busy)),
+            Err(_) => return Err((native, V2MemberSaveRefusal::Unavailable)),
         };
         let cell = match mount.existing_cell(context) {
             Ok(Some(cell)) => cell,
@@ -1112,8 +1115,9 @@ impl Drop for V2MemberSaveSourceEnd {
     }
 }
 
-/// Regression observations only (`current/tests/text_group_guard/host/member_save.rs`). They
-/// read DATA through the same derivation phase 1 uses and grant nothing.
+// Regression observations only (`current/tests/text_group_guard/host/member_save.rs`). They
+// read DATA through the same derivation phase 1 uses and grant nothing. This is a macro
+// invocation, so keep these as ordinary comments rather than unattached rustdoc.
 #[cfg(all(test, windows))]
 thread_local! {
     static BEFORE_MEMBER_PRESEAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };

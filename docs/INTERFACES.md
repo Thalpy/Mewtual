@@ -33,7 +33,7 @@ both `UnboundV2GenesisNode` and `ChannelSync`; MLS exposes
 `MlsDevice::sign_retained_ed25519_bounded`. No wire or persistence format changes.
 [Contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-SIGNER.md).
 
-## Critical namespace5: member outbox layout (11 November; not yet compiled)
+## Critical namespace5: member outbox layout (11 November; focused storage tests passed)
 
 Namespace5/version1 declares the ordinary-member outbox layout, independently of
 governance4. Both declarations now insert one entry at its sorted position, so either
@@ -45,9 +45,12 @@ ID5; every other opener refuses it and its fixed artifacts before cleanup. JOIN
 re-encoders preserve ID5 exactly. The mount grants no member source, save or governance
 authority. [Format and recovery](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
-## Member save (11 November; root implemented, not yet executed, no native caller)
+## Member save (11 November; root implemented, initial Windows execution 17/18, no native caller)
 
 Public root API for the native consumer (no Tauri types in root):
+
+The initial CI run found a no-prepared-work refusal mismatch; its correction is
+queued for CI. [Current execution evidence](HANDOVER.md).
 
 - `PreparedV2TextHost::prepare_member_save(layout, V2MemberSignRequest, &session, rng)`
   -> `Result<V2MemberSaveOutcome, V2MemberSaveRefusal>`. Phase 1, on the blocking pool

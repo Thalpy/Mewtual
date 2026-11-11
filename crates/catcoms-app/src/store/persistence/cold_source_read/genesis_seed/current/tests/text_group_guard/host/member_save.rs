@@ -343,15 +343,37 @@ fn a_member_save_reaches_saved_local_and_exact_retries_never_sign_again() {
 fn the_final_edge_refuses_without_presealed_work_and_returns_the_native_custody_whole() {
     let mut f = saving(0x7fb05);
     let live = session();
-    let (admission, released) = native(&live);
-    let (returned, refusal) = f
-        .host
-        .admit_member_save(&f.layout, [0x15; 32], admission)
-        .unwrap_err();
-    assert_eq!(refusal, V2MemberSaveRefusal::Stale);
-    assert!(!released.load(Ordering::SeqCst));
-    drop(returned);
-    assert!(released.load(Ordering::SeqCst));
+    let dispatches = member_sign_dispatches_for_test();
+    let files = f.outbox_files();
+    assert!(f
+        .layout
+        .checked_store()
+        .unwrap()
+        .installed_member_outbox_mount()
+        .unwrap()
+        .is_none());
+    for install_mount in [false, true] {
+        if install_mount {
+            // Installing the Store's lazy metadata alone supplies no prepared request.
+            f.layout
+                .checked_store()
+                .unwrap()
+                .member_outbox_mount()
+                .unwrap();
+        }
+        let (admission, released) = native(&live);
+        let (returned, refusal) = f
+            .host
+            .admit_member_save(&f.layout, [0x15; 32], admission)
+            .unwrap_err();
+        assert_eq!(refusal, V2MemberSaveRefusal::Stale);
+        assert!(!released.load(Ordering::SeqCst));
+        drop(returned);
+        assert!(released.load(Ordering::SeqCst));
+        assert_eq!(member_sign_dispatches_for_test(), dispatches);
+        assert_eq!(f.outbox_files(), files);
+        assert_eq!(f.custody(), None);
+    }
 }
 
 #[test]

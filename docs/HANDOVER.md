@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Primary member-save follow-up (11 November; runtime evidence pending)
+## Primary member-save follow-up (11 November; focused execution, one correction queued)
 
 The primary's fresh actual-diff review of `ae5a0837` found four MEDIUM issues: an
 invocation cancelled during lookup could still start signing; retryable preseal
@@ -17,7 +17,16 @@ sealing before authoring, post-sign append-credit refusal followed by lane
 replacement with the exact retained original/no new key, and retiring an unrun
 job's source end while its actual issuance mutex is held. The source inventory
 contains 15 earlier Windows save cases, now 18; B's two new mount cases are separate.
-All Rust execution for these corrections remains pending CI, not a local pass.
+CI at `57676fd2` passes all 57 Linux storage/catalog executions and the same 57
+Windows executions. Windows also passes 17 of 18 save cases, including all three
+primary regressions. Its existing no-prepared-work case fails deterministically:
+the final edge checks the not-yet-installed mount before checking for a lane and
+returns Busy instead of Stale. The correction checks the lane/context first,
+without changing any positive admission check. The strengthened case retains its
+Stale assertion for both absent and installed mounts, plus unchanged files/sign
+count and whole returned native custody. Its execution awaits the next CI run.
+Local Cargo remains paused by user request. Earlier "none run" entries below
+describe their original checkpoints, not this subsequent execution evidence.
 
 The independent `Chat V2 member storage regressions` workflow runs ordinary
 focused Cargo test commands on Linux/Windows, with exact nonzero cohort counts
@@ -27,10 +36,30 @@ deadlock regression. It neither changes warning handling nor replaces strict
 Clippy, supply-chain audit, native/frontend or full-suite gates. Standalone
 rustfmt and the Python count-guard self-check passed without invoking Cargo.
 
+The same head's ordinary CI passes all 3,434 frontend tests, Svelte checking
+(zero errors/warnings) and production build. Root tests are still not reached by
+the strict-Clippy jobs; native compilation stops on existing App warning debt.
+The root supply-chain audit still fails on the five advisories named below, and
+its native audit step is skipped. This checkpoint is not full-suite sign-off.
+The follow-up removes an unattached test-macro rustdoc comment introduced by the
+primary; it changes no runtime or test body. PR #86 remains draft and unmerged.
+
 M4 is decided: retain bounded exact signed-original DATA across a UI lock. Do not
 discard the only unsaved copy to implement lock. No save/publication authority
 survives that lock; a later invocation needs fresh native generation/row and
 actual source admission. No lock-time plaintext-erasure claim is made.
+
+The read-only dependency survey identified a published remediation route; no
+dependency changes are mixed into this save checkpoint. First update rustix to
+at least 1.1.6 in both lockfiles, move native xattr to published 1.7.0 in the same
+change (older xattr's empty-buffer size queries are incompatible with the fixed
+semantics), and use `fgetxattr_query` for the direct Linux ACL probe. Separately,
+all five direct libp2p 0.56 declarations need a coordinated 0.57 upgrade to admit
+fixed Hickory 0.26.2 or newer; this requires source adaptation and fixed-identity,
+mixed-version transport tests. Do not force an incompatible lock-only Hickory
+upgrade or add advisory ignores. See the upstream
+[xattr compatibility fix](https://github.com/Stebalien/xattr/commit/794a4fbec59289150af15de9aef6c3db7d62214e)
+and [libp2p 0.57.1 dependency set](https://github.com/libp2p/rust-libp2p/blob/v0.57.1/Cargo.toml).
 
 ## Member save, root path (11 November; B, pushed, nothing executed yet)
 
