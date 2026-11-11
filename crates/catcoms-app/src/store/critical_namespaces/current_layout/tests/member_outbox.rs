@@ -954,8 +954,9 @@ fn the_store_member_outbox_mount_installs_once_from_the_declared_parent_and_boun
 }
 
 /// The actual JOIN lifecycle on a namespace5 vault with NO governance4: save, pause, resume,
-/// activation (which migrates the JOIN payload) and the first arm each re-encode the whole
-/// catalog. Every step must carry the ID5 descriptor byte for byte, never introduce 4, and
+/// migration/initial grant and the first arm each re-encode the whole catalog. Activation
+/// supplies the network owner; `ensure_initial_grant` performs the migration. Every step
+/// must carry the ID5 descriptor byte for byte, never introduce 4, and
 /// leave the mounted marker/parent valid. A cold remount then writes nothing.
 #[test]
 fn actual_join_lifecycle_on_current3_preserves_five_exactly_without_four() {
@@ -1023,13 +1024,15 @@ fn actual_join_lifecycle_on_current3_preserves_five_exactly_without_four() {
         )
         .unwrap();
     let mut network = activated.into_network_execution(store).unwrap();
+    network.ensure_initial_grant(store, &mut rng).unwrap();
+    check("migration and initial grant");
     assert_eq!(
         network
             .ensure_submission_armed(store, &mut rng, Arc::new(ManualClock::new(1_000)))
             .unwrap(),
         CheckpointJoinSubmissionStatus::Armed
     );
-    check("migration and arm");
+    check("first arm");
     let updated = current();
     let updated_plain = Zeroizing::new(unseal(&key, &unframe(&updated).unwrap()).unwrap());
     assert_eq!(

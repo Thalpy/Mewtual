@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Primary namespace5 review (11 November; full validation queued)
+
+Two fresh read-only actual-diff reviews of `ea7e4ae1..d475ddb1` found no confirmed
+BLOCKER/HIGH/MEDIUM. Three LOWs are corrected: comments now distinguish disposable
+predecessor zero-byte stages and untouched authenticated JOIN successors, and the
+Current3 lifecycle test explicitly checks ID5 after migration/initial grant and
+again after first arm. Activation alone does not migrate the JOIN payload. These
+corrections change no recovery production behavior or cohort count; re-review is clear.
+
+The primary independently inspected the passing `952d8a1b` logs: 66 Linux and 84
+Windows cohort executions, plus one fixture-generator, one predecessor-gate and
+one head-round-trip test on each OS. The 23 fixtures x 10 openers are assertions
+inside the gate, not 230 separate Rust tests; all four round trips pass. The final
+follow-ups, including the stronger phase check, still need their own execution.
+
+The annotated remote tag `compat/chat-v2-namespace5-predecessor-ce402364` now
+retains exactly `ce4023649b1a2f37f7d8032c950fbefff03daef3` (peeled target verified).
+The gate remains full-SHA pinned and no longer depends on PR history surviving.
+The stale namespace5 gap list in the A/B/F save handoff is updated.
+
+The new `Chat V2 complete test execution` workflow supplies four isolated hosted
+jobs: complete root and native workspaces on Linux and Windows, native checking,
+and frontend tests/checking/build. It uses ordinary Cargo execution independently
+of strict Clippy, with one build job, two test threads and the default stack; it
+does not suppress warnings or change `ci.yml` or audit policy. Its workflow-only
+path filter is this integration PR's explicit execution lane, not a permanent
+all-source validation policy after merge. Full results remain pending.
+
+Local Cargo remains paused. Standalone rustfmt, the Python exact-count guard
+self-check, and the static ambient/raw-filesystem checks pass. The current root
+audit still reports the same five Hickory/rustix
+advisories (bans/licences/sources pass); strict Clippy still blocks ordinary CI's
+test steps. PR #86 remains draft/unmerged and Chat V2 remains disabled.
+
 ## Namespace5 recovery and compatibility (11 November; B, focused CI passed at 952d8a1b)
 
 Four namespace5 items, all on `chat-v2-member-outbox-production` (draft PR #86). Design,

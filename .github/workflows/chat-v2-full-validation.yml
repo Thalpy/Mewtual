@@ -1,0 +1,85 @@
+name: Chat V2 complete test execution
+
+on:
+  # An explicit execution lane for this integration PR while its inherited strict-lint
+  # debt prevents ordinary CI from reaching the tests. Later source PRs still use normal
+  # CI; this workflow-only filter is not an all-source validation policy after merge.
+  pull_request:
+    paths:
+      - '.github/workflows/chat-v2-full-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-v2-complete-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+  RUST_TEST_THREADS: 2
+
+jobs:
+  root:
+    name: Complete root tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      # No warning override, stack increase, filter, retry or ignored-test substitution.
+      # --no-fail-fast collects other crate results after a failure; it still fails the job.
+      # Strict Clippy and dependency audits remain separate mandatory gates in ci.yml.
+      - name: Run the complete root workspace
+        run: cargo test --locked --all --all-features --no-fail-fast
+
+  native:
+    name: Complete native tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install Linux Tauri build libraries
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        run: npm --prefix apps/desktop ci
+      - name: Run the complete frontend tests
+        if: runner.os == 'Linux'
+        run: npm --prefix apps/desktop test
+      - name: Check frontend types
+        if: runner.os == 'Linux'
+        run: npm --prefix apps/desktop run check
+      # Native builds consume real frontend assets; build them on both operating systems.
+      - name: Build frontend assets
+        run: npm --prefix apps/desktop run build
+      - name: Run the complete native workspace
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
+      # Collect the separate compile gate even if a native test fails, without masking it.
+      - name: Check the native workspace
+        if: ${{ !cancelled() }}
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml

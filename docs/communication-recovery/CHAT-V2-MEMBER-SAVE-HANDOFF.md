@@ -134,8 +134,12 @@ and retained-original recovery across host replacement. Root fixtures using a
 test guard do not establish native authorization; native tests must use F's real
 factory and generation/registry paths.
 
-Namespace5 still needs physical JOIN lifecycle coverage without ID4, interrupted
-ordinary JOIN-stage acceptance and the real `ce402364` predecessor gate. A
-governance4 metadata wrapper still supplies no operational source/host for saves;
-the genuine Current4/joined-member factory remains C's work. First-torn declaration
-seed recovery and physical two-device acceptance remain open.
+Namespace5's physical JOIN lifecycle without ID4, interrupted ordinary JOIN stages,
+real predecessor gate and first-torn-seed recovery are implemented. Their focused
+Linux/Windows evidence and final follow-up checks are recorded in HANDOVER and
+[the recovery design](CHAT-V2-NAMESPACE5-RECOVERY.md). The predecessor is retained by
+an annotated compatibility tag; the gate still checks its exact full SHA.
+
+A governance4 metadata wrapper still supplies no operational source/host for saves;
+the genuine Current4/joined-member factory remains C's work. Governance4's own
+first-torn recovery and physical two-device acceptance also remain open.

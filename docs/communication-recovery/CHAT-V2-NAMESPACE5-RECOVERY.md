@@ -20,7 +20,8 @@ Background:
 The governance wrapper already ran a real JOIN lifecycle with both 4 and 5. Its Current3 equivalent (`actual_join_lifecycle_on_current3_preserves_five_exactly_without_four`) runs a Current3 opener with the member handler and checkpoint-JOIN execution:
 
 1. It declares 3 and then 5.
-2. It runs save, pause, resume, activation (which migrates the JOIN payload) and the first arm.
+2. It runs save, pause and resume; activates the network owner; then separately checks
+   migration/initial grant (`ensure_initial_grant`) and the first arm.
 
 After every step:
 
@@ -50,7 +51,11 @@ In every case, openers without the handler, and the emulated predecessor, refuse
 
 The emulation flag inside the current binary is supplemented by the actual code at `ce402364`, the last commit before namespace5.
 
-That commit is not on `main`. It is reachable through PR #86's branch, and through the head ref GitHub keeps for the pull request, as long as that history is not rewritten. If it ever becomes unreachable, the fetch fails loudly rather than skipping the gate. Pushing a tag for it would remove this dependency; that is left to the primary.
+That commit is not on `main`. The primary preserved it with the annotated remote tag
+`compat/chat-v2-namespace5-predecessor-ce402364`, whose peeled target is exactly
+`ce4023649b1a2f37f7d8032c950fbefff03daef3`. The gate remains pinned to that full SHA;
+it does not trust a movable tag as a substitute. If fetching the commit fails, the
+gate fails loudly rather than skipping.
 
 The script fetches the commit explicitly and asserts the full SHA.
 

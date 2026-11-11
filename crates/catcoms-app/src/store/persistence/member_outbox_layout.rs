@@ -119,8 +119,9 @@ fn held(path: &Path, file: &File, id: SessionId) -> Result<(), AppError> {
 /// Claim the fixed seed name BEFORE the legacy fence: a zero-byte reservation, synced, followed
 /// by the caller's directory barrier. It carries no content and depends on no catalog, so a
 /// binary that predates namespace5 may ignore it harmlessly. What it buys is attribution: a
-/// fence is never created without this name, so the first-torn role can tell this
-/// declaration's empty fence from another writer's empty stage, which it never touches. The
+/// namespace5 fence is never created without this name. An unclaimed empty stage is never
+/// touched; during the claim window a predecessor's zero-byte stage is indistinguishable
+/// from this fence and may also be disposed (see the recovery design's residuals). The
 /// SAME held File later receives the complete seed; no replacement is adopted. A retry with the
 /// slot already held only re-proves and re-syncs it.
 fn ensure_seed_claim(

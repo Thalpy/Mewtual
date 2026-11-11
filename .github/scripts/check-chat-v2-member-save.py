@@ -49,10 +49,10 @@ COHORTS = (
     ("outbox-engine", "v2_member_outbox", 31),
 )
 
-# The last commit before namespace5. Its source is never modified by this gate. It is not on
-# main: it is reachable through PR #86's branch and kept head ref while that history is not
-# rewritten (a pushed tag would remove the dependency). An unreachable commit fails the fetch
-# loudly; it never skips the gate. The SHA is asserted in full.
+# The last commit before namespace5. Its source is never modified by this gate. The annotated
+# remote tag compat/chat-v2-namespace5-predecessor-ce402364 retains this exact commit independently
+# of PR history. The gate still pins/asserts the full SHA rather than trusting a movable tag.
+# An unreachable commit fails the fetch loudly; it never skips the gate.
 PREDECESSOR = "ce4023649b1a2f37f7d8032c950fbefff03daef3"
 PREDECESSOR_FIXTURES = 23
 PREDECESSOR_OPENERS = 10

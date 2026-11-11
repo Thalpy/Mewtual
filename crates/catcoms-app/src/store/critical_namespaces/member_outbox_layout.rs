@@ -27,8 +27,10 @@
 //! A FIRST seed that never authenticated (a crash before it was complete) is abandoned
 //! instead: the cold inspector's first-torn role unlinks the zero-byte fence, then the seed,
 //! and the warm retry declares afresh. It applies only when nothing a complete seed precedes
-//! exists (no marker, no parent, no ID5 in the authenticated current catalog). Any other
-//! stage, marker or directory without a complete authenticated seed is preserved and refused.
+//! exists (no marker, no parent, no ID5 in the authenticated current catalog). An authenticated
+//! ordinary JOIN successor from the claim window is left to JOIN settlement. A zero-byte
+//! predecessor stage in that window is indistinguishable from the fence and is disposable;
+//! other partial/foreign stages, markers and directories are preserved and refused.
 //! Design and residuals: `docs/communication-recovery/CHAT-V2-NAMESPACE5-RECOVERY.md`.
 //!
 //! Authority boundary. Declaring or mounting this namespace grants no membership, signing,
