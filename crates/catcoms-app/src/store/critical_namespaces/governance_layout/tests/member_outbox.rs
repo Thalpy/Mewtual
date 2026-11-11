@@ -30,8 +30,11 @@ fn member_governance(pool: &CriticalCatalogReadPool) -> V2GovernanceLayoutPolicy
         .unwrap()
 }
 
+/// `(id, version, payload)` per catalog entry, in order.
+type Entries = Vec<(u32, u32, Vec<u8>)>;
+
 /// `(id, version, payload)` of the selected catalog, decrypted with the vault key.
-fn catalog(key: &[u8; 32], domain: &[u8; 32], path: &Path) -> Vec<(u32, u32, Vec<u8>)> {
+fn catalog(key: &[u8; 32], domain: &[u8; 32], path: &Path) -> Entries {
     let raw = fs::read(path.join(Slot::Current.name())).unwrap();
     let plain = unseal(key, &unframe(&raw).unwrap()).unwrap();
     let parsed = outer::parse(&plain, domain, outer::MAX_ENVELOPE_PLAIN).unwrap();
@@ -128,7 +131,7 @@ fn member_cut_over_four(
     pool: &CriticalCatalogReadPool,
     cut: u8,
     rng: &mut ChaCha20Rng,
-) -> ([u8; 32], [u8; 32], Vec<(u32, u32, Vec<u8>)>) {
+) -> ([u8; 32], [u8; 32], Entries) {
     settled_three(path, pool, rng);
     let mut four = open(path, pool, rng);
     four.retry(rng).unwrap();
@@ -238,7 +241,7 @@ impl Drop for Predecessor {
 /// A predecessor's governance opener does not know the member seed name, so in the zero-byte
 /// claim window it can begin, and be interrupted inside, a governance4 declaration. The head
 /// then holds BOTH seeds:
-/// - a COMPLETE governance seed (232, 235-237): the claim is disposed without touching the
+/// - a COMPLETE governance seed (232-237): the claim is disposed without touching the
 ///   stage (governance's own), governance finishes cold, and the warm retry declares 5;
 /// - governance already finished (238): an ordinary first-torn claim, disposed;
 /// - only governance's empty fence (229): it looks like the claim's own fence and is unlinked.
@@ -253,6 +256,8 @@ fn a_predecessor_governance_declaration_in_the_claim_window_never_deadlocks_the_
         (230, false),
         (231, false),
         (232, true),
+        (233, true),
+        (234, true),
         (235, true),
         (236, true),
         (237, true),

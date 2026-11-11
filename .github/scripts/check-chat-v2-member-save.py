@@ -49,9 +49,10 @@ COHORTS = (
     ("outbox-engine", "v2_member_outbox", 31),
 )
 
-# The last commit before namespace5. Its source is never modified by this gate. It stays
-# fetchable after this branch merges: GitHub keeps every pull request's head ref, and this
-# commit is in PR #86's history. The SHA is asserted in full.
+# The last commit before namespace5. Its source is never modified by this gate. It is not on
+# main: it is reachable through PR #86's branch and kept head ref while that history is not
+# rewritten (a pushed tag would remove the dependency). An unreachable commit fails the fetch
+# loudly; it never skips the gate. The SHA is asserted in full.
 PREDECESSOR = "ce4023649b1a2f37f7d8032c950fbefff03daef3"
 PREDECESSOR_FIXTURES = 23
 PREDECESSOR_OPENERS = 10

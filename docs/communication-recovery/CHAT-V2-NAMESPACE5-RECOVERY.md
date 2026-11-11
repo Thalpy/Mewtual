@@ -48,7 +48,11 @@ In every case, openers without the handler, and the emulated predecessor, refuse
 
 ## 3. Real predecessor-binary gate (CI)
 
-The emulation flag inside the current binary is supplemented by the actual code at `ce402364`, the last commit before namespace5. GitHub keeps every pull request's head ref, and this commit is in PR #86's history, so it stays fetchable after the branch merges. The script fetches it explicitly and asserts the full SHA.
+The emulation flag inside the current binary is supplemented by the actual code at `ce402364`, the last commit before namespace5.
+
+That commit is not on `main`. It is reachable through PR #86's branch, and through the head ref GitHub keeps for the pull request, as long as that history is not rewritten. If it ever becomes unreachable, the fetch fails loudly rather than skipping the gate. Pushing a tag for it would remove this dependency; that is left to the primary.
+
+The script fetches the commit explicitly and asserts the full SHA.
 
 The focused lane (`.github/scripts/check-chat-v2-member-save.py`) runs three steps after its cohorts:
 
@@ -75,7 +79,7 @@ The harness owns every fixture's expected verdicts. The head's manifest must lis
 The round trip reopens all four `after/` trees with the member handler:
 
 1. Open, with no RNG, must abandon the claim or torn seed.
-2. The warm retry must declare 5, after the predecessor's 4 where it ran.
+2. The warm retry must declare 5, appended after exactly the entries the predecessor left (3, or 3 then 4). The predecessor's ID4 entry must be byte-identical afterwards, and both mounted layouts must validate.
 3. Both markers and the parent must end up present, with no seed or stage left.
 
 Counts are pinned in the head tests, the harness and the script: 23 fixtures, 10 openers, 4 round trips, and exactly one passing test per step. The job timeout is 90 minutes, and the predecessor build step has 40 of them.
@@ -150,7 +154,14 @@ The inspector abandons the declaration only when ALL of the following hold, all 
 3. The current catalog authenticates and parses under the configured grammar. It names the archive and Current3, and does NOT name ID5.
 4. The marker and the parent directory are absent. They are re-proven absent at the unlink edge.
 5. The seed is a real file of at most `MAX_SEED_FRAME` bytes, held, and `Unauthenticated`.
-6. The settled Current3 root and marker are proven read-only (`check_current_marker_before_old_gates`). A vault the Current3 gate will refuse later is therefore never mutated first.
+6. The settled Current3 root and marker are proven read-only (`check_current_marker_before_old_gates`). So an unsettled Current3 layout is refused before anything is touched.
+
+   This is not a proof that every later gate will accept the vault. The disposal does not run those gates' other checks (the owner-operations intent, the archive/JOIN gates). One known case mutates and is then refused:
+   1. A claim sits beside a predecessor JOIN stage, opened through the governance+member wrapper while 4 is undeclared.
+   2. The member inspector disposes the claim.
+   3. The governance inspector then refuses the stage, as it already refuses any stage while 4 is undeclared.
+
+   That loses only the zero-byte claim, and the Current3+member opener then settles the stage. Only unauthenticated bytes or a zero-byte stage can ever be lost this way.
 7. The stage has a classified role:
 
 | Stage found | Role |
@@ -199,7 +210,7 @@ It never rests on the seed, which can confer nothing unless it authenticates. On
 
 - **Bit rot.** Bit rot in a COMPLETE seed before the marker exists (cut 243) is also unauthenticated, so it is disposed. Nothing downstream existed.
 - **Future formats.** A future writer of `chat-critical-namespaces.member-outbox.seed` must seal under the v1 seed key domain, so this version preserves its seed as authenticated-unsupported. Otherwise it must use another name: under a different domain, this version would dispose it on a downgrade.
-- **Zero-byte stages from other writers.** In the claim window, a predecessor's own zero-byte governance fence (its cut 229), or a zero-length JOIN stage, looks like the claim's fence and is unlinked. It holds no bytes, and the current catalog is unchanged. This is regression-pinned for governance.
+- **Zero-byte stages from other writers.** In the claim window, a predecessor's own zero-byte governance fence (its cut 229), or a zero-length JOIN stage (its fault 5), looks like the claim's fence and is unlinked. It holds no bytes, and the current catalog is unchanged. Both cases are regression-pinned.
 - **Predecessor-only recoveries.** A predecessor's torn governance FIRST seed in the claim window stays refused, because it is governance's own gap. A predecessor's partial JOIN stage there stays refused, per the JOIN policy. The predecessor itself, which ignores the claim, can settle its own complete work.
 - **Out of scope, as elsewhere:** torn media despite a successful sync, external rollback, and arbitrary corruption. Governance4's own first-torn recovery is not part of this increment.
 
@@ -211,7 +222,8 @@ Current3 (`current_layout/tests/member_outbox.rs`):
 - **Disposal cuts.** Reopening at 226, 227 or 228 completes. At 226 and 227 the emulated predecessor opens the unfenced intermediate without touching the seed.
 - **H1 regression.** With the seam reporting the name still present, the open refuses with the seed untouched, and a reopen completes.
 - **Refusal classes.** Each is checked byte for byte (recursive tree).
-- **M2.** A predecessor JOIN complete stage in the claim window settles, and only the claim is disposed. A partial stage refuses.
+- **M2.** A predecessor JOIN complete stage in the claim window settles, and only the claim is disposed. A partial stage refuses. A zero-length one is unlinked with the claim (the residual above).
+- **Positive control.** The hand-built envelope in the authenticated-stage refusal test must reproduce the real catalog byte for byte, so that refusal cannot be vacuous.
 
 Governance+member (`governance_layout/tests/member_outbox.rs`):
 

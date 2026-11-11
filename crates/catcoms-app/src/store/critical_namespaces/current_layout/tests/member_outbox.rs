@@ -282,7 +282,7 @@ pub(super) fn member_cut(
     private(&owner).keys.db_key().unwrap()
 }
 
-fn ids(key: &[u8; 32], domain: &[u8; 32], path: &Path) -> Vec<u32> {
+pub(super) fn ids(key: &[u8; 32], domain: &[u8; 32], path: &Path) -> Vec<u32> {
     let raw = fs::read(path.join(Slot::Current.name())).unwrap();
     let plain = unseal(key, &unframe(&raw).unwrap()).unwrap();
     let parsed = outer::parse(&plain, domain, outer::MAX_ENVELOPE_PLAIN).unwrap();
@@ -522,8 +522,9 @@ fn a_stage_name_not_proven_gone_refuses_before_the_seed_is_touched() {
 fn first_torn_disposal_preserves_and_refuses_everything_it_cannot_attribute() {
     let shared = pool();
     // Each arranges a negative fixture over the first-torn cut-242 state (a torn seed and the
-    // empty fence, with the original current catalog).
-    let cases: [(&str, fn(&Path, &[u8; 32])); 6] = [
+    // empty fence, with the original current catalog), given the vault database key.
+    type Arrange = fn(&Path, &[u8; 32]);
+    let cases: [(&str, Arrange); 6] = [
         // An AUTHENTICATED seed (sealed under the seed key) with invalid content: possibly a
         // future version's seed, never torn scratch.
         ("authenticated invalid seed", |path, key| {
@@ -604,11 +605,14 @@ fn first_torn_disposal_preserves_and_refuses_everything_it_cannot_attribute() {
 /// write that is interrupted. A COMPLETE stage there is an authenticated ordinary successor
 /// that does not name ID5, so it can never be this declaration's: the head disposes only the
 /// claim, leaves the stage to the cold JOIN settlement, then declares namespace5 afresh. A
-/// partial stage is refused and preserved, as the JOIN policy already requires.
+/// partial stage is refused and preserved, as the JOIN policy already requires. A ZERO-length
+/// JOIN stage (fault 5) is the documented residual: beside the claim it is indistinguishable
+/// from the claim's own fence and is unlinked with it. It holds no bytes; the current catalog
+/// is unchanged, and the retry declares namespace5 over it with no JOIN row.
 #[test]
 fn a_predecessor_join_stage_in_the_claim_window_settles_and_only_the_claim_is_disposed() {
     use catcoms_mls::MlsDevice;
-    for fault_at in [1u8, 4] {
+    for fault_at in [1u8, 4, 5] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
         let shared = pool();
@@ -671,8 +675,13 @@ fn a_predecessor_join_stage_in_the_claim_window_settles_and_only_the_claim_is_di
         let mut cold = reopened.unwrap();
         assert!(!path.join(MEMBER_OUTBOX_SEED).exists());
         assert!(!path.join(Slot::Stage.name()).exists());
-        // The predecessor's exact stage is the selected catalog.
-        assert_eq!(fs::read(path.join(Slot::Current.name())).unwrap(), stage);
+        if fault_at == 5 {
+            assert!(stage.is_empty());
+            assert_eq!(fs::read(path.join(Slot::Current.name())).unwrap(), original);
+        } else {
+            // The predecessor's exact stage is the selected catalog.
+            assert_eq!(fs::read(path.join(Slot::Current.name())).unwrap(), stage);
+        }
         cold.retry(&mut rng).unwrap();
         assert_declared(&cold, path, fault_at);
         let ready = cold.into_current_layout_store().unwrap();
@@ -680,7 +689,7 @@ fn a_predecessor_join_stage_in_the_claim_window_settles_and_only_the_claim_is_di
         let (_, four, rows) =
             catalog_facts(store, &fs::read(path.join(Slot::Current.name())).unwrap());
         assert!(!four);
-        assert_eq!(rows, 1);
+        assert_eq!(rows, usize::from(fault_at == 1));
     }
 }
 
@@ -1194,6 +1203,25 @@ fn an_authenticated_stage_that_drops_or_changes_five_is_preserved_and_refused() 
                 (entry.id, entry.version, entry.payload.to_vec())
             })
             .collect();
+        let encode = |generation: u64, parent: &[u8; 32], entries: &[(u32, u32, Vec<u8>)]| {
+            let mut encoder = Encoder::new();
+            encoder.put_str(outer::TAG_V2).unwrap();
+            encoder.put_bytes(&domain).unwrap();
+            encoder.put_u64(generation);
+            encoder.put_bytes(parent).unwrap();
+            encoder.put_u32(entries.len() as u32);
+            for (id, version, payload) in entries {
+                encoder.put_u32(*id).put_u32(*version);
+                encoder.put_bytes(payload).unwrap();
+            }
+            encoder.finish()
+        };
+        // Positive control: this hand encoder reproduces the actual selected catalog byte for
+        // byte, so the refusals below come from the changed ID5 entry, not from bad framing.
+        assert_eq!(
+            encode(parsed.generation, &parsed.parent.unwrap(), &entries),
+            plain
+        );
         if change {
             let five = entries
                 .iter_mut()
@@ -1204,17 +1232,12 @@ fn an_authenticated_stage_that_drops_or_changes_five_is_preserved_and_refused() 
         } else {
             entries.retain(|entry| entry.0 != member_ns::NAMESPACE_ID);
         }
-        let mut encoder = Encoder::new();
-        encoder.put_str(outer::TAG_V2).unwrap();
-        encoder.put_bytes(&domain).unwrap();
-        encoder.put_u64(parsed.generation + 1);
-        encoder.put_bytes(&outer::catalog_digest(&plain)).unwrap();
-        encoder.put_u32(entries.len() as u32);
-        for (id, version, payload) in &entries {
-            encoder.put_u32(*id).put_u32(*version);
-            encoder.put_bytes(payload).unwrap();
-        }
-        let sealed = catcoms_crypto::keystore::seal(&key, &encoder.finish(), &mut rng).unwrap();
+        let successor = encode(
+            parsed.generation + 1,
+            &outer::catalog_digest(&plain),
+            &entries,
+        );
+        let sealed = catcoms_crypto::keystore::seal(&key, &successor, &mut rng).unwrap();
         fs::write(path.join(Slot::Stage.name()), crate::store::frame(&sealed)).unwrap();
         let snapshot = files(path);
         assert!(

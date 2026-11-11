@@ -16,9 +16,10 @@
 //! predecessor's verdicts belong to the harness. Vaults use this test module's `SECRET`, and
 //! the harness repeats it.
 use super::member_outbox::{
-    five_with_join_execution, join_source, member_cut, member_policy, settled_three,
+    five_with_join_execution, ids, join_source, member_cut, member_policy, settled_three,
 };
 use super::*;
+use crate::store::critical_namespaces::catalog_envelope as outer;
 use crate::store::critical_namespaces::governance_layout::{
     codec::PERSISTENT_MINIMUM as GOVERNANCE_MINIMUM, PreparedV2GovernanceLayoutStore,
     V2GovernanceLayoutPolicy, GOVERNANCE_MARKER, GOVERNANCE_SEED,
@@ -45,6 +46,27 @@ fn fixture_root() -> PathBuf {
         std::env::var_os("MEWTUAL_NAMESPACE5_FIXTURES")
             .expect("MEWTUAL_NAMESPACE5_FIXTURES must name the fixture root"),
     )
+}
+
+/// The vault database key and chat vault domain, for reading the selected catalog.
+fn keys(store: &ServerStore) -> ([u8; 32], [u8; 32]) {
+    (
+        store.keys.db_key().unwrap(),
+        store.chat_vault_domain().unwrap(),
+    )
+}
+
+/// The exact payload of catalog entry `id` in the selected catalog.
+fn entry_payload(key: &[u8; 32], domain: &[u8; 32], path: &Path, id: u32) -> Vec<u8> {
+    let raw = fs::read(path.join(Slot::Current.name())).unwrap();
+    let plain = unseal(key, &unframe(&raw).unwrap()).unwrap();
+    let parsed = outer::parse(&plain, domain, outer::MAX_ENVELOPE_PLAIN).unwrap();
+    (0..parsed.count)
+        .map(|index| parsed.entry(index).unwrap())
+        .find(|entry| entry.id == id)
+        .unwrap()
+        .payload
+        .to_vec()
 }
 
 fn governance(pool: &CriticalCatalogReadPool, member: bool) -> V2GovernanceLayoutPolicy {
@@ -259,10 +281,17 @@ fn verify_namespace5_predecessor_round_trip() {
             .unwrap_or_else(|error| panic!("{name}: {error:?}"));
             assert!(!path.join(MEMBER_OUTBOX_SEED).exists(), "{name}");
             assert!(!path.join(Slot::Stage.name()).exists(), "{name}");
+            let (key, domain) = keys(private(&cold));
+            // The predecessor left a settled Current3 catalog without 4 or 5.
+            let before = ids(&key, &domain, &path);
+            assert_eq!(before.last(), Some(&3), "{name}: {before:?}");
             cold.retry(&mut rng).unwrap();
             private(&cold)
                 .validate_mounted_member_outbox_layout()
                 .unwrap();
+            let mut declared = before;
+            declared.push(5);
+            assert_eq!(ids(&key, &domain, &path), declared, "{name}");
             drop(cold.into_current_layout_store().unwrap());
         } else {
             // The predecessor's governance retry declared 4 over the claim or torn seed.
@@ -280,7 +309,22 @@ fn verify_namespace5_predecessor_round_trip() {
             )
             .unwrap_or_else(|error| panic!("{name}: {error:?}"));
             assert!(!path.join(MEMBER_OUTBOX_SEED).exists(), "{name}");
+            let (key, domain) = keys(cold.store_for_test());
+            // The predecessor's settled 3 then 4; its exact ID4 entry must survive the retry.
+            let before = ids(&key, &domain, &path);
+            assert_eq!(&before[before.len() - 2..], &[3, 4], "{name}: {before:?}");
+            let four = entry_payload(&key, &domain, &path, 4);
             cold.retry(&mut rng).unwrap();
+            cold.store_for_test()
+                .validate_mounted_governance_layout()
+                .unwrap();
+            cold.store_for_test()
+                .validate_mounted_member_outbox_layout()
+                .unwrap();
+            let mut declared = before;
+            declared.push(5);
+            assert_eq!(ids(&key, &domain, &path), declared, "{name}");
+            assert_eq!(entry_payload(&key, &domain, &path, 4), four, "{name}");
             drop(cold.into_governance_layout_store().unwrap());
             assert!(!path.join(GOVERNANCE_SEED).exists(), "{name}");
         }

@@ -662,7 +662,7 @@ impl ServerStore {
     /// Order: the fence goes FIRST. Every intermediate (an unauthenticated seed with or without
     /// the fence) is then first-torn again on the next open. Removing the seed first would
     /// leave a fence with no claim, which no reader can attribute. Each name must be provably
-    /// gone before the next object is touched (see [`proven_absent`]).
+    /// gone before the next object is touched (see `proven_absent`).
     pub(in crate::store) fn dispose_first_torn_member_outbox_seed(
         &self,
         stage: member::FirstTornStage,
@@ -679,6 +679,16 @@ impl ServerStore {
         absent(&fixed(self, true, member::MEMBER_OUTBOX_MARKER)?)?;
         absent(&fixed(self, true, member::MEMBER_OUTBOX_PARENT)?)?;
         let (seed_file, seed_raw) = seed;
+        // Defence in depth: this edge itself refuses an authenticated seed, whatever the
+        // caller classified. Only bytes that cannot authenticate are ever discarded.
+        let key = Zeroizing::new(self.keys.db_key()?);
+        if !matches!(
+            member::codec::classify_seed(&key, &seed_raw)?,
+            member::codec::SeedEvidence::Unauthenticated
+        ) {
+            return Err(denied());
+        }
+        drop(key);
         let seed = critical_namespaces::pending_join::CreatedStage {
             identity: Some(session_id(&seed_file).map_err(io)?),
             file: seed_file,

@@ -194,8 +194,10 @@ impl ServerStore {
 
     /// Opener gate step for an opener WITH the concrete handler, run before every older
     /// inspector/cleaner. Returns the captured marker to install after the older gates, or
-    /// `None` when namespace5 is not declared. Unknown, partial or conflicting state is
-    /// preserved and refused.
+    /// `None` when namespace5 is not declared. A complete authenticated seed finishes its
+    /// declaration; a first seed that never authenticated abandons it (the first-torn role,
+    /// `dispose_first_torn_member_seed`), after which this also returns `None`. Every
+    /// other unknown, partial or conflicting state is preserved and refused.
     pub(in crate::store) fn inspect_and_repair_member_outbox_declaration(
         &self,
     ) -> Result<Option<MemberOutboxMarkerCapture>, AppError> {

@@ -1,5 +1,88 @@
 # Mewtual; Handover
 
+## Namespace5 recovery and compatibility (11 November; B, focused CI passed at 952d8a1b)
+
+Four namespace5 items, all on `chat-v2-member-outbox-production` (draft PR #86). Design,
+decisions and residuals:
+[Namespace5 recovery](communication-recovery/CHAT-V2-NAMESPACE5-RECOVERY.md).
+
+1. **JOIN lifecycle on ID5 without governance4.** A real Current3 test covers save, pause,
+   resume, migration and first arm. After every step, ID5 is byte-identical and governance4
+   is absent.
+2. **Interrupted ordinary JOIN stage at open.** The JOIN writer's cuts are exercised on an
+   ID5 vault: a complete stage settles cold, and a prefix or zero-length stage is preserved
+   and refused. A vault-key-sealed stage that drops or changes ID5 is refused too.
+3. **First-torn declaration seed recovery.**
+   - **Claim first.** A zero-byte claim of the seed name now precedes the legacy fence, so
+     every fence is attributable.
+   - **Disposal.** The cold first-torn role abandons a declaration whose first seed never
+     authenticated, and the warm retry declares afresh. It runs only when there is no
+     marker, no parent and no ID5. It unlinks the fence, then the seed, each followed by a
+     barrier and a NotFound proof, and needs no RNG.
+   - **Stages it leaves alone.** An authenticated ordinary JOIN successor left by a
+     predecessor in the claim window is left to its settlement.
+   - **Governance seeds.** An unauthenticated member seed beside a complete predecessor
+     governance seed is disposed without touching governance's stage.
+   - **Still preserved and refused:** authenticated-invalid seeds, seeds beside a torn
+     governance seed, and every other partial state.
+   - The read-only adversarial design review found no blocker. Its HIGH (Windows
+     delete-pending resurrection of a claimless fence) and all five MEDIUMs are fixed in the
+     design and code.
+4. **Real predecessor gate.**
+   - The focused lane writes 23 head fixtures and runs an unchanged `ce402364` worktree's
+     ten public openers against them. The harness file is the only addition.
+   - The harness, not the head, owns each fixture's verdicts.
+   - Controls must open, which rules out vacuous refusals.
+   - A fence-removed cut must open, which proves the fence is what refuses.
+   - The head reopens the four trees the predecessor's full runs produced and must recover
+     each.
+
+Counts: the current-mount cohort grows 9 → 16 and the governance-mount cohort 5 → 7. The
+predecessor gate pins 23 fixtures, 10 openers and 4 round trips.
+
+**Focused CI.** At `952d8a1b`, the focused lane passes on Linux and Windows:
+- **Every cohort,** at its exact count:
+  - 4 sorted-declaration cases;
+  - 6 codec cases;
+  - 2 JOIN-producer cases;
+  - 16 current-mount cases;
+  - 7 governance-mount cases;
+  - 31 outbox-engine cases;
+  - on Windows, also the 18 save cases.
+- **The real predecessor gate:**
+  - 23 fixtures were written.
+  - The predecessor checked them against all 10 openers: 2 controls, 18 refuse, 2 may-open
+    and 1 unfenced fixture.
+  - The head then verified all 4 round trips.
+
+The first run, at `7aab7775`, compiled on both platforms and failed two wrong test
+expectations, now corrected:
+- the first JOIN row adds the JOIN entry;
+- the fired probe was sticky.
+
+**Lint and review fixes.** The strict Clippy job reported two new test-only
+`type_complexity` lints; they are fixed. The library's lint count is unchanged at 531. The
+read-only actual-diff review found no production blocker. Its LOW follow-ups are in the
+next commit, whose CI is pending:
+- the disposal edge re-classifies the seed itself;
+- governance cuts 233 and 234 are added;
+- the zero-length JOIN stage residual is pinned;
+- the round trip also checks entry order, ID4 bytes and both mounts;
+- the hand-built envelope gets a positive control;
+- the docs are reworded.
+
+**Gates.** The store raw-fs gate (new allowlist entries for the claim and the two
+classified unlinks), the ambient gate and rustfmt pass. The full suites, strict Clippy
+sign-off and the advisory job remain the primary's.
+
+**Open to the primary.** The predecessor `ce402364` is not on `main`; a pushed tag would
+make the gate independent of PR #86's history. The namespace5 gap list in
+`CHAT-V2-MEMBER-SAVE-HANDOFF.md` is not edited.
+
+Not covered:
+- governance4's own first-torn states;
+- native integration, joined-member sources and transport (out of this increment).
+
 ## Primary member-save follow-up (11 November; focused tests passed, full sign-off open)
 
 The primary's fresh actual-diff review of `ae5a0837` found four MEDIUM issues: an

@@ -239,6 +239,16 @@ impl std::fmt::Debug for PreparedV2GovernanceLayoutStore {
         f.write_str("PreparedV2GovernanceLayoutStore")
     }
 }
+/// Regression-only DATA access for fixtures that live outside this module (the namespace5
+/// predecessor round trip). Production intentionally has no Store conversion.
+#[cfg(test)]
+impl PreparedV2GovernanceLayoutStore {
+    pub(in crate::store) fn store_for_test(&self) -> &ServerStore {
+        self.store
+            .as_deref()
+            .expect("an opened governance owner holds its Store")
+    }
+}
 
 /// Completed physical4 mount and historical DATA reader only. There is intentionally
 /// no checked_store/Deref/into-Current3 conversion: a Source4 factory is not paired.
