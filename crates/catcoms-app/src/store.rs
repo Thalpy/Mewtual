@@ -570,6 +570,8 @@ mod persistence {
     mod current_group;
     mod current_layout;
     pub(in crate::store) mod governance_layout;
+    /// Namespace5 (member outbox layout) declaration and mount I/O.
+    mod member_outbox_layout;
     mod v2_group_directory;
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
@@ -5661,6 +5663,11 @@ pub struct ServerStore {
         Option<critical_namespaces::governance_layout::V2GovernanceLayoutPolicy>,
     governance_layout:
         std::sync::Mutex<Option<critical_namespaces::governance_layout::MountedGovernanceLayout>>,
+    // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
+    // handler. Its presence is mount DATA, never a member-source or save permission.
+    member_outbox_layout: std::sync::Mutex<
+        Option<critical_namespaces::member_outbox_layout::MountedMemberOutboxLayout>,
+    >,
     current_layout:
         std::sync::Mutex<Option<critical_namespaces::current_layout::MountedCurrentLayout>>,
     archive_bootstrap_root: critical_namespaces::archive_bootstrap::SharedRoot,
@@ -5846,6 +5853,7 @@ impl ServerStore {
             current_layout_policy,
             governance_layout_policy,
             governance_layout: Default::default(),
+            member_outbox_layout: Default::default(),
             current_layout: Default::default(),
             archive_bootstrap_root: Default::default(),
             founder_invocations: Default::default(),

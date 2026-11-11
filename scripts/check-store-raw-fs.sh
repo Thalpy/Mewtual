@@ -56,6 +56,30 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|selected.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::remove_file(&seed_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|install_governance_layout_marker|original.marker.sync_all().map_err(io)?;']=1
+  # Namespace5 (member outbox layout) declaration: the same reviewed protocol as namespace4,
+  # with its own fixed seed/marker names. The empty legacy stage fence precedes every
+  # member-only output so actual older readers refuse first.
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_legacy_stage_fence|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_legacy_stage_fence|original.file.sync_all().map_err(io)?;']=1
+  # The one fixed `chat-owner-v2/member-outbox-v1` parent, created only by an owned declaration
+  # after its marker and before promotion; never re-created after the commit point.
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure_parent_directory|fs::create_dir(&path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|sync_parent_of_marker|root.directory.sync_all().map_err(io)']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure|let newly_opened = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure|let existing = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|ensure|slot.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|verify_seed|file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|write_member_outbox_layout_declaration|actual.sync_all().map_err(io)?;']=1
+  # Separate original selection-stage sync and exact captured cold-duplicate sync.
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|write_member_outbox_layout_declaration|stage.file.sync_all().map_err(io)?;']=2
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|write_member_outbox_layout_declaration|fs::rename(&stage_path, &current_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|write_member_outbox_layout_declaration|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|write_member_outbox_layout_declaration|current.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|write_member_outbox_layout_declaration|selected.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|write_member_outbox_layout_declaration|fs::remove_file(&seed_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/member_outbox_layout.rs|install_member_outbox_layout_marker|original.marker.sync_all().map_err(io)?;']=1
   # SAME-original warm retained-A recovery only. A distinct fresh Current repair marker
   # verifies complete authenticated MAIN before extending ONLY matching listed prefixes;
   # a distinct scratch marker verifies the original strict pre-MAIN prefix, parent and

@@ -107,10 +107,22 @@ impl ServerStore {
         if actual_format != catcoms_storage::VaultFormat::CriticalNamespaces {
             return Err(refused());
         }
+        // Namespace5 first: an in-progress member declaration owns the catalog stage slot
+        // (its empty legacy fence or partial candidate), which the ID3 inspector below would
+        // otherwise refuse. Only an opener with the concrete handler gets here with it; every
+        // other opener already refused the member artifacts in `open_critical_namespace_gate`.
+        let member = if self.member_outbox_policy().is_some() {
+            self.inspect_and_repair_member_outbox_declaration()?
+        } else {
+            None
+        };
         let layout = self.inspect_and_repair_current_declaration()?;
         self.open_archive_bootstrap_catalog_gate(actual_format, passphrase, rng)?;
         if let Some(layout) = layout {
             self.install_current_layout_marker(layout)?;
+        }
+        if let Some(member) = member {
+            self.install_member_outbox_layout_marker(member)?;
         }
         Ok(())
     }

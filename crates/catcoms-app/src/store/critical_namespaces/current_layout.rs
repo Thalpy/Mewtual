@@ -268,6 +268,10 @@ const _: () = assert!(
 /// initial common opening pays its own reads/gates; only after that phase drops do we acquire
 /// an ID2 retained-candidate fee (if needed), release it after completion, then acquire ID3's.
 pub struct PreparedV2CurrentLayoutStore {
+    // FIRST: an unfinished namespace5 declaration's original Files and large copies drain
+    // before the Store below releases its actual vault session.
+    member_declaration: Option<Box<super::member_outbox_layout::Declaration>>,
+    member_declaration_fee: Option<CatalogReadReservation>,
     archive: Option<PreparedArchiveBootstrapStore>,
     store: Option<Box<ServerStore>>,
     declaration: Option<Box<Declaration>>,
@@ -339,6 +343,8 @@ impl PreparedV2CurrentLayoutStore {
             )
         };
         Ok(Self {
+            member_declaration: None,
+            member_declaration_fee: None,
             archive,
             store,
             declaration: None,
@@ -409,6 +415,18 @@ impl PreparedV2CurrentLayoutStore {
         }
         store.initialize_current_lineage_index()?;
         store.validate_mounted_current_layout()?;
+        if store.member_outbox_policy().is_some() {
+            // Declaration debts are serial: the completed ID3 declaration's large copies and
+            // fee drain BEFORE namespace5 reserves its own declaration fee.
+            drop(self.declaration.take());
+            drop(self.declaration_fee.take());
+            store.retry_member_outbox_layout_declaration(
+                &mut self.member_declaration,
+                &mut self.member_declaration_fee,
+                rng,
+            )?;
+            store.validate_mounted_current_layout()?;
+        }
         self.complete = true;
         Ok(())
     }
@@ -416,10 +434,11 @@ impl PreparedV2CurrentLayoutStore {
     /// Owning refusal retains SAME physical Store/candidates/fees; no raw Store escapes.
     pub fn into_current_layout_store(mut self) -> Result<V2CurrentLayoutStore, Self> {
         if !self.complete
-            || self
-                .store
-                .as_ref()
-                .is_none_or(|store| store.validate_mounted_current_layout().is_err())
+            || self.store.as_ref().is_none_or(|store| {
+                store.validate_mounted_current_layout().is_err()
+                    || (store.member_outbox_policy().is_some()
+                        && store.validate_mounted_member_outbox_layout().is_err())
+            })
         {
             return Err(self);
         }
@@ -428,6 +447,8 @@ impl PreparedV2CurrentLayoutStore {
         };
         // Destructure rather than dropping a phase fee while its exact ciphertext survives.
         let Self {
+            member_declaration,
+            member_declaration_fee,
             archive: _,
             store: _,
             declaration,
@@ -435,6 +456,8 @@ impl PreparedV2CurrentLayoutStore {
             complete: _,
             _wrapper_fee,
         } = self;
+        drop(member_declaration);
+        drop(member_declaration_fee);
         drop(declaration);
         drop(declaration_fee);
         Ok(V2CurrentLayoutStore {
