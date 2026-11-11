@@ -273,7 +273,10 @@ pub struct PreparedV2CurrentLayoutStore {
     // before the Store below releases its actual vault session.
     member_declaration: Option<Box<super::member_outbox_layout::Declaration>>,
     member_declaration_fee: Option<CatalogReadReservation>,
-    archive: Option<PreparedArchiveBootstrapStore>,
+    // Boxed so the owning refusal `into_current_layout_store -> Err(Self)` stays a small
+    // move (`clippy::result_large_err`) now that the namespace5 slots above exist. Boxing
+    // changes neither drop order nor which fee pays for the archive phase.
+    archive: Option<Box<PreparedArchiveBootstrapStore>>,
     store: Option<Box<ServerStore>>,
     declaration: Option<Box<Declaration>>,
     declaration_fee: Option<CatalogReadReservation>,
@@ -337,9 +340,9 @@ impl PreparedV2CurrentLayoutStore {
                 .pool
                 .try_reserve(archive_bootstrap::DECLARATION_FEE)?;
             (
-                Some(PreparedArchiveBootstrapStore::from_private_current_open(
-                    store, phase_fee,
-                )?),
+                Some(Box::new(
+                    PreparedArchiveBootstrapStore::from_private_current_open(store, phase_fee)?,
+                )),
                 None,
             )
         };
@@ -359,11 +362,11 @@ impl PreparedV2CurrentLayoutStore {
     pub fn retry(&mut self, rng: &mut impl CryptoRngCore) -> Result<(), AppError> {
         if let Some(archive) = self.archive.as_mut() {
             archive.retry(rng)?;
-            let archive = self.archive.take().ok_or_else(refused)?;
+            let archive = *self.archive.take().ok_or_else(refused)?;
             match archive.into_store() {
                 Ok(store) => self.store = Some(Box::new(store)),
                 Err(archive) => {
-                    self.archive = Some(archive);
+                    self.archive = Some(Box::new(archive));
                     return Err(refused());
                 }
             }
