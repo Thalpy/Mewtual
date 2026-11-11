@@ -67,8 +67,11 @@ Public root API for the native consumer (no Tauri types in root):
 `V2MemberSaveRefusal`: `Unavailable`, `Busy`, `Retained { token }` (another request's
 original is retained for this context; resume that token), `Conflict` (including any
 same-token retry with changed DATA), `Pressure`, `Signing`, `Unresolved`, `Incomplete`,
-`Failed`, `Cancelled`, `Stale`; none means a write happened or "absent". The outbox engine key is the vault database key (unchanged format). No wire or
-persistence format changes. [Save path](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+`Failed`, `Cancelled`, `Stale`; none means a write happened or "absent". `Retained` is
+not terminal: while another token's original is retained, even an exact retry of an
+already saved token reports it, so the composer resumes the named token first. The outbox
+engine key is the vault database key (unchanged format). No wire or persistence format
+changes. [Save path](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
 
 ## Ordinary member outbox (8 November; storage-only)
 

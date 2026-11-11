@@ -697,11 +697,16 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         if admissible {
             return Ok(());
         }
-        ensure_owner(env, &mut state.owner)?;
-        let fee = env
-            .mount
-            .pay(MEMBER_OUTBOX_APPEND_FEE)
-            .map_err(|_| V2MemberSaveRefusal::Busy)?;
+        // Serial invoices: the unused lookup payment drains before recovery, and the old
+        // presealed append's payment drains before the new one is reserved.
+        drop(env.lookup_fee.take());
+        let owner = ensure_owner(env, &mut state.owner)?;
+        if matches!(state.custody.as_ref(),
+            Some(MemberOriginalCustody::Prepared(prepared)) if prepared.admissible_by(owner))
+        {
+            // Recovery restored the prepared parent: no reseal needed.
+            return Ok(());
+        }
         let prepared = match state.custody.take() {
             Some(MemberOriginalCustody::Prepared(prepared)) => prepared,
             other => {
@@ -711,6 +716,14 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         };
         let token = prepared.admission_facts().token;
         let original = (*prepared).abandon();
+        let Ok(fee) = env.mount.pay(MEMBER_OUTBOX_APPEND_FEE) else {
+            state.custody = Some(MemberOriginalCustody::Unresolved {
+                token,
+                original,
+                lost: false,
+            });
+            return Err(V2MemberSaveRefusal::Busy);
+        };
         let Some(outbox) = state.owner.as_mut() else {
             state.custody = Some(MemberOriginalCustody::Unresolved {
                 token,

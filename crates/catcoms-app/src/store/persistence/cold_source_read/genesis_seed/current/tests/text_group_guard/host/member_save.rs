@@ -363,7 +363,7 @@ fn an_uncertain_commit_keeps_the_exact_original_and_the_next_call_resolves_it_wi
         Ok(V2MemberSaveOutcome::Ready)
     );
     let dispatches = member_sign_dispatches_for_test();
-    member_outbox_crash_at_for_test(MemberOutboxTestCut::FirstOutputWritten);
+    member_outbox_crash_at_for_test(MemberOutboxTestCut::FirstOutput);
     let (admission, released) = native(&live);
     let job = f
         .host
@@ -394,7 +394,7 @@ fn a_job_that_unwinds_mid_commit_leaves_its_original_recoverable_and_never_signs
     );
     let dispatches = member_sign_dispatches_for_test();
     member_outbox_call_at_for_test(
-        MemberOutboxTestCut::FirstOutputWritten,
+        MemberOutboxTestCut::FirstOutput,
         Box::new(|| panic!("injected unwind inside the admitted commit")),
     );
     let (admission, released) = native(&live);
@@ -437,7 +437,7 @@ fn cancellation_and_receiver_loss_during_paused_io_cannot_cancel_admitted_work()
     let held_at_pause = Arc::new(AtomicBool::new(false));
     let (observed, seen) = (held_at_pause.clone(), released.clone());
     member_outbox_call_at_for_test(
-        MemberOutboxTestCut::HeadStageWritten,
+        MemberOutboxTestCut::HeadStage,
         Box::new(move || {
             // A lock or replacement publishes cancellation and the reply receiver vanishes
             // while the admitted write is paused between its head stage and the CAS.
@@ -494,7 +494,7 @@ fn a_replacement_lane_adopts_a_retained_original_instead_of_signing_again() {
         Ok(V2MemberSaveOutcome::Ready)
     );
     let dispatches = member_sign_dispatches_for_test();
-    member_outbox_crash_at_for_test(MemberOutboxTestCut::FirstOutputWritten);
+    member_outbox_crash_at_for_test(MemberOutboxTestCut::FirstOutput);
     let (admission, _) = native(&live);
     let job = f
         .host
@@ -623,7 +623,7 @@ fn a_same_token_retry_with_changed_data_is_a_conflict_in_every_custody_state() {
         f.prepare([0xc2; 32], &second, &live),
         Ok(V2MemberSaveOutcome::Ready)
     );
-    member_outbox_crash_at_for_test(MemberOutboxTestCut::FirstOutputWritten);
+    member_outbox_crash_at_for_test(MemberOutboxTestCut::FirstOutput);
     let (admission, _) = native(&live);
     let job = f
         .host
@@ -668,10 +668,12 @@ fn another_tokens_retained_original_is_named_rather_than_reported_busy() {
         f.prepare([0xd2; 32], &other, &live),
         Ok(V2MemberSaveOutcome::Ready)
     );
-    assert!(matches!(
+    // Retained is NOT terminal: even an exact retry of the already saved token names the
+    // retained other token until that one is finished (composer contract).
+    assert_eq!(
         f.prepare([0xd1; 32], &first, &live),
         Err(V2MemberSaveRefusal::Retained { token: [0xd2; 32] })
-    ));
+    );
 }
 
 #[test]
@@ -686,7 +688,7 @@ fn an_unwind_before_the_commit_point_re_presealing_the_same_original_after_an_ab
     let dispatches = member_sign_dispatches_for_test();
     let parent = f.vault.join("chat-owner-v2").join("member-outbox-v1");
     member_outbox_call_at_for_test(
-        MemberOutboxTestCut::WalStageWritten,
+        MemberOutboxTestCut::WalStage,
         Box::new(move || {
             // Tear the pre-commit WAL stage as an interrupted write would, then die before it
             // is renamed onto the WAL: nothing was ever committed.
@@ -760,18 +762,16 @@ fn the_member_context_pin_identity_is_the_on_disk_pin_ciphertext_in_every_family
     use crate::store::critical_namespaces::archive_current_codec::V2GroupPinId;
     // The stable context's pin component comes from the EXACT authenticated pin ciphertext,
     // which every family (warm, cold, repaired) retains from the same file a restart reads.
-    // So a receipt saved under one family's host is found under another's after restart.
+    // This pins only that component; a full warm-save then cold-reopen Hit is not covered.
     for family in 0..3 {
         let original = text_fixture(family, 0x7fbd0 + family as u64);
         let owner = original.owner.borrow_current().unwrap();
         let id = owner.original_pin_id_data().unwrap();
-        assert!(owner.original_pin_id_data().unwrap() == id);
         let pins = pin_files(original._directory.path());
         assert!(
             pins.iter()
                 .any(|pin| V2GroupPinId::of(&std::fs::read(pin).unwrap()) == id),
             "family {family}: the pin identity must name an on-disk pin ciphertext"
         );
-        drop(owner);
     }
 }

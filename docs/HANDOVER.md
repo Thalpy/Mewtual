@@ -23,12 +23,16 @@ unrelated token untouched, a lookup read failure before signing, same-token chan
 a conflict in every custody state, another token's retained original named, and the pin
 identity matching the on-disk pin ciphertext in all three families) and two cross-platform
 mount cases. None has run: local Cargo is paused and CI stops at the base branch's strict
-Clippy debt before tests. CI's Clippy pass type-checked `0371efbe` (library and test
-library, Linux and Windows) with no compile error and no new lint in the changed files.
+Clippy debt before tests. CI's Clippy pass type-checks the library and test library on Linux
+and Windows: `0371efbe` had no compile error and no new lint in the changed files; the
+review-fix commit `00c8b32d` introduced one Windows test compile error (an array-repeat
+pattern) and two new lints (`enum_variant_names` on the test-cut enum, `drop_non_drop` in a
+test), all fixed in the next commit, whose CI result is pending.
 
 The read-only adversarial review of `0371efbe` found no BLOCKER. Its HIGH (a same-token retry
-with changed DATA reported Ready or Saved) and its MEDIUM/LOW code findings are fixed in the
-follow-up; one MEDIUM is a recorded primary decision (retained plaintext across UI lock).
+with changed DATA reported Ready or Saved) and its MEDIUM/LOW code findings are fixed; one
+MEDIUM is a recorded primary decision (retained plaintext across UI lock). A short re-review
+of the fixes found no BLOCKER/HIGH/MEDIUM; its LOW notes are fixed or listed as follow-ups.
 
 Not done: F's native producer and barrier tests (root fixtures use a test custody box and
 establish no native authorization); true host replacement with a second whole owner (the

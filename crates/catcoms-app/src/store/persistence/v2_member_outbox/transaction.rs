@@ -90,19 +90,19 @@ thread_local! {
 #[derive(Clone, Copy, Debug)]
 pub(in crate::store) enum MemberOutboxTestCut {
     /// After the complete WAL stage is written, BEFORE it becomes MAIN (pre-commit).
-    WalStageWritten,
+    WalStage,
     /// After the WAL is MAIN and the first immutable output exists (commit point passed).
-    FirstOutputWritten,
+    FirstOutput,
     /// After the head stage is complete, before the selector CAS.
-    HeadStageWritten,
+    HeadStage,
 }
 #[cfg(test)]
 impl MemberOutboxTestCut {
     fn cut(self) -> Cut {
         match self {
-            Self::WalStageWritten => Cut::WalStageWritten,
-            Self::FirstOutputWritten => Cut::OutputWritten(0),
-            Self::HeadStageWritten => Cut::HeadStageWritten,
+            Self::WalStage => Cut::WalStageWritten,
+            Self::FirstOutput => Cut::OutputWritten(0),
+            Self::HeadStage => Cut::HeadStageWritten,
         }
     }
 }
