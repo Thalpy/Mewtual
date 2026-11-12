@@ -7,6 +7,33 @@ use std::sync::Arc;
 
 use crate::{AutoCommit, Automerge, Change, ChangeHash};
 
+// Opt-in dev instrumentation only. Resolver2 keeps the replication dev-dependency's
+// feature out of normal application builds. No operation contents or global cross-test
+// state are recorded; observers can prove that a read did not enter reconstruction.
+#[cfg(feature = "history-recovery-test-counters")]
+thread_local! {
+    static RECOVERY_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+#[cfg(feature = "history-recovery-test-counters")]
+/// Test-only cumulative reconstruction/value visits on this thread; contains no history.
+pub fn history_recovery_work_on_this_thread() -> (usize, usize) {
+    RECOVERY_WORK.with(std::cell::Cell::get)
+}
+#[cfg(feature = "history-recovery-test-counters")]
+pub(crate) fn note_history_reconstruction() {
+    RECOVERY_WORK.with(|work| {
+        let (reconstructed, values) = work.get();
+        work.set((reconstructed.saturating_add(1), values));
+    });
+}
+#[cfg(feature = "history-recovery-test-counters")]
+pub(crate) fn note_history_value() {
+    RECOVERY_WORK.with(|work| {
+        let (reconstructed, values) = work.get();
+        work.set((reconstructed, values.saturating_add(1)));
+    });
+}
+
 /// An opaque, process-local document-instance identity for rejecting replaced-source cursors.
 ///
 /// Repeated reads and token clones compare equal. A newly constructed, loaded, cloned or forked

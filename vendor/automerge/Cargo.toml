@@ -26,6 +26,7 @@ license = "MIT"
 repository = "https://github.com/automerge/automerge"
 
 [features]
+history-recovery-test-counters = []
 optree-visualisation = ["dot"]
 slow_path_assertions = ["hexane/slow_path_assertions"]
 utf16-indexing = []

@@ -29,6 +29,7 @@ use crate::ReplError;
 use crate::{CheckpointOrigin, VerifiedCheckpoint};
 
 mod history;
+mod saved_local_recovery;
 pub use history::{
     SignedHistoryError, SignedHistoryIndex, SignedHistoryProgress, SignedHistoryRow,
     HISTORY_HASH_BYTES_PER_TURN, HISTORY_RECORDS_PER_TURN, HISTORY_SIGNATURES_PER_TURN,
@@ -66,6 +67,9 @@ pub struct SavedLocalChatRecovery {
     change: ChangeHash,
     position: usize,
     found: Option<SavedLocalChatOp>,
+    active: Option<saved_local_recovery::RecoveryPhase>,
+    #[cfg(test)]
+    last_work: saved_local_recovery::RecoveryWork,
 }
 impl fmt::Debug for SavedLocalChatRecovery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -602,6 +606,9 @@ impl EncryptedDoc {
             change,
             position: 0,
             found: None,
+            active: None,
+            #[cfg(test)]
+            last_work: saved_local_recovery::RecoveryWork::default(),
         }
     }
 
@@ -610,7 +617,7 @@ impl EncryptedDoc {
     /// A completed but missing/contradictory original refuses promotion visibly; a later appended
     /// authenticated catch-up can be scanned on a subsequent retry with this same cursor.
     pub fn recover_saved_local_chat_op(
-        &mut self,
+        &self,
         device: &MlsDevice,
         progress: &mut SavedLocalChatRecovery,
     ) -> Result<Option<SavedLocalChatOp>, ReplError> {
@@ -621,51 +628,7 @@ impl EncryptedDoc {
         {
             return Err(ReplError::Malformed);
         }
-        let target = self
-            .doc
-            .get_change_by_hash(&progress.change)
-            .ok_or(ReplError::Malformed)?;
-        let target = target.raw_bytes();
-        if target.len() > MAX_SAVED_LOCAL_CHAT_BYTES {
-            return Err(ReplError::Malformed);
-        }
-        let mut scanned = 0usize;
-        let mut bytes = 0usize;
-        while let Some(op) = self.log.get(progress.position) {
-            let candidate = op.doc_type == self.doc_type
-                && op.doc_id == self.doc_id
-                && op.author_device == device.device_id()
-                && op.delta.len() == target.len();
-            let body_work = if candidate { op.delta.len() } else { 0 };
-            if scanned == MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS
-                || bytes.saturating_add(body_work) > MAX_LOCAL_CHAT_RECOVERY_SCANNED_BYTES
-            {
-                return Ok(None);
-            }
-            scanned += 1;
-            bytes += body_work;
-            // The already accepted DAG supplies canonical target bytes. Compare bounded raw
-            // bytes instead of parsing/decompressing every archived change under a metadata turn.
-            // Never infer a signature from actor bytes; the exact matching envelope is reverified.
-            if !candidate || op.delta.as_slice() != target {
-                progress.position += 1;
-                continue;
-            }
-            let exact =
-                SavedLocalChatOp::decode(&op.encode(), device, self.doc_id, progress.change)?;
-            if progress
-                .found
-                .as_ref()
-                .is_some_and(|previous| previous.encode() != exact.encode())
-            {
-                return Err(ReplError::BadSignature);
-            }
-            progress.found = Some(exact);
-            // Advance only after verification. A retry must never skip an envelope that failed
-            // signature/ambiguity checks on the preceding turn.
-            progress.position += 1;
-        }
-        progress.found.clone().map(Some).ok_or(ReplError::Malformed)
+        saved_local_recovery::recover(self, device, progress)
     }
 
     /// Verified signer of the change that created an object, where that signed history exists.
