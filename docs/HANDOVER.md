@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Primary namespace5 review (11 November; validation queued, one slow case deferred)
+## Primary namespace5 review (12 November; focused acceptance passed, broader failures open)
 
 Two fresh read-only actual-diff reviews of `ea7e4ae1..d475ddb1` found no confirmed
 BLOCKER/HIGH/MEDIUM. Three LOWs are corrected: comments now distinguish disposable
@@ -34,19 +34,33 @@ scope selection can execute root, native or both. It uses ordinary Cargo executi
 of strict Clippy, with one build job, two test threads and the default stack; it
 does not suppress warnings or change `ci.yml` or audit policy. Its workflow-only
 path filter is this integration PR's explicit execution lane, not a permanent
-all-source validation policy after merge. Results remain pending. The first run
+all-source validation policy after merge. The first run
 at `3c904440` mistakenly included the deferred case and was cancelled by the
 primary; its unfinished Rust jobs are not passes. Its frontend portion did pass
 3,434 tests, checking and build. This cancellation did not affect the separate
 focused namespace5 workflow.
 
 The corrected [manual integration run](https://github.com/Thalpy/Mewtual/actions/runs/43122799845)
-at `0eb29686` is executing all four Rust jobs. Its runtime/test source is identical
-to the focused-tested `3c904440`; only CI execution policy and documentation differ.
-No final Rust totals are recorded yet. A read-only reviewer is observing its
-outcomes; it cannot rerun or change the checks. The expanded native prerequisites
-now specify a reviewed fresh-founder first vertical and concrete key-admission
-lifecycle, but supply no native implementation or restart acceptance.
+at `0eb29686` has passed the Linux root job: 5,211 passed, zero failed, 29 existing
+ignores and exactly one filtered test (the deferred cost case). Windows root is
+still running at this checkpoint. Its runtime/test source is identical to the
+focused-tested `3c904440`; only CI execution policy and documentation differ.
+Both complete native jobs failed: Linux 1,007 passed/41 failed and Windows 1,030
+passed/18 failed, including six passing command-ACL cases per OS. There are two
+original failures: Linux's failed-media sibling test did not observe a fresh
+authenticated Current, and Windows's original-SDP-result test unwrapped a local
+`Protocol(Capacity)` at `integration/pc.rs:137`. The remaining 40/17 failures are
+the fixture's deliberate semaphore-close cascades after failed teardown. These
+are unresolved failures, not green acceptance or established production defects.
+Separate native checks passed on both OSes; Linux frontend passed 3,434 tests,
+checking and build, and Windows assets built. Read-only failure diagnosis is in
+progress; no limits, timeouts or assertions have been weakened.
+
+The expanded native prerequisites specify a reviewed fresh-founder first vertical
+and concrete key-admission lifecycle, but supply no native implementation or
+restart acceptance. [Agent C's brief](communication-recovery/CHAT-V2-AGENT-C-BRIEF.md)
+now assigns genuine joined-member sources and founder-offline ordinary saves on a
+separate branch; the primary retains native integration and broader validation.
 
 Local Cargo remains paused. Standalone rustfmt, the Python exact-count guard
 self-check, and the static ambient/raw-filesystem checks pass. The current root
