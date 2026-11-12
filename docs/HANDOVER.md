@@ -1,5 +1,57 @@
 # Mewtual; Handover
 
+## Agent C Core/Sync seams (12 November; authored, NOT executed)
+
+Branch `chat-v2-joined-member-source`, from `8674813c`. Four commits implement only the
+narrow seams the coordinator approved. There is no App joined source, governance replay,
+pin, lane/save change or historical custody yet, and Chat V2 stays disabled.
+
+- **Core read accessors:** `mls_epoch_data`, `is_open_data` and `require_open_data`, plus
+  the joined consumer named in the `from_trusted_host` contract.
+- **Sync join facts:** captured in `finish_join`, exact `new_joined` handoff, a once-only
+  take, and exclusion of the v1 owner checkpoint install.
+- **Sync live source fence:**
+  - It brackets every merge and records finalized transitions (commit digest,
+    authenticator, `DeviceId` delta).
+  - A contest flag is updated at every `pending` write.
+  - Final-admission custody is held while the save-source end is issued; the `closed`
+    atomic sits beside the mutex.
+  - It closes for good on removal, drop, v1 install, cancel or fork. Bytes-less,
+    non-contiguous or overflowing history is a terminal `HistoryGap`.
+
+Every invite-joined legacy member now carries a fence: two device-id roster listings and a
+short lock per merge. Founder and other non-joined nodes are unchanged.
+
+Execution: local Cargo is paused, so nothing compiled or ran. Standalone rustfmt
+(catcoms-sync and catcoms-replication) and `scripts/check-no-ambient.sh` pass. The full
+suites, strict Clippy and native checks still need CI through the primary.
+
+The adversarial diff review of `8674813c..c34e43b7` found 1 BLOCKER, 1 HIGH, 4 MEDIUM and 5
+LOW. All of these are fixed in the follow-up commit:
+- **BLOCKER:** a test compile error (`snapshot` needs `&mut`).
+- **HIGH:** a wrong test assertion (`initial_owner_evidence` is `Some` in the v1 fixture).
+- **M1:** the admission custody now closes the fence on unwind.
+- **M2:** the delta is computed from one sorted device-id roster pass, not per-key
+  lookups.
+- **M3:** a node's own legacy Add records its result's commit (`with_observed_mls_add`),
+  not `HistoryGap`.
+- **M4:** a non-contiguous bracket is a `HistoryGap`, and the fence now settles before
+  the observer hooks can unwind.
+- **LOWs:**
+  - a reserved Remove(self) ring slot;
+  - an install refuses to cover Neutral/Multiple/inactive deltas;
+  - doc corrections.
+
+Remaining:
+- `Diverged` marking at header-valid apply failures (needs a fault seam for its
+  regression).
+- No test yet produces a real neutral or multi-member delta, a header-valid winner that
+  fails to apply, staged we-won/we-lost branches on a joined committer, a ring overflow, or
+  a threaded race between `admit_final` and a merge.
+- The v1-exclusion tests are necessarily synthetic: a genuinely joined node cannot reach
+  that install.
+- A short re-review of the fixes is still owed.
+
 ## Agent C draft-4 decisions (12 November; durable fork backing required)
 
 The primary chooses durable backing, option (c), for the completed joined source.
