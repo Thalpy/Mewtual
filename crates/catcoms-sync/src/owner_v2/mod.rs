@@ -30,7 +30,9 @@ pub use founder::{
     MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES, MAX_CREATE_PADDED_BYTES,
     V2_GENESIS_SEED_METADATA_BYTES,
 };
-pub(crate) use joined_fence::JoinedFenceNode;
+#[cfg(test)]
+pub(crate) use joined_fence::faults as joined_fence_faults;
+pub(crate) use joined_fence::{JoinedFenceNode, V2MergeResult};
 pub use joined_fence::{
     V2AppliedTransition, V2JoinedFenceAdmission, V2JoinedFenceObservation, V2JoinedFenceRefusal,
     V2JoinedFenceTerminal, V2JoinedSourceFence, V2TransitionDelta, V2_JOINED_TRANSITION_CAPACITY,

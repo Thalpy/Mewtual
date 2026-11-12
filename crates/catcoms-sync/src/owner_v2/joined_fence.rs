@@ -132,6 +132,9 @@ pub enum V2JoinedFenceTerminal {
     /// The node changed in a way this fence cannot account for: a merge without its commit
     /// bytes, or more unconsumed transitions than the ring retains.
     HistoryGap { epoch: u64 },
+    /// An authenticated/current commit could not be applied, or its merge unwound. The old
+    /// selected state cannot establish that this incarnation is still eligible to author.
+    Diverged { epoch: u64 },
     /// The v1 owner checkpoint install bound this node (it bypasses the transition observer).
     V1Owner,
     /// The joined source cancelled or replaced itself.
@@ -189,8 +192,11 @@ struct FenceState {
 }
 impl FenceState {
     /// The single authorization predicate, under the lock.
-    fn authorized(&self, own: &[u8; 32]) -> Result<(), V2JoinedFenceRefusal> {
-        if self.terminal.is_some() {
+    fn authorized(&self, closed: &AtomicBool, own: &[u8; 32]) -> Result<(), V2JoinedFenceRefusal> {
+        // A section entered during an existing unwind need not poison std's mutex. Its
+        // unwind guard can nevertheless have closed this original source. The monotone
+        // negative is therefore mandatory even while the state mutex is healthy.
+        if closed.load(Ordering::Acquire) || self.terminal.is_some() {
             return Err(V2JoinedFenceRefusal::Closed);
         }
         if self.merging || self.contested {
@@ -260,6 +266,40 @@ impl Drop for CloseOnUnwind<'_> {
         if std::thread::panicking() {
             self.0.store(true, Ordering::Release);
         }
+    }
+}
+
+/// Cover the whole observer, including hooks outside the settlement mutex. This owns only
+/// the already-paid fence, so no node loan survives through the SDK call or its hooks.
+pub(crate) struct V2FenceUnwind(Option<Arc<FenceInner>>);
+impl Drop for V2FenceUnwind {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            if let Some(inner) = &self.0 {
+                inner.closed.store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
+/// Classification made by the observer from its ORIGINAL pre-work group and actual result.
+/// It is internal execution DATA, not an externally supplied failure/authority flag.
+#[derive(Clone, Copy)]
+pub(crate) enum V2MergeResult {
+    Observed(Option<[u8; 32]>),
+    RefusedCurrent([u8; 32]),
+    Panicked,
+}
+impl V2MergeResult {
+    pub(crate) fn commit_data(self) -> Option<[u8; 32]> {
+        match self {
+            Self::Observed(commit) => commit,
+            Self::RefusedCurrent(commit) => Some(commit),
+            Self::Panicked => None,
+        }
+    }
+    fn diverged(self) -> bool {
+        matches!(self, Self::RefusedCurrent(_) | Self::Panicked)
     }
 }
 
@@ -347,8 +387,19 @@ impl V2JoinedSourceFence {
     ) -> Result<(), V2JoinedFenceRefusal> {
         let mut state = self.inner.lock()?;
         let _unwind = CloseOnUnwind(&self.inner.closed);
-        if state.terminal.is_some() {
+        if self.inner.closed.load(Ordering::Acquire) || state.terminal.is_some() {
             return Err(V2JoinedFenceRefusal::Closed);
+        }
+        let selected = Selected {
+            epoch,
+            authenticator,
+            own,
+        };
+        // Consumed transitions must not make an exact retry (or a later Append at the same
+        // MLS state) forget its already-established selection. This shortcut binds ALL
+        // three fields and issues no new selection or transition allowance.
+        if state.selected == Some(selected) {
+            return Ok(());
         }
         let finalized = state.join == (epoch, authenticator)
             || state.transitions.iter().any(|transition| {
@@ -377,18 +428,14 @@ impl V2JoinedSourceFence {
         {
             state.transitions.pop_front();
         }
-        state.selected = Some(Selected {
-            epoch,
-            authenticator,
-            own,
-        });
+        state.selected = Some(selected);
         Ok(())
     }
 
     /// Signing-gate check (blocking lock, for the source that already holds the node loan).
     pub fn require_authorized(&self, own: &[u8; 32]) -> Result<(), V2JoinedFenceRefusal> {
         let state = self.inner.lock()?;
-        state.authorized(own)
+        state.authorized(&self.inner.closed, own)
     }
 
     /// FINAL save admission: `try_lock` (never waits), check, and return custody that keeps the
@@ -400,7 +447,7 @@ impl V2JoinedSourceFence {
         own: &[u8; 32],
     ) -> Result<V2JoinedFenceAdmission<'_>, V2JoinedFenceRefusal> {
         let state = self.inner.try_lock()?;
-        state.authorized(own)?;
+        state.authorized(&self.inner.closed, own)?;
         Ok(V2JoinedFenceAdmission {
             _unwind: CloseOnUnwind(&self.inner.closed),
             _state: state,
@@ -423,6 +470,13 @@ impl V2JoinedSourceFence {
 #[derive(Default)]
 pub(crate) struct JoinedFenceNode(Option<Arc<FenceInner>>);
 impl JoinedFenceNode {
+    pub(crate) fn is_present(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub(crate) fn unwind_guard(&self) -> V2FenceUnwind {
+        V2FenceUnwind(self.0.clone())
+    }
     /// A fresh fence for a genuinely joined node, settled at its post-Welcome state.
     pub(crate) fn for_join(group: &ServerGroup) -> Self {
         let state = (group.epoch(), group.epoch_authenticator_id());
@@ -512,7 +566,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub(crate) fn v2_fence_end_merge(
         &self,
         bracket: Option<V2MergeBracket>,
-        commit: Option<[u8; 32]>,
+        result: V2MergeResult,
     ) {
         let Some(bracket) = bracket else {
             return;
@@ -525,7 +579,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let transition = (after != bracket.before).then(|| V2AppliedTransition {
             before_epoch: bracket.before.0,
             after_epoch: after.0,
-            commit,
+            commit: result.commit_data(),
             authenticator: after.1,
             delta: delta(&bracket.ids, &roster_ids(&self.group)),
             own_active: self.group.is_active()
@@ -545,6 +599,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         let Some(transition) = transition else {
+            if result.diverged() {
+                state.terminate(
+                    &inner.closed,
+                    V2JoinedFenceTerminal::Diverged {
+                        epoch: bracket.before.0,
+                    },
+                );
+            }
             return;
         };
         state.settled = after;
@@ -563,6 +625,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         state.transitions.push_back(transition);
         if !transition.own_active {
             state.terminate(&inner.closed, V2JoinedFenceTerminal::Removed);
+        }
+        // Preserve an actual changed-state transition above, but never reopen authorization
+        // after a failed current commit. This happens under the SAME settlement lock as
+        // clearing `merging`; a caller's later Err arm would leave an admission window.
+        if result.diverged() {
+            state.terminate(
+                &inner.closed,
+                V2JoinedFenceTerminal::Diverged {
+                    epoch: bracket.before.0,
+                },
+            );
         }
     }
 
@@ -592,5 +665,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod faults;
 #[cfg(test)]
 mod tests;

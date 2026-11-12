@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Primary review of C's Core/Sync seams (12 November; CI pending)
+
+Integration branch `chat-v2-joined-source-integration` starts from C's pushed
+`0bcc808e`; C's branch and PR #86 are unchanged. The primary's actual-diff review
+found an authority gap in failed current-epoch commit settlement, an exact
+selected-state retry defect, and disagreement between the atomic closed flag and
+positive gates after a section entered during an existing unwind. These are
+fixed on the integration branch; this paragraph records authored changes, not
+compiled or executed results.
+
+The commit observer classifies against its ORIGINAL group/header/epoch. A failed
+current commit closes as Diverged in the SAME settlement section that clears
+merging, before the caller's Err arm. Invalid/noncommit headers remain the
+negative control. Actual changed-state evidence is retained when its commit is
+known; uncertain panic effects close without inventing an applied transition.
+An observer-wide unwind guard covers hooks outside that section. Every positive
+gate also checks the monotone atomic negative under its state guard. Repeating
+the exact already-selected epoch/authenticator/Admission is idempotent after
+transition consumption; altered tuples gain no such shortcut.
+
+Six new regressions use original-node/exact-commit scoped faults for genuine
+Remove/self refusal (real in-order and pre-caller boundaries), failed contest
+winner, uncertain merge panic, hook panic after actual settlement, and atomic
+closure without mutex poison, plus an error after a successful real SDK apply
+that must retain exact Add/Remove transition evidence. The existing Add test
+additionally covers exact retry and altered authenticator/Admission. Focused CI
+pins 56 executed, nonignored cases on each OS: three Core accessors, three join-fact, sixteen fence,
+eleven owner-operation (including two new V1 exclusion), seventeen tenure and six
+founder-member cases. These are 24 new cases and 32 neighboring legacy controls.
+Its Python guard self-check passes without Cargo.
+Standalone formatting is applied. Full/strict/native/frontend validation remains
+open; local Cargo is still paused. No App joined source or durable fork archive
+is supplied by this seam integration.
+
 ## Agent C Core/Sync seams (12 November; authored, NOT executed)
 
 Branch `chat-v2-joined-member-source`, from `8674813c`. Five code commits (`68acfe6a`,
@@ -44,8 +78,8 @@ LOW. All of these are fixed in the follow-up commit:
   - doc corrections.
 
 Remaining:
-- `Diverged` marking at header-valid apply failures (needs a fault seam for its
-  regression).
+- At C's `0bcc808e` checkpoint, `Diverged` marking at header-valid apply failures
+  was missing. The separate primary integration above fixes it with scoped faults.
 - No test yet produces a real neutral or multi-member delta, a header-valid winner that
   fails to apply, staged we-won/we-lost branches on a joined committer, a ring overflow, or
   a threaded race between `admit_final` and a merge.
@@ -58,7 +92,9 @@ Short re-review of the fixes: B1, H1 and M1-M4 are confirmed fixed. It found one
 (strict-warnings dead code) and five LOWs. The BLOCKER is fixed in the next commit: switching
 the two admission sites to `with_observed_mls_add` left the bytes-less
 `with_observed_mls_transition` with no production caller, so it is now `#[cfg(test)]`. That
-also makes the bytes-less `HistoryGap` path unreachable in production. The LOWs are
+does not make every bytes-less gap unreachable: a production Add can merge and
+then fail before returning its commit bytes, which still closes as `HistoryGap`.
+Only the direct bytes-less helper is test-only. The LOWs were
 recorded, not fixed:
 - `CloseOnUnwind` also closes when a section is merely opened during an unwind, which fails
   closed;

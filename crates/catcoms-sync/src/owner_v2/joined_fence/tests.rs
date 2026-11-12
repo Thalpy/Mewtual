@@ -134,6 +134,246 @@ fn an_in_order_add_is_recorded_with_its_exact_commit_and_pauses_until_covered() 
     fence.require_authorized(&OWN).unwrap();
     assert_eq!(fence.transition_data(before).unwrap(), None);
     assert_eq!(fence.observe_data().unwrap().unconsumed, 0);
+    // The ring no longer carries this transition. Exact retry and later Appends at this
+    // same MLS state must still recognize the previously established selection.
+    fence
+        .install_selected(b.epoch(), b.group.epoch_authenticator_id(), OWN)
+        .unwrap();
+    assert_eq!(
+        fence.install_selected(b.epoch(), [9; 32], OWN),
+        Err(V2JoinedFenceRefusal::Unknown)
+    );
+    assert_eq!(
+        fence.install_selected(b.epoch(), b.group.epoch_authenticator_id(), [1; 32]),
+        Err(V2JoinedFenceRefusal::Unknown)
+    );
+    fence.require_authorized(&OWN).unwrap();
+}
+
+#[test]
+fn a_current_remove_refusal_closes_before_the_caller_can_handle_the_error() {
+    for direct in [false, true] {
+        let mut f = founder(0xd201);
+        let (mut b, fence, _clock) = join(&mut f, 0xd202, 0xe3);
+        settle_at_join(&b, &fence);
+        let epoch = b.epoch();
+        let authenticator = b.group.epoch_authenticator_id();
+        f.commit_remove_now(&b.device.device_id());
+        let record = f.commit_log.back().unwrap().clone();
+        assert!(b.authorize_committer(&record));
+        assert!(b.commit_record_refusal(&record).is_none());
+        let _fault = super::faults::arm(&b, &record.mls_commit, super::faults::Cut::RefuseCommit);
+        if direct {
+            // Check the settlement boundary BEFORE the in-order caller's Err arm exists.
+            // Moving revocation into that caller would leave this path authorized.
+            let result = b.with_observed_mls_commit(&record.mls_commit, |node| {
+                node.group
+                    .apply_commit(&node.device, &record.mls_commit, record.commit_epoch)
+            });
+            assert!(result.is_err());
+            assert_eq!(
+                fence.admit_final(&OWN).unwrap_err(),
+                V2JoinedFenceRefusal::Closed
+            );
+        } else {
+            assert!(!b.apply_commit_in_order(&record));
+        }
+        assert_eq!(b.epoch(), epoch);
+        assert_eq!(b.group.epoch_authenticator_id(), authenticator);
+        assert!(
+            b.group.is_active(),
+            "the fault prevented the real SDK apply"
+        );
+        let observed = fence.observe_data().unwrap();
+        assert!(!observed.merging && !observed.contested);
+        assert_eq!(
+            observed.terminal,
+            Some(V2JoinedFenceTerminal::Diverged { epoch })
+        );
+        assert_eq!(fence.transition_data(epoch).unwrap(), None);
+        assert_eq!(
+            fence.require_authorized(&OWN),
+            Err(V2JoinedFenceRefusal::Closed)
+        );
+        assert_eq!(
+            fence.admit_final(&OWN).unwrap_err(),
+            V2JoinedFenceRefusal::Closed
+        );
+        assert_eq!(
+            fence.install_selected(epoch, authenticator, OWN),
+            Err(V2JoinedFenceRefusal::Closed)
+        );
+    }
+}
+
+#[test]
+fn a_failed_real_contest_winner_cannot_reopen_its_previous_selected_authority() {
+    let mut f = founder(0xd211);
+    let (mut b, fence, clock) = join(&mut f, 0xd212, 0xe4);
+    settle_at_join(&b, &fence);
+    let epoch = b.epoch();
+    f.commit_remove_now(&b.device.device_id());
+    let record = f.commit_log.back().unwrap().clone();
+    b.config.stage_decision_window_ms = 10;
+    b.contest_commit(record.clone());
+    assert!(fence.observe_data().unwrap().contested);
+    let _fault = super::faults::arm(&b, &record.mls_commit, super::faults::Cut::RefuseCommit);
+    clock.set_wall_ms(2_000);
+    assert!(b.resolve_pending_if_expired());
+    assert_eq!(b.epoch(), epoch);
+    let observed = fence.observe_data().unwrap();
+    assert!(!observed.merging && !observed.contested);
+    assert_eq!(
+        observed.terminal,
+        Some(V2JoinedFenceTerminal::Diverged { epoch })
+    );
+    assert_eq!(
+        fence.admit_final(&OWN).unwrap_err(),
+        V2JoinedFenceRefusal::Closed
+    );
+    assert_eq!(fence.transition_data(epoch).unwrap(), None);
+}
+
+#[test]
+fn an_error_after_actual_apply_retains_the_exact_transition_and_closes_admission() {
+    for remove_self in [false, true] {
+        let mut f = founder(0xd251);
+        let (mut b, fence, _clock) = join(&mut f, 0xd252, 0xea);
+        settle_at_join(&b, &fence);
+        let epoch = b.epoch();
+        let (record, expected_delta) = if remove_self {
+            let own = *b.device.device_id().as_bytes();
+            f.commit_remove_now(&b.device.device_id());
+            (
+                f.commit_log.back().unwrap().clone(),
+                V2TransitionDelta::Removed(own),
+            )
+        } else {
+            let (record, added) = founder_adds(&mut f, 0xeb);
+            (record, V2TransitionDelta::Added(added))
+        };
+        let result: Result<(), MlsError> = b.with_observed_mls_commit(&record.mls_commit, |node| {
+            node.group
+                .apply_commit(&node.device, &record.mls_commit, record.commit_epoch)?;
+            Err(MlsError::Internal("test-only failure after actual apply"))
+        });
+        assert!(result.is_err());
+        assert_eq!(b.epoch(), epoch + 1);
+        let transition = fence.transition_data(epoch).unwrap().unwrap();
+        assert_eq!(transition.commit_data(), digest(&record));
+        assert_eq!(transition.delta_data(), expected_delta);
+        assert_eq!(transition.own_active_data(), !remove_self);
+        assert_eq!(
+            fence.observe_data().unwrap().terminal,
+            Some(if remove_self {
+                V2JoinedFenceTerminal::Removed
+            } else {
+                V2JoinedFenceTerminal::Diverged { epoch }
+            })
+        );
+        assert_eq!(
+            fence.admit_final(&OWN).unwrap_err(),
+            V2JoinedFenceRefusal::Closed
+        );
+    }
+}
+
+#[test]
+fn an_uncertain_merge_panic_closes_without_inventing_an_applied_transition() {
+    let mut f = founder(0xd221);
+    let (mut b, fence, _clock) = join(&mut f, 0xd222, 0xe5);
+    settle_at_join(&b, &fence);
+    let epoch = b.epoch();
+    let (record, _) = founder_adds(&mut f, 0xe6);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), MlsError> = b.with_observed_mls_commit(&record.mls_commit, |_node| {
+            panic!("merge work unwound before a result");
+        });
+    }));
+    assert!(failed.is_err());
+    assert_eq!(b.epoch(), epoch);
+    assert_eq!(fence.transition_data(epoch).unwrap(), None);
+    assert_eq!(
+        fence.admit_final(&OWN).unwrap_err(),
+        V2JoinedFenceRefusal::Closed
+    );
+}
+
+#[test]
+fn an_observer_hook_panic_keeps_actual_transition_data_but_closes_authority() {
+    let mut f = founder(0xd231);
+    let (mut b, fence, _clock) = join(&mut f, 0xd232, 0xe7);
+    settle_at_join(&b, &fence);
+    let epoch = b.epoch();
+    let (record, _) = founder_adds(&mut f, 0xe8);
+    let _fault = super::faults::arm(
+        &b,
+        &record.mls_commit,
+        super::faults::Cut::PanicAfterSettlement,
+    );
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        b.apply_commit_in_order(&record);
+    }));
+    assert!(failed.is_err());
+    assert_eq!(b.epoch(), epoch + 1);
+    assert_eq!(
+        fence.transition_data(epoch).unwrap().unwrap().commit_data(),
+        digest(&record)
+    );
+    assert!(fence.is_closed());
+    assert_eq!(
+        fence.admit_final(&OWN).unwrap_err(),
+        V2JoinedFenceRefusal::Closed
+    );
+    assert_eq!(
+        fence.install_selected(b.epoch(), b.group.epoch_authenticator_id(), OWN),
+        Err(V2JoinedFenceRefusal::Closed)
+    );
+}
+
+#[test]
+fn a_section_entered_during_unwind_cannot_leave_atomic_and_positive_gates_in_disagreement() {
+    struct EnterDuringUnwind<'a> {
+        fence: &'a V2JoinedSourceFence,
+        epoch: u64,
+        authenticator: [u8; 32],
+    }
+    impl Drop for EnterDuringUnwind<'_> {
+        fn drop(&mut self) {
+            self.fence
+                .install_selected(self.epoch, self.authenticator, OWN)
+                .unwrap();
+        }
+    }
+    let mut f = founder(0xd241);
+    let (b, fence, _clock) = join(&mut f, 0xd242, 0xe9);
+    settle_at_join(&b, &fence);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _inside = EnterDuringUnwind {
+            fence: &fence,
+            epoch: b.epoch(),
+            authenticator: b.group.epoch_authenticator_id(),
+        };
+        panic!("outer unwind");
+    }));
+    assert!(failed.is_err());
+    assert!(
+        !fence.inner.state.is_poisoned(),
+        "std need not poison this acquisition"
+    );
+    assert!(fence.is_closed());
+    assert_eq!(
+        fence.require_authorized(&OWN),
+        Err(V2JoinedFenceRefusal::Closed)
+    );
+    assert_eq!(
+        fence.admit_final(&OWN).unwrap_err(),
+        V2JoinedFenceRefusal::Closed
+    );
+    assert_eq!(
+        fence.install_selected(b.epoch(), b.group.epoch_authenticator_id(), OWN),
+        Err(V2JoinedFenceRefusal::Closed)
+    );
 }
 
 #[test]

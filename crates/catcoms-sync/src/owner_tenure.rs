@@ -478,7 +478,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         work: impl FnOnce(&mut Self) -> O,
     ) -> O {
-        self.with_observed_mls_transition_recording(work, |_| None)
+        self.with_observed_mls_transition_recording(work, |_| {
+            owner_v2::V2MergeResult::Observed(None)
+        })
     }
 
     /// The same seam for a merge whose EXACT commit bytes are known before it runs: an applied
@@ -488,10 +490,39 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub(super) fn with_observed_mls_commit<O>(
         &mut self,
         commit: &[u8],
-        work: impl FnOnce(&mut Self) -> O,
-    ) -> O {
-        let digest = *blake3::hash(commit).as_bytes();
-        self.with_observed_mls_transition_recording(work, move |_| Some(digest))
+        work: impl FnOnce(&mut Self) -> Result<O, MlsError>,
+    ) -> Result<O, MlsError> {
+        // Classify against the original state, before work can advance it. Invalid,
+        // foreign or stale headers do not withdraw a still-current selection. Production
+        // callers additionally authenticate the committer (or own the staged commit). Nodes
+        // with no joined fence do not pay another full commit hash/header parse.
+        let observation = self.v2_fence.is_present().then(|| {
+            let digest = *blake3::hash(commit).as_bytes();
+            let epoch = self.group.epoch();
+            let current = check_commit_header(commit, &self.group.group_id(), epoch, epoch).is_ok();
+            (digest, current)
+        });
+        self.with_observed_mls_transition_recording(
+            |node| {
+                #[cfg(test)]
+                if observation.is_some_and(|(digest, _)| {
+                    owner_v2::joined_fence_faults::refuse_commit(node, &digest)
+                }) {
+                    return Err(MlsError::Internal("test-only exact commit refusal"));
+                }
+                work(node)
+            },
+            move |result| match observation {
+                Some((digest, current)) => {
+                    if current && result.is_err() {
+                        owner_v2::V2MergeResult::RefusedCurrent(digest)
+                    } else {
+                        owner_v2::V2MergeResult::Observed(Some(digest))
+                    }
+                }
+                None => owner_v2::V2MergeResult::Observed(None),
+            },
+        )
     }
 
     /// The same seam for this node's own synchronous Add, whose exact commit bytes exist only in
@@ -504,10 +535,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.with_observed_mls_transition_recording(
             work,
             |outcome: &Result<catcoms_mls::AddOutcome, catcoms_mls::MlsError>| {
-                outcome
-                    .as_ref()
-                    .ok()
-                    .map(|added| *blake3::hash(&added.commit).as_bytes())
+                owner_v2::V2MergeResult::Observed(
+                    outcome
+                        .as_ref()
+                        .ok()
+                        .map(|added| *blake3::hash(&added.commit).as_bytes()),
+                )
             },
         )
     }
@@ -515,8 +548,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     fn with_observed_mls_transition_recording<O>(
         &mut self,
         work: impl FnOnce(&mut Self) -> O,
-        commit_of: impl FnOnce(&O) -> Option<[u8; 32]>,
+        classify: impl FnOnce(&O) -> owner_v2::V2MergeResult,
     ) -> O {
+        let _fence_unwind = self.v2_fence.unwind_guard();
         let before = Position::of(&self.group);
         // A joined node's fence goes `merging` BEFORE the merge, so a concurrent final save
         // admission orders strictly before it or refuses (`owner_v2::joined_fence`).
@@ -525,11 +559,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Settle the fence FIRST, from the ACTUAL resulting group and before any hook below can
         // unwind: a changed state becomes one recorded transition (or a terminal gap), an
         // unchanged state records nothing. The hooks do not touch the MLS group.
-        let commit = match &outcome {
-            Ok(value) => commit_of(value),
-            Err(_) => None,
+        let result = match (&outcome, fence.is_some()) {
+            (Ok(value), true) => classify(value),
+            (Err(_), _) => owner_v2::V2MergeResult::Panicked,
+            _ => owner_v2::V2MergeResult::Observed(None),
         };
-        self.v2_fence_end_merge(fence, commit);
+        self.v2_fence_end_merge(fence, result);
+        #[cfg(test)]
+        owner_v2::joined_fence_faults::after_settlement(self, result.commit_data());
         // A callback may unwind after actually applying a removal. Revoke already queued chat
         // observers from the actual resulting own leaf before any independent driver progresses.
         self.observe_chat_scope_membership();
