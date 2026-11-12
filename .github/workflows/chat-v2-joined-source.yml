@@ -1,0 +1,50 @@
+name: Chat V2 joined-source focused execution
+
+on:
+  pull_request:
+    # Explicit integration-PR lane while inherited lint debt blocks ordinary CI's tests.
+    # Full/strict gates remain required; this is not all-source coverage after merge.
+    paths:
+      - '.github/workflows/chat-v2-joined-source.yml'
+      - '.github/scripts/check-chat-v2-joined-source.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-v2-joined-source-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+  RUST_TEST_THREADS: 2
+
+jobs:
+  focused:
+    name: Joined-source cohorts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check exact-count rejection guards without Cargo
+        run: python .github/scripts/check-chat-v2-joined-source.py --self-test
+      - name: Execute joined-source regressions
+        run: python .github/scripts/check-chat-v2-joined-source.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-v2-joined-source-${{ matrix.os }}
+          path: logs/chat-v2-joined-source/
