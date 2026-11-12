@@ -432,21 +432,58 @@ async fn exercise_impl(
 
 /// No first media effect occurred. A lost/negative media command must not introduce a
 /// separate SDK release debt. Endpoint's actual End -> SDK drain -> Final/GC proves cleanup.
-pub(in crate::voice_handoff) fn negative_before_admission(route: &Route, parent: &ResolvedRow) {
+async fn retry_original_negative(
+    route: &Route,
+    parent: &ResolvedRow,
+    original: &Begin<'_>,
+    kind: OriginalKind,
+    clock: &dyn catcoms_rt::Clock,
+) -> Option<MediaReceipt> {
+    // Force an actual pre-effect refusal before observing the same original again. The
+    // barrier is gone before sleeping/awaiting: retry must never retain the lock it needs.
+    let mut reply = {
+        let held = parent.fixture_hold_transition_index();
+        let reply = parent.media_original_history(route.session().identity(), original, kind);
+        assert!(matches!(reply, Err(VoiceError::Capacity)));
+        drop(held);
+        reply
+    };
+    let until = clock.monotonic_ms().saturating_add(1_000);
+    for attempt in 0..32 {
+        match reply {
+            Ok(receipt) => return receipt,
+            Err(VoiceError::Capacity) if attempt < 31 && clock.monotonic_ms() < until => {
+                clock.sleep(std::time::Duration::from_millis(5)).await;
+                reply = parent.media_original_history(route.session().identity(), original, kind);
+            }
+            Err(error) => panic!("original negative media command refused: {error:?}"),
+        }
+    }
+    unreachable!("the final bounded observation returns or fails")
+}
+
+pub(in crate::voice_handoff) async fn negative_before_admission(
+    route: &Route,
+    parent: &ResolvedRow,
+    clock: &dyn catcoms_rt::Clock,
+) {
     let original = parent.media_test_original(route.session().identity());
-    assert!(parent
-        .media_original_history(route.session().identity(), &original, OriginalKind::Resolve)
-        .unwrap()
-        .is_none());
-    let closed = parent
-        .media_original_history(route.session().identity(), &original, OriginalKind::Close)
-        .unwrap()
+    assert!(
+        retry_original_negative(route, parent, &original, OriginalKind::Resolve, clock)
+            .await
+            .is_none()
+    );
+    assert!(
+        parent.media_test_root().is_none(),
+        "refused Resolve created no media owner"
+    );
+    let closed = retry_original_negative(route, parent, &original, OriginalKind::Close, clock)
+        .await
         .unwrap();
     assert!(closed.closed && !closed.admitted && !closed.released);
     assert!(parent.media_test_root().is_none());
-    let recovered = parent
-        .media_original_history(route.session().identity(), &original, OriginalKind::Resolve)
-        .unwrap()
+    let recovered = retry_original_negative(route, parent, &original, OriginalKind::Resolve, clock)
+        .await
         .unwrap();
     assert!(recovered.closed && !recovered.admitted && !recovered.released);
 }

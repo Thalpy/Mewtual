@@ -228,6 +228,24 @@ async function idle(): Promise<void> {
     await new Promise<void>(resolve => setImmediate(resolve));
   }
 }
+
+async function freshOriginalMediaCurrent(record: (typeof mediaRecords)[number]): Promise<void> {
+  const previous = record.currents;
+  const until = performance.now() + 5000; // Harness bound only; never changes driver/protocol deadlines.
+  for (let observation = 0; observation < 32; observation++) {
+    assert.equal(record.calls.closed, 0, "the original media peer must remain live");
+    // A void result joins one attempt. It may coalesce with an existing flight or
+    // observe a legitimate local Capacity; only a new authenticated Current counts.
+    await broker.completeNativeMediaHandoff(owner, channel, record.plan);
+    if (record.currents > previous) {
+      assert.equal(record.calls.closed, 0);
+      return;
+    }
+    assert.ok(performance.now() < until, "the same original media peer did not receive fresh authenticated Current");
+    await new Promise<void>(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail("the bounded original media observations did not receive fresh authenticated Current");
+}
 type Step =
   | { tag: "step"; name: "fail-attached"; peers: 0 | 1 }
   | { tag: "step"; name: "fail-media"; peers: 0 | 1 }
@@ -256,9 +274,7 @@ async function step(value: Step): Promise<unknown> {
       for (const record of mediaRecords) {
         if (record === failed) continue;
         assert.equal(record.calls.closed, 0);
-        const previous: number = record.currents;
-        await broker.completeNativeMediaHandoff(owner, channel, record.plan);
-        assert.ok(record.currents > previous, "indexed sibling's authenticated Current must actually return");
+        await freshOriginalMediaCurrent(record);
       }
       assert.equal(session.keys, keys); assert.equal(session.bootstrap, bootstrap);
       assert.ok(session.tx > before, "negative cleanup retains original increasing Session counters");
@@ -275,9 +291,7 @@ async function step(value: Step): Promise<unknown> {
       for (const record of active) assert.equal(record.calls.closed, 0);
       if (value.name === "current-survivor") {
         for (const record of active) {
-          const before: number = record.currents;
-          await broker.completeNativeMediaHandoff(owner, channel, record.plan);
-          assert.ok(record.currents > before, "the exact surviving peer must receive fresh authenticated Current");
+          await freshOriginalMediaCurrent(record);
         }
         return { kind: "survivor-current", peers: value.peers, terminal: 1 };
       }

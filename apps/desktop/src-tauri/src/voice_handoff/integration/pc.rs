@@ -134,7 +134,35 @@ pub(super) async fn exercise(
         assert_eq!(phase.status(), Status::Drained);
         return None;
     }
-    factory::preflight_binding(&context, route).await.unwrap();
+    let clock = crate::voice_runtime(state).clock();
+    let mut preflight = {
+        // A real busy server map must refuse BEFORE any Actor work or effect. Keep the
+        // original Context/Route and drop this barrier before waiting for progress.
+        let held = state.servers.lock().await;
+        let first = factory::preflight_binding(&context, route).await;
+        assert!(matches!(
+            first,
+            Err(factory::Refused::Protocol(VoiceError::Capacity))
+        ));
+        drop(held);
+        first
+    };
+    let until = clock.monotonic_ms().saturating_add(1_000);
+    for attempt in 0..32 {
+        match preflight {
+            Ok(commit) => {
+                drop(commit);
+                break;
+            }
+            Err(factory::Refused::Protocol(VoiceError::Capacity))
+                if attempt < 31 && clock.monotonic_ms() < until =>
+            {
+                clock.sleep(std::time::Duration::from_millis(5)).await;
+                preflight = factory::preflight_binding(&context, route).await;
+            }
+            Err(error) => panic!("original PC preflight refused: {error:?}"),
+        }
+    }
     if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10..=15) {
         let first = exchange(state, public, route, parent, &body).await;
         assert_eq!(
