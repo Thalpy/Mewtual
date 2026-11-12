@@ -26,10 +26,12 @@ pub use v2_founder::{
     V2HostSelectionExpectation, V2RetiredAppendData, V2VerifiedAppendCandidate,
 };
 pub use v2_general::{
-    OriginalV2OrdinarySigningPlanObservation, V2AdmissionCloseCompletion, V2AuthenticatedAdmission,
-    V2FrozenAdmission, V2GeneralAcceptanceSource, V2GeneralCandidate, V2GeneralExpectation,
-    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2KnownGoverningParent, V2OrdinaryDependency,
-    V2OrdinaryKeyCall, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
+    OriginalV2OrdinarySigningPlanObservation, V2AdmissionCloseCompletion, V2ArchivedHeaderRefusal,
+    V2AuthenticatedAdmission, V2FrozenAdmission, V2GeneralAcceptanceSource, V2GeneralCandidate,
+    V2GeneralExpectation, V2GeneralPrefixVerifier, V2GeneralRetiredData, V2KnownGoverningParent,
+    V2OrdinaryDependency, V2OrdinaryKeyCall, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
+    V2PreparedSelectedHistoryData, V2SelectedHistoryHashData, V2SelectedHistoryNodeData,
+    V2SelectedHistoryTipData, V2SelectedParentProof, MAX_SELECTED_HISTORY_PROOF_HASHES,
 };
 pub use v2_origin::{V2OriginNegative, V2ProjectionOrigin};
 

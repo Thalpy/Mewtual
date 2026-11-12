@@ -274,3 +274,23 @@ must supply actual retained/transient accounting and independently funded
 overlaps for CI layout checks. Correct draft 4's stale resolution-table statement
 that replay is K-bounded, and incorporate its external review before coding the
 affected boundary. The narrow Core/Sync commits need not wait for the archive.
+
+## 8. Core selected-history handoff (12 November)
+
+Draft [PR #88](https://github.com/Thalpy/Mewtual/pull/88), stacked on the tested
+joined-fence integration in PR #87, adds negative-only cold parent proofs. Its
+13 new cases and 3 existing controls pass on Linux and Windows; full validation
+is still running. See
+[the exact API and residual boundaries](CHAT-V2-SELECTED-HISTORY-PROOFS.md).
+
+C can keep the agreed paid warm escrows until a genuine durable archive exists.
+The new `selected_history_append_data` lends only the original candidate's
+precomputed record IDs, next tip and created nodes. It does not prove that Root
+stored or selected them. The eventual reader may use bounded proof DATA with
+`observe_proven_archived_header`; that method checks the private selected tip
+and can only observe a duplicate or retain a signed contradiction and fence.
+It cannot replace an opaque hot escrow, historical Admission or frozen cut.
+No raw-parent adoption API is added. Root must still cover exact records/nodes
+under selected-write barriers and restore contradictions on restart before
+production eviction. This handoff does not unblock an unbacked cache eviction
+or change C's App-source ownership.

@@ -1,0 +1,56 @@
+name: Chat V2 selected-history focused execution
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/chat-v2-selected-history.yml'
+      - '.github/scripts/check-chat-v2-selected-history.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-v2-selected-history-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+  RUST_TEST_THREADS: 2
+
+jobs:
+  focused:
+    name: Selected-history cohorts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check exact-count rejection guards without Cargo
+        run: python .github/scripts/check-chat-v2-selected-history.py --self-test
+      - name: Execute selected-history regressions
+        run: python .github/scripts/check-chat-v2-selected-history.py
+      - name: Check root formatting
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all -- --check
+      # Affected-crate strict evidence is independent of inherited App lint debt.
+      # It is not a substitute for the full-workspace strict gate.
+      - name: Strict Clippy for the affected protocol crate
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p catcoms-replication --all-targets --all-features -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-v2-selected-history-${{ matrix.os }}
+          path: logs/chat-v2-selected-history/

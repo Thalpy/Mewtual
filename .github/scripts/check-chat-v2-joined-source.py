@@ -8,17 +8,21 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import runpy
+import sys
 
 REPO = Path(__file__).resolve().parents[2]
 COHORTS = (
     ("core-read-accessors", "catcoms-replication", "v2_general::tests::read_accessors", 3),
-    ("joined-facts", "catcoms-sync", "owner_v2::joined_source::tests", 3),
-    ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 17),
+    ("joined-facts", "catcoms-sync", "owner_v2::joined_source::tests", 4),
+    ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 18),
     # The eleven operation cases include both new V1 exclusion tests and the genuine
     # preexisting success controls, so they are not counted/run again as a separate cohort.
     ("owner-operations", "catcoms-sync", "owner_evidence::initial_tail::operation::tests", 11),
     ("owner-tenure", "catcoms-sync", "owner_tenure::tests", 17),
     ("founder-member", "catcoms-sync", "owner_v2::member::tests", 6),
+    ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),
+    ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
+    ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
 )
 
 
@@ -36,7 +40,10 @@ def main() -> None:
         return
     directory = REPO / "logs/chat-v2-joined-source"
     directory.mkdir(parents=True, exist_ok=True)
-    for name, crate, selector, expected in COHORTS:
+    cohorts = list(COHORTS)
+    if sys.platform == "win32":
+        cohorts.append(("negative-retirement-bound", "catcoms-app", "negative_retirement_reserves_the_last_slot", 1))
+    for name, crate, selector, expected in cohorts:
         command = [
             "cargo", "test", "--locked", "-p", crate, "--all-features", "--lib", selector,
         ]
