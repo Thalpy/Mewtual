@@ -1,14 +1,14 @@
 # Mewtual; Handover
 
-## Primary review of C's Core/Sync seams (12 November; CI pending)
+## Primary review of C's Core/Sync seams (12 November; focused CI green, full validation open)
 
 Integration branch `chat-v2-joined-source-integration` starts from C's pushed
 `0bcc808e`; C's branch and PR #86 are unchanged. The primary's actual-diff review
 found an authority gap in failed current-epoch commit settlement, an exact
 selected-state retry defect, and disagreement between the atomic closed flag and
 positive gates after a section entered during an existing unwind. These are
-fixed on the integration branch; this paragraph records authored changes, not
-compiled or executed results.
+fixed on the integration branch. Draft PR #87 contains C's original commits and
+the separate primary fixes. Nothing has been merged into C's branch or PR #86.
 
 The commit observer classifies against its ORIGINAL group/header/epoch. A failed
 current commit closes as Diverged in the SAME settlement section that clears
@@ -32,17 +32,39 @@ additionally covers exact retry and altered authenticator/Admission. Focused CI
 pins 57 executed, nonignored cases on each OS: three Core accessors, three join-fact, seventeen fence,
 eleven owner-operation (including two new V1 exclusion), seventeen tenure and six
 founder-member cases. These are 25 new cases and 32 neighboring legacy controls.
-Its Python guard self-check passes without Cargo.
-Strict CI at `5b325a3c` reported two unused wildcard imports in C's tests; both
-are removed. The root App still reports its inherited 531 library/471 Linux
-test-library Clippy errors. The initial focused run at `5b325a3c` was superseded
-by the early-retirement correction; cancelled jobs are not test passes. The final
-focused lane also runs strict Clippy for the two affected crates independently
-of the inherited App debt. No executed Rust test result is claimed yet.
-Standalone formatting is applied.
-Full/strict/native/frontend validation remains
-open; local Cargo is still paused. No App joined source or durable fork archive
-is supplied by this seam integration.
+Its Python guard self-check passes without Cargo. Standalone formatting,
+whitespace and the static ambient gate also pass; no local Cargo was run.
+
+The [corrected focused run](https://github.com/Thalpy/Mewtual/actions/runs/43305407742)
+at `0b2f94eca47ad4f34d9dd2ba133d77f860b8103f` passes all 57 cases with zero failed
+or ignored on BOTH Linux and Windows. Both affected-crate strict-Clippy steps
+(`catcoms-sync` and `catcoms-replication`, all targets/features, `-D warnings`)
+also pass. These are scoped results, not workspace-wide strict acceptance.
+Both complete job logs independently confirm the checkout, cohort counts and
+strict command; both OS jobs, including cleanup, completed successfully. The
+read-only evidence review confirms those exact results.
+
+Failed and cancelled evidence remains explicit: strict CI at `5b325a3c` reported
+two unused imports in C's tests (removed). CI at `b549f42b` then found the primary's
+transport-destructor fixture used `Unreachable` without its required peer;
+`0b2f94ec` corrects that test-only constructor. Superseded focused runs and the
+first queued broad run were cancelled rather than credited as passes. Root App
+Clippy still reports inherited 531 library/471 Linux test-library errors (188
+test-library on Windows); no waiver or broad warning suppression was added.
+
+The [restarted broad run](https://github.com/Thalpy/Mewtual/actions/runs/43308200073)
+executes root and separate native workspaces plus frontend checks/build on the
+same tested source `0b2f94ec`. Its results remain open. The single user-deferred
+10,000-operation cost case remains excluded until final acceptance. Dependency
+audit and full strict/native sign-off remain open too, including the parent
+branch's two diagnosed native fixture failures. This documentation update changes
+no runtime, tests, Cargo inputs or CI policy from that tested source.
+
+C may continue the separately reviewed App-source milestone from `0b2f94ec` on a
+new branch, preserving the primary's fence fixes and the ownership/boundaries in
+the coordination document. The primary retains broader validation, native work
+and the durable fork archive. No App joined source or archive is supplied by this
+seam integration; Chat V2 remains disabled and PR #87 stays draft/unmerged.
 
 ## Agent C Core/Sync seams (12 November; authored, NOT executed)
 
