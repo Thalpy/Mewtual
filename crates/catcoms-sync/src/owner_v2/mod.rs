@@ -2,6 +2,9 @@
 //! No production dispatcher, publisher, root acquisition, archive saver or positive issuer is
 //! enabled here. Public codec frames remain DATA until the actual host covers their originals.
 mod founder;
+// Join FACTS of a genuinely joined node, captured at its verified Welcome for the App's
+// joined-member source. DATA only: no pin provenance, membership, signing or publication.
+mod joined_source;
 // Ordinary-member signing seams (founder genesis node and joined ChannelSync). No owner
 // certification, Append lane, export or publication is reachable through them.
 mod member;
@@ -24,4 +27,6 @@ pub use founder::{
     MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES, MAX_CREATE_PADDED_BYTES,
     V2_GENESIS_SEED_METADATA_BYTES,
 };
+pub(crate) use joined_source::JoinFactsSlot;
+pub use joined_source::V2JoinFacts;
 pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};
