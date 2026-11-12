@@ -3,7 +3,6 @@
 //! one-time take by the original incarnation, and no facts on any other node kind. Nothing
 //! here exercises pin provenance, replay, selection or signing.
 use super::*;
-use crate::*;
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;

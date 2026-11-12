@@ -13,7 +13,7 @@ REPO = Path(__file__).resolve().parents[2]
 COHORTS = (
     ("core-read-accessors", "catcoms-replication", "v2_general::tests::read_accessors", 3),
     ("joined-facts", "catcoms-sync", "owner_v2::joined_source::tests", 3),
-    ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 16),
+    ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 17),
     # The eleven operation cases include both new V1 exclusion tests and the genuine
     # preexisting success controls, so they are not counted/run again as a separate cohort.
     ("owner-operations", "catcoms-sync", "owner_evidence::initial_tail::operation::tests", 11),

@@ -4328,7 +4328,10 @@ pub enum PostJoinDiscoveryEvent {
 }
 
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
-    // FIRST: its sole publisher must retire before transport, group or stores during Drop.
+    // Lifetime retirement comes BEFORE owned resources. A retained public fence handle must
+    // refuse new admissions before any transport, SDK or service destructor can run.
+    v2_fence: owner_v2::JoinedFenceNode,
+    // The sole file publisher also retires before transport, group or stores during Drop.
     file_effects: file_service::scope::FileEffectOwners,
     file_service: file_service::service::FileService,
     // Only this owner consumes next_event. Detached requests share outbound access without
@@ -4358,9 +4361,6 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// V2 joined-member join facts of THIS original incarnation (invite joins only), and
     /// whether the joined source or the v1 owner install claimed the node. Never serialized.
     v2_join_facts: owner_v2::JoinFactsSlot,
-    /// The joined node's live source fence (present only while join facts exist or the joined
-    /// source holds them). Closed when this incarnation drops. Never serialized.
-    v2_fence: owner_v2::JoinedFenceNode,
     /// Saved with this exact MLS group; never inferred from a received receipt or Welcome.
     owner_tenure: owner_tenure::OwnerTenure,
     group_policy: Option<GroupPolicy>,

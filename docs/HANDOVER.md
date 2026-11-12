@@ -20,17 +20,24 @@ gate also checks the monotone atomic negative under its state guard. Repeating
 the exact already-selected epoch/authenticator/Admission is idempotent after
 transition consumption; altered tuples gain no such shortcut.
 
-Six new regressions use original-node/exact-commit scoped faults for genuine
+Seven new regressions use original-node/exact-commit scoped faults for genuine
 Remove/self refusal (real in-order and pre-caller boundaries), failed contest
 winner, uncertain merge panic, hook panic after actual settlement, and atomic
 closure without mutex poison, plus an error after a successful real SDK apply
-that must retain exact Add/Remove transition evidence. The existing Add test
+that must retain exact Add/Remove transition evidence. A transport-destructor
+probe on a genuinely joined node now checks that fence retirement precedes
+resource teardown; the fence is the first lifetime guard, with the file publisher
+still preceding every resource it protects. The existing Add test
 additionally covers exact retry and altered authenticator/Admission. Focused CI
-pins 56 executed, nonignored cases on each OS: three Core accessors, three join-fact, sixteen fence,
+pins 57 executed, nonignored cases on each OS: three Core accessors, three join-fact, seventeen fence,
 eleven owner-operation (including two new V1 exclusion), seventeen tenure and six
-founder-member cases. These are 24 new cases and 32 neighboring legacy controls.
+founder-member cases. These are 25 new cases and 32 neighboring legacy controls.
 Its Python guard self-check passes without Cargo.
-Standalone formatting is applied. Full/strict/native/frontend validation remains
+Strict CI at `5b325a3c` reported two unused wildcard imports in C's tests; both
+are removed. The root App still reports its inherited 531 library/471 Linux
+test-library Clippy errors. The first focused run is pending on both platforms;
+no executed Rust test result is claimed. Standalone formatting is applied.
+Full/strict/native/frontend validation remains
 open; local Cargo is still paused. No App joined source or durable fork archive
 is supplied by this seam integration.
 
