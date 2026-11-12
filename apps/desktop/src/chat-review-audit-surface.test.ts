@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ActionCaseRow, AuditReads } from "./chat-review-audit.ts";
+import type { ActionCaseRow, AuditReads, ReviewDecisionRow } from "./chat-review-audit.ts";
 const { default: Audit } = await import("./ChatReviewAudit.svelte");
 const { mount, unmount, flushSync, tick } = await import("svelte");
 
@@ -18,9 +18,9 @@ const detail = { status: "detail", availability: "complete", revision: "r1", cas
   action: { kind: "create", text: "<script>retained body</script>", replyTo: null }, signedActionHex: "0102",
   signatureHex: "ab".repeat(64), factIds: [], missingFactIds: [], evidenceTruncated: false };
 async function settle() { await tick(); await Promise.resolve(); flushSync(); }
-function surface(reads: AuditReads) {
+function surface(reads: AuditReads, nameOfIdentity: (identity: string) => string = () => "Member") {
   const target = document.createElement("div"); document.body.appendChild(target);
-  const mounted = mount(Audit, { target, props: { reads, nameOf: () => "Member" } }); flushSync();
+  const mounted = mount(Audit, { target, props: { reads, nameOfIdentity } }); flushSync();
   return { target, async click(label: string) {
     const button = [...target.querySelectorAll("button")].find((b) => b.textContent?.trim() === label);
     assert.ok(button, label); button.click(); await settle();
@@ -86,4 +86,50 @@ test("unmounting the compiled log fences delayed held detail", async () => {
   const ui = surface({ page: async () => page, detail: () => pending });
   await settle(); await ui.click("View details"); await ui.done(); resolve(detail); await settle();
   assert.equal(ui.target.textContent, "");
+});
+
+function decision(n: number): ReviewDecisionRow {
+  return { ...held, kind: "review-decision", rowId: `decision:${id(n)}`, decisionId: id(n),
+    recordKind: "decision", choice: "approve", issuerPublicKey: id(n + 30), issuerId: id(n + 40),
+    issuerFingerprint: id(n + 40).slice(0, 8), authorityBasis: id(50), predecessors: [],
+    reason: "Reviewed", effect: "selected" };
+}
+
+test("held authors with colliding fingerprints resolve only by their full verified identity", async () => {
+  const first = held;
+  const second = { ...held, caseId: id(20), rowId: `held:${id(20)}`, authorId: id(21) };
+  assert.equal(first.authorFingerprint, second.authorFingerprint);
+  const seen: string[] = [];
+  const ui = surface({ page: async () => ({ ...page, rows: [first, second], knownRowCount: 2 }), detail: async () => detail },
+    identity => { seen.push(identity); return identity === first.authorId ? "First author" : "Second author"; });
+  try {
+    await settle(); assert.deepEqual(new Set(seen), new Set([first.authorId, second.authorId]));
+    assert.match(ui.target.textContent!, /First author/); assert.match(ui.target.textContent!, /Second author/);
+  } finally { await ui.done(); }
+});
+
+test("decision issuers with colliding fingerprints resolve separately from the target author", async () => {
+  const first = decision(30), second = decision(31);
+  assert.equal(first.issuerFingerprint, second.issuerFingerprint);
+  const seen: string[] = [];
+  const ui = surface({ page: async () => ({ ...page, rows: [first, second], knownRowCount: 2 }), detail: async () => detail },
+    identity => { seen.push(identity); return identity === first.issuerId ? "First reviewer" : "Second reviewer"; });
+  try {
+    await settle(); assert.deepEqual(new Set(seen), new Set([first.issuerId, second.issuerId]));
+    assert.match(ui.target.textContent!, /First reviewer/); assert.match(ui.target.textContent!, /Second reviewer/);
+    assert.ok(!seen.includes(first.authorId), "a decision proof must not verify the target author's attribution");
+  } finally { await ui.done(); }
+});
+
+test("invalid and pending author or issuer signatures never resolve a trusted profile name", async () => {
+  for (const signature of ["invalid", "pending"] as const) {
+    for (const row of [held, decision(32)]) {
+      const entry = { ...row, proof: { ...row.proof, signature } };
+      const ui = surface({ page: async () => ({ ...page, rows: [entry] }), detail: async () => detail },
+        () => { assert.fail("unverified identity reached trusted-name resolver"); });
+      try {
+        await settle(); assert.match(ui.target.textContent!, row.kind === "held-action" ? /Unverified author/ : /Unverified reviewer/);
+      } finally { await ui.done(); }
+    }
+  }
 });

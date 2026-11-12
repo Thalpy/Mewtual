@@ -68,11 +68,53 @@ fn all_files(path: &Path) -> Snapshot {
     )
 }
 
-/// A namespace5 declaration interrupted through the governance+member wrapper on a vault
-/// that already holds 4: the governance gate must settle the member seed FIRST (its stage
-/// owns the catalog slot), then let governance and the Current3 gate re-inspect. A first
-/// seed that never authenticated (241 claim only, 240 claim + fence, 242 torn) is abandoned
-/// with no RNG and declared afresh by the warm retry; every later cut finishes with no RNG.
+/// Keep the SAME governance opener alive after successful unlink; its own seed handles
+/// must close before either post-unlink fault, including on Windows.
+#[test]
+fn member_same_governance_opener_retries_after_seed_unlink_without_rng() {
+    for cut in [250, 255] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let shared = pool();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x56e0 + u64::from(cut));
+        settled_three(path, &shared, &mut rng);
+        let mut four = open(path, &shared, &mut rng);
+        four.retry(&mut rng).unwrap();
+        let key = private(&four).keys.db_key().unwrap();
+        let domain = private(&four).chat_vault_domain().unwrap();
+        drop(four.into_governance_layout_store().unwrap());
+        let after_four = catalog(&key, &domain, path);
+        let mut owner = PreparedV2GovernanceLayoutStore::open(
+            path,
+            SECRET,
+            &mut rng,
+            member_governance(&shared),
+        )
+        .unwrap();
+        fault(&owner, cut);
+        assert!(owner.retry(&mut rng).is_err(), "cut {cut}");
+        let declaration = owner.member_declaration.as_ref().unwrap();
+        assert!(declaration.seed_unlinked && declaration.seed_file.is_none());
+        let candidate = declaration.candidate.to_vec();
+        assert_eq!(
+            fs::symlink_metadata(path.join(MEMBER_OUTBOX_SEED))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        fault(&owner, 0);
+        owner.retry(&mut NeverRng).unwrap();
+        assert_eq!(
+            fs::read(path.join(Slot::Current.name())).unwrap(),
+            candidate
+        );
+        assert_settled_four_and_five(&owner, path, &key, &domain, &after_four, cut);
+        drop(owner.into_governance_layout_store().unwrap());
+    }
+}
+
+/// Cold cuts settle the member seed before governance re-inspection. An unauthenticated
+/// first seed is abandoned; later complete cuts recover without drawing new randomness.
 #[test]
 fn member_cuts_through_the_governance_wrapper_settle_before_governance_inspects() {
     let shared = pool();
