@@ -25,8 +25,14 @@ macro_rules! redacted_debug {
     })+ };
 }
 mod ordinary;
+mod selected_history;
 mod signing;
 pub use ordinary::{V2GeneralAcceptanceSource, V2OrdinaryDependency};
+pub use selected_history::{
+    V2ArchivedHeaderRefusal, V2PreparedSelectedHistoryData, V2SelectedHistoryHashData,
+    V2SelectedHistoryNodeData, V2SelectedHistoryTipData, V2SelectedParentProof,
+    MAX_SELECTED_HISTORY_PROOF_HASHES,
+};
 pub use signing::{
     OriginalV2OrdinarySigningPlanObservation, V2OrdinaryKeyCall, V2OrdinarySigningGuard,
     V2OrdinarySigningPlan,
@@ -187,6 +193,7 @@ pub struct V2GeneralCandidate {
     admissions: Vec<V2AuthenticatedAdmission>,
     removed: Option<V2AuthenticatedAdmission>,
     next_parent: V2KnownGoverningParent,
+    history: V2PreparedSelectedHistoryData,
     _claim: CandidateClaim,
 }
 struct CandidateClaim(Arc<AtomicBool>);
@@ -196,6 +203,9 @@ impl Drop for CandidateClaim {
     }
 }
 impl V2GeneralCandidate {
+    pub fn selected_history_append_data(&self) -> &V2PreparedSelectedHistoryData {
+        &self.history
+    }
     pub fn header_data(&self) -> &SignedOwnerHeader {
         self.step.next.header()
     }
@@ -213,11 +223,19 @@ pub struct V2GeneralRetiredData {
     append: Option<crate::chat::acceptance_tree::PreparedAppend>,
     frozen: Option<V2FrozenAdmission>,
     closed: Option<V2AdmissionCloseCompletion>,
+    history: Box<selected_history::HistoryFrontier>,
+    history_nodes: Vec<V2SelectedHistoryNodeData>,
     // A next candidate cannot create a THIRD model while this actual old math is held.
     // Drop this whole old owner outside writers after taking separately paid archive DATA.
     _claim: CandidateClaim,
 }
 impl V2GeneralRetiredData {
+    pub fn prior_selected_history_tip_data(&self) -> V2SelectedHistoryTipData {
+        self.history.tip()
+    }
+    pub fn selected_history_nodes_data(&self) -> &[V2SelectedHistoryNodeData] {
+        &self.history_nodes
+    }
     pub fn parent_data(&self) -> &ReplayMath {
         &self.math
     }
@@ -268,6 +286,8 @@ pub struct V2GeneralPrefixVerifier {
     origin: V2ProjectionOrigin,
     fork_close: Option<ProjectionGroupCloseCompletion>,
     candidate_live: Arc<AtomicBool>,
+    history: Box<selected_history::HistoryFrontier>,
+    archived_conflict: Option<Box<V2KnownGoverningParent>>,
 }
 impl Drop for V2GeneralPrefixVerifier {
     fn drop(&mut self) {
@@ -302,6 +322,7 @@ impl V2GeneralPrefixVerifier {
             + 4 * crate::chat::owner_header::MAX_HEADER_BYTES
             + 2 * std::mem::size_of::<V2GeneralCandidate>()
             + 2 * std::mem::size_of::<V2GeneralRetiredData>()
+            + selected_history::retained_layout_bytes()
             + 2 * (std::mem::size_of::<AtomicBool>() + 4 * std::mem::size_of::<usize>())
     }
 
@@ -331,6 +352,7 @@ impl V2GeneralPrefixVerifier {
             first: None,
             second: None,
         };
+        let history = Box::new(selected_history::HistoryFrontier::new(profile, header));
         if !origin.live() || !group.life.live() {
             return Err(ChatError::Scope);
         }
@@ -343,6 +365,8 @@ impl V2GeneralPrefixVerifier {
             origin,
             fork_close: None,
             candidate_live: Arc::new(AtomicBool::new(false)),
+            history,
+            archived_conflict: None,
         })
     }
     fn new_admission(
@@ -445,6 +469,9 @@ impl V2GeneralPrefixVerifier {
             _ => None,
         };
         let step = self.math.derive_successor(header, body, image)?;
+        let history = self
+            .history
+            .prepare(self.math.header(), step.next.header())?;
         let mut admissions = Vec::with_capacity(MAX_ADMISSIONS);
         let mut removed = None;
         for old in &self.admissions {
@@ -474,6 +501,7 @@ impl V2GeneralPrefixVerifier {
             admissions,
             removed,
             next_parent,
+            history,
             _claim: claim,
         })
     }
@@ -490,6 +518,7 @@ impl V2GeneralPrefixVerifier {
         if !Arc::ptr_eq(&self.identity, &next.identity)
             || next.parent != self.math.header().id()
             || !selected.matches_data(next.step.next.header())
+            || next.history.old_tip_data() != self.history.tip()
         {
             return Err(ChatError::Scope);
         }
@@ -520,6 +549,7 @@ impl V2GeneralPrefixVerifier {
         let math = std::mem::replace(&mut self.math, next.step.next);
         let parent = std::mem::replace(&mut self.known, next.next_parent);
         let admissions = std::mem::replace(&mut self.admissions, next.admissions);
+        let history = std::mem::replace(&mut self.history, next.history.next);
         Ok(V2GeneralRetiredData {
             math,
             parent: Some(parent),
@@ -527,6 +557,8 @@ impl V2GeneralPrefixVerifier {
             append: next.step.append,
             frozen,
             closed,
+            history,
+            history_nodes: next.history.nodes,
             _claim: next._claim,
         })
     }

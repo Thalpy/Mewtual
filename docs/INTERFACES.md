@@ -8767,3 +8767,16 @@ The later owning Node/runtime consumer must loan both owners and repeat full Cur
 writer/task proofs after pairing callbacks. Neither the loan nor graph payment supplies those
 permissions. One new Sync identity regression plus one App cross-resource regression are UNRUN;
 App runtime/Current/governor/native integration and compiled verification remain unfinished.
+## Selected governing-history proof DATA (12 November; Core only, pending CI)
+
+`V2GeneralPrefixVerifier` now maintains a private bounded selected-history
+commitment. Candidates precompute node/frontier outputs; actual HOST selection
+moves them and returns whole retired owners for outside-writer disposal. Public
+tip/append/node getters are DATA, not selector/storage/Current capabilities.
+`observe_proven_archived_header` verifies untrusted cold parent/child/path DATA
+against that private tip, checks every signature representation, and retains
+both valid siblings before a negative fork fence. It never issues positive
+authority or reconstructs an opaque hot parent. `StaleTip` grants no retry IO.
+See [the exact contract](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).
+Root durable record/node coupling, cold replay, historical custody and
+contradiction restoration remain unimplemented prerequisites for eviction.

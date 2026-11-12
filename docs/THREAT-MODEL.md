@@ -6284,3 +6284,16 @@ The node is DATA/resource ownership, not Current or publication. Root's actual S
 pin/head/row/mount and original negative checks, all non-SDK lifetime fees, governor/live SDK
 operations and native integration remain separate. All13 regressions are authored UNRUN;
 compilation, tests and builds remain paused. [Boundary and invoice](communication-recovery/CHAT-V2-GENESIS-DATA-SEED.md).
+## Selected-history cold proof boundary (12 November; Core only, pending CI)
+
+An untrusted archive may omit, reorder or forge governing record/node DATA.
+Core's new negative proof path uses only its private selected-history tip,
+bound to verified pinned genesis, and checks all supplied signature bytes even
+when semantic IDs agree. Bad/stale/foreign evidence cannot close the source or
+grant authority. A confirmed signed sibling caches both originals before
+closing. No raw frontier import or opaque parent reconstruction is exposed.
+The existing hot-parent identity check remains unchanged. This adds no durable
+archive: malicious omission can still deny progress, and Root must implement
+bounded authenticated export, selected-write coupling and contradiction replay
+before evicting hot evidence or claiming restart-safe fork detection. See
+[the detailed boundary](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).
