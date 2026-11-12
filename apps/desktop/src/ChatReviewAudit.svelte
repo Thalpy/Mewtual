@@ -7,7 +7,7 @@
 
   // The parent MUST key this component to the original server/view/session/role and
   // unmount it on lock or loss of moderator access. Native repeats the real role check.
-  let { reads, nameOf }: { reads: AuditReads; nameOf: (fingerprint: string) => string } = $props();
+  let { reads, nameOfIdentity }: { reads: AuditReads; nameOfIdentity: (identity: string) => string } = $props();
   const originalReads = untrack(() => reads);
   let snapshot = $state<AuditSnapshot>({ page: null, detail: null, loading: false, detailLoading: false, stale: false, message: "" });
   const reader = new ChatReviewAuditReader({
@@ -44,14 +44,19 @@
         <li data-review-row={row.rowId}>
           <div class="review-meta">
             <strong>{label(row)}</strong>
-            <span>{nameOf(row.authorFingerprint)}</span>
+            <!-- Each proof attributes this row's own signed record. A decision signature
+                 verifies its issuer, not the held action's author. Never resolve a trusted
+                 name by an abbreviated fingerprint or by unverified attribution. -->
+            <span>{row.kind === "held-action"
+              ? row.proof.signature === "valid" ? nameOfIdentity(row.authorId) : "Unverified author"
+              : row.proof.signature === "valid" ? nameOfIdentity(row.issuerId) : "Unverified reviewer"}</span>
             {#if row.presentedMs !== null}<time datetime={new Date(row.presentedMs).toISOString()}>{new Date(row.presentedMs).toLocaleString()}</time>{/if}
           </div>
           {#if row.kind === "held-action"}
             <span class="review-state">{caseStateLabel(row)}</span>
             {#if row.preview}<p class="review-text">{row.preview.text}{row.preview.truncated ? "…" : ""}</p>{/if}
           {:else}
-            <span class="review-state">{reviewEffectLabel(row)} · {nameOf(row.issuerFingerprint)}</span>
+            <span class="review-state">{reviewEffectLabel(row)}</span>
             {#if row.reason}<p class="review-text">{row.reason}</p>{/if}
           {/if}
           <button class="ghost small" disabled={snapshot.loading || snapshot.detailLoading || snapshot.stale} onclick={() => reader.open(row.caseId)}>View details</button>

@@ -86,10 +86,16 @@ bounds before any comparison or dependency resolution. The request composer must
 the exact token, channel, body and parent list it sent: a retry after restart with
 different parents is a conflict by design, not a hit (member outbox lookup).
 
-One pending request per lane. A finished token (saved, abandoned or forgotten) cannot author
-again in this host lifetime; the bounded ring keeps the last 64. Cross-restart and
-older-token deduplication is the member outbox's exact token lookup, which must run before
-authoring.
+One pending request per lane. Abandoned/forgotten tokens remain in a separate, non-evicting
+64-entry negative table for this lane incarnation. Every fresh or adopted request reserves
+one slot before any new key/RNG work, so final retirement cannot fail for capacity. At 64
+negative retirements fresh authoring pauses; pending retries and reconciliation still work.
+Normal Saved/SavedHit traffic releases that reservation and uses a separate rolling
+64-entry positive cache, so saved messages have no lifetime message-count cliff. Old saved
+tokens and restarts require the outbox's exact lookup before authoring. An Absent lookup
+cannot remember an abandoned token: restart-safe negative retirement is still unimplemented.
+Current save-driver errors classify lane exhaustion as Signing (adoption as Busy), not
+durable disk pressure or evidence of absence; blindly retrying cannot clear this condition.
 
 - `take_member_signed_original` moves the original out and leaves the request Lent with its
   fee.
@@ -127,8 +133,9 @@ retrievable as DATA after lock and grants no save or publication right.
 
 ## Payments (logical invoices, not RSS claims)
 
-- Lane: replay math 1 MiB, general verifier metadata, 8 channel ledgers/views, 64 finished
-  tokens, lane layout. The member domain and parent capture pay their own existing fees.
+- Lane: replay math 1 MiB, general verifier metadata, 8 channel ledgers/views, 64 positive
+  cached tokens and 64 retained negative tokens, including their actual container layouts.
+  The member domain and parent capture pay their own existing fees. No pool cap is raised.
 - Request: one Draft plus completion overlap, Plan metadata, the outside-writer
   authorization transient, the request copy and 65 dependency loans. Dependency actions
   are borrowed and paid by their owner.

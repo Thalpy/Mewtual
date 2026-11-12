@@ -895,6 +895,8 @@ impl<'a> ValueIter<'a> {
     }
 
     pub(crate) fn try_next(&mut self) -> Result<ScalarValue<'a>, ReadOpError> {
+        #[cfg(feature = "history-recovery-test-counters")]
+        crate::history::note_history_value();
         let meta = self.meta.next().flatten();
         let meta = meta.ok_or(ReadOpError::MissingValue("value_meta"))?;
         let raw = self.raw.read_next(meta.length())?;

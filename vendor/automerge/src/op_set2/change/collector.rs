@@ -739,6 +739,8 @@ impl<'a> ChangeCollector<'a> {
         change_graph: &'a ChangeGraph,
         changes: Vec<BuildChangeMetadata<'a>>,
     ) -> Vec<Change> {
+        #[cfg(feature = "history-recovery-test-counters")]
+        crate::history::note_history_reconstruction();
         let min = changes
             .iter()
             .map(|c| c.start_op as usize)

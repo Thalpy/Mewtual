@@ -119,6 +119,46 @@ fn join_token(index: usize) -> [u8; 32] {
 }
 
 #[test]
+fn negative_retirement_reserves_the_last_slot_before_signing_and_keeps_pending_retries() {
+    let mut f = promoted(0, 0x7fef8);
+    let body = create("discarded without any outbox publication", None);
+    let before = member_sign_dispatches_for_test();
+    for index in 0..63 {
+        let token = join_token(index);
+        f.host
+            .retry_sign_member_request(&f.layout, plain(token, &body))
+            .unwrap();
+        f.host.abandon_member_request(token).unwrap();
+    }
+    let last = join_token(63);
+    f.host
+        .retry_sign_member_request(&f.layout, plain(last, &body))
+        .unwrap();
+    let original = f.host.take_member_signed_original(last).unwrap();
+    // The reserved last slot must not deny retries/completion of its original request.
+    f.host
+        .retry_sign_member_request(&f.layout, plain(last, &body))
+        .unwrap();
+    f.host
+        .restore_member_signed_original(last, original)
+        .unwrap();
+    drop(f.host.take_member_signed_original(last).unwrap());
+    f.host.forget_lent_member_request(last).unwrap();
+    assert_eq!(member_sign_dispatches_for_test(), before + 64);
+    for token in [join_token(0), last, join_token(64)] {
+        assert!(f
+            .host
+            .retry_sign_member_request(&f.layout, plain(token, &body))
+            .is_err());
+    }
+    assert_eq!(
+        member_sign_dispatches_for_test(),
+        before + 64,
+        "pressure is checked before a fresh key entry"
+    );
+}
+
+#[test]
 fn actual_three_family_founder_signs_successive_ordinary_sends_without_header_or_append() {
     for family in 0..3 {
         let mut f = promoted(family, 0x7fa00 + family as u64);
