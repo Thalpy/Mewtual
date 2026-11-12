@@ -182,9 +182,12 @@ fn cold_fork_keeps_prepared_candidate_and_drains_the_original_admitted_signing_r
         .verifier
         .prepare_ordinary_signing_plan(&draft, &admission, &[], &view)
         .unwrap();
+    let mut later_spec = draft.spec_data().clone();
+    later_spec.nonce = [62; 16];
+    let later_draft = ActionDraft::new(later_spec, signer).unwrap();
     let mut later = f
         .verifier
-        .prepare_ordinary_signing_plan(&draft, &admission, &[], &view)
+        .prepare_ordinary_signing_plan(&later_draft, &admission, &[], &view)
         .unwrap();
     let (header, body, image) = append_input(&f, 3);
     let mut candidate = Some(
@@ -205,7 +208,7 @@ fn cold_fork_keeps_prepared_candidate_and_drains_the_original_admitted_signing_r
         f.verifier.archived_contradiction_data().unwrap().2,
         &alternate
     );
-    assert!(later.admit_signing(&draft, &signer).is_err());
+    assert!(later.admit_signing(&later_draft, &signer).is_err());
     assert!(f
         .verifier
         .advance_host_selected(&selected, &mut candidate)
