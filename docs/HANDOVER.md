@@ -1,5 +1,28 @@
 # Mewtual; Handover
 
+## Agent C draft-4 decisions (12 November; durable fork backing required)
+
+The primary chooses durable backing, option (c), for the completed joined source.
+4096 may limit a paid hot cache, not lifetime governing steps or membership
+changes. Forgetting an old Append fork is not repaired by a guaranteed later gap;
+that guarantee is false. Core's opaque archived-parent owners are bound to the
+original verifier, so disk retention needs a reviewed selected-record/cold-replay
+handoff rather than raw parent reconstruction. The primary owns this archive.
+
+The [draft-4 addendum](communication-recovery/CHAT-V2-JOINED-SOURCE-COORDINATION.md)
+approves C's private joined selection-constructor use, the pre-take V1 checkpoint
+exclusion, `SavedHistorical`/bounded historical custody, and the closed negative
+enum under explicit binding/accounting conditions. Prepared classification needs
+the actual unstarted/current-parent proof or exact recovery/lookup. Conflict is
+not absence. A historical discard command is primary-owned future work and is
+not supplied or approved by this decision. No numeric pool estimate is accepted
+without its actual retained/transient invoice.
+
+C can implement the narrow Core/Sync commits and strict bounded warm tests now;
+complete replay/source acceptance still requires actual durable backing. A
+read-only cross-boundary design review supports these decisions. No Rust, wire,
+format or runtime change is made here; no Cargo/suites run for these documents.
+
 ## Agent C coordination (12 November; design decisions, no implementation)
 
 C's source survey confirms missing production V2 invite/pin provenance, founder

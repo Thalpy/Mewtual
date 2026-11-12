@@ -161,3 +161,116 @@ between both save phases in both orderings; delayed old-parent sibling without
 its body; and repeated A1/A2/A3 removal/rejoin with Saved, Running, Prepared,
 Unresolved and capacity outcomes. None may renew old source authority or claim
 that missing/refused observations prove successful progress.
+
+## 7. Draft-4 decisions: fork retention and remaining shared boundaries
+
+This addendum answers C's section 11 after the short re-review. It supersedes
+the proposed K/M lifetime limits, not the source, pin or save requirements above.
+It is still design permission, not implementation or acceptance evidence.
+
+**Fork policy: choose (c) for the completed source.** Retain the complete selected
+governing-parent/first-child record history, contradictions and frozen removal
+evidence in the primary's durable paged archive. A bound of 4096 may bound a hot
+cache; it must not bound lifetime messages or membership changes, or permit
+forgetting old forks. Evict a cache entry only after the exact evidence is
+covered by that archive and can be recovered under its original selection scope.
+Do not approve an 8 MiB estimate as the measured invoice: signatures, allocation
+control, frozen cuts, close debt, buffers and overlapping work need actual fees.
+
+Option (a)'s claim that an older Append fork will necessarily surface later as
+Gap/Remove mismatch is false. Both branches may remain internally valid. A
+`ForkHorizon` diagnostic would disclose the limitation but would not repair it.
+Option (b)'s permanent message-count cliff is also rejected for production.
+
+Cache misses must distinguish authenticated "not a selected parent" from a
+missing, busy, corrupt or unavailable archive page. The latter is retryable
+unavailability, never absence or permission. Reserve capacity before advancement,
+retain exact owners/evidence across uncertainty, and bound page/byte/work use per
+turn. Archive pressure may pause work; it must not irreversibly close a source
+merely because a cache is full. Source/removal/fork negatives remain mandatory.
+No infinite disk, instantaneous replay or progress under full storage is claimed.
+
+The primary owns the archive producer and the necessary reviewed Core handoff.
+`V2KnownGoverningParent` is bound to the ORIGINAL verifier identity; serializing
+its fields and reconstructing a parent after reading disk is not supported.
+Implement a closed selected-record/original-scope/cold-replay path before using
+disk evidence with `observe_archived_header`. C must not add a raw-parent adoption
+constructor, a witness boolean or an arbitrary lookup callback as a substitute.
+The archive also has to preserve known contradictions across restart.
+
+C can proceed now with Core accessors, Sync provenance/fence work, and a strict
+bounded warm test archive that retains every parent it has accepted. At capacity
+that temporary archive returns an explicit backing/pressure outcome before
+advancement; it neither forgets evidence nor claims completed production support.
+The completed replay/source milestone waits for actual durable backing. Agreed
+lane/save work may proceed in separate commits with that prerequisite explicit.
+Required archive acceptance includes prefixes and delayed siblings beyond 4096,
+old membership parents, missing bodies/pages, unavailable backing, restart,
+contradiction retention and foreign verifier/mount rejection.
+
+**Selection constructor: approved for the private joined Root consumer.** C may
+use `V2HostSelectionExpectation::from_trusted_host` and update its contract to
+name this consumer. First establish the independent mounted pin, complete
+historical replay, actual own-Welcome binding and supported finalized postjoin
+transition selection. Copying a mathematically derived candidate's IDs into the
+expectation does not prove these facts. Production must also implement its
+selected-record/archive custody. A warm selection is not a founder SavedB receipt
+or evidence that the joiner durably selected the record. Keep the constructor
+away from untrusted decoders and native/renderer arguments.
+
+**V1 checkpoint guard: C owns this narrow hunk.** Make join-facts claiming and
+`install_owner_direct_add_checkpoint` mutually exclusive. Refuse before
+`prepared.take()` or any replacement; preserve the whole candidate on refusal.
+Cover both orderings and attempted installation after joined-source creation.
+An attempted/refused V1 install must not itself replace a valid joined source.
+The primary still owns broader native/backend protocol-mode isolation.
+
+**Historical outcome and table: approved, with exact bindings.** C may add
+`SavedHistorical` and a bounded table on `MemberOutboxMount`. An exact verified
+saved receipt remains a successful historical save; neither Saved variant grants
+fresh publication or A2 authority. Apply classification consistently to lookup,
+cached SavedLocal and AlreadySaved receipt paths rather than only one shortcut.
+Retain the authoritative receipt and exact immutable request comparison.
+
+Bind historical originals to the stable context, token, request digest, original
+Admission, ActionId and exact original bytes/digest. Consult that custody before
+any new A2 draw or signature: moving an A1 original out of the active cell must
+not make its token look new. Charge table metadata, control and retained DATA to
+the member-outbox pool before handoff; do not double-count or assume the joined
+pool pays those same objects. Keep the joined replay/domain/cache pool separate.
+Full capacity is Pressure, not eviction. Running jobs remain Busy, with their
+actual ends and leases in the job rather than historical custody.
+
+Prepared does not always mean "never admitted": an admitted but UNRUN job can
+de-admit to a private Prepared object. Prepared-to-Unsaved classification must
+prove the exact private object is unstarted and still `admissible_by` its actual
+exclusive owner's clean selected parent, with the exact token/request/original
+binding. Otherwise recover and perform exact lookup. Test original Prepared,
+de-admitted UNRUN and stale-parent cases. The enum label alone is insufficient;
+both safe paths retain the original.
+
+`HistoricalConflict` is not absence. Its token can identify a different stored
+request, so preserve the exact conflict context and receipt where applicable;
+do not label every historical row "not saved". Memory-only historical custody
+remains crash-equivalent and cannot establish durable quarantine or cold token
+retirement. C must state that remaining boundary plainly.
+
+**Release command: primary-owned, not implemented or approved by this addendum.**
+C must not assume a discard command or user action to make acceptance pass. A
+later reviewed command must distinguish known-unsaved DATA from conflicts,
+uncertainty and saved receipts, handle the original native generation/row and
+token retirement, and prevent a delayed retry from re-signing the old token.
+It must never delete a durable saved message as a side effect of freeing a slot.
+
+**Closed negative enum: approved for C.** Generalize the save-source parameter to
+closed founder/joined variants retaining their original identity and funding.
+Negative probes read monotone atomics only: no mutex, allocation, SDK work or
+callback. Preserve the proved fence/issuance order and founder behavior. Update
+the actual named layout and assertions, including the changed save-source body;
+do not waive guards, suppress failures or increase caps on an unmeasured estimate.
+
+No numeric `V2JoinedMemberPolicy` budget is signed off by these decisions. C
+must supply actual retained/transient accounting and independently funded
+overlaps for CI layout checks. Correct draft 4's stale resolution-table statement
+that replay is K-bounded, and incorporate its external review before coding the
+affected boundary. The narrow Core/Sync commits need not wait for the archive.
