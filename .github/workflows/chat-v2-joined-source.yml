@@ -43,6 +43,27 @@ jobs:
         run: python .github/scripts/check-chat-v2-joined-source.py --self-test
       - name: Execute joined-source regressions
         run: python .github/scripts/check-chat-v2-joined-source.py
+      - name: Execute member-storage regressions and the real predecessor gate
+        run: python .github/scripts/check-chat-v2-member-save.py
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: 22
+      - name: Install frontend dependencies for the actual compiled audit component
+        if: runner.os == 'Linux'
+        run: npm --prefix apps/desktop ci
+      - name: Execute the full frontend suite
+        if: runner.os == 'Linux'
+        run: npm --prefix apps/desktop test
+      - name: Check frontend types
+        if: runner.os == 'Linux'
+        run: npm --prefix apps/desktop run check
+      - name: Build frontend assets
+        if: runner.os == 'Linux'
+        run: npm --prefix apps/desktop run build
+      - name: Check root formatting
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all -- --check
       # Keep an affected-crate strict result visible separately from inherited App debt.
       # This does not replace or relax the required workspace-wide Clippy job.
       - name: Strict Clippy for the affected protocol crates
