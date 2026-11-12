@@ -32,13 +32,22 @@ fn join(owner: &mut Node, nonce: u8) -> Node {
     let kp = device
         .key_package_for_invite(&invite.group_id, invite.invite_nonce)
         .unwrap();
+    let expected_key_package = device.key_package_reference(&kp).unwrap();
     let request = encode_join_req(&invite, &serialize_key_package(&kp).unwrap());
     let response = owner
         .serve_join(PeerId::from_u64(nonce as u64), &request)
         .unwrap();
     assert_eq!(response[0], JOIN_READY);
     let (welcome, signature, transfer) = decode_join_resp(&response[1..]).unwrap();
-    let (group, routing) = finish_join(&device, &invite, &welcome, &signature, &transfer).unwrap();
+    let (group, routing) = finish_join(
+        &device,
+        &invite,
+        &welcome,
+        &signature,
+        &transfer,
+        &expected_key_package,
+    )
+    .unwrap();
     Node::new_joined(
         Hub::new().join(PeerId::from_u64(nonce as u64)),
         group,
@@ -151,13 +160,22 @@ fn group_policy_admission_rejects_a_different_policy_even_with_valid_inviter_sig
     let kp = joining
         .key_package_for_invite(&invite.group_id, invite.invite_nonce)
         .unwrap();
+    let expected_key_package = joining.key_package_reference(&kp).unwrap();
     let (welcome, transfer, signature) = alice
         .admit_now(&invite, &serialize_key_package(&kp).unwrap(), 1_000)
         .unwrap();
     let other = GroupPolicy::issue(&alice.group, &alice.device, GroupMode::Dedicated).unwrap();
     invite.bind_policy(&alice.device, other).unwrap();
     assert!(invite.verify_self());
-    assert!(finish_join(&joining, &invite, &welcome, &signature, &transfer).is_err());
+    assert!(finish_join(
+        &joining,
+        &invite,
+        &welcome,
+        &signature,
+        &transfer,
+        &expected_key_package
+    )
+    .is_err());
 }
 
 /// Malicious clients can sign policy bytes without going through GroupPolicy::issue. Verify

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use catcoms_rt::{
-    PublishOnceError, PublishSubmission, Topic, MAX_PUBLISH_ONCE_BYTES,
+    PublishOnceError, PublishSubmission, RequestCancellation, Topic, MAX_PUBLISH_ONCE_BYTES,
     MAX_PUBLISH_ONCE_TOPIC_BYTES,
 };
 use libp2p::gossipsub;
@@ -22,6 +22,7 @@ pub(super) struct Publication {
     topic: Topic,
     data: Bytes,
     reply: oneshot::Sender<Result<PublishSubmission, PublishOnceError>>,
+    authority: Option<RequestCancellation>,
     _slot: OwnedSemaphorePermit,
 }
 
@@ -38,6 +39,16 @@ impl Publication {
         attempt: impl FnOnce(Topic, Bytes) -> Result<PublishSubmission, PublishOnceError>,
     ) {
         if !self.reply.is_closed() {
+            // This read is the serialized lower admission point. No await separates it from
+            // gossip mutation. Revocation after this point cannot retract admitted bytes.
+            if self
+                .authority
+                .as_ref()
+                .is_some_and(RequestCancellation::is_cancelled)
+            {
+                let _ = self.reply.send(Err(PublishOnceError::Revoked));
+                return;
+            }
             let result = attempt(self.topic, self.data);
             // A lost acknowledgement is ambiguous, never a reason to requeue raw ciphertext.
             let _ = self.reply.send(result);
@@ -66,6 +77,22 @@ pub(super) async fn publish_once(
     topic: Topic,
     data: Bytes,
 ) -> Result<PublishSubmission, PublishOnceError> {
+    publish_once_with_authority(commands, slots, topic, data, None).await
+}
+
+pub(super) async fn publish_once_with_authority(
+    commands: &mpsc::Sender<Command>,
+    slots: &Arc<Semaphore>,
+    topic: Topic,
+    data: Bytes,
+    authority: Option<RequestCancellation>,
+) -> Result<PublishSubmission, PublishOnceError> {
+    if authority
+        .as_ref()
+        .is_some_and(RequestCancellation::is_cancelled)
+    {
+        return Err(PublishOnceError::Revoked);
+    }
     if data.len() > MAX_PUBLISH_ONCE_BYTES || topic.as_bytes().len() > MAX_PUBLISH_ONCE_TOPIC_BYTES
     {
         return Err(PublishOnceError::TooLarge);
@@ -80,6 +107,7 @@ pub(super) async fn publish_once(
         topic: Topic::new(Bytes::copy_from_slice(topic.as_bytes())),
         data: Bytes::copy_from_slice(&data),
         reply,
+        authority,
         _slot: slot,
     };
     drop(topic);

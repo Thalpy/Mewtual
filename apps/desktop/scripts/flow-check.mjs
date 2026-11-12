@@ -23,6 +23,7 @@ import process from "node:process";
 import { gate7FlowExpression } from "./gate7-flow.mjs";
 import { keptFlowExpression } from "./kept-flow.mjs";
 import { privateDownloadFlowExpression } from "./private-download-flow.mjs";
+import { chatAdminLedgerFlowExpression } from "./chat-admin-ledger-flow.mjs";
 
 const PORT = Number(process.env.FLOW_PORT ?? 5177);
 const URL_UNDER_TEST = `http://localhost:${PORT}/?fixture=chat`;
@@ -658,7 +659,15 @@ try {
   // A private debugger endpoint plus our exact navigation prevents touching an existing app.
   await cdp.navigate(URL_UNDER_TEST);
 
-  if (process.env.FLOW_SCENARIO === "private-download") {
+  if (process.env.FLOW_SCENARIO === "chat-ledger") {
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+    await cdp.waitReady();
+    const result = await cdp.eval(chatAdminLedgerFlowExpression);
+    failed |= !assertEqual("privileged originals, edits, deletes and retired server reads", result,
+      { incompleteShown: true, originalVisible: true, editVisible: true, deleteVisible: true, oldScopeDiscarded: true, exactCommands: true, reopened: true });
+    const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
+    if (capture.result?.data) writeFileSync(new URL("../../../target/chat-v2-admin-history.png", import.meta.url), Buffer.from(capture.result.data, "base64"));
+  } else if (process.env.FLOW_SCENARIO === "private-download") {
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
     await cdp.waitReady();
     const result = await cdp.eval(privateDownloadFlowExpression);
@@ -835,8 +844,10 @@ try {
 } catch (e) {
   console.error(`FAIL harness: ${e.message}`);
   if (!connected && process.env.FLOW_CDP_TRACE === "1" && browserOutput) console.error(`Edge setup: ${browserOutput}`);
-  if (["gate7", "kept", "private-download"].includes(process.env.FLOW_SCENARIO) && connected) {
-    try { const capture = await connected.send("Page.captureScreenshot", { format: "png" }); if (capture.result?.data) writeFileSync(new URL(`../../../target/${process.env.FLOW_SCENARIO === "private-download" ? "pr48-private-download-failure" : process.env.FLOW_SCENARIO === "kept" ? "pr48-kept-failure" : "gate7-pixa-failure"}.png`, import.meta.url), Buffer.from(capture.result.data, "base64")); } catch { /* preserve original failure */ }
+  const failureImage = { gate7: "gate7-pixa-failure", kept: "pr48-kept-failure",
+    "private-download": "pr48-private-download-failure", "chat-ledger": "chat-v2-admin-history-failure" }[process.env.FLOW_SCENARIO];
+  if (failureImage && connected) {
+    try { const capture = await connected.send("Page.captureScreenshot", { format: "png" }); if (capture.result?.data) writeFileSync(new URL(`../../../target/${failureImage}.png`, import.meta.url), Buffer.from(capture.result.data, "base64")); } catch { /* preserve original failure */ }
   }
   // Whatever the page managed to say before it gave up. This is usually the actual diagnosis: a
   // "never became ready" is nearly always a module that threw or would not parse, and the browser

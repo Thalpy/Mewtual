@@ -127,6 +127,8 @@
   { "command": "restore_wiki_page", "risk": "account-write", "surfaces": ["main"] },
   { "command": "get_roles", "risk": "account-read", "surfaces": ["main"] },
   { "command": "get_moderation", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "get_admin_chat_ledger", "risk": "sensitive-authority", "surfaces": ["main"] },
+  { "command": "get_admin_chat_ledger_detail", "risk": "sensitive-authority", "surfaces": ["main"] },
   { "command": "warn_message", "risk": "account-write", "surfaces": ["main"] },
   { "command": "create_kick_case", "risk": "membership-admin", "surfaces": ["main"] },
   { "command": "cast_kick_vote", "risk": "membership-admin", "surfaces": ["main"] },

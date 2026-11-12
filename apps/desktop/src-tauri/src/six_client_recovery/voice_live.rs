@@ -1079,6 +1079,16 @@ async fn native_v2_abandoned_custody_needs_exact_physical_collection_dead_lease_
     confirmation_over_blocked_tcp(true, false, false, true, None, None).await;
 }
 
+#[test]
+fn confirmation_scenario_keeps_retained_async_work_off_the_caller_stack() {
+    let scenario = confirmation_over_blocked_tcp(true, false, false, true, None, None);
+    let bytes = std::mem::size_of_val(&scenario);
+    assert!(
+        bytes <= 64 * 1024,
+        "native confirmation wrapper retains {bytes} bytes on its caller stack"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_close_and_sdk_release_order_actual_queued_and_returned_actor_work() {
     confirmation_over_blocked_tcp(true, false, false, false, Some(0), None).await;
@@ -1172,7 +1182,7 @@ async fn confirmation_over_blocked_tcp(
     }
 }
 #[allow(clippy::too_many_arguments)]
-async fn confirmation_over_blocked_tcp_inner(
+fn confirmation_over_blocked_tcp_inner(
     framed: bool,
     reject: bool,
     known_incoming: bool,
@@ -1180,78 +1190,126 @@ async fn confirmation_over_blocked_tcp_inner(
     pc_cases: Option<u8>,
     fence_cases: Option<u8>,
     clock: Option<Arc<crate::voice_handoff::integration::ExpiryClock>>,
-) {
-    let mut scenario = Scenario::new(false, isolate().await);
-    scenario.voice_clock = clock.map(|clock| clock as Arc<dyn catcoms_rt::Clock>);
-    scenario.admit().await;
-    scenario.close(&[3, 4, 5]).await;
-    scenario.rules.drop_gossip.store(true, Ordering::Release);
-    for index in [0, 1, 2] {
-        enable(&scenario, index).await;
-    }
-    let a = join(&scenario, 1).await;
-    let c = join(&scenario, 2).await;
-    let ag = a.grant().unwrap();
-    let cg = c.grant().unwrap();
-    let discovered = both_fresh(&scenario, &a, &c, &ag, &cg, None, 0).await;
-    // A-C is forbidden by the real socket graph; unjoined B only serves discovery here.
-    // Test-only AES keys exercise native confirmation; this does not claim RTC or browser keys.
-    scenario.rules.assert_graph();
-    let (ap, cp) = tokio::join!(
-        crate::voice_handoff::integration::derivation_returned(
-            &scenario.online(1).state,
-            &a,
-            discovered[0].1
-        ),
-        crate::voice_handoff::integration::derivation_returned(
-            &scenario.online(2).state,
-            &c,
-            discovered[1].1
-        ),
-    );
-    // This post-authentication fixture used to have no HTTP Host. Native key adoption
-    // nudges once, but actual old-Lower drainage can require another paid Ready turn.
-    // Start the real service cadence; never manufacture Ready/CoreDrained in the test.
-    let services = if framed && !reject && !known_incoming {
-        Some([1, 2].map(|index| {
-            crate::voice_handoff::integration::NativeFixtureService::start(
-                &scenario.online(index).state,
-            )
-        }))
-    } else {
-        None
-    };
-    if scenario.clients[1].identity.as_ref().unwrap().1
-        < scenario.clients[2].identity.as_ref().unwrap().1
-    {
-        if known_incoming {
-            crate::voice_handoff::integration::confirmation_known_incoming_retry(
+) -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
+    // The real six-client setup is also a large retained child (independently of which
+    // custody mode later runs). Heap it BEFORE task-local result/clock wrappers embed it.
+    // This synchronous constructor changes no setup, polling, timeout or teardown order.
+    Box::pin(async move {
+        let mut scenario = Scenario::new(false, isolate().await);
+        scenario.voice_clock = clock.map(|clock| clock as Arc<dyn catcoms_rt::Clock>);
+        scenario.admit().await;
+        scenario.close(&[3, 4, 5]).await;
+        scenario.rules.drop_gossip.store(true, Ordering::Release);
+        for index in [0, 1, 2] {
+            enable(&scenario, index).await;
+        }
+        let a = join(&scenario, 1).await;
+        let c = join(&scenario, 2).await;
+        let ag = a.grant().unwrap();
+        let cg = c.grant().unwrap();
+        let discovered = both_fresh(&scenario, &a, &c, &ag, &cg, None, 0).await;
+        // A-C is forbidden by the real socket graph; unjoined B only serves discovery here.
+        // Test-only AES keys exercise native confirmation; this does not claim RTC or browser keys.
+        scenario.rules.assert_graph();
+        let (ap, cp) = tokio::join!(
+            crate::voice_handoff::integration::derivation_returned(
                 &scenario.online(1).state,
                 &a,
-                &ap,
+                discovered[0].1
+            ),
+            crate::voice_handoff::integration::derivation_returned(
+                &scenario.online(2).state,
+                &c,
+                discovered[1].1
+            ),
+        );
+        // This post-authentication fixture used to have no HTTP Host. Native key adoption
+        // nudges once, but actual old-Lower drainage can require another paid Ready turn.
+        // Start the real service cadence; never manufacture Ready/CoreDrained in the test.
+        let services = if framed && !reject && !known_incoming {
+            Some([1, 2].map(|index| {
+                crate::voice_handoff::integration::NativeFixtureService::start(
+                    &scenario.online(index).state,
+                )
+            }))
+        } else {
+            None
+        };
+        if scenario.clients[1].identity.as_ref().unwrap().1
+            < scenario.clients[2].identity.as_ref().unwrap().1
+        {
+            if known_incoming {
+                crate::voice_handoff::integration::confirmation_known_incoming_retry(
+                    &scenario.online(1).state,
+                    &a,
+                    &ap,
+                    &scenario.online(2).state,
+                    &c,
+                    &cp,
+                )
+                .await;
+            } else if reject {
+                crate::voice_handoff::integration::confirmation_rejected_result(
+                    &scenario.online(1).state,
+                    &a,
+                    &ap,
+                    &scenario.online(2).state,
+                    &c,
+                    &cp,
+                )
+                .await;
+            } else if framed {
+                crate::voice_handoff::integration::confirmation_framed_round_trip(
+                    &scenario.online(1).state,
+                    &a,
+                    &ap,
+                    &scenario.online(2).state,
+                    &c,
+                    &cp,
+                    orphan,
+                    pc_cases,
+                    fence_cases,
+                )
+                .await;
+            } else {
+                crate::voice_handoff::integration::confirmation_round_trip(
+                    &scenario.online(1).state,
+                    &a,
+                    &ap,
+                    &scenario.online(2).state,
+                    &c,
+                    &cp,
+                )
+                .await;
+            }
+        } else if known_incoming {
+            crate::voice_handoff::integration::confirmation_known_incoming_retry(
                 &scenario.online(2).state,
                 &c,
                 &cp,
+                &scenario.online(1).state,
+                &a,
+                &ap,
             )
             .await;
         } else if reject {
             crate::voice_handoff::integration::confirmation_rejected_result(
-                &scenario.online(1).state,
-                &a,
-                &ap,
                 &scenario.online(2).state,
                 &c,
                 &cp,
+                &scenario.online(1).state,
+                &a,
+                &ap,
             )
             .await;
         } else if framed {
             crate::voice_handoff::integration::confirmation_framed_round_trip(
-                &scenario.online(1).state,
-                &a,
-                &ap,
                 &scenario.online(2).state,
                 &c,
                 &cp,
+                &scenario.online(1).state,
+                &a,
+                &ap,
                 orphan,
                 pc_cases,
                 fence_cases,
@@ -1259,102 +1317,59 @@ async fn confirmation_over_blocked_tcp_inner(
             .await;
         } else {
             crate::voice_handoff::integration::confirmation_round_trip(
-                &scenario.online(1).state,
-                &a,
-                &ap,
                 &scenario.online(2).state,
                 &c,
                 &cp,
+                &scenario.online(1).state,
+                &a,
+                &ap,
             )
             .await;
         }
-    } else if known_incoming {
-        crate::voice_handoff::integration::confirmation_known_incoming_retry(
-            &scenario.online(2).state,
-            &c,
-            &cp,
-            &scenario.online(1).state,
-            &a,
-            &ap,
-        )
-        .await;
-    } else if reject {
-        crate::voice_handoff::integration::confirmation_rejected_result(
-            &scenario.online(2).state,
-            &c,
-            &cp,
-            &scenario.online(1).state,
-            &a,
-            &ap,
-        )
-        .await;
-    } else if framed {
-        crate::voice_handoff::integration::confirmation_framed_round_trip(
-            &scenario.online(2).state,
-            &c,
-            &cp,
-            &scenario.online(1).state,
-            &a,
-            &ap,
-            orphan,
-            pc_cases,
-            fence_cases,
-        )
-        .await;
-    } else {
-        crate::voice_handoff::integration::confirmation_round_trip(
-            &scenario.online(2).state,
-            &c,
-            &cp,
-            &scenario.online(1).state,
-            &a,
-            &ap,
-        )
-        .await;
-    }
-    crate::end_voice_owner_inner(&scenario.online(1).state, a.id()).await;
-    crate::end_voice_owner_inner(&scenario.online(2).state, c.id()).await;
-    let purposes = [
-        crate::voice_handoff::ledger::Purpose::Derive(discovered[0].1),
-        crate::voice_handoff::ledger::Purpose::Derive(discovered[1].1),
-    ];
-    if orphan {
-        assert_ne!(
-            ap.retire_plan().is_ok(),
-            cp.retire_plan().is_ok(),
-            "only the abandoned Borrowed Claim refuses ordinary retirement"
-        );
-    } else {
-        ap.retire_plan().unwrap();
-        cp.retire_plan().unwrap();
-    }
-    drop((ap, cp, ag, cg));
-    if orphan {
-        let low = if scenario.clients[1].identity.as_ref().unwrap().1
-            < scenario.clients[2].identity.as_ref().unwrap().1
-        {
-            1
+        crate::end_voice_owner_inner(&scenario.online(1).state, a.id()).await;
+        crate::end_voice_owner_inner(&scenario.online(2).state, c.id()).await;
+        let purposes = [
+            crate::voice_handoff::ledger::Purpose::Derive(discovered[0].1),
+            crate::voice_handoff::ledger::Purpose::Derive(discovered[1].1),
+        ];
+        if orphan {
+            assert_ne!(
+                ap.retire_plan().is_ok(),
+                cp.retire_plan().is_ok(),
+                "only the abandoned Borrowed Claim refuses ordinary retirement"
+            );
         } else {
-            2
-        };
-        let selected = if low == 1 { &a } else { &c };
-        let state = &scenario.online(low).state;
-        state.voice_channels.collect_retired(&state.voice_handoff);
-        assert!(
-            state
-                .voice_handoff
-                .lookup_original(selected, purposes[low - 1])
-                .is_none(),
-            "dead original history collects only after its actual last row owner drops"
-        );
-    }
-    if let Some(services) = services {
-        for service in services {
-            service.finish().await;
+            ap.retire_plan().unwrap();
+            cp.retire_plan().unwrap();
         }
-    }
-    scenario.close(&[0, 1, 2]).await;
-    scenario.rules.assert_graph();
+        drop((ap, cp, ag, cg));
+        if orphan {
+            let low = if scenario.clients[1].identity.as_ref().unwrap().1
+                < scenario.clients[2].identity.as_ref().unwrap().1
+            {
+                1
+            } else {
+                2
+            };
+            let selected = if low == 1 { &a } else { &c };
+            let state = &scenario.online(low).state;
+            state.voice_channels.collect_retired(&state.voice_handoff);
+            assert!(
+                state
+                    .voice_handoff
+                    .lookup_original(selected, purposes[low - 1])
+                    .is_none(),
+                "dead original history collects only after its actual last row owner drops"
+            );
+        }
+        if let Some(services) = services {
+            for service in services {
+                service.finish().await;
+            }
+        }
+        scenario.close(&[0, 1, 2]).await;
+        scenario.rules.assert_graph();
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

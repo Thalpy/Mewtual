@@ -49,72 +49,79 @@ struct Pair {
     clock: ManualClock,
 }
 impl Pair {
-    async fn new() -> Self {
-        let hub = Hub::new();
-        let alice_net = hub.join(PeerId::from_u64(1));
-        let bob_net = hub.join(PeerId::from_u64(2));
-        let clock = ManualClock::new(1000);
-        let mut alice = Server::found(
-            alice_net,
-            MlsDevice::generate().unwrap(),
-            rng(),
-            Box::new(clock.clone()),
-            "alice",
-        )
-        .unwrap();
-        alice.subscribe_control().await.unwrap();
-        let invite = alice.mint_invite([1; 16], u64::MAX, vec![]).unwrap();
-        // The actual product admission handshake, not a shared same-device decrypt fixture.
-        let (bob, tick) = tokio::join!(
-            Server::join(
-                bob_net,
+    fn new() -> impl std::future::Future<Output = Box<Self>> {
+        // Two full Servers and the joined admission handshake must not be copied
+        // into every parent fixture's initial async state on the default test stack.
+        Box::pin(async {
+            let hub = Hub::new();
+            let alice_net = hub.join(PeerId::from_u64(1));
+            let bob_net = hub.join(PeerId::from_u64(2));
+            let clock = ManualClock::new(1000);
+            let mut alice = Server::found(
+                alice_net,
                 MlsDevice::generate().unwrap(),
                 rng(),
                 Box::new(clock.clone()),
-                "bob",
-                alice.local_peer(),
-                &invite
-            ),
-            alice.sync_once()
-        );
-        tick.unwrap();
-        let mut bob = bob.unwrap();
-        assert_eq!(alice.member_count(), 2);
-        assert_eq!(bob.member_count(), 2);
-        let alice_root = tempfile::tempdir().unwrap();
-        let bob_root = tempfile::tempdir().unwrap();
-        let mut alice_store =
-            ServerStore::open(alice_root.path(), b"receive-test", &mut rng()).unwrap();
-        let mut bob_store =
-            ServerStore::open(bob_root.path(), b"receive-test", &mut rng()).unwrap();
-        let (alice_budget, alice_intents) = inventory(&mut alice_store, &alice.group_id());
-        let (bob_budget, _) = inventory(&mut bob_store, &bob.group_id());
-        let key = PointerKey::new(DocType::StudioObject, b"private-received-cat".to_vec()).unwrap();
-        let document = registry_document(&alice.group_id(), key.bucket()).unwrap();
-        let id = epoch_zero_id(DocType::DocRegistry, &document.logical_key);
-        let watch = bob
-            .watch_registry_epoch(&bob_store, SERVER, key.bucket())
+                "alice",
+            )
             .unwrap();
-        bob.flush_registry_subscriptions().await.unwrap();
-        let mut pair = Self {
-            hub,
-            clock,
-            _alice_root: alice_root,
-            bob_root,
-            alice,
-            bob,
-            alice_store,
-            bob_store,
-            alice_budget,
-            alice_intents,
-            bob_budget,
-            watch,
-            key,
-            document,
-            id,
-        };
-        pair.edit(1);
-        pair
+            alice.subscribe_control().await.unwrap();
+            let invite = alice.mint_invite([1; 16], u64::MAX, vec![]).unwrap();
+            // The actual product admission handshake, not a shared same-device decrypt fixture.
+            let (bob, tick) = tokio::join!(
+                Server::join(
+                    bob_net,
+                    MlsDevice::generate().unwrap(),
+                    rng(),
+                    Box::new(clock.clone()),
+                    "bob",
+                    alice.local_peer(),
+                    &invite
+                ),
+                alice.sync_once()
+            );
+            tick.unwrap();
+            let mut bob = bob.unwrap();
+            assert_eq!(alice.member_count(), 2);
+            assert_eq!(bob.member_count(), 2);
+            let alice_root = tempfile::tempdir().unwrap();
+            let bob_root = tempfile::tempdir().unwrap();
+            let mut alice_store =
+                ServerStore::open(alice_root.path(), b"receive-test", &mut rng()).unwrap();
+            let mut bob_store =
+                ServerStore::open(bob_root.path(), b"receive-test", &mut rng()).unwrap();
+            let (alice_budget, alice_intents) = inventory(&mut alice_store, &alice.group_id());
+            let (bob_budget, _) = inventory(&mut bob_store, &bob.group_id());
+            let key =
+                PointerKey::new(DocType::StudioObject, b"private-received-cat".to_vec()).unwrap();
+            let document = registry_document(&alice.group_id(), key.bucket()).unwrap();
+            let id = epoch_zero_id(DocType::DocRegistry, &document.logical_key);
+            let watch = bob
+                .watch_registry_epoch(&bob_store, SERVER, key.bucket())
+                .unwrap();
+            bob.flush_registry_subscriptions().await.unwrap();
+            let mut pair = Self {
+                hub,
+                clock,
+                _alice_root: alice_root,
+                bob_root,
+                alice,
+                bob,
+                alice_store,
+                bob_store,
+                alice_budget,
+                alice_intents,
+                bob_budget,
+                watch,
+                key,
+                document,
+                id,
+            };
+            pair.edit(1);
+            // Keep the original pair heap-owned across fixture returns as well. Its
+            // two Servers occupy about90KiB before composed receive/serve state.
+            Box::new(pair)
+        })
     }
     fn edit(&mut self, nonce: u8) {
         let op = RegistryOp::Put {

@@ -15,6 +15,34 @@ pub const MAX_MEMBER_FINALIZATION_OBSERVATIONS: usize =
 const PENDING_SNAPSHOT_VERSION: u8 = 1;
 const MAX_PENDING_SNAPSHOT_BYTES: usize = 5 + MAX_PEER_RECORDS * 72;
 
+/// Borrow the initialization-only subset before the general snapshot decoder allocates its
+/// maps. The actual decoder still enforces uniqueness/membership and grants no endpoint proof.
+pub(super) fn preflight_owner_initialization_pending(
+    bytes: &[u8],
+    max_entries: usize,
+) -> Result<(), SyncError> {
+    let bad = || SyncError::Malformed;
+    let mut decoder = Decoder::new(bytes);
+    if decoder.get_u8().map_err(|_| bad())? != PENDING_SNAPSHOT_VERSION {
+        return Err(bad());
+    }
+    let count = decoder.get_u32().map_err(|_| bad())? as usize;
+    if count > decoder.remaining() / 72 {
+        return Err(bad());
+    }
+    if count > max_entries || count > MAX_PEER_RECORDS {
+        return Err(SyncError::OwnerInitializationUnsupported);
+    }
+    for _ in 0..count {
+        if decoder.get_bytes().map_err(|_| bad())?.len() != 32
+            || decoder.get_bytes().map_err(|_| bad())?.len() != 32
+        {
+            return Err(bad());
+        }
+    }
+    decoder.finish().map_err(|_| bad())
+}
+
 /// Scheduling evidence only, never membership, listener or file-service authority. Only an
 /// authenticated response to OUR kind26 request settles this obligation: serving a request
 /// cannot establish that our reply reached the other endpoint. Nothing here survives restart.
@@ -573,6 +601,7 @@ mod tests {
         let package = device
             .key_package_for_invite(&invite.group_id, invite.invite_nonce)
             .unwrap();
+        let expected_key_package = device.key_package_reference(&package).unwrap();
         let response = alice
             .serve_join(
                 bob_peer,
@@ -580,8 +609,15 @@ mod tests {
             )
             .unwrap();
         let (welcome, signature, transfer) = decode_join_resp(&response[1..]).unwrap();
-        let (group, routing) =
-            finish_join(&device, &invite, &welcome, &signature, &transfer).unwrap();
+        let (group, routing) = finish_join(
+            &device,
+            &invite,
+            &welcome,
+            &signature,
+            &transfer,
+            &expected_key_package,
+        )
+        .unwrap();
         let mut bob = Node::new_joined(
             hub.join(bob_peer),
             group,

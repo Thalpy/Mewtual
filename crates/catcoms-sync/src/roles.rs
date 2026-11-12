@@ -137,11 +137,179 @@ pub fn read_published_roster(
     Some(fps.into_iter().collect())
 }
 
+/// Bounded read of the same owner-signed published role copy, for privileged projections.
+/// Refuse an oversized scalar BEFORE cloning bytes or allocating the signer list. This is
+/// locally known role evidence, not globally fresh revocation; MLS admission must keep using
+/// owner-local authority. `max_entries` is a host work limit, not a new wire-format limit.
+/// The caller separately requires committed state (no pending transaction) and current MLS
+/// membership of the reader. A returned set alone confers neither requirement.
+pub fn read_published_roster_bounded(
+    doc: &AutoCommit,
+    group_id: &[u8],
+    owner_id: &DeviceId,
+    max_entries: usize,
+) -> Option<HashSet<DeviceId>> {
+    let max_bytes = max_entries.checked_mul(32)?.checked_add(106)?;
+    if group_id.len() > 256 {
+        return None;
+    }
+    // Normal ReadDoc::get allocates its winning scalar and inspects losing conflicts/actor
+    // identities before it returns. Even a checked winner size cannot bound that path. Borrow
+    // only the exact current winning Bytes slice through the reviewed SDK observer instead.
+    let bytes = doc
+        .root_bytes(
+            ROSTER_KEY,
+            automerge::RootValueReadLimits {
+                max_ops: 8192,
+                max_key_bytes: 64 * 1024,
+            },
+            max_bytes,
+        )
+        .ok()??;
+    if bytes.len() < 106 {
+        return None;
+    }
+    let count = usize::from(u16::from_be_bytes(bytes[40..42].try_into().ok()?));
+    if count > max_entries || bytes.len() != 106 + count * 32 {
+        return None;
+    }
+    let generation = u64::from_be_bytes(bytes[..8].try_into().ok()?);
+    let owner_pk = &bytes[8..40];
+    if DeviceId::from_public_key_bytes(owner_pk) != *owner_id {
+        return None;
+    }
+    let mut ids = Vec::with_capacity(count);
+    for raw in bytes[42..42 + count * 32].chunks_exact(32) {
+        ids.push(DeviceId::from_bytes(raw.try_into().ok()?));
+    }
+    if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return None;
+    }
+    let signature: [u8; 64] = bytes[42 + count * 32..].try_into().ok()?;
+    verify_with_public_bytes(
+        owner_pk,
+        &roster_payload(group_id, generation, &ids),
+        &signature,
+    )
+    .then(|| ids.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use automerge::transaction::Transactable;
     use catcoms_mls::MlsDevice;
+
+    fn signed_roster(owner: &MlsDevice, ids: &[DeviceId]) -> Vec<u8> {
+        let signature = owner
+            .sign(&roster_payload(b"bounded-group", 7, ids))
+            .unwrap();
+        encode_roster(7, &owner.public_key_bytes(), ids, &signature)
+    }
+
+    #[test]
+    fn bounded_roster_checks_real_signature_group_and_exact_entry_limit() {
+        let owner = MlsDevice::generate().unwrap();
+        let ids = [DeviceId::from_bytes([1; 32]), DeviceId::from_bytes([2; 32])];
+        let mut doc = AutoCommit::new().with_actor(automerge::ActorId::from(vec![7; 16]));
+        doc.put(
+            ROOT,
+            ROSTER_KEY,
+            ScalarValue::Bytes(signed_roster(&owner, &ids)),
+        )
+        .unwrap();
+        let bounded =
+            read_published_roster_bounded(&doc, b"bounded-group", &owner.device_id(), 2).unwrap();
+        assert_eq!(
+            bounded,
+            read_published_roster(&doc, b"bounded-group", &owner.device_id()).unwrap()
+        );
+        assert!(
+            read_published_roster_bounded(&doc, b"bounded-group", &owner.device_id(), 1).is_none()
+        );
+        assert!(
+            read_published_roster_bounded(&doc, b"another-group", &owner.device_id(), 2).is_none()
+        );
+        assert!(read_published_roster_bounded(&doc, b"bounded-group", &ids[0], 2).is_none());
+        let mut bad = signed_roster(&owner, &ids);
+        *bad.last_mut().unwrap() ^= 1;
+        doc.put(ROOT, ROSTER_KEY, ScalarValue::Bytes(bad)).unwrap();
+        assert!(
+            read_published_roster_bounded(&doc, b"bounded-group", &owner.device_id(), 2).is_none()
+        );
+    }
+
+    #[test]
+    fn bounded_roster_borrows_small_signed_winner_amid_huge_loser_and_actor_history() {
+        let owner = MlsDevice::generate().unwrap();
+        let ids = [DeviceId::from_bytes([1; 32])];
+        let mut base = AutoCommit::new().with_actor(automerge::ActorId::from(vec![7]));
+        base.put(ROOT, ROSTER_KEY, "base").unwrap();
+        base.commit();
+        let mut loser = base.clone().with_actor(automerge::ActorId::from(vec![1]));
+        let mut winner = base
+            .clone()
+            .with_actor(automerge::ActorId::from(vec![2; 1024 * 1024]));
+        loser
+            .put(ROOT, ROSTER_KEY, "x".repeat(2 * 1024 * 1024))
+            .unwrap();
+        winner
+            .put(
+                ROOT,
+                ROSTER_KEY,
+                ScalarValue::Bytes(signed_roster(&owner, &ids)),
+            )
+            .unwrap();
+        let loser = loser.get_last_local_change().unwrap();
+        let winner = winner.get_last_local_change().unwrap();
+        for changes in [[loser.clone(), winner.clone()], [winner, loser]] {
+            let mut doc = base.clone();
+            doc.apply_changes(changes).unwrap();
+            let before = doc.save();
+            assert_eq!(
+                read_published_roster_bounded(&doc, b"bounded-group", &owner.device_id(), 64),
+                Some(HashSet::from(ids))
+            );
+            assert_eq!(
+                doc.save(),
+                before,
+                "inspection never removes the losing original"
+            );
+        }
+        // Upstream observer tests poison the raw column on size/type refusal and assert a
+        // pointer-identical winner slice, independently pinning the host's no-copy primitive.
+    }
+
+    #[test]
+    fn bounded_roster_refuses_huge_current_bytes_wrong_type_and_lookup_work() {
+        let owner = MlsDevice::generate().unwrap();
+        let mut doc = AutoCommit::new().with_actor(automerge::ActorId::from(vec![7]));
+        doc.put(
+            ROOT,
+            ROSTER_KEY,
+            ScalarValue::Bytes(vec![0; 2 * 1024 * 1024]),
+        )
+        .unwrap();
+        assert!(
+            read_published_roster_bounded(&doc, b"bounded-group", &owner.device_id(), 64).is_none()
+        );
+        doc.put(ROOT, ROSTER_KEY, "x".repeat(2 * 1024 * 1024))
+            .unwrap();
+        assert!(
+            read_published_roster_bounded(&doc, b"bounded-group", &owner.device_id(), 64).is_none()
+        );
+        let key = "k".repeat(64 * 1024 + 1);
+        doc.put(ROOT, key, 1u64).unwrap();
+        doc.put(
+            ROOT,
+            ROSTER_KEY,
+            ScalarValue::Bytes(signed_roster(&owner, &[])),
+        )
+        .unwrap();
+        assert!(
+            read_published_roster_bounded(&doc, b"bounded-group", &owner.device_id(), 64).is_none()
+        );
+    }
 
     #[test]
     fn full_identity_roster_distinguishes_collision_and_rejects_noncanonical_sets() {

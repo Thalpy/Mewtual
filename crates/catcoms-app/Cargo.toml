@@ -37,6 +37,8 @@ bytes.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+# Deterministic single-poll assertions in actual cancellation/commit-boundary tests.
+futures.workspace = true
 # Turns on the replication crate's test-only reconstruction counter for this crate's tests, so the
 # exact-retry regression can see a branch rebuilt by any path, not only the app's own draft reader.
 catcoms-replication = { path = "../catcoms-replication", features = ["test-counters"] }

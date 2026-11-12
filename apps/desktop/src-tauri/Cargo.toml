@@ -52,6 +52,10 @@ hex = "0.4"
 base64 = "0.22"
 zeroize = "1"
 catcoms-app = { path = "../../../crates/catcoms-app" }
+# Privileged retained-history DTO mapping consumes these already-locked types directly. Neither
+# Automerge's generic serde representation nor its numeric counters cross the bridge unchanged.
+automerge = "0.10"
+catcoms-replication = { path = "../../../crates/catcoms-replication" }
 catcoms-mls = { path = "../../../crates/catcoms-mls" }
 catcoms-net = { path = "../../../crates/catcoms-net" }
 catcoms-rt = { path = "../../../crates/catcoms-rt" }
@@ -104,8 +108,6 @@ rfd = { version = "0.16", default-features = false, features = ["common-controls
 tauri = { version = "2.12.5", features = ["test"] }
 catcoms-crypto = { path = "../../../crates/catcoms-crypto" }
 tokio = { version = "1", features = ["io-util", "process"] }
-automerge = "0.10"
-catcoms-replication = { path = "../../../crates/catcoms-replication" }
 catcoms-wire = { path = "../../../crates/catcoms-wire" }
 tempfile = "3"
 rand_chacha = "0.3"
@@ -113,3 +115,8 @@ rand_core = "0.6"
 
 # Own workspace so the heavy Tauri/webview deps stay out of the root `cargo test --all`.
 [workspace]
+
+# Cargo patches belong to each workspace root, including this separate native workspace.
+[patch.crates-io]
+automerge = { path = "../../../vendor/automerge" }
+openmls_memory_storage = { path = "../../../vendor/openmls_memory_storage" }

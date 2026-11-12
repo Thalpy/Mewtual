@@ -663,16 +663,18 @@ async fn clearing_a_saved_row_keeps_the_only_copy_when_its_final_name_is_gone() 
 
 #[test]
 fn claims_are_per_download_and_released_by_the_last_holder() {
-    let first = CleanupClaim::acquire(7, id(0xB1)).unwrap();
-    let other = CleanupClaim::acquire(7, id(0xB2)).expect("another download is independent");
-    let elsewhere = CleanupClaim::acquire(8, id(0xB1)).expect("another server is independent");
+    // Claims are process-wide. The Remove/Save-new-copy tests use B1/B2 concurrently,
+    // so this independent ownership test needs its own IDs, even on a fast Linux runner.
+    let first = CleanupClaim::acquire(7, id(0xD1)).unwrap();
+    let other = CleanupClaim::acquire(7, id(0xD2)).expect("another download is independent");
+    let elsewhere = CleanupClaim::acquire(8, id(0xD1)).expect("another server is independent");
     let worker = first.clone();
     drop(first);
     assert!(
-        CleanupClaim::acquire(7, id(0xB1)).is_err(),
+        CleanupClaim::acquire(7, id(0xD1)).is_err(),
         "a clone still holds it"
     );
     drop(worker);
-    assert!(CleanupClaim::acquire(7, id(0xB1)).is_ok());
+    assert!(CleanupClaim::acquire(7, id(0xD1)).is_ok());
     drop((other, elsewhere));
 }

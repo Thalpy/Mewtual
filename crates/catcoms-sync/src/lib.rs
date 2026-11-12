@@ -71,11 +71,27 @@ use member_finalization::KIND_MEMBER_FINALIZE;
 pub use member_finalization::{
     MAX_MEMBER_FINALIZATION_OBSERVATIONS, MEMBER_FINALIZATION_WORK_PER_PASS,
 };
+pub mod chat_scope;
 pub mod checkpoint_exchange;
 pub mod durable_chat;
 pub mod epoch_service;
 mod group_policy;
+mod initialization_restore;
+mod initialization_snapshot;
+mod prepared_direct_join;
+pub use initialization_restore::OwnerInitializationRestoreLimits;
+pub use prepared_direct_join::{
+    BoundOriginalJoinNetwork, CompletedDirectJoin, DirectJoinLimits, DirectJoinRequestIdentity,
+    OriginalJoinArmData, OriginalJoinNetworkContext, OriginalJoinNetworkStatus,
+    OriginalJoinNetworkSubmission, OriginalJoinSavedArm, PreparedDirectJoin,
+    PreparedOriginalJoinContinuation, RecoveredDirectJoinSource, RetainedOriginalJoinNetwork,
+    ReturnedOriginalJoinBinding, ReturnedOriginalJoinContinuation, ReturnedOriginalJoinSubmission,
+    SealedDirectJoinSource, SealedOriginalJoinInput,
+};
+pub mod local_chat_scope;
+pub mod owner_evidence;
 mod owner_tenure;
+pub mod owner_v2;
 mod voice_endpoint;
 mod voice_runtime;
 mod voice_schedule;
@@ -121,8 +137,8 @@ pub use voice_transport::{
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
 pub use roles::{
-    encode_roster, fingerprint, read_published_roster, roster_payload, ROLES_DOC,
-    ROLE_ROSTER_DOMAIN, ROSTER_KEY,
+    encode_roster, fingerprint, read_published_roster, read_published_roster_bounded,
+    roster_payload, ROLES_DOC, ROLE_ROSTER_DOMAIN, ROSTER_KEY,
 };
 
 /// Request/response protocol (one RR protocol; the first payload byte selects the
@@ -1887,6 +1903,8 @@ pub struct RoutingState {
     /// Transient lifecycle state consumed while waiting for a staged Welcome. Never encoded,
     /// sealed, persisted, or sent on the wire; `new_joined` drains it exactly once.
     connection_handoff: PreOwnerConnectionHandoff,
+    /// Minted only by the live exact-KP completion path; never part of routing wire/storage.
+    fresh_chat_admission: Option<chat_scope::VerifiedFreshChatAdmission>,
 }
 
 impl std::fmt::Debug for RoutingState {
@@ -1941,6 +1959,7 @@ fn open_routing_transfer(
         file_wrap_key: Some(file_wrap_key),
         policy,
         connection_handoff: PreOwnerConnectionHandoff::default(),
+        fresh_chat_admission: None,
     })
 }
 
@@ -2272,6 +2291,16 @@ pub enum SyncError {
     /// A prepared chat owns this document's next local actor sequence until it is committed.
     #[error("CHAT_SEND_DOCUMENT_PENDING: retry the outstanding send for this channel first")]
     ChatPreparationPending,
+    /// Scope-bearing snapshots remain unbound until the original mounted vault validates
+    /// independent current-admission lineage. A decoded Active label is not a permit.
+    #[error("CHAT_SEND_CONTEXT_CHANGED: managed chat admission is unbound or retired")]
+    ChatScopeUnavailable,
+    #[error("CHAT_SCOPE_MIGRATION_PENDING: retained original recovery needs another owner turn")]
+    ChatScopeMigrationPending,
+    /// The private first-owner checkpoint never truncates history, receipts or unsupported
+    /// inventories to fit its bounded restore grammar. General restore remains separate.
+    #[error("saved state is outside the supported owner initialization checkpoint")]
+    OwnerInitializationUnsupported,
     /// A join request was rejected by the inviter.
     #[error("join request rejected")]
     JoinRejected,
@@ -4320,6 +4349,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     // topic before calculating the next routing diff; never lose unsubscribe ownership.
     routing_subscription_pending: Option<Topic>,
     group: ServerGroup,
+    /// Actual constructor/join provenance, not inferred from restored MLS epoch/roster labels.
+    fresh_chat_admission: Option<chat_scope::VerifiedFreshChatAdmission>,
     /// Saved with this exact MLS group; never inferred from a received receipt or Welcome.
     owner_tenure: owner_tenure::OwnerTenure,
     group_policy: Option<GroupPolicy>,
@@ -4334,6 +4365,17 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     ledger: InviteLedger,
     docs: HashMap<(DocType, u128), EncryptedDoc>,
     durable_chat: durable_chat::DurableChatState,
+    local_chat_scope: local_chat_scope::LocalChatScope,
+    initial_owner_evidence: Option<owner_evidence::InitialOwnerEvidence>,
+    // Immutable original first-Add result; no serialized runtime or response observer.
+    owner_operation: Option<Arc<owner_evidence::OwnerOperationTail>>,
+    // Process-local local-driver suppression only. The immutable durable debt is NEVER
+    // cleared by this flag or inferred to have reached any remote member.
+    owner_commit_submitted: bool,
+    owner_direct_request: Option<owner_evidence::OwnerDirectRequest>,
+    /// Managed raw-post retries retain their ORIGINAL observer. They never fall back into the
+    /// unscoped generic outbox, and rebind/restart cannot authorize an old queued handoff.
+    managed_chat_outbox: Vec<(Topic, Vec<u8>, catcoms_rt::RequestCancellation)>,
     /// The **current** routing label's control topic (where this node publishes
     /// commits). Recomputed whenever the routing label changes.
     control_topic: Topic,
@@ -4790,6 +4832,34 @@ impl DialOutcomeTally {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Actually create the group before minting fresh local provenance. `new` and `restore`
+    /// cannot infer this event from an epoch-zero state or a current roster label.
+    pub fn found(
+        transport: T,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+    ) -> Result<Self, SyncError> {
+        let group = ServerGroup::create(&device)?;
+        let evidence =
+            chat_scope::VerifiedFreshChatAdmission::from_fresh_creation(&group, &device)?;
+        let mut node = Self::new(transport, group, device, rng, clock);
+        node.fresh_chat_admission = Some(evidence);
+        Ok(node)
+    }
+
+    /// Inspect actual fresh provenance without consuming the local admission owner's token.
+    /// This is local completion evidence, never an owner-certified historical Add proof.
+    pub fn fresh_chat_admission(&self) -> Option<&chat_scope::VerifiedFreshChatAdmission> {
+        self.fresh_chat_admission.as_ref()
+    }
+
+    /// Move the original nonserialized completion exactly once to its native admission owner.
+    /// The caller must retain its pre-await vault/lineage capture; this token alone cannot renew it.
+    pub fn take_fresh_chat_admission(&mut self) -> Option<chat_scope::VerifiedFreshChatAdmission> {
+        self.fresh_chat_admission.take()
+    }
+
     /// Build a synchronizer over `transport` for this member's `group`/`device`.
     /// `clock` is used to check invite expiry when serving join requests.
     pub fn new(
@@ -4836,6 +4906,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             group_policy_publish_ready: false,
             group_policy_last_topic: None,
             group,
+            fresh_chat_admission: None,
             device,
             rng,
             clock: clock.clone(),
@@ -4845,6 +4916,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
             durable_chat: durable_chat::DurableChatState::default(),
+            local_chat_scope: local_chat_scope::LocalChatScope::default(),
+            initial_owner_evidence: None,
+            owner_operation: None,
+            owner_commit_submitted: false,
+            owner_direct_request: None,
+            managed_chat_outbox: Vec::new(),
             // Placeholder; set from `ns_secret_L` by `capture_routing_secret` below.
             control_topic: Topic::new(Vec::<u8>::new()),
             control_topics: HashSet::new(),
@@ -4981,6 +5058,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::ChatPreparationPending);
         }
         let mls = snapshot_server(&self.device, &self.group)?;
+        self.snapshot_with_mls(&mls, None)
+    }
+
+    // Shared unchanged framing. The private bounded initializer reaches this ONLY after its
+    // closed field/count preflight and the same-guard bounded MLS encoder have succeeded.
+    fn snapshot_with_mls(
+        &mut self,
+        mls: &[u8],
+        capacity: Option<usize>,
+    ) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+        self.snapshot_with_governance(mls, capacity, None)
+    }
+
+    // The candidate path supplies explicit borrowed overrides. No live governing field is
+    // temporarily installed while encoding, and ordinary no-operation snapshot bytes use the
+    // exact same framing/order as before. The actual canonical host owns positive installation.
+    fn snapshot_with_governance(
+        &mut self,
+        mls: &[u8],
+        capacity: Option<usize>,
+        view: Option<&owner_evidence::OwnerMembershipSnapshot<'_>>,
+    ) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+        // The V2 founder S0 comparer in owner_v2/founder/snapshot.rs checks EVERY field below
+        // against its immutable original, without resampling a replacement snapshot. Any new
+        // field/order/framing MUST update that closed comparer, its caps and mutation tests too.
+        #[cfg(test)]
+        initialization_snapshot::note_encoding();
         // `routing` carries the live routing secrets in the clear; zeroize the intermediate
         // (the returned blob is already `Zeroizing`).
         let routing = {
@@ -4991,11 +5095,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .collect();
             Zeroizing::new(encode_routing_state(self.routing_label, &secrets))
         };
-        let ledger = self.ledger.snapshot();
+        let ledger = view.map_or(&self.ledger, |view| view.ledger).snapshot();
 
-        let mut e = Encoder::new();
+        let mut e = capacity.map_or_else(Encoder::new, Encoder::with_capacity);
         let oversize = || SyncError::Malformed;
-        e.put_bytes(&mls).map_err(|_| oversize())?;
+        e.put_bytes(mls).map_err(|_| oversize())?;
         e.put_bytes(&routing).map_err(|_| oversize())?;
         e.put_bytes(&ledger).map_err(|_| oversize())?;
         e.put_u32(self.docs.len() as u32);
@@ -5003,9 +5107,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             let snap = doc.snapshot()?;
             e.put_bytes(&snap).map_err(|_| oversize())?;
         }
-        e.put_u32(self.commit_log.len() as u32);
+        let commit_count = self
+            .commit_log
+            .len()
+            .checked_add(usize::from(view.is_some()))
+            .and_then(|count| u32::try_from(count).ok())
+            .ok_or_else(oversize)?;
+        e.put_u32(commit_count);
         for rec in &self.commit_log {
             e.put_bytes(&rec.encode()).map_err(|_| oversize())?;
+        }
+        if let Some(view) = view {
+            e.put_bytes(&view.commit.encode()).map_err(|_| oversize())?;
         }
         e.put_u32(self.peer_records.len() as u32);
         for desc in self.peer_records.values() {
@@ -5046,7 +5159,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // P1 observed tenure is an optional versioned tail for old-snapshot compatibility.
         // Persist it together with MLS: a separately saved counter could bless an old tenure
         // after a crash or A -> B -> A. Unknown is encoded explicitly on every new snapshot.
-        e.put_bytes(&self.owner_tenure.encode(&self.group)?)
+        let (tenure, group) = view.map_or((&self.owner_tenure, &self.group), |view| {
+            (view.tenure, view.group)
+        });
+        e.put_bytes(&tenure.encode(group)?)
             .map_err(|_| oversize())?;
         e.put_bytes(&group_policy::encode_pin(self.group_policy.as_ref()))
             .map_err(|_| oversize())?;
@@ -5063,6 +5179,36 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for id in &self.admin_roster {
             e.put_bytes(id.as_bytes()).map_err(|_| oversize())?;
         }
+        // Strict optional extension: no-tail legacy bytes stay unchanged. An old strict reader
+        // rejects even an empty scope-bearing snapshot rather than forgetting its lineage.
+        if let Some(scope) = self.local_chat_scope.encode(
+            &self.group.group_id(),
+            &self.device.public_key_bytes(),
+            &self.durable_chat,
+        )? {
+            e.put_bytes(&scope).map_err(|_| oversize())?;
+        }
+        if let Some(owner) = view
+            .map(|view| view.evidence)
+            .or(self.initial_owner_evidence.as_ref())
+        {
+            e.put_bytes(&owner.encode()?).map_err(|_| oversize())?;
+        }
+        if let Some(operation) = view
+            .map(|view| view.operation)
+            .or(self.owner_operation.as_deref())
+        {
+            let record = match view {
+                Some(view) => view.commit,
+                None => self
+                    .commit_log
+                    .iter()
+                    .find(|record| record.commit_id() == operation.commit)
+                    .ok_or(SyncError::Malformed)?,
+            };
+            e.put_bytes(&operation.encode(record)?)
+                .map_err(|_| oversize())?;
+        }
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -5076,6 +5222,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         rng: R,
         clock: Box<dyn Clock + Send>,
     ) -> Result<Self, SyncError> {
+        Self::restore_with_mls(
+            snapshot,
+            transport,
+            rng,
+            clock,
+            initialization_restore::MlsDecode::Legacy,
+        )
+    }
+
+    // One common body, with one actual MLS load. Keeping the strategy a private enum avoids
+    // monomorphizing this entire compatibility decoder again for a second closure type.
+    fn restore_with_mls(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        mls_decode: initialization_restore::MlsDecode,
+    ) -> Result<Self, SyncError> {
+        #[cfg(test)]
+        initialization_restore::note_decoder_entry();
         let bad = || SyncError::Malformed;
         let mut d = Decoder::new(snapshot);
         let mls = d.get_bytes().map_err(|_| bad())?.to_vec();
@@ -5207,15 +5373,46 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
             }
         }
+        let local_scope_bytes = if d.is_empty() {
+            None
+        } else {
+            Some(d.get_bytes().map_err(|_| bad())?)
+        };
+        let initial_owner_bytes = if d.is_empty() {
+            None
+        } else {
+            Some(d.get_bytes().map_err(|_| bad())?)
+        };
+        let owner_operation_bytes = if d.is_empty() {
+            None
+        } else {
+            let bytes = d.get_bytes().map_err(|_| bad())?;
+            owner_evidence::preflight_owner_operation(bytes)?;
+            Some(bytes)
+        };
+        if (initial_owner_bytes.is_some() && local_scope_bytes.is_none())
+            || (owner_operation_bytes.is_some() && initial_owner_bytes.is_none())
+        {
+            return Err(bad());
+        }
         d.finish().map_err(|_| bad())?;
+
+        if owner_operation_bytes.is_some() {
+            if commit_log.len() != 1 {
+                return Err(bad());
+            }
+            // Even the generic compatibility entry must not let a small new tail cause an
+            // unbounded separately decoded legacy record to enter SDK header parse/encoding.
+            owner_evidence::preflight_owner_operation_record(commit_log.front().ok_or_else(bad)?)?;
+        }
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
         // durable state. `new` re-derives an L=0 routing secret from the (post-restore) epoch;
         // `adopt_routing_state` then replaces it with the persisted label + secrets. The
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
-        let (device, group) = restore_server(&mls)?;
-        let durable_chat = match durable_chat_bytes {
+        let (device, group) = mls_decode.restore(&mls)?;
+        let mut durable_chat = match durable_chat_bytes {
             Some(bytes) => durable_chat::DurableChatState::decode(bytes, &device)?,
             None => Default::default(),
         };
@@ -5228,6 +5425,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             None => owner_tenure::OwnerTenure::unknown(&group),
         };
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.local_chat_scope = match local_scope_bytes {
+            None => Default::default(),
+            Some(bytes) => local_chat_scope::LocalChatScope::decode(
+                bytes,
+                &this.group,
+                &this.device,
+                &mut durable_chat,
+            )?,
+        };
+        this.initial_owner_evidence = initial_owner_bytes
+            .map(|bytes| {
+                owner_evidence::InitialOwnerEvidence::decode(bytes, &this.group.group_id())
+            })
+            .transpose()?;
         this.owner_tenure = tenure;
         this.durable_chat = durable_chat;
         let (label, secrets) = decode_routing_state(&routing_bytes)?;
@@ -5240,6 +5451,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             file_wrap_key: None,
             policy,
             connection_handoff: PreOwnerConnectionHandoff::default(),
+            fresh_chat_admission: None,
         });
         this.group_policy_publish_ready = this.group_policy.is_some();
         this.file_wrap_key = Zeroizing::new(file_wrap_key);
@@ -5256,8 +5468,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // with. Drop those by header alone (nothing is decrypted), so this build never serves them.
         // A record whose header matches but would not apply cannot be told apart here; a
         // requester on this build refuses it when it tries (`apply_commit_in_order`).
+        if owner_operation_bytes.is_some()
+            && (commit_log.len() != 1 || !commit_log.iter().all(CommitRecord::header_matches_label))
+        {
+            return Err(bad());
+        }
         commit_log.retain(CommitRecord::header_matches_label);
         this.commit_log = commit_log;
+        this.owner_operation = owner_operation_bytes
+            .map(|bytes| {
+                let record = this.commit_log.front().ok_or_else(bad)?;
+                owner_evidence::OwnerOperationTail::decode(bytes, record).map(Arc::new)
+            })
+            .transpose()?;
         // A snapshot's documents are as old as the process that wrote them, and nothing else will
         // notice that. See `first_proof_sweep_owed`; discharged by the first member that proves
         // it can serve a document catch-up.
@@ -5365,6 +5588,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// copy by a malicious member cannot affect the gate. Errors `Unauthorized` if not the owner;
     /// `NoSuchDoc` if the roles doc isn't open.
     pub async fn set_admin(&mut self, device: &DeviceId, admin: bool) -> Result<(), SyncError> {
+        if self.initial_owner_evidence.is_some() {
+            // A closed owner checkpoint has no covering roster-operation producer. Do not
+            // mutate authoritative state through the old UI/legacy persistence path.
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if !self.is_designated_committer() {
             return Err(SyncError::Unauthorized);
         }
@@ -5432,6 +5663,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// store directory, so a reloaded server finds its sealed blobs.
     pub fn group_id(&self) -> Vec<u8> {
         self.group.group_id()
+    }
+
+    /// Namespace bytes without a preliminary allocation. Bounded observers check their own
+    /// supported namespace size before making DTOs; this is not an authority assertion.
+    pub fn group_id_ref(&self) -> &[u8] {
+        self.group.group_id_ref()
     }
 
     /// Replace the blob store (default in-memory); e.g. with a persistent, sealing on-disk
@@ -5687,7 +5924,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         mut routing: RoutingState,
     ) -> Self {
         let connection_handoff = std::mem::take(&mut routing.connection_handoff);
+        // RoutingState is a public transport container and can be paired with another raw
+        // group/device. Retain fresh provenance only for its original exact MLS handoff.
+        let fresh_chat_admission = routing
+            .fresh_chat_admission
+            .take()
+            .filter(|proof| proof.matches_initial_state(&group, &device));
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.fresh_chat_admission = fresh_chat_admission;
         // `joined`, not `unknown`. A device that joins into a recycled low leaf becomes the
         // designated committer, and with `unknown` it could never issue a receipt while every witness
         // knew the answer. The inference is about current continuous membership: a tenure is an
@@ -5713,6 +5957,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Subscribe to this group's control topic so the member receives membership
     /// commits. Call once after construction (and after joining).
     pub async fn subscribe_control(&mut self) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         self.control_subscribed = true;
         self.resync_subscriptions().await
     }
@@ -5876,6 +6123,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Open a document: create it locally (if absent) and subscribe to its topic.
     pub async fn open_channel(&mut self, doc_type: DocType, doc_id: u128) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         let key = (doc_type, doc_id);
         let actor = self.device.device_id();
         self.docs
@@ -5917,9 +6167,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), AutomergeError>,
     {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         let current_context = self.durable_send_context();
-        self.durable_chat
-            .stop_obsolete(current_context.as_ref().ok());
+        let managed_chat = doc_type == DocType::Channel && self.local_chat_scope.managed();
+        // This check must precede the edit/signing callback. stop_obsolete alone previously
+        // swallowed context failure and then continued authoring a fresh operation.
+        let managed_authority = if managed_chat {
+            if current_context.is_err() {
+                return Err(SyncError::ChatScopeUnavailable);
+            }
+            Some(
+                self.local_chat_scope
+                    .authority()
+                    .ok_or(SyncError::ChatScopeUnavailable)?,
+            )
+        } else {
+            None
+        };
+        if !self.local_chat_scope.managed() || current_context.is_ok() {
+            self.durable_chat
+                .stop_obsolete(current_context.as_ref().ok());
+        }
         if self.durable_chat.blocks(doc_type, doc_id) {
             return Err(SyncError::ChatPreparationPending);
         }
@@ -5953,6 +6223,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             bytes = bytes.len(),
             "post op"
         );
+        if let Some(authority) = managed_authority {
+            if !matches!(
+                self.transport
+                    .publish_once_authorized(
+                        topic.clone(),
+                        Bytes::from(bytes.clone()),
+                        authority.clone()
+                    )
+                    .await,
+                Ok(catcoms_rt::PublishSubmission::Submitted)
+            ) {
+                self.managed_chat_outbox.push((topic, bytes, authority));
+                while self.managed_chat_outbox.len() > self.config.max_outbox {
+                    self.managed_chat_outbox.remove(0);
+                }
+            }
+            return Ok(change);
+        }
         if let Err(error) = self
             .transport
             .publish(topic.clone(), Bytes::from(bytes.clone()))
@@ -6482,6 +6770,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         T: 'static,
     {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         self.reconcile_voice_actor();
         self.drain_durable_chat().await;
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
@@ -6584,6 +6875,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     responder.respond(Bytes::new());
                     return Ok(true);
                 }
+                if data.first() == Some(&KIND_JOIN) && self.initial_owner_evidence.is_some() {
+                    // Owner-profile membership cannot use the legacy mutate→reply handler.
+                    // Retain this exact driver request for the actual canonical save/install
+                    // drain, which may expose its result only after the covering barrier.
+                    self.queue_owner_direct_request(from, data, responder);
+                    return Ok(true);
+                }
                 if data.first() == Some(&catcoms_rt::FILE_SOURCE_KIND) {
                     self.queue_file_source(from, &data, responder);
                     return Ok(true);
@@ -6640,6 +6938,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Ok(true)
             }
             Some(TransportEvent::PeerConnected(peer)) => {
+                self.owner_commit_submitted = false;
                 self.note_peer_connected(peer);
                 Ok(true)
             }
@@ -6648,6 +6947,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 active,
                 newly_established,
             }) => {
+                self.owner_commit_submitted = false;
                 self.note_peer_paths(peer, active, newly_established);
                 Ok(true)
             }
@@ -6667,10 +6967,43 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// by `max_outbox` (drop oldest on overflow so a persistently failing transport
     /// cannot grow the queue without bound).
     async fn drain_outbox(&mut self) {
+        if self.owner_evidence_unbound() {
+            return;
+        }
+        // This bounded queue retains the original observer and never samples a replacement
+        // mount's authority. Revoked work cannot fall through into generic publish().
+        let mut index = 0;
+        let remaining = self.managed_chat_outbox.len();
+        for _ in 0..remaining {
+            let (topic, bytes, authority) = self.managed_chat_outbox[index].clone();
+            if authority.is_cancelled() {
+                self.managed_chat_outbox.remove(index);
+                continue;
+            }
+            if matches!(
+                self.transport
+                    .publish_once_authorized(topic, Bytes::from(bytes), authority)
+                    .await,
+                Ok(catcoms_rt::PublishSubmission::Submitted)
+            ) {
+                self.managed_chat_outbox.remove(index);
+            } else {
+                index += 1;
+            }
+        }
         let mut index = 0;
         let remaining = self.outbox.len();
         for _ in 0..remaining {
             let (topic, bytes) = self.outbox[index].clone();
+            // Pre-upgrade raw chat packets have no original managed permit. Keep their bounded
+            // local history/retry bytes without silently promoting them into the new lifetime.
+            // Membership/control recovery and other document types retain their existing path.
+            if self.local_chat_scope.managed()
+                && SealedOp::decode(&bytes).is_ok_and(|sealed| sealed.doc_type == DocType::Channel)
+            {
+                index += 1;
+                continue;
+            }
             // Queue ownership survives a cancelled actor poll, including a transport which
             // submitted its command but has not yet acknowledged it. Exact retries may duplicate
             // delivery; they cannot manufacture another signed operation or lose this one.
@@ -11854,6 +12187,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// config, remove via the local MLS path instead. Errors if a commit is
     /// already staged here (one pending commit at a time).
     pub async fn remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
+        if self.initial_owner_evidence.is_some() {
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if self.pending.is_some() {
             tracing::warn!("a commit is already staged here; remove deferred");
             return Err(SyncError::JoinRejected);
@@ -11964,6 +12303,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// losing committer, after aborting its own) applies the winner. Returns whether
     /// a contest was resolved this call.
     fn resolve_pending_if_expired(&mut self) -> bool {
+        if self.initial_owner_evidence.is_some() {
+            // Preserve any unsupported original contest; never take/drop it behind a private
+            // canonical candidate. This checkpoint cannot activate concurrent committers.
+            return false;
+        }
         let (epoch, deadline) = match &self.pending {
             Some(p) => (p.epoch, p.deadline_ms),
             None => return false,
@@ -12262,6 +12606,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// window needed). If *this* node is already the designated committer, the
     /// removal is performed directly.
     pub async fn request_remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
+        if self.initial_owner_evidence.is_some() {
+            return Err(SyncError::OwnerInitializationUnsupported);
+        }
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         // Removal is owner-only (THREAT-MODEL R1): only the designated committer (the server
         // owner) may remove, and it does so directly. A non-owner caller is unauthorized; we
         // return an error rather than broadcasting a request the committer would only reject.
@@ -12319,6 +12669,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// stage the Remove, capture the pre-advance keys, merge, and queue the signed
     /// commit for fan-out. Single-committer, so it cannot fork.
     fn commit_remove_now(&mut self, target: &DeviceId) {
+        if self.initial_owner_evidence.is_some() {
+            return;
+        }
         let before = self.group.member_device_ids();
         let staged = match self.group.stage_remove(&self.device, target) {
             Ok(s) => s,
@@ -13428,6 +13781,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .map(|(key, doc)| (*key, doc.op_count() as u64))
     }
 
+    /// Borrow installed documents under a declared-capacity work threshold, without cloning
+    /// graphs or original envelopes. The document table is insert-only: replacement swaps a
+    /// value, and deleting a channel changes its index projection rather than removing a key.
+    /// That invariant excludes deletion-tombstone churn. Std capacity is not an exact physical
+    /// bucket/allocation count; this is a logical threshold, not an allocator byte invoice.
+    /// Future key removal/compaction must revisit this guard before relying on it for reads.
+    pub fn bounded_documents(
+        &self,
+        max_declared_capacity: usize,
+    ) -> Option<impl Iterator<Item = ((DocType, u128), &EncryptedDoc)> + '_> {
+        (self.docs.capacity() <= max_declared_capacity)
+            .then(|| self.docs.iter().map(|(key, doc)| (*key, doc)))
+    }
+
     /// The ids of every open chat-channel document (excludes profile/roles/status/etc.); lets the
     /// product layer scan across channels (e.g. to build the mention/reply inbox).
     pub fn channel_ids(&self) -> Vec<u128> {
@@ -14364,6 +14731,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// ([`ChannelSync::join_attempts`]) with its distinct cause; the bytes returned to the
     /// joiner are unchanged (an opaque `None` for every rejection).
     fn serve_join(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        if self.initial_owner_evidence.is_some() {
+            // Also refuse internal/helper callers that bypass run_once's direct interception.
+            // A canonical owner must never consume its invite before the covering successor.
+            return None;
+        }
         // The nonce is filled in as soon as the request decodes, so a rejection *after* that
         // point still tells the operator which invite it was about; which is the whole point.
         let mut nonce = None;
@@ -14562,6 +14934,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         kp_bytes: &[u8],
         now: u64,
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        if self.initial_owner_evidence.is_some() {
+            return None;
+        }
         // Recheck at the protected mutation, after queueing. This synchronous operation
         // cannot interleave a demotion or removal between authorization and MLS Add.
         if !self.is_designated_committer() || !self.inviter_is_authorized(&invite.inviter_device_id)
@@ -15150,6 +15525,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         cert: &DeviceCertificate,
         kp_bytes: &[u8],
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        if self.initial_owner_evidence.is_some() {
+            return None;
+        }
         self.policy_admission_ready().ok()?;
         let key_package = self
             .device
@@ -15487,6 +15865,7 @@ pub async fn request_join_tracking<T: MeshTransport>(
 
     let key_package = device.key_package_for_invite(&invite.group_id, invite.invite_nonce)?;
     let kp_bytes = serialize_key_package(&key_package)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
 
     let mut payload = vec![KIND_JOIN];
     payload.extend_from_slice(&encode_join_req(invite, &kp_bytes));
@@ -15499,7 +15878,14 @@ pub async fn request_join_tracking<T: MeshTransport>(
         // Synchronous admission (single-committer): the Welcome is inline.
         Some((&JOIN_READY, rest)) => {
             let (welcome, signature, sealed_routing) = decode_join_resp(rest)?;
-            finish_join(device, invite, &welcome, &signature, &sealed_routing)
+            finish_join(
+                device,
+                invite,
+                &welcome,
+                &signature,
+                &sealed_routing,
+                &expected_key_package,
+            )
         }
         // Staged admission (concurrent committers): the inviter will *push* the
         // signed Welcome once its staged commit wins and merges. Await it.
@@ -15508,7 +15894,15 @@ pub async fn request_join_tracking<T: MeshTransport>(
             // The wall-clock bound on this wait lives at the call site (catcoms-app, which owns
             // the tokio runtime) so this crate stays runtime-agnostic; see the `request_join`
             // timeout wrapper there, so a never-finalizing owner can't wedge the joiner.
-            await_welcome_push(transport, connection_handoff, inviter, device, invite).await
+            await_welcome_push(
+                transport,
+                connection_handoff,
+                inviter,
+                device,
+                invite,
+                &expected_key_package,
+            )
+            .await
         }
         // Empty or unknown => rejected.
         _ => Err(SyncError::JoinRejected),
@@ -15554,6 +15948,7 @@ pub async fn request_join_via_helper_tracking<T: MeshTransport>(
 
     let key_package = device.key_package_for_invite(&invite.group_id, invite.invite_nonce)?;
     let kp_bytes = serialize_key_package(&key_package)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
     let join_body = encode_join_req(invite, &kp_bytes);
     let mut payload = vec![KIND_JOIN_FORWARD];
     payload.extend_from_slice(&encode_join_forward(inviter, &join_body, None));
@@ -15568,14 +15963,29 @@ pub async fn request_join_via_helper_tracking<T: MeshTransport>(
     match resp.split_first() {
         Some((&JOIN_READY, rest)) => {
             let (welcome, signature, sealed_routing) = decode_join_resp(rest)?;
-            finish_join(device, invite, &welcome, &signature, &sealed_routing)
+            finish_join(
+                device,
+                invite,
+                &welcome,
+                &signature,
+                &sealed_routing,
+                &expected_key_package,
+            )
         }
         Some((&JOIN_PENDING, _)) => {
             tracing::debug!(
                 ?helper,
                 "helper forwarded a staged admission; awaiting Welcome"
             );
-            await_welcome_push(transport, connection_handoff, helper, device, invite).await
+            await_welcome_push(
+                transport,
+                connection_handoff,
+                helper,
+                device,
+                invite,
+                &expected_key_package,
+            )
+            .await
         }
         _ => Err(SyncError::JoinRejected),
     }
@@ -15597,6 +16007,7 @@ async fn start_reply_join<T: MeshTransport>(
     join_body: &[u8],
     clock: &dyn Clock,
     within: std::time::Duration,
+    expected_key_package: &[u8; 32],
 ) -> ReplyJoinStart {
     let payload = if contact == inviter {
         let mut payload = vec![KIND_JOIN];
@@ -15625,7 +16036,14 @@ async fn start_reply_join<T: MeshTransport>(
             let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) else {
                 return ReplyJoinStart::Rejected;
             };
-            match finish_join(device, invite, &welcome, &signature, &sealed_routing) {
+            match finish_join(
+                device,
+                invite,
+                &welcome,
+                &signature,
+                &sealed_routing,
+                expected_key_package,
+            ) {
                 Ok((group, routing)) => ReplyJoinStart::Ready(Box::new(group), Box::new(routing)),
                 Err(_) => ReplyJoinStart::Rejected,
             }
@@ -15693,6 +16111,7 @@ pub async fn request_join_from_reply_tracking<T: MeshTransport>(
         .key_package_for_invite(&invite.group_id, invite.invite_nonce)
         .map_err(|_| SyncError::JoinRejected)?;
     let kp_bytes = serialize_key_package(&key_package).map_err(|_| SyncError::JoinRejected)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
     let join_body = encode_join_req(invite, &kp_bytes);
     let mut contacts = VecDeque::from([first_contact]);
     let mut proven = HashSet::from([first_contact]);
@@ -15729,6 +16148,7 @@ pub async fn request_join_from_reply_tracking<T: MeshTransport>(
                 &join_body,
                 clock,
                 std::time::Duration::from_millis(attempt_ms),
+                &expected_key_package,
             )
             .await
             {
@@ -15801,9 +16221,14 @@ pub async fn request_join_from_reply_tracking<T: MeshTransport>(
                 }
                 if let Some((&JOIN_READY, body)) = data[1..].split_first() {
                     if let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) {
-                        if let Ok((group, routing)) =
-                            finish_join(device, invite, &welcome, &signature, &sealed_routing)
-                        {
+                        if let Ok((group, routing)) = finish_join(
+                            device,
+                            invite,
+                            &welcome,
+                            &signature,
+                            &sealed_routing,
+                            &expected_key_package,
+                        ) {
                             return Ok((group, routing, from));
                         }
                     }
@@ -15932,6 +16357,7 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
         .key_package_for_invite(&invite.group_id, invite.invite_nonce)
         .map_err(|_| SyncError::JoinRejected)?;
     let kp_bytes = serialize_key_package(&key_package).map_err(|_| SyncError::JoinRejected)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
     let join_body = encode_join_req(invite, &kp_bytes);
     // Tauri dials the bounded route set concurrently, so several helpers can already be
     // connected before this routine begins. Queue every endorsed live contact now instead of
@@ -15980,6 +16406,7 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
                                         &welcome,
                                         &signature,
                                         &sealed_routing,
+                                        &expected_key_package,
                                     )
                                 },
                             ) {
@@ -16052,9 +16479,14 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
                 }
                 if let Some((&JOIN_READY, body)) = data[1..].split_first() {
                     if let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) {
-                        if let Ok((group, routing)) =
-                            finish_join(device, invite, &welcome, &signature, &sealed_routing)
-                        {
+                        if let Ok((group, routing)) = finish_join(
+                            device,
+                            invite,
+                            &welcome,
+                            &signature,
+                            &sealed_routing,
+                            &expected_key_package,
+                        ) {
                             return Ok((group, routing, from));
                         }
                     }
@@ -16081,6 +16513,7 @@ fn finish_join(
     welcome: &[u8],
     signature: &[u8; 64],
     sealed_routing: &[u8],
+    expected_key_package: &[u8; 32],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     let transcript = join_transcript(
         &invite.group_id,
@@ -16092,7 +16525,7 @@ fn finish_join(
         tracing::warn!("Welcome was not signed by the invite's inviter (or transfer tampered)");
         return Err(SyncError::JoinRejected);
     }
-    let group = ServerGroup::join(device, welcome)?;
+    let group = ServerGroup::join_for_key_package(device, welcome, expected_key_package)?;
     // Defense in depth: we must have landed in the group the invite named.
     if group.group_id() != invite.group_id {
         tracing::warn!("joined group id does not match the invite");
@@ -16101,7 +16534,7 @@ fn finish_join(
     // We are now at the post-join epoch the inviter sealed the routing state under,
     // so we can open it and adopt the group's routing label/secrets. A present but
     // unopenable transfer (signature already verified) is a hard error.
-    let routing = open_routing_transfer(&group, device, sealed_routing)?;
+    let mut routing = open_routing_transfer(&group, device, sealed_routing)?;
     match (&invite.policy, &routing.policy) {
         (None, None) => {}
         (Some(expected), Some(actual)) if expected.digest() == actual.digest() => {
@@ -16112,6 +16545,14 @@ fn finish_join(
         _ => return Err(SyncError::JoinRejected),
     }
     tracing::info!(epoch = group.epoch(), "joined server via invite");
+    routing.fresh_chat_admission = Some(
+        chat_scope::VerifiedFreshChatAdmission::from_verified_welcome(
+            &group,
+            device,
+            *expected_key_package,
+            welcome,
+        )?,
+    );
     Ok((group, routing))
 }
 
@@ -16178,6 +16619,7 @@ pub async fn request_device_join_tracking<T: MeshTransport>(
     let bind = device_bind_nonce(certificate);
     let key_package = device.key_package_for_invite(&certificate.group_id, bind)?;
     let kp_bytes = serialize_key_package(&key_package)?;
+    let expected_key_package = device.key_package_reference(&key_package)?;
     let pubkey = device.public_key_bytes();
     let transcript = device_add_transcript(
         &certificate.group_id,
@@ -16212,6 +16654,7 @@ pub async fn request_device_join_tracking<T: MeshTransport>(
                 &welcome,
                 &sig,
                 &sealed_routing,
+                &expected_key_package,
             )
         }
         // The contact relayed to the owner; the Welcome is pushed when the owner serializes it.
@@ -16224,6 +16667,7 @@ pub async fn request_device_join_tracking<T: MeshTransport>(
                 device,
                 certificate,
                 owner_public_key,
+                &expected_key_package,
             )
             .await
         }
@@ -16240,10 +16684,10 @@ pub async fn request_device_join_tracking<T: MeshTransport>(
 ///    grant before this device ever spoke to the network. This is the no-substitution property
 ///    the invite path gets from the inviter signature: a relay cannot mint its own group and pass
 ///    it off as this one, because it cannot produce that signature.
-/// 2. **It was built for *this* device.** `ServerGroup::join` can only open a Welcome whose group
-///    secrets were HPKE-sealed to the init key of the KeyPackage this device published; a key
-///    that exists solely in this device's provider. So a Welcome minted for device X is inert on
-///    device Y even if an attacker delivers it there; the device keypair *is* the binding.
+/// 2. **It selects this exact live attempt.** A restored provider may contain several init keys
+///    for the same signing device. `join_for_key_package` checks the actual OpenMLS selection
+///    against the freshly minted request's retained reference, not merely whether any old key
+///    could decrypt a captured Welcome.
 /// 3. **It is the group the certificate names.** `group_id` is inside the origin's signature, and
 ///    the origin must be a member of the group we landed in.
 fn finish_device_join(
@@ -16253,6 +16697,7 @@ fn finish_device_join(
     welcome: &[u8],
     signature: &[u8; 64],
     sealed_routing: &[u8],
+    expected_key_package: &[u8; 32],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     let transcript = device_join_transcript(
         &certificate.group_id,
@@ -16264,7 +16709,7 @@ fn finish_device_join(
         tracing::warn!("Welcome was not signed by the granted owner (or transfer tampered)");
         return Err(SyncError::JoinRejected);
     }
-    let group = ServerGroup::join(device, welcome)?;
+    let group = ServerGroup::join_for_key_package(device, welcome, expected_key_package)?;
     if group.group_id() != certificate.group_id {
         tracing::warn!("joined group id does not match the device certificate");
         return Err(SyncError::JoinRejected);
@@ -16273,8 +16718,16 @@ fn finish_device_join(
         tracing::warn!("the certifying origin is not a member of the joined group");
         return Err(SyncError::JoinRejected);
     }
-    let routing = open_routing_transfer(&group, device, sealed_routing)?;
+    let mut routing = open_routing_transfer(&group, device, sealed_routing)?;
     tracing::info!(epoch = group.epoch(), "joined server as a companion device");
+    routing.fresh_chat_admission = Some(
+        chat_scope::VerifiedFreshChatAdmission::from_verified_welcome(
+            &group,
+            device,
+            *expected_key_package,
+            welcome,
+        )?,
+    );
     Ok((group, routing))
 }
 
@@ -16288,6 +16741,7 @@ async fn await_device_welcome<T: MeshTransport>(
     device: &MlsDevice,
     certificate: &DeviceCertificate,
     owner_public_key: &[u8; 32],
+    expected_key_package: &[u8; 32],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     loop {
         match transport.next_event().await {
@@ -16308,6 +16762,7 @@ async fn await_device_welcome<T: MeshTransport>(
                             &welcome,
                             &signature,
                             &sealed_routing,
+                            expected_key_package,
                         );
                     }
                     _ => return Err(SyncError::JoinRejected),
@@ -16336,6 +16791,7 @@ async fn await_welcome_push<T: MeshTransport>(
     expected: PeerId,
     device: &MlsDevice,
     invite: &InviteToken,
+    expected_key_package: &[u8; 32],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     loop {
         match transport.next_event().await {
@@ -16349,7 +16805,14 @@ async fn await_welcome_push<T: MeshTransport>(
                 match data[1..].split_first() {
                     Some((&JOIN_READY, body)) => {
                         let (welcome, signature, sealed_routing) = decode_join_resp(body)?;
-                        return finish_join(device, invite, &welcome, &signature, &sealed_routing);
+                        return finish_join(
+                            device,
+                            invite,
+                            &welcome,
+                            &signature,
+                            &sealed_routing,
+                            expected_key_package,
+                        );
                     }
                     // Empty body => the committer lost; rejected.
                     _ => return Err(SyncError::JoinRejected),
@@ -16375,6 +16838,9 @@ impl<T: MeshTransport, R: CryptoRngCore> fmt::Debug for ChannelSync<T, R> {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod join_attempt_tests;
 
 #[cfg(test)]
 mod tests {
@@ -17907,6 +18373,7 @@ mod tests {
             file_wrap_key: Some(founder_key),
             policy: None,
             connection_handoff: PreOwnerConnectionHandoff::default(),
+            fresh_chat_admission: None,
         });
         assert_eq!(
             joiner.open_file(&stored, &fref).unwrap(),

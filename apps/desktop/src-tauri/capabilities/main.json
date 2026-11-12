@@ -95,6 +95,8 @@
     "allow-get-wiki-review-days",
     "allow-get-roles",
     "allow-get-moderation",
+    "allow-get-admin-chat-ledger",
+    "allow-get-admin-chat-ledger-detail",
     "allow-get-join-attempts",
     "allow-get-connectivity",
     "allow-get-call-transport",
