@@ -292,6 +292,41 @@ pub(super) fn ids(key: &[u8; 32], domain: &[u8; 32], path: &Path) -> Vec<u32> {
 }
 
 #[test]
+fn member_same_opener_retries_after_seed_unlink_without_rng_or_retained_handles() {
+    for cut in [250, 255] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let shared = pool();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x55e0 + u64::from(cut));
+        settled_three(path, &shared, &mut rng);
+        let mut owner =
+            PreparedV2CurrentLayoutStore::open(path, SECRET, &mut rng, member_policy(&shared))
+                .unwrap();
+        fault(&owner, cut);
+        assert!(owner.retry(&mut rng).is_err(), "cut {cut}");
+        let declaration = owner.member_declaration.as_ref().unwrap();
+        assert!(declaration.seed_unlinked);
+        assert!(declaration.seed_file.is_none());
+        let candidate = declaration.candidate.to_vec();
+        // `exists()` would hide Windows AccessDenied/delete-pending, the original bug.
+        assert_eq!(
+            fs::symlink_metadata(path.join(MEMBER_OUTBOX_SEED))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        fault(&owner, 0);
+        owner.retry(&mut NeverRng).unwrap();
+        assert_eq!(
+            fs::read(path.join(Slot::Current.name())).unwrap(),
+            candidate
+        );
+        assert_declared(&owner, path, cut);
+        drop(owner.into_current_layout_store().unwrap());
+    }
+}
+
+#[test]
 fn member_namespace_declares_on_current3_alone_and_unconfigured_openers_refuse_before_cleanup() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();

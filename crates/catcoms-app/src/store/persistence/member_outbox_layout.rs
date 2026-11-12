@@ -439,6 +439,12 @@ fn verify_seed(
     path: &Path,
     declaration: &Declaration,
 ) -> Result<Option<(File, SessionId)>, AppError> {
+    if declaration.seed_unlinked {
+        // No pathname read/adoption after our successful unlink. An access error, a
+        // delete-pending external handle or a newly planted object is never absence.
+        absent(path)?;
+        return Ok(None);
+    }
     let Some((file, raw)) = read(path, member::codec::MAX_SEED_FRAME)? else {
         return Ok(None);
     };
@@ -923,10 +929,18 @@ impl ServerStore {
         if let Some((seed, id)) = seed {
             held(&seed_path, &seed, id)?;
             fs::remove_file(&seed_path).map_err(io)?;
+            declaration.seed_unlinked = true;
+            // Close BOTH owned handles before any fallible step. Windows finishes the
+            // unlink only after the last handle closes; keeping either one in the retry
+            // owner would make verify_seed fail forever with AccessDenied on this name.
+            drop(seed);
+            drop(declaration.seed_file.take());
+            absent(&seed_path)?;
             self.member_outbox_fault(250)
                 .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
         }
         sync_directory(&self.dir).map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
+        absent(&seed_path)?;
         self.member_outbox_fault(255)
     }
 
