@@ -140,6 +140,9 @@ Linux/Windows evidence and final follow-up checks are recorded in HANDOVER and
 [the recovery design](CHAT-V2-NAMESPACE5-RECOVERY.md). The predecessor is retained by
 an annotated compatibility tag; the gate still checks its exact full SHA.
 
-A governance4 metadata wrapper still supplies no operational source/host for saves;
-the genuine Current4/joined-member factory remains C's work. Governance4's own
-first-torn recovery and physical two-device acceptance also remain open.
+A governance4 metadata wrapper still supplies no operational source/host for saves.
+The primary owns production founder/governance4 custody; C owns the joined-member
+source and its agreed narrow lane/save changes. See the
+[coordinator decisions](CHAT-V2-JOINED-SOURCE-COORDINATION.md) for pin, transport,
+final-admission and removed-original boundaries. Governance4's own first-torn
+recovery and physical two-device acceptance also remain open.

@@ -1,5 +1,25 @@
 # Mewtual; Handover
 
+## Agent C coordination (12 November; design decisions, no implementation)
+
+C's source survey confirms missing production V2 invite/pin provenance, founder
+Add/governance custody, multi-member archive support, governance delivery and a
+joined App owner. The primary owns those production prerequisites and native
+integration; C owns the joined source/replay, factual Sync seams, three narrow
+Core read accessors and agreed lane/save adaptations. The
+[coordinator response](communication-recovery/CHAT-V2-JOINED-SOURCE-COORDINATION.md)
+answers D1-D6 and owner placement. C's external design review is still required.
+
+A read-only cross-boundary review found two HIGH design defects in draft 1:
+phase-1 epoch observations cannot authorize phase-2 saves, and removal cannot
+justify discarding the only retained A1 original. Both are rejected in the
+response. The response also requires complete prejoin history, actual finalized
+postjoin transitions, paid archived-parent fork escrows, stable pin ciphertext
+across rejoin and a defined neutral-epoch protocol. It approves real MLS/Core
+test producers and a warm first milestone only as partial evidence. No new wire,
+namespace, producer, authoring capability or Chat V2 activation is implemented by
+these documents. Documentation-only checks; no suites rerun for this response.
+
 ## Primary namespace5 review (12 November; focused acceptance passed, broader failures open)
 
 Two fresh read-only actual-diff reviews of `ea7e4ae1..d475ddb1` found no confirmed
@@ -42,8 +62,11 @@ focused namespace5 workflow.
 
 The corrected [manual integration run](https://github.com/Thalpy/Mewtual/actions/runs/43122799845)
 at `0eb29686` has passed the Linux root job: 5,211 passed, zero failed, 29 existing
-ignores and exactly one filtered test (the deferred cost case). Windows root is
-still running at this checkpoint. Its runtime/test source is identical to the
+ignores and exactly one filtered test (the deferred cost case). The Windows root
+test step also succeeded: 5,469 passed, zero failed, 28 existing ignores and that
+one filter. Its overall job was cancelled during post-job Rust-cache saving;
+that cancellation does not erase the successful test-step result or make the
+overall job green. Its runtime/test source is identical to the
 focused-tested `3c904440`; only CI execution policy and documentation differ.
 Both complete native jobs failed: Linux 1,007 passed/41 failed and Windows 1,030
 passed/18 failed, including six passing command-ACL cases per OS. There are two

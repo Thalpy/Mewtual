@@ -7,6 +7,13 @@ The primary owns native integration and broader validation; C owns this source
 vertical. Namespace5's focused acceptance is complete, but the overall PR is not
 fully green and Chat V2 remains disabled.
 
+After C's source survey, the primary recorded explicit
+[coordination decisions](CHAT-V2-JOINED-SOURCE-COORDINATION.md). Apply them to this
+brief: production invite/pin, founder governance/archive and transport are
+primary-owned prerequisites; a warm real-MLS/Core source milestone is partial
+evidence. In particular, do not use a phase-1 epoch snapshot as final authority or
+discard removed A1 originals to unblock A2.
+
 ## Required outcome
 
 A genuinely joined ordinary member can author and durably save its own Create,
@@ -23,7 +30,8 @@ Implement the actual joined-member owner/source using the original live
 Preserve whole ownership; do not clone an actor SDK or manufacture authority from
 decoded IDs, a caller-selected pin/image, a boolean, a historical Admission or a
 generic callback. Governance4 currently provides metadata, not this operational
-owner; implement the required factory rather than treating that wrapper as one.
+owner. C implements the joined source factory; the primary owns the founder's
+production governance4 owner. Neither may treat the metadata wrapper as one.
 
 ## Boundaries and coordination
 

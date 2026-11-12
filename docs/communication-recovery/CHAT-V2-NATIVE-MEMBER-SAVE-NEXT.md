@@ -5,8 +5,11 @@ do; it introduces no API, factory, native command or activation. The root member
 save driver is in draft PR #86. Its test native custody is not authentication.
 See [HANDOVER](../HANDOVER.md) for execution evidence and the
 [A/B/F contract](CHAT-V2-MEMBER-SAVE-HANDOFF.md) for the approved save boundary.
-Neither the joined-member source nor native integration has an external agent
-running; the primary owns the next native slice.
+Agent C is preparing the joined-member source; the primary owns the next native
+slice and its production prerequisites. The
+[coordinator decisions](CHAT-V2-JOINED-SOURCE-COORDINATION.md) separate C's warm
+source milestone from the still-missing invite/pin, founder-governance and
+transport producers. None is completed by the design handoff.
 
 ## What the current production paths actually provide
 
