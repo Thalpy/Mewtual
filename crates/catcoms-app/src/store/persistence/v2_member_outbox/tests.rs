@@ -485,7 +485,19 @@ fn lost_reply_retry_recovers_the_original_and_never_saves_twice() {
 #[test]
 fn duplicate_action_under_another_token_is_refused_without_overwrite() {
     let mut fx = Fixture::new(5);
-    let owner = fx.open();
+    let context = fx.context();
+    let owner = fx
+        .open_full(
+            fx.registry.clone(),
+            context,
+            MemberOutboxQuota {
+                max_pending: 1,
+                ..MEMBER_OUTBOX_DEFAULT_QUOTA
+            },
+            None,
+            true,
+        )
+        .unwrap();
     let action = fx.sign("once", 1);
     let (owner, _) = fx.save(owner, token(1), action.clone(), admission(0xa1));
     let returned = fx
@@ -501,6 +513,38 @@ fn duplicate_action_under_another_token_is_refused_without_overwrite() {
     ));
     fx.expect_hit(&owner, token(1), &action);
     assert_consistent(&owner);
+}
+
+#[test]
+fn interrupted_namespace_creation_requires_parent_barrier_on_every_retry() {
+    let mut fx = Fixture::new(65);
+    let namespace = fx.parent_path().join(fx.context().namespace_leaf());
+    arm(Cut::NamespaceCreated, HookAction::Crash);
+    assert!(fx.try_open().is_err());
+    assert!(namespace.is_dir());
+    assert!(!namespace.join("head.bin").exists());
+
+    // Reopening a visible directory must still reach the missing parent barrier.
+    // Refusal there cannot expose an owner or let initialization acknowledge a save.
+    arm(Cut::NamespaceParentSyncPending, HookAction::Crash);
+    assert!(fx.try_open().is_err());
+    assert!(!namespace.join("head.bin").exists());
+    let synced = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = synced.clone();
+    arm(
+        Cut::NamespaceParentSynced,
+        HookAction::Call(Box::new(move || observed.set(true))),
+    );
+    let owner = fx.open();
+    assert!(
+        synced.get(),
+        "the real parent sync completed before returning the owner"
+    );
+    let action = fx.sign("saved after completing the original directory debt", 1);
+    let (owner, _) = fx.save(owner, token(1), action.clone(), admission(0xa1));
+    drop(owner);
+    let reopened = fx.open();
+    fx.expect_hit(&reopened, token(1), &action);
 }
 
 #[test]
