@@ -379,6 +379,8 @@ impl V2JoinedSourceFence {
     /// node inactive. Consumed transitions up to `epoch` are released. A closed fence refuses:
     /// removal and fork are final here. `own` is the 32 bytes of an `OwnerFactId`; the
     /// handle, not this label, is the capability.
+    /// Selection is monotone: an exact current retry is idempotent, but an older epoch
+    /// or a different tuple at the current epoch cannot replace already consumed evidence.
     pub fn install_selected(
         &self,
         epoch: u64,
@@ -400,6 +402,9 @@ impl V2JoinedSourceFence {
         // three fields and issues no new selection or transition allowance.
         if state.selected == Some(selected) {
             return Ok(());
+        }
+        if state.selected.is_some_and(|current| epoch <= current.epoch) {
+            return Err(V2JoinedFenceRefusal::Unknown);
         }
         let finalized = state.join == (epoch, authenticator)
             || state.transitions.iter().any(|transition| {

@@ -54,6 +54,33 @@ fn joined_node(peer: u64, group: ServerGroup, device: MlsDevice, routing: Routin
 }
 
 #[test]
+fn same_epoch_and_authenticator_cannot_transfer_join_facts_to_another_own_leaf() {
+    let mut owner = inviter(0xc141);
+    let joiner = MlsDevice::generate().unwrap();
+    let (group, routing, _) = invite_join(&mut owner, &joiner, 0xcf);
+    assert_eq!(owner.group.group_id(), group.group_id());
+    assert_eq!(owner.group.epoch(), group.epoch());
+    assert_eq!(
+        owner.group.epoch_authenticator_id(),
+        group.epoch_authenticator_id()
+    );
+    assert!(group.has_local_signer(&joiner.public_key_bytes()));
+    assert!(!owner.group.has_local_signer(&joiner.public_key_bytes()));
+    let facts = routing.v2_join_facts.as_ref().unwrap();
+    assert!(!facts.matches_initial_state(&owner.group, &joiner));
+    // Supply the actual inviter's post-Add local group with the genuine joiner device and
+    // routing. All public tuple labels match; only the local own-leaf binding distinguishes it.
+    let mut wrong = joined_node(0xc142, owner.group, joiner, routing);
+    assert!(wrong.fresh_chat_admission().is_none());
+    let instance = wrong.registry_instance();
+    assert!(wrong.take_v2_joined_join_facts(&instance).is_err());
+    assert!(
+        !wrong.v2_fence.is_present(),
+        "no open fence may survive the rejected handoff"
+    );
+}
+
+#[test]
 fn invite_join_captures_exact_facts_that_move_once_to_the_original_incarnation() {
     let mut inviter = inviter(0xc101);
     let joiner = MlsDevice::generate().unwrap();

@@ -81,6 +81,47 @@ fn settle_at_join(node: &Node, fence: &V2JoinedSourceFence) {
 }
 
 #[test]
+fn stale_join_and_same_epoch_mismatch_cannot_replace_a_consumed_newer_selection() {
+    let mut f = founder(0xd1f1);
+    let (mut b, fence, _) = join(&mut f, 0xd1f2, 0x81);
+    let epoch = b.epoch();
+    let join_authenticator = b.group.epoch_authenticator_id();
+    settle_at_join(&b, &fence);
+    assert_eq!(
+        fence.install_selected(epoch, join_authenticator, [0; 32]),
+        Err(V2JoinedFenceRefusal::Unknown)
+    );
+    fence.require_authorized(&OWN).unwrap();
+    let (record, _) = founder_adds(&mut f, 0x82);
+    assert!(b.apply_commit_in_order(&record));
+    let next_epoch = b.epoch();
+    let next_authenticator = b.group.epoch_authenticator_id();
+    fence
+        .install_selected(next_epoch, next_authenticator, OWN)
+        .unwrap();
+    assert!(fence.transition_data(epoch).unwrap().is_none());
+    for (old_epoch, old_state, own) in [
+        (epoch, join_authenticator, OWN),
+        (next_epoch, next_authenticator, [0; 32]),
+        (next_epoch, [0; 32], OWN),
+    ] {
+        assert_eq!(
+            fence.install_selected(old_epoch, old_state, own),
+            Err(V2JoinedFenceRefusal::Unknown)
+        );
+        assert_eq!(
+            fence.observe_data().unwrap().selected_epoch,
+            Some(next_epoch)
+        );
+        fence.require_authorized(&OWN).unwrap();
+    }
+    fence
+        .install_selected(next_epoch, next_authenticator, OWN)
+        .unwrap();
+    fence.require_authorized(&OWN).unwrap();
+}
+
+#[test]
 fn an_in_order_add_is_recorded_with_its_exact_commit_and_pauses_until_covered() {
     let mut f = founder(0xd101);
     let (mut b, fence, _clock) = join(&mut f, 0xd102, 0xd1);

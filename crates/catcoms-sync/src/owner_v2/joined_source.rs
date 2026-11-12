@@ -82,7 +82,9 @@ impl V2JoinFacts {
     /// the very group, device and post-Welcome state they were captured on, as with
     /// `VerifiedFreshChatAdmission::matches_initial_state`.
     pub(crate) fn matches_initial_state(&self, group: &ServerGroup, device: &MlsDevice) -> bool {
-        self.group == group.group_id()
+        group.is_active()
+            && group.has_local_signer(&self.signer)
+            && self.group == group.group_id()
             && self.signer.as_slice() == device.public_key_bytes().as_slice()
             && self.join_epoch == group.epoch()
             && self.admission_state == group.epoch_authenticator_id()
