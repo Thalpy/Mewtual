@@ -21,7 +21,7 @@ COHORTS = (
     ("owner-tenure", "catcoms-sync", "owner_tenure::tests", 17),
     ("founder-member", "catcoms-sync", "owner_v2::member::tests", 6),
     ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),
-    ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 4),
+    ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
 )
 
