@@ -1,5 +1,35 @@
 # Mewtual; Handover
 
+## External reviews 84–88 corrected (12 November; focused CI green, drafts remain)
+
+All six reported code defects are fixed and pushed through the scoped PR stack.
+Read-only actual-diff re-reviews found no remaining blocker/high/medium in those
+corrections. The [correction ledger](communication-recovery/CHAT-V2-EXTERNAL-REVIEW-FIXES.md)
+records each defect, regression, failed precursor and publication correction.
+
+The [Linux/Windows run at ac25f840](https://github.com/Thalpy/Mewtual/actions/runs/43323677107)
+passes joined/source-fence, bounded saved-original recovery, cold-fork ordering,
+member storage and actual predecessor-binary acceptance. Windows passes all 19
+member-save cases and the final negative-retirement slot. Linux also passes all
+3,437 frontend tests, types and build. Formatting and strict Sync/Replication
+Clippy pass on both platforms. No local Cargo was run.
+
+PR #89 replaces #85 after a mistaken base-branch push briefly made GitHub mark
+#85 merged. That base was restored; the marker establishes no acceptance and
+no intended main merge occurred. Open draft order: #84, #89, #86, #87, #88.
+Current complete-suite, workspace-wide strict and audit gates remain required.
+Earlier e1b7e34a full native acceptance now passes 1,042 library plus six ACL
+tests on both platforms; it is distinct older-source evidence. Native fixture
+corrections continue in draft #90 with bounded diagnostics and forced local
+contention. They change no shipping protocol or timeout.
+
+Chat V2 remains disabled and incomplete. Next implementation is the closed
+original fresh-founder bootstrap/native path; joined App source, durable
+governing archive/transport, cold operational ownership, native signer/save
+admission and activation/combined acceptance remain open. A fresh typed-mount
+prerequisite regression is pushed on `chat-v2-native-bootstrap-driver` and runs
+separately. It does not establish the runtime handoff or native integration.
+
 ## Primary review of C's Core/Sync seams (12 November; focused CI green, full validation open)
 
 Integration branch `chat-v2-joined-source-integration` starts from C's pushed
