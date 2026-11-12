@@ -12,8 +12,11 @@ corrections change no recovery production behavior or cohort count; re-review is
 The primary independently inspected the passing `952d8a1b` logs: 66 Linux and 84
 Windows cohort executions, plus one fixture-generator, one predecessor-gate and
 one head-round-trip test on each OS. The 23 fixtures x 10 openers are assertions
-inside the gate, not 230 separate Rust tests; all four round trips pass. The final
-follow-ups, including the stronger phase check, still need their own execution.
+inside the gate, not 230 separate Rust tests; all four round trips pass. The
+[final focused run at `3c904440`](https://github.com/Thalpy/Mewtual/actions/runs/43117903583)
+also passes on BOTH platforms at those exact counts, including the stronger
+separate migration/first-arm check and all predecessor stages. Namespace5's four
+assigned recovery/compatibility items are accepted within that scope.
 
 The annotated remote tag `compat/chat-v2-namespace5-predecessor-ce402364` now
 retains exactly `ce4023649b1a2f37f7d8032c950fbefff03daef3` (peeled target verified).
@@ -36,6 +39,14 @@ at `3c904440` mistakenly included the deferred case and was cancelled by the
 primary; its unfinished Rust jobs are not passes. Its frontend portion did pass
 3,434 tests, checking and build. This cancellation did not affect the separate
 focused namespace5 workflow.
+
+The corrected [manual integration run](https://github.com/Thalpy/Mewtual/actions/runs/43122799845)
+at `0eb29686` is executing all four Rust jobs. Its runtime/test source is identical
+to the focused-tested `3c904440`; only CI execution policy and documentation differ.
+No final Rust totals are recorded yet. A read-only reviewer is observing its
+outcomes; it cannot rerun or change the checks. The expanded native prerequisites
+now specify a reviewed fresh-founder first vertical and concrete key-admission
+lifecycle, but supply no native implementation or restart acceptance.
 
 Local Cargo remains paused. Standalone rustfmt, the Python exact-count guard
 self-check, and the static ambient/raw-filesystem checks pass. The current root

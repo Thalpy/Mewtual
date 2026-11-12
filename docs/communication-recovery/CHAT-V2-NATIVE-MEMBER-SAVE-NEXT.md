@@ -59,7 +59,11 @@ wrapper alone does not close these gaps.
    Keep the cold-genesis rejection intact. This is a prerequisite for claiming
    warm-save/cold-reopen or restart-safe native operation.
 4. Bind an invocation to the original native session and row before its first
-   authorization wait. Resolve the still-open native command-credential/key-cut
+   authorization wait. A queued command must not adopt a replacement merely
+   because its numeric server id matches: capture the original row before waiting,
+   or require its native-issued binding as a selector and reject a mismatch under
+   the registry guard. That selector is not authentication. Resolve the still-open
+   native command-credential/key-cut
    boundary as well as final save admission: phase 2's UI guard alone does not
    establish what may enter the signer during phase 1. Distinguish permitted
    completion of already admitted DATA work from fresh work after revocation;
@@ -91,6 +95,74 @@ support and governance4 operational ownership remain separate required consumers
 M4 retains bounded signed-original DATA across UI lock. It renews no authorization
 and is not a promise of RAM erasure. A later save still needs fresh actual native
 and source checks; memory custody never reports SavedLocal.
+
+## First implementation increment: fresh founder on its original mount
+
+The next coherent increment can prove a fresh-founder native save while remaining
+disabled by default. It must not advertise restart or joined-member support.
+
+Start with one typed Current mount configured with archive, JOIN and member
+handlers. Its existing retry already carries the same Store through archive,
+Current3 and member5 declaration; an archive-only mount followed by a second
+physical open is unnecessary. Add a regression that creates SourceSaved after
+this typed mount completes: existing fixtures create it before the typed open.
+Preserve the public Current opener's existing-vault check. New-vault support
+needs a separate reviewed closed create path, not removal of that check.
+
+A proposed closed Root bootstrap driver should retain the actual creation,
+planning, source-preparation, completed-source/runtime, seed and Current stages
+in owning phase slots. Each refusal restores its exact original inputs; each
+successful stage is cached before late checks. Its product owns the whole Host,
+the necessary original creator lifetime and bounded historical binding DATA.
+It exposes neither a legacy actor nor a raw Store/SDK/node accessor.
+
+The existing Sync `FounderBootstrapPreparation::into_genesis_runtime_parts`
+consumes the original ChannelSync, drains its old group/device/provider and
+returns the actual transport/RNG/clock/Fresh runtime owners. Use that seam before
+restoring the saved source SDK, preserving both originals on refusal and keeping
+the original creator lifetime separately alive. The driver still needs the
+actual completed-source handoff and paired native consumer; this paragraph does
+not supply them.
+
+Use an explicit private native mounted-vault sum for legacy and typed V2 storage,
+with concrete common operations and explicit legacy-only matching. A separate
+bounded V2 registry is acceptable only when the durable backend-tagged row belongs
+to exactly one backend, IDs/incarnations are shared, installation consumes the
+genuine product, and retirement revokes its original lifetime before waits.
+There must be no duplicate actor/SDK sidecar.
+
+### Native key admission within phase 1
+
+An entry-time command reader carried across IO is insufficient. The proposed
+concrete key gate can travel through B's phase 1, then admit at the actual key cut:
+
+1. Root's genuine product creates the Product-bound owner/observer pair before
+   phase 1. It is initially unbound and cannot admit a key call.
+2. The private native factory first registers that unbound owner against the real
+   authenticated session and original row. Registration and retirement serialize,
+   with generation/row checks repeated before making the owner reachable. Root
+   then binds the immutable Draft, retained source and request token once, outside
+   writers during phase 1. No callback or return to native is needed between this
+   binding and the key cut. Unbound/closed owners, rebinding and foreign/replaced
+   products refuse.
+3. After all waits and source proofs, compare the fixed binding and prepare the
+   checked issuance counter. The final concrete native-negative observation is
+   the admission linearization point. No arbitrary RequestAuthority callback,
+   allocation or blocking acquisition belongs under Current/Core writers.
+4. Release the short gate mutex before cryptography. A unique non-Clone End
+   remains through the one key call and immediate raw cache; its Drop only
+   records completion atomically. Cached raw can complete as DATA without another
+   admission or signature.
+5. Retirement closes new admission synchronously. Drain issued Ends outside UI,
+   registry and Root guards. Lock must await admitted key work even if no save
+   job was admitted. Unlock may issue fresh authority after authentication, but
+   cannot reopen an old command owner.
+
+Root cannot authenticate that arbitrary caller-provided atomics belong to native
+AppState. Acceptance therefore requires both its genuine product/Draft/source
+binding and the traced private native factory supplying the actual controls.
+Keep the original source/Host live across UI lock; retire native command authority
+there. Actual row leave or vault shutdown closes the source.
 
 ## Acceptance through the actual producer
 
