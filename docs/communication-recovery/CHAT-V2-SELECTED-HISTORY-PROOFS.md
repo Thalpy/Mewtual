@@ -90,8 +90,11 @@ signature positions, unselected siblings, failed/abandoned/refused candidates,
 original removal/frozen custody, retired-owner drainage and u64 arithmetic.
 The exporter is deliberately untrusted in-memory test data, not an App archive.
 
-Standalone rustfmt and static gates are run locally; Cargo execution is routed
-through CI at the user's request. The exact-count lane must execute 11 replay
+Standalone rustfmt, the ambient-dependency gate and the exact-count harness
+self-test passed locally without Cargo. Read-only adversarial design and actual
+diff reviews found no remaining blocker, high or medium finding. This is static
+review, not execution evidence. Cargo execution is routed through CI at the
+user's request. The exact-count lane must execute 11 replay
 cases, 2 arithmetic cases and 3 existing accessor controls per OS. These are
 focused Core results, not full Chat V2 acceptance. Full suites, workspace strict
 lint/audit and production archive/native/network acceptance remain required.
