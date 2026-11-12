@@ -67,11 +67,13 @@ use std::collections::VecDeque;
 /// Bounded live channel views per lane. Refuse beyond it; a view with a live Plan is never
 /// evicted (that would revoke the Plan's channel lifetime under an in-flight request).
 const MAX_MEMBER_CHANNELS: usize = 8;
-/// Rolling positive cache, backed by mandatory exact durable lookup before authoring.
+/// Rolling positive cache for requests covered by Saved/SavedHit. Older saved-token
+/// deduplication is the outbox's mandatory exact lookup before authoring.
 const MAX_FINISHED_TOKENS: usize = 64;
-/// Unsaved negative retirements cannot be inferred from an Absent outbox entry. Reserve
-/// one non-evicting slot before each new request so finishing can never strand its original.
-/// Normal saved traffic releases its reservation and has no lifetime message-count cliff.
+/// Negative retirement is different: Absent lookup cannot remember cancellation. Never
+/// evict these tokens during this lane incarnation. Reserve room before new work so an
+/// admitted original can always be abandoned/forgotten. Normal saved traffic consumes no
+/// permanent slot; restart-safe negative retirement needs a future durable record.
 const MAX_UNSAVED_RETIREMENTS: usize = 64;
 
 const MEMBER_CHANNEL_LAYOUT_BYTES: usize = std::mem::size_of::<MemberChannel>() + 4 * 1024;
@@ -580,6 +582,8 @@ impl V2MemberLane {
             };
         }
         if self.finished.contains(&token)
+            || self.retired_unsaved.contains(&token)
+            || self.retired_unsaved.len() == MAX_UNSAVED_RETIREMENTS
             || action.signer() != &signer
             || action.spec().realm.group() != self.group.as_slice()
             || original.admission() != self.admission
@@ -893,8 +897,8 @@ impl V2MemberLane {
         }
     }
 
-    /// Retire the request and fee. Unsaved negatives are permanent for this lane; old
-    /// saved tokens remain protected by mandatory exact durable lookup after cache eviction.
+    /// Retire the request and its fee. Unsaved negatives are permanent for this lane;
+    /// saved tokens rely on exact durable lookup once their positive cache entry expires.
     /// Returns, for `Saved`, whether the outbox's saved original is the one this lane lent.
     fn finish(&mut self, token: [u8; 32], mode: FinishMode) -> Result<bool, AppError> {
         let pending = self
@@ -918,6 +922,8 @@ impl V2MemberLane {
             _ => return Err(refused()),
         };
         if matches!(mode, FinishMode::Abandon | FinishMode::ForgetLent) {
+            // New Pending/adopted requests reserve this slot before any key/RNG entry.
+            // Final retirement cannot fail for pressure or allocate another buffer.
             debug_assert!(self.retired_unsaved.len() < MAX_UNSAVED_RETIREMENTS);
             self.retired_unsaved.push(token);
         } else {
@@ -952,9 +958,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// is cached in this host for [`Self::take_member_signed_original`].
     ///
     /// Refuses (never authors) when: the host has not completed its empty promotion, founder
-    /// Create state exists on this host, another token is pending, the token is negatively
-    /// retired or positively cached, negative-retirement capacity is full, the selected O
-    /// is no longer generation 1, or the source/lock
+    /// Create state exists on this host, another token is pending, the token was abandoned
+    /// or forgotten (or remains in the positive saved cache), negative-retirement capacity
+    /// is exhausted, the selected O is no longer generation 1, or the source/lock
     /// closed. A completed original stays retrievable after lock (historical DATA).
     pub(in crate::store) fn retry_sign_member_request(
         &mut self,
@@ -1024,8 +1030,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     }
 
     /// The outbox reported SavedLocal or AlreadySaved for this token: release the request and
-    /// its fee. The token remains protected by exact durable lookup when its positive
-    /// cache entry expires. `saved_action` is the
+    /// its fee. The durable exact lookup prevents this token authoring again after the
+    /// rolling positive cache evicts it; callers MUST perform that lookup. `saved_action` is the
     /// receipt's ActionId. Returns `true` when that is the original this lane lent. `false`
     /// means AlreadySaved named an EARLIER original (for example the same request signed
     /// under another nonce before a restart): the caller must drop its lent copy and never
