@@ -11,7 +11,7 @@ import runpy
 
 REPO = Path(__file__).resolve().parents[2]
 COHORTS = (
-    ("selected-replay", "v2_general::tests::selected_history", 11),
+    ("selected-replay", "v2_general::tests::selected_history", 12),
     ("selected-arithmetic", "v2_general::selected_history::tests", 2),
     ("existing-read-accessors", "v2_general::tests::read_accessors", 3),
 )
