@@ -24,23 +24,25 @@ COHORTS = (
     ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
+    ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 8 if sys.platform == "win32" else 4),
 )
 
 
 def fresh_founder_cohort(cohorts: tuple) -> list:
-    selected = [cohort for cohort in cohorts if cohort[0] == "fresh-founder-mount"]
-    if len(selected) != 1 or selected[0][1:] != (
-        "catcoms-app", "current_layout::tests::fresh_founder", 1,
-    ):
-        raise RuntimeError("fresh-founder mode requires exactly its one nonempty pinned cohort")
+    selected = [cohort for cohort in cohorts if cohort[0].startswith("fresh-founder-")]
+    if selected != [
+        ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
+        ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 8 if sys.platform == "win32" else 4),
+    ]:
+        raise RuntimeError("fresh-founder mode requires both exact nonempty pinned cohorts")
     return selected
 
 
 def selection_self_test() -> None:
     selected = fresh_founder_cohort(COHORTS)
-    for invalid in ((), tuple(selected * 2),
-                    (("fresh-founder-mount", "catcoms-app", "missing-selector", 1),),
-                    (("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 0),)):
+    for invalid in ((), tuple(selected[:1]), tuple(selected * 2),
+                    (selected[0], (selected[1][0], selected[1][1], "missing-selector", selected[1][3])),
+                    (selected[0], (*selected[1][:3], 0))):
         try:
             fresh_founder_cohort(invalid)
         except RuntimeError:
@@ -52,7 +54,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--fresh-founder-only", action="store_true",
-                        help="Run only the fresh-founder mount prerequisite; not joined/member acceptance.")
+                        help="Run only fresh-founder library regressions; not native acceptance.")
     args = parser.parse_args()
     # Reuse the existing bounded process owner and rejection tests. run_path does not
     # execute that script's main or its member/predecessor Cargo commands.

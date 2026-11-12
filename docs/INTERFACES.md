@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The new `V2CurrentLayoutStore::prepare_fresh_v2_text_founder` consumes original
+runtime inputs only through a closed owning producer. Its product retains the
+whole Host and creator and exposes concrete member-save operations plus bounded
+historical binding DATA. It supplies no native credential, row or cold owner.
+The exact grammar/payment/refusal and reservation-bridge contract is in
+[the fresh-founder driver](communication-recovery/CHAT-V2-FRESH-FOUNDER-DRIVER.md);
+compilation and execution are pending.
+
 ## Governance capability (7 November; private metadata handler)
 
 Critical namespace4/version1 is reserved for a distinct private governance layout.

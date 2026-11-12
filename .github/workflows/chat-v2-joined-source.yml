@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       fresh_founder_only:
-        description: Run only the fresh-founder mount prerequisite (not joined/member acceptance).
+        description: Run only fresh-founder library regressions (not native acceptance).
         type: boolean
         default: false
 

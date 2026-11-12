@@ -39,6 +39,17 @@ pub struct GenesisSeedBudget {
     sdk: OwnerSdkRestoreLimits,
 }
 impl GenesisSeedBudget {
+    /// Negative compatibility check for a closed fresh producer before any
+    /// creation/source grant is spent. These caps do not pay for SDK work.
+    pub(in crate::store) fn supports_founder_limits(
+        &self,
+        required: FounderSnapshotLimits,
+    ) -> bool {
+        self.source.max_snapshot_bytes() >= required.max_snapshot_bytes()
+            && self.source.max_mls_bytes() >= required.max_mls_bytes()
+            && self.source.max_provider_backing_bytes() >= required.max_provider_backing_bytes()
+    }
+
     pub fn new(
         snapshot: usize,
         mls: usize,

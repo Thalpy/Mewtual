@@ -104,6 +104,39 @@ pub struct PreparedV2TextHost<T, R> {
 }
 
 impl<T, R> PreparedV2TextHost<T, R> {
+    /// Historical DATA for the closed warm driver, never an owner constructor.
+    /// The driver prepays this bounded group copy and performs a final genuine
+    /// selected-head check AFTER caching the result.
+    pub(in crate::store) fn fresh_founder_binding_data(
+        &self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<crate::store::FreshV2TextFounderBinding, AppError> {
+        let store = layout.checked_store()?;
+        let namespace = store
+            .current_layout
+            .lock()
+            .map_err(|_| refused())?
+            .as_ref()
+            .ok_or_else(refused)?
+            .layout;
+        let owner = self.owner.borrow_current()?;
+        owner.source().validate_original(store)?;
+        let data = owner.source().data();
+        let spec = data.context.spec_data();
+        if spec.vault != namespace.vault || spec.group.is_empty() || spec.group.len() > 256 {
+            return Err(refused());
+        }
+        Ok(crate::store::FreshV2TextFounderBinding {
+            vault: namespace.vault,
+            layout: namespace.root,
+            group: spec.group.to_vec(),
+            signer: spec.signer,
+            source: *data.source.as_bytes(),
+            profile: *data.profile.id().as_bytes(),
+            pin: *owner.original_pin_id_data()?.as_bytes(),
+        })
+    }
+
     /// Moving a read-only owner creates no allocation or permission. The trusted policy
     /// is fixed for this host; all actual captures and work acquire their own fees first.
     pub fn from_read(read: PreparedV2TextRead<T, R>, policy: V2TextHostPolicy) -> Self {

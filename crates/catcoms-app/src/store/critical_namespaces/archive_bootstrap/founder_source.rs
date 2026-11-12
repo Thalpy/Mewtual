@@ -12,12 +12,21 @@ use catcoms_sync::owner_v2::{
 };
 
 const PHASE_METADATA_FEE: usize = 64 * 1024;
+#[path = "founder_source_handoff.rs"]
+mod handoff;
+pub(in crate::store) use handoff::{CompletedWarmFounderOrigin, WarmFounderCurrentReservation};
 #[path = "founder_source_prepared.rs"]
 mod prepared;
 #[path = "founder_source_terminal.rs"]
 mod terminal;
+#[path = "founder_warm.rs"]
+mod warm;
 #[path = "founder_source_write.rs"]
 mod write;
+pub use warm::{
+    FreshV2TextFounderBegin, FreshV2TextFounderBinding, FreshV2TextFounderPolicy,
+    PreparedFreshV2TextFounder,
+};
 
 enum SourcePhase {
     PendingPrivateStage,
@@ -32,6 +41,9 @@ enum SourcePhase {
     // This is also a temporary exclusive move-out sentinel. No borrow/I/O path accepts it;
     // returned actual originals restore their exact phase before an error returns.
     HeldConsumingRefusal,
+    // The complete original runtime moved to the closed warm driver. The creator
+    // and its fee stay owned here; none of the earlier source APIs accepts this phase.
+    RuntimeTransferred,
 }
 
 /// The SAME actual original creator, now retained before any private scope mutation. Private

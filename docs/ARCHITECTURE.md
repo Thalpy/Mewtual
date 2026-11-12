@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+The fresh-founder Root producer now owns one original typed-mount chain through
+warm runtime attachment and the whole member-save Host. Its reservation-only
+bridge preserves the founder identity and both original/Current negatives while
+validating the real Current identity separately. This is authored, not executed;
+native backend/key admission and cold operational ownership remain unfinished.
+[Exact library boundary](communication-recovery/CHAT-V2-FRESH-FOUNDER-DRIVER.md).
+
 Owner-offline text is a separate required path: the fixed Profile founder signs
 certification Headers, while members sign their own ordinary actions. The local
 first-founder storage tests do not establish member send/outbox availability.

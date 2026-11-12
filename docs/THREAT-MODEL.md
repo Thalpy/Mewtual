@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+The authored fresh-founder library bridge is reservation-only. It preserves
+Sync's old owner-pointer check and combines complete original/Current negatives,
+while actual stored Current/source/head/writer proofs validate the distinct
+successor identity before and after bridge allocation. No callback, decoded
+label or historical binding DATA can issue this bridge or a native row. There is
+no native key/command admission or cold operational owner yet, and the new driver
+has not been executed. [Contract and limits](communication-recovery/CHAT-V2-FRESH-FOUNDER-DRIVER.md).
+
 The inactive joined-node source fence now distinguishes unverified input refusal
 from a failed current-epoch MLS commit. The latter cannot leave the old selected
 authority usable: it closes inside settlement before transitions are exposed as

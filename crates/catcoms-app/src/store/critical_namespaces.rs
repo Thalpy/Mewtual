@@ -41,8 +41,10 @@ pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
     ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
     ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
-    ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress, PreparedArchiveBootstrapStore,
-    ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
+    ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress, FreshV2TextFounderBegin,
+    FreshV2TextFounderBinding, FreshV2TextFounderPolicy, PreparedArchiveBootstrapStore,
+    PreparedFreshV2TextFounder, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ReturnedArchiveFounderPlanning,
 };
 pub use current_layout::{
     CanonicalFilenameInventoryPolicy, PreparedV2CurrentLayoutStore, V2CurrentLayoutPolicy,
