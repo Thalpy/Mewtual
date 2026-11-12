@@ -551,7 +551,7 @@ impl MemberOutbox {
             Presence::Present => false,
             Presence::Absent if create => {
                 create_namespace(&path)?;
-                parent.held.sync()?;
+                super::transaction::reach(super::transaction::Cut::NamespaceCreated)?;
                 true
             }
             Presence::Absent => return Err(MemberOutboxRefusal::Absent.into()),
@@ -559,6 +559,15 @@ impl MemberOutbox {
         let ns = Namespace {
             dir: HeldDirectory::open(path)?,
         };
+        // Presence does not prove that an earlier creator completed its parent barrier.
+        // In particular, a process can stop after mkdir and retry against the same visible
+        // directory. Syncing only the namespace later cannot make its parent's entry
+        // durable. Complete this identity-checked barrier on EVERY successful open before
+        // initialization/recovery can expose an owner capable of acknowledging a save.
+        super::transaction::reach(super::transaction::Cut::NamespaceParentSyncPending)?;
+        parent.held.sync()?;
+        ns.dir.require()?;
+        super::transaction::reach(super::transaction::Cut::NamespaceParentSynced)?;
         let head = if created {
             initialize(&ns, &context, key, rng)?
         } else {
