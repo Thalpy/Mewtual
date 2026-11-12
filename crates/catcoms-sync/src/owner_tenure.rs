@@ -471,7 +471,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         work: impl FnOnce(&mut Self) -> O,
     ) -> O {
+        self.with_observed_mls_transition_recording(None, work)
+    }
+
+    /// The same seam for a merge whose EXACT commit bytes are known before it runs: an applied
+    /// fork winner, an in-order or caught-up commit, or this node's own staged commit. A joined
+    /// node's fence records the change as a finalized transition carrying `blake3(commit)`. A
+    /// state change through the plain seam (no bytes) is unaccountable there: `HistoryGap`.
+    pub(super) fn with_observed_mls_commit<O>(
+        &mut self,
+        commit: &[u8],
+        work: impl FnOnce(&mut Self) -> O,
+    ) -> O {
+        let digest = *blake3::hash(commit).as_bytes();
+        self.with_observed_mls_transition_recording(Some(digest), work)
+    }
+
+    fn with_observed_mls_transition_recording<O>(
+        &mut self,
+        commit: Option<[u8; 32]>,
+        work: impl FnOnce(&mut Self) -> O,
+    ) -> O {
         let before = Position::of(&self.group);
+        // A joined node's fence goes `merging` BEFORE the merge, so a concurrent final save
+        // admission orders strictly before it or refuses (`owner_v2::joined_fence`).
+        let fence = self.v2_fence_begin_merge();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(self)));
         // A callback may unwind after actually applying a removal. Revoke already queued chat
         // observers from the actual resulting own leaf before any independent driver progresses.
@@ -485,6 +509,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.admin_roster
             .retain(|id| self.group.contains_device(id));
         self.reconcile_voice_actor();
+        // Settle the fence from the ACTUAL resulting group, including after an unwind: a
+        // finalized change becomes one recorded transition, an unchanged state records nothing.
+        self.v2_fence_end_merge(fence, commit);
         match outcome {
             Ok(outcome) => outcome,
             Err(panic) => std::panic::resume_unwind(panic),

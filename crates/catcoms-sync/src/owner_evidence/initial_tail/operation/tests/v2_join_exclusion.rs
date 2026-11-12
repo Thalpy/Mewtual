@@ -5,7 +5,7 @@
 //! explicit TEST contract, now also supplying the saved operation binding the install checks.
 use super::*;
 use crate::owner_evidence::ManagedOwnerOperationBinding;
-use crate::owner_v2::{JoinFactsSlot, V2JoinFacts};
+use crate::owner_v2::{JoinFactsSlot, JoinedFenceNode, V2JoinFacts, V2JoinedFenceTerminal};
 
 /// The parent fixture's binding plus the saved predecessor/request the install compares.
 struct InstallBinding<'a> {
@@ -111,14 +111,23 @@ fn v1_install_refuses_after_the_joined_source_claimed_the_node_and_keeps_the_can
 fn join_facts_can_never_be_taken_after_the_v1_install_bound_the_node() {
     let (mut node, binding, mut prepared) = frozen_fixture();
     let install = install_binding(&binding, &prepared);
-    // Untaken facts captured from this node's own real group, as an invite join leaves them.
+    // Untaken facts captured from this node's own real group, with the live fence an invite
+    // join leaves beside them.
     let facts = V2JoinFacts::capture(&node.group, &node.device, [0xd1; 32]).unwrap();
     node.v2_join_facts = JoinFactsSlot::from_handoff(Some(facts));
+    node.v2_fence = JoinedFenceNode::for_join(&node.group);
+    let fence = node.v2_fence.handle().unwrap();
     node.install_owner_direct_add_checkpoint(&mut prepared, &install)
         .unwrap();
     assert!(matches!(node.v2_join_facts, JoinFactsSlot::BoundToV1Owner));
     let instance = node.registry_instance();
     assert!(node.take_v2_joined_join_facts(&instance).is_err());
+    // That install bypassed the transition observer, so the fence closed for good.
+    assert!(fence.is_closed());
+    assert_eq!(
+        fence.observe_data().unwrap().terminal,
+        Some(V2JoinedFenceTerminal::V1Owner)
+    );
     // And a later v1 install path stays open for the v1 owner (the exclusion is one-sided
     // per claim, never a lockout of the owner that won).
     assert!(node.require_no_v2_joined_source().is_ok());

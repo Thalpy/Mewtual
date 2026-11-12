@@ -2,6 +2,9 @@
 //! No production dispatcher, publisher, root acquisition, archive saver or positive issuer is
 //! enabled here. Public codec frames remain DATA until the actual host covers their originals.
 mod founder;
+// The live ordered source fence of a joined node: finalized transitions, contest/merge state
+// and final-admission custody. Observation and ordering only; it issues no authority.
+mod joined_fence;
 // Join FACTS of a genuinely joined node, captured at its verified Welcome for the App's
 // joined-member source. DATA only: no pin provenance, membership, signing or publication.
 mod joined_source;
@@ -26,6 +29,11 @@ pub use founder::{
     MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, MAX_CREATE_ACTION_BYTES, MAX_CREATE_CIPHERTEXT_BYTES,
     MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES, MAX_CREATE_PADDED_BYTES,
     V2_GENESIS_SEED_METADATA_BYTES,
+};
+pub(crate) use joined_fence::JoinedFenceNode;
+pub use joined_fence::{
+    V2AppliedTransition, V2JoinedFenceAdmission, V2JoinedFenceObservation, V2JoinedFenceRefusal,
+    V2JoinedFenceTerminal, V2JoinedSourceFence, V2TransitionDelta, V2_JOINED_TRANSITION_CAPACITY,
 };
 pub(crate) use joined_source::JoinFactsSlot;
 pub use joined_source::V2JoinFacts;

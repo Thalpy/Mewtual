@@ -86,8 +86,14 @@ fn invite_join_captures_exact_facts_that_move_once_to_the_original_incarnation()
         V2MemberSignRefusal::Source
     );
     let instance = node.registry_instance();
-    let taken = node.take_v2_joined_join_facts(&instance).unwrap();
+    let (taken, fence) = node.take_v2_joined_join_facts(&instance).unwrap();
     assert_eq!(taken.key_package_data(), &expected);
+    // The fence came with them, live and settled at the post-Welcome state.
+    assert!(!fence.is_closed());
+    let observed = fence.observe_data().unwrap();
+    assert_eq!(observed.settled_epoch, taken.join_epoch_data());
+    assert_eq!(observed.join_epoch, taken.join_epoch_data());
+    assert_eq!(observed.selected_epoch, None);
     assert_eq!(
         node.take_v2_joined_join_facts(&instance).unwrap_err(),
         V2MemberSignRefusal::Source,

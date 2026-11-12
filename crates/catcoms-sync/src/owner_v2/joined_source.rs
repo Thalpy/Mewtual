@@ -138,21 +138,26 @@ impl JoinFactsSlot {
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Move this ORIGINAL joined incarnation's join facts out, exactly once, to the App's
-    /// joined-member source. Refuses for another incarnation, for a node with no facts
-    /// (founder, restored, companion device, or a mismatched handoff), for facts already taken,
-    /// and after the v1 owner checkpoint install bound this node. A refusal changes nothing.
+    /// joined-member source, together with the source's handle on this node's live fence (which
+    /// has recorded every finalized transition since the Welcome). Refuses for another
+    /// incarnation, for a node with no facts (founder, restored, companion device, or a
+    /// mismatched handoff), for facts already taken, and after the v1 owner checkpoint install
+    /// bound this node. A refusal changes nothing.
     ///
-    /// DATA only. Taking the facts is not membership, selection or signing permission; the
-    /// source must still establish the mounted pin, complete replay and its live fence.
+    /// DATA plus ordering custody only. Taking them is not membership, selection or signing
+    /// permission; the source must still establish the mounted pin and complete replay.
     pub fn take_v2_joined_join_facts(
         &mut self,
         instance: &RegistrySyncInstance,
-    ) -> Result<V2JoinFacts, V2MemberSignRefusal> {
-        if !self.matches_registry_instance(instance) {
+    ) -> Result<(V2JoinFacts, crate::owner_v2::V2JoinedSourceFence), V2MemberSignRefusal> {
+        if !self.matches_registry_instance(instance)
+            || !matches!(self.v2_join_facts, JoinFactsSlot::Available(_))
+        {
             return Err(V2MemberSignRefusal::Source);
         }
+        let fence = self.v2_fence.handle().ok_or(V2MemberSignRefusal::Source)?;
         match std::mem::replace(&mut self.v2_join_facts, JoinFactsSlot::TakenByJoinedSource) {
-            JoinFactsSlot::Available(facts) => Ok(*facts),
+            JoinFactsSlot::Available(facts) => Ok((*facts, fence)),
             other => {
                 self.v2_join_facts = other;
                 Err(V2MemberSignRefusal::Source)
@@ -172,9 +177,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Called only after a successful v1 owner checkpoint install. Any untaken join facts are
-    /// dropped, and the joined source can never be created on this incarnation.
+    /// dropped, the node's fence closes for good (that install bypassed the transition
+    /// observer), and the joined source can never be created on this incarnation.
     pub(crate) fn note_v1_owner_install(&mut self) {
         self.v2_join_facts = JoinFactsSlot::BoundToV1Owner;
+        self.v2_fence
+            .terminate(crate::owner_v2::V2JoinedFenceTerminal::V1Owner);
     }
 }
 
