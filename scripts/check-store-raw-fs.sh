@@ -33,8 +33,101 @@ pattern='fs::(write|rename|remove_file|remove_dir|remove_dir_all|copy|hard_link|
 # a hit in an initializer after a function's body is charged to that function: never to an
 # allowance, unless its text is also exactly a reviewed line of that function.
 declare -A allowed=(
+  # Namespace4 declaration first creates/syncs the SAME empty legacy stage so
+  # actual older readers refuse before any governance-only recovery debt exists.
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|original.file.sync_all().map_err(io)?;']=1
+  # Private offline Current4 metadata declaration only. Complete authenticated TWO-frame
+  # seed and exact original native objects precede promotion; no arbitrary path, Source,
+  # SDK/key entry or epoch-family effect. Preserve partial/foreign evidence on refusal.
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure|let newly_opened = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure|let existing = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure|slot.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|sync_marker_parent|root.directory.sync_all().map_err(io)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|verify_seed|file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|actual.sync_all().map_err(io)?;']=1
+  # Separate original selection-stage sync and exact captured cold-duplicate sync.
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|stage.file.sync_all().map_err(io)?;']=2
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::rename(&stage_path, &current_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|current.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|selected.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::remove_file(&seed_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|install_governance_layout_marker|original.marker.sync_all().map_err(io)?;']=1
+  # SAME-original warm retained-A recovery only. A distinct fresh Current repair marker
+  # verifies complete authenticated MAIN before extending ONLY matching listed prefixes;
+  # a distinct scratch marker verifies the original strict pre-MAIN prefix, parent and
+  # absence of dependents before unlinking that one fixed stage. Actual outcomes cache
+  # before barriers/late errors. Every helper File drains before its actual lease/End.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|scratch_inner|fs::remove_file(&p.wal_stage_path).map_err(io::io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|file.sync_all().map_err(io::io)?;']=1
+  # Read-only held-directory capture, with explicit reparse/name/native-ID checks.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/io.rs|capture|fs::OpenOptions::new()']=1
+  # First retained-A only: the SAME consumed Current Stage/Commit marker retains its
+  # actual vault lease and writer gate through all helper Files/cleanup. WAL is complete
+  # and parent-synced before immutable outputs; all exact outputs precede selector CAS.
+  # Existing objects are compared/resynced only; fresh writes use create_new, never
+  # truncate/append/unlink. Closed names stay inside the original non-epoch text family.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work.rs|ensure_wal|fs::rename(&parent.wal_stage_path, &parent.wal_path).map_err(native_error)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work.rs|commit_inner|fs::rename(&head_stage, &parent.head_path).map_err(native_error)?;']=1
+  # Unsigned-I only: its distinct consumed Current Stage/Commit markers hold the real
+  # native lease and writer end. Full original WA/WI comparisons and file/parent sync
+  # barriers precede journal replacement or exact O_I selection; no signing is implied.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/work.rs|ensure_wal|fs::rename(&p.wal_stage_path, &p.wal_path).map_err(failed)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/work.rs|commit_inner|fs::rename(&head_stage, &p.head_path).map_err(failed)?;']=1
+  # Raw S consumes the real Current Stage/Commit admission and SAME whole I/SDK;
+  # full original WI/WS, I/S dependencies and barriers precede these two renames.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/work.rs|ensure_wal|fs::rename(&p.base.wal_stage_path, &p.base.wal_path).map_err(failed)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/work.rs|commit_inner|fs::rename(&head_stage, &p.base.head_path).map_err(failed)?;']=1
+  # First accepted B only: SAME original S/Core candidate and distinct consumed
+  # actual Current Stage/Commit own the native lease/End; full WS/WB and ALL exact
+  # new artifacts plus file/parent barriers precede these two replacement edges.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/work.rs|ensure_wal|fs::rename(&base.wal_stage_path, &base.wal_path).map_err(failed)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/work.rs|commit_inner|fs::rename(&stage_path, &base.head_path).map_err(failed)?;']=1
+  # DISTINCT completed-WC readonly source holds directory handles in the real
+  # same-vault Source/lease/End bundle. It performs no writes or removal.
+  ['crates/catcoms-app/src/store/persistence/v2_text/completed_workspace/io.rs|capture|fs::OpenOptions::new()']=1
+  # Only original NEXT-A Stage after full original WC; fixed recorded stage,
+  # bounded whole prefix before suffix, no missing/adopt/truncate/new nonce.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/completed_continuation.rs|write_original|let mut file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/completed_continuation.rs|write_original|file.sync_all().map_err(failed)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/completed.rs|ensure_completed_wal|std::fs::rename(&self.parent.wal_stage_path, &self.parent.wal_path)']=1
+  # DISTINCT actual WD deletion / fresh WC completion, SAME exact B+Drained.
+  # Full WB/WD precedes stage replacement, durable WD precedes only its exact
+  # authenticated private list unlink, actual Files drain before ReadyWC/End.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/retirement/work.rs|ensure_deletion_journal|fs::rename(&facts.stage_path, &facts.wal_path).map_err(failed)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/retirement/work.rs|deletion_inner|fs::remove_file(&object.path).map_err(failed)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/retirement/work.rs|completion_inner|fs::rename(&facts.stage_path, &facts.wal_path).map_err(failed)?;']=1
+  # SAME-original retirement-stage prefix continuation only, never missing
+  # adoption/general cold repair. Distinct actual role+full parent WAL first.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/retirement/continuation.rs|write_original|let mut file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/retirement/continuation.rs|write_original|file.sync_all().map_err(failed)?;']=1
+  # SAME-B recorded Stage continuation only: full originalWS beforeWB stage or
+  # exactownWB beforeimmutable/head outputs; fixed original bytes, native refusal
+  # filter, bounded wholeprefix +suffix/sync/name; no cold adoption/key/reseal.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/warm.rs|write_original|let mut file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/accepted/warm.rs|write_original|file.sync_all().map_err(failed)?;']=1
+  # SAME-I recorded Stage continuation only: actual opaque original + exact WA/own WI,
+  # regular bounded exact prefix and recorded native refusal filter precede suffix-only
+  # completion. Full sync/bytes/names/barriers follow; missing/foreign work is preserved.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/warm.rs|write_original|let mut file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/warm.rs|write_original|file.sync_all().map_err(failed)?;']=1
+  # SAME-S recorded Stage continuation has the same restrictions, with full original
+  # WI or own WS and the original raw signature; it never reopens MAIN for appending.
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/warm.rs|write_original|let mut file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/intent/raw/warm.rs|write_original|file.sync_all().map_err(failed)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|sync_exact|let mut writable = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|sync_exact|writable.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|let mut file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|file.sync_all().map_err(io)?;']=1
   # Both public open APIs use this one private constructor before any token/cursor exists.
-  ['crates/catcoms-app/src/store.rs|open_with_catalog_policy|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
+  ['crates/catcoms-app/src/store.rs|open_with_catalog_policies|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
   # remove_server unlinks only the non-family {id}.bin, .net and .cache files (I-4 audit:
   # correctly not rotating).
   ['crates/catcoms-app/src/store.rs|remove_server|fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;']=1
@@ -54,6 +147,41 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/bootstrap_source_work.rs|ensure_large_source_output|held.file.sync_all().map_err(io)?;']=1
+  # First empty operational text promotion only: fixed text controls and complete-hash
+  # children under the actual original group, independently paid Current/lane admissions
+  # and same-mount physical lease. These are NOT inventoried epoch files. Reopened output
+  # must already match the complete original frame; only create_new permits content writes.
+  # Keep each exact function/text site rather than exempting this persistence descendant.
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|sync_exact_control|let writable = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|sync_exact_control|writable.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|write_same|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|write_same|let created_file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|write_same|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|write_same|file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|ensure_seed_main|fs::rename(&stage, &main).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|stage_effects|fs::create_dir(&pages).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/work.rs|commit_effects|fs::rename(&stage_path, &head_path).map_err(io)?;']=1
+  # Distinct same-owner promotion recovery: a COMPLETE authenticated seed plus fresh
+  # Current/idle-lane admission fixes the nonselected children. Repair creates only a
+  # listed absent child, or writes the missing EXACT suffix through a matching held file;
+  # no truncate, selected head mutation or epoch-family path is reachable. The capture's
+  # Windows directory open is read-only. Scratch unlink has its own pre-MAIN/no-dependent
+  # purpose/version proof and actual WorkEnd; any known authenticated frame is preserved.
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/exact_repair.rs|repair_children|fs::create_dir(&source.plan.paths.pages).map_err(recovery::io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/exact_repair.rs|repair_child|DependentSelection::Absent => OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/exact_repair.rs|repair_child|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/exact_repair.rs|repair_child|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/exact_repair.rs|repair_child|file.sync_all().map_err(recovery::io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/recovery.rs|capture|std::fs::OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/promotion/scratch.rs|run|fs::remove_file(&self.plan.paths.seed_stage).map_err(recovery::io)?;']=1
+  # These two Windows directory opens are read-only metadata/identity observations,
+  # structurally retained in their actual same-vault Source/physical-lease/end bundles.
+  # No create/truncate/append or writable directory handle is permitted at either site.
+  ['crates/catcoms-app/src/store/persistence/v2_text/query.rs|capture|fs::OpenOptions::new()']=1
+  # Accepted lookup is independently paid and retains the same actual native lease,
+  # finite IO end and affine root pin through these readonly directory handles.
+  ['crates/catcoms-app/src/store/persistence/v2_text/accepted_query/io.rs|capture|fs::OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/workspace/io.rs|capture|fs::OpenOptions::new()']=1
   # Current namespace3 pre-exposure transaction. Only its original fixed declaration seed,
   # whole catalog current/stage and marker under SAME held ID2 Root are reachable; these are
   # non-epoch metadata. Keep exact sites rather than exempting the child directory or module.
@@ -122,6 +250,26 @@ declare -A allowed=(
   # can unlink only its fixed original activation.seed and sync that held group directory;
   # source.seed, source pages, pin/head, epoch files and unknown private work are preserved.
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|fs::remove_file(&self.body.paths.seed).map_err(io)?;']=1
+  # Chat V2 ordinary-member outbox (docs/communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+  # Its own separately versioned `mo-<context>` namespace only, never an epoch, founder or
+  # group inventory file. Every caller holds the exclusive per-context owner claim and the
+  # actual VaultPhysicalWorkLease through all of these Files and barriers.
+  # ensure_exact: create_new, or append ONLY the missing suffix of an existing exact prefix
+  # of authenticated expected bytes (our presealed output or an authenticated WAL's frame);
+  # never truncate, never adopt other content.
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|file.sync_all().map_err(io)?;']=1
+  # rename_fixed: WAL stage -> WAL MAIN, and head stage -> head.bin (the selector CAS), each
+  # after re-verifying the source's exact bytes and the parent still selected.
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|rename_fixed|fs::rename(from, to).map_err(io)']=1
+  # remove_listed: a WAL-listed retiree proven unreachable, the retired WAL after its cleanup,
+  # or a demonstrably owned torn pre-commit stage (exact rebuildable preamble prefix bound to
+  # the authenticated selected head). Unknown or foreign state is preserved instead.
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|remove_listed|match fs::remove_file(path) {']=1
+  # create_namespace: one new `mo-<context>` directory under the separately held parent.
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|create_namespace|fs::create_dir(path).map_err(io)']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|files.directory.1.sync_all().map_err(io)?;']=1
 )
 

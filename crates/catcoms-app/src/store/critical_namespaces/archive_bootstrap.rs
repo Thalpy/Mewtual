@@ -152,6 +152,9 @@ impl ServerStore {
             .pending_join_policy
             .as_ref()
             .and_then(|policy| policy.execution.as_ref());
+        if let Some(policy) = self.governance_layout_policy.as_ref() {
+            return super::pending_join_codec::parse_governance_layout(plain, &domain, policy);
+        }
         if self.current_layout_policy.is_some() {
             return super::pending_join_codec::parse_current_layout(
                 plain,

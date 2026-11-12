@@ -2,7 +2,9 @@
 //!
 //! Public lifetime owners create only negative custody. The bounded V2 founder verifier can
 //! issue exact accepted Creates after full replay from an explicitly HOST-selected genesis;
-//! raw labels, snapshots and semantic Valid cannot construct an admission token. Native root
+//! the separate general verifier issues ordinary OPEN effects from actual selected
+//! Admission/dependency provenance. Raw labels, snapshots and semantic Valid cannot
+//! construct an admission token. Native root
 //! provenance, selected storage receipts and UI authorization remain the actual host's job.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -11,6 +13,7 @@ use std::sync::{Arc, RwLock, TryLockError};
 mod group;
 mod guarded;
 mod v2_founder;
+mod v2_general;
 mod v2_origin;
 use group::GroupViewLife;
 pub use group::{
@@ -21,6 +24,12 @@ pub use guarded::{GuardedCausalHeads, GuardedMessageProjection, GuardedProjectio
 pub use v2_founder::{
     FounderGenesisAnchorData, V2FounderExpectation, V2FounderPrefixVerifier, V2FounderReplayCursor,
     V2HostSelectionExpectation, V2RetiredAppendData, V2VerifiedAppendCandidate,
+};
+pub use v2_general::{
+    OriginalV2OrdinarySigningPlanObservation, V2AdmissionCloseCompletion, V2AuthenticatedAdmission,
+    V2FrozenAdmission, V2GeneralAcceptanceSource, V2GeneralCandidate, V2GeneralExpectation,
+    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2KnownGoverningParent, V2OrdinaryDependency,
+    V2OrdinaryKeyCall, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
 };
 pub use v2_origin::{V2OriginNegative, V2ProjectionOrigin};
 
@@ -490,14 +499,10 @@ impl ProjectionLease {
         if let Some(scope) = &token.open {
             self.open.push(scope.clone());
         }
-        match &token.support {
-            ProjectionSupport::V2FounderCreate { origin, .. } => {
-                if !self.v2_origins.iter().any(|old| old.same_original(origin)) {
-                    self.v2_origins.push(origin.clone());
-                }
+        if let Some(origin) = token.support.v2_origin() {
+            if !self.v2_origins.iter().any(|old| old.same_original(origin)) {
+                self.v2_origins.push(origin.clone());
             }
-            #[cfg(test)]
-            ProjectionSupport::Legacy { .. } => {}
         }
     }
     pub(super) fn publish<T>(&self, callback: impl FnOnce() -> T) -> Result<T, ChatError> {
@@ -552,6 +557,11 @@ enum EvidenceContext {
         profile: owner_facts::OwnerFactId,
         admission: owner_facts::OwnerFactId,
     },
+    V2Ordinary {
+        profile: owner_facts::OwnerFactId,
+        admission: owner_facts::OwnerFactId,
+        tenure: owner_header::OwnerTenureId,
+    },
     V2Founder {
         profile: owner_facts::OwnerFactId,
         admission: owner_facts::OwnerFactId,
@@ -563,21 +573,21 @@ impl EvidenceContext {
         match self {
             #[cfg(test)]
             Self::LegacyV1 { profile, .. } => profile,
-            Self::V2Founder { profile, .. } => profile,
+            Self::V2Founder { profile, .. } | Self::V2Ordinary { profile, .. } => profile,
         }
     }
     fn admission(self) -> owner_facts::OwnerFactId {
         match self {
             #[cfg(test)]
             Self::LegacyV1 { admission, .. } => admission,
-            Self::V2Founder { admission, .. } => admission,
+            Self::V2Founder { admission, .. } | Self::V2Ordinary { admission, .. } => admission,
         }
     }
     fn is_legacy(self) -> bool {
         match self {
             #[cfg(test)]
             Self::LegacyV1 { .. } => true,
-            Self::V2Founder { .. } => false,
+            Self::V2Founder { .. } | Self::V2Ordinary { .. } => false,
         }
     }
 }
@@ -591,7 +601,18 @@ enum ProjectionSupport {
         proof: owner_facts::OwnerFactId,
         source: Arc<()>,
     },
-    V2FounderCreate {
+    // General OPEN uses the private verified incarnation's original negative. A raw
+    // public ProjectionOpenAdmission cannot create this support. Accepted support retains
+    // only the original source, independently of later OPEN removal.
+    GeneralOpen {
+        origin: V2ProjectionOrigin,
+    },
+    GeneralAccepted {
+        record: owner_bodies::AcceptanceRecordId,
+        leaf_index: u64,
+        origin: V2ProjectionOrigin,
+    },
+    FounderCreate {
         // Supporting tip headers can advance without changing this accepted effect.
         // Exact signed witnesses remain in the real archive, not in effect identity.
         record: owner_bodies::AcceptanceRecordId,
@@ -600,11 +621,22 @@ enum ProjectionSupport {
     },
 }
 impl ProjectionSupport {
+    fn v2_origin(&self) -> Option<&V2ProjectionOrigin> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy { .. } => None,
+            Self::FounderCreate { origin, .. }
+            | Self::GeneralOpen { origin }
+            | Self::GeneralAccepted { origin, .. } => Some(origin),
+        }
+    }
     fn live(&self) -> bool {
         match self {
             #[cfg(test)]
             Self::Legacy { .. } => true,
-            Self::V2FounderCreate { origin, .. } => origin.live(),
+            Self::FounderCreate { origin, .. }
+            | Self::GeneralOpen { origin }
+            | Self::GeneralAccepted { origin, .. } => origin.live(),
         }
     }
     fn same_effect(&self, other: &Self) -> bool {
@@ -614,18 +646,32 @@ impl ProjectionSupport {
             #[cfg(test)]
             (Self::Legacy { .. }, Self::Legacy { .. }) => true,
             (
-                Self::V2FounderCreate {
+                Self::FounderCreate {
                     record: ar,
                     leaf_index: ai,
                     origin: ao,
                 },
-                Self::V2FounderCreate {
+                Self::FounderCreate {
                     record: br,
                     leaf_index: bi,
                     origin: bo,
                 },
             ) => ar == br && ai == bi && ao.same_original(bo),
-            #[cfg(test)]
+            (Self::GeneralOpen { origin: a }, Self::GeneralOpen { origin: b }) => {
+                a.same_original(b)
+            }
+            (
+                Self::GeneralAccepted {
+                    record: ar,
+                    leaf_index: ai,
+                    origin: ao,
+                },
+                Self::GeneralAccepted {
+                    record: br,
+                    leaf_index: bi,
+                    origin: bo,
+                },
+            ) => ar == br && ai == bi && ao.same_original(bo),
             _ => false,
         }
     }
@@ -633,7 +679,9 @@ impl ProjectionSupport {
         match self {
             #[cfg(test)]
             Self::Legacy { source, proof } => Some((source, *proof)),
-            Self::V2FounderCreate { .. } => None,
+            Self::FounderCreate { .. }
+            | Self::GeneralOpen { .. }
+            | Self::GeneralAccepted { .. } => None,
         }
     }
 }
@@ -641,7 +689,8 @@ impl ProjectionSupport {
 /// Opaque exact current-effect permission. There is no decoder, public field setter or
 /// status-bool adapter. The V2 founder verifier issues only accepted Create effects inside
 /// this boundary after checking exact signed lineage, delegated semantics and inclusion.
-/// Other effect kinds still require their separate governing verifier.
+/// The separate general verifier issues Provisional ordinary effects and non-Delete LOG
+/// inclusion. Exact Proven V2 Delete custody/Review remain separately closed.
 /// Its view binding is identity/support, not issuance revision: unrelated OPEN closure must not
 /// revoke accepted/reviewed support when the next original projection lease is captured.
 #[derive(Clone)]
@@ -671,7 +720,7 @@ impl ProjectionAdmissionToken {
             }
     }
     fn certainty(&self) -> ProjectionCertainty {
-        if self.open.is_some() {
+        if self.open.is_some() || matches!(self.support, ProjectionSupport::GeneralOpen { .. }) {
             ProjectionCertainty::Provisional
         } else {
             ProjectionCertainty::Proven

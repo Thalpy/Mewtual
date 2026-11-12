@@ -1,5 +1,36 @@
 # Mewtual; Architecture
 
+Owner-offline text is a separate required path: the fixed Profile founder signs
+certification Headers, while members sign their own ordinary actions. The local
+first-founder storage tests do not establish member send/outbox availability.
+The general Core OPEN issuer and separate member-outbox storage now have focused
+test coverage. Actual member source/signing and native integration remain
+incomplete; Chat V2 stays disabled. [Current boundaries](HANDOVER.md).
+
+The store-private `persistence::v2_member_outbox` owns independently durable signed
+originals, exact request receipts and publication debt. It is separate from the
+founder's certification journal and legacy Automerge outbox. Epoch changes affect
+transport envelopes, not stored action identities. Its registry/physical-work
+lease isolates finite IO; its storage types supply no membership or native authority.
+Production save admission, parent provisioning and sender-state export remain
+separate integration work. [Outbox contract](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
+## First operational text signing/storage path (7 November; disabled)
+
+The local Windows library graph now connects actual retained A, unsigned I and raw
+signature S transactions to their original Current admissions and owning retries.
+The same paid verifier and SDK move whole through those phases. Only the exact
+selected-I guard reaches the bounded signer; genuine selected S then permits outside-
+writer Header materialization and one cached candidate. Recorded-original partial S
+writes can finish without another signer or nonce. These are first-founder tests,
+not production multi-member Chat V2. First-B selection, same-verifier advancement and
+distinct finalization now pass focused Windows tests. Closing and draining old readers
+also pass their kernel and owning-Host regressions. Distinct WD deletion and WC
+completion pass focused worker and Host tests. First-request finish into the same
+flat resident also passes its focused tests; later-message/cold recovery and native
+transport/UI remain unfinished.
+[Current checks and boundaries](HANDOVER.md).
+
 ## Founder-only operational verifier (6 November; integration in progress)
 
 Cold historical replay can now run without prematurely acquiring an effect owner. Its

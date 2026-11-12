@@ -21,6 +21,7 @@ use catcoms_replication::chat::{Body, ChatError, SignedAction, MAX_GROUP_ID_BYTE
 /// NEW original operation buffers, independently paid outside writers. Neither original
 /// source/SDK/current-math fee nor the separate Create DATA fee can be reused as credit.
 pub const APPEND_DATA_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+mod materialized;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Planned,
@@ -366,6 +367,8 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
             .map_err(|_| V2CreateRefusal::Source)?;
         p.header = Some(header);
         p.stage = Stage::Complete;
+        #[cfg(test)]
+        after_materialize();
         if let Err(error) = p.require(self, model) {
             p.stage = Stage::Failed;
             return Err(error);
@@ -377,11 +380,15 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
 std::thread_local! {
     static SIGNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static AFTER_SIGN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_MATERIALIZE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(test)]
 pub(super) fn reset_for_test() {
     SIGNS.with(|count| count.set(0));
     AFTER_SIGN.with(|h| {
+        h.borrow_mut().take();
+    });
+    AFTER_MATERIALIZE.with(|h| {
         h.borrow_mut().take();
     });
 }
@@ -397,6 +404,17 @@ fn after_sign() {
     }
 }
 #[cfg(test)]
+fn after_materialize() {
+    let hook = AFTER_MATERIALIZE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+#[cfg(test)]
+pub(super) fn after_materialize_for_test(hook: Box<dyn FnOnce()>) {
+    AFTER_MATERIALIZE.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+#[cfg(test)]
 pub(super) fn after_sign_for_test(h: Box<dyn FnOnce()>) {
     AFTER_SIGN.with(|slot| *slot.borrow_mut() = Some(h));
 }
@@ -410,6 +428,21 @@ impl PreparedV2AppendData {
     }
 }
 impl PreparedV2AppendData {
+    /// Borrow only an already cached raw signature from this EXACT original plan.
+    /// This negative DATA loan works after a late failure/cancellation and performs no
+    /// source, node, signing, materialization or allocation work. It grants no durable
+    /// S selection or completed Header authority; the host must separately admit those
+    /// effects. Keeping the whole Prepared value also keeps its original identity alive.
+    pub fn borrow_existing_raw_signature_data(
+        &self,
+        original_plan: &V2AppendPlanObservation,
+    ) -> Result<&[u8; 64], V2CreateRefusal> {
+        if !original_plan.matches_original_data(self) {
+            return Err(V2CreateRefusal::RequestMismatch);
+        }
+        self.body.raw.as_ref().ok_or(V2CreateRefusal::Terminal)
+    }
+
     pub fn borrow_unsigned_data<'a, T, R>(
         &'a self,
         node: &'a UnboundV2GenesisNode<T, R>,

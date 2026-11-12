@@ -50,6 +50,7 @@ pub(crate) fn studio_refused(
 mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
+mod governance_open;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -58,8 +59,9 @@ pub use critical_namespaces::{
     CanonicalFilenameInventoryPolicy, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
     CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, JournalledCheckpointJoinPreparation,
     PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore, PreparedV2CurrentLayoutStore,
-    ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
-    ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy, V2CurrentLayoutStore,
+    PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
+    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
 };
 mod owner_evidence;
 pub use chat_admission::{
@@ -549,8 +551,9 @@ pub use persistence::RetainedBootstrapSourceData;
 pub use persistence::{
     GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
     PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
-    PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
-    UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
+    PreparedV2GenesisCurrent, PreparedV2TextHost, PreparedV2TextRead, RetainedBootstrapGenesisSeed,
+    ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
+    UnexposedV2GenesisCurrent, V2TextHostPolicy,
 };
 mod persistence {
     use super::*;
@@ -559,21 +562,32 @@ mod persistence {
     type OpenedArchiveObject = (File, Zeroizing<Vec<u8>>);
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
     mod cold_source_read;
+    pub(in crate::store) use cold_source_read::{
+        OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+        PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
+        PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+    };
     mod current_group;
     mod current_layout;
+    pub(in crate::store) mod governance_layout;
     mod v2_group_directory;
+    /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
+    pub(in crate::store) mod v2_member_outbox;
+    pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
     pub use cold_source_read::RetainedBootstrapSourceData;
     pub(super) use cold_source_read::{
         GenesisCurrentOwnerRef, GenesisSourceDataRef, OriginalBootstrapReadObservation,
-        ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
+        PreparedV2TextSourceObserver, V2TextOwnedCurrent, V2TextOwnerRef,
+        V2TextSourceNegativeObserver, ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
+        V2_TEXT_SOURCE_OBSERVER_BYTES,
     };
     pub use cold_source_read::{
         GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
         PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
-        PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
-        UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
-        UnexposedV2GenesisCurrent,
+        PreparedV2GenesisCurrent, PreparedV2TextHost, PreparedV2TextRead,
+        RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent,
+        UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent, V2TextHostPolicy,
     };
     pub(in crate::store) use current_layout::{
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,
@@ -5643,6 +5657,10 @@ pub struct ServerStore {
     // constructors continue rejecting its descriptor, seed and root before old cleaners.
     archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
     current_layout_policy: Option<critical_namespaces::current_layout::V2CurrentLayoutPolicy>,
+    governance_layout_policy:
+        Option<critical_namespaces::governance_layout::V2GovernanceLayoutPolicy>,
+    governance_layout:
+        std::sync::Mutex<Option<critical_namespaces::governance_layout::MountedGovernanceLayout>>,
     current_layout:
         std::sync::Mutex<Option<critical_namespaces::current_layout::MountedCurrentLayout>>,
     archive_bootstrap_root: critical_namespaces::archive_bootstrap::SharedRoot,
@@ -5786,6 +5804,33 @@ impl ServerStore {
         archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
         current_layout_policy: Option<critical_namespaces::current_layout::V2CurrentLayoutPolicy>,
     ) -> Result<Self, AppError> {
+        Self::open_with_catalog_policies(
+            dir,
+            passphrase,
+            rng,
+            governance_open::CatalogPolicies {
+                catalog_read_pool,
+                pending_join_policy,
+                archive_bootstrap_policy,
+                current_layout_policy,
+                governance_layout_policy: None,
+            },
+        )
+    }
+
+    fn open_with_catalog_policies(
+        dir: impl AsRef<Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        policies: governance_open::CatalogPolicies,
+    ) -> Result<Self, AppError> {
+        let governance_open::CatalogPolicies {
+            catalog_read_pool,
+            pending_join_policy,
+            archive_bootstrap_policy,
+            current_layout_policy,
+            governance_layout_policy,
+        } = policies;
         let dir = dir.as_ref().to_path_buf();
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
         // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
@@ -5799,6 +5844,8 @@ impl ServerStore {
             pending_join_policy,
             archive_bootstrap_policy,
             current_layout_policy,
+            governance_layout_policy,
+            governance_layout: Default::default(),
             current_layout: Default::default(),
             archive_bootstrap_root: Default::default(),
             founder_invocations: Default::default(),

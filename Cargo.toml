@@ -24,6 +24,7 @@ exclude = [
     # Temporary pinned upstream observer patch; not a Mewtual workspace member.
     "vendor/automerge",
     "vendor/openmls_memory_storage",
+    "vendor/openmls",
 ]
 
 [workspace.package]
@@ -56,3 +57,37 @@ all = { level = "warn", priority = -1 }
 automerge = { path = "vendor/automerge" }
 # Both workspaces also use the same reviewed provider backing-map observation.
 openmls_memory_storage = { path = "vendor/openmls_memory_storage" }
+# Same pinned SDK; reviewed explicit-time and bounded private-Add patches.
+openmls = { path = "vendor/openmls" }
+
+# Real-vault tests retain the same Argon2id algorithm, parameters and assertions.
+# Optimize only dependency arithmetic in development and the inherited test
+# profile; release settings, features and password handling remain unchanged.
+# Repeat these overrides in the separate native workspace below apps/desktop.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+# This locked version serves MLS Ed25519/X25519 and Noise arithmetic.
+# Another dependency branch uses curve5; leave that branch and release profiles
+# alone. Development/test debug assertions and overflow checks still apply.
+[profile.dev.package."curve25519-dalek:4.1.3"]
+opt-level = 3
+
+# Ed25519 verifies the full signed payload with this locked digest version.
+# Optimize development/test digest loops without changing SHA-2, its parameters,
+# features or assertions.
+[profile.dev.package."sha2:0.10.9"]
+opt-level = 3
+
+# Automerge hashes complete raw change bodies through this separate version.
+# Keep its algorithm/features and all assertions; change development arithmetic only.
+[profile.dev.package."sha2:0.11.0"]
+opt-level = 3
+
+# Bulk AEAD authentication uses these concrete kernels during seal and open.
+# Keep the cipher, nonce/tag formats, verification and release settings unchanged.
+[profile.dev.package."poly1305:0.8.0"]
+opt-level = 3

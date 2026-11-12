@@ -10,13 +10,23 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Weak;
 mod genesis_seed;
+pub(in crate::store) use genesis_seed::{
+    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+    PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+};
+pub(in crate::store) use genesis_seed::{
+    PreparedV2TextSourceObserver, V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
+    V2_TEXT_SOURCE_OBSERVER_BYTES,
+};
 pub(in crate::store) mod v2_genesis_activation;
 pub(in crate::store) use genesis_seed::{GenesisCurrentOwnerRef, GenesisSourceDataRef};
 pub use genesis_seed::{
     GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
     PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
-    PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
-    UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
+    PreparedV2GenesisCurrent, PreparedV2TextHost, PreparedV2TextRead, RetainedBootstrapGenesisSeed,
+    ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
+    UnexposedV2GenesisCurrent, V2TextHostPolicy,
 };
 
 const MAX_PATH: usize = 32 * 1024;
@@ -134,6 +144,21 @@ impl RetainedBootstrapSourceData {
     /// This DATA accessor cannot authorize a host, write or IPC disclosure after UI lock.
     pub fn data(&self) -> &OpenedBootstrapSourceData {
         &self.opened
+    }
+
+    /// Borrow the ORIGINAL held target association while this paid capture stays owned.
+    /// This performs no IO/clone/allocation and grants no Current, write or save role.
+    /// Operational callers must hold their concrete source/ID3/name proof, prepay every
+    /// escaping File/path copy, then obtain the SAME mount's actual physical work lease.
+    /// Neither these ephemeral IDs nor an OS lease may become persistent context labels.
+    pub(in crate::store) fn original_target_data(
+        &self,
+    ) -> (&Path, &File, catcoms_storage::kept::SessionId) {
+        (
+            &self.capture.target,
+            &self.capture.target_directory,
+            self.capture.target_id,
+        )
     }
 
     /// Reobserve the original physical capture before a later consumer. This performs only

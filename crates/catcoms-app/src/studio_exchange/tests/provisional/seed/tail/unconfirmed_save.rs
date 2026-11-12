@@ -273,7 +273,7 @@ fn install_source(p: &mut Pair, target: StudioTarget) {
         .unwrap();
 }
 
-async fn preview_pair(target: StudioTarget) -> Pair {
+async fn preview_pair(target: StudioTarget) -> Box<Pair> {
     let mut p = pages::proven_pair().await;
     p.watch = p
         .bob

@@ -29,6 +29,8 @@ pub(in crate::store) mod archive_current_codec;
 mod catalog_envelope;
 pub(in crate::store) mod current_group;
 pub(in crate::store) mod current_layout;
+pub(in crate::store) mod governance_layout;
+pub(in crate::store) mod governance_namespace_codec;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
     ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -39,6 +41,9 @@ pub use archive_bootstrap::{
 pub use current_layout::{
     CanonicalFilenameInventoryPolicy, PreparedV2CurrentLayoutStore, V2CurrentLayoutPolicy,
     V2CurrentLayoutStore,
+};
+pub use governance_layout::{
+    PreparedV2GovernanceLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
@@ -135,6 +140,7 @@ pub(super) fn refuse_orphan_before_vault_creation(dir: &Path) -> Result<(), AppE
             _ => return Err(refused()),
         }
     }
+    governance_layout::refuse_unsupported_storage(dir)?;
     refuse_unimplemented_archive_storage(dir)?;
     Ok(())
 }
@@ -196,6 +202,10 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        if self.governance_layout_policy.is_some() {
+            return self.open_governance_layout_catalog_gate(actual_format, passphrase, rng);
+        }
+        governance_layout::refuse_unsupported_storage(&self.dir)?;
         if self.current_layout_policy.is_some() {
             return self.open_current_layout_catalog_gate(actual_format, passphrase, rng);
         }

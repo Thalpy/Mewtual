@@ -552,7 +552,7 @@ async fn studio_receiver_large_registry_cold_provider_and_reopened_receiver_do_n
     };
     assert_eq!(art.title.unwrap().selected.value, "large registry tail");
 }
-fn reopen_with_large_registry(mut p: Pair, bucket: u8) -> Pair {
+fn reopen_with_large_registry(mut p: Box<Pair>, bucket: u8) -> Box<Pair> {
     // Give the newcomer a legitimate large Registry checkpoint, then reopen both mounts
     // so neither receiver nor provider can rely on a previously warmed footprint LRU.
     let mut b = budget(&mut p.bob, &mut p.b_store);
@@ -612,11 +612,21 @@ fn reopen_with_large_registry(mut p: Pair, bucket: u8) -> Pair {
     p
 }
 
-async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
+fn actor_newcomer(
+    selected_target: StudioTarget,
+    restart_closing: bool,
+) -> impl std::future::Future<Output = ()> {
+    // The isolated global-pool diagnostic runs several complete newcomer scenarios in one
+    // registered test. Return an already-pinned original scenario so none of those large
+    // futures are embedded in that test's default-stack frame. All actor work stays lazy.
+    Box::pin(run_actor_newcomer(selected_target, restart_closing))
+}
+
+async fn run_actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     use crate::studio::{StudioRequest, StudioVaultLease};
     use crate::{spawn, AppEvent};
     use tokio::sync::Mutex;
-    let mut p = Pair::new().await;
+    let mut p = Box::pin(Pair::new()).await;
     let (_, _, id) = super::discovery::prepared_checkpoint(&mut p, selected_target);
     let bucket = prepared_registry(&mut p, selected_target, false);
     let tail = match selected_target {
@@ -648,7 +658,7 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     // This device joins AFTER rotation, not merely a pre-existing member with an empty vault.
     let invite = p.alice.mint_invite([44; 16], u64::MAX, vec![]).unwrap();
     let (joined, tick) = tokio::join!(
-        Node::join(
+        Box::pin(Node::join(
             Net::new(p.hub.join(PeerId::from_u64(3))),
             MlsDevice::generate().unwrap(),
             rng(),
@@ -656,7 +666,7 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
             "newcomer",
             p.alice.local_peer(),
             &invite
-        ),
+        )),
         p.alice.sync_once()
     );
     tick.unwrap();

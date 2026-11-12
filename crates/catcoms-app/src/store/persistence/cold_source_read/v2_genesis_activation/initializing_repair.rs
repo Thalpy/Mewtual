@@ -21,6 +21,7 @@ mod inventory;
 // independent settlement worker; this child cannot select another File or mint a receipt.
 mod pre_initializing;
 mod settlement;
+mod text_origin;
 
 #[cfg(test)]
 std::thread_local! {

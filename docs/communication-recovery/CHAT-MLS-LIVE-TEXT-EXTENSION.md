@@ -1,7 +1,17 @@
 # MLS live text state: extension audit and regression plan
 
-This is a source-backed **design and regression-draft** checkpoint. No live loader extension,
-operation admission, native dispatch or Chat V2 activation is implemented here. The proposed
+7 November continuation: a distinct text-CURRENT consumer is now implemented and
+passes actual20/50-member and epoch/ring/blank-reuse tests. It supports only the
+explicit Operational/all-null-current-ratchet family and keeps all SDK mutation
+fences closed. The later initialized-ratchet and operation work below remains a
+design, not completed runtime behavior. [Exact current consumer](CHAT-MLS-TEXT-CURRENT-CONSUMER.md).
+The separate KeyPackage clock hook passes six focused tests; the full MLS library
+suite passes115 tests with its existing fixture generator ignored. No actual
+member Source/native activation follows. [Current evidence](../HANDOVER.md).
+
+The original sections below are a source-backed **design and regression-draft**
+checkpoint. The narrower current consumer above supersedes the old loader status;
+operation admission, native dispatch and Chat V2 activation remain unimplemented. The proposed
 live-loader extension has not been validated by the focused genesis checks recorded in
 `HANDOVER.md`; compilation is permitted again. The proposed tests use genuine SDK groups and the
 unchanged legacy restore path; they do not claim the new closed loader accepts or pays for them.

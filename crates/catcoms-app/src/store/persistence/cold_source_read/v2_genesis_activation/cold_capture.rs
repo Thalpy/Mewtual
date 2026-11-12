@@ -8,6 +8,7 @@
 //! Seed unlink/settlement and later-head selection are distinct owning operations.
 use super::*;
 mod settlement;
+mod text_origin;
 use crate::store::chat_admission::v2_current::ColdV2GenesisScopeBasis;
 use crate::store::critical_namespaces::current_layout::ColdV2CurrentGroupReadGuard;
 #[cfg(test)]

@@ -21,6 +21,7 @@ pub(in crate::store) mod cold_initializing;
 pub(in crate::store) mod cold_preinitializing;
 pub(in crate::store) mod cold_read;
 pub(in crate::store) mod settlement;
+pub(in crate::store) mod text;
 
 const MAX_PENDING_GROUPS: usize = 16;
 const MAX_GROUP_BYTES: usize = 256;

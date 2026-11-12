@@ -36,6 +36,9 @@ zeroize = "1"
 test-support = []
 
 [dev-dependencies]
+# Negative-only actual candidate provider fault/counter seams. Resolver2 keeps
+# this feature off the ordinary production dependency.
+openmls_memory_storage = { version = "=0.6.0", features = ["test-utils"] }
 # Real restored-group catalog regressions alter one existing MemoryStorage JSON field. This
 # uses the already-resolved dependency; no snapshot or secret storage content is printed.
 serde_json = "1"

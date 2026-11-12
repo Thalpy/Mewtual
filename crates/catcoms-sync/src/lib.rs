@@ -19281,6 +19281,108 @@ mod tests {
         events: std::sync::Mutex<VecDeque<TransportEvent>>,
     }
 
+    /// Script only connection delivery, not the admission payload. The real
+    /// tracking function creates a fresh KeyPackage, so a precomputed Welcome
+    /// belongs to a different attempt even when this device retains both keys.
+    #[derive(Debug)]
+    struct CurrentAttemptJoinNetwork {
+        scripted: ScriptedReplyNetwork,
+        // Keep the genuine inviter graph out of the joined transport's inline
+        // state. No second graph is cloned or reconstructed for a reply.
+        founder: Box<std::sync::Mutex<Member>>,
+        contact: PeerId,
+        hostile_contact: Option<PeerId>,
+    }
+
+    #[async_trait::async_trait]
+    impl MeshTransport for CurrentAttemptJoinNetwork {
+        fn local_peer(&self) -> PeerId {
+            self.scripted.local_peer()
+        }
+
+        async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
+            self.scripted.subscribe(topic).await
+        }
+
+        async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError> {
+            self.scripted.unsubscribe(topic).await
+        }
+
+        async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError> {
+            self.scripted.publish(topic, data).await
+        }
+
+        async fn request(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+        ) -> Result<Bytes, TransportError> {
+            assert_eq!(
+                peer, self.contact,
+                "fixture request must use the approved contact"
+            );
+            assert_eq!(proto, ProtocolId(RR_PROTOCOL));
+            let (target, join_body) = match data.split_first() {
+                Some((&KIND_JOIN, body)) => (None, body.to_vec()),
+                Some((&KIND_JOIN_FORWARD, body)) => {
+                    let (target, join_body, _) = decode_join_forward(body).unwrap();
+                    (Some(target), join_body)
+                }
+                _ => panic!("fixture requires an actual join request"),
+            };
+            let ready = {
+                let mut founder = self.founder.lock().expect("founder mutex");
+                if let Some(target) = target {
+                    assert_eq!(target, founder.transport.local_peer());
+                }
+                founder
+                    .serve_join(self.scripted.local, &join_body)
+                    .expect("real inviter admits the actual transmitted KeyPackage")
+            };
+            assert_eq!(ready.first(), Some(&JOIN_READY));
+            let mut push = vec![KIND_WELCOME];
+            push.extend_from_slice(&ready);
+            let push = Bytes::from(push);
+            let mut events = self.scripted.events.lock().expect("event mutex");
+            // The hostile contact gets the SAME valid signed response first.
+            // A malformed body would not test sender binding independently of
+            // decoder/signature rejection. At most two pushes are queued per
+            // request; reconnect retries may leave bounded duplicate pushes.
+            for from in self
+                .hostile_contact
+                .into_iter()
+                .chain(std::iter::once(self.contact))
+            {
+                let (responder, _) = catcoms_rt::Responder::channel();
+                events.push_back(TransportEvent::Request {
+                    from,
+                    proto,
+                    data: push.clone(),
+                    responder,
+                });
+            }
+            Ok(self.scripted.response.clone())
+        }
+
+        async fn request_cancellable(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+            cancellation: RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            if cancellation.is_cancelled() {
+                return Err(TransportError::Cancelled);
+            }
+            self.request(peer, proto, data).await
+        }
+
+        async fn next_event(&self) -> Option<TransportEvent> {
+            self.scripted.next_event().await
+        }
+    }
+
     /// A standing-join transport where the first helper rejects and a second already-connected
     /// helper forwards to the real inviter. There are deliberately no later connection events:
     /// the join succeeds only if the initial queue contains every endorsed helper.
@@ -23649,7 +23751,7 @@ mod tests {
         let joiner_peer = PeerId::from_u64(4);
         let inviter_device = MlsDevice::generate().unwrap();
         let inviter_group = ServerGroup::create(&inviter_device).unwrap();
-        let mut inviter = ChannelSync::new(
+        let inviter = ChannelSync::new(
             hub.join(inviter_peer),
             inviter_group,
             inviter_device,
@@ -23658,42 +23760,22 @@ mod tests {
         );
         let invite = inviter.mint_invite([0x46; 16], 10_000, Vec::new()).unwrap();
         let joiner_device = MlsDevice::generate().unwrap();
-        let key_package = joiner_device
-            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
-            .unwrap();
-        let join_body = encode_join_req(&invite, &serialize_key_package(&key_package).unwrap());
-        let valid_ready = inviter
-            .serve_join(joiner_peer, &join_body)
-            .expect("inviter admits synchronously");
-        assert_eq!(valid_ready.first(), Some(&JOIN_READY));
-
-        let (attacker_responder, _) = catcoms_rt::Responder::channel();
-        let (helper_responder, _) = catcoms_rt::Responder::channel();
-        let mut valid_push = vec![KIND_WELCOME];
-        valid_push.extend_from_slice(&valid_ready);
-        let transport = ScriptedReplyNetwork {
-            local: joiner_peer,
-            response: Bytes::from_static(&[JOIN_PENDING]),
-            events: std::sync::Mutex::new(VecDeque::from([
-                TransportEvent::PeerConnected(helper_peer),
-                TransportEvent::PeerPathsChanged {
-                    peer: helper_peer,
-                    active: vec![direct_v4_quic()],
-                    newly_established: Some(direct_v4_quic()),
-                },
-                TransportEvent::Request {
-                    from: attacker_peer,
-                    proto: ProtocolId(RR_PROTOCOL),
-                    data: Bytes::from_static(&[KIND_WELCOME]),
-                    responder: attacker_responder,
-                },
-                TransportEvent::Request {
-                    from: helper_peer,
-                    proto: ProtocolId(RR_PROTOCOL),
-                    data: Bytes::from(valid_push),
-                    responder: helper_responder,
-                },
-            ])),
+        let transport = CurrentAttemptJoinNetwork {
+            scripted: ScriptedReplyNetwork {
+                local: joiner_peer,
+                response: Bytes::from_static(&[JOIN_PENDING]),
+                events: std::sync::Mutex::new(VecDeque::from([
+                    TransportEvent::PeerConnected(helper_peer),
+                    TransportEvent::PeerPathsChanged {
+                        peer: helper_peer,
+                        active: vec![direct_v4_quic()],
+                        newly_established: Some(direct_v4_quic()),
+                    },
+                ])),
+            },
+            founder: Box::new(std::sync::Mutex::new(inviter)),
+            contact: helper_peer,
+            hostile_contact: Some(attacker_peer),
         };
         let clock = ManualClock::new(1_000);
         let joiner_nonce = [0x92; 16];
@@ -23738,7 +23820,7 @@ mod tests {
         let joiner_peer = PeerId::from_u64(42);
         let inviter_device = MlsDevice::generate().unwrap();
         let inviter_group = ServerGroup::create(&inviter_device).unwrap();
-        let mut inviter = ChannelSync::new(
+        let inviter = ChannelSync::new(
             Hub::new().join(inviter_peer),
             inviter_group,
             inviter_device,
@@ -23747,33 +23829,22 @@ mod tests {
         );
         let invite = inviter.mint_invite([0x81; 16], 10_000, Vec::new()).unwrap();
         let joiner_device = MlsDevice::generate().unwrap();
-        let key_package = joiner_device
-            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
-            .unwrap();
-        let join_body = encode_join_req(&invite, &serialize_key_package(&key_package).unwrap());
-        let ready = inviter
-            .serve_join(joiner_peer, &join_body)
-            .expect("inviter creates a valid signed Welcome");
-        let mut push = vec![KIND_WELCOME];
-        push.extend_from_slice(&ready);
-        let (responder, _) = catcoms_rt::Responder::channel();
-        let transport = ScriptedReplyNetwork {
-            local: joiner_peer,
-            response: Bytes::from_static(&[JOIN_PENDING]),
-            events: std::sync::Mutex::new(VecDeque::from([
-                TransportEvent::PeerConnected(inviter_peer),
-                TransportEvent::PeerPathsChanged {
-                    peer: inviter_peer,
-                    active: vec![direct_v4_quic()],
-                    newly_established: Some(direct_v4_quic()),
-                },
-                TransportEvent::Request {
-                    from: inviter_peer,
-                    proto: ProtocolId(RR_PROTOCOL),
-                    data: Bytes::from(push),
-                    responder,
-                },
-            ])),
+        let transport = CurrentAttemptJoinNetwork {
+            scripted: ScriptedReplyNetwork {
+                local: joiner_peer,
+                response: Bytes::from_static(&[JOIN_PENDING]),
+                events: std::sync::Mutex::new(VecDeque::from([
+                    TransportEvent::PeerConnected(inviter_peer),
+                    TransportEvent::PeerPathsChanged {
+                        peer: inviter_peer,
+                        active: vec![direct_v4_quic()],
+                        newly_established: Some(direct_v4_quic()),
+                    },
+                ])),
+            },
+            founder: Box::new(std::sync::Mutex::new(inviter)),
+            contact: inviter_peer,
+            hostile_contact: None,
         };
         let mut handoff = PreOwnerConnectionHandoff::default();
         let (group, routing) = request_join_tracking(
@@ -23808,7 +23879,7 @@ mod tests {
         let joiner_peer = PeerId::from_u64(53);
         let inviter_device = MlsDevice::generate().unwrap();
         let inviter_group = ServerGroup::create(&inviter_device).unwrap();
-        let mut inviter = ChannelSync::new(
+        let inviter = ChannelSync::new(
             Hub::new().join(inviter_peer),
             inviter_group,
             inviter_device,
@@ -23817,33 +23888,22 @@ mod tests {
         );
         let invite = inviter.mint_invite([0x83; 16], 10_000, Vec::new()).unwrap();
         let joiner_device = MlsDevice::generate().unwrap();
-        let key_package = joiner_device
-            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
-            .unwrap();
-        let join_body = encode_join_req(&invite, &serialize_key_package(&key_package).unwrap());
-        let ready = inviter
-            .serve_join(joiner_peer, &join_body)
-            .expect("inviter creates a valid signed Welcome");
-        let mut push = vec![KIND_WELCOME];
-        push.extend_from_slice(&ready);
-        let (responder, _) = catcoms_rt::Responder::channel();
-        let transport = ScriptedReplyNetwork {
-            local: joiner_peer,
-            response: Bytes::from_static(&[JOIN_PENDING]),
-            events: std::sync::Mutex::new(VecDeque::from([
-                TransportEvent::PeerConnected(helper_peer),
-                TransportEvent::PeerPathsChanged {
-                    peer: helper_peer,
-                    active: vec![relayed_v6()],
-                    newly_established: Some(relayed_v6()),
-                },
-                TransportEvent::Request {
-                    from: helper_peer,
-                    proto: ProtocolId(RR_PROTOCOL),
-                    data: Bytes::from(push),
-                    responder,
-                },
-            ])),
+        let transport = CurrentAttemptJoinNetwork {
+            scripted: ScriptedReplyNetwork {
+                local: joiner_peer,
+                response: Bytes::from_static(&[JOIN_PENDING]),
+                events: std::sync::Mutex::new(VecDeque::from([
+                    TransportEvent::PeerConnected(helper_peer),
+                    TransportEvent::PeerPathsChanged {
+                        peer: helper_peer,
+                        active: vec![relayed_v6()],
+                        newly_established: Some(relayed_v6()),
+                    },
+                ])),
+            },
+            founder: Box::new(std::sync::Mutex::new(inviter)),
+            contact: helper_peer,
+            hostile_contact: None,
         };
         let clock = ManualClock::new(1_000);
         let mut handoff = PreOwnerConnectionHandoff::default();

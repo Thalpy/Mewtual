@@ -1,5 +1,141 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Governance capability (7 November; private metadata handler)
+
+Critical namespace4/version1 is reserved for a distinct private governance layout.
+Its immutable descriptor binds the same vault/root and a domain-separated digest
+of the exact namespace3 descriptor. The declaration codec appends exactly
+this entry to a whole-catalog successor, preserving every prior entry byte for byte.
+Existing Current3/default readers refuse4 in either fixed catalog before settlement
+or cleanup. A separate concrete private Current4 opener now declares and validates
+that metadata, preserving all prior payloads and both complete catalog frames in
+its recovery seed. Its25 current focused tests pass. It supplies historical DATA; a Source4
+owner, governance request writer and effect authority remain separate unfinished
+consumers. [Format and recovery boundary](communication-recovery/CHAT-V2-GOVERNANCE-CAPABILITY.md).
+
+Declaration first syncs an owned empty legacy fixed stage and its parent before
+new-only seed/marker outputs. Warm promotion owns no replacement-stage cleanup;
+only a cold independently captured exact duplicate has that role. Actual older-
+binary acceptance is the separate predecessor gate, not a modern-reader unit result.
+
+## Ordinary-member signer (11 November; focused checks passed, inactive)
+
+Store-private and inactive. `PreparedV2TextHost::retry_sign_member_request` authors one
+`V2MemberSignRequest { token, channel, body, parents, dependencies }` as the founder acting
+as an ordinary member and caches a `MemberSignedOriginal`; `take_member_signed_original`,
+`restore_member_signed_original`, `finish_member_request_saved(token, receipt ActionId)`
+(returns whether the saved original is the lent one), `abandon_member_request` and
+`forget_lent_member_request` hand it to and from the member outbox. Parents are the
+request's exact list (at most 64 entries as supplied, then sorted and deduped; a Create
+names exactly its reply target); the composer must persist what it sent. Sync exposes
+`V2MemberDraftInputs` and three seams on
+both `UnboundV2GenesisNode` and `ChannelSync`; MLS exposes
+`MlsDevice::sign_retained_ed25519_bounded`. No wire or persistence format changes.
+[Contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-SIGNER.md).
+
+## Ordinary member outbox (8 November; storage-only)
+
+`store::persistence::v2_member_outbox` is store-private and inactive. Its exclusive
+owner exposes exact token lookup, prepaid append preparation, finite admitted
+save/recovery and bounded debt/checkpoint operations. Existing-token receipts and
+conflicts precede pending pressure. Debt batches bind context, front and exact
+immutable entries so unrelated appends need not invalidate submission in flight.
+Only a contiguous submitted/Held prefix advances; audit and request receipts stay.
+
+Signed-original DATA and final save admission are distinct. Their production
+constructors, held parent provisioning and native/member-source guard are absent;
+test fixtures grant storage durability only. Final admission must compare original
+member-source/UI generations and exact prepared facts. Work retains the actual
+vault lease and payments through IO/cleanup. Append additionally commits bounded
+quota for future checkpoints; this is not disk preallocation or peer durability.
+[Methods, invoices and recovery rules](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
+## Operational private text byte codes (6 November; implementation in progress)
+
+The private text WAL uses its existing `catcoms/private-chat-text-wal/v1\0` tag,
+u16 version1 and separate WAL key/complete-frame-ID domains. Its closed variant byte
+is WORK=1, WD=2 or WC=3. WORK's operation byte is Retain A=1, Unsigned I=2,
+Raw signature S=3 or Accept B=4. Unknown values refuse; they never select an older
+parser or mean an empty workspace. WORK cleanup is None=0, Carry=1 or Final=2;
+A/I/S carry their original retirement roots, while B requires its exact precomputed
+final plan and WD/WC chain. These numeric assignments supplement the reviewed physical
+FORMAT's symbolic fields; they do not change existing genesis or legacy formats.
+
+An index-capture DATA commitment uses the literal
+`catcoms/private-chat-text-index-capture/v1\0`, followed by b32 Cid, one role byte
+(Directory=1, Token=2, Publication=3), and the exact canonical Empty/Present root
+descriptor. Neither this hash nor a decoded WAL issues a source, complete miss,
+signing, scratch-disposal, selection or reclamation permission. Actual Current,
+original source, selected parent, paid work, lane and physical barriers remain required.
+
+The first retained-A physical consumer derives immutable names only within the SAME
+held `text.pages` namespace: Action/Cipher/Manifest/Token pages use
+`p-<64 lowercase hex ID>.bin`, Archive uses `h-<64 lowercase hex ID>.bin`, and the
+Retain control uses `a-<64 lowercase hex ID>.bin`. It accepts no path field or filename
+alias. Other control roles remain refused until their distinct consumer is implemented.
+
+The unsigned-I consumer adds only `i-<64 lowercase hex Intent ID>.bin` beneath the
+SAME held `text.pages` directory. It preserves H_A and all three selected roots;
+only a separate fresh commit may select O_I. This at-rest name grants no signer access.
+
+The SAME owning I cell may resume an original interrupted Stage through a fresh actual
+SAME-I Stage admission. Full original W_A is checked before a pre-MAIN I-WAL stage;
+full own W_I is checked before I/head.stage output. Only a previously cached-created
+fixed/content-addressed slot may complete a present bounded exact proper prefix of
+its frozen ciphertext, using suffix append, file sync, full comparison and named/parent
+barriers. Its recorded native ID is a refusal filter, never proof of incarnation or
+independent repair authority. Missing, replaced, nonregular, oversized or different
+prefix objects are preserved/refused. Pre-MAIN I work additionally requires no recorded
+or actual dependent I/head/seed stage. No MAIN/selected O is appended in place, no
+unknown file is adopted and no nonce/SDK/key operation is repeated. This warm path is
+separate from cold authenticated-control reconstruction and scratch disposal; it cannot
+select O_I or replace the fresh Commit edge.
+
+The raw-S consumer adds exactly `s-<64 lowercase hex Signature ID>.bin` beneath
+that SAME held directory, using the existing Signature kind's complete-frame ID.
+It reads raw64 only from the SAME actual opaque SDK plan retained by whole I; no
+caller signature/preimage, signing retry, Header materialization or model setter is
+accepted. S preserves H_A, all three roots, public parent, queues and original I/Txn;
+only its distinct fresh commit may select O_S. The same owning S Stage may also finish
+its own recorded, present, regular, bounded exact ciphertext prefix after full original
+W_I or own W_S verification. It appends only the missing suffix, then checks file sync,
+full bytes, names and parent barriers. A recorded native ID is only a refusal filter;
+missing, replaced, unknown or different outputs are preserved. No signer, new nonce,
+new SDK preparation or quota grant follows. Cold reconstruction remains separate.
+
+The first-B implementation adds only `u-<64 lowercase hex Publication ID>.bin`
+for publication controls beneath the SAME held `text.pages`; all new private index,
+record, node, Header/body and manifest pages use the existing `p-` family, and H_B
+uses `h-`. No alternative spelling or caller path is accepted. Its current closed
+source-initial issuer consumes the whole actual S and its cached verified Core candidate;
+it does not accept a Header, model, raw signature or caller-provided Empty tree.
+The actual completed Directory query must prove the founder's first empty accepted
+prefix and the candidate must append exactly one leaf. First-B WD/WC now have their
+distinct physical consumers and focused Windows tests. Later-message/general COW,
+cold operational reopen and activation remain separate incomplete consumers.
+
+B stages its complete original W_B and parent barrier before writing any immutable
+output. Fresh Commit compares that complete journal and every exact new artifact
+before selecting O_B. The flat SavedB closure keeps only O_B and its new artifact/source
+facts, so its proof does not reopen old Directory/T_A/I/S objects that the exact future
+WD plan retires. Before Core advance/finalization, a separate current fence additionally
+holds full original W_B and proves reserved stage absences; a historical SavedB alone
+is not advance, retirement, publication or next-message authority. WD/WC require their
+own actual source, reader/work drain, exact-list effects and named barriers.
+
+For this first-B profile, actual retirement closes all four old roots in the same
+bounded native registry, waits for the real logical and physical reader Ends, and
+detaches those exact generation objects outside the writer. A distinct deletion
+admission then persists its exact original WD and parent barrier before unlinking
+the two replaced private index pages plus the original I/S controls. Public-history
+pages remain. Both named-open and already-unlinked Files drain before the finite
+deletion lease and writer End release. Ready-for-completion DATA grants no WC right:
+a new Current admission proves the same WD, selected B, final basis, drained roots,
+all four absences and idle physical work before WC selection. An uncertain rename
+is recovered only through the recorded native object and exact original bytes.
+The private publication-index tree uses `p-`; publication records use `u-`.
+This first retirement plan contains no publication-index entry.
+
 ## Nonissuing founder replay and live binding (6 November)
 
 `V2FounderReplayCursor::from_genesis` verifies complete historical genesis against an
@@ -25,7 +161,22 @@ must supply its independent pin and actual selected receipt. Sync's exact-plan o
 does not borrow the mutable preparation; only the raw sign occurs under host writers.
 Inert consuming handoff can recover existing bytes after a late negative without keys or
 source callbacks. No wire/dispatcher activation follows.
+
+`PreparedV2AppendData::borrow_existing_raw_signature_data` checks the exact opaque plan
+observation before borrowing an existing raw64, including after a post-cut failure. It
+does no source, node, signer, replay or allocation work, and keeps the whole original
+preparation alive. Absent raw stays an error; another plan is rejected even if its bytes
+would match. This DATA loan grants no selected S receipt or completed Header authority.
 [Full contract and limits](communication-recovery/CHAT-V2-FOUNDER-PROJECTION-ISSUER.md).
+
+`borrow_existing_materialized_append_data` similarly checks that exact opaque plan
+before borrowing its already cached Header and immutable action/record/body/image,
+including after a failed post-materialization source check. Missing raw or Header
+remains an error. This historical DATA loan invokes no source, node, key, encoding,
+allocation or replay. Root first proves genuine selected S, releases writers, then
+materializes the original Header if missing and derives ONE candidate using its SAME
+paid verifier. The candidate is cached before late checks. Neither output supplies
+SavedB, verifier advancement, projection support or publication permission.
 
 ## Complete-seed no-row continuation (6 November; focused Windows tests pass)
 

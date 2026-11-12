@@ -1,5 +1,67 @@
 # Threat model; client integrity & enforcement boundaries
 
+Owner-offline text is a separate required path: the fixed Profile founder signs
+certification Headers, while members sign their own ordinary actions. The local
+first-founder storage tests do not establish member send/outbox availability.
+The general Core OPEN issuer and separate member-outbox storage now have focused
+test coverage. Actual member source/signing and native integration remain
+incomplete; Chat V2 stays disabled. [Current boundaries](HANDOVER.md).
+
+The inactive member-outbox engine assumes the existing cooperative private-directory
+and whole-component rollback model. Context/role-authenticated records, exact
+request lookup, bounded WAL recovery and retained originals do not establish
+membership authority. Unknown/foreign/corrupt state is preserved; IO failure never
+means absence. After same-context removal/rejoin, A1 receipts remain historical
+while A2 cannot adopt A1 publication debt. Submission checkpoints do not attest peer
+receipt. Append reserves bounded checkpoint quota before admission and never evicts;
+external ENOSPC, lowered policy or finite trie exhaustion can still stop progress.
+Production source/UI admission and sender-state persistence remain required.
+
+## Ordinary-member signer (11 November; focused checks passed, inactive)
+
+The founder acting as an ordinary member signs with the SAME retained device of its whole
+genesis node under a Core plan from a general verifier, with no founder Header, Append,
+export or ratchet. The verifier's HOST anchor comes from the authenticated original pin,
+and the lane requires the selected O to be the empty generation-1 promotion, re-proved by
+byte comparison under the Current guard before every Core admission. While it holds the
+governing prefix is exactly genesis; when it stops holding, signing refuses. The lane
+excludes founder Create on the same host, and the anchor refuses while a crash-left founder
+WAL or WAL stage exists, so one token cannot be authored in two namespaces. Under Core's
+held reader no IO, allocation, codec or SDK lookup runs: the request's draw cell must name
+the exact node it was drawn on (seed Weak or sync incarnation), the Draft must carry that
+cell's exact drawn time and nonce, the genesis scope cancellation flag must be clear, and
+the retained key must equal the Draft signer, before the one key entry.
+Raw64 is cached in the Plan before any late check; a completed original stays retrievable
+as DATA after lock and grants no save or publication right. Not covered: nonfounder
+sources, later governing prefixes, removal/rejoin in App, native command credentials,
+save admission and pre-raw crash uncertainty.
+[Contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-SIGNER.md).
+
+## First operational A/I/S does not grant accepted history (7 November)
+
+The disabled Windows library path requires genuine original Current and selected I
+before its actual bounded raw-key call. Its held-file proof compares full original
+W_I before and after the final source check. The returned signature is cached before
+late negatives; retries reuse it. Only genuine selected S permits materializing that
+same Header and deriving one candidate outside writers. A cached signature, historical
+Saved receipt, Header or candidate cannot issue accepted projection or publication.
+Actual first-B selection and same-verifier advance/finalization now pass focused Windows
+tests. Old-reader closure/drain and distinct WD/WC physical retirement also pass their
+kernel, worker and owning-Host regressions. First-request finish into the same flat
+resident also passes focused lifecycle/payment tests; later-message and cold
+operational recovery, multi-member authority and native
+activation remain open.
+
+Direct A/I/S validators reject another runtime's resources before allocating proof
+scratch or opening payloads. The resource invoice keeps retained A/I/S state summed
+and counts the complete serialized Current peak, including S's two nested proof
+bundles. Same-original interrupted S completion requires the real Stage, full W_I or
+own W_S and the original recorded, bounded exact ciphertext prefix. Native identity
+alone grants no repair; missing, unknown and different files are preserved. This
+provides no cold reconstruction, new nonce, repeated signing or fresh execution quota.
+The checks do not address malicious local storage replacement beyond the existing
+cooperative private-directory and whole-component rollback assumptions.
+
 ## Exact V2 founder acceptance is not root acquisition (6 November)
 
 The nonissuing cold replay cursor contains verified historical facts, no live permission.

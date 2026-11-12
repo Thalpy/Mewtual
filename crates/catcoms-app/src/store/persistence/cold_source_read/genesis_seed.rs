@@ -11,10 +11,20 @@ use catcoms_sync::owner_v2::{
     UnboundV2GenesisSeed, V2GenesisSeedData, V2GenesisSeedLimits, V2_GENESIS_SEED_METADATA_BYTES,
 };
 pub(in crate::store) use current::settlement::GenesisCurrentOwnerRef;
+pub(in crate::store) use current::{
+    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+    PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+};
 pub use current::{
     PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing,
-    PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, UnexposedColdV2GenesisCurrent,
-    UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
+    PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, PreparedV2TextHost,
+    PreparedV2TextRead, UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
+    UnexposedV2GenesisCurrent, V2TextHostPolicy,
+};
+pub(in crate::store) use current::{
+    PreparedV2TextSourceObserver, V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
+    V2_TEXT_SOURCE_OBSERVER_BYTES,
 };
 #[cfg(test)]
 thread_local! { static SDK_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }

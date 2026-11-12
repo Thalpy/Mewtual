@@ -58,13 +58,30 @@ async fn successor(selected_target: StudioTarget, checkpoint: bool, closing: boo
     successor_with_interruption(selected_target, checkpoint, closing, None).await;
 }
 
-async fn successor_with_interruption(
+fn successor_with_interruption(
+    selected_target: StudioTarget,
+    checkpoint: bool,
+    closing: bool,
+    interruption: Option<interrupted::Interruption>,
+) -> impl std::future::Future<Output = ()> {
+    // Both ordinary succession and interrupted-writer matrices retain the complete
+    // multi-owner scenario across awaits. Return an already-pinned future so their
+    // callers never embed that whole graph in another default-stack test frame.
+    Box::pin(run_successor_with_interruption(
+        selected_target,
+        checkpoint,
+        closing,
+        interruption,
+    ))
+}
+
+async fn run_successor_with_interruption(
     selected_target: StudioTarget,
     checkpoint: bool,
     closing: bool,
     interruption: Option<interrupted::Interruption>,
 ) {
-    let mut p = Pair::new().await;
+    let mut p = Box::pin(Pair::new()).await;
     let logical = selected_target.document(&p.bob.group_id()).unwrap();
     // Only the PREVIOUS owner's checkpoint is a fixture. The new tenure must derive its
     // inherited close and seed from this installed opening, even if a later old close seals it.

@@ -641,3 +641,5 @@ fn actual_join_pause_resume_migration_and_first_arm_preserve_complete_namespace3
     assert_eq!(row.execution.unwrap().spent, 1);
     drop(network);
 }
+
+mod governance_capability;

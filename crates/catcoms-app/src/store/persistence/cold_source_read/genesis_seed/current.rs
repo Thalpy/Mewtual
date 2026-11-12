@@ -484,6 +484,24 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
 mod tests;
 // Declare after opaque_debug so the private child sees that lexical macro. Only the two
 // inert owning wrappers escape; all receipt/guard/registration constructors stay private.
+mod operational;
+pub(in crate::store) use operational::{
+    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+    PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+};
+mod text;
+pub(in crate::store) use operational::negative::{
+    PreparedV2TextSourceObserver, V2TextSourceNegativeObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
+};
+pub(in crate::store) use operational::owner::{V2TextOwnedCurrent, V2TextOwnerRef};
+#[cfg(all(test, windows))]
+use operational::{
+    arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
+    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test, V2MemberDependency,
+    V2MemberSignRequest,
+};
+pub use operational::{PreparedV2TextHost, PreparedV2TextRead, V2TextHostPolicy};
 mod cold;
 pub(super) mod settlement;
 pub use cold::{PreparedColdV2GenesisCurrent, UnexposedColdV2GenesisCurrent};

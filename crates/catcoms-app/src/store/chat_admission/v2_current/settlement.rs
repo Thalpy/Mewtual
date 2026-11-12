@@ -202,7 +202,7 @@ fn require_binding(
     Ok(())
 }
 
-fn read<'writer>(
+pub(super) fn read<'writer>(
     store: &'writer ServerStore,
     runtime: &'writer Runtime,
     owner: &'writer GenesisCurrentOwnerRef<'writer>,

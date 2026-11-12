@@ -208,6 +208,26 @@ impl<'owner> GenesisCurrentOwnerRef<'owner> {
 }
 
 impl<T, R> UnexposedV2GenesisCurrent<T, R> {
+    /// Cached prerequisite only; new operational physical proof is separate. An ambiguous
+    /// cleanup must first finish its SAME worker, not adopt file absence.
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn text_owner_ref(
+        &self,
+    ) -> Result<GenesisCurrentOwnerRef<'_>, AppError> {
+        self.seed_settlement
+            .as_ref()
+            .and_then(|worker| worker.saved_outcome())
+            .ok_or_else(critical_namespaces::refused)?;
+        self.settlement_owner_ref()
+    }
+    /// Negative only; explicit close joins real work separately from this revocation.
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn cancel_for_text(
+        &self,
+    ) {
+        self.writer.cancel_original();
+        self.scope.cancel_original();
+        self.task.cancel_original();
+    }
+
     /// Pure owning loan from this SAME actual node/resources. Even if a previous cleanup
     /// attempt has unlinked its seed, this cached association check performs no old
     /// mandatory-seed validation; the retained cleanup phase selects the full verifier.
