@@ -642,6 +642,7 @@ fn actual_join_pause_resume_migration_and_first_arm_preserve_complete_namespace3
     drop(network);
 }
 
+mod fresh_founder;
 mod governance_capability;
 mod member_outbox;
 mod predecessor_fixtures;
