@@ -2,8 +2,9 @@
 
 ## Agent C Core/Sync seams (12 November; authored, NOT executed)
 
-Branch `chat-v2-joined-member-source`, from `8674813c`. Four commits implement only the
-narrow seams the coordinator approved. There is no App joined source, governance replay,
+Branch `chat-v2-joined-member-source`, from `8674813c`. Five code commits (`68acfe6a`,
+`12a7cee9`, `c34e43b7`, `a9af1526`, `e29de641`) implement only the narrow seams the
+coordinator approved. There is no App joined source, governance replay,
 pin, lane/save change or historical custody yet, and Chat V2 stays disabled.
 
 - **Core read accessors:** `mls_epoch_data`, `is_open_data` and `require_open_data`, plus
