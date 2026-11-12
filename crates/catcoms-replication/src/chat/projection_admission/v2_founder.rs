@@ -61,8 +61,19 @@ impl V2FounderExpectation {
 }
 
 /// Explicit HOST selection of an already saved successor. This is not a proof that App
-/// storage selected it. Only the private actual Root adapter may supply this in production,
-/// after its exact SavedB/current proof (or authenticated frozen cold-selector replay).
+/// storage selected it. In production exactly two private consumers may supply it:
+///
+/// - the founder's actual Root adapter, after its exact SavedB/current proof (or
+///   authenticated frozen cold-selector replay);
+/// - the private joined-member Root consumer, only after it has established, in order: the
+///   independently mounted joined pin, complete historical replay of the pinned prefix, the
+///   own Add's binding to this device's actual consumed Welcome, and (postjoin) this node's
+///   supported FINALIZED MLS transition for the step. A warm joined selection is neither a
+///   founder SavedB receipt nor evidence that the joiner durably selected the record; the
+///   completed joined source also needs its durable selected-record/archive custody.
+///
+/// Copying a mathematically derived candidate's header/state into this value proves none of
+/// those facts. Keep it away from untrusted decoders and native/renderer arguments.
 pub struct V2HostSelectionExpectation {
     header: OwnerHeaderId,
     state: OwnerStateCommitment,

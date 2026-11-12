@@ -170,6 +170,17 @@ impl ReplayMath {
     pub fn header(&self) -> &SignedOwnerHeader {
         &self.header
     }
+    /// The MLS epoch this model's last step recorded: 0 at genesis. Only an Add or Removal
+    /// step advances it, by exactly one; an Append keeps its parent's epoch.
+    ///
+    /// Observation DATA only: it is neither a selected-prefix witness nor evidence that any
+    /// local MLS group is at this epoch. The joined-member source compares it with its node's
+    /// FINALIZED transition state, as one negative input under its own live source fence;
+    /// equality alone authorizes nothing. Core has no membership-neutral transition, so an
+    /// MLS epoch that no Add/Removal covers can never be made equal here by design.
+    pub fn mls_epoch_data(&self) -> u64 {
+        self.epoch
+    }
     pub fn image(&self) -> &[u8] {
         &self.image
     }
