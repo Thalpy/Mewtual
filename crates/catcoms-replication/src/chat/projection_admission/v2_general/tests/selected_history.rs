@@ -5,6 +5,7 @@ use super::*;
 use crate::chat::acceptance_tree::{proof_plan::inclusion_ranges, AcceptanceLeaf};
 use crate::chat::owner_facts::OwnerFactId;
 use crate::chat::owner_header::OwnerStateCommitment;
+use crate::chat::ActionDraft;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -146,6 +147,89 @@ fn reference_root(
         h.update(reference_root(context, &records[left..]).as_bytes());
     }
     V2SelectedHistoryHashData::from_bytes(*h.finalize().as_bytes())
+}
+
+#[test]
+fn cold_fork_keeps_prepared_candidate_and_drains_the_original_admitted_signing_reader() {
+    let mut f = Fixture::new();
+    let mut archive = Archive::default();
+    for marker in 0..3 {
+        select_append(&mut f, &mut archive, marker);
+    }
+    let tip = f.verifier.selected_history_tip_data();
+    let admission = f.verifier.admissions[0].clone();
+    let realm = Realm::new(GROUP, 42).unwrap();
+    let labels = admission.admission_data().ordinary_labels(&realm).unwrap();
+    let signer = f.owner.key.verifying_key().to_bytes();
+    let draft = ActionDraft::new(
+        ActionSpec {
+            realm,
+            basis: labels.basis,
+            grant: labels.grant,
+            nonce: [61; 16],
+            presented_ms: 1,
+            parents: vec![],
+            body: Body::Create {
+                text: "already admitted".into(),
+                reply_to: None,
+            },
+        },
+        signer,
+    )
+    .unwrap();
+    let (_ledger, view) = f.ledger();
+    let mut plan = f
+        .verifier
+        .prepare_ordinary_signing_plan(&draft, &admission, &[], &view)
+        .unwrap();
+    let mut later = f
+        .verifier
+        .prepare_ordinary_signing_plan(&draft, &admission, &[], &view)
+        .unwrap();
+    let (header, body, image) = append_input(&f, 3);
+    let mut candidate = Some(
+        f.verifier
+            .derive_successor(&header, ReplayBody::Append(&body), &image)
+            .unwrap(),
+    );
+    let selected = V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
+    let reader = plan.admit_signing(&draft, &signer).unwrap();
+    let siblings = archive.siblings(tip, 0);
+    let alternate = sibling(&f, &archive.records[0].1);
+    assert_eq!(
+        f.verifier
+            .observe_proven_archived_header(archive.proof(tip, 0, &siblings), &alternate),
+        Err(rejected(ChatError::AuthorityConflict))
+    );
+    assert_eq!(
+        f.verifier.archived_contradiction_data().unwrap().2,
+        &alternate
+    );
+    assert!(later.admit_signing(&draft, &signer).is_err());
+    assert!(f
+        .verifier
+        .advance_host_selected(&selected, &mut candidate)
+        .is_err());
+    assert!(
+        candidate.is_some(),
+        "closed selection preserves the exact original candidate"
+    );
+    assert_eq!(f.verifier.selected_history_tip_data(), tip);
+    assert!(!f
+        .verifier
+        .fork_close_completion_mut()
+        .unwrap()
+        .try_complete());
+    drop(reader);
+    assert!(f
+        .verifier
+        .fork_close_completion_mut()
+        .unwrap()
+        .try_complete());
+    assert_eq!(
+        f.verifier.archived_contradiction_data().unwrap().2,
+        &alternate
+    );
 }
 
 #[test]
