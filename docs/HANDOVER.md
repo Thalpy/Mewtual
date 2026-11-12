@@ -35,8 +35,11 @@ founder-member cases. These are 25 new cases and 32 neighboring legacy controls.
 Its Python guard self-check passes without Cargo.
 Strict CI at `5b325a3c` reported two unused wildcard imports in C's tests; both
 are removed. The root App still reports its inherited 531 library/471 Linux
-test-library Clippy errors. The first focused run is pending on both platforms;
-no executed Rust test result is claimed. Standalone formatting is applied.
+test-library Clippy errors. The initial focused run at `5b325a3c` was superseded
+by the early-retirement correction; cancelled jobs are not test passes. The final
+focused lane also runs strict Clippy for the two affected crates independently
+of the inherited App debt. No executed Rust test result is claimed yet.
+Standalone formatting is applied.
 Full/strict/native/frontend validation remains
 open; local Cargo is still paused. No App joined source or durable fork archive
 is supplied by this seam integration.

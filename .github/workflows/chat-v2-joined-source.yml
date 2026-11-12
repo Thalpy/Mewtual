@@ -43,6 +43,11 @@ jobs:
         run: python .github/scripts/check-chat-v2-joined-source.py --self-test
       - name: Execute joined-source regressions
         run: python .github/scripts/check-chat-v2-joined-source.py
+      # Keep an affected-crate strict result visible separately from inherited App debt.
+      # This does not replace or relax the required workspace-wide Clippy job.
+      - name: Strict Clippy for the affected protocol crates
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p catcoms-replication -p catcoms-sync --all-targets --all-features -- -D warnings
       - uses: actions/upload-artifact@v4
         if: always()
         with:
