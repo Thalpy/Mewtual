@@ -225,6 +225,9 @@ pub struct PreparedV2GovernanceLayoutStore {
     // FIRST: on an ordinary error/partial-owner Drop, every original declaration
     // File and large buffer must drain before Store releases its actual vault
     // session. Named-field construction alone cannot enforce this ordering.
+    // The namespace5 slots exist only when the member handler is configured.
+    member_declaration: Option<Box<member_outbox_layout::Declaration>>,
+    member_declaration_fee: Option<CatalogReadReservation>,
     declaration: Option<Box<Declaration>>,
     store: Option<Box<ServerStore>>,
     declaration_fee: Option<CatalogReadReservation>,
@@ -234,6 +237,16 @@ pub struct PreparedV2GovernanceLayoutStore {
 impl std::fmt::Debug for PreparedV2GovernanceLayoutStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PreparedV2GovernanceLayoutStore")
+    }
+}
+/// Regression-only DATA access for fixtures that live outside this module (the namespace5
+/// predecessor round trip). Production intentionally has no Store conversion.
+#[cfg(test)]
+impl PreparedV2GovernanceLayoutStore {
+    pub(in crate::store) fn store_for_test(&self) -> &ServerStore {
+        self.store
+            .as_deref()
+            .expect("an opened governance owner holds its Store")
     }
 }
 
@@ -271,6 +284,8 @@ impl PreparedV2GovernanceLayoutStore {
             dir, passphrase, rng, policy,
         )?);
         Ok(Self {
+            member_declaration: None,
+            member_declaration_fee: None,
             store: Some(store),
             declaration: None,
             declaration_fee: None,
@@ -339,6 +354,14 @@ impl PreparedV2GovernanceLayoutStore {
         // BEFORE a separately funded canonical inventory read starts below.
         drop(self.declaration.take());
         drop(self.declaration_fee.take());
+        // Namespace5 after 4 (or already present before it): declared only when this opener
+        // carries the concrete member handler, serially after governance's own debt drained.
+        // Declaring 5 here grants nothing to governance and needs nothing from it.
+        store.retry_member_outbox_layout_declaration(
+            &mut self.member_declaration,
+            &mut self.member_declaration_fee,
+            rng,
+        )?;
         store.initialize_current_lineage_index()?;
         store.validate_mounted_governance_layout()?;
         self.complete = true;
@@ -346,10 +369,11 @@ impl PreparedV2GovernanceLayoutStore {
     }
     pub fn into_governance_layout_store(mut self) -> Result<V2GovernanceLayoutStore, Self> {
         if !self.complete
-            || self
-                .store
-                .as_ref()
-                .is_none_or(|s| s.validate_mounted_governance_layout().is_err())
+            || self.store.as_ref().is_none_or(|s| {
+                s.validate_mounted_governance_layout().is_err()
+                    || (s.member_outbox_policy().is_some()
+                        && s.validate_mounted_member_outbox_layout().is_err())
+            })
         {
             return Err(self);
         }
@@ -357,12 +381,16 @@ impl PreparedV2GovernanceLayoutStore {
             return Err(self);
         };
         let Self {
+            member_declaration,
+            member_declaration_fee,
             store: _,
             declaration,
             declaration_fee,
             complete: _,
             _wrapper_fee,
         } = self;
+        drop(member_declaration);
+        drop(member_declaration_fee);
         drop(declaration);
         drop(declaration_fee);
         Ok(V2GovernanceLayoutStore {

@@ -59,7 +59,12 @@ impl ServerStore {
         let mut next = self
             .parse_configured_join_catalog(&next_plain)?
             .summary([0; 32]);
-        if next.governance != Some(capability) {
+        // An existing member-outbox ID5 is carried over byte for byte (the codec inserts
+        // 4 before it); this second, Summary-level check never lets 4 alter or drop it.
+        if next.governance != Some(capability)
+            || next.member_outbox != before.member_outbox
+            || next.member_outbox_payload_digest != before.member_outbox_payload_digest
+        {
             return Err(refused());
         }
         self.require_no_prior_governance_declaration_debts()?;
@@ -103,6 +108,16 @@ impl ServerStore {
         if actual != VaultFormat::CriticalNamespaces {
             return Err(refused());
         }
+        // An in-progress namespace5 declaration owns the catalog stage slot, which the
+        // governance inspector would refuse. With the concrete member handler configured,
+        // finish it, abandon a first seed that never authenticated, or preserve and refuse it
+        // first; the Current3 gate below re-inspects and installs its marker. Both seeds at
+        // once are conflicting debts, except that an unauthenticated member seed beside a
+        // governance seed (a predecessor's governance write during the claim window) is
+        // abandoned without touching the stage, which is governance's own.
+        if self.member_outbox_policy().is_some() && self.member_outbox_seed_present()? {
+            drop(self.inspect_and_repair_member_outbox_declaration()?);
+        }
         // The large4 transient/repair fee is gone before the old3/2 gates reserve
         // their own large phases. An exact captured marker keeps only its OWN fee.
         let captured = self.inspect_and_repair_governance_declaration()?;
@@ -144,6 +159,8 @@ impl ServerStore {
                 || next.governance != Some(saved.capability)
                 || before.current_layout != Some(layout)
                 || next.current_layout != Some(layout)
+                || before.member_outbox != next.member_outbox
+                || before.member_outbox_payload_digest != next.member_outbox_payload_digest
             {
                 return Err(refused());
             }

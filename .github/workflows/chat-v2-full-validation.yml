@@ -1,0 +1,130 @@
+name: Chat V2 integration test execution
+
+on:
+  # An explicit execution lane for this integration PR while its inherited strict-lint
+  # debt prevents ordinary CI from reaching the tests. Later source PRs still use normal
+  # CI; this workflow-only filter is not an all-source validation policy after merge.
+  pull_request:
+    paths:
+      - '.github/workflows/chat-v2-full-validation.yml'
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Workspaces to execute; all is the normal validation run.
+        type: choice
+        options: [all, root, native]
+        default: all
+      run_deferred_catchup:
+        description: Include the slow case at final Chat V2 acceptance (scope all or root).
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-v2-complete-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+  RUST_TEST_THREADS: 2
+
+jobs:
+  root:
+    name: Root tests, slow case deferred (${{ matrix.os }})
+    if: github.event_name != 'workflow_dispatch' || inputs.scope != 'native'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      # No warning override, stack increase, retry or ignored-test substitution.
+      # --no-fail-fast collects other crate results after a failure; it still fails the job.
+      # Strict Clippy and dependency audits remain separate mandatory gates in ci.yml.
+      # The user explicitly deferred this one unusually slow case until final Chat V2
+      # acceptance. Keep the test intact and make the execution exception visible. This
+      # intermediate run cannot claim complete root sign-off until that case also passes.
+      - name: Run root workspace except the explicitly deferred cost case
+        run: >-
+          cargo test --locked --all --all-features --no-fail-fast --
+          --exact --skip cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'workflow_dispatch' && inputs.run_deferred_catchup && runner.os == 'Linux'
+        with:
+          python-version: '3.12'
+      - name: Run exactly one deferred cost case at final acceptance
+        if: github.event_name == 'workflow_dispatch' && inputs.run_deferred_catchup && runner.os == 'Linux'
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import runpy
+
+          guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
+          directory = Path('logs/chat-v2-final-catchup')
+          directory.mkdir(parents=True, exist_ok=True)
+          command = [
+              'cargo', 'test', '--locked', '-p', 'catcoms-replication', '--all-features',
+              '--test', 'catchup_cost',
+              'cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations',
+              '--', '--exact',
+          ]
+          code, summaries, timed_out, _ = guard['run_logged'](
+              'deferred-catchup', command, directory, limit=45 * 60,
+          )
+          if timed_out:
+              raise RuntimeError('deferred catch-up cost case exceeded its deadline')
+          guard['validate'](''.join(summaries), code, 1)
+          PY
+
+  native:
+    name: Complete native tests (${{ matrix.os }})
+    if: github.event_name != 'workflow_dispatch' || inputs.scope != 'root'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install Linux Tauri build libraries
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        run: npm --prefix apps/desktop ci
+      - name: Run the complete frontend tests
+        if: runner.os == 'Linux'
+        run: npm --prefix apps/desktop test
+      - name: Check frontend types
+        if: runner.os == 'Linux'
+        run: npm --prefix apps/desktop run check
+      # Native builds consume real frontend assets; build them on both operating systems.
+      - name: Build frontend assets
+        run: npm --prefix apps/desktop run build
+      - name: Run the complete native workspace
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
+      # Collect the separate compile gate even if a native test fails, without masking it.
+      - name: Check the native workspace
+        if: ${{ !cancelled() }}
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml

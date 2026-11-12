@@ -25,20 +25,25 @@
 //! * [`fs`]: the only raw filesystem mutation sites (listed in the raw-fs gate).
 //! * [`engine`]: the exclusive owner, open/create, cold recovery and reads.
 //! * [`transaction`]: presealed transitions, the final save-admission edge, workers.
+//! * [`production`]: the Store-scoped mount (registry, production parent, custody cells).
 //!
 //! Authority boundary. Nothing here decides membership, Admission, signing or publication
 //! rights. A [`MemberSignedOriginal`] is custody DATA; a save additionally needs a
-//! [`MemberOutboxSaveAdmission`] from the primary's real member-source guard, which is NOT
-//! implemented yet. Until that guard exists, production activation is explicitly incomplete:
-//! only cfg(test) durability fixtures can construct the signed input, the parent directory and
-//! the save admission. The dead-code allowance below exists for exactly that reason and must be
-//! removed when the real admission and provisioning are wired.
+//! [`MemberOutboxSaveAdmission`], issued only by the operational host's member-save final edge
+//! (`operational::host::member_save`) after the member lane's own save-source end, the live
+//! mount and the native session authority. The parent comes only from the namespace5 mount
+//! ([`MemberOutboxParentDirectory::from_mount`]).
+//!
+//! The dead-code allowance below remains for the publication half only: debt batches,
+//! submission marks and checkpoints are consumed by transport, which is not wired yet. Remove
+//! it when transport consumes them.
 #![allow(dead_code)]
 
 mod data;
 mod engine;
 mod frames;
 mod fs;
+mod production;
 mod transaction;
 mod trie;
 
@@ -64,9 +69,20 @@ pub(in crate::store) use engine::{
 #[allow(unused_imports)]
 pub(in crate::store) use frames::DispositionCode;
 #[allow(unused_imports)]
+pub(in crate::store) use production::{
+    member_outbox_key, MemberContextCell, MemberContextState, MemberOriginalCustody,
+    MemberOutboxMount, MEMBER_OUTBOX_MOUNT_FEE,
+};
+#[cfg(test)]
+#[allow(unused_imports)]
 pub(in crate::store) use transaction::{
-    AdmittedMemberAppend, MemberAppendAdmissionFacts, MemberAppendOutcome, MemberAppendRun,
-    MemberCheckpointRun, MemberCheckpointSaved, MemberOutboxSaveAdmission, PreparedMemberAppend,
-    PreparedMemberCheckpoint, RefusedMemberAppendAdmission, ReturnedMemberDebtBatch,
-    ReturnedMemberOriginal,
+    member_outbox_call_at_for_test, member_outbox_crash_at_for_test, member_outbox_disarm_for_test,
+    MemberOutboxTestCut,
+};
+#[allow(unused_imports)]
+pub(in crate::store) use transaction::{
+    AdmittedMemberAppend, AdmittedMemberCommit, MemberAppendAdmissionFacts, MemberAppendOutcome,
+    MemberAppendRun, MemberCheckpointRun, MemberCheckpointSaved, MemberCommitRun,
+    MemberOutboxSaveAdmission, PreparedMemberAppend, PreparedMemberCheckpoint,
+    RefusedMemberAppendAdmission, ReturnedMemberDebtBatch, ReturnedMemberOriginal,
 };

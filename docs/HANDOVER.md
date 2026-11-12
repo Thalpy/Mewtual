@@ -1,5 +1,363 @@
 # Mewtual; Handover
 
+## Agent C draft-4 decisions (12 November; durable fork backing required)
+
+The primary chooses durable backing, option (c), for the completed joined source.
+4096 may limit a paid hot cache, not lifetime governing steps or membership
+changes. Forgetting an old Append fork is not repaired by a guaranteed later gap;
+that guarantee is false. Core's opaque archived-parent owners are bound to the
+original verifier, so disk retention needs a reviewed selected-record/cold-replay
+handoff rather than raw parent reconstruction. The primary owns this archive.
+
+The [draft-4 addendum](communication-recovery/CHAT-V2-JOINED-SOURCE-COORDINATION.md)
+approves C's private joined selection-constructor use, the pre-take V1 checkpoint
+exclusion, `SavedHistorical`/bounded historical custody, and the closed negative
+enum under explicit binding/accounting conditions. Prepared classification needs
+the actual unstarted/current-parent proof or exact recovery/lookup. Conflict is
+not absence. A historical discard command is primary-owned future work and is
+not supplied or approved by this decision. No numeric pool estimate is accepted
+without its actual retained/transient invoice.
+
+C can implement the narrow Core/Sync commits and strict bounded warm tests now;
+complete replay/source acceptance still requires actual durable backing. A
+read-only cross-boundary design review supports these decisions. No Rust, wire,
+format or runtime change is made here; no Cargo/suites run for these documents.
+
+## Agent C coordination (12 November; design decisions, no implementation)
+
+C's source survey confirms missing production V2 invite/pin provenance, founder
+Add/governance custody, multi-member archive support, governance delivery and a
+joined App owner. The primary owns those production prerequisites and native
+integration; C owns the joined source/replay, factual Sync seams, three narrow
+Core read accessors and agreed lane/save adaptations. The
+[coordinator response](communication-recovery/CHAT-V2-JOINED-SOURCE-COORDINATION.md)
+answers D1-D6 and owner placement. C's external design review is still required.
+
+A read-only cross-boundary review found two HIGH design defects in draft 1:
+phase-1 epoch observations cannot authorize phase-2 saves, and removal cannot
+justify discarding the only retained A1 original. Both are rejected in the
+response. The response also requires complete prejoin history, actual finalized
+postjoin transitions, paid archived-parent fork escrows, stable pin ciphertext
+across rejoin and a defined neutral-epoch protocol. It approves real MLS/Core
+test producers and a warm first milestone only as partial evidence. No new wire,
+namespace, producer, authoring capability or Chat V2 activation is implemented by
+these documents. Documentation-only checks; no suites rerun for this response.
+
+## Primary namespace5 review (12 November; focused acceptance passed, broader failures open)
+
+Two fresh read-only actual-diff reviews of `ea7e4ae1..d475ddb1` found no confirmed
+BLOCKER/HIGH/MEDIUM. Three LOWs are corrected: comments now distinguish disposable
+predecessor zero-byte stages and untouched authenticated JOIN successors, and the
+Current3 lifecycle test explicitly checks ID5 after migration/initial grant and
+again after first arm. Activation alone does not migrate the JOIN payload. These
+corrections change no recovery production behavior or cohort count; re-review is clear.
+
+The primary independently inspected the passing `952d8a1b` logs: 66 Linux and 84
+Windows cohort executions, plus one fixture-generator, one predecessor-gate and
+one head-round-trip test on each OS. The 23 fixtures x 10 openers are assertions
+inside the gate, not 230 separate Rust tests; all four round trips pass. The
+[final focused run at `3c904440`](https://github.com/Thalpy/Mewtual/actions/runs/43117903583)
+also passes on BOTH platforms at those exact counts, including the stronger
+separate migration/first-arm check and all predecessor stages. Namespace5's four
+assigned recovery/compatibility items are accepted within that scope.
+
+The annotated remote tag `compat/chat-v2-namespace5-predecessor-ce402364` now
+retains exactly `ce4023649b1a2f37f7d8032c950fbefff03daef3` (peeled target verified).
+The gate remains full-SHA pinned and no longer depends on PR history surviving.
+The stale namespace5 gap list in the A/B/F save handoff is updated.
+
+The new `Chat V2 integration test execution` workflow supplies four isolated hosted
+jobs: root tests and complete native workspaces on Linux and Windows, native
+checking, and frontend tests/checking/build. The root command explicitly excludes
+only `cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations`,
+honouring the user's instruction to defer that unusually slow cost case until
+final Chat V2 acceptance. Manual `run_deferred_catchup=true` runs it last on Linux;
+the test is unchanged and root sign-off stays incomplete until it passes. Manual
+scope selection can execute root, native or both. It uses ordinary Cargo execution independently
+of strict Clippy, with one build job, two test threads and the default stack; it
+does not suppress warnings or change `ci.yml` or audit policy. Its workflow-only
+path filter is this integration PR's explicit execution lane, not a permanent
+all-source validation policy after merge. The first run
+at `3c904440` mistakenly included the deferred case and was cancelled by the
+primary; its unfinished Rust jobs are not passes. Its frontend portion did pass
+3,434 tests, checking and build. This cancellation did not affect the separate
+focused namespace5 workflow.
+
+The corrected [manual integration run](https://github.com/Thalpy/Mewtual/actions/runs/43122799845)
+at `0eb29686` has passed the Linux root job: 5,211 passed, zero failed, 29 existing
+ignores and exactly one filtered test (the deferred cost case). The Windows root
+test step also succeeded: 5,469 passed, zero failed, 28 existing ignores and that
+one filter. Its overall job was cancelled during post-job Rust-cache saving;
+that cancellation does not erase the successful test-step result or make the
+overall job green. Its runtime/test source is identical to the
+focused-tested `3c904440`; only CI execution policy and documentation differ.
+Both complete native jobs failed: Linux 1,007 passed/41 failed and Windows 1,030
+passed/18 failed, including six passing command-ACL cases per OS. There are two
+original failures: Linux's failed-media sibling test did not observe a fresh
+authenticated Current, and Windows's original-SDP-result test unwrapped a local
+`Protocol(Capacity)` at `integration/pc.rs:137`. The remaining 40/17 failures are
+the fixture's deliberate semaphore-close cascades after failed teardown. These
+are unresolved failures, not green acceptance or established production defects.
+Separate native checks passed on both OSes; Linux frontend passed 3,434 tests,
+checking and build, and Windows assets built. Read-only failure diagnosis is in
+progress; no limits, timeouts or assertions have been weakened.
+
+The expanded native prerequisites specify a reviewed fresh-founder first vertical
+and concrete key-admission lifecycle, but supply no native implementation or
+restart acceptance. [Agent C's brief](communication-recovery/CHAT-V2-AGENT-C-BRIEF.md)
+now assigns genuine joined-member sources and founder-offline ordinary saves on a
+separate branch; the primary retains native integration and broader validation.
+
+Local Cargo remains paused. Standalone rustfmt, the Python exact-count guard
+self-check, and the static ambient/raw-filesystem checks pass. The current root
+audit still reports the same five Hickory/rustix
+advisories (bans/licences/sources pass); strict Clippy still blocks ordinary CI's
+test steps. PR #86 remains draft/unmerged and Chat V2 remains disabled.
+
+## Namespace5 recovery and compatibility (11 November; B, focused CI passed at 952d8a1b)
+
+Four namespace5 items, all on `chat-v2-member-outbox-production` (draft PR #86). Design,
+decisions and residuals:
+[Namespace5 recovery](communication-recovery/CHAT-V2-NAMESPACE5-RECOVERY.md).
+
+1. **JOIN lifecycle on ID5 without governance4.** A real Current3 test covers save, pause,
+   resume, migration and first arm. After every step, ID5 is byte-identical and governance4
+   is absent.
+2. **Interrupted ordinary JOIN stage at open.** The JOIN writer's cuts are exercised on an
+   ID5 vault: a complete stage settles cold, and a prefix or zero-length stage is preserved
+   and refused. A vault-key-sealed stage that drops or changes ID5 is refused too.
+3. **First-torn declaration seed recovery.**
+   - **Claim first.** A zero-byte claim of the seed name now precedes the legacy fence, so
+     every fence is attributable.
+   - **Disposal.** The cold first-torn role abandons a declaration whose first seed never
+     authenticated, and the warm retry declares afresh. It runs only when there is no
+     marker, no parent and no ID5. It unlinks the fence, then the seed, each followed by a
+     barrier and a NotFound proof, and needs no RNG.
+   - **Stages it leaves alone.** An authenticated ordinary JOIN successor left by a
+     predecessor in the claim window is left to its settlement.
+   - **Governance seeds.** An unauthenticated member seed beside a complete predecessor
+     governance seed is disposed without touching governance's stage.
+   - **Still preserved and refused:** authenticated-invalid seeds, seeds beside a torn
+     governance seed, and every other partial state.
+   - The read-only adversarial design review found no blocker. Its HIGH (Windows
+     delete-pending resurrection of a claimless fence) and all five MEDIUMs are fixed in the
+     design and code.
+4. **Real predecessor gate.**
+   - The focused lane writes 23 head fixtures and runs an unchanged `ce402364` worktree's
+     ten public openers against them. The harness file is the only addition.
+   - The harness, not the head, owns each fixture's verdicts.
+   - Controls must open, which rules out vacuous refusals.
+   - A fence-removed cut must open, which proves the fence is what refuses.
+   - The head reopens the four trees the predecessor's full runs produced and must recover
+     each.
+
+Counts: the current-mount cohort grows 9 → 16 and the governance-mount cohort 5 → 7. The
+predecessor gate pins 23 fixtures, 10 openers and 4 round trips.
+
+**Focused CI.** At `952d8a1b`, the focused lane passes on Linux and Windows:
+- **Every cohort,** at its exact count:
+  - 4 sorted-declaration cases;
+  - 6 codec cases;
+  - 2 JOIN-producer cases;
+  - 16 current-mount cases;
+  - 7 governance-mount cases;
+  - 31 outbox-engine cases;
+  - on Windows, also the 18 save cases.
+- **The real predecessor gate:**
+  - 23 fixtures were written.
+  - The predecessor checked them against all 10 openers: 2 controls, 18 refuse, 2 may-open
+    and 1 unfenced fixture.
+  - The head then verified all 4 round trips.
+
+The first run, at `7aab7775`, compiled on both platforms and failed two wrong test
+expectations, now corrected:
+- the first JOIN row adds the JOIN entry;
+- the fired probe was sticky.
+
+**Lint and review fixes.** The strict Clippy job reported two new test-only
+`type_complexity` lints; they are fixed. The library's lint count is unchanged at 531. The
+read-only actual-diff review found no production blocker. Its LOW follow-ups are in the
+next commit, whose CI is pending:
+- the disposal edge re-classifies the seed itself;
+- governance cuts 233 and 234 are added;
+- the zero-length JOIN stage residual is pinned;
+- the round trip also checks entry order, ID4 bytes and both mounts;
+- the hand-built envelope gets a positive control;
+- the docs are reworded.
+
+**Gates.** The store raw-fs gate (new allowlist entries for the claim and the two
+classified unlinks), the ambient gate and rustfmt pass. The full suites, strict Clippy
+sign-off and the advisory job remain the primary's.
+
+**Open to the primary.** The predecessor `ce402364` is not on `main`; a pushed tag would
+make the gate independent of PR #86's history. The namespace5 gap list in
+`CHAT-V2-MEMBER-SAVE-HANDOFF.md` is not edited.
+
+Not covered:
+- governance4's own first-torn states;
+- native integration, joined-member sources and transport (out of this increment).
+
+## Primary member-save follow-up (11 November; focused tests passed, full sign-off open)
+
+The primary's fresh actual-diff review of `ae5a0837` found four MEDIUM issues: an
+invocation cancelled during lookup could still start signing; retryable preseal
+refusal kept its known original only in the replaceable host; temporary lookup
+scratch could outlive its refunded payer; and source-end Drop could wait on its
+issuance mutex. Corrections retain originals in the Store before append payment,
+recheck the native negative before new authoring, explicitly fund serialized
+scratch from the existing slot allowance, and retire issued ends atomically.
+No pool cap is increased. F's actual close/key and native authorization boundaries
+remain required; the negative observation is not a credential substitute.
+
+Three new Windows regressions cover cancellation during real namespace-head
+sealing before authoring, post-sign append-credit refusal followed by lane
+replacement with the exact retained original/no new key, and retiring an unrun
+job's source end while its actual issuance mutex is held. The source inventory
+contains 15 earlier Windows save cases, now 18; B's two new mount cases are separate.
+CI at `5960b177` passes all 57 Linux storage/catalog executions and all 75 Windows
+executions (the same 57 plus 18 save cases). No cases are ignored. The first run
+at `57676fd2` exposed a deterministic Busy-versus-Stale mismatch for a never-prepared
+host. The correction checks the lane/context before the lazy mount, without
+changing any positive admission check. Its now-passing strengthened case retains
+the Stale assertion for both absent and installed mounts, plus unchanged files/sign
+count and whole returned native custody.
+[Focused run and artifacts](https://github.com/Thalpy/Mewtual/actions/runs/43093078523).
+Local Cargo remains paused by user request. Earlier "none run" entries below
+describe their original checkpoints, not this subsequent execution evidence.
+
+The independent `Chat V2 member storage regressions` workflow runs ordinary
+focused Cargo test commands on Linux/Windows, with exact nonzero cohort counts
+(57 storage/catalog executions on either OS plus 18 Windows-only save cases).
+It streams artifacts and bounds each owned subprocess tree, including the
+deadlock regression. It neither changes warning handling nor replaces strict
+Clippy, supply-chain audit, native/frontend or full-suite gates. Standalone
+rustfmt and the Python count-guard self-check passed without invoking Cargo.
+
+The same head's ordinary CI passes all 3,434 frontend tests, Svelte checking
+(zero errors/warnings) and production build. Root tests are still not reached by
+the strict-Clippy jobs; native compilation stops on existing App warning debt.
+The root supply-chain audit still fails on the five advisories named below, and
+its native audit step is skipped. This checkpoint is not full-suite sign-off.
+An unattached test-macro rustdoc comment introduced by the primary was also
+converted to ordinary comments. PR #86 remains draft and unmerged.
+
+M4 is decided: retain bounded exact signed-original DATA across a UI lock. Do not
+discard the only unsaved copy to implement lock. No save/publication authority
+survives that lock; a later invocation needs fresh native generation/row and
+actual source admission. No lock-time plaintext-erasure claim is made.
+
+Neither C nor F is running externally; the primary owns the next native slice.
+The actual native/source audit confirms that a new IPC handler is insufficient:
+typed vault/bootstrap custody, genuine durable backend/source binding, a distinct
+cold-operational owner factory and actual native key admission are still absent.
+Cold genesis explicitly rejects a promoted operational head, including an empty
+promotion. A warm-save/cold-reopen result therefore needs implementation, not
+only another test. The reviewed next-slice design is
+[Native member saves: production prerequisites](communication-recovery/CHAT-V2-NATIVE-MEMBER-SAVE-NEXT.md).
+No native or root-factory code was changed during that audit.
+
+The read-only dependency survey identified a published remediation route; no
+dependency changes are mixed into this save checkpoint. First update rustix to
+at least 1.1.6 in both lockfiles, move native xattr to published 1.7.0 in the same
+change (older xattr's empty-buffer size queries are incompatible with the fixed
+semantics), and use `fgetxattr_query` for the direct Linux ACL probe. Separately,
+all five direct libp2p 0.56 declarations need a coordinated 0.57 upgrade to admit
+fixed Hickory 0.26.2 or newer; this requires source adaptation and fixed-identity,
+mixed-version transport tests. Do not force an incompatible lock-only Hickory
+upgrade or add advisory ignores. See the upstream
+[xattr compatibility fix](https://github.com/Stebalien/xattr/commit/794a4fbec59289150af15de9aef6c3db7d62214e)
+and [libp2p 0.57.1 dependency set](https://github.com/libp2p/rust-libp2p/blob/v0.57.1/Cargo.toml).
+
+## Member save, root path (11 November; B, pushed, nothing executed yet)
+
+Branch `chat-v2-member-outbox-production` (draft PR #86) now connects the member outbox to
+its production owners under the primary's A/B/F contract: a Store-scoped mount
+(`v2_member_outbox/production.rs`: registry, `MemberOutboxParentDirectory::from_mount`,
+bounded paid per-context custody cells), the engine's final-edge admission constructor and
+commit split, the authorized lane hooks in `operational/host/member.rs` (historical pin
+identity, serialized save-source lifecycle composed into close, exact saved-hit
+reconciliation, recovered-DATA adoption) and the public two-phase driver
+`operational/host/member_save.rs` (`prepare_member_save`, `admit_member_save`,
+`MemberSaveJob`). It also fixes the one strict-lint finding namespace5 had introduced
+(`result_large_err` on the Current3 owning refusal).
+
+Seventeen new regressions: fifteen Windows-only save cases on the real warm whole-owner
+fixture with namespace5 mounted (SavedLocal and exact retries without signing, refusal
+without presealed work, a cancelled session at the edge, close before and after admission,
+unrun de-admission, an uncertain commit, an unwind mid-commit, an unwind before the commit
+point that re-preseals the same original after an Absent lookup, cancellation and receiver
+loss during paused IO, lane replacement adoption, an exact hit in every lane state with an
+unrelated token untouched, a lookup read failure before signing, same-token changed DATA as
+a conflict in every custody state, another token's retained original named, and the pin
+identity matching the on-disk pin ciphertext in all three families) and two cross-platform
+mount cases. None has run: local Cargo is paused and CI stops at the base branch's strict
+Clippy debt before tests. CI's Clippy pass type-checks the library and test library on Linux
+and Windows: `0371efbe` had no compile error and no new lint in the changed files; the
+review-fix commit `00c8b32d` introduced one Windows test compile error (an array-repeat
+pattern) and two new lints (`enum_variant_names` on the test-cut enum, `drop_non_drop` in a
+test), all fixed in `7ff99020`, which type-checks on both platforms with no compile error and
+no lint in the changed files (Linux 531 library / 471 test-library lint errors, Windows 531 /
+188; the base at `ca35f74a` had 556 / 497 and 556 / 189).
+
+The read-only adversarial review of `0371efbe` found no BLOCKER. Its HIGH (a same-token retry
+with changed DATA reported Ready or Saved) and its MEDIUM/LOW code findings are fixed; one
+MEDIUM is a recorded primary decision (retained plaintext across UI lock). A short re-review
+of the fixes found no BLOCKER/HIGH/MEDIUM; its LOW notes are fixed or listed as follow-ups.
+
+Not done: F's native producer and barrier tests (root fixtures use a test custody box and
+establish no native authorization); true host replacement with a second whole owner (the
+cases replace the lane under one owner); routing checkpoints through the cell; nonfounder
+and joined-member sources (C); governance4-vault saves. Process restart is crash-equivalent.
+[Save path](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
+## Primary namespace5 review and save handoff (11 November; CI red, updated tests pending)
+
+The namespace checkpoint is published in draft PR #86 against the inactive Chat V2
+integration branch. Static actual-diff review through `ab5852a1` found no confirmed
+BLOCKER/HIGH/MEDIUM. The remaining LOW coverage gap now has two source regressions:
+complete-seed recovery with a populated parent refuses before recreating a stage,
+and a settled seed-free populated parent remounts unchanged. Both compare recursive
+names and file contents. There are now 24 new namespace cases (22 from B plus two
+from the primary); none has executed successfully for this checkpoint yet.
+
+Standalone rustfmt passes on the added tests. Local Cargo remains paused by user
+request. CI for `ab5852a1` is red: the Linux strict-Clippy job reports 556 App library
+errors and 497 App test-library errors, including unused integration and API-size
+findings. This stops its test steps; source inspection is not compile/test clearance.
+The supply-chain job also fails on the locked `hickory-proto 0.25.2` advisories
+RUSTSEC-2026-0487/0489/0490/0491 and `rustix 1.1.4` RUSTSEC-2026-0486. Bans, licences
+and sources pass that root audit. No ignore or dependency change is made here.
+
+The primary has resolved the A/B/F design requests in
+[the member-save handoff](communication-recovery/CHAT-V2-MEMBER-SAVE-HANDOFF.md).
+B may implement the narrow A-side hooks without waiting for another A session.
+Use the existing exact retained-pin identity before lookup/lane creation, serialize
+source-end admission against close, reconcile saved hits instead of abandoning them,
+and retain known originals across host replacement. The two-phase native contract
+requires real checked UI/row custody and forbids reversed UI/host lock order.
+These are implementation decisions, not implemented save/native producers.
+
+## Member outbox namespace5 (11 November; source checkpoint, NOT compiled)
+
+Branch `chat-v2-member-outbox-production` (from `ce402364`) declares the member outbox's
+parent as critical namespace5/version1, independent of governance4, in two commits:
+`c87f8f84` (catalog DATA: shared sorted-insert declarations, the ID5 codec, ID5 in the
+JOIN grammar, successor and every JOIN re-encoder; governance4 moved onto sorted insert)
+and `94f5290d` (physical declaration, mount, gate ordering and older-reader fences).
+No successful Cargo compile/test result is recorded; the store raw-fs and ambient-dependency gates pass.
+Twenty-two original focused tests await CI. An independent read-only
+actual-diff review found one compile blocker (a cross-module visibility error) and one
+`-D warnings` dead-code failure; both are fixed in the follow-up commit with the review's
+hardening (empty-parent adoption only, independent member pool, fault cut 255, summary
+ordering) and its requested regressions (both wrappers' cut matrices, pre-namespace5
+emulation at every cut, ID2 to 3 to 5 in one retry, frozen governance bytes). Still not
+covered: an interrupted ordinary JOIN stage present at open on an ID5 vault. The member save path itself
+(Store-scoped slot table, production save admission, native job handoff) is not written:
+its A-side hooks and native handoff now have the primary's contract above, while F's
+actual native producer remains absent. Unsupported today: member saves on governance4
+vaults (that wrapper yields no Store) and first-torn member-seed recovery.
+[Format](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
 ## Ordinary-member signer, founder vertical (11 November; focused checks passed)
 
 Branch `chat-v2-ordinary-member-signing` (from `b24fd196`) adds the production signing
@@ -16,10 +374,9 @@ The unchanged frontend passes all 3,434 tests, static checking with zero errors/
 warnings and its production build. Ambient-dependency and store raw-filesystem
 gates pass. Independent actual-diff review found no BLOCKER/HIGH/MEDIUM; its LOW
 comment overclaim about full-Draft binding was corrected and re-reviewed.
-The full root/native suites, separate native check and strict lint/audit gates are
-running serially; their new results are not yet acceptance evidence. The named
-10,000-operation test remains deferred until the end. The previous 9 November
-results below describe the earlier checkpoint, not this new source.
+The local broad runner was subsequently stopped at the user's request to pause and
+use CI. Its unfinished root run is not a pass. The previous 9 November results below
+describe the earlier checkpoint, not this new source.
 
 - MLS: narrow retained-device signer with an exact full-key check and payload bound.
 - Core: `V2OrdinarySigningGuard::signer_data` (DATA getter).
@@ -59,8 +416,10 @@ guards. All 21 succession cases pass in 127.53 seconds on the default stack.
 The full native suite passes 1,048 tests and the separate native compile check
 passes. The unchanged frontend passes all 3,434 unit tests, static checking,
 production build, default browser flows and the admin-history browser scenario.
-Current formatting, ambient-dependency and raw-filesystem gates pass; the recorded
-dependency audit remains applicable to the unchanged locked dependencies.
+Formatting, ambient-dependency and raw-filesystem gates passed at that checkpoint.
+The dependency audit passed on 9 November against the advisory data then available;
+the 11 November CI advisory failures above supersede that result despite the
+unchanged locked dependencies.
 
 Strict root Clippy still fails with 534 App library errors: unfinished unused
 integration plus remaining style/API findings. CI/sign-off is not green and no

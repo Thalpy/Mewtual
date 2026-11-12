@@ -243,9 +243,10 @@ impl Drop for MemberOutboxClaim {
 
 /// The separately held, validated parent directory that contains member namespaces.
 ///
-/// Production construction is the primary's (critical-namespace provisioning); it must not be
-/// a closed founder/group inventory, and a caller-provided path alone is not provenance. Only
-/// the cfg(test) temporary-vault fixture exists here.
+/// The only production constructor is [`Self::from_mount`]: the namespace5 parent that the
+/// Store's concrete configured handler declared and mounted. It is not a closed founder/group
+/// inventory, and a caller-provided path alone is never provenance. The cfg(test) temporary
+/// fixture exists for storage-only regressions.
 pub(in crate::store) struct MemberOutboxParentDirectory {
     held: HeldDirectory,
 }
@@ -256,6 +257,20 @@ impl std::fmt::Debug for MemberOutboxParentDirectory {
     }
 }
 impl MemberOutboxParentDirectory {
+    /// The production parent: `chat-owner-v2/member-outbox-v1/` of THIS Store's mounted
+    /// namespace5 layout. `member_outbox_parent_data` re-proves the whole mount first (marker
+    /// bytes, root and parent identities, the physical mount and its liveness negative); the
+    /// parent is then held by the mount's ORIGINAL directory identity, so a directory swapped
+    /// in under the same name is refused rather than adopted.
+    pub(in crate::store) fn from_mount(
+        store: &crate::store::ServerStore,
+    ) -> Result<Self, AppError> {
+        let (path, id) = store.member_outbox_parent_data()?;
+        Ok(Self {
+            held: HeldDirectory::adopt(path, id)?,
+        })
+    }
+
     #[cfg(test)]
     pub(in crate::store) fn temporary_fixture_for_test(
         path: &std::path::Path,

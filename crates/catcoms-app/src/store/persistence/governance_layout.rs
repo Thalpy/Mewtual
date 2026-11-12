@@ -188,6 +188,16 @@ impl ServerStore {
             self,
             false,
             critical_namespaces::current_group::DECLARATION_SEED,
+        )?)?;
+        // An unfinished namespace5 declaration is likewise a prior debt: its owner (the
+        // member handler, which runs first when configured) must settle it before 4 starts.
+        if critical_namespaces::member_outbox_layout::pre_namespace5_emulated() {
+            return Ok(());
+        }
+        absent(&fixed(
+            self,
+            false,
+            critical_namespaces::member_outbox_layout::MEMBER_OUTBOX_SEED,
         )?)
     }
     pub(in crate::store) fn read_governance_inventory(

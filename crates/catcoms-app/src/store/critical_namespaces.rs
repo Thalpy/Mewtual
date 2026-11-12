@@ -27,10 +27,16 @@ pub(in crate::store) mod archive_current_namespace_codec;
 // Decoding alone still issues no source/fee/writer or operational protocol authority.
 pub(in crate::store) mod archive_current_codec;
 mod catalog_envelope;
+// Shared exact sorted-insert declaration DATA for independently declared namespaces (4, 5).
+mod catalog_declaration;
 pub(in crate::store) mod current_group;
 pub(in crate::store) mod current_layout;
 pub(in crate::store) mod governance_layout;
 pub(in crate::store) mod governance_namespace_codec;
+// Namespace5: the ordinary-member outbox layout. Its descriptor codec is DATA only; the
+// configured handler in `member_outbox_layout` is the only physical interpreter.
+pub(in crate::store) mod member_outbox_layout;
+pub(in crate::store) mod member_outbox_namespace_codec;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
     ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -45,6 +51,7 @@ pub use current_layout::{
 pub use governance_layout::{
     PreparedV2GovernanceLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
 };
+pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
@@ -141,6 +148,8 @@ pub(super) fn refuse_orphan_before_vault_creation(dir: &Path) -> Result<(), AppE
         }
     }
     governance_layout::refuse_unsupported_storage(dir)?;
+    // A vault that does not exist yet can never own namespace5 artifacts.
+    member_outbox_layout::refuse_unsupported_storage(dir)?;
     refuse_unimplemented_archive_storage(dir)?;
     Ok(())
 }
@@ -202,6 +211,12 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        // Every opener WITHOUT the concrete namespace5 handler refuses its fixed artifacts
+        // before any gate below can settle, clean or reinterpret them. The configured handler
+        // instead inspects them first inside the Current3 (and governance) gate.
+        if self.member_outbox_policy().is_none() {
+            member_outbox_layout::refuse_unsupported_storage(&self.dir)?;
+        }
         if self.governance_layout_policy.is_some() {
             return self.open_governance_layout_catalog_gate(actual_format, passphrase, rng);
         }

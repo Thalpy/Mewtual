@@ -6,8 +6,11 @@
 //! Join are signed here by the SAME retained MLS device of this host's whole original node,
 //! under a Core `V2OrdinarySigningPlan` from a general verifier. Nothing here touches the
 //! founder A/I/S/B certification lane, a governing Header, an owner Append, a channel secret,
-//! a sender ratchet, the network or the member outbox. The output is a cached
-//! [`MemberSignedOriginal`]: DATA custody that grants no save or publication right.
+//! a sender ratchet or the network. The output is a cached [`MemberSignedOriginal`]: DATA
+//! custody that grants no save or publication right. Saving is the sibling `member_save`
+//! driver's, which uses this lane only through its narrow save hooks: the stable outbox context
+//! binding, the serialized save-source lifecycle (`admit_save_source`), exact saved-hit
+//! reconciliation (`reconcile_saved`) and recovered-DATA adoption (`adopt_retained_original`).
 //!
 //! Trust and scope (why this is sound, and exactly where it stops):
 //! - The general verifier's HOST expectation is the genesis anchor produced from the
@@ -42,10 +45,11 @@
 //! is enforced by `with_v2_text_current`. The primary's dispatcher must add its own command
 //! generation check before calling in.
 use super::super::owner::V2TextOwnerRef;
+use super::member_save::{V2MemberSaveSource, V2MemberSaveSourceEnd};
 use super::projection::{BoundV2TextFounderAnchor, V2TextProjectionDomain};
 use super::*;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
-use crate::store::persistence::v2_member_outbox::MemberSignedOriginal;
+use crate::store::persistence::v2_member_outbox::{MemberOutboxContextId, MemberSignedOriginal};
 use crate::store::persistence::v2_text::{PreparedV2TextParentCapture, V2TextFounderAnchorData};
 use crate::store::ServerStore;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
@@ -63,11 +67,13 @@ use std::collections::VecDeque;
 /// Bounded live channel views per lane. Refuse beyond it; a view with a live Plan is never
 /// evicted (that would revoke the Plan's channel lifetime under an in-flight request).
 const MAX_MEMBER_CHANNELS: usize = 8;
-/// Rolling positive cache, backed by mandatory exact durable lookup before authoring.
+/// Rolling positive cache for requests covered by Saved/SavedHit. Older saved-token
+/// deduplication is the outbox's mandatory exact lookup before authoring.
 const MAX_FINISHED_TOKENS: usize = 64;
-/// Unsaved negative retirements cannot be inferred from an Absent outbox entry. Reserve
-/// one non-evicting slot before each new request so finishing can never strand its original.
-/// Normal saved traffic releases its reservation and has no lifetime message-count cliff.
+/// Negative retirement is different: Absent lookup cannot remember cancellation. Never
+/// evict these tokens during this lane incarnation. Reserve room before new work so an
+/// admitted original can always be abandoned/forgotten. Normal saved traffic consumes no
+/// permanent slot; restart-safe negative retirement needs a future durable record.
 const MAX_UNSAVED_RETIREMENTS: usize = 64;
 
 const MEMBER_CHANNEL_LAYOUT_BYTES: usize = std::mem::size_of::<MemberChannel>() + 4 * 1024;
@@ -109,21 +115,24 @@ pub(super) const V2_MEMBER_REQUEST_BYTES: usize = ActionDraft::private_layout_by
 /// Delete and Join must name their target and may name further observed parents. The request
 /// composer must persist the exact token, channel, body and parent list it sent: a retry
 /// after restart with different parents is a conflict by design (member outbox lookup).
-pub(in crate::store) struct V2MemberSignRequest<'a> {
-    pub(in crate::store) token: [u8; 32],
-    pub(in crate::store) channel: u128,
-    pub(in crate::store) body: &'a Body,
-    pub(in crate::store) parents: &'a [ActionId],
+///
+/// Public borrowed DATA for the native consumer of `prepare_member_save`; constructing one
+/// grants nothing.
+pub struct V2MemberSignRequest<'a> {
+    pub token: [u8; 32],
+    pub channel: u128,
+    pub body: &'a Body,
+    pub parents: &'a [ActionId],
     /// The exact required dependency set (parents plus Edit/Delete/Join target), in any
     /// order. Caller-owned DATA loans: Core verifies every signature, delegation and that each
     /// names a CURRENT Admission of this verifier. Unused extras or a missing one refuse.
-    pub(in crate::store) dependencies: &'a [V2MemberDependency<'a>],
+    pub dependencies: &'a [V2MemberDependency<'a>],
 }
 
 /// One dependency loan: an already-signed action and the Admission it was signed under.
-pub(in crate::store) struct V2MemberDependency<'a> {
-    pub(in crate::store) action: &'a SignedAction,
-    pub(in crate::store) admission: OwnerFactId,
+pub struct V2MemberDependency<'a> {
+    pub action: &'a SignedAction,
+    pub admission: OwnerFactId,
 }
 
 impl std::fmt::Debug for V2MemberSignRequest<'_> {
@@ -139,9 +148,14 @@ impl std::fmt::Debug for V2MemberDependency<'_> {
 }
 
 /// The ONE parent canonicalisation for a member request: sort and dedup, refuse more than
-/// MAX_PARENTS, and a Create must name exactly its reply target. The member outbox's lookup
-/// request DATA must be built from the signed spec (which this produced), so digests agree.
-fn canonical_member_parents(body: &Body, parents: &[ActionId]) -> Result<Vec<ActionId>, AppError> {
+/// MAX_PARENTS (bounded as supplied, before dedup), and a Create must name exactly its reply
+/// target. The member-save driver digests its pre-signing outbox lookup over exactly this
+/// list, after funding that lookup, so the lookup and the signed spec agree. Parents are the
+/// request's explicit persisted list, never fresh tips sampled during a retry.
+pub(super) fn canonical_member_parents(
+    body: &Body,
+    parents: &[ActionId],
+) -> Result<Vec<ActionId>, AppError> {
     if parents.len() > MAX_PARENTS {
         return Err(refused());
     }
@@ -206,6 +220,10 @@ struct PendingMemberRequest {
     plan: Option<V2OrdinarySigningPlan>,
     original: Option<OriginalV2OrdinarySigningPlanObservation>,
     signed: SignedState,
+    /// Recovered-DATA custody only: the historical Admission of an original this lane ADOPTED
+    /// from the Store's member-outbox cell (signed by an earlier host on the same Store). Such a
+    /// request has no Draft or Plan, is always Lent, and can never be signed again.
+    adopted: Option<OwnerFactId>,
     fee: CatalogReadReservation,
 }
 
@@ -232,8 +250,55 @@ impl PendingMemberRequest {
             plan: None,
             original: None,
             signed: SignedState::Pending,
+            adopted: None,
             fee,
         })
+    }
+
+    /// Adopt a retained original (recovered-DATA custody): the request DATA is copied from the
+    /// original's OWN signed spec under the request fee, which must already be canonical. The
+    /// request starts Lent with that exact ActionId; no Draft, Plan, Clock, RNG or key exists.
+    fn adopt(
+        store: &ServerStore,
+        token: [u8; 32],
+        original: &MemberSignedOriginal,
+    ) -> Result<Self, AppError> {
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        let fee = pool.try_reserve(V2_MEMBER_REQUEST_BYTES)?;
+        fee.validate(pool, V2_MEMBER_REQUEST_BYTES)?;
+        let spec = original.action().spec();
+        let parents = canonical_member_parents(&spec.body, &spec.parents)?;
+        if parents != spec.parents {
+            return Err(refused());
+        }
+        Ok(Self {
+            token,
+            channel: spec.realm.channel(),
+            body: spec.body.clone(),
+            parents,
+            inputs: V2MemberDraftInputs::new(),
+            draft: None,
+            plan: None,
+            original: None,
+            signed: SignedState::Lent(original.action().id()),
+            adopted: Some(original.admission()),
+            fee,
+        })
+    }
+
+    /// The historical Admission this request's original was signed under: the Plan's, or the
+    /// adopted original's. DATA only; never proof that the Admission is still current.
+    fn historical_admission(&self) -> Option<OwnerFactId> {
+        match (&self.plan, self.adopted) {
+            (Some(plan), None) => Some(plan.admission_id_data()),
+            (None, Some(adopted)) => Some(adopted),
+            _ => None,
+        }
     }
 
     /// Same token must mean the same request. A changed channel, body or parent set is a
@@ -298,7 +363,7 @@ struct MemberChannel {
 
 /// The whole ordinary-member lane. Field order is Drop order: the request (Plan/Draft) first,
 /// then channel views, then the verifier (whose Drop closes this lane's own group), then the
-/// anchor/capture, the member-role domain, and the lane fee LAST.
+/// anchor/capture, the save-source lifecycle, the member-role domain, and the lane fee LAST.
 pub(super) struct V2MemberLane {
     request: Option<Box<PendingMemberRequest>>,
     finished: VecDeque<[u8; 32]>,
@@ -308,6 +373,13 @@ pub(super) struct V2MemberLane {
     bound: Option<BoundV2TextFounderAnchor>,
     anchor: Option<V2TextFounderAnchorData>,
     capture: PreparedV2TextParentCapture,
+    /// The serialized save-source lifecycle. Its `close` is part of [`Self::cancel`] and its
+    /// drain part of [`Self::try_closed`]: an admitted save job keeps this lane's close pending
+    /// through its IO. Its body holds the member domain's own paid negative, not this lane.
+    save_source: V2MemberSaveSource,
+    /// The stable member-outbox context this lane's saves are bound to, once the save driver
+    /// derived it. A cache/comparison only: the driver derives it from historical DATA itself.
+    outbox_context: Option<MemberOutboxContextId>,
     domain: Arc<V2TextProjectionDomain>,
     group: Vec<u8>,
     /// This source's own Admission (the founder's genesis Admission in this vertical).
@@ -334,6 +406,8 @@ impl V2MemberLane {
         let domain = Arc::new(V2TextProjectionDomain::prepare_member(
             store, owner, observer,
         )?);
+        // Independently paid: an issued end can outlive this lane while its job drains.
+        let save_source = V2MemberSaveSource::prepare(pool, domain.negative())?;
         let capture = PreparedV2TextParentCapture::prepare(store, owner.source())?;
         let genesis = owner.source().data();
         let group_ref = genesis.context.spec_data().group;
@@ -351,6 +425,8 @@ impl V2MemberLane {
             bound: None,
             anchor: None,
             capture,
+            save_source,
+            outbox_context: None,
             domain,
             group,
             admission: genesis.admission.admission_id(),
@@ -373,13 +449,153 @@ impl V2MemberLane {
         Ok(())
     }
 
-    /// Negative only: future admissions refuse immediately. Never an acknowledgment that an
-    /// already-admitted key operation has finished; `try_closed` polls the real gate.
+    /// Negative only: future key admissions AND save-source issuance refuse immediately. Never
+    /// an acknowledgment that already admitted work has finished; `try_closed` polls the real
+    /// gates.
     pub(super) fn cancel(&self) {
         self.domain.cancel();
+        self.save_source.close();
     }
+    /// The lane's real close completion: the member domain's group barrier AND every issued
+    /// save-source end dropped (its job finished its IO and cleanup). Never blocks.
     pub(super) fn try_closed(&self) -> bool {
-        self.domain.try_closed()
+        self.domain.try_closed() && self.save_source.drained()
+    }
+
+    /// Save-source lifecycle, for regressions only.
+    #[cfg(all(test, windows))]
+    pub(super) fn save_source_for_test(&self) -> &V2MemberSaveSource {
+        &self.save_source
+    }
+
+    /// The bound stable outbox context, if the save driver bound one. DATA only.
+    pub(super) fn outbox_context(&self) -> Option<MemberOutboxContextId> {
+        self.outbox_context
+    }
+
+    /// Bind (once) the stable outbox context this lane's saves use. A different context is
+    /// refused: one lane saves into exactly one member outbox.
+    pub(super) fn bind_outbox_context(
+        &mut self,
+        context: MemberOutboxContextId,
+    ) -> Result<(), AppError> {
+        match self.outbox_context {
+            Some(bound) if bound != context => Err(refused()),
+            _ => {
+                self.outbox_context = Some(context);
+                Ok(())
+            }
+        }
+    }
+
+    /// FINAL-EDGE source admission (no IO, no allocation): issue this lane's save-source end
+    /// for exactly these facts. Refuses unless the stable context is this lane's own, the
+    /// pending request is `token` Lent with exactly `action`, `admission` is that request's
+    /// historical Admission (its Plan's, or the adopted original's), and the member domain's
+    /// original source negative is live. Historical labels alone are not present authority;
+    /// the later joined-member source must additionally enforce that Admission's actual
+    /// current lifetime here.
+    pub(super) fn admit_save_source(
+        &self,
+        context: MemberOutboxContextId,
+        token: [u8; 32],
+        action: ActionId,
+        admission: OwnerFactId,
+    ) -> Result<V2MemberSaveSourceEnd, AppError> {
+        if self.outbox_context != Some(context) {
+            return Err(refused());
+        }
+        let pending = self
+            .request
+            .as_deref()
+            .filter(|pending| pending.token == token)
+            .ok_or_else(refused)?;
+        if !matches!(pending.signed, SignedState::Lent(lent) if lent == action)
+            || pending.historical_admission() != Some(admission)
+        {
+            return Err(refused());
+        }
+        self.domain.validate_negative()?;
+        // The serialized lifecycle re-checks the same negative under its own lock.
+        self.save_source.issue()
+    }
+
+    /// Exact saved-hit reconciliation: the member outbox holds `saved` for `token`. Acts ONLY
+    /// on this lane's pending request for exactly that token and never touches other work.
+    /// - no such request: `Ok(None)` (the receipt stands on its own);
+    /// - Lent: retire it as saved; `Some(true)` when the lent original is the stored one,
+    ///   `Some(false)` when the store holds an EARLIER original of the same request;
+    /// - Pending or Complete: complete any cached raw as DATA first, then retire it as saved,
+    ///   but only when `spec` (the stored original's own signed spec) is this exact request.
+    ///   The in-memory original, if any, is retired; only the stored entry may be published.
+    pub(super) fn reconcile_saved(
+        &mut self,
+        token: [u8; 32],
+        saved: ActionId,
+        spec: Option<&ActionSpec>,
+    ) -> Result<Option<bool>, AppError> {
+        let Some(pending) = self
+            .request
+            .as_deref_mut()
+            .filter(|pending| pending.token == token)
+        else {
+            return Ok(None);
+        };
+        pending.complete_cached();
+        if !matches!(pending.signed, SignedState::Lent(_)) {
+            let spec = spec.ok_or_else(refused)?;
+            if pending.channel != spec.realm.channel()
+                || pending.body != spec.body
+                || pending.parents != spec.parents
+            {
+                return Err(refused());
+            }
+        }
+        self.finish(token, FinishMode::SavedHit(saved)).map(Some)
+    }
+
+    /// Whether this lane's member source can still admit anything: the member domain's
+    /// original source negative is live and the lane was not cancelled. Cached negatives only.
+    pub(super) fn require_live_source(&self) -> Result<(), AppError> {
+        self.domain.validate_negative()
+    }
+
+    /// Recovered-DATA custody across host replacement: adopt a retained original from the
+    /// Store's member-outbox cell as this lane's Lent request, so the next final edge can issue
+    /// a source end for it without signing again. Idempotent for the request it already holds.
+    /// Refuses while another request is pending, for a token this lane already finished, and
+    /// for an original that is not this lane's own device, group and source Admission or does
+    /// not verify. Requiring the lane's OWN Admission keeps the final-edge Admission check from
+    /// being circular: the adopted label must equal this source's Admission, not merely itself.
+    pub(super) fn adopt_retained_original(
+        &mut self,
+        store: &ServerStore,
+        token: [u8; 32],
+        original: &MemberSignedOriginal,
+        signer: [u8; 32],
+    ) -> Result<(), AppError> {
+        let action = original.action();
+        if let Some(pending) = self.request.as_deref() {
+            return match pending.signed {
+                SignedState::Lent(lent) if pending.token == token && lent == action.id() => Ok(()),
+                _ => Err(refused()),
+            };
+        }
+        if self.finished.contains(&token)
+            || self.retired_unsaved.contains(&token)
+            || self.retired_unsaved.len() == MAX_UNSAVED_RETIREMENTS
+            || action.signer() != &signer
+            || action.spec().realm.group() != self.group.as_slice()
+            || original.admission() != self.admission
+            || !action.verify()
+        {
+            return Err(refused());
+        }
+        self.validate_accounts(store)?;
+        self.request = Some(Box::new(PendingMemberRequest::adopt(
+            store, token, original,
+        )?));
+        Ok(())
     }
 
     /// Anchor and verifier, once. The anchor comes from the authenticated original pin and
@@ -681,8 +897,8 @@ impl V2MemberLane {
         }
     }
 
-    /// Retire the request and fee. Unsaved negatives are permanent for this lane; old
-    /// saved tokens remain protected by mandatory exact durable lookup after cache eviction.
+    /// Retire the request and its fee. Unsaved negatives are permanent for this lane;
+    /// saved tokens rely on exact durable lookup once their positive cache entry expires.
     /// Returns, for `Saved`, whether the outbox's saved original is the one this lane lent.
     fn finish(&mut self, token: [u8; 32], mode: FinishMode) -> Result<bool, AppError> {
         let pending = self
@@ -694,7 +910,11 @@ impl V2MemberLane {
         // state below never hides a completed original behind `Pending`.
         pending.complete_cached();
         let same = match (&pending.signed, mode) {
-            (SignedState::Lent(lent), FinishMode::Saved(saved)) => *lent == saved,
+            (SignedState::Lent(lent), FinishMode::Saved(saved) | FinishMode::SavedHit(saved)) => {
+                *lent == saved
+            }
+            // An exact stored hit retires an in-memory original that never left this lane.
+            (SignedState::Pending | SignedState::Complete(_), FinishMode::SavedHit(_)) => false,
             (SignedState::Lent(_), FinishMode::ForgetLent) => false,
             // Discarding an original that never left process memory publishes nothing. A
             // Pending request may hold a terminal unverifiable raw; that is dropped too.
@@ -702,6 +922,8 @@ impl V2MemberLane {
             _ => return Err(refused()),
         };
         if matches!(mode, FinishMode::Abandon | FinishMode::ForgetLent) {
+            // New Pending/adopted requests reserve this slot before any key/RNG entry.
+            // Final retirement cannot fail for pressure or allocate another buffer.
             debug_assert!(self.retired_unsaved.len() < MAX_UNSAVED_RETIREMENTS);
             self.retired_unsaved.push(token);
         } else {
@@ -721,6 +943,8 @@ impl V2MemberLane {
 enum FinishMode {
     /// The outbox reported SavedLocal/AlreadySaved; the receipt's ActionId.
     Saved(ActionId),
+    /// An exact authoritative outbox hit for this token (any lane state); the stored ActionId.
+    SavedHit(ActionId),
     /// No original was handed out (Pending) or it never left this lane (Complete).
     Abandon,
     /// The lent value was lost and the outbox lookup proved Absent.
@@ -734,9 +958,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// is cached in this host for [`Self::take_member_signed_original`].
     ///
     /// Refuses (never authors) when: the host has not completed its empty promotion, founder
-    /// Create state exists on this host, another token is pending, the token is negatively
-    /// retired or positively cached, negative-retirement capacity is full, the selected O
-    /// is no longer generation 1, or the source/lock
+    /// Create state exists on this host, another token is pending, the token was abandoned
+    /// or forgotten (or remains in the positive saved cache), negative-retirement capacity
+    /// is exhausted, the selected O is no longer generation 1, or the source/lock
     /// closed. A completed original stays retrievable after lock (historical DATA).
     pub(in crate::store) fn retry_sign_member_request(
         &mut self,
@@ -806,8 +1030,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     }
 
     /// The outbox reported SavedLocal or AlreadySaved for this token: release the request and
-    /// its fee. The token remains protected by exact durable lookup when its positive
-    /// cache entry expires. `saved_action` is the
+    /// its fee. The durable exact lookup prevents this token authoring again after the
+    /// rolling positive cache evicts it; callers MUST perform that lookup. `saved_action` is the
     /// receipt's ActionId. Returns `true` when that is the original this lane lent. `false`
     /// means AlreadySaved named an EARLIER original (for example the same request signed
     /// under another nonce before a restart): the caller must drop its lent copy and never
@@ -862,6 +1086,35 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             .ok_or_else(refused)?
             .finish(token, FinishMode::ForgetLent)
             .map(|_| ())
+    }
+
+    /// The member lane for saving a RETAINED original (recovered-DATA custody), created with
+    /// the same founder-lane exclusion as authoring when this host has none (a replacement host
+    /// on the same Store). Unlike authoring, a new lane is installed without a verifier: it
+    /// holds the adopted lent work and signs nothing until a later authoring call builds its
+    /// verifier under the usual gates.
+    pub(super) fn ensure_member_lane(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<&mut V2MemberLane, AppError> {
+        if self.member.is_none() {
+            if self.selected.is_none()
+                || self.lookup.is_some()
+                || self.request_preparation.is_some()
+                || self.resident.is_some()
+                || self.next_request_preparation.is_some()
+            {
+                return Err(refused());
+            }
+            let store = layout.checked_store()?;
+            let lane = {
+                let owner = self.owner.borrow_current()?;
+                let observer = self.observer.as_ref().ok_or_else(refused)?;
+                V2MemberLane::prepare(store, &owner, observer)?
+            };
+            self.member = Some(Box::new(lane));
+        }
+        self.member.as_deref_mut().ok_or_else(refused)
     }
 }
 

@@ -133,6 +133,10 @@ pub struct V2CurrentLayoutPolicy {
     pub(in crate::store) archive: ArchiveBootstrapCatalogPolicy,
     pub(in crate::store) canonical: CanonicalFilenameInventoryPolicy,
     pub(in crate::store) persistent_capacity: usize,
+    /// The concrete namespace5 (ordinary-member outbox) handler. `None` keeps this opener's
+    /// grammar exactly as before: an ID5 entry or member-outbox fixed artifact refuses before
+    /// any old cleaner. Trusted Rust configuration only, never decoded from storage.
+    pub(in crate::store) member_outbox: Option<super::member_outbox_layout::V2MemberOutboxPolicy>,
 }
 impl std::fmt::Debug for V2CurrentLayoutPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -152,9 +156,25 @@ impl V2CurrentLayoutPolicy {
             archive,
             canonical,
             persistent_capacity,
+            member_outbox: None,
         };
         policy.require_persistent_capacity()?;
         Ok(policy)
+    }
+
+    /// Install the concrete namespace5 handler for ordinary-member outbox storage. Opening
+    /// with it declares and mounts ID5 (independently of governance4) and admits ID5 in this
+    /// opener's catalog grammar. Its separate member pool and quotas never share credit with
+    /// the archive/JOIN pool; the declaration's own transient fee stays on that pool.
+    pub fn with_member_outbox(
+        mut self,
+        member_outbox: super::member_outbox_layout::V2MemberOutboxPolicy,
+    ) -> Result<Self, AppError> {
+        member_outbox.require_capacity()?;
+        member_outbox.require_independent_of(&self.archive.pending.pool)?;
+        self.member_outbox = Some(member_outbox);
+        self.require_persistent_capacity()?;
+        Ok(self)
     }
     /// Repeat this trusted negative policy check at actual opening/writing, not only while
     /// constructing a cloneable configuration. It is logical fixed-file capacity, not disk
@@ -249,7 +269,14 @@ const _: () = assert!(
 /// initial common opening pays its own reads/gates; only after that phase drops do we acquire
 /// an ID2 retained-candidate fee (if needed), release it after completion, then acquire ID3's.
 pub struct PreparedV2CurrentLayoutStore {
-    archive: Option<PreparedArchiveBootstrapStore>,
+    // FIRST: an unfinished namespace5 declaration's original Files and large copies drain
+    // before the Store below releases its actual vault session.
+    member_declaration: Option<Box<super::member_outbox_layout::Declaration>>,
+    member_declaration_fee: Option<CatalogReadReservation>,
+    // Boxed so the owning refusal `into_current_layout_store -> Err(Self)` stays a small
+    // move (`clippy::result_large_err`) now that the namespace5 slots above exist. Boxing
+    // changes neither drop order nor which fee pays for the archive phase.
+    archive: Option<Box<PreparedArchiveBootstrapStore>>,
     store: Option<Box<ServerStore>>,
     declaration: Option<Box<Declaration>>,
     declaration_fee: Option<CatalogReadReservation>,
@@ -313,13 +340,15 @@ impl PreparedV2CurrentLayoutStore {
                 .pool
                 .try_reserve(archive_bootstrap::DECLARATION_FEE)?;
             (
-                Some(PreparedArchiveBootstrapStore::from_private_current_open(
-                    store, phase_fee,
-                )?),
+                Some(Box::new(
+                    PreparedArchiveBootstrapStore::from_private_current_open(store, phase_fee)?,
+                )),
                 None,
             )
         };
         Ok(Self {
+            member_declaration: None,
+            member_declaration_fee: None,
             archive,
             store,
             declaration: None,
@@ -333,11 +362,11 @@ impl PreparedV2CurrentLayoutStore {
     pub fn retry(&mut self, rng: &mut impl CryptoRngCore) -> Result<(), AppError> {
         if let Some(archive) = self.archive.as_mut() {
             archive.retry(rng)?;
-            let archive = self.archive.take().ok_or_else(refused)?;
+            let archive = *self.archive.take().ok_or_else(refused)?;
             match archive.into_store() {
                 Ok(store) => self.store = Some(Box::new(store)),
                 Err(archive) => {
-                    self.archive = Some(archive);
+                    self.archive = Some(Box::new(archive));
                     return Err(refused());
                 }
             }
@@ -390,6 +419,18 @@ impl PreparedV2CurrentLayoutStore {
         }
         store.initialize_current_lineage_index()?;
         store.validate_mounted_current_layout()?;
+        if store.member_outbox_policy().is_some() {
+            // Declaration debts are serial: the completed ID3 declaration's large copies and
+            // fee drain BEFORE namespace5 reserves its own declaration fee.
+            drop(self.declaration.take());
+            drop(self.declaration_fee.take());
+            store.retry_member_outbox_layout_declaration(
+                &mut self.member_declaration,
+                &mut self.member_declaration_fee,
+                rng,
+            )?;
+            store.validate_mounted_current_layout()?;
+        }
         self.complete = true;
         Ok(())
     }
@@ -397,10 +438,11 @@ impl PreparedV2CurrentLayoutStore {
     /// Owning refusal retains SAME physical Store/candidates/fees; no raw Store escapes.
     pub fn into_current_layout_store(mut self) -> Result<V2CurrentLayoutStore, Self> {
         if !self.complete
-            || self
-                .store
-                .as_ref()
-                .is_none_or(|store| store.validate_mounted_current_layout().is_err())
+            || self.store.as_ref().is_none_or(|store| {
+                store.validate_mounted_current_layout().is_err()
+                    || (store.member_outbox_policy().is_some()
+                        && store.validate_mounted_member_outbox_layout().is_err())
+            })
         {
             return Err(self);
         }
@@ -409,6 +451,8 @@ impl PreparedV2CurrentLayoutStore {
         };
         // Destructure rather than dropping a phase fee while its exact ciphertext survives.
         let Self {
+            member_declaration,
+            member_declaration_fee,
             archive: _,
             store: _,
             declaration,
@@ -416,6 +460,8 @@ impl PreparedV2CurrentLayoutStore {
             complete: _,
             _wrapper_fee,
         } = self;
+        drop(member_declaration);
+        drop(member_declaration_fee);
         drop(declaration);
         drop(declaration_fee);
         Ok(V2CurrentLayoutStore {
@@ -439,6 +485,16 @@ impl V2CurrentLayoutStore {
     }
     pub(in crate::store) fn checked_store(&self) -> Result<&ServerStore, AppError> {
         self.store.validate_mounted_current_layout()?;
+        Ok(&self.store)
+    }
+    /// Cached negatives ONLY, for a final edge that must perform no IO (the member-save
+    /// admission under the native commit guard): the physical chat mount is not revoked. Work
+    /// that may do IO uses [`Self::checked_store`], which re-proves the marker files; the edge's
+    /// own consumers check their cached mount identities separately.
+    pub(in crate::store) fn cached_store(&self) -> Result<&ServerStore, AppError> {
+        if self.store.chat_mount.observer().is_cancelled() {
+            return Err(refused());
+        }
         Ok(&self.store)
     }
 }

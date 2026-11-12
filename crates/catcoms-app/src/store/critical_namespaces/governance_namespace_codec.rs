@@ -6,7 +6,7 @@
 //! DATA here is never Saved, SDK/key, source, publication or disposal authority.
 
 use super::{archive_current_namespace_codec as current, catalog_envelope as outer};
-use super::{pending_join_codec as prior, refused, MAX_ENTRIES};
+use super::{catalog_declaration, pending_join_codec as prior, refused, MAX_ENTRIES};
 use crate::AppError;
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
@@ -86,9 +86,11 @@ fn original_data<'a>(
     domain: &[u8; 32],
 ) -> Result<(outer::Envelope<'a>, GovernanceLayoutData), AppError> {
     // This is DATA grammar validation, not selection of a runtime JOIN executor.
-    // The existing complete parser accepts only its actual known JOINv1/v2, ID2,
-    // and ID3. No namespace3 parser/descriptor is widened or relaxed here.
-    let parsed = prior::parse_current_layout(raw, domain, true)?;
+    // The complete parser accepts only its actual known JOINv1/v2, ID2, ID3 and an
+    // already declared member-outbox ID5 (which the new4 is inserted before, byte for
+    // byte). An existing4 refuses. No namespace3 parser/descriptor is widened here;
+    // the configured opener's own grammar still decides runtime support of ID5.
+    let parsed = prior::parse_governance_declaration_original(raw, domain)?;
     let layout = parsed.current_layout.ok_or_else(refused)?;
     let archive = parsed.archive.as_ref().ok_or_else(refused)?;
     if layout.vault != *domain || archive.vault != layout.vault || archive.root != layout.root {
@@ -127,7 +129,9 @@ fn candidate_len(original: usize) -> Result<usize, AppError> {
         .ok_or_else(refused)
 }
 
-/// Produce a complete catalog successor DATA candidate, with exactly one new4.
+/// Produce a complete catalog successor DATA candidate, with exactly one new4 at its
+/// sorted position: appended when every existing ID is below 4 (byte-identical to the
+/// earlier append-only builder), or inserted before an existing member-outbox ID5.
 /// Caller must fund the original input, candidate buffer, parser metadata and later
 /// sealing/ciphertext overlap independently BEFORE calling. There is no payer here.
 /// A future declaration seed must retain BOTH whole original and candidate frames;
@@ -137,68 +141,43 @@ pub(super) fn prepare_declaration_data(
     domain: &[u8; 32],
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
     let (old, layout) = original_data(original, domain)?;
-    let generation = old.generation.checked_add(1).ok_or_else(refused)?;
-    let count = old
-        .count
+    old.generation.checked_add(1).ok_or_else(refused)?;
+    old.count
         .checked_add(1)
         .filter(|n| *n <= MAX_ENTRIES)
         .ok_or_else(refused)?;
-    let length = candidate_len(original.len())?;
+    candidate_len(original.len())?;
     // Overflow/whole-envelope/namespace checks finish before growing any encoder.
     let descriptor = layout.encode_data()?;
-    let mut e = Encoder::with_capacity(length);
-    e.put_str(outer::TAG_V2).map_err(|_| refused())?;
-    e.put_bytes(domain).map_err(|_| refused())?;
-    e.put_u64(generation);
-    // WHOLE prior plaintext digest, never its ciphertext/frame identity.
-    e.put_bytes(&old.digest).map_err(|_| refused())?;
-    e.put_u32(u32::try_from(count).map_err(|_| refused())?);
-    for index in 0..old.count {
-        let entry = old.entry(index)?;
-        e.put_u32(entry.id).put_u32(entry.version);
-        e.put_bytes(entry.payload).map_err(|_| refused())?;
-    }
-    e.put_u32(NAMESPACE_ID).put_u32(NAMESPACE_VERSION);
-    e.put_bytes(&descriptor).map_err(|_| refused())?;
-    if e.len() != length {
-        return Err(refused());
-    }
-    let candidate = Zeroizing::new(e.finish());
+    let candidate = catalog_declaration::insert_entry_data(
+        original,
+        domain,
+        NAMESPACE_ID,
+        NAMESPACE_VERSION,
+        &descriptor,
+    )?;
     validate_declaration_pair_data(original, &candidate, domain)?;
     Ok(candidate)
 }
 
-/// Validate one exact original→declaration DATA pair. Neither a complete MAC nor
-/// this pair comparison is an admitted write, mounted capability or Source result.
+/// Validate one exact original→declaration DATA pair: one inserted4, every other
+/// entry (including an existing ID5) byte-identical in order, checked generation and
+/// whole-plaintext parent. Neither a complete MAC nor this pair comparison is an
+/// admitted write, mounted capability or Source result.
 pub(super) fn validate_declaration_pair_data(
     original: &[u8],
     candidate: &[u8],
     domain: &[u8; 32],
 ) -> Result<(), AppError> {
-    let (old, expected) = original_data(original, domain)?;
-    let next = outer::parse(candidate, domain, outer::MAX_ENVELOPE_PLAIN)?;
-    if next.format != outer::Format::Namespaces
-        || old.generation.checked_add(1) != Some(next.generation)
-        || next.parent != Some(old.digest)
-        || old.count.checked_add(1) != Some(next.count)
-    {
-        return Err(refused());
-    }
-    for index in 0..old.count {
-        let before = old.entry(index)?;
-        let after = next.entry(index)?;
-        if before.id != after.id
-            || before.version != after.version
-            || before.payload != after.payload
-        {
-            return Err(refused());
-        }
-    }
-    let added = next.entry(old.count)?;
-    if added.id != NAMESPACE_ID || added.version != NAMESPACE_VERSION {
-        return Err(refused());
-    }
-    GovernanceLayoutData::decode_data(added.payload, expected)?;
+    let (_, expected) = original_data(original, domain)?;
+    let added = catalog_declaration::validate_insert_pair_data(
+        original,
+        candidate,
+        domain,
+        NAMESPACE_ID,
+        NAMESPACE_VERSION,
+    )?;
+    GovernanceLayoutData::decode_data(added, expected)?;
     Ok(())
 }
 

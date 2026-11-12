@@ -6,6 +6,7 @@ use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
+mod member_outbox;
 mod review_regressions;
 
 const SECRET: &[u8] = b"actual private governance metadata mount";

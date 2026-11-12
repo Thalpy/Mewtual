@@ -38,8 +38,56 @@ model's cooperative-directory assumption).
 
 ## Namespace and context
 
-One namespace `mo-<64 hex context id>` per member context, under a separately held parent
-directory that the primary provisions (never inside a closed founder/group inventory).
+One namespace `mo-<64 hex context id>` per member context, under the parent directory of
+the declared critical namespace5 (below; never inside a closed founder/group inventory).
+
+### Declared namespace5 (member outbox layout)
+
+Critical catalog namespace5/version1 declares the member-outbox layout. Its descriptor is
+the tag `catcoms/private-chat-v2-member-outbox-layout/v1\0`, u16 version1, then three
+length-framed b32 fields: vault, root and BLAKE3 of
+`catcoms/private-chat-v2-member-outbox-current-descriptor/v1\0 || u64 BE length || exact ID3
+descriptor`. Its fixed objects:
+
+```text
+<vault>/chat-critical-namespaces.member-outbox.seed   transient two-catalog declaration seed
+<vault>/chat-owner-v2/member-outbox-layout.bin        sealed marker: the exact descriptor
+<vault>/chat-owner-v2/member-outbox-v1/               parent of every mo-<context> namespace
+```
+
+- Namespace5 is independent of governance4 and either may be declared first. Every
+  declaration (4 or 5) inserts exactly one entry at its sorted position over the whole
+  original catalog (`catalog_declaration`), keeping every other entry byte for byte, with
+  checked generation + 1 and the whole-plaintext parent digest. For a catalog whose IDs
+  are all below the new one this equals the earlier append-only bytes.
+- Only an opener whose `V2CurrentLayoutPolicy` carries `with_member_outbox(..)` reads ID5
+  or its artifacts. Every other opener refuses them before any cleaner.
+- Binaries that predate ID5 are fenced in two ways:
+  - during the declaration, by an owned empty legacy catalog stage. It precedes every
+    content-bearing member output, until the declaration commits or its abandonment starts;
+  - afterwards, by their closed grammar.
+
+  CI checks this against the real predecessor commit `ce402364`. Every JOIN transition
+  preserves ID5 exactly.
+- The declaration follows governance4's protocol (empty stage fence, seed, marker, parent
+  directory, candidate stage, rename, seed removal), preceded by a zero-byte claim of the
+  seed name. Every fence therefore has a claim beside it.
+  - **Complete authenticated seed:** cold recovery finishes the declaration.
+  - **First seed that never authenticated:** the declaration is abandoned. The cold
+    inspector unlinks the zero-byte fence, then the seed. Each unlink is followed by a
+    directory barrier and a proof that the name is gone. The warm retry then declares
+    afresh. This happens only when there is no marker, no parent and no ID5 in the
+    authenticated current catalog.
+  - **Anything else without a complete seed** is preserved and refused: orphan markers or
+    directories, a lost marker, an authenticated but invalid seed, and any stage that is not
+    a valid ordinary successor.
+
+  [Recovery design](CHAT-V2-NAMESPACE5-RECOVERY.md).
+- Declared from the Current3 opener after ID3, or from the governance opener after ID4,
+  serially after that opener's own declaration debt. Declaring 5 never creates or implies 4.
+- `V2MemberOutboxPolicy` supplies an independent pool (sized by
+  `V2MemberOutboxPolicy::required_capacity`), the persistent quotas and the per-Store
+  context bound. The declaration's transient fee stays on the catalog/JOIN pool.
 
 The context ID is a domain-separated hash of vault, layout root, trusted pin, Profile,
 Profile tenure, original group nonce, full device key and group. Transport epoch and the
@@ -113,11 +161,13 @@ dropping a row), and the quota check, all before admission.
 ### Admission edge
 
 `PreparedMemberAppend::admission_facts()` names the context, selected parent head, ordinal,
-token, request digest, ActionId, original digest and original Admission. The primary's real
-member-source guard must check the original member-source generation and the native/UI
-session generation against those facts at the final edge and produce a
-`MemberOutboxSaveAdmission` carrying a `VaultPhysicalWorkLease`. That production constructor
-does not exist yet; the only constructor is cfg(test) and grants durability only.
+token, request digest, ActionId, original digest and original Admission. The one production
+issuer of `MemberOutboxSaveAdmission` is the operational host's member-save final edge
+(below): it issues the member lane's own save-source end for exactly these facts, re-checks
+the Store's member-outbox mount, observes the native session authority last, and only then
+calls `at_member_save_final_edge(facts, lease)`. The constructor is visible to
+`persistence` because the host is a sibling subtree; the facts alone are labels. The
+cfg(test) constructor grants durability only.
 
 `admit` refuses, returning every input unchanged, unless the admission names exactly the
 prepared facts and the owner still selects the prepared parent. The admitted worker then
@@ -142,6 +192,99 @@ contract that the integration code must follow, not something the outbox can enf
 
 `lookup` refuses with `NeedsRecovery` until a pending WAL is resolved, so an `Absent` answer
 always comes from a recovered, selected head.
+
+## Production save path
+
+The approved boundary is [CHAT-V2-MEMBER-SAVE-HANDOFF](CHAT-V2-MEMBER-SAVE-HANDOFF.md). Root
+implements it; the native producer that calls it is F's and does not exist yet.
+
+### Store mount and custody cells
+
+`ServerStore::member_outbox_mount()` installs, once per physical mount, a
+`MemberOutboxMount` from the declared namespace5 layout: the mount's registry, the production
+parent (`MemberOutboxParentDirectory::from_mount`, held by the mount's original directory
+identity after re-proving the whole mount) and a table of per-context cells bounded by
+`V2MemberOutboxPolicy::max_contexts`, each paid from the independent member pool. The engine
+key is the vault database key, as the Formats section specifies.
+
+A cell lives with the Store, not the host. It holds the idle exclusive owner and at most one
+request's custody DATA:
+
+| Custody | Meaning | Next phase-1 call |
+|---|---|---|
+| `Prepared` | presealed, not admitted (exact original inside) | `Ready`; adopts it into a replacement lane if needed |
+| `Running` | a job owns the owner; the exact original stays in the cell | `Busy` |
+| `Unresolved { lost }` | uncertain run, unwound job (`lost`), or mismatched de-admission | recover the owner, look up with the original's OWN request: Hit settles it, Absent re-preseals the SAME original; never signs |
+| `Saved` | SavedLocal cached by the job before it released anything | tells the lane, reports the receipt |
+
+A cell never holds a save-source end, physical lease or native commit guard; those move with
+the job. Phase 1 keeps custody in the cell across every lane and IO call (an original leaves
+it only for pure DATA sealing) and recovers a poisoned cell, since every state write is a
+single assignment; the final edge refuses a poisoned cell. Every phase-1 shortcut compares
+the caller's request digest, so a same-token retry with changed DATA is `Conflict` whether
+the request is presealed, cached Saved, Unresolved or durable. Another token's retained
+original is reported as `Retained { token }` so a composer can resume it.
+
+Primary M4 decision: retain bounded exact signed-original DATA across a UI lock;
+do not discard the only unsaved copy. This does not retain save/publication authority:
+a later invocation needs fresh native generation/row and actual source checks.
+No UI-lock plaintext-erasure guarantee is made, and memory-only custody is never
+reported as SavedLocal.
+
+Fresh authoring rechecks the native negative after namespace recovery/lookup IO;
+that negative is not F's actual close/key credential. Before fallible append payment,
+the Store cell owns the known original as Unresolved. A retryable preseal refusal
+cannot leave it solely in a replaceable host. Once its cell is locked, that call's
+bounded context/canonical-parent scratch is funded from a named, checked part of
+the existing slot allowance; it drops before unlock. Engine lookup/recovery fees
+remain separate and may drain without refunding the scratch's payer early.
+Save-source issuance/close stays serialized, while end retirement is atomic and
+does not acquire the issuance mutex under native custody.
+
+### Phases
+
+- `PreparedV2TextHost::prepare_member_save` (phase 1, no native UI commit custody): funds
+  the lookup, derives the stable context from historical DATA (mounted layout vault and root,
+  `V2GroupPinId::of` the exact original pin ciphertext, Profile ID and initial tenure, the
+  Profile's `creation` nonce, the full device key, the group), settles any earlier custody
+  without signing, runs the exact lookup BEFORE any authoring (Hit is reconciled with the
+  lane and reported Saved; Conflict refuses; read failures are errors), then signs through
+  the member lane, takes the original and preseals it into the cell. The `prepare_append`
+  refusal table above is applied; the original is restored to the lane on every retryable
+  refusal.
+- `PreparedV2TextHost::admit_member_save` (phase 2, under the native commit guard): no IO,
+  no payment wait, no allocation, fail-fast locks only. Requires `Prepared` custody for the
+  token and an admissible idle owner, then the lane's save-source end, then the cached mount
+  negatives, then the native session's cancellation authority (the linearization point).
+  Every refusal returns the native custody whole and keeps the presealed DATA.
+- `MemberSaveJob::run` (native-owned `spawn_blocking`): commits, deposits `Saved` or
+  `Unresolved` and the owner into the cell, then drops the source end and the native custody
+  LAST. Dropping the job unrun de-admits with no IO (the exact presealed append returns to
+  the cell; the next attempt needs a fresh final edge). An unwind leaves the original in the
+  cell as `Unresolved { lost: true }`.
+
+### Save-source lifecycle
+
+The member lane owns one serialized lifecycle shared by end issuance and close: a closed flag
+and monotone issued/completed counters under one mutex (active = issued - completed, at most
+one). The lane's `cancel` closes it; its `try_closed` requires the member domain's group close
+AND every issued end dropped, so a host close stays pending while an admitted job does IO and
+can finish after cancellation. Issuance refuses after close, while the member domain's source
+negative is not live, at the bound, or when poisoned. The lifecycle body holds the member
+domain's paid negative and its own fee, never a Host, Store or SDK backlink.
+
+### Lane hooks
+
+`canonical_member_parents` is shared with the driver; `admit_save_source` checks the bound
+context, the token Lent with exactly the ActionId and the request's historical Admission (the
+Plan's, or an adopted original's); `reconcile_saved` retires only the matching token's request
+(Lent: reports whether the lent original is the stored one; Pending/Complete: only when the
+stored spec is this exact request); `adopt_retained_original` lets a replacement lane hold a
+retained original as Lent without a Draft or Plan, so it is saved without signing again.
+
+Residual: an original moved into `prepare_append` would be lost if that pure DATA sealing
+panicked; the next call then finds the lane Lent with no custody and retires the token after
+an exact Absent lookup instead of signing again.
 
 ## Recovery
 
@@ -256,25 +399,34 @@ settlement, stale and foreign batches, and audit after debt clears.
 
 ## Remaining integration gaps
 
-- Production orchestration connecting `MemberSignedOriginal::from_completed_plan`
-  to the real save admission. The constructor and historical Admission getter are
-  implemented and tested; neither grants source, save or publication authority.
+The primary's approved A/B/F implementation boundary is recorded in
+[CHAT-V2-MEMBER-SAVE-HANDOFF](CHAT-V2-MEMBER-SAVE-HANDOFF.md). Root now implements the save
+path above; all 18 focused Windows save cases now pass in the independent CI lane,
+alongside 57 storage/catalog executions on both Linux and Windows. Strict/full/native
+gates remain incomplete. [Current evidence](../HANDOVER.md).
+
+- The native producer (F): the checked factory that builds `MemberSaveNativeAdmission`
+  from the actual owned UI commit guard and row custody, the per-server-incarnation entry,
+  lock order, `spawn_blocking` dispatch and the native barrier tests. Root fixtures use a
+  test custody box and establish no native authorization.
 - Request persistence above the host: lookup recovers a save only from the SAME token,
   channel, body and exact canonical parent list. Parents are the request's explicit list
   (never recomputed from tips), so the request composer must persist the exact parent list it
   sent; a retry after restart with different parents is a conflict by design, not a hit.
-- The production `MemberOutboxSaveAdmission` issuer: the real member-source generation and
-  native/UI-session guard at the final edge.
-  Its current facts-plus-vault-lease representation does not own native lock
-  completion. Production must move real native commit ownership and original
-  source completion ownership into the running job through SavedLocal caching
-  and IO/cleanup, including when the IPC receiver disappears. A borrowed guard
-  retained only by that receiver is insufficient.
-- Production `MemberOutboxParentDirectory` provisioning inside a declared critical
-  namespace, and registry placement beside the Store's session guard.
+- True host replacement on one Store (a second whole original owner) is not exercised; the
+  regressions replace the member lane under the same owner. The cell is memory and the
+  engine's restart-equivalent cases resolve lookup from the durable outbox; they do not
+  establish whole-Host reopen. The actual cold-genesis factory rejects a promoted
+  operational head. A distinct cold-operational factory and genuine native bootstrap
+  are still required. [Native prerequisites](CHAT-V2-NATIVE-MEMBER-SAVE-NEXT.md).
+- Nonfounder sends and the joined-member source (C), including enforcing the original
+  Admission's actual current lifetime at `admit_save_source`.
+- Member saves on a governance4 vault: the governance wrapper yields no Store or host, so
+  only the namespace5 declaration and mount work there today.
 - Pool sizing and the independent pool credits; these invoices are not measured fits.
 - Transport: resealing under the current envelope, persisting sender state before export,
-  and calling `record_submitted` only after transport accepts an envelope.
-- Removing the module's dead-code allowance once the above are wired.
+  and calling `record_submitted` only after transport accepts an envelope. Checkpoints are
+  not yet routed through the cell (a checkpoint must take the idle owner the same way).
+- Removing the module's dead-code allowance once transport consumes the publication half.
 - A durable per-attempt epoch record is not kept; add one only if diagnostics need it.
 - Two-device or native acceptance of the outbox is not covered by these storage tests.

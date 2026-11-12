@@ -22,11 +22,13 @@ pub(in crate::store) use genesis_seed::{
 pub(in crate::store) mod v2_genesis_activation;
 pub(in crate::store) use genesis_seed::{GenesisCurrentOwnerRef, GenesisSourceDataRef};
 pub use genesis_seed::{
-    GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
-    PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
-    PreparedV2GenesisCurrent, PreparedV2TextHost, PreparedV2TextRead, RetainedBootstrapGenesisSeed,
-    ReturnedBootstrapSourceData, UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
-    UnexposedV2GenesisCurrent, V2TextHostPolicy,
+    GenesisSeedBudget, GenesisSeedRefusal, MemberSaveJob, MemberSaveJobReport,
+    MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing,
+    PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, PreparedV2TextHost,
+    PreparedV2TextRead, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
+    UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
+    V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
+    V2TextHostPolicy,
 };
 
 const MAX_PATH: usize = 32 * 1024;

@@ -246,8 +246,10 @@ pub(in crate::store) struct MemberRequestData<'a> {
 }
 impl MemberRequestData<'_> {
     /// Bounded digest. Oversized DATA is refused rather than hashed, so an absurd lookup
-    /// cannot be mistaken for a conflict with a real stored request.
-    pub(super) fn digest(
+    /// cannot be mistaken for a conflict with a real stored request. The member-save driver
+    /// compares it against retained custody so a same-token retry with different DATA is a
+    /// conflict there too, not only at lookup.
+    pub(in crate::store) fn digest(
         &self,
         context: MemberOutboxContextId,
     ) -> Result<MemberRequestDigest, AppError> {

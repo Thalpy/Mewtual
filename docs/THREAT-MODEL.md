@@ -17,6 +17,57 @@ receipt. Append reserves bounded checkpoint quota before admission and never evi
 external ENOSPC, lowered policy or finite trie exhaustion can still stop progress.
 Production source/UI admission and sender-state persistence remain required.
 
+Its parent is the declared critical namespace5 (focused Linux/Windows storage cases
+executed; see HANDOVER for current evidence). Only an opener
+configured with the member-outbox handler reads ID5 or its seed, marker and parent
+directory; every other opener refuses them before any cleaner.
+
+Binaries that predate ID5 are fenced in two ways:
+- during the declaration, by the same empty legacy catalog stage governance4 uses;
+- afterwards, by their closed grammar.
+
+The fence precedes every content-bearing member output, until the declaration commits or
+its abandonment starts. A zero-byte claim of the seed name comes before the fence.
+Predecessor refusal is checked in CI against the real `ce402364` code.
+
+This is fail-closed refusal, not protection against a local process that rewrites the
+private directory.
+
+A first declaration seed that never authenticated is abandoned: the zero-byte fence and the
+unauthenticated seed are unlinked, and the namespace is declared afresh. Two conditions
+apply:
+- **Only when nothing downstream exists:** no marker, no parent, and no ID5 in the
+  authenticated current catalog.
+- **Each unlink is proven before the next object is touched:** a barrier follows it, and the
+  name must then read NotFound.
+
+"Undeclared" never rests on the seed, and an authenticated but invalid seed is preserved.
+Residuals are listed in the recovery design: bit rot in a complete seed before its marker
+exists, other writers' zero-byte stages in the claim window, and future seed formats under
+another key domain. Declaring ID5 grants no governance, member-source or save authority.
+[Recovery design](communication-recovery/CHAT-V2-NAMESPACE5-RECOVERY.md).
+
+Member saves (18 focused Windows save cases passed; no native caller).
+See HANDOVER for the separate incomplete native/restart boundaries. The only issuer of a
+save admission is the host's final edge: the member lane's own save-source end for the exact
+prepared facts (bound context, token Lent with the ActionId, the request's historical
+Admission), then cached mount negatives, then the native session authority as the
+linearization point. Historical Admission labels are not present authority; the
+joined-member source must still enforce the original Admission's current lifetime there.
+The erased native custody is ownership, not authentication: root cannot verify it, so native
+authorization rests on the native consumer's checked factory. Lookup runs before any signing
+and a read failure is never absence. Store-scoped custody cells hold DATA only (never a
+source end, lease or native guard); an uncertain, unwound or unrun save keeps its exact
+original there and is resolved by recovery and lookup, never by signing again. A residual
+panic inside pure DATA sealing can lose an in-hand original; the token is then retired after
+an exact Absent lookup rather than re-signed. A same-token retry with changed DATA is always a
+conflict, never reported as saved. The primary's M4 decision retains bounded plaintext
+originals across a UI lock rather than discarding the only unsaved copy. This is DATA only:
+lock revokes old native authority, and a later save/publication requires fresh actual native
+generation/row and source checks. Retention never renews an earlier invocation or claims
+RAM erasure at UI lock. Store/cache destruction and process loss remain distinct from local
+durable save; no SavedLocal result is issued for memory-only custody.
+
 ## Ordinary-member signer (11 November; focused checks passed, inactive)
 
 The founder acting as an ordinary member signs with the SAME retained device of its whole

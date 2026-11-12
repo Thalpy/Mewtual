@@ -155,11 +155,14 @@ impl ServerStore {
         if let Some(policy) = self.governance_layout_policy.as_ref() {
             return super::pending_join_codec::parse_governance_layout(plain, &domain, policy);
         }
-        if self.current_layout_policy.is_some() {
-            return super::pending_join_codec::parse_current_layout(
+        if let Some(policy) = self.current_layout_policy.as_ref() {
+            // Namespace5 is accepted only when THIS opener carries the concrete member-outbox
+            // handler; otherwise an ID5 entry refuses before any old cleaner.
+            return super::pending_join_codec::parse_configured_current_layout(
                 plain,
                 &domain,
                 execution.is_some(),
+                policy.member_outbox.is_some(),
             );
         }
         match (self.archive_bootstrap_policy.as_ref(), execution) {

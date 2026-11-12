@@ -755,6 +755,9 @@ impl ServerStore {
 
 #[cfg(test)]
 mod tests;
+// DATA-level pins that every JOIN re-encoder preserves namespace5 (and 4) exactly.
+#[cfg(test)]
+mod member_outbox_tests;
 
 fn encode_schedule(
     current: &codec::Parsed<'_>,
@@ -786,11 +789,7 @@ fn encode_schedule(
     output.put_bytes(domain).map_err(|_| refused())?;
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
-    output.put_u32(
-        1 + u32::from(current.archive.is_some())
-            + u32::from(current.current_layout.is_some())
-            + u32::from(current.governance.is_some()),
-    );
+    output.put_u32(preserved_entry_count(current));
     encode_join_entry_header(&mut output, current, payload)?;
     output
         .put_str(join_payload_tag(current)?)
@@ -865,10 +864,25 @@ fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError>
         (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
         _ => return Err(refused()),
     };
+    let member_outbox = match (current.member_outbox, current.member_outbox_payload) {
+        (None, None) => 0,
+        (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
+        _ => return Err(refused()),
+    };
     archive
         .checked_add(current_layout)
         .and_then(|n| n.checked_add(governance))
+        .and_then(|n| n.checked_add(member_outbox))
         .ok_or_else(refused)
+}
+
+/// Outer entry count of every JOIN re-encoding: the JOIN entry itself plus each preserved
+/// namespace descriptor. One definition so no writer can count a namespace it then omits.
+pub(super) fn preserved_entry_count(current: &codec::Parsed<'_>) -> u32 {
+    1 + u32::from(current.archive.is_some())
+        + u32::from(current.current_layout.is_some())
+        + u32::from(current.governance.is_some())
+        + u32::from(current.member_outbox.is_some())
 }
 
 /// Outer header only; payload version/tag/rows remain the actual JOIN consumer's contract.
@@ -905,6 +919,13 @@ fn append_original_archive(
     if let Some(payload) = current.governance_payload {
         output.put_u32(super::super::governance_namespace_codec::NAMESPACE_ID);
         output.put_u32(super::super::governance_namespace_codec::NAMESPACE_VERSION);
+        output.put_bytes(payload).map_err(|_| refused())?;
+    }
+    // Ascending ID order is preserved: 5 follows 4. The exact original descriptor bytes are
+    // re-emitted, never a re-created layout.
+    if let Some(payload) = current.member_outbox_payload {
+        output.put_u32(super::super::member_outbox_namespace_codec::NAMESPACE_ID);
+        output.put_u32(super::super::member_outbox_namespace_codec::NAMESPACE_VERSION);
         output.put_bytes(payload).map_err(|_| refused())?;
     }
     Ok(())
@@ -963,11 +984,7 @@ fn encode_added(
     output.put_bytes(domain).map_err(|_| refused())?;
     output.put_u64(current.generation.checked_add(1).ok_or_else(refused)?);
     output.put_bytes(&current.digest).map_err(|_| refused())?;
-    output.put_u32(
-        1 + u32::from(current.archive.is_some())
-            + u32::from(current.current_layout.is_some())
-            + u32::from(current.governance.is_some()),
-    );
+    output.put_u32(preserved_entry_count(current));
     encode_join_entry_header(&mut output, current, payload)?;
     output
         .put_str(join_payload_tag(current)?)

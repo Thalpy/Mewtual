@@ -34,6 +34,12 @@ fn archive(
     .with_bootstrap_source_data_read()
 }
 fn fixture(seed: u64) -> Fixture {
+    fixture_with(seed, false)
+}
+/// The same actual fixture; `member_outbox` additionally configures the concrete namespace5
+/// handler (on its own independent pool), so the Current3 opening declares and mounts the
+/// member-outbox parent. No member source, save or authority is created by the declaration.
+fn fixture_with(seed: u64, member_outbox: bool) -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     drop(
@@ -86,12 +92,29 @@ fn fixture(seed: u64) -> Fixture {
 
     // Independently open the physical declaration, read SourceSaved and restore the SDK.
     // No warm source write arm or owner crosses this mount boundary.
-    let policy = V2CurrentLayoutPolicy::new(
+    let mut policy = V2CurrentLayoutPolicy::new(
         archive(&pool),
         CanonicalFilenameInventoryPolicy::new(16, 144 * 1024 * 1024 + 1024 + 40).unwrap(),
         4 * critical_namespaces::archive_current_namespace_codec::MAX_DECLARATION_FRAME,
     )
     .unwrap();
+    if member_outbox {
+        let member_pool =
+            critical_namespaces::read_pool::CriticalCatalogReadPool::new(64 * 1024 * 1024).unwrap();
+        policy = policy
+            .with_member_outbox(
+                crate::store::V2MemberOutboxPolicy::new(
+                    member_pool,
+                    256,
+                    256 * 1024 * 1024,
+                    1 << 20,
+                    1,
+                    critical_namespaces::member_outbox_layout::codec::PERSISTENT_MINIMUM,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
     let mut opening =
         PreparedV2CurrentLayoutStore::open(directory.path(), SECRET, &mut rng, policy).unwrap();
     opening.retry(&mut rng).unwrap();
