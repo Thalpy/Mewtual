@@ -44,9 +44,9 @@ COHORTS = (
     ("sorted-declarations", "critical_namespaces::catalog_declaration", 4),
     ("namespace-codec", "critical_namespaces::member_outbox_namespace_codec", 6),
     ("join-producer", "critical_namespaces::pending_join::producer::member_outbox_tests", 2),
-    ("current-mount", "critical_namespaces::current_layout::tests::member_outbox", 16),
-    ("governance-mount", "critical_namespaces::governance_layout::tests::member_outbox", 7),
-    ("outbox-engine", "v2_member_outbox", 31),
+    ("current-mount", "critical_namespaces::current_layout::tests::member_outbox", 17),
+    ("governance-mount", "critical_namespaces::governance_layout::tests::member_outbox", 8),
+    ("outbox-engine", "v2_member_outbox", 32),
 )
 
 # The last commit before namespace5. Its source is never modified by this gate. The annotated
@@ -293,7 +293,7 @@ def run() -> None:
     directory.mkdir(parents=True, exist_ok=True)
     cohorts = list(COHORTS)
     if sys.platform == "win32":
-        cohorts.append(("member-save-host", "member_save", 18))
+        cohorts.append(("member-save-host", "member_save", 19))
     else:
         print("Windows-only member-save host cases are not claimed on this platform.")
     results: list[dict] = []

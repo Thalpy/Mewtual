@@ -157,6 +157,44 @@ impl SaveFixture {
 }
 
 #[test]
+fn abandoned_and_forgotten_tokens_stay_retired_across_sixty_four_real_saved_requests() {
+    for forgotten in [false, true] {
+        let mut f = saving(0x7fef0 + u64::from(forgotten));
+        let token = [0xe0; 32];
+        let body = create("retired before any outbox write");
+        let before = member_sign_dispatches_for_test();
+        f.host
+            .retry_sign_member_request(&f.layout, plain(token, &body))
+            .unwrap();
+        // Fresh vault, no member save has run and the outbox parent has no context. The
+        // original has never been written; neither retirement may rely on a saved receipt.
+        assert!(f.outbox_files().is_empty());
+        if forgotten {
+            drop(f.host.take_member_signed_original(token).unwrap());
+            f.host.forget_lent_member_request(token).unwrap();
+        } else {
+            f.host.abandon_member_request(token).unwrap();
+        }
+        for index in 0..64u8 {
+            f.save([index; 32], &create("a later actually saved message"));
+        }
+        assert_eq!(member_sign_dispatches_for_test(), before + 65);
+        let live = session();
+        assert!(f.prepare(token, &body, &live).is_err());
+        assert_eq!(
+            member_sign_dispatches_for_test(),
+            before + 65,
+            "old cancellation cannot sign again"
+        );
+        f.save(
+            [0xf0; 32],
+            &create("saved traffic has no sixty-four-message cliff"),
+        );
+        assert_eq!(member_sign_dispatches_for_test(), before + 66);
+    }
+}
+
+#[test]
 fn cancellation_during_namespace_initialization_refuses_before_fresh_signing() {
     struct CancelOnDraw<'a> {
         rng: &'a mut ChaCha20Rng,

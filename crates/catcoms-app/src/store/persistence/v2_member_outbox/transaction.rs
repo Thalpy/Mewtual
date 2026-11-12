@@ -57,6 +57,9 @@ use zeroize::Zeroizing;
 /// Every write/barrier/selector boundary. Tests inject a crash or a pause at each one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Cut {
+    NamespaceCreated,
+    NamespaceParentSyncPending,
+    NamespaceParentSynced,
     InitialStageWritten,
     WalStageWritten,
     WalMainNamed,
@@ -426,11 +429,6 @@ impl MemberOutbox {
             }
             .into());
         }
-        // Capacity applies only to new debt. Exact-token outcomes must remain
-        // recoverable when a lost reply leaves the queue completely full.
-        if head.data.pending() >= self.quota.max_pending {
-            return Err(MemberOutboxRefusal::Pressure(MemberOutboxPressure::Pending).into());
-        }
         let mut nodes = DiskNodes { ns: &self.ns, key };
         if lookup(
             context.id,
@@ -441,6 +439,13 @@ impl MemberOutbox {
         .is_some()
         {
             return Err(MemberOutboxRefusal::DuplicateAction.into());
+        }
+        // Capacity applies only to new debt, after BOTH token and ActionId lookup.
+        // An existing action under another token may already have been submitted: it
+        // must retain DuplicateAction semantics even when the queue is full. Pressure
+        // instead means this new action was not saved, which is a different promise.
+        if head.data.pending() >= self.quota.max_pending {
+            return Err(MemberOutboxRefusal::Pressure(MemberOutboxPressure::Pending).into());
         }
         // Author every immutable output exactly once, under the RNG seam.
         let pages = PreparedActionPages::prepare(context.vault, context.profile, action)

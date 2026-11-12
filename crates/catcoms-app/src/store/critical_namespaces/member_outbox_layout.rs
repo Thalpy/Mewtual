@@ -173,10 +173,13 @@ impl std::fmt::Debug for V2MemberOutboxPolicy {
 }
 
 /// Logical requirement for ONE context: its retained owner metadata and slot, plus every
-/// value that can be simultaneously retained for it. Open/recovery and append preparation
-/// never coexist for one owner (both need the exclusive owner and recovery consumes no
-/// prepared work), so the larger of the two counts once; a lookup hit, a debt batch held
-/// during publication and a prepared checkpoint can all coexist with prepared append work.
+/// value that the supported save path can simultaneously retain for it. `refresh_prepared`
+/// can recover an owner while its cell still holds an old prepared append (6+6 MiB today);
+/// it drops lookup payment before recovery and old append payment before replacement.
+/// The existing work allowance below (17 MiB today) covers that real overlap. It also
+/// inventories publication/checkpoint work, which is NOT yet connected to these cells.
+/// Before connecting it, recalculate all overlaps: recovery and prepared append are not
+/// mutually exclusive, and this formula is not proof that future combined work fits.
 const fn per_context_requirement() -> usize {
     let open_or_append = if MEMBER_OUTBOX_RECOVERY_FEE > MEMBER_OUTBOX_APPEND_FEE {
         MEMBER_OUTBOX_RECOVERY_FEE
@@ -287,6 +290,10 @@ pub(in crate::store) struct Declaration {
     pub(in crate::store) initial_current: pending_join::CreatedStage,
     pub(in crate::store) initial_current_frame: [u8; 32],
     pub(in crate::store) seed_file: Option<pending_join::CreatedStage>,
+    // A successful unlink is cached BEFORE closing handles/fallible barriers. On Windows
+    // our own open File would otherwise keep the name delete-pending across warm retries.
+    // Retained seed bytes still bind the same declaration; true only permits proving absence.
+    pub(in crate::store) seed_unlinked: bool,
     pub(in crate::store) stage_file: Option<pending_join::CreatedStage>,
     // Cold AlreadyPromoted only: an independently captured exact duplicate stage, retained
     // across every wait and re-compared before unlink. A warm owner never adopts one.
