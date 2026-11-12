@@ -38,11 +38,11 @@ impl MeshTransport for ProbeTransport {
     }
     async fn request(
         &self,
-        _: PeerId,
+        peer: PeerId,
         _: catcoms_rt::ProtocolId,
         _: bytes::Bytes,
     ) -> Result<bytes::Bytes, catcoms_rt::TransportError> {
-        Err(catcoms_rt::TransportError::Unreachable)
+        Err(catcoms_rt::TransportError::Unreachable(peer))
     }
     async fn request_cancellable(
         &self,
