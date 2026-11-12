@@ -63,10 +63,12 @@ use std::collections::VecDeque;
 /// Bounded live channel views per lane. Refuse beyond it; a view with a live Plan is never
 /// evicted (that would revoke the Plan's channel lifetime under an in-flight request).
 const MAX_MEMBER_CHANNELS: usize = 8;
-/// Tokens finished (saved or abandoned) in this host lifetime that may not author again.
-/// Bounded; cross-restart and older-token dedupe is the member outbox's exact token lookup,
-/// which the request composer must run before authoring.
+/// Rolling positive cache, backed by mandatory exact durable lookup before authoring.
 const MAX_FINISHED_TOKENS: usize = 64;
+/// Unsaved negative retirements cannot be inferred from an Absent outbox entry. Reserve
+/// one non-evicting slot before each new request so finishing can never strand its original.
+/// Normal saved traffic releases its reservation and has no lifetime message-count cliff.
+const MAX_UNSAVED_RETIREMENTS: usize = 64;
 
 const MEMBER_CHANNEL_LAYOUT_BYTES: usize = std::mem::size_of::<MemberChannel>() + 4 * 1024;
 
@@ -79,6 +81,7 @@ pub(super) const V2_MEMBER_LANE_BYTES: usize = REPLAY_MATH_PRIVATE_INVOICE
     + MAX_MEMBER_CHANNELS * MEMBER_CHANNEL_LAYOUT_BYTES
     + std::mem::size_of::<V2MemberLane>()
     + MAX_FINISHED_TOKENS * 32
+    + MAX_UNSAVED_RETIREMENTS * 32
     + MAX_GROUP_ID_BYTES
     + 16 * 1024;
 
@@ -299,6 +302,7 @@ struct MemberChannel {
 pub(super) struct V2MemberLane {
     request: Option<Box<PendingMemberRequest>>,
     finished: VecDeque<[u8; 32]>,
+    retired_unsaved: Vec<[u8; 32]>,
     channels: Vec<MemberChannel>,
     verifier: Option<V2GeneralPrefixVerifier>,
     bound: Option<BoundV2TextFounderAnchor>,
@@ -341,6 +345,7 @@ impl V2MemberLane {
         Ok(Self {
             request: None,
             finished: VecDeque::with_capacity(MAX_FINISHED_TOKENS),
+            retired_unsaved: Vec::with_capacity(MAX_UNSAVED_RETIREMENTS),
             channels: Vec::with_capacity(MAX_MEMBER_CHANNELS),
             verifier: None,
             bound: None,
@@ -452,7 +457,10 @@ impl V2MemberLane {
         // before any comparison, copy or dependency resolution.
         require_request_shape(request)?;
         let Some(pending) = self.request.as_deref_mut() else {
-            if self.finished.contains(&request.token) {
+            if self.finished.contains(&request.token)
+                || self.retired_unsaved.contains(&request.token)
+                || self.retired_unsaved.len() == MAX_UNSAVED_RETIREMENTS
+            {
                 return Err(refused());
             }
             return Ok(false);
@@ -673,7 +681,8 @@ impl V2MemberLane {
         }
     }
 
-    /// Retire the request and its fee; the token cannot author again in this host lifetime.
+    /// Retire the request and fee. Unsaved negatives are permanent for this lane; old
+    /// saved tokens remain protected by mandatory exact durable lookup after cache eviction.
     /// Returns, for `Saved`, whether the outbox's saved original is the one this lane lent.
     fn finish(&mut self, token: [u8; 32], mode: FinishMode) -> Result<bool, AppError> {
         let pending = self
@@ -692,10 +701,15 @@ impl V2MemberLane {
             (SignedState::Pending | SignedState::Complete(_), FinishMode::Abandon) => false,
             _ => return Err(refused()),
         };
-        if self.finished.len() == MAX_FINISHED_TOKENS {
-            self.finished.pop_front();
+        if matches!(mode, FinishMode::Abandon | FinishMode::ForgetLent) {
+            debug_assert!(self.retired_unsaved.len() < MAX_UNSAVED_RETIREMENTS);
+            self.retired_unsaved.push(token);
+        } else {
+            if self.finished.len() == MAX_FINISHED_TOKENS {
+                self.finished.pop_front();
+            }
+            self.finished.push_back(token);
         }
-        self.finished.push_back(token);
         // Outside every writer: the Plan, Draft, cells and request fee drain here.
         drop(self.request.take());
         Ok(same)
@@ -720,8 +734,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// is cached in this host for [`Self::take_member_signed_original`].
     ///
     /// Refuses (never authors) when: the host has not completed its empty promotion, founder
-    /// Create state exists on this host, another token is pending, the token finished earlier
-    /// in this host lifetime, the selected O is no longer generation 1, or the source/lock
+    /// Create state exists on this host, another token is pending, the token is negatively
+    /// retired or positively cached, negative-retirement capacity is full, the selected O
+    /// is no longer generation 1, or the source/lock
     /// closed. A completed original stays retrievable after lock (historical DATA).
     pub(in crate::store) fn retry_sign_member_request(
         &mut self,
@@ -791,7 +806,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     }
 
     /// The outbox reported SavedLocal or AlreadySaved for this token: release the request and
-    /// its fee; the token cannot author again in this host lifetime. `saved_action` is the
+    /// its fee. The token remains protected by exact durable lookup when its positive
+    /// cache entry expires. `saved_action` is the
     /// receipt's ActionId. Returns `true` when that is the original this lane lent. `false`
     /// means AlreadySaved named an EARLIER original (for example the same request signed
     /// under another nonce before a restart): the caller must drop its lent copy and never
