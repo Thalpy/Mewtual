@@ -12,7 +12,7 @@ on:
       scope:
         description: Workspaces to execute; all is the normal validation run.
         type: choice
-        options: [all, root, native]
+        options: [all, root, native, native-focused]
         default: all
       run_deferred_catchup:
         description: Include the slow case at final Chat V2 acceptance (scope all or root).
@@ -36,7 +36,7 @@ env:
 jobs:
   root:
     name: Root tests, slow case deferred (${{ matrix.os }})
-    if: github.event_name != 'workflow_dispatch' || inputs.scope != 'native'
+    if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'native' && inputs.scope != 'native-focused')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -87,7 +87,7 @@ jobs:
           PY
 
   native:
-    name: Complete native tests (${{ matrix.os }})
+    name: Native tests (${{ matrix.os }}, ${{ inputs.scope || 'all' }})
     if: github.event_name != 'workflow_dispatch' || inputs.scope != 'root'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -123,8 +123,21 @@ jobs:
       - name: Build frontend assets
         run: npm --prefix apps/desktop run build
       - name: Run the complete native workspace
+        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'native-focused'
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-focused'
+        with:
+          python-version: '3.12'
+      - name: Run exact native gate regressions (focused, not complete acceptance)
+        if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-focused'
+        run: python .github/scripts/check-chat-v2-native-gates.py
       # Collect the separate compile gate even if a native test fails, without masking it.
       - name: Check the native workspace
         if: ${{ !cancelled() }}
         run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-v2-native-gates-${{ matrix.os }}
+          path: logs/chat-v2-native-gates/

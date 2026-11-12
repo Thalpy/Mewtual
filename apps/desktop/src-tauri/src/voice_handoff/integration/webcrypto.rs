@@ -33,7 +33,7 @@ enum Frame {
     Failed { reason: String },
     Blocked,
 }
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 enum Method {
     AdmitKey,
@@ -957,7 +957,13 @@ impl Endpoint {
                     );
                 }
             } else if lose_replies {
-                super::super::media::tests::negative_before_admission(&route, parent);
+                let clock = crate::voice_runtime(&self.state).clock();
+                super::super::media::tests::negative_before_admission(
+                    &route,
+                    parent,
+                    clock.as_ref(),
+                )
+                .await;
             } else {
                 self.media_fixture_grant = Some(if matches!(round, Round::NativeIndexDrop) {
                     super::super::media::tests::exercise_index_drop(&self.state, &route, parent)
@@ -1387,6 +1393,18 @@ async fn drive_streams(
     diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
+    let step_name = step["name"]
+        .as_str()
+        .filter(|name| {
+            name.len() <= 32
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+        })
+        .unwrap_or("unknown")
+        .to_owned();
+    // Fixed metadata only. No payload, identity, key, SDP or result is retained here.
+    let observed = std::sync::Mutex::new((0usize, None::<Method>));
     // This bounds a broken subprocess/harness, never a protocol deadline. Cancelling this
     // waiter drops its original pipe/process owners; admitted native work keeps its own
     // custody. No timeout creates a replacement key, action, Phase or channel.
@@ -1398,7 +1416,7 @@ async fn drive_streams(
     } else {
         30
     };
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(bound),
         drive_streams_inner(
             state,
@@ -1409,10 +1427,33 @@ async fn drive_streams(
             callbacks,
             diagnostic_scope,
             step,
+            &observed,
         ),
     )
-    .await
-    .expect("native/WebCrypto control step exceeded its harness bound")
+    .await;
+    match result {
+        Ok(done) => done,
+        Err(_) => {
+            // Read only the original scope's bounded diagnostic observers. No Actor
+            // await, replacement lookup, retry or protocol deadline change on timeout.
+            let detail = diagnostic_scope.map(|selected| {
+                let (selector, ledger) = state
+                    .voice_handoff
+                    .fixture_sdp_diagnostic(selected, callbacks.expected_parent);
+                let native = selector.map(|selector| {
+                    state
+                        .voice_channels
+                        .fixture_native_diagnostic(selected, selector)
+                });
+                let session = state
+                    .voice_channels
+                    .fixture_sdp_session_diagnostic(selected);
+                format!("{ledger}; {native:?}; independent {session}")
+            });
+            let observed = *observed.lock().unwrap_or_else(|error| error.into_inner());
+            panic!("native/WebCrypto control timeout: step={step_name}, observed={observed:?}; original-scope diagnostics={detail:?}");
+        }
+    }
 }
 #[allow(clippy::too_many_arguments)] // Never resolve a replacement owner on failure.
 async fn drive_streams_inner(
@@ -1424,6 +1465,7 @@ async fn drive_streams_inner(
     callbacks: &mut Callbacks,
     diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
+    observed: &std::sync::Mutex<(usize, Option<Method>)>,
 ) -> (Value, Option<[u8; 32]>) {
     let automatic = step["name"] == "pump";
     let coordinator = step["name"] == "coordinator";
@@ -1444,7 +1486,7 @@ async fn drive_streams_inner(
     } else {
         32
     };
-    for _ in 0..callbacks_bound {
+    for count in 0..callbacks_bound {
         let length = output
             .read_u32()
             .await
@@ -1455,6 +1497,7 @@ async fn drive_streams_inner(
         );
         let mut bytes = [0; FRAME_BYTES];
         output.read_exact(&mut bytes[..length]).await.unwrap();
+        observed.lock().unwrap_or_else(|error| error.into_inner()).0 = count + 1;
         match serde_json::from_slice::<Frame>(&bytes[..length]).expect("closed metadata protocol") {
             Frame::Done { value } => return (value, published_executor),
             Frame::Failed { reason } => {
@@ -1476,6 +1519,7 @@ async fn drive_streams_inner(
             }
             Frame::Blocked => panic!("unexpected blocked-step acknowledgement"),
             Frame::Call { method, args } => {
+                observed.lock().unwrap_or_else(|error| error.into_inner()).1 = Some(method);
                 let stop_pump = automatic
                     && matches!(method, Method::ObserveTerminal)
                     && hex::decode(&args.executor)

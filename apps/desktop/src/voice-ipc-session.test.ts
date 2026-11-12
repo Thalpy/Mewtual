@@ -3423,7 +3423,9 @@ async function framedMedia(t: TestContext, low = true,
     const expected = mode <= 3 ? encodeVoiceMediaOriginal(original, (["admit", "resolve", "close", "release"] as const)[mode])
       : encodeVoiceMediaExisting(original.parentRow, original.identity, proof, (["current", "close", "release", "detach", "retirehistory"] as const)[mode - 4]);
     assert.deepEqual(opened, expected.body);
-    if (mode === busy) return {kind:0,body:Uint8Array.of(9,2,2,7)};
+    // Actual native Refused(Protocol(Capacity)), carried by this fixture's real AEAD.
+    // A malformed receipt is not evidence that the legitimate refusal can recover.
+    if (mode === busy) return {kind:0,body:Uint8Array.of(1,3,7)};
     if (mode === 0) admitted = true;
     if (mode === 7) { assert.equal(remaining,0); indexed=true; }
     if (mode === 2 || mode === 5) closed = true;
@@ -3452,6 +3454,28 @@ for (const low of [true, false]) test(`framed media adopts original peer once an
   await f.child.channel.close(); assert.deepEqual(f.modes.slice(-2), [2, 3]);
   assert.equal(f.f.broker.counts().bytes, 0); assert.equal(f.child.parent.finalCounts().finalAcknowledged, true);
 });
+test("framed Current Capacity retries the original peer without renewing admission or payment", async t => {
+  const f = await framedMedia(t), paid = f.f.broker.counts().bytes;
+  f.busy(4);
+  await f.media(); // A joined void attempt, not a successful authenticated Current.
+  assert.deepEqual(f.modes, [0, 4]);
+  assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0);
+  assert.equal(f.custody.effectCounts().sdkReleases, 0);
+  assert.equal(f.f.broker.counts().bytes, paid + 8192);
+  f.busy(-1);
+  await f.media();
+  assert.deepEqual(f.modes, [0, 4, 4], "no second Admit or replacement peer");
+  assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0);
+  assert.equal(f.f.broker.counts().bytes, paid + 8192);
+  // Retirement requires subsequent authenticated Current/detach on this SAME owner;
+  // merely treating void as success could not release its original SDK custody.
+  f.remaining(0); await f.retireNegotiation();
+  assert.equal(f.custody.effectCounts().sdkReleases, 1);
+  assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0);
+  f.f.owner.retire(); await f.child.channel.close();
+  assert.equal(f.f.broker.counts().bytes, 0);
+});
+
 for (const mode of [0, 4]) test(`framed End closes actual peer before held media mode${mode} returns`, async t => {
   const f = await framedMedia(t), held = f.hold(mode), pending = f.media();
   await until(() => f.modes.includes(mode)); const paid = f.f.broker.counts().bytes; let finished = false;

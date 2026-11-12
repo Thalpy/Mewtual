@@ -659,6 +659,15 @@ impl ResolvedRow {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }
+    /// The real transition-index exclusion, for proving local pre-effect Capacity. This
+    /// cannot edit an index, issue a row/claim or stand in for native authorization.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_hold_transition_index(&self) -> impl Drop + '_ {
+        self.ledger
+            .index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
     /// Requires prior authenticated browser closure; neither this handle nor a renderer's
     /// claim of drainage can establish that protocol precondition by itself.
     pub(crate) async fn wait_compacted(&self) -> Result<Status, VoiceError> {
