@@ -50,7 +50,22 @@ Remaining:
   a threaded race between `admit_final` and a merge.
 - The v1-exclusion tests are necessarily synthetic: a genuinely joined node cannot reach
   that install.
-- A short re-review of the fixes is still owed.
+- Two regressions are not deterministically testable and have none: the M1 test cannot pin
+  the admission's field order, and there is no hook-unwind test.
+
+Short re-review of the fixes: B1, H1 and M1-M4 are confirmed fixed. It found one new BLOCKER
+(strict-warnings dead code) and five LOWs. The BLOCKER is fixed in the next commit: switching
+the two admission sites to `with_observed_mls_add` left the bytes-less
+`with_observed_mls_transition` with no production caller, so it is now `#[cfg(test)]`. That
+also makes the bytes-less `HistoryGap` path unreachable in production. The LOWs are
+recorded, not fixed:
+- `CloseOnUnwind` also closes when a section is merely opened during an unwind, which fails
+  closed;
+- the contiguity check fires only at the next bracket;
+- `install_selected`'s own-inactive arm is unreachable;
+- the two test gaps above.
+
+No BLOCKER or HIGH remains on review.
 
 ## Agent C draft-4 decisions (12 November; durable fork backing required)
 
