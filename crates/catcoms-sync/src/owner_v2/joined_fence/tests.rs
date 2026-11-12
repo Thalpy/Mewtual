@@ -52,10 +52,11 @@ fn join(founder: &mut Node, peer: u64, nonce: u8) -> (Node, V2JoinedSourceFence,
     (node, fence, clock)
 }
 
-/// The founder admits a fresh device; returns the exact commit record it broadcast.
+/// The founder admits a fresh device; returns the exact commit record it broadcast and the new
+/// member's `DeviceId` bytes.
 fn founder_adds(founder: &mut Node, nonce: u8) -> (CommitRecord, [u8; 32]) {
     let device = MlsDevice::generate().unwrap();
-    let key: [u8; 32] = device.public_key_bytes().try_into().unwrap();
+    let id = *device.device_id().as_bytes();
     let invite = founder
         .mint_invite([nonce; 16], 10_000, Vec::new())
         .unwrap();
@@ -65,7 +66,7 @@ fn founder_adds(founder: &mut Node, nonce: u8) -> (CommitRecord, [u8; 32]) {
     founder
         .admit_now(&invite, &serialize_key_package(&package).unwrap(), 1_000)
         .unwrap();
-    (founder.commit_log.back().unwrap().clone(), key)
+    (founder.commit_log.back().unwrap().clone(), id)
 }
 
 fn digest(record: &CommitRecord) -> Option<[u8; 32]> {
@@ -159,7 +160,7 @@ fn final_admission_holds_the_fence_and_a_second_edge_never_waits() {
 fn self_removal_closes_the_fence_and_keeps_its_transition_readable() {
     let mut f = founder(0xd121);
     let (mut b, fence, _clock) = join(&mut f, 0xd122, 0xd4);
-    let own_key: [u8; 32] = b.device.public_key_bytes().try_into().unwrap();
+    let own_id = *b.device.device_id().as_bytes();
     settle_at_join(&b, &fence);
     let before = b.epoch();
     f.commit_remove_now(&b.device.device_id());
@@ -180,7 +181,7 @@ fn self_removal_closes_the_fence_and_keeps_its_transition_readable() {
     );
     // Historical DATA for replaying the Remove(self) record stays readable.
     let transition = fence.transition_data(before).unwrap().unwrap();
-    assert_eq!(transition.delta_data(), V2TransitionDelta::Removed(own_key));
+    assert_eq!(transition.delta_data(), V2TransitionDelta::Removed(own_id));
     assert!(!transition.own_active_data());
     assert_eq!(transition.commit_data(), digest(&record));
     // Removal is final: no governed install reopens it.
@@ -275,6 +276,73 @@ fn a_pending_contest_pauses_authorization_until_its_merge_settles() {
         )
         .unwrap();
     fence.require_authorized(&OWN).unwrap();
+}
+
+#[test]
+fn a_panic_while_final_admission_is_held_closes_the_fence_for_lock_free_negatives() {
+    let mut f = founder(0xd171);
+    let (b, fence, _clock) = join(&mut f, 0xd172, 0xdd);
+    settle_at_join(&b, &fence);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _admission = fence.admit_final(&OWN).unwrap();
+        panic!("issuing the save-source end failed");
+    }));
+    assert!(unwound.is_err());
+    // Closed by the admission's own unwind guard, before the lock poisoned.
+    assert!(fence.is_closed());
+    assert_eq!(
+        fence.require_authorized(&OWN),
+        Err(V2JoinedFenceRefusal::Closed)
+    );
+    drop(b);
+}
+
+#[test]
+fn a_joined_nodes_own_add_is_recorded_with_the_commit_from_its_result() {
+    let mut f = founder(0xd181);
+    let (mut b, fence, _clock) = join(&mut f, 0xd182, 0xde);
+    let before = b.epoch();
+    let device = MlsDevice::generate().unwrap();
+    let added = *device.device_id().as_bytes();
+    let package = device
+        .key_package_for_invite(&b.group_id(), [0xdf; 16])
+        .unwrap();
+    let outcome = b
+        .with_observed_mls_add(|node| node.group.add_member(&node.device, package))
+        .unwrap();
+    let transition = fence.transition_data(before).unwrap().unwrap();
+    assert_eq!(
+        transition.commit_data(),
+        Some(*blake3::hash(&outcome.commit).as_bytes())
+    );
+    assert_eq!(transition.delta_data(), V2TransitionDelta::Added(added));
+    // Recorded, not a gap: whether a member's own Add is governed is the source's decision.
+    assert!(!fence.is_closed());
+}
+
+#[test]
+fn a_mutation_outside_the_observer_makes_the_next_bracket_a_history_gap() {
+    let mut f = founder(0xd191);
+    let (mut b, fence, _clock) = join(&mut f, 0xd192, 0xe1);
+    settle_at_join(&b, &fence);
+    let (record, _) = founder_adds(&mut f, 0xe2);
+    // Bypass the observer entirely.
+    b.group
+        .apply_commit(&b.device, &record.mls_commit, record.commit_epoch)
+        .unwrap();
+    let epoch = b.epoch();
+    // Even a merge that changes nothing now finds the node moved since its last settlement.
+    assert!(b
+        .with_observed_mls_commit(b"not a commit", |node| {
+            node.group
+                .apply_commit(&node.device, b"not a commit", epoch)
+        })
+        .is_err());
+    assert!(fence.is_closed());
+    assert!(matches!(
+        fence.observe_data().unwrap().terminal,
+        Some(V2JoinedFenceTerminal::HistoryGap { .. })
+    ));
 }
 
 #[test]

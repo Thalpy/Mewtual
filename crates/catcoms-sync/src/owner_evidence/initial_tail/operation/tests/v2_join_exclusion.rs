@@ -81,7 +81,12 @@ fn install_binding<'a>(
 fn v1_install_refuses_after_the_joined_source_claimed_the_node_and_keeps_the_candidate() {
     let (mut node, binding, mut prepared) = frozen_fixture();
     let install = install_binding(&binding, &prepared);
+    // The joined source's claim, with the live fence it holds. (A genuinely joined node cannot
+    // reach this v1 install at all, so the claimed state is built explicitly here.)
     node.v2_join_facts = JoinFactsSlot::TakenByJoinedSource;
+    node.v2_fence = JoinedFenceNode::for_join(&node.group);
+    let fence = node.v2_fence.handle().unwrap();
+    let log = node.commit_log.len();
     assert!(node
         .install_owner_direct_add_checkpoint(&mut prepared, &install)
         .is_err());
@@ -90,12 +95,13 @@ fn v1_install_refuses_after_the_joined_source_claimed_the_node_and_keeps_the_can
     assert_eq!(node.epoch(), 0);
     assert_eq!(node.member_count(), 1);
     assert!(node.owner_operation.is_none());
-    assert!(node.initial_owner_evidence.is_none());
-    // The refused install did not displace the joined source's claim.
+    assert_eq!(node.commit_log.len(), log);
+    // The refused install did not displace the joined source's claim or close its fence.
     assert!(matches!(
         node.v2_join_facts,
         JoinFactsSlot::TakenByJoinedSource
     ));
+    assert!(!fence.is_closed());
 
     // Control on the same inputs: with no joined claim the identical install succeeds, so the
     // refusal above was the exclusion and not another check. (Releasing the claim is a test

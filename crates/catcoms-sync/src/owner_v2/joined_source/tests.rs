@@ -121,7 +121,7 @@ fn founder_restored_and_repaired_nodes_have_no_join_facts() {
     let mut inviter = inviter(0xc112);
     let joiner = MlsDevice::generate().unwrap();
     let (group, routing, _) = invite_join(&mut inviter, &joiner, 0xc2);
-    let joined = joined_node(0xc113, group, joiner, routing);
+    let mut joined = joined_node(0xc113, group, joiner, routing);
     let snapshot = joined.snapshot().unwrap();
     let mut restored = ChannelSync::restore(
         &snapshot,

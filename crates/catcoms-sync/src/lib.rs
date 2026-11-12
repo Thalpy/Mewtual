@@ -14991,7 +14991,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
-            .with_observed_mls_transition(|node| {
+            .with_observed_mls_add(|node| {
                 node.group.add_member_via_invite(
                     &node.device,
                     key_package,
@@ -15578,7 +15578,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
-            .with_observed_mls_transition(|node| node.group.add_member(&node.device, key_package))
+            .with_observed_mls_add(|node| node.group.add_member(&node.device, key_package))
             .ok()?;
         self.evict_past_keys();
         // Burn the certificate. `check_device_add` already refused a consumed nonce, so this can

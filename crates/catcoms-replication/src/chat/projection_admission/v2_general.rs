@@ -93,6 +93,10 @@ impl V2AuthenticatedAdmission {
     /// Not authority and not a fence: a `true` read can be stale the moment it returns. A
     /// caller that acts on it (for example final member-save admission) must order it under
     /// its own live source fence; there it is only an additional refusal.
+    ///
+    /// It does NOT reflect a verifier fork fence: that closes the verifier's group view, not
+    /// this Admission's life. A caller holding a Plan must also check
+    /// `V2OrdinarySigningPlan::require_open_data`, which covers the group view.
     pub fn is_open_data(&self) -> bool {
         self.core.open_origin.live()
     }

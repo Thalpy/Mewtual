@@ -138,8 +138,9 @@ impl JoinFactsSlot {
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Move this ORIGINAL joined incarnation's join facts out, exactly once, to the App's
-    /// joined-member source, together with the source's handle on this node's live fence (which
-    /// has recorded every finalized transition since the Welcome). Refuses for another
+    /// joined-member source, together with the source's handle on this node's live fence. The
+    /// fence has recorded every finalized transition since the Welcome, unless it already
+    /// closed (for example with `HistoryGap`); check `observe_data`. Refuses for another
     /// incarnation, for a node with no facts (founder, restored, companion device, or a
     /// mismatched handoff), for facts already taken, and after the v1 owner checkpoint install
     /// bound this node. A refusal changes nothing.

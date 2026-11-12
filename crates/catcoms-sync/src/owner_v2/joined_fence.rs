@@ -19,25 +19,42 @@
 //!
 //! The fence also retains this node's FINALIZED transitions (exact commit digest, epochs,
 //! post-merge authenticator, membership delta) until the source consumes them. A provisional
-//! contest, a staged own commit or a failed merge is never a transition. This is local
-//! observation DATA. It grants nothing; selection still needs the pinned, replayed, signed
-//! governing record. Transition DATA stays readable after the node's own removal, so the
-//! Remove(self) record can still be replayed.
+//! contest or a staged own commit is never a transition. A merge that leaves the state
+//! unchanged records nothing. A merge that changed the state and then returned an error is
+//! still recorded, because it happened.
+//!
+//! This is local observation DATA. It grants nothing; selection still needs the pinned,
+//! replayed, signed governing record. Transition DATA stays readable after the node's own
+//! removal, so the Remove(self) record can still be replayed.
+//!
+//! Brackets do not nest; no production path nests them. Recorded transitions are contiguous:
+//! a bracket that finds the node already moved since the last settlement (a mutation outside
+//! the observer) records a terminal `HistoryGap` instead of a transition.
+//!
+//! Every invite-joined node carries a fence from its Welcome, including legacy members that
+//! never host a joined source. The per-merge cost is two device-id roster listings and one
+//! short lock; nodes without join facts pay nothing.
 use crate::*;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
-/// Finalized transitions retained until the joined source consumes them. A node that finalizes
-/// more before the source catches up records a terminal `HistoryGap` rather than forgetting one.
-/// The ring is allocated once, so recording under the lock never allocates.
+/// Finalized transitions retained until the joined source consumes them.
+///
+/// A node that finalizes more before the source catches up records a terminal `HistoryGap`
+/// rather than forgetting one. That close is deliberate: a warm node cannot rebuild an
+/// observation it dropped. One extra slot is always reserved for the transition that removes
+/// this node, so a Remove(self) stays replayable even on a full ring. The ring is allocated
+/// once (capacity + 1), so recording under the lock never allocates.
 pub const V2_JOINED_TRANSITION_CAPACITY: usize = 64;
 
-/// Membership delta of one finalized merge, by signature key.
+/// Membership delta of one finalized merge, by `DeviceId` bytes (the hash of a member's
+/// signature key). The source compares a record's subject through
+/// `DeviceId::from_public_key_bytes`.
 ///
 /// A V2 Add or Remove changes exactly one member. `Neutral` (nobody added or removed) and
 /// `Multiple` have no Core transition. The source must report them as unsupported; it can
-/// never treat them as progress.
+/// never treat them as progress. `install_selected` refuses to cover them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum V2TransitionDelta {
     Neutral,
@@ -258,8 +275,14 @@ impl std::fmt::Debug for V2JoinedSourceFence {
 
 /// Final-admission custody: the fence stays locked while the caller issues its save-source end.
 /// Holding it blocks node transitions only for that constant-time section. Drop releases it.
+///
+/// Never touch the node (no merge, no drop) on the thread that holds this: both re-lock the
+/// fence. A panic while it is held closes the fence before the lock poisons, so lock-free
+/// negatives observe it at once.
 #[must_use = "issue the save-source end while this admission is held"]
 pub struct V2JoinedFenceAdmission<'a> {
+    // FIRST field: fields drop in declaration order, so this runs while the guard still holds.
+    _unwind: CloseOnUnwind<'a>,
     _state: MutexGuard<'a, FenceState>,
 }
 impl std::fmt::Debug for V2JoinedFenceAdmission<'_> {
@@ -310,8 +333,11 @@ impl V2JoinedSourceFence {
     /// current own Admission ID).
     ///
     /// Refuses unless that state is the join state or a recorded transition's post-merge state.
-    /// The source cannot name a state this node never finalized. Consumed transitions up to
-    /// `epoch` are released. A closed fence refuses: removal and fork are final here.
+    /// The source cannot name a state this node never finalized. It also refuses to cover a
+    /// transition Core has no step for (`Neutral` or `Multiple` delta), or one that left this
+    /// node inactive. Consumed transitions up to `epoch` are released. A closed fence refuses:
+    /// removal and fork are final here. `own` is the 32 bytes of an `OwnerFactId`; the
+    /// handle, not this label, is the capability.
     pub fn install_selected(
         &self,
         epoch: u64,
@@ -328,6 +354,19 @@ impl V2JoinedSourceFence {
                 transition.after_epoch == epoch && transition.authenticator == authenticator
             });
         if !finalized {
+            return Err(V2JoinedFenceRefusal::Unknown);
+        }
+        let unsupported = state
+            .transitions
+            .iter()
+            .take_while(|transition| transition.after_epoch <= epoch)
+            .any(|transition| {
+                matches!(
+                    transition.delta,
+                    V2TransitionDelta::Neutral | V2TransitionDelta::Multiple
+                ) || !transition.own_active
+            });
+        if unsupported {
             return Err(V2JoinedFenceRefusal::Unknown);
         }
         while state
@@ -361,7 +400,10 @@ impl V2JoinedSourceFence {
     ) -> Result<V2JoinedFenceAdmission<'_>, V2JoinedFenceRefusal> {
         let state = self.inner.try_lock()?;
         state.authorized(own)?;
-        Ok(V2JoinedFenceAdmission { _state: state })
+        Ok(V2JoinedFenceAdmission {
+            _unwind: CloseOnUnwind(&self.inner.closed),
+            _state: state,
+        })
     }
 
     /// The source cancelled or replaced itself. Irreversible.
@@ -391,7 +433,8 @@ impl JoinedFenceNode {
                 merging: false,
                 contested: false,
                 terminal: None,
-                transitions: VecDeque::with_capacity(V2_JOINED_TRANSITION_CAPACITY),
+                // +1: the reserved Remove(self) slot.
+                transitions: VecDeque::with_capacity(V2_JOINED_TRANSITION_CAPACITY + 1),
                 selected: None,
             }),
         })))
@@ -417,22 +460,25 @@ impl Drop for JoinedFenceNode {
 /// Pre-merge capture, taken only when this node has a fence.
 pub(crate) struct V2MergeBracket {
     before: (u64, [u8; 32]),
-    keys: Vec<[u8; 32]>,
+    ids: Vec<[u8; 32]>,
 }
 
-/// Current members' signature keys. Bounded by the group size; only fenced nodes pay for it.
-fn roster_keys(group: &ServerGroup) -> Vec<[u8; 32]> {
-    group
+/// Current members' `DeviceId` bytes, sorted. One roster listing; bounded by the group size;
+/// only fenced nodes pay for it. No per-member signature-key lookup (that rescans the roster).
+fn roster_ids(group: &ServerGroup) -> Vec<[u8; 32]> {
+    let mut ids: Vec<[u8; 32]> = group
         .member_device_ids()
         .iter()
-        .filter_map(|id| group.member_signature_key(id))
-        .filter_map(|key| <[u8; 32]>::try_from(key.as_slice()).ok())
-        .collect()
+        .map(|id| *id.as_bytes())
+        .collect();
+    ids.sort_unstable();
+    ids
 }
 
+/// Both inputs sorted (`roster_ids`).
 fn delta(before: &[[u8; 32]], after: &[[u8; 32]]) -> V2TransitionDelta {
-    let mut added = after.iter().filter(|key| !before.contains(*key));
-    let mut removed = before.iter().filter(|key| !after.contains(*key));
+    let mut added = after.iter().filter(|id| before.binary_search(*id).is_err());
+    let mut removed = before.iter().filter(|id| after.binary_search(*id).is_err());
     match (added.next(), added.next(), removed.next(), removed.next()) {
         (None, _, None, _) => V2TransitionDelta::Neutral,
         (Some(key), None, None, _) => V2TransitionDelta::Added(*key),
@@ -448,7 +494,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let inner = self.v2_fence.0.as_ref()?;
         let bracket = V2MergeBracket {
             before: (self.group.epoch(), self.group.epoch_authenticator_id()),
-            keys: roster_keys(&self.group),
+            ids: roster_ids(&self.group),
         };
         if let Ok(mut state) = inner.lock() {
             let _unwind = CloseOnUnwind(&inner.closed);
@@ -479,7 +525,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             after_epoch: after.0,
             commit,
             authenticator: after.1,
-            delta: delta(&bracket.keys, &roster_keys(&self.group)),
+            delta: delta(&bracket.ids, &roster_ids(&self.group)),
             own_active: self.group.is_active()
                 && self.group.has_local_signer(&self.device.public_key_bytes()),
         });
@@ -489,11 +535,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let _unwind = CloseOnUnwind(&inner.closed);
         state.merging = false;
         state.contested = contested;
+        // Contiguity: the node must still be where the last settlement left it. Otherwise
+        // something mutated it outside the observer, and nothing after that can be accounted.
+        if bracket.before != state.settled {
+            let epoch = state.settled.0;
+            state.terminate(&inner.closed, V2JoinedFenceTerminal::HistoryGap { epoch });
+            return;
+        }
         let Some(transition) = transition else {
             return;
         };
         state.settled = after;
-        if transition.commit.is_none() || state.transitions.len() >= V2_JOINED_TRANSITION_CAPACITY {
+        // The reserved last slot is only for the transition that removes this node.
+        let full = state.transitions.len() >= V2_JOINED_TRANSITION_CAPACITY
+            && (transition.own_active || state.transitions.len() > V2_JOINED_TRANSITION_CAPACITY);
+        if transition.commit.is_none() || full {
             state.terminate(
                 &inner.closed,
                 V2JoinedFenceTerminal::HistoryGap {
