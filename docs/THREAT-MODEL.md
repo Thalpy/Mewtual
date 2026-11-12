@@ -6284,7 +6284,7 @@ The node is DATA/resource ownership, not Current or publication. Root's actual S
 pin/head/row/mount and original negative checks, all non-SDK lifetime fees, governor/live SDK
 operations and native integration remain separate. All13 regressions are authored UNRUN;
 compilation, tests and builds remain paused. [Boundary and invoice](communication-recovery/CHAT-V2-GENESIS-DATA-SEED.md).
-## Selected-history cold proof boundary (12 November; Core only, pending CI)
+## Selected-history cold proof boundary (12 November; Core focused checks passed)
 
 An untrusted archive may omit, reorder or forge governing record/node DATA.
 Core's new negative proof path uses only its private selected-history tip,

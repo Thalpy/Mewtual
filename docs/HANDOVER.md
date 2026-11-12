@@ -15890,12 +15890,15 @@ opener above. These DATA codecs issue no source, quota, Saved, Current or live c
 Root's actual group-wide/cross-signer fences, pin/head/seed/scope writes and owning Current
 consumer remain required. Compilation/tests/builds remain paused; direct format, whitespace
 and ambient/raw-FS static checks do not establish readiness. [Format and limits](communication-recovery/CHAT-OWNER-V2-GENESIS-ACTIVATION-FORMAT.md).
-## Selected governing-history Core increment (12 November; authored, pending CI)
+## Selected governing-history Core increment (12 November; focused checks passed)
 
 Branch `chat-v2-selected-history-proofs` adds bounded negative-only old-parent
 proofs against the actual selected prefix, with precomputed candidate outputs
-and retained signed contradiction evidence. Thirteen new tests are authored;
-execution remains in CI. This does not complete durable history backing or
+and retained signed contradiction evidence. CI run43313196959 passed all13 new
+cases plus3 existing controls, root formatting and strict Core Clippy on Linux
+and Windows at sourcee1b7e34a (runtime3f94470c). Broader run43313807311 remains
+running; the user's slow catch-up cost case is still deferred. No local Cargo
+was run. This does not complete durable history backing or
 Chat V2. The App joined source, governing transport, registered archive,
 cold authority reconstruction and native admission remain separate work.
 Details and exact acceptance gaps:

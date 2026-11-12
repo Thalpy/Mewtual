@@ -8767,7 +8767,7 @@ The later owning Node/runtime consumer must loan both owners and repeat full Cur
 writer/task proofs after pairing callbacks. Neither the loan nor graph payment supplies those
 permissions. One new Sync identity regression plus one App cross-resource regression are UNRUN;
 App runtime/Current/governor/native integration and compiled verification remain unfinished.
-## Selected governing-history proof DATA (12 November; Core only, pending CI)
+## Selected governing-history proof DATA (12 November; Core focused checks passed)
 
 `V2GeneralPrefixVerifier` now maintains a private bounded selected-history
 commitment. Candidates precompute node/frontier outputs; actual HOST selection

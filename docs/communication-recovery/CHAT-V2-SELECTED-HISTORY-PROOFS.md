@@ -1,4 +1,4 @@
-# Selected governing-history proofs (12 November; Core increment, unexecuted)
+# Selected governing-history proofs (12 November; focused CI passed)
 
 This is negative-only Core support for a future durable governing archive. It
 does not implement the archive, a cold source/restart factory, new native
@@ -80,7 +80,7 @@ Root still has to implement all of the following before production eviction:
 - Stop or pause coherently on unavailable/corrupt pages and storage pressure,
   preserving originals; a missing page is not proof of absence or a fork.
 
-## Authored coverage and pending execution
+## Coverage and execution evidence
 
 Thirteen new deterministic tests cover selected trees and independent recursive
 roots, every path through small irregular trees, an old body-less sibling after
@@ -94,7 +94,21 @@ Standalone rustfmt, the ambient-dependency gate and the exact-count harness
 self-test passed locally without Cargo. Read-only adversarial design and actual
 diff reviews found no remaining blocker, high or medium finding. This is static
 review, not execution evidence. Cargo execution is routed through CI at the
-user's request. The exact-count lane must execute 11 replay
-cases, 2 arithmetic cases and 3 existing accessor controls per OS. These are
-focused Core results, not full Chat V2 acceptance. Full suites, workspace strict
-lint/audit and production archive/native/network acceptance remain required.
+user's request.
+
+[Focused run 43313196959](https://github.com/Thalpy/Mewtual/actions/runs/43313196959)
+passed on Linux and Windows: exactly 11 replay, 2 arithmetic and 3 existing
+accessor control cases on each, with zero failed or ignored cases. Root
+formatting and strict affected-crate Clippy also passed on both. The runtime
+source is `3f94470c`; tested head `e1b7e34a` changes only this review record.
+CI checked synthetic merge `1fe69d3dfe2cae6d7f413a4d2434a4482cd29d07`;
+its tree and the pushed head's tree are both
+`165a4b947577f8a307b99120fb62dcfc569b4eff`.
+
+[Broader run 43313807311](https://github.com/Thalpy/Mewtual/actions/runs/43313807311)
+targets that exact head for root/native/frontend validation and remains running.
+The unusually slow catch-up cost case remains explicitly deferred until final
+Chat V2 acceptance; the test is unchanged. These are focused Core results, not
+full Chat V2 acceptance. Full suites, workspace strict lint/audit and production
+archive/native/network acceptance remain required. Inherited App strict-Clippy
+debt and dependency advisories have not been waived by this lane.
