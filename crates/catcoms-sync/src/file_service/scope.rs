@@ -18,8 +18,9 @@ struct View {
     policy_revision: u64,
 }
 
-/// Sole publisher. This is the FIRST ChannelSync field, so ordinary field destruction closes
-/// every observer before releasing transport/MLS/store ownership. No worker/handle clones it.
+/// Sole publisher. This is one of the initial ChannelSync lifetime guards, so ordinary field
+/// destruction closes every observer before releasing transport/MLS/store ownership. No
+/// worker/handle clones it.
 /// Reconciliation permanently closes a generation; later readmission creates a fresh channel.
 pub(crate) struct FileEffectOwners {
     view: Option<View>,

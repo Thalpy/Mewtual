@@ -84,6 +84,22 @@ impl V2AuthenticatedAdmission {
     pub fn admission_data(&self) -> &AdmissionBody {
         &self.core.body
     }
+    /// Negative observation of THIS Admission's original OPEN life: false once a selected
+    /// Remove closed it or the issuing verifier's original origin stopped. Like every Core
+    /// origin probe it is atomic loads only (no lock, allocation, SDK or callback beyond the
+    /// host's own nonblocking negative) and it latches a false observation, so a later `true`
+    /// from the host cannot reopen it.
+    ///
+    /// Not authority and not a fence: a `true` read can be stale the moment it returns. A
+    /// caller that acts on it (for example final member-save admission) must order it under
+    /// its own live source fence; there it is only an additional refusal.
+    ///
+    /// It does NOT reflect a verifier fork fence: that closes the verifier's group view, not
+    /// this Admission's life. A caller holding a Plan must also check
+    /// `V2OrdinarySigningPlan::require_open_data`, which covers the group view.
+    pub fn is_open_data(&self) -> bool {
+        self.core.open_origin.live()
+    }
 }
 
 /// ONE known governing parent and at most TWO valid semantic children. This escrow is

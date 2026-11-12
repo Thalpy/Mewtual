@@ -18,6 +18,36 @@ new-only seed/marker outputs. Warm promotion owns no replacement-stage cleanup;
 only a cold independently captured exact duplicate has that role. Actual older-
 binary acceptance is the separate predecessor gate, not a modern-reader unit result.
 
+## Joined-member source seams (12 November; authored, not executed, no consumer yet)
+
+Agent C's narrow Core/Sync seams for the future joined (non-founder) V2 source. Nothing
+consumes them yet. They add no wire or persistence format, and grant no membership, selection,
+signing or save authority.
+
+- **Core reads:** `ReplayMath::mls_epoch_data`, `V2AuthenticatedAdmission::is_open_data` and
+  `V2OrdinarySigningPlan::require_open_data`. Each is a lock-free observation. The
+  `V2HostSelectionExpectation` contract now names the private joined Root consumer and the
+  facts it must establish first.
+- **Join facts:** `ChannelSync::take_v2_joined_join_facts(&RegistrySyncInstance)` returns
+  `(V2JoinFacts, V2JoinedSourceFence)` once, to the original invite-joined incarnation.
+  - The facts are the consumed KP reference, credential digest, join epoch and post-Welcome
+    authenticator, captured in `finish_join`.
+  - They are never serialized. Founder, restored and companion-device nodes have none.
+  - The take is mutually exclusive with the v1 `install_owner_direct_add_checkpoint`,
+    whichever comes first.
+- **`V2JoinedSourceFence`:**
+  - Readers: `is_closed` (an atomic), `observe_data` and `transition_data`. Writers:
+    `install_selected` (only a finalized node state) and `cancel` / `record_fork`. Checks:
+    `require_authorized` and `admit_final` (`try_lock`; the returned custody is held while
+    the save-source end is issued).
+  - Every merge through `with_observed_mls_transition` / `_commit` / `_add` brackets the
+    fence and records one finalized `V2AppliedTransition`: commit digest, epochs, post-merge
+    authenticator, `DeviceId` delta and own-active.
+  - A bytes-less change, a non-contiguous bracket or a ring overflow is a terminal
+    `HistoryGap`.
+
+[Design](communication-recovery/CHAT-V2-JOINED-SOURCE-COORDINATION.md).
+
 ## Ordinary-member signer (11 November; focused checks passed, inactive)
 
 Store-private and inactive. `PreparedV2TextHost::retry_sign_member_request` authors one

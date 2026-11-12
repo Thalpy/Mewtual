@@ -1,5 +1,141 @@
 # Mewtual; Handover
 
+## Primary review of C's Core/Sync seams (12 November; focused CI green, full validation open)
+
+Integration branch `chat-v2-joined-source-integration` starts from C's pushed
+`0bcc808e`; C's branch and PR #86 are unchanged. The primary's actual-diff review
+found an authority gap in failed current-epoch commit settlement, an exact
+selected-state retry defect, and disagreement between the atomic closed flag and
+positive gates after a section entered during an existing unwind. These are
+fixed on the integration branch. Draft PR #87 contains C's original commits and
+the separate primary fixes. Nothing has been merged into C's branch or PR #86.
+
+The commit observer classifies against its ORIGINAL group/header/epoch. A failed
+current commit closes as Diverged in the SAME settlement section that clears
+merging, before the caller's Err arm. Invalid/noncommit headers remain the
+negative control. Actual changed-state evidence is retained when its commit is
+known; uncertain panic effects close without inventing an applied transition.
+An observer-wide unwind guard covers hooks outside that section. Every positive
+gate also checks the monotone atomic negative under its state guard. Repeating
+the exact already-selected epoch/authenticator/Admission is idempotent after
+transition consumption; altered tuples gain no such shortcut.
+
+Seven new regressions use original-node/exact-commit scoped faults for genuine
+Remove/self refusal (real in-order and pre-caller boundaries), failed contest
+winner, uncertain merge panic, hook panic after actual settlement, and atomic
+closure without mutex poison, plus an error after a successful real SDK apply
+that must retain exact Add/Remove transition evidence. A transport-destructor
+probe on a genuinely joined node now checks that fence retirement precedes
+resource teardown; the fence is the first lifetime guard, with the file publisher
+still preceding every resource it protects. The existing Add test
+additionally covers exact retry and altered authenticator/Admission. Focused CI
+pins 57 executed, nonignored cases on each OS: three Core accessors, three join-fact, seventeen fence,
+eleven owner-operation (including two new V1 exclusion), seventeen tenure and six
+founder-member cases. These are 25 new cases and 32 neighboring legacy controls.
+Its Python guard self-check passes without Cargo. Standalone formatting,
+whitespace and the static ambient gate also pass; no local Cargo was run.
+
+The [corrected focused run](https://github.com/Thalpy/Mewtual/actions/runs/43305407742)
+at `0b2f94eca47ad4f34d9dd2ba133d77f860b8103f` passes all 57 cases with zero failed
+or ignored on BOTH Linux and Windows. Both affected-crate strict-Clippy steps
+(`catcoms-sync` and `catcoms-replication`, all targets/features, `-D warnings`)
+also pass. These are scoped results, not workspace-wide strict acceptance.
+Both complete job logs independently confirm the checkout, cohort counts and
+strict command; both OS jobs, including cleanup, completed successfully. The
+read-only evidence review confirms those exact results.
+
+Failed and cancelled evidence remains explicit: strict CI at `5b325a3c` reported
+two unused imports in C's tests (removed). CI at `b549f42b` then found the primary's
+transport-destructor fixture used `Unreachable` without its required peer;
+`0b2f94ec` corrects that test-only constructor. Superseded focused runs and the
+first queued broad run were cancelled rather than credited as passes. Root App
+Clippy still reports inherited 531 library/471 Linux test-library errors (188
+test-library on Windows); no waiver or broad warning suppression was added.
+
+The [restarted broad run](https://github.com/Thalpy/Mewtual/actions/runs/43308200073)
+executes root and separate native workspaces plus frontend checks/build on the
+same tested source `0b2f94ec`. Its results remain open. The single user-deferred
+10,000-operation cost case remains excluded until final acceptance. Dependency
+audit and full strict/native sign-off remain open too, including the parent
+branch's two diagnosed native fixture failures. This documentation update changes
+no runtime, tests, Cargo inputs or CI policy from that tested source.
+
+C may continue the separately reviewed App-source milestone from `0b2f94ec` on a
+new branch, preserving the primary's fence fixes and the ownership/boundaries in
+the coordination document. The primary retains broader validation, native work
+and the durable fork archive. No App joined source or archive is supplied by this
+seam integration; Chat V2 remains disabled and PR #87 stays draft/unmerged.
+
+## Agent C Core/Sync seams (12 November; authored, NOT executed)
+
+Branch `chat-v2-joined-member-source`, from `8674813c`. Five code commits (`68acfe6a`,
+`12a7cee9`, `c34e43b7`, `a9af1526`, `e29de641`) implement only the narrow seams the
+coordinator approved. There is no App joined source, governance replay,
+pin, lane/save change or historical custody yet, and Chat V2 stays disabled.
+
+- **Core read accessors:** `mls_epoch_data`, `is_open_data` and `require_open_data`, plus
+  the joined consumer named in the `from_trusted_host` contract.
+- **Sync join facts:** captured in `finish_join`, exact `new_joined` handoff, a once-only
+  take, and exclusion of the v1 owner checkpoint install.
+- **Sync live source fence:**
+  - It brackets every merge and records finalized transitions (commit digest,
+    authenticator, `DeviceId` delta).
+  - A contest flag is updated at every `pending` write.
+  - Final-admission custody is held while the save-source end is issued; the `closed`
+    atomic sits beside the mutex.
+  - It closes for good on removal, drop, v1 install, cancel or fork. Bytes-less,
+    non-contiguous or overflowing history is a terminal `HistoryGap`.
+
+Every invite-joined legacy member now carries a fence: two device-id roster listings and a
+short lock per merge. Founder and other non-joined nodes are unchanged.
+
+Execution: local Cargo is paused, so nothing compiled or ran. Standalone rustfmt
+(catcoms-sync and catcoms-replication) and `scripts/check-no-ambient.sh` pass. The full
+suites, strict Clippy and native checks still need CI through the primary.
+
+The adversarial diff review of `8674813c..c34e43b7` found 1 BLOCKER, 1 HIGH, 4 MEDIUM and 5
+LOW. All of these are fixed in the follow-up commit:
+- **BLOCKER:** a test compile error (`snapshot` needs `&mut`).
+- **HIGH:** a wrong test assertion (`initial_owner_evidence` is `Some` in the v1 fixture).
+- **M1:** the admission custody now closes the fence on unwind.
+- **M2:** the delta is computed from one sorted device-id roster pass, not per-key
+  lookups.
+- **M3:** a node's own legacy Add records its result's commit (`with_observed_mls_add`),
+  not `HistoryGap`.
+- **M4:** a non-contiguous bracket is a `HistoryGap`, and the fence now settles before
+  the observer hooks can unwind.
+- **LOWs:**
+  - a reserved Remove(self) ring slot;
+  - an install refuses to cover Neutral/Multiple/inactive deltas;
+  - doc corrections.
+
+Remaining:
+- At C's `0bcc808e` checkpoint, `Diverged` marking at header-valid apply failures
+  was missing. The separate primary integration above fixes it with scoped faults.
+- No test yet produces a real neutral or multi-member delta, a header-valid winner that
+  fails to apply, staged we-won/we-lost branches on a joined committer, a ring overflow, or
+  a threaded race between `admit_final` and a merge.
+- The v1-exclusion tests are necessarily synthetic: a genuinely joined node cannot reach
+  that install.
+- Two regressions are not deterministically testable and have none: the M1 test cannot pin
+  the admission's field order, and there is no hook-unwind test.
+
+Short re-review of the fixes: B1, H1 and M1-M4 are confirmed fixed. It found one new BLOCKER
+(strict-warnings dead code) and five LOWs. The BLOCKER is fixed in the next commit: switching
+the two admission sites to `with_observed_mls_add` left the bytes-less
+`with_observed_mls_transition` with no production caller, so it is now `#[cfg(test)]`. That
+does not make every bytes-less gap unreachable: a production Add can merge and
+then fail before returning its commit bytes, which still closes as `HistoryGap`.
+Only the direct bytes-less helper is test-only. The LOWs were
+recorded, not fixed:
+- `CloseOnUnwind` also closes when a section is merely opened during an unwind, which fails
+  closed;
+- the contiguity check fires only at the next bracket;
+- `install_selected`'s own-inactive arm is unreachable;
+- the two test gaps above.
+
+No BLOCKER or HIGH remains on review.
+
 ## Agent C draft-4 decisions (12 November; durable fork backing required)
 
 The primary chooses durable backing, option (c), for the completed joined source.

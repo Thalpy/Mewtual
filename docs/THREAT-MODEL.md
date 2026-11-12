@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+The inactive joined-node source fence now distinguishes unverified input refusal
+from a failed current-epoch MLS commit. The latter cannot leave the old selected
+authority usable: it closes inside settlement before transitions are exposed as
+idle. Positive gates also honor atomic-only unwind closure, even without mutex
+poison. Original-node/digest-bound test faults exercise those boundaries; CI
+execution is pending. These Sync seams supply no App joined source, independent
+pin, governing-record selection or native save authority. See HANDOVER for the
+remaining integration and archive prerequisites.
+
 Owner-offline text is a separate required path: the fixed Profile founder signs
 certification Headers, while members sign their own ordinary actions. The local
 first-founder storage tests do not establish member send/outbox availability.
