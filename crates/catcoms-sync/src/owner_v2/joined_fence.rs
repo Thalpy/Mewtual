@@ -2,8 +2,9 @@
 //!
 //! The App's joined-member source and this node share one fence. It gives final member-save
 //! admission and every MLS transition of the node one proved order:
-//! - every merge on the node passes through `with_observed_mls_transition`, which marks the
-//!   fence `merging` BEFORE the merge and settles it afterwards;
+//! - every merge on the node passes through the observer seam (`with_observed_mls_commit` or
+//!   `with_observed_mls_add` in production), which marks the fence `merging` BEFORE the merge
+//!   and settles it right after, before the observer's own hooks run;
 //! - a pending fork contest marks it `contested`;
 //! - the App's governed install records which finalized node state its replayed prefix covers;
 //! - final admission `try_lock`s the same mutex, checks, and issues its save-source end while
@@ -503,8 +504,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Some(bracket)
     }
 
-    /// Close the merge bracket after the merge and the observer's own hooks. A changed state is
-    /// recorded as one finalized transition. `commit` is the digest of the exact merged bytes;
+    /// Close the merge bracket straight after the merge, BEFORE the observer's own hooks (so a
+    /// hook unwind cannot leave the fence `merging`). A changed state is recorded as one
+    /// finalized transition. `commit` is the digest of the exact merged bytes;
     /// without it a change is an unaccountable `HistoryGap`. An unchanged state (a failed or
     /// no-op merge) records nothing. All allocation happens before the lock.
     pub(crate) fn v2_fence_end_merge(

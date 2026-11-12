@@ -463,10 +463,17 @@ impl OwnerTenure {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
-    /// All synchronous MLS mutations go through this seam. Observation follows the actual group
-    /// before the caller propagates an error: serialization can fail after a successful merge.
-    /// A panic still fails closed via observed()/snapshot's position checks; no publication permit
+    /// TEST-ONLY bytes-less form of the observer seam. Every production synchronous MLS mutation
+    /// goes through [`Self::with_observed_mls_commit`] or [`Self::with_observed_mls_add`], which
+    /// hand a joined node's fence the exact commit digest. A state change through this form is
+    /// unaccountable for that fence (terminal `HistoryGap`). Keeping it test-only makes that
+    /// path unreachable in production.
+    ///
+    /// Shared contract of all three forms: observation follows the actual group before the
+    /// caller propagates an error (serialization can fail after a successful merge). A panic
+    /// still fails closed via observed()/snapshot's position checks; no publication permit
     /// escapes this helper. The callback must not publish or snapshot its intermediate state.
+    #[cfg(test)]
     pub(super) fn with_observed_mls_transition<O>(
         &mut self,
         work: impl FnOnce(&mut Self) -> O,
