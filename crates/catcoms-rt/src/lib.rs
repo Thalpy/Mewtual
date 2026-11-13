@@ -15,11 +15,17 @@
 
 pub mod clock;
 pub mod mem;
+mod native_chat_key;
 pub mod rng;
 pub mod transport;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
+pub use native_chat_key::{
+    NativeChatKeyDrain, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatKeyRefusal,
+    NativeChatPreparedKeyCut, NativeChatSourceObservation, NativeChatSourceOwner,
+    NativeChatUiBinding, NativeChatUiCommand, NativeChatUiSessionOwner,
+};
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
     BoxedDialPermit, ConnectionDirection, ConnectionFamily, ConnectionLease, ConnectionPath,
