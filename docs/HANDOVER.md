@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Native founder integration (13 November; in progress)
+
+PR98 atb7803f83 is pushed with83 passing local surrounding storage tests and the
+actual18-fixture native1-aware predecessor gate. Exact-head full validation is
+run43384631617. It is storage evidence; the warm cell/producer is still absent.
+
+The next isolated branch, `chat-v2-native-founder-integration`, has a reviewed
+affine-owner/private-physical split and bounded actual transport-identity DATA.
+All3 Net regressions pass, including a literal compatibility vector and real
+Mesh identity. All32 index2 cases pass, including the two new actual storage-drain
+cases. Read-only review has no blocker/high/medium; both Net LOWs are fixed. No public loan,
+DATA publisher, native command or SDK/key authorization was added. Central JOIN
+helpers still refuse CLOSED; all-JOIN-after-close drainage is not claimed.
+
 ## Native index2 storage (13 November; in progress)
 
 The isolated `chat-v2-native-index-admission` branch now has explicit7/v2 and

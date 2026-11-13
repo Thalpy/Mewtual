@@ -494,11 +494,58 @@ fn mounted(path: &Path, rng: &mut ChaCha20Rng) -> NativeIndexStore {
     upgrade.retry().unwrap();
     upgrade.into_index_store().unwrap()
 }
+
+#[test]
+fn native_index2_owner_close_precedes_a_late_private_physical_loan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x7a31);
+    let mounted = mounted(dir.path(), &mut rng);
+    // Model the actual storage loan a future admitted native worker will hold.
+    // It receives no AdmissionOwner; cloning physical custody cannot clone close
+    // ownership or reopen the original interlock after the facade disappears.
+    let physical = Arc::clone(&mounted.physical);
+    let gate = physical.handler.gate.clone();
+    let refunded = physical.handler.fee.refund_notice();
+    let mount = physical
+        .current
+        .cached_store()
+        .unwrap()
+        .chat_mount
+        .observer();
+    assert!(gate.idle());
+    drop(mounted);
+    assert!(!gate.idle());
+    assert!(gate.claim().is_err());
+    assert!(!refunded.load(Ordering::Acquire));
+    // Physical custody is intentionally still live for finite admitted DATA
+    // completion. It grants no native/key/source authority, and is not an API
+    // available to callers of the opaque public facade.
+    assert!(!mount.is_cancelled());
+    {
+        let _read = physical.read.try_lock().unwrap();
+        assert_eq!(physical.read_index().unwrap().rows.len(), 1);
+    }
+    assert!(NativeIndexStore::open(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        policy()
+    )
+    .is_err());
+    drop(physical);
+    assert!(mount.is_cancelled());
+    // Even the remaining negative metadata retains its own exact invoice.
+    assert!(!refunded.load(Ordering::Acquire));
+    drop(gate);
+    assert!(refunded.load(Ordering::Acquire));
+    assert_eq!(reopened(dir.path()).unwrap().row_count_data().unwrap(), 1);
+}
 fn pending_data(
     mounted: &NativeIndexStore,
     rng: &mut ChaCha20Rng,
 ) -> (io::IndexCommitIo, Zeroizing<Vec<u8>>) {
-    let store = mounted.current.checked_store().unwrap();
+    let store = mounted.physical.current.checked_store().unwrap();
     let snapshot = io::IndexSnapshot::capture(store).unwrap();
     let key = Zeroizing::new(store.keys.db_key().unwrap());
     let cap = capability_data(
@@ -545,6 +592,55 @@ fn pending_data(
 }
 
 #[test]
+fn native_index2_admitted_data_debt_finishes_after_its_affine_owner_closes() {
+    for (number, cut) in [io::Fault::IndexStage, io::Fault::IndexRename]
+        .into_iter()
+        .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x7a40 + number as u64);
+        let mounted = mounted(dir.path(), &mut rng);
+        let physical = Arc::clone(&mounted.physical);
+        let store = physical.current.checked_store().unwrap();
+        let (mut commit, frame) = pending_data(&mounted, &mut rng);
+        let claim = {
+            let _catalog = store.pending_join_catalog.lock().unwrap();
+            physical.handler.gate.claim().unwrap()
+        };
+        io::arm_fault(cut);
+        assert!(commit.commit_index(store, &frame).is_err());
+        assert!(io::take_fault_seen());
+        drop(mounted);
+        assert!(physical.handler.gate.claim().is_err());
+        // Preserve the exact admitted file/ciphertext/phase through Stage or
+        // post-rename uncertainty. Closing admission does not revoke physical
+        // custody that an already admitted finite DATA effect needs to finish.
+        commit.commit_index(store, &frame).unwrap();
+        assert_eq!(
+            claim.finish().unwrap(),
+            super::super::interlock::ClaimRelease::Closed
+        );
+        assert!(store.require_native_index_idle_cached().is_err());
+        assert_eq!(
+            fs::read(file(dir.path(), previous::INDEX_NAME)).unwrap(),
+            *frame
+        );
+        drop(commit);
+        drop(physical);
+        let recovered = reopened(dir.path()).unwrap();
+        assert_eq!(recovered.row_count_data().unwrap(), 2);
+        assert_eq!(
+            recovered
+                .lookup_creation_data([41; 32], [42; 32])
+                .unwrap()
+                .unwrap()
+                .state,
+            super::super::NativeCreationStateData::Pending
+        );
+    }
+}
+
+#[test]
 fn native_index2_index_last_target_proof_preserves_late_equal_replacement() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0x79e0);
@@ -565,7 +661,7 @@ fn native_index2_index_last_target_proof_preserves_late_equal_replacement() {
         }),
     );
     assert!(commit
-        .commit_index(mounted.current.checked_store().unwrap(), &frame)
+        .commit_index(mounted.physical.current.checked_store().unwrap(), &frame)
         .is_err());
     assert!(io::take_rename_hook_seen());
     assert_eq!(fs::read(destination).unwrap(), foreign);
@@ -583,7 +679,7 @@ fn native_index2_real_index_stage_and_selected_cut_recover_data_without_sdk_or_r
         let (mut commit, frame) = pending_data(&mounted, &mut rng);
         io::arm_fault(cut);
         assert!(commit
-            .commit_index(mounted.current.checked_store().unwrap(), &frame)
+            .commit_index(mounted.physical.current.checked_store().unwrap(), &frame)
             .is_err());
         assert!(io::take_fault_seen());
         drop(commit);
@@ -611,7 +707,7 @@ fn native_index2_unlink_refusal_retains_original_cleanup_and_excludes_join_until
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0x7a00);
     let mounted = mounted(dir.path(), &mut rng);
-    let store = mounted.current.checked_store().unwrap();
+    let store = mounted.physical.current.checked_store().unwrap();
     fs::write(
         file(dir.path(), previous::INDEX_STAGE_NAME),
         b"torn index ciphertext",
@@ -622,7 +718,7 @@ fn native_index2_unlink_refusal_retains_original_cleanup_and_excludes_join_until
     assert!(authenticate(&key, INDEX_KEY, snapshot.stage().unwrap(), data::MAX_FRAME).is_err());
     let mut cleanup = io::IndexStageCleanup::prepare_unauthenticated(snapshot).unwrap();
     let catalog = store.pending_join_catalog.lock().unwrap();
-    let claim = mounted.handler.gate.claim().unwrap();
+    let claim = mounted.physical.handler.gate.claim().unwrap();
     drop(catalog);
     io::arm_fault(io::Fault::IndexStageUnlink);
     assert!(cleanup.run(store).is_err());
@@ -687,6 +783,7 @@ fn native_index2_authenticated_empty_and_future_index_stages_are_preserved() {
         let mounted = mounted(dir.path(), &mut rng);
         let key = Zeroizing::new(
             mounted
+                .physical
                 .current
                 .cached_store()
                 .unwrap()

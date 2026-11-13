@@ -1,11 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Net's `seeded_transport_identity_data(&[u8;32])` returns only bounded public
+`SeededTransportIdentityData`: the full canonical Ed25519 protobuf public key,
+canonical libp2p/Phase-0 IDs and a domain-separated full-key commitment. It uses
+the actual transport key builder, starts no socket/task and grants no native or
+SDK authority. The native reservation must still preserve its original seed and
+compare the actual constructed Mesh owner before handing it to a founder.
+
 `NativeIndexPolicy`, `NativeIndexUpgrade::{prepare,retry,into_index_store}` and
 `NativeIndexStore::{open,row_count_data,lookup_creation_data}` are the distinct
 namespace7/v2 storage APIs. The upgrade consumes a genuine opaque v1 G1 owner;
 no Store/Current getter or generic row-publish API is exposed. Status is historical
 DATA, never native/runtime authority. The actual warm transaction consumer remains
 unfinished. [Contract and validation](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+Its affine facade closes admission before releasing a private reference-counted
+physical allocation. No public physical loan, raw Store or Current is exposed;
+physical custody alone can finish retained index DATA, never issue new work.
 
 Sync's `begin_owner_v2_founder_signing` and
 `prepare_owner_v2_founder_retained(&mut RetainedFounderSigning)` retain separate

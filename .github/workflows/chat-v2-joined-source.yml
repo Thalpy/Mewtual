@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/scripts/check-chat-v2-native-index2.py'
       - '.github/predecessor/native_index2_gate.rs'
+      - 'crates/catcoms-net/src/seeded_identity.rs'
+      - 'crates/catcoms-net/src/lib.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native2_predecessor_tests.rs'
       - 'crates/catcoms-app/src/store/persistence/native_registry/**'
       - '.github/workflows/chat-v2-joined-source.yml'
@@ -97,7 +99,7 @@ jobs:
       # This does not replace or relax the required workspace-wide Clippy job.
       - name: Strict Clippy for the affected protocol crates
         if: ${{ !cancelled() }}
-        run: cargo clippy --locked -p catcoms-replication -p catcoms-sync --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p catcoms-replication -p catcoms-sync -p catcoms-net --all-targets --all-features -- -D warnings
       - uses: actions/upload-artifact@v4
         if: always()
         with:

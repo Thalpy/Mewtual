@@ -23,6 +23,15 @@ pub struct NativeCreationStatusData {
 
 pub struct NativeIndexStore {
     pub(super) _admission: interlock::AdmissionOwner,
+    // Only this affine wrapper owns close. An admitted worker may retain the
+    // private physical allocation, never a second admission owner or raw Store.
+    pub(super) physical: Arc<NativeIndexPhysical>,
+}
+
+/// Physical custody for admitted finite work. This is deliberately private to
+/// the concrete native-index implementation; no public loan/getter/clone API
+/// exists. Retained transaction cells must not own an Arc back to this object.
+pub(super) struct NativeIndexPhysical {
     // Retained cells/read metadata must drain before the actual mount and fee.
     pub(super) read: Mutex<()>,
     pub(super) current: V2CurrentLayoutStore,
@@ -51,9 +60,11 @@ impl NativeIndexStore {
             .map_err(|_| refused())?;
         let value = Self {
             _admission: interlock::AdmissionOwner::new(handler.gate.clone()),
-            current,
-            handler,
-            read: Mutex::new(()),
+            physical: Arc::new(NativeIndexPhysical {
+                current,
+                handler,
+                read: Mutex::new(()),
+            }),
         };
         value.row_count_data()?;
         Ok(value)
@@ -62,10 +73,42 @@ impl NativeIndexStore {
     /// for UI lock or one group's departure: those close their own issuers.
     /// Historical DATA reads may remain available; session drainage is separate.
     pub fn close_index_admission(&self) {
-        self.handler.gate.close();
+        self.physical.handler.gate.close();
     }
 
-    fn read_index(&self) -> Result<data::Index, AppError> {
+    pub fn row_count_data(&self) -> Result<usize, AppError> {
+        let _read = self.physical.read.try_lock().map_err(|_| refused())?;
+        Ok(self.physical.read_index()?.rows.len())
+    }
+    /// Exact immutable receipt lookup. A conflicting request refuses; absence
+    /// grants no permission to create a row, draw RNG, sign or start an SDK.
+    pub fn lookup_creation_data(
+        &self,
+        invocation: [u8; 32],
+        request: [u8; 32],
+    ) -> Result<Option<NativeCreationStatusData>, AppError> {
+        let _read = self.physical.read.try_lock().map_err(|_| refused())?;
+        let index = self.physical.read_index()?;
+        let Some(row) = index.lookup_data(invocation, request)? else {
+            return Ok(None);
+        };
+        let state = match &row.backend {
+            data::Backend::Pending { .. } => NativeCreationStateData::Pending,
+            data::Backend::Founder { .. } => NativeCreationStateData::Founder,
+            data::Backend::Retired { .. } => NativeCreationStateData::Retired,
+            data::Backend::Abandoned { .. } => NativeCreationStateData::Abandoned,
+            data::Backend::Legacy { .. } => return Err(refused()),
+        };
+        Ok(Some(NativeCreationStatusData {
+            id: row.id,
+            identity: row.identity,
+            state,
+        }))
+    }
+}
+
+impl NativeIndexPhysical {
+    pub(super) fn read_index(&self) -> Result<data::Index, AppError> {
         self.handler.require()?;
         let store = self.current.checked_store()?;
         let snapshot = io::IndexSnapshot::capture(store)?;
@@ -91,34 +134,5 @@ impl NativeIndexStore {
         snapshot.require_selected(store)?;
         self.current.cached_store()?;
         Ok(index)
-    }
-    pub fn row_count_data(&self) -> Result<usize, AppError> {
-        let _read = self.read.try_lock().map_err(|_| refused())?;
-        Ok(self.read_index()?.rows.len())
-    }
-    /// Exact immutable receipt lookup. A conflicting request refuses; absence
-    /// grants no permission to create a row, draw RNG, sign or start an SDK.
-    pub fn lookup_creation_data(
-        &self,
-        invocation: [u8; 32],
-        request: [u8; 32],
-    ) -> Result<Option<NativeCreationStatusData>, AppError> {
-        let _read = self.read.try_lock().map_err(|_| refused())?;
-        let index = self.read_index()?;
-        let Some(row) = index.lookup_data(invocation, request)? else {
-            return Ok(None);
-        };
-        let state = match &row.backend {
-            data::Backend::Pending { .. } => NativeCreationStateData::Pending,
-            data::Backend::Founder { .. } => NativeCreationStateData::Founder,
-            data::Backend::Retired { .. } => NativeCreationStateData::Retired,
-            data::Backend::Abandoned { .. } => NativeCreationStateData::Abandoned,
-            data::Backend::Legacy { .. } => return Err(refused()),
-        };
-        Ok(Some(NativeCreationStatusData {
-            id: row.id,
-            identity: row.identity,
-            state,
-        }))
     }
 }

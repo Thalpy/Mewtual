@@ -81,6 +81,25 @@ Fields retire admission first, then files/buffers, then the mount, then payment.
 The interlock and retained claim keep the exact debit alive; copying a pool handle
 or claim label cannot replace it.
 
+The next native-founder increment separates that affine admission owner from a
+private reference-counted physical allocation containing the reader, Current and
+handler. Only the opaque facade owns close; a future admitted worker may retain
+physical custody without cloning authority. No public physical loan exists, and
+retained cells must not contain an Arc back to their physical owner. Index DATA
+completion remains possible after admission closes; central JOIN helpers still
+reject CLOSED, so this does not claim every admitted JOIN repair drains after
+owner removal. There are no operational source/command issuers here yet; the
+native founder consumer must retire those before waiting for worker drainage.
+
+Net now derives bounded public identity DATA from its actual Ed25519 key builder:
+the full algorithm-tagged protobuf key, canonical libp2p and Phase-0 IDs, and a
+domain-separated full-key commitment. A literal compatibility vector and real
+Mesh ownership tests cover it. This helper borrows the original seed; it holds
+no private-key/runtime permission and does not reserve or persist a network file.
+The follow-up passes all32 index2 cases and3 identity cases locally, including
+actual retained Stage/post-rename completion after facade close. Read-only review
+has no blocker/high/medium. Full current-source gates are still required.
+
 Local Windows execution passes30 exact cases, including14 real warm cuts,11
 complete-intent cold cuts, first-torn recovery, authenticated-empty/future intent
 and index Stage preservation, committed-output loss, a JOIN-compatible duplicate

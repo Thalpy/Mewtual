@@ -7,6 +7,13 @@ outputs or discard authenticated unknown DATA. Admission closes before files,
 buffers, mount and exact payment retire. These storage properties supply no
 native-session, SDK, key, joined-member or backend permission; those live consumers
 remain incomplete. [Enforcement and limits](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+The admission facade and private physical custody have distinct lifetimes: a late
+storage loan cannot reopen the original closed fence, while an already retained
+index write can finish its exact WAL/barriers. The final physical drop retires
+the mount; negative gate/claim metadata retains its exact invoice until released.
+This proves no absent native issuer lifecycle and no all-JOIN-after-close drain.
+The seeded transport commitment covers the full algorithm-tagged public key;
+mutable routes/ports and encrypted-frame identities cannot substitute for it.
 
 The retained Root bootstrap producer records each Profile/Header key entry before
 the primitive and caches returned raw immediately. Unknown entered results are

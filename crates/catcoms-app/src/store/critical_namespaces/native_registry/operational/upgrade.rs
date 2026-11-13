@@ -432,9 +432,11 @@ impl NativeIndexUpgrade {
         drop(output);
         Ok(NativeIndexStore {
             _admission: admission,
-            current: *current,
-            handler,
-            read: std::sync::Mutex::new(()),
+            physical: Arc::new(super::mount::NativeIndexPhysical {
+                current: *current,
+                handler,
+                read: std::sync::Mutex::new(()),
+            }),
         })
     }
 }

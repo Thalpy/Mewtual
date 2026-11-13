@@ -6,6 +6,12 @@ uses exact old/new file roles for upgrade and index-WAL recovery. Its shared JOI
 fence is negative only. The warm native producer/cell, actual key admission and
 backend installation remain unfinished; no actor can be built from its DATA
 status. [Storage scope](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+The opaque facade now owns the affine admission fence separately from its private
+reference-counted physical Current/handler. An admitted index DATA worker can
+retain physical custody after facade close without retaining admission authority.
+The owning native founder/worker consumer is still absent. Net's bounded seeded
+identity helper supplies complete actual-key DATA for that consumer, not a
+transport reservation or SDK permission.
 
 Root founder-source preparation now retains one paid bootstrap signer across
 Profile/Header preparation and consuming freeze. Exact raw64 results survive

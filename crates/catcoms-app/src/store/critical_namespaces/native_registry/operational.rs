@@ -38,6 +38,7 @@ const _: () = assert!(
 );
 const _: () = assert!(
     8 * (std::mem::size_of::<mount::NativeIndexStore>()
+        + std::mem::size_of::<mount::NativeIndexPhysical>()
         + std::mem::size_of::<upgrade::NativeIndexUpgrade>()
         + std::mem::size_of::<crate::store::persistence::native_registry::operational::UpgradeIo>(
         )
