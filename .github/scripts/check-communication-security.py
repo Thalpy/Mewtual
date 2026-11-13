@@ -20,18 +20,23 @@ STORAGE = (
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("storage", "native", "self-test"))
+    parser.add_argument("mode", choices=("storage", "native", "gossip", "self-test"))
     args = parser.parse_args()
     guard = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-member-save.py"))
     guard["self_test"]()
     assert len(STORAGE) == len(set(STORAGE)) == 3
     if args.mode == "self-test":
         return
-    if sys.platform != "linux":
+    if sys.platform != "linux" and args.mode != "gossip":
         raise RuntimeError("Linux-only regressions cannot be credited on another platform")
     directory = REPO / "logs/communication-security"
     directory.mkdir(parents=True, exist_ok=True)
-    if args.mode == "storage":
+    expected = 1
+    if args.mode == "gossip":
+        commands = [("gossip-resource", ["cargo", "test", "--locked", "-p", "catcoms-net",
+                     "--all-features", "--lib", "gossip_resource_tests"])]
+        expected = 4
+    elif args.mode == "storage":
         commands = [(selector, ["cargo", "test", "--locked", "-p", "catcoms-storage",
                      "--all-features", "--lib", selector]) for selector in STORAGE]
     else:
@@ -41,7 +46,7 @@ def main() -> None:
         code, summaries, timed_out, _ = guard["run_logged"](name, command, directory, limit=30 * 60)
         if timed_out:
             raise RuntimeError(f"{name}: owned regression exceeded its bound")
-        guard["validate"]("".join(summaries), code, 1)
+        guard["validate"]("".join(summaries), code, expected)
 
 
 if __name__ == "__main__":

@@ -102,9 +102,11 @@ use libp2p::swarm::{
     SwarmEvent, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
 };
 use libp2p::{
-    allow_block_list, autonat, connection_limits, dcutr, gossipsub, identify, noise, relay,
-    rendezvous, request_response, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
+    allow_block_list, autonat, connection_limits, dcutr, identify, noise, relay, rendezvous,
+    request_response, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
+// The direct production edge enforces the repaired compatible dependency floor.
+use libp2p_gossipsub as gossipsub;
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
@@ -762,6 +764,9 @@ pub fn build_tcp_swarm_with_key_and_port_mapping(
         .map_err(|e| NetError::Build(e.to_string()))?
         .build())
 }
+
+#[cfg(test)]
+mod gossip_resource_tests;
 
 // ----- mapping helpers -------------------------------------------------------
 

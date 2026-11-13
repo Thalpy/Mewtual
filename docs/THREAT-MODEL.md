@@ -1,5 +1,12 @@
 # Threat model; client integrity & enforcement boundaries
 
+The compatible gossip repair prevents unsolicited GRAFT controls from adding
+remote subscriptions. Its real TCP receipt/regression fails on0.49.4 and passes
+on0.49.5; the release's new2000/2000 incoming subscription count bounds are retained
+and tested through actual traffic. This is not a global byte-budget or complete
+gossip-resource proof: the inherited unknown-topic PRUNE backoff growth remains
+HIGH. [Exact boundary and outstanding migration](communication-recovery/GOSSIP-GRAFT-REPAIR.md).
+
 The compatible dependency repair preserves the existing sanitizer allow-list
 and string-output mode. The POSIX ACL detector uses rustix's explicit size query
 with the same fail-closed error folding; native tar's xattr dependency is updated
