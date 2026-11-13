@@ -38,7 +38,8 @@ pub(super) fn require_pre_initializing_inventory(
     }
 }
 
-#[cfg(all(test, any(windows, target_os = "linux")))]
+#[cfg(test)]
+#[cfg(any(windows, target_os = "linux"))]
 mod tests {
     use super::*;
 
