@@ -12,6 +12,14 @@ import runpy
 
 REPO = Path(__file__).resolve().parents[2]
 CASES = (
+    # Keep manual and End-before-input controls beside the new local-consumer
+    # ordering. All selectors must run their unchanged real transport oracles.
+    "native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bridge",
+    "native_webcrypto_end_closes_automatic_work_before_first_browser_input",
+    "native_and_browser_automatically_confirm_over_blocked_tcp_member_bridge",
+    "native_ready_is_automatic_over_blocked_tcp_member_bridge_after_browser_confirmation_returns",
+    "native_browser_maximum_offer_answer_round_uses_real_http_and_blocked_tcp_bridge",
+    "production_browser_coordinator_completes_native_handoff_over_blocked_tcp_bridge",
     "native_v2_original_sdp_result_uses_actual_actor_and_survives_eager_cancellation_lock_and_history_retries",
     "native_browser_original_round_retries_lost_http_results_applied_and_return",
     "native_browser_failed_media_peer_preserves_original_session_and_indexed_sibling",
@@ -25,7 +33,7 @@ def main() -> None:
     args = parser.parse_args()
     guard = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-member-save.py"))
     guard["self_test"]()
-    assert len(set(CASES)) == 4
+    assert len(CASES) == len(set(CASES)) == 10
     if args.self_test:
         return
     directory = REPO / "logs/chat-v2-native-gates"

@@ -70,6 +70,7 @@ impl Ledger {
         let mut parents = 0_u8;
         let mut matches = [0_u8; 4];
         let mut exact = None;
+        let mut original_parent = None;
         for row in index.rows.iter().flatten() {
             let Purpose::Derive(actual) = row.key.purpose else {
                 continue;
@@ -89,6 +90,7 @@ impl Ledger {
             if actual != expected {
                 continue;
             }
+            original_parent = Some(row.id);
             exact = Some(match row.state.try_lock() {
                 Err(_) => ("contended", false, false, false, false, false),
                 Ok(state) => {
@@ -111,7 +113,50 @@ impl Ledger {
                 }
             });
         }
+        // Copy a fixed bounded metadata snapshot. Never retain rows, payloads,
+        // receipts, action owners or a producer lock while formatting diagnostics.
+        let mut children = [None; ROWS];
+        for (slot, row) in index.rows.iter().enumerate() {
+            let Some(row) = row else { continue };
+            let Purpose::Confirmation { parent, request } = row.key.purpose else {
+                continue;
+            };
+            if Some(parent) != original_parent || !row.key.matches(selected, row.key.purpose) {
+                continue;
+            }
+            let role = match request {
+                ConfirmationPurpose::Start(_) => 0_u16,
+                ConfirmationPurpose::Respond(_) => 1_u16,
+                ConfirmationPurpose::Incoming(kind) => 2 + u16::from(kind),
+            };
+            children[slot] = Some(match row.state.try_lock() {
+                Err(_) => (role, "contended", false, false, false, None),
+                Ok(state) => {
+                    let outcome = state.status.engine.receipt.as_ref().map(|receipt| {
+                        use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
+                        match receipt.outcome {
+                            CryptoOutcome::Derived => "derived",
+                            CryptoOutcome::Opened => "opened",
+                            CryptoOutcome::Sealed { .. } => "sealed",
+                            CryptoOutcome::Rejected(_) => "rejected",
+                        }
+                    });
+                    (
+                        role,
+                        if state.status.action.is_some() {
+                            "attached"
+                        } else {
+                            "unattached"
+                        },
+                        state.status.acknowledged,
+                        state.status.drained,
+                        state.status.engine.settled,
+                        outcome,
+                    )
+                }
+            });
+        }
         drop(index); // Formatting/allocator work cannot hold the producer's index.
-        format!("parents={parents}; matching peer/join/key/epoch={matches:?}; exact state/action/worker/handoff/prepared/publication={exact:?}")
+        format!("parents={parents}; matching peer/join/key/epoch={matches:?}; exact state/action/worker/handoff/prepared/publication={exact:?}; children role/attachment/ack/drained/settled/outcome={children:?}")
     }
 }

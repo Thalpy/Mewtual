@@ -80,10 +80,16 @@ struct Callbacks {
     refuse_collect: bool,
     // Rust-only observation scope, derived from actual native discovery, never Node input.
     expected_parent: Option<ledger::RowId>,
+    // Actual discovery observation, used ONLY for failure diagnostics. Automatic
+    // consumers still choose their own work; this never scopes terminal success.
+    diagnostic_pair: Option<PairSelector>,
     pause_setup: bool,
     discovery_hold: Option<super::super::channel::NativeHold>,
     // Negative test-owned cadence barrier; dropping always resumes the actual Host.
     deferred_maintenance: Option<tokio::sync::oneshot::Sender<()>>,
+    // Only the automatic-consumer fixture owns this startup barrier. Manual tests
+    // intentionally allow work before browser intake and retain their old order.
+    initial_auto_consumer: bool,
 }
 impl Default for Callbacks {
     fn default() -> Self {
@@ -94,9 +100,11 @@ impl Default for Callbacks {
             refuse_publish: true,
             refuse_collect: true,
             expected_parent: None,
+            diagnostic_pair: None,
             pause_setup: false,
             discovery_hold: None,
             deferred_maintenance: None,
+            initial_auto_consumer: false,
         }
     }
 }
@@ -120,10 +128,22 @@ pub(crate) struct Endpoint {
     media_http: bool,
 }
 impl Endpoint {
-    /// Complete the actual selected-key publication and channel Status before starting a
-    /// protected pair. A slow process launch/setup cannot consume the original pair deadline.
+    /// Complete actual selected-key publication and channel Status. Manual scenarios
+    /// deliberately let native work exist before they drive the browser input.
     pub(crate) async fn prepare(state: Arc<AppState>, owner: String) -> Result<Self, Failure> {
-        Self::prepare_inner(state, owner, false, false).await
+        Self::prepare_inner(state, owner, false, false, false).await
+    }
+
+    /// Model the production order: the local consumer is installed as soon as
+    /// authenticated setup is ready. The process fixture must return from Setup
+    /// before it can receive its pump command; retain the original factory position
+    /// and cadence only across that artificial no-consumer interval. The first
+    /// authenticated ReadWork releases them, independently on each endpoint.
+    pub(crate) async fn prepare_initial_automatic(
+        state: Arc<AppState>,
+        owner: String,
+    ) -> Result<Self, Failure> {
+        Self::prepare_inner(state, owner, true, true, true).await
     }
 
     /// Pause only the actual native factory position before delivering Setup/Ready ACK.
@@ -132,14 +152,14 @@ impl Endpoint {
         state: Arc<AppState>,
         owner: String,
     ) -> Result<Self, Failure> {
-        Self::prepare_inner(state, owner, true, false).await
+        Self::prepare_inner(state, owner, true, false, false).await
     }
 
     pub(crate) async fn prepare_deferred_discovery(
         state: Arc<AppState>,
         owner: String,
     ) -> Result<Self, Failure> {
-        Self::prepare_inner(state, owner, true, true).await
+        Self::prepare_inner(state, owner, true, true, false).await
     }
 
     async fn prepare_inner(
@@ -147,6 +167,7 @@ impl Endpoint {
         owner: String,
         pause_setup: bool,
         defer_maintenance: bool,
+        initial_auto_consumer: bool,
     ) -> Result<Self, Failure> {
         super::super::channel::Session::fixture_prepare_native_diagnostics();
         let runtime = crate::voice_runtime(&state);
@@ -264,6 +285,7 @@ impl Endpoint {
             callbacks: Callbacks {
                 pause_setup,
                 deferred_maintenance: deferred.map(|(_, sender)| sender),
+                initial_auto_consumer,
                 ..Callbacks::default()
             },
             media_fixture_grant: None,
@@ -309,6 +331,25 @@ impl Endpoint {
             .as_ref()
             .expect("only a completed native publication supplies a selected owner")
             .clone()
+    }
+
+    /// Bounded, read-only regression oracle while BOTH original startup holds
+    /// still exist. It names no parent for the browser and creates no work.
+    pub(crate) fn assert_initial_consumer_fenced(&self, selector: PairSelector) {
+        assert!(self.callbacks.initial_auto_consumer);
+        assert!(self.callbacks.discovery_hold.is_some());
+        assert!(self.callbacks.deferred_maintenance.is_some());
+        assert!(
+            self.state
+                .voice_handoff
+                .lookup_original(&self.selected(), ledger::Purpose::Derive(selector))
+                .is_none(),
+            "native work must not consume its deadline before the local consumer exists"
+        );
+    }
+
+    pub(crate) fn observe_discovered_pair(&mut self, selector: PairSelector) {
+        self.callbacks.diagnostic_pair = Some(selector);
     }
 
     async fn step(&mut self, value: Value) -> Value {
@@ -1448,7 +1489,14 @@ async fn drive_streams(
                 let session = state
                     .voice_channels
                     .fixture_sdp_session_diagnostic(selected);
-                format!("{ledger}; {native:?}; independent {session}")
+                let confirmation = callbacks.diagnostic_pair.map(|pair| {
+                    state
+                        .voice_handoff
+                        .fixture_derivation_diagnostic(selected, pair)
+                });
+                format!(
+                    "{ledger}; {native:?}; independent {session}; confirmation={confirmation:?}"
+                )
             });
             let observed = *observed.lock().unwrap_or_else(|error| error.into_inner());
             panic!("native/WebCrypto control timeout: step={step_name}, observed={observed:?}; original-scope diagnostics={detail:?}");
@@ -1513,7 +1561,8 @@ async fn drive_streams_inner(
                     let session = state
                         .voice_channels
                         .fixture_sdp_session_diagnostic(selected);
-                    format!("{ledger}; {native:?}; independent {session}")
+                    let confirmation = callbacks.diagnostic_pair.map(|pair| state.voice_handoff.fixture_derivation_diagnostic(selected, pair));
+                    format!("{ledger}; {native:?}; independent {session}; confirmation={confirmation:?}")
                 });
                 panic!("actual native/WebCrypto step failed: {reason}; original-scope diagnostics={detail:?}")
             }
@@ -1572,6 +1621,31 @@ async fn drive_streams_inner(
                 } else {
                     metadata(state, owner, port, method, args, callbacks.expected_parent).await
                 };
+                if (automatic || coordinator)
+                    && matches!(method, Method::ReadWork)
+                    && reply.is_ok()
+                    && callbacks.initial_auto_consumer
+                {
+                    // This call traversed the actual selected-owner/executor checks.
+                    // A refused/malformed ReadWork cannot release these holds. Historical
+                    // same-owner ReadWork is intentionally allowed even after End; dropping
+                    // negative startup gates cannot reopen that ended Session. Drop
+                    // factory custody before cadence; no peer/RowId/deadline is supplied
+                    // or renewed, and no remote endpoint is awaited by this release.
+                    callbacks.initial_auto_consumer = false;
+                    drop(
+                        callbacks
+                            .discovery_hold
+                            .take()
+                            .expect("original factory hold"),
+                    );
+                    drop(
+                        callbacks
+                            .deferred_maintenance
+                            .take()
+                            .expect("original cadence hold"),
+                    );
+                }
                 if matches!(method, Method::Setup) && reply.is_ok() && callbacks.pause_setup {
                     // Setup has installed the actual Session, but Node cannot ACK it until
                     // this reply returns. Reserve its existing sole factory position here;

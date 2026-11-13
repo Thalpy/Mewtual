@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Native consumer startup fixture (13 November; focused validation)
+
+The separate `chat-v2-native-consumer-startup-fixture` branch corrects a test-only
+no-consumer interval: automatic scenarios hold the original native factory and
+first service cadence until their local authenticated browser ReadWork. Manual,
+End-before-input and deferred-refusal modes retain their earlier order; no protocol
+deadline or independent terminal/bridge assertion changes. The formerly failing
+Windows maximum-SDP case now passes twice locally. Ten focused native cases and six ACL
+controls pass; complete current-source validation remains open.
+The separate native cargo check, native formatting, ambient and whitespace gates
+also pass. This fixture-only change requires no setup/startup or visual-flow gate.
+Read-only review has no blocker/high/medium. The specific CI expiry explanation
+remains a hypothesis, with bounded diagnostic and deterministic-control limits
+recorded in [the fixture contract](communication-recovery/NATIVE-CONSUMER-STARTUP-FIXTURE.md).
+
 ## Native registry physical installation (13 November; validation in progress)
 
 The new isolated `chat-v2-native-registry-install` branch, based on58b39fb9,
