@@ -192,7 +192,7 @@ struct SupportedLayout {
     current: bool,
     governance: bool,
     member_outbox: bool,
-    native_registry: bool,
+    native_registry: Option<u32>,
 }
 impl SupportedLayout {
     const PENDING_ONLY: Self = Self {
@@ -201,7 +201,7 @@ impl SupportedLayout {
         current: false,
         governance: false,
         member_outbox: false,
-        native_registry: false,
+        native_registry: None,
     };
     const ARCHIVE_BOOTSTRAP: Self = Self {
         archive: true,
@@ -224,7 +224,7 @@ impl SupportedLayout {
             ..self
         }
     }
-    const fn native_registry(self, native_registry: bool) -> Self {
+    const fn native_registry(self, native_registry: Option<u32>) -> Self {
         Self {
             native_registry,
             ..self
@@ -251,7 +251,24 @@ pub(super) fn parse_native_registry_layout<'a>(
         layout
             .executing(executing)
             .member_outbox(true)
-            .native_registry(true),
+            .native_registry(Some(1)),
+    )
+}
+
+/// The distinct private v2 handler chooses this closed grammar. A v1 handler
+/// cannot opt into it, and knowing this parser does not construct either owner.
+pub(super) fn parse_operational_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::CURRENT_LAYOUT
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(Some(2)),
     )
 }
 
@@ -304,7 +321,13 @@ pub(super) fn parse_governance_layout<'a>(
         SupportedLayout::GOVERNANCE_LAYOUT
             .executing(policy.current.archive.pending.execution.is_some())
             .member_outbox(policy.current.member_outbox.is_some())
-            .native_registry(policy.current.native_registry.is_some()),
+            .native_registry(
+                policy
+                    .current
+                    .native_registry
+                    .as_ref()
+                    .map(|handler| handler.namespace_version()),
+            ),
     )
 }
 
@@ -478,7 +501,7 @@ fn parse_known<'a>(
                 );
                 member_outbox_payload = Some(entry.payload);
             }
-            7 if layout.native_registry && entry.version == 1 => {
+            7 if layout.native_registry == Some(1) && entry.version == 1 => {
                 let expected =
                     super::native_registry::capability::NativeCapabilityData::for_current_data(
                         current_layout.ok_or_else(refused)?,
@@ -487,6 +510,14 @@ fn parse_known<'a>(
                 super::native_registry::capability::NativeCapabilityData::decode_exact(
                     entry.payload,
                     expected,
+                )?;
+                native_registry_payload = Some(entry.payload);
+            }
+            7 if layout.native_registry == Some(2) && entry.version == 2 => {
+                super::native_registry::operational::validate_descriptor_data(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    current_payload.ok_or_else(refused)?,
                 )?;
                 native_registry_payload = Some(entry.payload);
             }

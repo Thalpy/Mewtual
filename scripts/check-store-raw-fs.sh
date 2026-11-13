@@ -54,6 +54,27 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/native_registry.rs|dispose_native_first_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry.rs|dispose_native_first_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry.rs|dispose_native_first_torn|inputs.vault.file.sync_all().map_err(io)?;']=2
+  # Explicit namespace7/v2 fixed metadata, outside inventoried epoch files. The
+  # original paid owner/cold role authenticates exact catalog/index/marker/seed
+  # relations and retains actual File identities. No row supplies a path. Each
+  # destination is re-proved after large reads before rename; selection/unlink
+  # phases are cached before covering barriers. These are not epoch-file permits.
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|self.base.vault.file.sync_all().map_err(io)?;']=2
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::remove_file(&seed).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::rename(&index_temp, &index).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::rename(&marker_temp, &marker).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::rename(&stage, &current).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|selected.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|self.original.root.file.sync_all().map_err(io)?;']=5
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|self.original.vault.file.sync_all().map_err(io)?;']=6
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|commit_index|fs::rename(&stage_path, &index_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|commit_index|selected.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|commit_index|self.original.root.file.sync_all().map_err(io)?;']=2
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|self.original.index.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|self.original.root.file.sync_all().map_err(io)?;']=2
   # Namespace4 declaration first creates/syncs the SAME empty legacy stage so
   # actual older readers refuse before any governance-only recovery debt exists.
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1

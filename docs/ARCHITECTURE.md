@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+Native index2 now has an explicit7/v2 descriptor and opaque storage upgrade/open
+path. It retains immutable create receipts independently of current metadata and
+uses exact old/new file roles for upgrade and index-WAL recovery. Its shared JOIN
+fence is negative only. The warm native producer/cell, actual key admission and
+backend installation remain unfinished; no actor can be built from its DATA
+status. [Storage scope](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+
 Root founder-source preparation now retains one paid bootstrap signer across
 Profile/Header preparation and consuming freeze. Exact raw64 results survive
 later refusal/unwind; the original node/scope and canonical full-key byte bindings

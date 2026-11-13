@@ -39,6 +39,8 @@ pub(in crate::store) mod member_outbox_layout;
 pub(in crate::store) mod member_outbox_namespace_codec;
 // Independent native registry: non-writing preparation plus its private physical handler.
 #[cfg(test)]
+mod native2_predecessor_tests;
+#[cfg(test)]
 mod native7_predecessor_tests;
 pub(in crate::store) mod native_registry;
 pub use archive_bootstrap::{
@@ -59,8 +61,9 @@ pub use governance_layout::{
 };
 pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use native_registry::{
-    NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
-    NativeRegistryStore, PreparedNativeRegistryMigration,
+    NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
+    NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    NativeRegistryPreparationPolicy, NativeRegistryStore, PreparedNativeRegistryMigration,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;

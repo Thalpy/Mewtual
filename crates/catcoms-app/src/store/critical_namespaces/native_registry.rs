@@ -5,8 +5,13 @@
 //! consumers. No default opener may infer support from decoded descriptor bytes.
 pub(in crate::store::critical_namespaces) mod capability;
 mod data;
+pub(in crate::store::critical_namespaces) mod operational;
 pub(in crate::store) mod preparation;
 
+pub use operational::{
+    NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
+    NativeIndexUpgrade,
+};
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
     NativeRegistryStore, PreparedNativeRegistryMigration,

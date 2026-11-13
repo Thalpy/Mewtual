@@ -59,12 +59,14 @@ pub use critical_namespaces::{
     CanonicalFilenameInventoryPolicy, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
     CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, FreshV2TextFounderBegin,
     FreshV2TextFounderBinding, FreshV2TextFounderPolicy, JournalledCheckpointJoinPreparation,
-    NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
-    NativeRegistryStore, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
-    PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
-    PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
-    ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
-    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
+    NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
+    NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    NativeRegistryPreparationPolicy, NativeRegistryStore, PendingJoinCatalogPolicy,
+    PreparedArchiveBootstrapStore, PreparedFreshV2TextFounder, PreparedNativeRegistryMigration,
+    PreparedV2CurrentLayoutStore, PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation,
+    ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation,
+    V2CurrentLayoutPolicy, V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
+    V2MemberOutboxPolicy,
 };
 mod owner_evidence;
 pub use chat_admission::{
@@ -3027,6 +3029,10 @@ mod persistence {
         ) -> Result<(), AppError> {
             use critical_namespaces::pending_join::Settle;
             use critical_namespaces::Slot;
+            // Runtime callers hold the catalog mutex; startup has not exposed
+            // an index owner. This cached check covers every existing-result
+            // settlement path without recursively acquiring that mutex.
+            self.require_native_index_idle_cached()?;
             opened.validate_original(self)?;
             for file in opened.current.iter().chain(opened.stage.iter()) {
                 file.sync_all()
@@ -3066,6 +3072,7 @@ mod persistence {
         ) -> Result<(), AppError> {
             use critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED;
             use critical_namespaces::{refused, Slot};
+            self.require_native_index_idle_cached()?; // Caller retains catalog exclusion through all IO.
             permit.validate_candidate(candidate)?;
             if candidate.bytes.len() > MAX_CATALOG_FRAMED
                 || *blake3::hash(&candidate.bytes).as_bytes() != candidate.next.framed

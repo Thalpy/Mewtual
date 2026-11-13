@@ -72,7 +72,10 @@ def run() -> None:
                 raise RuntimeError("predecessor path escaped owned temporary directory")
             # A commit object alone is not proof that a shallow/partial checkout has its
             # whole tree. Fetch this exact pinned object closure, never a movable branch.
-            git("fetch", "--no-tags", "--depth=1", "origin", PREDECESSOR)
+            fetch = ["fetch", "--no-tags"]
+            if git("rev-parse", "--is-shallow-repository") == "true":
+                fetch.append("--depth=1")
+            git(*fetch, "origin", PREDECESSOR)
             git("worktree", "add", "--detach", str(worktree), PREDECESSOR)
             try:
                 if git("rev-parse", "HEAD", cwd=worktree) != PREDECESSOR:

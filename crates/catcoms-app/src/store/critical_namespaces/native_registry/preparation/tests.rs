@@ -8,8 +8,9 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::fs;
 
-pub(super) const SECRET: &[u8] = b"private native registry preparation";
-pub(super) struct NeverRng;
+pub(in crate::store::critical_namespaces::native_registry) const SECRET: &[u8] =
+    b"private native registry preparation";
+pub(in crate::store::critical_namespaces::native_registry) struct NeverRng;
 impl RngCore for NeverRng {
     fn next_u32(&mut self) -> u32 {
         panic!("refusal reached RNG")
@@ -25,7 +26,8 @@ impl RngCore for NeverRng {
     }
 }
 impl CryptoRng for NeverRng {}
-pub(super) fn current_policy() -> V2CurrentLayoutPolicy {
+pub(in crate::store::critical_namespaces::native_registry) fn current_policy(
+) -> V2CurrentLayoutPolicy {
     let shared = CriticalCatalogReadPool::new(1024 * 1024 * 1024).unwrap();
     V2CurrentLayoutPolicy::new(
         ArchiveBootstrapCatalogPolicy::new(
@@ -55,7 +57,7 @@ fn native_policy() -> NativeRegistryPreparationPolicy {
     NativeRegistryPreparationPolicy::new(CriticalCatalogReadPool::new(PREPARATION_FEE).unwrap())
         .unwrap()
 }
-pub(super) fn records() -> Vec<ServerRecord> {
+pub(in crate::store::critical_namespaces::native_registry) fn records() -> Vec<ServerRecord> {
     vec![ServerRecord {
         id: 9,
         display_name: "original legacy".into(),
@@ -63,7 +65,11 @@ pub(super) fn records() -> Vec<ServerRecord> {
         is_dm: true,
     }]
 }
-pub(super) fn initialize(path: &Path, records: Option<&[ServerRecord]>, rng: &mut ChaCha20Rng) {
+pub(in crate::store::critical_namespaces::native_registry) fn initialize(
+    path: &Path,
+    records: Option<&[ServerRecord]>,
+    rng: &mut ChaCha20Rng,
+) {
     let store = ServerStore::open(path, SECRET, rng).unwrap();
     if let Some(records) = records {
         store.save_registry(records, rng).unwrap();

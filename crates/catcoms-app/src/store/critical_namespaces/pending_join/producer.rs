@@ -731,6 +731,7 @@ impl ServerStore {
         let mut mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
         let mounted = mounted.as_mut().ok_or_else(refused)?;
         let pending = candidate.as_mut().ok_or_else(refused)?;
+        self.require_native_index_idle_cached()?; // Before consuming the original task observation.
         if pending.continuation_outcome.is_some() {
             return Err(refused());
         }
