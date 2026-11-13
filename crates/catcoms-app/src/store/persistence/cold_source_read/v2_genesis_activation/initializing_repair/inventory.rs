@@ -10,7 +10,8 @@ pub(super) enum GenesisRepairHeadInventory {
     Current,
 }
 
-#[cfg(all(test, any(windows, target_os = "linux")))]
+#[cfg(test)]
+#[cfg(any(windows, target_os = "linux"))]
 mod tests {
     use super::*;
 
