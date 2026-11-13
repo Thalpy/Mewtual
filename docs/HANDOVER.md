@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Index3 lifecycle DATA (13 November; physical upgrade not implemented)
+
+`chat-v2-native-index3-lifecycle`, based on PR101/bdf1a462, adds a private version3
+descriptor/model/codec and exact owned version2 DATA conversion. No opener or
+physical writer supports3 yet. Existing1/2 parsers and public Copy projections
+retain their contracts; only internal DATA visibility is expanded for conversion.
+
+The model preserves original receipts/highwater, imported Legacy provenance and
+immutable group/DM classification. Rename and Legacy invite refresh are separate
+revision-checked operations. Terminal records preserve bindings and receipts and
+cannot resurrect. Generation1 permits only genuine predecessor shapes, with
+the predecessor's own G1 restrictions retained. Joined fields are initial facts;
+actual namespace6/own-Add/live replay proofs are still required. Founder journal
+abandonment reasons cannot be reinterpreted for Joined or LegacyJoin attempts.
+
+Admission reserves future parent, activation and terminal bytes, independently
+of actual current size. A valid full4MiB version2 table converts with enough
+space to complete its old rows. New birth/optional metadata cannot spend those
+promised completion bytes. See [the design and scope](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
+Local execution passes all133 surrounding native-registry cases. After final
+test-only assertion improvements, all24 new lifecycle cases pass again. They
+exercise the actual version2 canonical codec at its exact size limit, short-name
+rename/all64 Legacy retirements, minimum-frame Founder activation/retirement,
+exact moved ciphertext, every conversion field and terminal reason, full3 table
+reservation refusal and strict malformed/cross-context inputs. Read-only design,
+diff and re-review have no B/H/M/LOW remaining after migration-shape and completion-
+capacity fixes. These are DATA tests, not physical3/native/SDK acceptance.
+
+Next: genuine consuming2→3 ownership, dedicated fixed IO roles/invoices, catalog
+and JOIN-history preservation, crash recovery and real predecessor refusal gates.
+The checked native producer, mixed Legacy operation, cold restore, joined source,
+transport and UI/admin acceptance remain open. Chat V2 remains disabled.
+
 ## Warm native saved-source SDK admission (13 November; factory still open)
 
 The real warm handoff now binds its retained creator's native origin. A distinct

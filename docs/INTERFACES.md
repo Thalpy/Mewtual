@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Private `native_registry::lifecycle` contains version3 DATA only. Its decoder and
+one-row successor checks confer no physical or runtime authority. Owned version2
+conversion moves exact receipts, network ciphertext and highwater; a real upgrader
+must still authenticate the original held frame and prove all physical barriers.
+Actual/reserved lengths protect already-admitted activation/terminal capacity.
+No public index snapshot setter, Store loan, native issuer or version3 opener is
+provided. [Contract and remaining work](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
 Warm saved-source SDK reopen has a distinct `NativeChatWarmSdkReopenCut` and
 single-operation `NativeChatSdkRestoreEnds`. The private Root path requires
 evidence borrowed from the real completed warm handoff and its exact paid read;

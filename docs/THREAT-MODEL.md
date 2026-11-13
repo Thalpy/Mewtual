@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+Index3 DATA cannot authorize a joined member or manufacture a migration. G1
+accepts only predecessor shapes/revision0; a real owning upgrade must additionally
+prove exact old-to-new bytes and held destinations. Imported Legacy receives no
+invented birth receipt. Terminal/native initial bindings and group/DM class stay
+immutable. Birth/metadata admission reserves mandatory future completion space,
+so it cannot strand an earlier operation by consuming its terminal budget.
+The private codec/converter has no physical opener or SDK/native grant; those
+consumers and their persistence/resource proofs remain implementation work.
+
 The warm native SDK reopen path must own the successful original SDK-drained
 handoff, its saved terminal provenance and the same paid source read. A decoded
 SourceSaved/Pending label, copied currentness flag or fresh SDK cut cannot issue

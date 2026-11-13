@@ -4,10 +4,12 @@
 //! receipts here must not silently enlarge its grammar or authorize its reader.
 //! A decoded receipt is historical DATA, never permission to instantiate an SDK,
 //! construct a network transport, sign, or install a native backend.
-mod capability;
+// Internal DATA visibility for the owning version3 conversion only. This does
+// not expose a physical Index/Store loan or change the closed version2 grammar.
+pub(super) mod capability;
 mod catalog;
 mod cell;
-mod data;
+pub(super) mod data;
 mod facade;
 mod interlock;
 mod mount;
