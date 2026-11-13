@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+Private namespace7 initial installation now has an independent paid physical
+handler. Ordinary openers remain fenced before older cleanup; the private existing-
+vault route checks the authenticated format before any repair. Continuous actual
+file/directory custody, exact seeded G1 mapping and late selected-tuple proofs
+prevent replacement or stale initial evidence from selecting another index or
+discarding needed recovery state. AEAD success, including empty plaintext, never
+means disposable first-torn scratch. The narrow governance claim-window cleanup
+removes only an unauthenticated native claim and never Stage or governance data.
+This grants no native command/key/runtime authority and does not implement later
+index CAS, cold operational ownership or general rollback resistance.
+[Enforcement and limits](communication-recovery/CHAT-V2-NATIVE-REGISTRY-INSTALLATION.md).
+
 The compatible gossip repair prevents unsolicited GRAFT controls from adding
 remote subscriptions. Its real TCP receipt/regression fails on0.49.4 and passes
 on0.49.5; the release's new2000/2000 incoming subscription count bounds are retained

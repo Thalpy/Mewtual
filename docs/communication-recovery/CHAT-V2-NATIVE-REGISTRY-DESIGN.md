@@ -1,10 +1,11 @@
 # Native vault/row integration: implementation design (13 November)
 
-This is the next implementation boundary after the closed fresh-founder driver.
-It does not declare a format on disk, install a native backend or enable Chat V2.
-The existing default, Current and governance readers still cannot interpret
-namespace7. The preparation increment adds early refusal of its reserved
-artifacts; the concrete handler and predecessor tests remain separate.
+The physical declaration/repair portion of this design is now implemented in the
+separate [native-registry installation API](CHAT-V2-NATIVE-REGISTRY-INSTALLATION.md).
+The existing preparation API stays non-writing and ordinary default, Current and
+governance readers still refuse namespace7. The remaining native backend/command,
+index update and operational ownership boundaries below are not implemented by
+that physical increment; Chat V2 remains disabled.
 
 ## Coordinated format allocation
 

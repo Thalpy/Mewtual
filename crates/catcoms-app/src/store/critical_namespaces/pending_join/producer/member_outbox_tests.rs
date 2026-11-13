@@ -204,3 +204,101 @@ fn a_reencoding_that_loses_or_changes_five_is_not_a_successor() {
     let changed = encoded(11, &parent, &changed);
     assert!(codec::parse_all_known_for_test(&changed, &VAULT, false).is_err());
 }
+
+/// Codec-only evidence for both declaration orders. The true native opener still requires
+/// its actual physical handlers; this all-known grammar manufactures no mounted capability.
+fn with_native(declare_four_first: Option<bool>) -> Zeroizing<Vec<u8>> {
+    use super::super::super::{
+        catalog_declaration, native_registry::capability::NativeCapabilityData,
+    };
+    let base = catalog(if declare_four_first == Some(true) {
+        &[4, 5]
+    } else {
+        &[5]
+    });
+    let layout = current::CurrentLayoutData {
+        vault: VAULT,
+        root: ROOT,
+    };
+    let cap =
+        NativeCapabilityData::for_current_data(layout, &layout.encode_data().unwrap()).unwrap();
+    let mut next =
+        catalog_declaration::insert_entry_data(&base, &VAULT, 7, 1, &cap.encode_data().unwrap())
+            .unwrap();
+    if declare_four_first == Some(false) {
+        let four = entries(&catalog(&[4, 5]))
+            .into_iter()
+            .find(|entry| entry.0 == 4)
+            .unwrap();
+        next = catalog_declaration::insert_entry_data(&next, &VAULT, 4, four.1, &four.2).unwrap();
+    }
+    next
+}
+
+#[test]
+fn native_registry_join_add_pause_resume_preserve_seven_in_both_declaration_orders() {
+    for four in [None, Some(false), Some(true)] {
+        let original = with_native(four);
+        let parsed =
+            codec::parse_native_registry_layout(&original, &VAULT, false, four.is_some()).unwrap();
+        let summary = parsed.summary([0; 32]);
+        assert!(parsed.native_registry_payload.is_some());
+        assert!(codec::parse_configured_current_layout(&original, &VAULT, false, true).is_err());
+        let mut target = parsed.rows[0].as_ref().unwrap().metadata.clone();
+        target.revision += 1;
+        target.scheduling = codec::Scheduling::Active;
+        let resumed = encode_schedule(&parsed, &target, &VAULT).unwrap();
+        assert_namespaces_kept(&original, &resumed);
+        let next =
+            codec::parse_native_registry_layout(&resumed, &VAULT, false, four.is_some()).unwrap();
+        codec::successor(&summary, &next.summary([1; 32])).unwrap();
+        target.revision += 1;
+        target.scheduling = codec::Scheduling::Paused;
+        let paused = encode_schedule(&next, &target, &VAULT).unwrap();
+        assert_namespaces_kept(&original, &paused);
+        let last =
+            codec::parse_native_registry_layout(&paused, &VAULT, false, four.is_some()).unwrap();
+        codec::successor(&next.summary([1; 32]), &last.summary([2; 32])).unwrap();
+        let added_bytes = row(0x20, 1, false);
+        let added = codec::parse_original_row(&added_bytes, &VAULT).unwrap();
+        let grown = encode_added(
+            &last,
+            &added.metadata,
+            added.immutable,
+            added.encrypted,
+            &VAULT,
+        )
+        .unwrap();
+        assert_namespaces_kept(&original, &grown);
+        let grown =
+            codec::parse_native_registry_layout(&grown, &VAULT, false, four.is_some()).unwrap();
+        codec::successor(&last.summary([2; 32]), &grown.summary([3; 32])).unwrap();
+    }
+}
+
+#[test]
+fn native_registry_join_successor_refuses_lost_changed_or_unknown_seven() {
+    let original = with_native(None);
+    let parsed = codec::parse_native_registry_layout(&original, &VAULT, false, false).unwrap();
+    let mut target = parsed.rows[0].as_ref().unwrap().metadata.clone();
+    target.revision += 1;
+    target.scheduling = codec::Scheduling::Active;
+    let resumed = encode_schedule(&parsed, &target, &VAULT).unwrap();
+    let mut lost = entries(&resumed);
+    lost.retain(|entry| entry.0 != 7);
+    let lost = encoded(parsed.generation + 1, &parsed.digest, &lost);
+    let lost = codec::parse_native_registry_layout(&lost, &VAULT, false, false).unwrap();
+    assert!(codec::successor(&parsed.summary([0; 32]), &lost.summary([1; 32])).is_err());
+    for unknown_version in [false, true] {
+        let mut changed = entries(&resumed);
+        let seven = changed.iter_mut().find(|entry| entry.0 == 7).unwrap();
+        if unknown_version {
+            seven.1 = 2;
+        } else {
+            let last = seven.2.len() - 1;
+            seven.2[last] ^= 1;
+        }
+        let changed = encoded(parsed.generation + 1, &parsed.digest, &changed);
+        assert!(codec::parse_native_registry_layout(&changed, &VAULT, false, false).is_err());
+    }
+}

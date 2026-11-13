@@ -137,6 +137,10 @@ pub struct V2CurrentLayoutPolicy {
     /// grammar exactly as before: an ID5 entry or member-outbox fixed artifact refuses before
     /// any old cleaner. Trusted Rust configuration only, never decoded from storage.
     pub(in crate::store) member_outbox: Option<super::member_outbox_layout::V2MemberOutboxPolicy>,
+    // Only the opaque native-registry opener installs this handler. There is deliberately
+    // no public policy setter: a public Current wrapper must not bypass native row admission.
+    pub(in crate::store) native_registry:
+        Option<super::native_registry::preparation::NativeRegistryHandler>,
 }
 impl std::fmt::Debug for V2CurrentLayoutPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -157,6 +161,7 @@ impl V2CurrentLayoutPolicy {
             canonical,
             persistent_capacity,
             member_outbox: None,
+            native_registry: None,
         };
         policy.require_persistent_capacity()?;
         Ok(policy)
@@ -471,6 +476,55 @@ impl PreparedV2CurrentLayoutStore {
     }
 }
 impl V2CurrentLayoutStore {
+    /// Private owner transfer after the original native declaration completed. Public
+    /// Current callers cannot obtain the handler or extract this wrapper from its new owner.
+    pub(in crate::store) fn install_native_registry_handler(
+        &mut self,
+        handler: super::native_registry::preparation::NativeRegistryHandler,
+    ) -> Result<(), AppError> {
+        handler.require()?;
+        self.store.validate_mounted_current_layout()?;
+        let fee = self
+            .store
+            .current_layout_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .archive
+            .pending
+            .pool
+            .try_reserve(super::pending_join::READ_FEE)?;
+        let (_, raw) = self
+            .store
+            .open_pending_join_catalog_slot(Slot::Current, &fee)?
+            .ok_or_else(refused)?;
+        let key = Zeroizing::new(self.store.keys.db_key()?);
+        let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
+        let parsed = super::pending_join_codec::parse_native_registry_layout(
+            &plain,
+            &self.store.chat_vault_domain()?,
+            true,
+            false,
+        )?;
+        if parsed.native_registry_payload.is_none() || parsed.count != 0 {
+            return Err(refused());
+        }
+        let mut catalog = self
+            .store
+            .pending_join_catalog
+            .lock()
+            .map_err(|_| refused())?;
+        let catalog = catalog.as_mut().ok_or_else(refused)?;
+        if catalog.pending.is_some() {
+            return Err(refused());
+        }
+        catalog.current = parsed.summary(*blake3::hash(&raw).as_bytes());
+        self.store
+            .current_layout_policy
+            .as_mut()
+            .ok_or_else(refused)?
+            .native_registry = Some(handler);
+        Ok(())
+    }
     /// Real historical SourceSaved DATA read. Checks the actual mandatory namespace marker on
     /// BOTH sides of the independent paid reader; decoded layout/source labels confer nothing.
     pub fn read_saved_bootstrap_source_data(

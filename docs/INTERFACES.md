@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`NativeRegistryPolicy`, `NativeRegistryInstallation::{prepare,retry,into_native_registry}`
+and `NativeRegistryStore::{open,row_count_data}` implement the private physical
+namespace7 transaction described in the [installation contract](communication-recovery/CHAT-V2-NATIVE-REGISTRY-INSTALLATION.md).
+Only that opaque opener installs the private paid handler; there is no public
+Current-policy setter, raw Store/Current escape or native command credential.
+Shared DATA reads serialize their single prepaid inventory. The declaration
+installs only the exact migrated legacy rows; index-update/native backend admission
+remain separate work. A DATA codec is never a native row producer.
+
 `NativeRegistryPreparationPolicy` and `PreparedNativeRegistryMigration::open`
 provide the non-writing startup preparation described in the
 [native registry contract](communication-recovery/CHAT-V2-NATIVE-REGISTRY-PREPARATION.md).

@@ -182,6 +182,7 @@ fn summary(
         governance_payload_digest: None,
         member_outbox: None,
         member_outbox_payload_digest: None,
+        native_registry_payload_digest: None,
     }
 }
 fn original_metadata(n: u8, active: bool) -> codec::Metadata {

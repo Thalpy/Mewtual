@@ -59,7 +59,8 @@ pub use critical_namespaces::{
     CanonicalFilenameInventoryPolicy, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
     CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, FreshV2TextFounderBegin,
     FreshV2TextFounderBinding, FreshV2TextFounderPolicy, JournalledCheckpointJoinPreparation,
-    NativeRegistryPreparationPolicy, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
+    NativeRegistryStore, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
     PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
     PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
     ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
@@ -5855,7 +5856,12 @@ impl ServerStore {
         // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
         // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
         let session = acquire_vault_session(&dir)?;
-        critical_namespaces::refuse_orphan_before_vault_creation(&dir)?;
+        critical_namespaces::refuse_orphan_before_vault_creation(
+            &dir,
+            current_layout_policy
+                .as_ref()
+                .is_some_and(|policy| policy.native_registry.is_some()),
+        )?;
         owner_evidence::operations::refuse_orphaned_intent_before_vault_creation(&dir)?;
         let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;

@@ -14,7 +14,7 @@ pub(super) const DESCRIPTOR_BYTES: usize = 4 + TAG.len() + 2 + 3 * 36 + 2;
 
 /// Read-only labels. Equality verifies context DATA, not mounted capability.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct NativeCapabilityData {
+pub(in crate::store::critical_namespaces) struct NativeCapabilityData {
     pub(super) vault: [u8; 32],
     pub(super) root: [u8; 32],
     current: [u8; 32],
@@ -33,7 +33,7 @@ pub(super) fn field32(d: &mut Decoder<'_>) -> Result<[u8; 32], AppError> {
         .map_err(|_| refused())
 }
 impl NativeCapabilityData {
-    pub(super) fn for_current_data(
+    pub(in crate::store::critical_namespaces) fn for_current_data(
         layout: current::CurrentLayoutData,
         descriptor: &[u8],
     ) -> Result<Self, AppError> {
@@ -48,7 +48,9 @@ impl NativeCapabilityData {
             current: *hash.finalize().as_bytes(),
         })
     }
-    pub(super) fn encode_data(self) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    pub(in crate::store::critical_namespaces) fn encode_data(
+        self,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let mut output = Encoder::with_capacity(DESCRIPTOR_BYTES);
         output.put_bytes(TAG).map_err(|_| refused())?;
         output.put_u16(1);
@@ -61,7 +63,10 @@ impl NativeCapabilityData {
         }
         Ok(Zeroizing::new(output.finish()))
     }
-    pub(super) fn decode_exact(raw: &[u8], expected: Self) -> Result<Self, AppError> {
+    pub(in crate::store::critical_namespaces) fn decode_exact(
+        raw: &[u8],
+        expected: Self,
+    ) -> Result<Self, AppError> {
         if raw.len() != DESCRIPTOR_BYTES {
             return Err(refused());
         }

@@ -7,6 +7,12 @@ on:
     paths:
       - '.github/workflows/chat-v2-joined-source.yml'
       - '.github/scripts/check-chat-v2-joined-source.py'
+      - '.github/scripts/check-chat-v2-native-registry.py'
+      - '.github/predecessor/namespace7_gate.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/**'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native7_predecessor_tests.rs'
+      - 'crates/catcoms-app/src/store/persistence/native_registry.rs'
   workflow_dispatch:
     inputs:
       fresh_founder_only:
@@ -32,7 +38,9 @@ jobs:
   focused:
     name: Chat cohorts (${{ matrix.os }}, fresh-only=${{ inputs.fresh_founder_only || false }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # Head cohorts plus pinned namespace5 and ID3/ID5-aware namespace7 predecessors.
+    # Per-cohort bounds are unchanged; this only covers the additional build work.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -46,11 +54,17 @@ jobs:
           python-version: '3.12'
       - name: Check exact-count rejection guards without Cargo
         run: python .github/scripts/check-chat-v2-joined-source.py --self-test
+      - name: Check native-registry predecessor count guards
+        if: ${{ !inputs.fresh_founder_only }}
+        run: python .github/scripts/check-chat-v2-native-registry.py --self-test
       - name: Execute selected exact-count regressions
         run: python .github/scripts/check-chat-v2-joined-source.py ${{ inputs.fresh_founder_only && '--fresh-founder-only' || '' }}
       - name: Execute member-storage regressions and the real predecessor gate
         if: ${{ !inputs.fresh_founder_only }}
         run: python .github/scripts/check-chat-v2-member-save.py
+      - name: Execute the ID3 and ID5 aware native-registry predecessor gate
+        if: ${{ !inputs.fresh_founder_only }}
+        run: python .github/scripts/check-chat-v2-native-registry.py
       - uses: actions/setup-node@v4
         if: runner.os == 'Linux'
         with:
@@ -79,4 +93,6 @@ jobs:
         if: always()
         with:
           name: chat-v2-joined-source-${{ matrix.os }}
-          path: logs/chat-v2-joined-source/
+          path: |
+            logs/chat-v2-joined-source/
+            logs/chat-v2-native-registry/

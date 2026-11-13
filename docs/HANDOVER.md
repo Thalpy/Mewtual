@@ -1,5 +1,42 @@
 # Mewtual; Handover
 
+## Native registry physical installation (13 November; validation in progress)
+
+The new isolated `chat-v2-native-registry-install` branch, based on58b39fb9,
+implements the actual initial namespace7 declaration and cold recovery. The
+original preparation API remains non-writing. Separate prepaid writing and opaque
+mount APIs retain the actual private Current3/member5 owner; there is no raw
+Store/Current escape, public handler switch, native command credential or V2 row.
+
+Read-only adversarial review found and corrected authenticated-empty-seed disposal,
+classification/reopen identity substitution, late selected-catalog loss, final
+index exactness and shared-reader invoice reuse. Regressions use actual file/key
+state, deterministic cuts and bounded reader overlap. The real JOIN lifecycle
+test exercises native7 through save/pause/resume/migration/arm/reopen. Its first
+failure was a fixture's lost ephemeral owner budget after opening a new mount;
+the test now configures that trusted budget on the actual new owner.
+
+The predecessor gate pins the real ID3/ID5-aware a607123a commit and four capable
+public openers, not a simulated old-handler boolean. Sixteen fixture states have
+positive control/claim/unfenced cases. A negative first-torn native role handles
+settled or complete-seeded predecessor governance progress without touching its
+Stage or other objects; native4+7 operational ownership is still unsupported.
+All53 focused native-registry cases now pass on Windows, including the actual
+JOIN lifecycle and governance claim-window regressions. All3438 frontend tests,
+Svelte checks (zero errors/warnings), build, ambient and raw-fs gates pass.
+Workspace strict Clippy still hits its531 inherited App errors; its first run
+also found two new style lints, both fixed before publication. Fresh lint inventory,
+predecessor execution and complete current-source gates remain pending; no Chat V2
+acceptance is claimed here.
+
+Next: serialize native index updates with exact-parent CAS and retained uncertain
+candidate; implement the opaque mounted-vault/native backend sum and durable
+PendingCreate before SDK entry; bind/install the genuine founder product; complete
+original native command/key and save admission. Cold operational owner, durable
+Leave, joined source/pin/archive/transport and UI/admin/combined acceptance remain
+hard activation gates. Chat V2 stays disabled.
+[Implementation and residuals](communication-recovery/CHAT-V2-NATIVE-REGISTRY-INSTALLATION.md).
+
 ## GRAFT-specific gossip repair (13 November; full validation pending)
 
 Parent native-registry source8cd87b32 now has5294 passing Linux Root cases,

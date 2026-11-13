@@ -33,6 +33,27 @@ pattern='fs::(write|rename|remove_file|remove_dir|remove_dir_all|copy|hard_link|
 # a hit in an initializer after a function's body is charged to that function: never to an
 # allowance, unless its text is also exactly a reviewed line of that function.
 declare -A allowed=(
+  # Private namespace7 declaration, not epoch-family mutation. Only the original startup
+  # mount and cached authenticated exact catalog/index/marker/seed can reach these fixed
+  # destinations. Claim -> durable old-reader fence -> complete seed -> covering outputs ->
+  # catalog selection -> late tuple proofs -> cleanup. No SDK/native session is granted.
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|capture_writable|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|claim|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|claim|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|claim|value.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|complete|value.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|write|inputs.vault.file.sync_all().map_err(io)?;']=7
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|write|inputs.root.file.sync_all().map_err(io)?;']=3
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|write|fs::rename(&stage, &current).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|write|selected.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|write|value.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|write|fs::remove_file(&stage).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|write|fs::remove_file(&seed).map_err(io)?;']=1
+  # Only an original held unauthenticated first seed and its classified EMPTY fence, with
+  # authenticated pre-ID7 current and no index/marker. Never an authenticated future seed.
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|dispose_native_first_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|dispose_native_first_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry.rs|dispose_native_first_torn|inputs.vault.file.sync_all().map_err(io)?;']=2
   # Namespace4 declaration first creates/syncs the SAME empty legacy stage so
   # actual older readers refuse before any governance-only recovery debt exists.
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1
