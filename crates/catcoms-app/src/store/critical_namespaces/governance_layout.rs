@@ -234,6 +234,18 @@ pub struct PreparedV2GovernanceLayoutStore {
     complete: bool,
     _wrapper_fee: CatalogReadReservation,
 }
+#[cfg(test)]
+impl PreparedV2GovernanceLayoutStore {
+    /// A negative cut against the actual declaration writer; no raw Store or capability
+    /// escapes to the native7 predecessor-interleaving regression.
+    pub(in crate::store) fn native_claim_fault_for_test(&self, point: u8) {
+        self.store
+            .as_deref()
+            .unwrap()
+            .critical_namespace_fault
+            .store(point, Ordering::SeqCst);
+    }
+}
 impl std::fmt::Debug for PreparedV2GovernanceLayoutStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PreparedV2GovernanceLayoutStore")

@@ -37,7 +37,9 @@ pub(in crate::store) mod governance_namespace_codec;
 // configured handler in `member_outbox_layout` is the only physical interpreter.
 pub(in crate::store) mod member_outbox_layout;
 pub(in crate::store) mod member_outbox_namespace_codec;
-// Original, non-writing native-registry preparation. No namespace7 physical handler yet.
+// Independent native registry: non-writing preparation plus its private physical handler.
+#[cfg(test)]
+mod native7_predecessor_tests;
 pub(in crate::store) mod native_registry;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
@@ -56,7 +58,10 @@ pub use governance_layout::{
     PreparedV2GovernanceLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
 };
 pub use member_outbox_layout::V2MemberOutboxPolicy;
-pub use native_registry::{NativeRegistryPreparationPolicy, PreparedNativeRegistryMigration};
+pub use native_registry::{
+    NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
+    NativeRegistryStore, PreparedNativeRegistryMigration,
+};
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
@@ -139,14 +144,22 @@ impl ValidatedEmptyCatalog {
 
 /// Inspect fixed metadata BEFORE lower vault opening could allocate a new identity. In
 /// particular a dangling vault link is present/unsupported, not permission to create a DEK.
-pub(super) fn refuse_orphan_before_vault_creation(dir: &Path) -> Result<(), AppError> {
-    super::persistence::native_registry::refuse_unsupported_storage(dir)?;
+pub(super) fn refuse_orphan_before_vault_creation(
+    dir: &Path,
+    native_handler: bool,
+) -> Result<(), AppError> {
+    // Only the private native opener has already paid for its handler. It may defer
+    // classification on an EXISTING real vault; absence never permits adopting artifacts.
+    if !native_handler {
+        super::persistence::native_registry::refuse_unsupported_storage(dir)?;
+    }
     match fs::symlink_metadata(dir.join("vault.bin")) {
         Ok(metadata) if metadata.file_type().is_file() => return Ok(()),
         Ok(_) => return Err(refused()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(refused()),
     }
+    super::persistence::native_registry::refuse_unsupported_storage(dir)?;
     for slot in [Slot::Current, Slot::Stage] {
         match fs::symlink_metadata(dir.join(slot.name())) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -217,9 +230,20 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        // Namespace7 has no physical handler yet, in any configuration. Reserve
-        // its fixed artifacts before every older inspector/cleaner below.
-        super::persistence::native_registry::refuse_unsupported_storage(&self.dir)?;
+        // Only the private prepaid native opener can classify/repair namespace7. All
+        // ordinary openers keep the early fixed-artifact refusal before older cleaners.
+        if self
+            .current_layout_policy
+            .as_ref()
+            .is_some_and(|policy| policy.native_registry.is_some())
+        {
+            if actual_format != VaultFormat::CriticalNamespaces {
+                return Err(refused());
+            }
+            self.inspect_and_repair_native_registry_declaration()?;
+        } else {
+            super::persistence::native_registry::refuse_unsupported_storage(&self.dir)?;
+        }
         // Every opener WITHOUT the concrete namespace5 handler refuses its fixed artifacts
         // before any gate below can settle, clean or reinterpret them. The configured handler
         // instead inspects them first inside the Current3 (and governance) gate.

@@ -100,6 +100,7 @@ pub(super) struct Parsed<'a> {
     pub(in crate::store) member_outbox:
         Option<super::member_outbox_namespace_codec::MemberOutboxCapabilityData>,
     pub(super) member_outbox_payload: Option<&'a [u8]>,
+    pub(super) native_registry_payload: Option<&'a [u8]>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -123,6 +124,7 @@ pub(in crate::store) struct Summary {
     pub(in crate::store) member_outbox:
         Option<super::member_outbox_namespace_codec::MemberOutboxCapabilityData>,
     pub(super) member_outbox_payload_digest: Option<[u8; 32]>,
+    pub(super) native_registry_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -148,6 +150,9 @@ impl Parsed<'_> {
             member_outbox: self.member_outbox,
             member_outbox_payload_digest: self
                 .member_outbox_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            native_registry_payload_digest: self
+                .native_registry_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
@@ -187,6 +192,7 @@ struct SupportedLayout {
     current: bool,
     governance: bool,
     member_outbox: bool,
+    native_registry: bool,
 }
 impl SupportedLayout {
     const PENDING_ONLY: Self = Self {
@@ -195,6 +201,7 @@ impl SupportedLayout {
         current: false,
         governance: false,
         member_outbox: false,
+        native_registry: false,
     };
     const ARCHIVE_BOOTSTRAP: Self = Self {
         archive: true,
@@ -217,6 +224,35 @@ impl SupportedLayout {
             ..self
         }
     }
+    const fn native_registry(self, native_registry: bool) -> Self {
+        Self {
+            native_registry,
+            ..self
+        }
+    }
+}
+
+/// Closed grammar used only by the private native physical handler. The descriptor
+/// is checked against the same Current3 entry; parsing issues no mounted owner.
+pub(super) fn parse_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+    governance: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let layout = if governance {
+        SupportedLayout::GOVERNANCE_LAYOUT
+    } else {
+        SupportedLayout::CURRENT_LAYOUT
+    };
+    parse_known(
+        plain,
+        domain,
+        layout
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(true),
+    )
 }
 
 /// Only the concrete Current-layout physical inspector may select this grammar. The default,
@@ -267,7 +303,8 @@ pub(super) fn parse_governance_layout<'a>(
         domain,
         SupportedLayout::GOVERNANCE_LAYOUT
             .executing(policy.current.archive.pending.execution.is_some())
-            .member_outbox(policy.current.member_outbox.is_some()),
+            .member_outbox(policy.current.member_outbox.is_some())
+            .native_registry(policy.current.native_registry.is_some()),
     )
 }
 
@@ -358,6 +395,7 @@ fn parse_known<'a>(
             governance_payload: None,
             member_outbox: None,
             member_outbox_payload: None,
+            native_registry_payload: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -371,6 +409,7 @@ fn parse_known<'a>(
     let mut governance_payload = None;
     let mut member_outbox = None;
     let mut member_outbox_payload = None;
+    let mut native_registry_payload = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -439,6 +478,18 @@ fn parse_known<'a>(
                 );
                 member_outbox_payload = Some(entry.payload);
             }
+            7 if layout.native_registry && entry.version == 1 => {
+                let expected =
+                    super::native_registry::capability::NativeCapabilityData::for_current_data(
+                        current_layout.ok_or_else(refused)?,
+                        current_payload.ok_or_else(refused)?,
+                    )?;
+                super::native_registry::capability::NativeCapabilityData::decode_exact(
+                    entry.payload,
+                    expected,
+                )?;
+                native_registry_payload = Some(entry.payload);
+            }
             _ => return Err(refused()),
         }
     }
@@ -457,6 +508,7 @@ fn parse_known<'a>(
         governance_payload,
         member_outbox,
         member_outbox_payload,
+        native_registry_payload,
     })
 }
 
@@ -641,6 +693,11 @@ pub(super) fn encode_original_row(
 /// exact immutable/ciphertext custody; one original add or one scheduling toggle is permitted.
 /// Duplicate same-plaintext files are handled separately by actual source classification.
 pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppError> {
+    // Only the native declaration's exact whole-frame validator may introduce ID7.
+    // JOIN cannot remove, normalize or replace it, including in a validly sealed stage.
+    if current.native_registry_payload_digest != next.native_registry_payload_digest {
+        return Err(refused());
+    }
     // A namespace4 addition is NEVER inferred from Summary fields. The private
     // declaration owns BOTH whole frames and uses its exact-pair validator.
     if current.governance != next.governance

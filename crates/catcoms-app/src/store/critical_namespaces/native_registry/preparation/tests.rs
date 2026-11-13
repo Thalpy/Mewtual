@@ -8,8 +8,8 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::fs;
 
-const SECRET: &[u8] = b"private native registry preparation";
-struct NeverRng;
+pub(super) const SECRET: &[u8] = b"private native registry preparation";
+pub(super) struct NeverRng;
 impl RngCore for NeverRng {
     fn next_u32(&mut self) -> u32 {
         panic!("refusal reached RNG")
@@ -25,7 +25,7 @@ impl RngCore for NeverRng {
     }
 }
 impl CryptoRng for NeverRng {}
-fn current_policy() -> V2CurrentLayoutPolicy {
+pub(super) fn current_policy() -> V2CurrentLayoutPolicy {
     let shared = CriticalCatalogReadPool::new(1024 * 1024 * 1024).unwrap();
     V2CurrentLayoutPolicy::new(
         ArchiveBootstrapCatalogPolicy::new(
@@ -55,7 +55,7 @@ fn native_policy() -> NativeRegistryPreparationPolicy {
     NativeRegistryPreparationPolicy::new(CriticalCatalogReadPool::new(PREPARATION_FEE).unwrap())
         .unwrap()
 }
-fn records() -> Vec<ServerRecord> {
+pub(super) fn records() -> Vec<ServerRecord> {
     vec![ServerRecord {
         id: 9,
         display_name: "original legacy".into(),
@@ -63,7 +63,7 @@ fn records() -> Vec<ServerRecord> {
         is_dm: true,
     }]
 }
-fn initialize(path: &Path, records: Option<&[ServerRecord]>, rng: &mut ChaCha20Rng) {
+pub(super) fn initialize(path: &Path, records: Option<&[ServerRecord]>, rng: &mut ChaCha20Rng) {
     let store = ServerStore::open(path, SECRET, rng).unwrap();
     if let Some(records) = records {
         store.save_registry(records, rng).unwrap();

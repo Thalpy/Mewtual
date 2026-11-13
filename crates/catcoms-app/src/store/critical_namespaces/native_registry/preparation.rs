@@ -1,5 +1,5 @@
-//! Original private migration preparation. This increment deliberately writes no ID7
-//! artifacts: a later physical handler must prove its own exclusion and commit barriers.
+//! Original non-writing migration preparation. The separate `installation` API owns
+//! physical namespace7 declaration/recovery; this preparation alone has no write operation.
 use super::super::{
     catalog_declaration, current_layout, read_pool::CatalogReadReservation, refused,
 };
@@ -13,6 +13,7 @@ use catcoms_crypto::{seal, unseal};
 use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, Encoder};
 use std::path::Path;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 pub(in crate::store) const MAX_BASE_PATH: usize = current_layout::MAX_OPEN_BASE_PATH;
@@ -23,14 +24,28 @@ pub(in crate::store) const INDEX_STAGE_NAME: &str = "native-registry.stage";
 pub(in crate::store) const MAX_CATALOG_FRAME: usize =
     super::super::pending_join_codec::MAX_CATALOG_FRAMED;
 pub(in crate::store) const MAX_LEGACY_FRAME: usize = MAX_PLAIN + 40;
-const MAX_MARKER_PLAIN: usize = 1024;
-const MAX_MARKER_FRAME: usize = MAX_MARKER_PLAIN + 40;
-const MAX_SEED_PLAIN: usize = 2 * MAX_CATALOG_FRAME + MAX_FRAME + MAX_MARKER_FRAME + 1024;
-const MAX_SEED_FRAME: usize = MAX_SEED_PLAIN + 40;
+pub(in crate::store) const MAX_INDEX_FRAME: usize = MAX_FRAME;
+pub(in crate::store) const MAX_MARKER_PLAIN: usize = 1024;
+pub(in crate::store) const MAX_MARKER_FRAME: usize = MAX_MARKER_PLAIN + 40;
+pub(in crate::store) const MAX_SEED_PLAIN: usize =
+    2 * MAX_CATALOG_FRAME + MAX_FRAME + MAX_MARKER_FRAME + 1024;
+pub(in crate::store) const MAX_SEED_FRAME: usize = MAX_SEED_PLAIN + 40;
 const SEED_TAG: &[u8] = b"catcoms/private-native-backend-declaration/v1\0";
 const INDEX_KEY: &str = "catcoms/private-native-backend-index-key/v1";
 const MARKER_KEY: &str = "catcoms/private-native-backend-marker-key/v1";
 const SEED_KEY: &str = "catcoms/private-native-backend-declaration-key/v1";
+mod installation;
+pub use installation::{NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryStore};
+
+/// Private handler plus its original prepaid lifetime. No public Current policy can
+/// construct this switch, and ordinary openers cannot opt in by decoding an ID7.
+#[derive(Clone)]
+pub(in crate::store) struct NativeRegistryHandler {
+    policy: NativeRegistryPreparationPolicy,
+    fee: Arc<CatalogReadReservation>,
+    physical_fee: Arc<CatalogReadReservation>,
+    persistent_capacity: usize,
+}
 
 // Named conservative LOGICAL inventory, not RSS. All maxima are independent of
 // untrusted lengths. Actual buffers use their bounded input lengths, not these maxima.
@@ -94,11 +109,12 @@ impl NativeRegistryPreparationPolicy {
 /// No Store/Host/key/row getter, writer, generic callback or decoding-based authority.
 /// Files and ciphertexts drain before the original mount and its final payment.
 pub struct PreparedNativeRegistryMigration {
+    read: std::sync::Mutex<()>,
     inputs: NativeMigrationInputs,
     output: MigrationOutput,
     current: V2CurrentLayoutStore,
     policy: NativeRegistryPreparationPolicy,
-    fee: CatalogReadReservation,
+    fee: Arc<CatalogReadReservation>,
 }
 impl std::fmt::Debug for PreparedNativeRegistryMigration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -129,7 +145,7 @@ impl PreparedNativeRegistryMigration {
     ) -> Result<Self, AppError> {
         policy.require_independent(&current_policy)?;
         // Failure here must precede even prerequisite opening, KDF and RNG.
-        let fee = policy.pool.try_reserve(PREPARATION_FEE)?;
+        let fee = Arc::new(policy.pool.try_reserve(PREPARATION_FEE)?);
         crate::store::persistence::native_registry::refuse_unsupported_storage(dir.as_ref())?;
         let mut opening = PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current_policy)?;
         opening.retry(rng)?;
@@ -217,6 +233,7 @@ impl PreparedNativeRegistryMigration {
         }
         current.cached_store()?;
         Ok(Self {
+            read: Default::default(),
             inputs,
             output,
             current,
@@ -234,6 +251,9 @@ impl PreparedNativeRegistryMigration {
     /// drawing randomness, rebinding a replacement or changing the candidate.
     /// A later writer must additionally own its real exclusion/commit protocol.
     pub fn revalidate_inputs(&self) -> Result<(), AppError> {
+        // The retained invoice covers ONE complete validation inventory. Shared callers
+        // cannot allocate another copy while an earlier read is still using that payment.
+        let _read = self.read.try_lock().map_err(|_| refused())?;
         self.fee.validate(&self.policy.pool, PREPARATION_FEE)?;
         let store = self.current.checked_store()?;
         store.validate_mounted_member_outbox_layout()?;
@@ -347,6 +367,14 @@ fn seed_plain(
 }
 impl MigrationOutput {
     fn require(&self, key: &[u8; 32], input: &NativeMigrationInputs) -> Result<(), AppError> {
+        self.require_data(key, input.catalog(), input.legacy())
+    }
+    fn require_data(
+        &self,
+        key: &[u8; 32],
+        original_raw: &[u8],
+        legacy_raw: Option<&[u8]>,
+    ) -> Result<(), AppError> {
         let marker = open_kind(key, MARKER_KEY, &self.marker, MAX_MARKER_PLAIN)?;
         NativeCapabilityData::decode_exact(&marker, self.capability)?;
         let index = open_kind(key, INDEX_KEY, &self.index, MAX_PLAIN)?;
@@ -364,19 +392,28 @@ impl MigrationOutput {
         // Authentication of both files does not prove the initial rows came
         // from THIS exact migration input. Recompute its deterministic DATA
         // mapping so an authenticated inconsistent seed cannot install G1.
-        let records = match input.legacy() {
+        let records = match legacy_raw {
             None => Vec::new(),
             Some(raw) => decode_bounded_legacy(&Zeroizing::new(unseal(key, &unframe(raw)?)?))?,
         };
         let expected_index = IndexData::migrate_legacy_data(
             self.capability,
-            input.legacy().map(|raw| *blake3::hash(raw).as_bytes()),
+            legacy_raw.map(|raw| *blake3::hash(raw).as_bytes()),
             &records,
         )?;
         if index != expected_index {
             return Err(refused());
         }
-        let original = Zeroizing::new(unseal(key, &unframe(input.catalog())?)?);
+        let original = Zeroizing::new(unseal(key, &unframe(original_raw)?)?);
+        let parent = super::super::pending_join_codec::parse_configured_current_layout(
+            &original,
+            &self.capability.vault,
+            true,
+            true,
+        )?;
+        if parent.count != 0 || parent.member_outbox.is_none() {
+            return Err(refused());
+        }
         let candidate = Zeroizing::new(unseal(key, &unframe(&self.candidate)?)?);
         let descriptor = catalog_declaration::validate_insert_pair_data(
             &original,
@@ -389,11 +426,11 @@ impl MigrationOutput {
         let actual = open_kind(key, SEED_KEY, &self.seed, MAX_SEED_PLAIN)?;
         let expected = seed_plain(
             self.capability,
-            input.catalog(),
+            original_raw,
             &self.candidate,
             &self.index,
             &self.marker,
-            input.legacy(),
+            legacy_raw,
         )?;
         if actual != expected {
             return Err(refused());

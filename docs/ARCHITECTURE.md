@@ -1,12 +1,13 @@
 # Mewtual; Architecture
 
-Native-registry migration now has a closed, independently paid read/seal
-preparation on a newly opened private Current3/member5 mount. It retains exact
-file/directory associations and caches the initial native index/catalog/seed,
-without writing namespace7 or exposing a Store/runtime. Every current opener
-refuses reserved native artifacts before older cleaners. The physical handler,
-native backend installation and key admission remain unfinished.
-[Boundary and invoice](communication-recovery/CHAT-V2-NATIVE-REGISTRY-PREPARATION.md).
+The independent native registry now has a private physical namespace7 declaration
+and cold-repair API, returning only an opaque DATA owner. Its cached initial legacy
+index, old-reader fence, same-file proofs and cleanup are separate from the still
+non-writing preparation API. Ordinary openers continue to refuse native artifacts.
+A negative first-torn role can retire its own unauthenticated claim beside actual
+predecessor governance progress, leaving all governance objects/Stage untouched.
+Native backend/key admission, index updates and cold operational ownership remain
+unfinished. [Scope and invoices](communication-recovery/CHAT-V2-NATIVE-REGISTRY-INSTALLATION.md).
 
 The fresh-founder Root producer now owns one original typed-mount chain through
 warm runtime attachment and the whole member-save Host. Its reservation-only

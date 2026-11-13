@@ -158,6 +158,14 @@ impl ServerStore {
             return super::pending_join_codec::parse_governance_layout(plain, &domain, policy);
         }
         if let Some(policy) = self.current_layout_policy.as_ref() {
+            if policy.native_registry.is_some() {
+                return super::pending_join_codec::parse_native_registry_layout(
+                    plain,
+                    &domain,
+                    execution.is_some(),
+                    false,
+                );
+            }
             // Namespace5 is accepted only when THIS opener carries the concrete member-outbox
             // handler; otherwise an ID5 entry refuses before any old cleaner.
             return super::pending_join_codec::parse_configured_current_layout(
