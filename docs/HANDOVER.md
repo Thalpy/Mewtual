@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Retained bootstrap signing (13 November; in progress)
+
+The next isolated branch `chat-v2-retained-bootstrap-signing` follows PR95. The
+actual Root source now installs a paid Signing phase before primitive entry and
+retains separate Profile/Header raw results through refusal/unwind and consuming
+freeze. The stateless Sync library API is preserved. Six focused Sync and three
+Root regressions pass, including the same-owner cache-pressure refusal/retry.
+Read-only diff review has no blocker/high/medium; direct primitive counts are
+tested in Sync, with Root composition coverage separately identified.
+The surrounding11 Root source and15 stateless Sync cases and eight Windows warm
+factory cases also pass. Strict Sync Clippy, fmt, ambient and raw-fs pass. The App
+warning inventory still has719 warnings with zero on new/added Rust lines; that
+does not waive the inherited531-error strict workspace gate. Exact-source complete
+Root/native/frontend execution remains required before completed handoff.
+
+This adds no native session/key authority. NativeRequired still needs original
+synchronous router capture, concrete SDK/Profile/Header/member key cuts, Ends and
+lock drainage. [Scope and remaining work](communication-recovery/CHAT-V2-RETAINED-BOOTSTRAP-SIGNING.md).
+
+The index2/native-founder consumer has a reviewed implementation design in
+[native index admission](communication-recovery/CHAT-V2-NATIVE-INDEX-ADMISSION-DESIGN.md),
+including explicit namespace7/version2 migration, immutable birth receipts,
+Pending's exact network frame, actual transport identity and no SDK restart grant.
+It is not implemented by the retained-signing prerequisite.
+
 ## Native registry physical installation (13 November; validation in progress)
 
 The new isolated `chat-v2-native-registry-install` branch, based on58b39fb9,
@@ -24,10 +49,20 @@ Stage or other objects; native4+7 operational ownership is still unsupported.
 All53 focused native-registry cases now pass on Windows, including the actual
 JOIN lifecycle and governance claim-window regressions. All3438 frontend tests,
 Svelte checks (zero errors/warnings), build, ambient and raw-fs gates pass.
-Workspace strict Clippy still hits its531 inherited App errors; its first run
-also found two new style lints, both fixed before publication. Fresh lint inventory,
-predecessor execution and complete current-source gates remain pending; no Chat V2
-acceptance is claimed here.
+Workspace strict Clippy still hits exactly531 inherited App errors. The complete
+App warning inventory reports zero diagnostics on added Rust lines, and the native
+cargo check passes. The real local a607 predecessor passes16fixtures x4openers and
+the head governance round trip. Windows hosted execution passed all storage cohorts
+but hit Git checkout's MAX_PATH in the new predecessor harness; PR95fix382a30a0
+uses command-local longpaths/shorter temporary names and reports original stderr.
+The hosted rerun is pending. Linux focused execution passes.
+
+Full Windows native validation found a separate pre-SDP automatic-confirmation
+timeout in native_browser_maximum_offer_answer_round_uses_real_http_and_blocked_tcp_bridge;
+37 later cases intentionally refuse because its shared fixture did not shut down.
+That first failure is being diagnosed, not credited as a storage regression or
+ignored as flaky. Linux full native passes. Complete current-source gates and
+Chat V2 acceptance remain open.
 
 Next: serialize native index updates with exact-parent CAS and retained uncertain
 candidate; implement the opaque mounted-vault/native backend sum and durable

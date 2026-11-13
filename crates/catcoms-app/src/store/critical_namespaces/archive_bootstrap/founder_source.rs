@@ -8,7 +8,8 @@ use crate::store::persistence::{
 };
 use catcoms_sync::owner_v2::{
     BootstrapSourceContextData, BootstrapSourceId, FounderArchivePreparation,
-    FounderBootstrapPreparation, FrozenFounder, PreparedBootstrapSource,
+    FounderBootstrapPreparation, FrozenFounder, PreparedBootstrapSource, RetainedFounderSigning,
+    RETAINED_FOUNDER_SIGNING_INVOICE,
 };
 
 const PHASE_METADATA_FEE: usize = 64 * 1024;
@@ -30,6 +31,12 @@ pub use warm::{
 
 enum SourcePhase {
     PendingPrivateStage,
+    // Install BEFORE either primitive. This phase survives error/unwind from preparation
+    // or consuming freeze, retaining raw signatures while temporary signed DATA drains.
+    Signing {
+        signing: Box<RetainedFounderSigning>,
+        _fee: CatalogReadReservation,
+    },
     Frozen(Box<FrozenFounder>),
     Archive(Box<FounderArchivePreparation>),
     Bootstrap(Box<FounderBootstrapPreparation>),
@@ -290,7 +297,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
                 .sync
                 .stage_managed_chat_scope(facts.scope_domain, facts.nonce)?;
             server.sync.attach_managed_chat_reservation(&reservation)?;
-            let prepared = server.sync.prepare_owner_v2_founder()?;
+            let configured = store
+                .archive_bootstrap_policy
+                .as_ref()
+                .ok_or_else(refused)?;
+            let fee = configured
+                .pending
+                .pool
+                .try_reserve(RETAINED_FOUNDER_SIGNING_INVOICE)?;
+            let signing = server.sync.begin_owner_v2_founder_signing()?;
+            self.phase = SourcePhase::Signing {
+                signing: Box::new(signing),
+                _fee: fee,
+            };
+        }
+        if let SourcePhase::Signing { signing, .. } = &mut self.phase {
+            let server = self.original.creator.server.as_ref().ok_or_else(refused)?;
+            let prepared = server.sync.prepare_owner_v2_founder_retained(signing)?;
             #[cfg(test)]
             {
                 FOUNDERS_PREPARED.with(|count| count.set(count.get() + 1));
@@ -298,14 +321,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
                     hook();
                 }
             }
-            match prepared.freeze(&server.sync) {
-                Ok(frozen) => self.phase = SourcePhase::Frozen(Box::new(frozen)),
-                Err(error) => {
-                    self.phase = SourcePhase::HeldConsumingRefusal;
-                    self.original.close();
-                    return Err(error.into());
-                }
-            }
+            // Borrow Signing THROUGH freeze. Losing a temporary PreparedFounder must not
+            // lose its actual primitive results or let a retry enter either key again.
+            let frozen = Box::new(prepared.freeze(&server.sync)?);
+            self.phase = SourcePhase::Frozen(frozen);
             self.original.creator.original.validate_original(store)?;
         }
         if let SourcePhase::Frozen(frozen) = &mut self.phase {

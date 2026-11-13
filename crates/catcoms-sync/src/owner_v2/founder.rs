@@ -10,7 +10,9 @@ use catcoms_replication::chat::{
     },
     owner_state::{self, CurrentAdmissionSlot, StateFrame, StateMeta},
 };
+mod retained_signing;
 mod snapshot;
+pub use retained_signing::{RetainedFounderSigning, RETAINED_FOUNDER_SIGNING_INVOICE};
 pub use snapshot::{FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits};
 mod archive_candidate;
 pub use archive_candidate::{
@@ -162,6 +164,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// A host using a native scope must reserve/stage/attach it FIRST, so freeze observes the
     /// same original reservation. Preparing unmanaged DATA then changing scope cannot rebind.
     pub fn prepare_owner_v2_founder(&self) -> Result<PreparedFounder, SyncError> {
+        self.prepare_owner_v2_founder_with_cache(None)
+    }
+
+    /// Begin a retained preparation on this ACTUAL original node/scope. The host must
+    /// reserve the separate invoice before constructing this cache. No native authority
+    /// is created; a NativeRequired caller still needs separate concrete key cuts.
+    pub fn begin_owner_v2_founder_signing(&self) -> Result<RetainedFounderSigning, SyncError> {
+        RetainedFounderSigning::new(self)
+    }
+
+    /// Retain each exact primitive result before verification, encoding or late checks.
+    /// A failed or unwound primitive with no returned raw remains entered/terminal; it is
+    /// never retried. The older stateless library producer above remains compatible.
+    pub fn prepare_owner_v2_founder_retained(
+        &self,
+        signing: &mut RetainedFounderSigning,
+    ) -> Result<PreparedFounder, SyncError> {
+        signing.validate_original(self)?;
+        self.prepare_owner_v2_founder_with_cache(Some(signing))
+    }
+
+    fn prepare_owner_v2_founder_with_cache(
+        &self,
+        mut signing: Option<&mut RetainedFounderSigning>,
+    ) -> Result<PreparedFounder, SyncError> {
         let source = self.fresh_chat_admission().ok_or_else(unavailable)?;
         let origin = source
             .observe_original_founder(&self.group, &self.device)
@@ -187,6 +214,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 creation,
             },
             |bytes| {
+                if let Some(signing) = signing.as_deref_mut() {
+                    signing
+                        .validate_original(self)
+                        .map_err(|_| catcoms_replication::chat::ChatError::Signature)?;
+                    return signing.profile.sign(&self.device, bytes);
+                }
                 self.device
                     .sign(bytes)
                     .map_err(|_| catcoms_replication::chat::ChatError::Signature)
@@ -245,6 +278,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 state,
             },
             |bytes| {
+                if let Some(signing) = signing {
+                    signing
+                        .validate_original(self)
+                        .map_err(|_| catcoms_replication::chat::ChatError::Signature)?;
+                    return signing.header.sign(&self.device, bytes);
+                }
                 self.device
                     .sign(bytes)
                     .map_err(|_| catcoms_replication::chat::ChatError::Signature)

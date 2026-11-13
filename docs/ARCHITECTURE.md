@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+Root founder-source preparation now retains one paid bootstrap signer across
+Profile/Header preparation and consuming freeze. Exact raw64 results survive
+later refusal/unwind; the original node/scope and canonical full-key byte bindings
+remain mandatory. Sync's stateless library API is unchanged. This is library
+custody, not native admission; the native SDK/bootstrap/member key cuts remain
+unfinished. [Contract](communication-recovery/CHAT-V2-RETAINED-BOOTSTRAP-SIGNING.md).
+
 The independent native registry now has a private physical namespace7 declaration
 and cold-repair API, returning only an opaque DATA owner. Its cached initial legacy
 index, old-reader fence, same-file proofs and cleanup are separate from the still
