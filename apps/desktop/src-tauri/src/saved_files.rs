@@ -334,7 +334,7 @@ async fn with_owner<T>(
     act: impl FnOnce(&ServerStore, &[u8]) -> T,
 ) -> Option<T> {
     let guard = state.store.lock().await;
-    let store = guard.as_ref()?;
+    let store = guard.as_ref().and_then(MountedVault::as_legacy)?;
     let servers = state.servers.lock().await;
     let entry = servers
         .get(&server)
@@ -1189,6 +1189,7 @@ async fn reset_saved_files_in_session(state: &AppState, server: u64) -> Result<(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "The vault is locked.".to_string())?;
     let servers = state.servers.lock().await;
     let entry = servers

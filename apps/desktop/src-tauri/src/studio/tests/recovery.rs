@@ -36,6 +36,10 @@ async fn native_recovery_export_conversion_holds_fences_and_suppresses_a_late_lo
             .lock()
             .await
             .as_mut()
+            .and_then(|vault| match vault {
+                MountedVault::Legacy(store) => Some(store.as_mut()),
+                MountedVault::TextV2(_) => None,
+            })
             .unwrap()
             .update_epoch_recovery(
                 7,
@@ -65,9 +69,9 @@ async fn native_recovery_export_conversion_holds_fences_and_suppresses_a_late_lo
                 assert_eq!(value["format"], "p1-recovery-v1");
                 converted.set(true);
                 if generation_change {
-                    state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+                    state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
                 } else {
-                    state.session_lock_requested.store(true, Ordering::Release);
+                    state.session_lock_requested.store(true, Ordering::SeqCst);
                 }
                 Ok(value)
             },
@@ -78,7 +82,7 @@ async fn native_recovery_export_conversion_holds_fences_and_suppresses_a_late_lo
             result.is_err(),
             "converted export must not escape a now-stale session"
         );
-        state.session_lock_requested.store(false, Ordering::Release);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
         actor.shutdown().await;
         task.await.unwrap();
         drain.await.unwrap();
@@ -116,13 +120,13 @@ async fn native_recovery_custody_is_shared_with_save_and_lock_guards() {
             .is_err()
     );
     drop(guard);
-    state.session_lock_requested.store(true, Ordering::Release);
+    state.session_lock_requested.store(true, Ordering::SeqCst);
     assert!(
         super::super::recovery::invoke_control(&state, 7, target(), Action::List)
             .await
             .is_err()
     );
-    state.session_lock_requested.store(false, Ordering::Release);
+    state.session_lock_requested.store(false, Ordering::SeqCst);
     assert!(
         super::super::recovery::invoke_control(&state, 7, target(), Action::List)
             .await

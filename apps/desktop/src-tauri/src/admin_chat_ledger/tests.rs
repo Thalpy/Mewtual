@@ -10,7 +10,7 @@ fn capture(state: &AppState, server: u64) -> Result<Captured, &'static str> {
     super::capture(
         state,
         server,
-        state.ui_session_generation.load(Ordering::Acquire),
+        state.ui_session_generation.load(Ordering::SeqCst),
     )
 }
 struct Running {
@@ -30,7 +30,7 @@ async fn mounted() -> Running {
     let root = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState::default());
     *state.store.lock().await =
-        Some(ServerStore::open(root.path(), b"native ledger", &mut OsCryptoRng).unwrap());
+        Some((ServerStore::open(root.path(), b"native ledger", &mut OsCryptoRng).unwrap()).into());
     *state.session_resumable.lock().await = true;
     finalize_unlock_session(&state, 0, false).await.unwrap();
     Running {
@@ -433,7 +433,7 @@ async fn completely_unpolled_original_work_stays_revoked_after_actual_lock_and_u
         },
     );
     lock_session_inner(&running.state, None).await.unwrap();
-    let fresh = running.state.ui_session_generation.load(Ordering::Acquire);
+    let fresh = running.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&running.state, fresh, false)
         .await
         .unwrap();
@@ -553,7 +553,7 @@ async fn final_publication_orders_both_lock_wins_and_reply_wins_with_real_commit
     );
     locking.await.unwrap();
 
-    let fresh = running.state.ui_session_generation.load(Ordering::Acquire);
+    let fresh = running.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&running.state, fresh, false)
         .await
         .unwrap();
@@ -667,7 +667,7 @@ async fn actual_mockruntime_router_captures_before_spawn_and_acl_denies_secondar
     let root = tempfile::tempdir().unwrap();
     let state = app.state::<AppState>();
     *state.store.lock().await =
-        Some(ServerStore::open(root.path(), b"native router", &mut OsCryptoRng).unwrap());
+        Some((ServerStore::open(root.path(), b"native router", &mut OsCryptoRng).unwrap()).into());
     *state.session_resumable.lock().await = true;
     finalize_unlock_session(&state, 0, false).await.unwrap();
     let mut node = owner(887).await;
@@ -699,7 +699,7 @@ async fn actual_mockruntime_router_captures_before_spawn_and_acl_denies_secondar
     ));
     assert_eq!(queued.lock().unwrap().len(), 1);
     lock_session_inner(&state, None).await.unwrap();
-    let fresh = state.ui_session_generation.load(Ordering::Acquire);
+    let fresh = state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&state, fresh, false).await.unwrap();
     let task = queued.lock().unwrap().pop().unwrap();
     task.await;

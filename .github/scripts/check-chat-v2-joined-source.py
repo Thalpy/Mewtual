@@ -24,7 +24,7 @@ COHORTS = (
     # must not vanish behind a selector typo or a platform-only fixture.
     ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 10),
     ("retained-bootstrap-owner", "catcoms-app", "retained_bootstrap", 3),
-    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::tests", 20),
+    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::tests", 21),
     ("native-founder-sdk", "catcoms-app", "native_sdk_", 5),
     ("native-network-identity", "catcoms-net", "seeded_transport_identity_data", 3),
     ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),
@@ -32,7 +32,7 @@ COHORTS = (
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
     ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform in ("win32", "linux") else 4),
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 101),
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 109),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
     ("native-registry-join-lifecycle", "catcoms-app", "native_registry_actual_join_lifecycle", 1),

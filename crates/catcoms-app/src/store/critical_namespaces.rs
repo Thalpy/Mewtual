@@ -63,7 +63,10 @@ pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use native_registry::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
     NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
-    NativeRegistryPreparationPolicy, NativeRegistryStore, PreparedNativeRegistryMigration,
+    NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextUiCandidate,
+    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
+    NativeTextUiRetirementBatch, NativeTextUiRetirementState, NativeTextVault,
+    NativeUiInvocationBudget, NativeUiInvocationMetadata, PreparedNativeRegistryMigration,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;

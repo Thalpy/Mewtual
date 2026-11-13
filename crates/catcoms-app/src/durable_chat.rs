@@ -88,7 +88,7 @@ pub struct DurableSendOutcome {
 /// Trusted native custody, obtained with try-locks only AFTER Ready. `ordering` must retain
 /// the exact numeric-server incarnation, persistence serializer and session authorization.
 pub struct DurableSendLease {
-    store: OwnedMutexGuard<Option<ServerStore>>,
+    store: crate::store::LegacyStoreCustody,
     server: u64,
     _ordering: Box<dyn Send>,
 }
@@ -106,10 +106,26 @@ impl DurableSendLease {
         ordering: impl Send + 'static,
     ) -> Self {
         Self {
-            store,
+            store: crate::store::LegacyStoreCustody::Standalone(store),
             server,
             _ordering: Box::new(ordering),
         }
+    }
+
+    /// Native closed backend composition. Refusal retains the original mutex
+    /// and ordering; V2 must use its own member-save path, never this actor.
+    pub fn new_mounted(
+        store: OwnedMutexGuard<Option<crate::store::MountedVault>>,
+        server: u64,
+        ordering: impl Send + 'static,
+    ) -> Result<Self, crate::store::MountedLeaseRefusal> {
+        let (store, ordering) =
+            crate::store::LegacyStoreCustody::from_mounted(store, Box::new(ordering))?;
+        Ok(Self {
+            store,
+            server,
+            _ordering: ordering,
+        })
     }
 }
 

@@ -263,6 +263,15 @@ pub struct NativeChatUiSessionOwner {
     original: Arc<UiSession>,
 }
 impl NativeChatUiSessionOwner {
+    /// Pin only this original session's paid metadata for a final negative
+    /// check. Observe the actual canonical owner, never a losing candidate.
+    /// Retain/drop the pin outside native/Root commit guards; it is not an
+    /// issuer, row/window credential, primitive admission or drainage proof.
+    pub fn observe_current(&self) -> NativeChatUiCurrentCheck {
+        NativeChatUiCurrentCheck {
+            original: self.original.clone(),
+        }
+    }
     /// Negative retirement observation, allocated/paid with the generation
     /// BEFORE commands may observe it. It grants no close or key authority and
     /// waits for CLOSED+zero, including when first polled while still open.
@@ -299,6 +308,20 @@ impl Drop for NativeChatUiSessionOwner {
 #[derive(Clone)]
 pub struct NativeChatUiCommand {
     original: Weak<UiSession>,
+}
+
+/// Strong metadata, not a session owner. Owner retirement still closes the
+/// counter immediately; this pin only keeps the actual counter/Host fee alive.
+pub struct NativeChatUiCurrentCheck {
+    original: Arc<UiSession>,
+}
+impl NativeChatUiCurrentCheck {
+    /// Cached SC negatives only: no Weak upgrade, mutex, pool, IO, allocation
+    /// or temporary custody destruction. The caller retains this pin through
+    /// the entire final guard scope, including refusal and unwind.
+    pub fn is_current(&self) -> bool {
+        self.original.current()
+    }
 }
 
 struct Source {
@@ -549,6 +572,7 @@ pub const NATIVE_CHAT_UI_FIXED_METADATA_BYTES: usize = std::mem::size_of::<Host>
     + std::mem::size_of::<NativeChatUiSessionPreparation>()
     + std::mem::size_of::<NativeChatUiSessionOwner>()
     + std::mem::size_of::<NativeChatUiCommand>()
+    + std::mem::size_of::<NativeChatUiCurrentCheck>()
     + std::mem::size_of::<NativeChatKeyDrain>()
     + 8 * 64;
 
@@ -588,6 +612,7 @@ redacted_debug!(
     NativeChatUiSessionOwner,
     NativeChatUiSessionPreparation,
     NativeChatUiCommand,
+    NativeChatUiCurrentCheck,
     NativeChatSourceOwner,
     NativeChatSourceObservation,
     NativeChatPreparedKeyCut,

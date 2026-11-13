@@ -10,7 +10,10 @@ pub(in crate::store) mod preparation;
 
 pub use operational::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
-    NativeIndexUpgrade, NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    NativeIndexUpgrade, NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation,
+    NativeTextUiPreparation, NativeTextUiRetirement, NativeTextUiRetirementBatch,
+    NativeTextUiRetirementState, NativeTextVault, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata,
 };
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,

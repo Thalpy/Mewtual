@@ -734,7 +734,7 @@ async fn exact_setup_settlement_after_reply_loss_and_lock_releases_only_setup_an
             let generation = f
                 .state
                 .ui_session_generation
-                .load(std::sync::atomic::Ordering::Acquire);
+                .load(std::sync::atomic::Ordering::SeqCst);
             crate::finalize_unlock_session(&f.state, generation, false)
                 .await
                 .unwrap();

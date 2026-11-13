@@ -358,3 +358,38 @@ fn repeated_retirement_cannot_become_the_last_payer_after_concurrent_final_end_a
     assert!(AFTER_RETIREMENT_UNLOCK.with(|slot| slot.borrow().is_none()));
     assert_eq!(f.pool.charged_for_test(), HOST_BYTES + REGISTRY_BYTES);
 }
+
+#[test]
+fn cached_ui_check_uses_only_original_pins_and_atomics_while_registry_is_held() {
+    let f = Fixture::new();
+    let capture = f.capture();
+    let other = Fixture::new();
+    let guard = f.owner.registry.state.lock().unwrap();
+    assert!(f.owner.is_current_cached(&capture));
+    assert!(!other.owner.is_current_cached(&capture));
+    // The full registry/payment check is deliberately NOT the final edge.
+    assert!(f.owner.require_capture(&capture).is_err());
+    f.generation.store(8, SeqCst);
+    assert!(!f.owner.is_current_cached(&capture));
+    f.generation.store(7, SeqCst);
+    assert!(f.owner.is_current_cached(&capture));
+    f.requested.store(true, SeqCst);
+    assert!(!f.owner.is_current_cached(&capture));
+    drop(guard);
+}
+
+#[test]
+fn cached_ui_check_sees_canonical_withdrawal_before_outside_guard_counter_retirement() {
+    let f = Fixture::new();
+    let capture = f.capture();
+    assert!(f.owner.is_current_cached(&capture));
+    // Hold native atomics unchanged to isolate the canonical record's fence.
+    // Production lock publishes them first; cached withdrawal must still stand
+    // on its own before the moved close owner can notify outside the guard.
+    let retiring = f.owner.begin_retirement(7).unwrap();
+    assert!(capture.current.is_current());
+    assert!(!f.owner.is_current_cached(&capture));
+    futures::executor::block_on(retiring.into_batch().unwrap().retire());
+    assert!(!capture.current.is_current());
+    assert!(!f.owner.is_current_cached(&capture));
+}

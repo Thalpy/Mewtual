@@ -54,10 +54,10 @@ async fn native_lock_outcome_returns_its_registered_generation_even_after_newer_
     let commit = state.ui_session_commit.lock().await;
     let mut first = Box::pin(lock_session_outcome_inner(&state, None));
     assert!(first.as_mut().now_or_never().is_none());
-    let first_registered = state.ui_session_generation.load(Ordering::Acquire);
+    let first_registered = state.ui_session_generation.load(Ordering::SeqCst);
     let mut second = Box::pin(lock_session_outcome_inner(&state, Some("not json".into())));
     assert!(second.as_mut().now_or_never().is_none());
-    let second_registered = state.ui_session_generation.load(Ordering::Acquire);
+    let second_registered = state.ui_session_generation.load(Ordering::SeqCst);
     assert_ne!(first_registered, second_registered);
     drop(commit);
     let (first, second) = tokio::join!(first, second);
@@ -98,7 +98,7 @@ async fn entirely_unpolled_cold_unlock_cannot_adopt_a_newer_completed_lock() {
     assert_eq!(
         state
             .ui_session_generation
-            .load(Ordering::Acquire)
+            .load(Ordering::SeqCst)
             .to_string(),
         newer.generation
     );
@@ -112,7 +112,7 @@ async fn entirely_unpolled_cold_unlock_cannot_adopt_a_newer_completed_lock() {
 async fn entirely_unpolled_mounted_unlock_cannot_adopt_a_newer_completed_lock() {
     let root = tempfile::tempdir().unwrap();
     let state = AppState::default();
-    *state.store.lock().await = Some(open_store(root.path(), 603));
+    *state.store.lock().await = Some((open_store(root.path(), 603)).into());
     let original = lock_session_outcome_inner(&state, None).await;
     let old = unlock_authentication(
         &state,
@@ -134,7 +134,7 @@ async fn entirely_unpolled_mounted_unlock_cannot_adopt_a_newer_completed_lock() 
     assert_eq!(
         state
             .ui_session_generation
-            .load(Ordering::Acquire)
+            .load(Ordering::SeqCst)
             .to_string(),
         newer.generation
     );
@@ -165,7 +165,7 @@ async fn malformed_generation_refuses_in_actual_authentication_before_await_or_k
 async fn actual_mounted_authentication_keeps_secret_checks_and_uses_the_exact_barrier() {
     let root = tempfile::tempdir().unwrap();
     let state = AppState::default();
-    *state.store.lock().await = Some(open_store(root.path(), 604));
+    *state.store.lock().await = Some((open_store(root.path(), 604)).into());
     let barrier = lock_session_outcome_inner(&state, None).await;
     let error = unlock_authentication(
         &state,
@@ -198,7 +198,7 @@ async fn actual_mounted_authentication_keeps_secret_checks_and_uses_the_exact_ba
     assert_eq!(
         state
             .ui_authorized_generation
-            .load(Ordering::Acquire)
+            .load(Ordering::SeqCst)
             .to_string(),
         barrier.generation
     );
@@ -208,7 +208,7 @@ async fn actual_mounted_authentication_keeps_secret_checks_and_uses_the_exact_ba
 async fn mounted_unlock_polled_before_lock_still_refuses_at_original_finalization() {
     let root = tempfile::tempdir().unwrap();
     let state = AppState::default();
-    *state.store.lock().await = Some(open_store(root.path(), 605));
+    *state.store.lock().await = Some((open_store(root.path(), 605)).into());
     let barrier = lock_session_outcome_inner(&state, None).await;
     let mount = state.vault_mount.lock().await;
     let mut old = Box::pin(unlock_authentication(
@@ -254,7 +254,7 @@ async fn actual_cold_store_continuation_retains_original_generation_through_fina
                 &mut ChaCha20Rng::seed_from_u64(607),
             )
             .map_err(|error| op.fail(codes::VAULT_LOCKED_OUT, error.to_string()))?;
-            *cold_state.store.lock().await = Some(store);
+            *cold_state.store.lock().await = Some((store).into());
             finalize_unlock_session_with_voice(cold_state, generation, false, &ticket)
                 .await
                 .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;

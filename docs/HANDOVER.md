@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Mounted native vault boundary (13 November; inactive integration)
+
+The production branch carries one Root-owned `MountedVault` sum through the
+original native Store mutex. Existing Legacy paths explicitly select Legacy;
+they cannot borrow the Store hidden by `NativeTextVault`. Durable send, shutdown
+and Studio leases preserve the same mutex and ordering token. Their unscoped
+constructors intentionally refuse TextV2; mixed Legacy rows in a native vault
+still need the scoped original-row bridge described in
+[the index3 design](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
+`NativeTextVault` owns the affine UI lifecycle and physical index. Its final UI
+check uses only the captured original metadata and SC atomics, without locking a
+registry, upgrading a Weak or touching a pool under final native guards. Actual
+native generation, authorized-generation and lock-request accesses participate
+in that ordering. An already mounted TextV2 vault explicitly refuses the Legacy
+unlock route; it must never fall through to a cold Legacy opener or replace its
+original owner. Native V2 opening is still unimplemented.
+
+Focused Root native-registry tests pass109 cases; RT passes21 cases and strict
+Clippy. The separate native library check and test-library compilation pass.
+The subsequent full local native run passed1012 and failed30: the first media
+fixture capacity refusal poisoned28 later recovery fixtures, and the Studio
+Node export child exited because this worktree lacked frontend dependencies.
+Dependencies are now installed. The new native unlock regression and all three
+shared Root Studio fixture cases pass. All3438 frontend tests, frontend static
+checking and the production build pass; these are not a full-suite sign-off.
+Windows CI at9d3a3dd2 independently failed a fresh-Current assertion after media
+retirement. Static review traced both media failures to one-shot fixture
+assumptions around valid local refusal/joined attempts, rather than establishing
+a production regression. Corrections and three passing framed browser regressions
+are pending actual native reruns. Other one-shot affine media setup sites remain
+explicit coverage follow-ups.
+
+The mounted sum is not backend activation: per-group backend ownership, native
+founder/network publication, cold restore, joined provenance, transport and UI
+acceptance remain open. Chat V2 remains disabled. Unregistered index3 and sequence
+starter files are neither executed code nor acceptance evidence.
+
 ## Native source close fence (13 November; consumer still unfinished)
 
 SourceOwner now supports SC-only close before native row/operation locks, with
@@ -62,7 +100,8 @@ eight seed cleanup and three covering-write cases, two focused promotion recover
 cases and the ten whole warm driver cases now have actual Linux positive paths.
 Windows mount/warm compatibility passes. Hosted run43407038976 passes42 focused
 Linux cases and11 Windows cases, plus3438 frontend tests/check/build. The exact-head
-full run43416522284 at053ac72a remains in progress. Review has no
+full run43416522284 at053ac72a passes all four Root/native jobs on Linux and
+Windows. Review has no
 production blocker/high/medium; the Stat invoice LOW is fixed. This supplies no
 native command or backend permission. Chat V2 remains disabled.
 [Exact reader, tests and limits](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
@@ -72,7 +111,7 @@ native command or backend permission. Chat V2 remains disabled.
 Exact-source run43403553170 atPR99/ecb7472f now passes all four hosted Root/
 native jobs across Linux and Windows, plus full frontend/check/build. The agreed
 slow cost case and strict/dependency acceptance remain open. PR100/053ac72a also
-passes Root Linux and native Linux/Windows; its Windows Root is still running.
+passes all four Root/native jobs across Linux and Windows.
 
 The integration branch privately carries an immutable NativeRequired origin through
 SDK creation, encrypted SourceSaved, Current, empty promotion and the whole member

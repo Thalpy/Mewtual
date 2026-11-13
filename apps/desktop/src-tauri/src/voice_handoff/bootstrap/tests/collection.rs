@@ -322,7 +322,7 @@ async fn lock_unlock_and_replacement_do_not_revive_or_collect_the_wrong_original
     let generation = f
         .state
         .ui_session_generation
-        .load(std::sync::atomic::Ordering::Acquire);
+        .load(std::sync::atomic::Ordering::SeqCst);
     crate::finalize_unlock_session(&f.state, generation, false)
         .await
         .unwrap();

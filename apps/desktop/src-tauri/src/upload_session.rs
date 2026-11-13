@@ -22,7 +22,7 @@ impl AdmittedUpload {
 }
 
 fn current(state: &AppState, generation: u64) -> bool {
-    !ui_session_closed(state) && state.ui_session_generation.load(Ordering::Acquire) == generation
+    !ui_session_closed(state) && state.ui_session_generation.load(Ordering::SeqCst) == generation
 }
 
 /// Install only into the session/registry incarnation captured before begin's actor awaits.

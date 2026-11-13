@@ -292,7 +292,7 @@ pub(super) async fn adopt_cache_setting(
     };
     let limit = {
         let guard = state.store.lock().await;
-        let Some(store) = guard.as_ref() else {
+        let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
             return; // in-memory fallback store: no size-limited cache
         };
         resolve_setting(store, server, group, complete, status.usage_bytes)
@@ -358,6 +358,10 @@ async fn studio_scan_once(app: AppHandle) {
         let mut guard = guard;
         guard
             .as_mut()
+            .and_then(|vault| match vault {
+                MountedVault::Legacy(store) => Some(store.as_mut()),
+                MountedVault::TextV2(_) => None,
+            })
             .map(|store| store.creative_pinned_cids().is_ok())
     })
     .await
@@ -443,7 +447,14 @@ pub(super) async fn clean_namespace(
         let key = key.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let mut guard = guard;
-            guard.as_mut()?.begin_leave_cleanup(&key).ok()
+            guard
+                .as_mut()
+                .and_then(|vault| match vault {
+                    MountedVault::Legacy(store) => Some(store.as_mut()),
+                    MountedVault::TextV2(_) => None,
+                })?
+                .begin_leave_cleanup(&key)
+                .ok()
         })
         .await
         .ok()
@@ -507,7 +518,7 @@ pub(super) async fn clean_namespace(
 pub(super) async fn sweep_leaving(state: &AppState, generation: Option<u64>) {
     let root = {
         let guard = state.store.lock().await;
-        let Some(store) = guard.as_ref() else {
+        let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
             return;
         };
         store.blobs_root()
@@ -640,6 +651,7 @@ async fn set_cache_limit_in_session(
         let guard = state.store.lock().await;
         let store = guard
             .as_ref()
+            .and_then(MountedVault::as_legacy)
             .ok_or_else(|| "The vault is locked.".to_string())?;
         let servers = state.servers.lock().await;
         let entry = servers

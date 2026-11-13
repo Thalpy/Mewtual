@@ -26,12 +26,13 @@ impl RevealCase {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await = Some(
-            ServerStore::open(
+            (ServerStore::open(
                 root.path(),
                 b"reveal",
                 &mut rand_chacha::ChaCha20Rng::seed_from_u64(51_077),
             )
-            .unwrap(),
+            .unwrap())
+            .into(),
         );
         *state.session_resumable.lock().await = true;
         let (entry, task, drain, cid) =

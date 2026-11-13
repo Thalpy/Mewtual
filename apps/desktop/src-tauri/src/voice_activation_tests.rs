@@ -32,7 +32,7 @@ impl Fixture {
     async fn from_state(state: AppState) -> Self {
         let root = tempfile::tempdir().unwrap();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(1)),
@@ -50,7 +50,7 @@ impl Fixture {
             7,
             tests::snapshot_test_entry(1, actor.clone(), group, device),
         );
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -287,7 +287,7 @@ async fn accepted_activation_lock_then_unlock_never_revives_old_join() {
         }
     );
     assert!(result.is_err());
-    let generation = f.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = f.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&f.state, generation, false)
         .await
         .unwrap();
@@ -308,7 +308,7 @@ async fn accepted_activation_generation_fence_precedes_delayed_revocation_hook()
     activate_voice_owner_inner(&f.state, candidate.clone())
         .await
         .unwrap();
-    let generation = f.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = f.state.ui_session_generation.load(Ordering::SeqCst);
     {
         let authority = f.state.voice_authority.lock().unwrap();
         let accepted = authority.accepted_activation(&candidate).unwrap();

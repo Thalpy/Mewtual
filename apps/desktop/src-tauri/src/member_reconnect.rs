@@ -50,7 +50,11 @@ pub(super) async fn saved_warning(
             .filter_map(|route| route.peer_id.map(PeerId::new)),
     );
     let guard = state.store.lock().await;
-    let net = guard.as_ref()?.load_server_net(server).ok()??;
+    let net = guard
+        .as_ref()
+        .and_then(MountedVault::as_legacy)?
+        .load_server_net(server)
+        .ok()??;
     (!net.reconnect_routes.iter().any(|route| {
         claims.contains(&PeerId::new(route.peer_id))
             && (net.reconnect_policy == ReconnectPolicy::MemberMesh
@@ -291,6 +295,7 @@ pub(super) async fn persist_with_proofs(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "vault is not mounted".to_string())?;
     let registry = state.servers.lock().await;
     if registry

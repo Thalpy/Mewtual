@@ -51,6 +51,7 @@ mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
 mod governance_open;
+mod mounted;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -61,13 +62,18 @@ pub use critical_namespaces::{
     FreshV2TextFounderBinding, FreshV2TextFounderPolicy, JournalledCheckpointJoinPreparation,
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
     NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
-    NativeRegistryPreparationPolicy, NativeRegistryStore, PendingJoinCatalogPolicy,
+    NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextUiCandidate,
+    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
+    NativeTextUiRetirementBatch, NativeTextUiRetirementState, NativeTextVault,
+    NativeUiInvocationBudget, NativeUiInvocationMetadata, PendingJoinCatalogPolicy,
     PreparedArchiveBootstrapStore, PreparedFreshV2TextFounder, PreparedNativeRegistryMigration,
     PreparedV2CurrentLayoutStore, PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation,
     ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation,
     V2CurrentLayoutPolicy, V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
     V2MemberOutboxPolicy,
 };
+pub(crate) use mounted::LegacyStoreCustody;
+pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,

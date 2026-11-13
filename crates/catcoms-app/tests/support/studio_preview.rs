@@ -1,7 +1,7 @@
 //! Shared integration fixture: authentic head/seed/tail service, real actor preview admission.
 //! The provider deliberately omits a current-owner proof; no ready cache or delivery is injected.
 use catcoms_app::{
-    store::ServerStore,
+    store::{MountedVault, ServerStore},
     studio::{StudioRead, StudioRequest, StudioVaultLease},
     Server, ServerActor,
 };
@@ -34,7 +34,7 @@ fn rng() -> ChaCha20Rng {
 
 #[derive(Debug)]
 pub(super) struct PreviewFixture {
-    pub(super) store: Arc<Mutex<Option<ServerStore>>>,
+    pub(super) store: Arc<Mutex<Option<MountedVault>>>,
     pub(super) actor: ServerActor,
     pub(super) clock: ManualClock,
     pub(super) target: StudioTarget,
@@ -288,7 +288,7 @@ impl PreviewFixture {
         let group = bob.group_id();
         let device = bob.device_id();
         bob.set_blob_store(store.blob_store(&hex::encode(&group)).unwrap());
-        let store = Arc::new(Mutex::new(Some(store)));
+        let store = Arc::new(Mutex::new(Some(store.into())));
         let (actor, mut events, actor_task) = catcoms_app::spawn(bob);
         let drain = tokio::spawn(async move {
             while let Some(event) = events.recv().await {
@@ -322,11 +322,14 @@ impl PreviewFixture {
             })
             .await
             .unwrap()
-            .execute_read(StudioVaultLease::new(
-                self.store.clone().try_lock_owned().unwrap(),
-                SERVER,
-                (),
-            ))
+            .execute_read(
+                StudioVaultLease::new_mounted(
+                    self.store.clone().try_lock_owned().unwrap(),
+                    SERVER,
+                    (),
+                )
+                .unwrap(),
+            )
             .await
             .unwrap()
     }
@@ -349,11 +352,14 @@ impl PreviewFixture {
                     .studio_receive_begin()
                     .await
                     .unwrap()
-                    .execute(StudioVaultLease::new(
-                        self.store.clone().try_lock_owned().unwrap(),
-                        SERVER,
-                        (),
-                    ))
+                    .execute(
+                        StudioVaultLease::new_mounted(
+                            self.store.clone().try_lock_owned().unwrap(),
+                            SERVER,
+                            (),
+                        )
+                        .unwrap(),
+                    )
                     .await
                     .unwrap();
                 // Allow real detached I/O/parsers to finish; this is bounded polling, not a

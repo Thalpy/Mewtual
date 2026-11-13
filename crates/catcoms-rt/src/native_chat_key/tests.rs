@@ -785,6 +785,28 @@ fn native_chat_key_source_sc_close_keeps_admitted_ends_and_other_sources_indepen
 }
 
 #[test]
+fn native_chat_key_current_metadata_pin_observes_owner_close_without_becoming_an_issuer() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let current = ui.observe_current();
+    let command = ui.observe();
+    let guard = std::sync::Mutex::new(());
+    {
+        let _held = guard.lock().unwrap();
+        assert!(current.is_current());
+        fixture.generation.store(8, Ordering::SeqCst);
+        assert!(!current.is_current());
+    }
+    fixture.generation.store(7, Ordering::SeqCst);
+    assert!(current.is_current());
+    drop(ui);
+    assert!(!current.is_current());
+    // A strong metadata pin can keep the weak command's allocation present;
+    // it cannot keep the owner open or authorize another source/primitive.
+    assert!(NativeChatSourceOwner::for_trusted_source(&command, Arc::new(())).is_err());
+}
+
+#[test]
 fn native_chat_key_idle_retirement_keeps_actual_generation_and_host_custody_in_unentered_pins() {
     struct Charge(Arc<AtomicUsize>);
     impl Drop for Charge {

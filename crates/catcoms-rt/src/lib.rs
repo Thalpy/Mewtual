@@ -24,7 +24,7 @@ pub use mem::{Hub, MemNetwork};
 pub use native_chat_key::{
     NativeChatKeyDrain, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatKeyRefusal,
     NativeChatPreparedKeyCut, NativeChatSourceObservation, NativeChatSourceOwner,
-    NativeChatUiBinding, NativeChatUiCommand, NativeChatUiSessionOwner,
+    NativeChatUiBinding, NativeChatUiCommand, NativeChatUiCurrentCheck, NativeChatUiSessionOwner,
     NativeChatUiSessionPreparation, NATIVE_CHAT_UI_FIXED_METADATA_BYTES,
 };
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};

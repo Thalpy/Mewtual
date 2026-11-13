@@ -11,6 +11,9 @@
 #[cfg(all(test, target_os = "windows", target_env = "msvc"))]
 mod native_test_manifest;
 
+#[cfg(test)]
+mod native_vault_tests;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Write};
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use catcoms_app::store::MAX_UI_STATE_BYTES;
+use catcoms_app::store::{MountedVault, MAX_UI_STATE_BYTES};
 use catcoms_app::{
     channel_id, spawn, AppEvent, Cid, CidHasher, DeviceId, FileListing, FileRef, InviteJoinPlan,
     Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, ReconnectPolicy,
@@ -84,6 +87,7 @@ mod voice_authority;
 #[allow(dead_code)]
 mod voice_handoff;
 mod voice_join_key;
+
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
 #[cfg(test)]
@@ -506,7 +510,7 @@ struct AppState {
     /// the final registry check still decides which incarnation may write. Never substitute
     /// persist_locks here: capture itself seals a snapshot through that other lock.
     reconnect_persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
-    store: Arc<Mutex<Option<ServerStore>>>,
+    store: Arc<Mutex<Option<MountedVault>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
     session_resumable: Arc<Mutex<bool>>,
@@ -1128,12 +1132,12 @@ struct UiSessionGate<'a> {
     requested: &'a AtomicBool,
     generation: &'a AtomicU64,
     authorized: &'a AtomicU64,
-    store: &'a Mutex<Option<ServerStore>>,
+    store: &'a Mutex<Option<MountedVault>>,
 }
 impl UiSessionGate<'_> {
     fn is_closed(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
-            || self.generation.load(Ordering::Acquire) != self.authorized.load(Ordering::Acquire)
+        self.requested.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != self.authorized.load(Ordering::SeqCst)
     }
     async fn require_unlocked(&self) -> Result<(), String> {
         if self.is_closed() {
@@ -1149,7 +1153,7 @@ impl UiSessionGate<'_> {
     }
     /// Pure final fence, safe while Coordinator is held. No await or native callback.
     fn check_generation(&self, expected: u64) -> Result<(), String> {
-        if self.is_closed() || self.generation.load(Ordering::Acquire) != expected {
+        if self.is_closed() || self.generation.load(Ordering::SeqCst) != expected {
             return Err("the UI session changed while the operation was in progress".into());
         }
         Ok(())
@@ -1178,7 +1182,7 @@ async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
 async fn unlocked_ui_session_generation(state: &AppState) -> Result<u64, String> {
     let _commit = state.ui_session_commit.lock().await;
     require_unlocked_session(state).await?;
-    Ok(state.ui_session_generation.load(Ordering::Acquire))
+    Ok(state.ui_session_generation.load(Ordering::SeqCst))
 }
 
 /// Permit one externally-visible step only if it still belongs to the UI session that began it.
@@ -1190,7 +1194,7 @@ async fn require_ui_session_generation(
 ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
     let commit = state.ui_session_commit.lock().await;
     require_unlocked_session(state).await?;
-    if state.ui_session_generation.load(Ordering::Acquire) != expected {
+    if state.ui_session_generation.load(Ordering::SeqCst) != expected {
         return Err("the UI session changed while the operation was in progress".into());
     }
     Ok(commit)
@@ -3550,7 +3554,7 @@ async fn register_server(
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     let timer_actor = actor.clone();
     let mut servers = state.servers.lock().await;
-    let install = if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+    let install = if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
         || ui_session_closed(state)
     {
         Err("server registration was superseded by a lock request".into())
@@ -3758,11 +3762,18 @@ async fn persist_captured(
             {
                 return PersistOutcome::Superseded;
             }
-            let lease = catcoms_app::durable_chat::DurableSendLease::new(
+            let lease = match catcoms_app::durable_chat::DurableSendLease::new_mounted(
                 store,
                 server,
                 (writing, registry),
-            );
+            ) {
+                Ok(lease) => lease,
+                Err(_) => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::StoreUnavailable,
+                    }
+                }
+            };
             if let Err(error) = ready.commit(lease).await {
                 tracing::error!(target:"catcoms_app",server,error=%error,"VAULT.CHAT_REPAIR.FAILED");
                 return PersistOutcome::Pending {
@@ -3794,7 +3805,7 @@ async fn persist_captured(
         }
     };
     let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return PersistOutcome::Pending {
             reason: PersistFailure::StoreUnavailable,
         };
@@ -3855,7 +3866,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
     // happens while holding it.
     let key = {
         let guard = state.store.lock().await;
-        match guard.as_ref() {
+        match guard.as_ref().and_then(MountedVault::as_legacy) {
             Some(store) => match store.address_cache_key() {
                 Ok(k) => k,
                 Err(e) => {
@@ -3870,7 +3881,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
         return; // the actor stopped
     };
     let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
+    if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_address_cache(server, &bytes, &mut rng) {
             tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.ADDRESS_CACHE.SEAL_FAILED");
@@ -3940,7 +3951,7 @@ async fn persist_live_local_reconnect_routes_in_state(
     let now_ms = SystemClock.now_ms();
     let net = {
         let guard = state.store.lock().await;
-        let Some(store) = guard.as_ref() else {
+        let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
             return;
         };
         match store.load_server_net(server) {
@@ -4021,7 +4032,7 @@ async fn persist_live_local_reconnect_routes_in_state(
         .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
         .collect();
     let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return;
     };
     // Re-read under the final write lock. A recovery-code apply can update only the pending field
@@ -4120,7 +4131,7 @@ async fn attach_blob_store_inner<T: MeshTransport, R: catcoms_rt::CryptoRngCore>
         }
     };
     let prepared = tokio::task::spawn_blocking(move || {
-        let store = guard.as_ref()?;
+        let store = guard.as_ref().and_then(MountedVault::as_legacy)?;
         Some(cache_housekeeping::prepare_blob_store(
             store, server_id, &group,
         ))
@@ -7503,7 +7514,7 @@ async fn leave_server(
     let mut marked = false;
     {
         let guard = state.store.lock().await;
-        if let Some(store) = guard.as_ref() {
+        if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
             if claim.is_some() {
                 match cache_housekeeping::mark_leaving(store, &removed.group_id) {
                     Ok(present) => marked = present,
@@ -8399,7 +8410,7 @@ async fn push_file_chunk(
             .get_mut(&key)
             .ok_or_else(|| "no such upload".to_string())?;
         if ui_session_closed(&state)
-            || state.ui_session_generation.load(Ordering::Acquire) != up.generation
+            || state.ui_session_generation.load(Ordering::SeqCst) != up.generation
             || !up.actor.same_instance(&actor)
         {
             return Err("this upload is no longer active".into());
@@ -8465,7 +8476,7 @@ async fn seal_pending_chunk(
                 .filter(|up| {
                     up.can_accept(index)
                         && !ui_session_closed(state)
-                        && state.ui_session_generation.load(Ordering::Acquire) == up.generation
+                        && state.ui_session_generation.load(Ordering::SeqCst) == up.generation
                         && up.actor.same_instance(actor)
                 })
                 .map(|up| up.chunk_sealed(file_ref.clone()));
@@ -8526,7 +8537,7 @@ async fn finish_file_upload(
             .get_mut(&key)
             .ok_or_else(|| op.fail(codes::FILE_UPLOAD_FAILED, "no such upload"))?;
         if ui_session_closed(&state)
-            || state.ui_session_generation.load(Ordering::Acquire) != up.generation
+            || state.ui_session_generation.load(Ordering::SeqCst) != up.generation
             || !up.actor.same_instance(&actor)
         {
             return Err(op.fail(codes::FILE_UPLOAD_FAILED, "this upload is no longer active"));
@@ -9025,6 +9036,7 @@ async fn authorize_member_recovery_capture(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "the vault is locked".to_string())?;
     let mut net = store
         .load_server_net(server)
@@ -9492,7 +9504,7 @@ async fn commit_kept_command<T>(
     {
         return Err("server changed".into());
     }
-    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != generation
     {
         return Err("the UI session changed while the operation was in progress".into());
     }
@@ -9507,7 +9519,7 @@ async fn commit_kept_command<T>(
     {
         return Err("server changed".into());
     }
-    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != generation
     {
         return Err("the UI session changed while the operation was in progress".into());
     }
@@ -10524,7 +10536,7 @@ async fn set_switchboard_offered(
     }
     let persist_result: Result<(), String> = async {
         let store = state.store.lock().await;
-        if let Some(store) = store.as_ref() {
+        if let Some(store) = store.as_ref().and_then(MountedVault::as_legacy) {
             let mut net = store
                 .load_server_net(server)
                 .map_err(|error| error.to_string())?
@@ -10552,7 +10564,7 @@ async fn set_switchboard_offered(
         // actor has stopped, roll the persisted bit back so a reload cannot surprise-enable it.
         if let Err(error) = actor.set_switchboard_offered(true).await {
             let store = state.store.lock().await;
-            if let Some(store) = store.as_ref() {
+            if let Some(store) = store.as_ref().and_then(MountedVault::as_legacy) {
                 if let Ok(Some(mut net)) = store.load_server_net(server) {
                     net.switchboard = false;
                     let mut rng = OsCryptoRng;
@@ -10839,7 +10851,7 @@ async fn prepare_call_mapping_owner(
 async fn call_mapping_binding_current(state: &AppState, binding: &call_mappings::Binding) -> bool {
     let servers = state.servers.lock().await;
     !ui_session_closed(state)
-        && state.ui_session_generation.load(Ordering::Acquire) == binding.generation
+        && state.ui_session_generation.load(Ordering::SeqCst) == binding.generation
         && servers.get(&binding.server).is_some_and(|entry| {
             entry.instance == binding.instance && entry.group_id == binding.group
         })
@@ -11008,7 +11020,7 @@ enum VoiceActivationPlan {
 async fn voice_binding_current(state: &AppState, binding: &voice_authority::Binding) -> bool {
     let servers = state.servers.lock().await;
     !ui_session_closed(state)
-        && state.ui_session_generation.load(Ordering::Acquire) == binding.generation
+        && state.ui_session_generation.load(Ordering::SeqCst) == binding.generation
         && servers.get(&binding.server).is_some_and(|entry| {
             entry.instance == binding.instance && entry.group_id == binding.group
         })
@@ -12242,6 +12254,7 @@ async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before loading UI state".to_string())?;
     let bytes = store.load_ui_state().map_err(|error| error.to_string())?;
     if bytes.is_empty() {
@@ -12271,6 +12284,7 @@ async fn save_ui_state_for_generation(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before saving UI state".to_string())?;
     store
         .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
@@ -13452,6 +13466,7 @@ where
         let mounted = state.store.lock().await;
         let store = mounted
             .as_ref()
+            .and_then(MountedVault::as_legacy)
             .ok_or_else(|| "vault is not mounted during chat fence restore".to_string())?;
         let registry = state.servers.lock().await;
         // An actual fence may require a covering server save. Never let this private older
@@ -13498,7 +13513,7 @@ where
     // best-effort cache data never prevents the authoritative group snapshot from opening.
     {
         let guard = state.store.lock().await;
-        if let Some(store) = guard.as_ref() {
+        if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
             match (
                 store.address_cache_key(),
                 store.load_address_cache(record.id),
@@ -13730,7 +13745,7 @@ async fn reload_one(
     let timer_actor = actor.clone();
     let commit = state.ui_session_commit.lock().await;
     let mut servers = state.servers.lock().await;
-    let install = if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+    let install = if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
         || !voice_runtime(state).is_current_ticket(voice_ticket)
         || servers.get(&record.id).map(|entry| entry.instance) != previous_instance
     {
@@ -14661,6 +14676,7 @@ async fn create_backup(
         let guard = state.store.lock().await;
         let store = guard
             .as_ref()
+            .and_then(MountedVault::as_legacy)
             .ok_or_else(|| op.fail(codes::VAULT_BACKUP_FAILED, "The vault is not mounted."))?;
         let registry = state.servers.lock().await;
         if registry.len() != servers.len()
@@ -14721,6 +14737,7 @@ async fn change_vault_secret(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before changing its secret".to_string())?;
     vault_secret_change_result(store.change_passphrase(
         current_secret.as_bytes(),
@@ -16079,11 +16096,20 @@ async fn authenticate_mounted_store(
     passphrase: &[u8],
 ) -> Result<bool, catcoms_app::AppError> {
     let store_guard = state.store.lock().await;
-    let Some(store) = store_guard.as_ref() else {
-        return Ok(false);
-    };
-    store.verify_passphrase(passphrase)?;
-    Ok(true)
+    match store_guard.as_ref() {
+        None => Ok(false),
+        Some(MountedVault::Legacy(store)) => {
+            store.verify_passphrase(passphrase)?;
+            Ok(true)
+        }
+        // This route currently implements legacy restoration only. An actual
+        // mounted native owner must remain intact until its checked cold and
+        // authenticated re-entry paths exist. It is never permission to try an
+        // old opener against the same mount or restore its old flat registry.
+        Some(MountedVault::TextV2(_)) => Err(catcoms_app::AppError::Invalid(
+            "Chat V2 vault opening is not enabled yet.".into(),
+        )),
+    }
 }
 
 /// Resolve continuity debt from the locked UI generation before reopening native IPC.
@@ -16110,7 +16136,7 @@ async fn settle_ui_lock_continuity_before_unlock(
             Err(error) => Err(error),
             Ok(()) => {
                 let store = state.store.lock().await;
-                match store.as_ref() {
+                match store.as_ref().and_then(MountedVault::as_legacy) {
                     Some(store) => store
                         .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
                         .map_err(|error| error.to_string()),
@@ -16193,7 +16219,7 @@ async fn reattach_voice_actors(
             .await;
         let _commit = state.ui_session_commit.lock().await;
         let mut servers = state.servers.lock().await;
-        if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+        if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
             || !voice_runtime(state).is_current_ticket(ticket)
         {
             return Err("unlock was superseded by a newer lock request; try again".into());
@@ -16255,7 +16281,7 @@ async fn finalize_unlock_session_with_voice(
 ) -> Result<Option<Vec<ReloadedServer>>, String> {
     reattach_voice_actors(state, expected_generation, voice_ticket).await?;
     let _commit = state.ui_session_commit.lock().await;
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
     settle_ui_lock_continuity_before_unlock(state, expected_generation).await?;
@@ -16268,7 +16294,7 @@ async fn finalize_unlock_session_with_voice(
     } else {
         None
     };
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
 
@@ -16277,21 +16303,21 @@ async fn finalize_unlock_session_with_voice(
     *resumable = true;
     let activation = voice_runtime(state).activate_session(voice_ticket);
     if activation.is_ok()
-        && state.ui_session_generation.load(Ordering::Acquire) == expected_generation
+        && state.ui_session_generation.load(Ordering::SeqCst) == expected_generation
     {
         state
             .ui_authorized_generation
-            .store(expected_generation, Ordering::Release);
-        state.session_lock_requested.store(false, Ordering::Release);
+            .store(expected_generation, Ordering::SeqCst);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
     }
     if activation.is_err()
-        || state.ui_session_generation.load(Ordering::Acquire) != expected_generation
-        || state.session_lock_requested.load(Ordering::Acquire)
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+        || state.session_lock_requested.load(Ordering::SeqCst)
     {
         // A lock request may publish its generation without this mutex so new IPC fails promptly.
         // Restore the conservative state before releasing either transition boundary.
         *resumable = false;
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
     if let Some(session) = keep_session::current(state, expected_generation) {
@@ -16387,7 +16413,7 @@ where
     // ANY await/authentication/KDF and retain it through every existing finalization barrier.
     let unlock_generation = parse_unlock_generation(&expected_ui_generation)
         .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;
-    if state.ui_session_generation.load(Ordering::Acquire) != unlock_generation {
+    if state.ui_session_generation.load(Ordering::SeqCst) != unlock_generation {
         return Err(op.fail(
             codes::SESSION_LOCKED,
             "unlock was superseded by a newer lock request; try again",
@@ -16471,7 +16497,7 @@ async fn unlock_cold(
     // `state.store` to attach the on-disk sealing blob store; if it were still `None` here,
     // every reloaded server would silently keep an empty in-memory blob store and be unable to
     // read its own persisted blobs ("no peer has it" for files you uploaded before the restart).
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
     {
         let mut n = state.next_id.lock().await;
         if *n < max_id {
@@ -16566,7 +16592,7 @@ async fn resume_session_projection(
     // Lock invalidation deliberately happens before `lock_session_inner` waits for `_commit`, so
     // recheck after every actor await. If a lock began while channels were being projected, none
     // of the names/invites/channels may cross back into the stale webview.
-    if state.ui_session_generation.load(Ordering::Acquire) != generation
+    if state.ui_session_generation.load(Ordering::SeqCst) != generation
         || require_unlocked_session(state).await.is_err()
     {
         return None;
@@ -16763,9 +16789,9 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
 fn register_ui_lock_request(state: &AppState) -> u64 {
     let generation = state
         .ui_session_generation
-        .fetch_add(1, Ordering::AcqRel)
+        .fetch_add(1, Ordering::SeqCst)
         .wrapping_add(1);
-    state.session_lock_requested.store(true, Ordering::Release);
+    state.session_lock_requested.store(true, Ordering::SeqCst);
     keep_session::revoke(state);
     state.admin_chat_ledger.retire();
     generation
@@ -16838,7 +16864,7 @@ async fn lock_session_with_generation_inner(
             Err(error) => (Err(error), None),
             Ok(()) => {
                 let guard = state.store.lock().await;
-                let result = match guard.as_ref() {
+                let result = match guard.as_ref().and_then(MountedVault::as_legacy) {
                     Some(store) => store
                         .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
                         .map_err(|error| error.to_string()),
@@ -17059,7 +17085,7 @@ async fn pairing_decline(state: State<'_, AppState>) -> Result<(), String> {
 async fn persist_pairing_ledger(state: &AppState) {
     let snapshot = state.pairing_ledger.lock().await.snapshot();
     let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
+    if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_pairing_ledger(&snapshot, &mut rng) {
             tracing::error!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.SEAL_FAILED");
@@ -18969,7 +18995,7 @@ pub fn run() {
             let expected_generation = handle
                 .state::<AppState>()
                 .ui_session_generation
-                .load(Ordering::Acquire);
+                .load(Ordering::SeqCst);
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
                 // Capture authorization before any actor/disk await, then hold its native commit
@@ -19376,7 +19402,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"kept test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"kept test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(72)),
@@ -19866,7 +19892,7 @@ mod tests {
             catcoms_app::ServerStore::open(dir.path(), b"passphrase", &mut catcoms_rt::OsCryptoRng)
                 .expect("a fresh vault opens");
         *state.session_resumable.lock().await = true;
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         assert_eq!(actor_of(&state, 1).await.unwrap_err(), ActorLookup::NotOpen);
     }
 
@@ -20683,7 +20709,7 @@ mod tests {
             tokio::spawn(
                 async move { lock_session_with_generation_inner(&locking_state, None).await },
             );
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
 
@@ -21070,7 +21096,7 @@ mod tests {
         let downloads = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(vault.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let old_generation = unlocked_ui_session_generation(&state).await.unwrap();
         let (mut file, staging, final_path) =
@@ -21099,7 +21125,7 @@ mod tests {
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
             .unwrap());
-        let new_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let new_generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, new_generation, true)
             .await
             .unwrap();
@@ -21362,7 +21388,7 @@ mod tests {
         let state = Arc::new(AppState::default());
         let dir = tempfile::tempdir().unwrap();
         let store = ServerStore::open(dir.path(), b"passphrase", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -21388,7 +21414,7 @@ mod tests {
             "stale join work must not enter the registration/persistence boundary"
         );
         assert_ne!(
-            state.ui_session_generation.load(Ordering::Acquire),
+            state.ui_session_generation.load(Ordering::SeqCst),
             generation
         );
     }
@@ -21718,7 +21744,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         state.media_cache.lock().await.push(cached(1, "cid", 0));
@@ -22876,7 +22902,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         state.storage_health.lock().await.insert(
             7,
@@ -22905,6 +22931,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_ui_state()
             .unwrap();
@@ -22978,8 +23006,9 @@ mod tests {
     async fn ordinary_lock_completion_cannot_erase_native_close_debt() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
 
         let (failed_close, may_destroy) =
@@ -23020,7 +23049,7 @@ mod tests {
         let ordinary = tokio::spawn(async move {
             lock_session_inner(&ordinary_state, Some("ordinary-invalid".into())).await
         });
-        while state.ui_session_generation.load(Ordering::Acquire) < 1
+        while state.ui_session_generation.load(Ordering::SeqCst) < 1
             || state
                 .pending_ui_lock_snapshot
                 .lock()
@@ -23036,7 +23065,7 @@ mod tests {
         let closing = tokio::spawn(async move {
             close_vault_window_plan_inner(&close_state, Some("close-invalid".into()), false).await
         });
-        while state.ui_session_generation.load(Ordering::Acquire) < 2
+        while state.ui_session_generation.load(Ordering::SeqCst) < 2
             || state
                 .pending_ui_lock_snapshot
                 .lock()
@@ -23066,15 +23095,16 @@ mod tests {
     async fn successful_reunlock_resolves_old_native_close_debt() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let (failed, may_destroy) =
             close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
         assert!(failed.continuity_error.is_some());
         assert!(!may_destroy);
 
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         assert!(finalize_unlock_session(&state, generation, false)
             .await
             .is_err());
@@ -23100,7 +23130,7 @@ mod tests {
         store
             .save_ui_state(BEFORE_CANCELLED_LOCK_UI_STATE.as_bytes(), &mut OsCryptoRng)
             .unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let events = state.ui_event_commit.lock().await;
         let commands = state.ui_session_commit.lock().await;
@@ -23141,6 +23171,8 @@ mod tests {
                 .await
                 .as_ref()
                 .unwrap()
+                .as_legacy()
+                .unwrap()
                 .load_ui_state()
                 .unwrap(),
             latest.as_bytes(),
@@ -23161,6 +23193,8 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
+                .unwrap()
+                .as_legacy()
                 .unwrap()
                 .load_ui_state()
                 .unwrap(),
@@ -23206,7 +23240,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let late_report =
@@ -23257,7 +23291,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(71)),
@@ -23276,7 +23310,7 @@ mod tests {
             .lock()
             .await
             .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23358,7 +23392,7 @@ mod tests {
             let controller = mappings
                 .prepare(
                     call_mappings::CandidateKind::Controller {
-                        generation: state.ui_session_generation.load(Ordering::Acquire),
+                        generation: state.ui_session_generation.load(Ordering::SeqCst),
                     },
                     0,
                 )
@@ -23369,7 +23403,7 @@ mod tests {
                     call_mappings::CandidateKind::Call {
                         controller,
                         binding: call_mappings::Binding {
-                            generation: state.ui_session_generation.load(Ordering::Acquire),
+                            generation: state.ui_session_generation.load(Ordering::SeqCst),
                             server: 7,
                             instance: 1,
                             group: vec![4; 16],
@@ -23451,7 +23485,7 @@ mod tests {
             actors.push(actor);
             workers.push((task, drain));
         }
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23470,7 +23504,7 @@ mod tests {
         assert_eq!(runtime.resources().counts(), counts);
         lock_session_inner(&state, None).await.unwrap();
         assert!(old.iter().all(|grant| !grant.lease().is_live()));
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23520,7 +23554,7 @@ mod tests {
             .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
         let runtime = voice_runtime(&state);
         let old_ticket = runtime.session_ticket();
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let boundary = state.ui_session_commit.lock().await;
         let (result, ()) = tokio::join!(biased;
             reattach_voice_actors(&state, generation, &old_ticket),
@@ -23571,7 +23605,7 @@ mod tests {
             workers.push((task, drain));
         }
         actors[0].shutdown().await;
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23604,7 +23638,7 @@ mod tests {
                 charges.push(credit);
             }
         }
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23635,7 +23669,7 @@ mod tests {
     #[tokio::test]
     async fn voice_old_unlock_cannot_erase_lock_registered_before_revocation_hooks() {
         let state = AppState::default();
-        let old_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let old_generation = state.ui_session_generation.load(Ordering::SeqCst);
         let runtime = voice_runtime(&state);
         let old_ticket = runtime.session_ticket();
         // Split the real synchronous entry seam at the point where a coordinator/mapping mutex
@@ -23651,7 +23685,7 @@ mod tests {
         assert!(!*state.session_resumable.lock().await);
         assert!(require_unlocked_session(&state).await.is_err());
         // Clearing only the separate flag cannot open the still-uncommitted generation.
-        state.session_lock_requested.store(false, Ordering::Release);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
         assert!(ui_session_closed(&state));
         assert!(require_unlocked_session(&state).await.is_err());
         state.voice_authority.lock().unwrap().revoke_all();
@@ -23721,8 +23755,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
-        state.session_lock_requested.store(true, Ordering::Release);
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         let channel = channel_id("general");
         let mut running = Vec::new();
         for id in 1..=2 {
@@ -23798,7 +23832,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(71)),
             MlsDevice::generate().unwrap(),
@@ -23843,7 +23877,7 @@ mod tests {
             .send_reply(channel, "after the backup captured history", "")
             .await
             .unwrap();
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert!(
             shutdown::freeze_servers(&state).await.is_err(),
             "close must observe the outstanding backup writer"
@@ -23858,6 +23892,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(1)
             .unwrap();
@@ -23901,10 +23937,11 @@ mod tests {
         let channel = channel_id("general");
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         // A mounted explicit UI lock permits sealed native persistence, but no frontend commands.
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert!(require_unlocked_session(&state).await.is_err());
 
         let hub = Hub::new();
@@ -23972,6 +24009,8 @@ mod tests {
                     .lock()
                     .await
                     .as_ref()
+                    .unwrap()
+                    .as_legacy()
                     .unwrap()
                     .load_server(SERVER)
                     .unwrap();
@@ -24146,8 +24185,9 @@ mod tests {
             }
         );
         drop(idle);
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         note_event_for_persistence(&state, 1, 10, &AppEvent::SnapshotNeeded).await;
         wait_for_clean_snapshot(&state, 1).await;
         assert_eq!(
@@ -24162,6 +24202,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(1)
             .unwrap();
@@ -24191,8 +24233,9 @@ mod tests {
         const INSTANCE: u64 = 40;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let mut server = Server::found(
             Hub::new().join(PeerId::from_u64(91)),
@@ -24286,6 +24329,8 @@ mod tests {
             .await
             .as_ref()
             .unwrap()
+            .as_legacy()
+            .unwrap()
             .load_server(SERVER)
             .unwrap();
         let restored = Server::restore(
@@ -24362,8 +24407,9 @@ mod tests {
         const NEW: u64 = 41;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
 
         // Two genuinely different groups, so what reached the disk is legible from its content.
         let build = |peer: u64, seed: u64| {
@@ -24441,7 +24487,13 @@ mod tests {
         persist_server(&state, SERVER).await;
         let after_replacement = {
             let guard = state.store.lock().await;
-            guard.as_ref().unwrap().load_server(SERVER).unwrap()
+            guard
+                .as_ref()
+                .unwrap()
+                .as_legacy()
+                .unwrap()
+                .load_server(SERVER)
+                .unwrap()
         };
 
         // Now the departed writer resumes.
@@ -24458,7 +24510,13 @@ mod tests {
 
         let on_disk = {
             let guard = state.store.lock().await;
-            guard.as_ref().unwrap().load_server(SERVER).unwrap()
+            guard
+                .as_ref()
+                .unwrap()
+                .as_legacy()
+                .unwrap()
+                .load_server(SERVER)
+                .unwrap()
         };
         assert_eq!(
             on_disk.to_vec(),
@@ -24507,7 +24565,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -24582,7 +24640,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
         let mut recovery = state.network_changes.subscribe();
 
@@ -24603,7 +24661,7 @@ mod tests {
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
             .unwrap());
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let running = finalize_unlock_session(&state, generation, true)
             .await
             .unwrap()
@@ -24633,9 +24691,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let latest = r#"{"version":1,"drafts":{"room":"survives remount"},"readMarks":{}}"#;
 
         // A reloaded webview has no JavaScript coordinator or Promise. Native state is therefore
@@ -24660,6 +24718,8 @@ mod tests {
                 .await
                 .as_ref()
                 .unwrap()
+                .as_legacy()
+                .unwrap()
                 .load_ui_state()
                 .unwrap(),
             latest.as_bytes(),
@@ -24674,8 +24734,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.session_resumable.lock().await = false;
-        state.session_lock_requested.store(true, Ordering::Release);
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let recovery = state.network_changes.subscribe();
         let latest = r#"{"version":1,"drafts":{"room":"retry me"},"readMarks":{}}"#;
         *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
@@ -24700,12 +24760,12 @@ mod tests {
             "a failed retry must retain the immutable bytes rather than accept older continuity",
         );
         assert!(!*state.session_resumable.lock().await);
-        assert!(state.session_lock_requested.load(Ordering::Acquire));
+        assert!(state.session_lock_requested.load(Ordering::SeqCst));
 
         // Model a transient persistence problem clearing. The next unlock retries the same native
         // transaction and only then reopens the IPC boundary.
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         finalize_unlock_session(&state, generation, false)
             .await
             .expect("the retained exact snapshot should be retryable");
@@ -24716,6 +24776,8 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
+                .unwrap()
+                .as_legacy()
                 .unwrap()
                 .load_ui_state()
                 .unwrap(),
@@ -24744,11 +24806,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
         let recovery = state.network_changes.subscribe();
 
-        let stale_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let stale_generation = state.ui_session_generation.load(Ordering::SeqCst);
         assert!(
             authenticate_mounted_store(&state, b"correct horse")
                 .await
@@ -24757,9 +24819,9 @@ mod tests {
         );
         let newer_generation = state
             .ui_session_generation
-            .fetch_add(1, Ordering::AcqRel)
+            .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         let newer_snapshot = r#"{"version":1,"drafts":{"room":"newer lock"},"readMarks":{}}"#;
         *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
             generation: newer_generation,
@@ -24784,7 +24846,7 @@ mod tests {
             require_unlocked_session(&state).await.unwrap_err(),
             "the vault is locked"
         );
-        assert!(state.session_lock_requested.load(Ordering::Acquire));
+        assert!(state.session_lock_requested.load(Ordering::SeqCst));
         assert!(!*state.session_resumable.lock().await);
         assert_eq!(
             state
@@ -24813,7 +24875,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
 
         // This generation is exactly what production captures before `running_servers` begins its
@@ -24837,7 +24899,7 @@ mod tests {
 
         let lock_state = Arc::clone(&state);
         let locking = tokio::spawn(async move { lock_session_inner(&lock_state, None).await });
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
         release_projection.notify_one();
@@ -24854,7 +24916,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -24877,7 +24939,7 @@ mod tests {
         let lock_state = Arc::clone(&state);
         let locking =
             tokio::spawn(async move { lock_session_inner(&lock_state, Some(latest.into())).await });
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
         drop(boundary);
@@ -24892,6 +24954,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_ui_state()
             .unwrap();
@@ -24991,7 +25055,7 @@ mod tests {
                 "reconnect consent is part of the sealed lifecycle"
             );
             let state = AppState::default();
-            *state.store.lock().await = Some(store);
+            *state.store.lock().await = Some((store).into());
             *state.next_id.lock().await = SERVER_ID;
             *state.session_resumable.lock().await = true;
             let restored = restore_server_actor(
@@ -25104,7 +25168,7 @@ mod tests {
         store
             .save_server_net(SERVER_ID, &network, &mut rng)
             .unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
 
         let pending_peer = PeerId::from_u64(99);
         authorize_member_recovery_capture(&state, SERVER_ID, pending_peer, u64::MAX)
@@ -25114,6 +25178,8 @@ mod tests {
         let guard = state.store.lock().await;
         let sealed = guard
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server_net(SERVER_ID)
             .unwrap()
@@ -25198,7 +25264,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (owner, member, _, _) = admitted_reply_pair(Vec::new()).await;
         assert_eq!(member.my_role(), catcoms_app::Role::Member);
@@ -25228,7 +25294,7 @@ mod tests {
         state.servers.lock().await.get_mut(&1).unwrap().invite = None;
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
         assert_eq!(get_available_invite(&state, 99).await.unwrap(), None);
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert_eq!(
             get_available_invite(&state, 1).await.unwrap_err(),
             "the vault is locked"
@@ -25246,7 +25312,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (owner, member, owner_peer, _) = admitted_reply_pair(Vec::new()).await;
         let owner_device = owner.device_id();
@@ -26626,8 +26692,9 @@ mod tests {
     async fn jam_sheet_export_cannot_publish_or_reveal_after_lock() {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let safe = format!(

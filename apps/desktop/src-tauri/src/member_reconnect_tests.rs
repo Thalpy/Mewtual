@@ -207,7 +207,7 @@ mod member_reconnect_regressions {
     async fn mount(path: &std::path::Path) -> AppState {
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(path, b"reconnect test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(path, b"reconnect test", &mut OsCryptoRng).unwrap()).into());
         state
     }
 
@@ -217,7 +217,7 @@ mod member_reconnect_regressions {
             .lock()
             .await
             .as_ref()
-            .unwrap()
+            .unwrap().as_legacy().unwrap()
             .load_server_net(1)
             .unwrap()
             .unwrap()
@@ -238,7 +238,7 @@ mod member_reconnect_regressions {
             .lock()
             .await
             .as_ref()
-            .unwrap()
+            .unwrap().as_legacy().unwrap()
             .load_server(1)
             .unwrap();
         let listeners = if listen {
@@ -386,7 +386,7 @@ mod member_reconnect_regressions {
             .lock()
             .await
             .as_ref()
-            .unwrap()
+            .unwrap().as_legacy().unwrap()
             .save_server_net(1, &saved, &mut OsCryptoRng)
             .unwrap();
         assert_eq!(net(&state).await.reconnect_routes, saved.reconnect_routes);
@@ -585,6 +585,7 @@ mod member_reconnect_regressions {
         );
         assert_eq!(
             mounted
+                .as_legacy().unwrap()
                 .load_server_net(1)
                 .unwrap()
                 .unwrap()
@@ -616,7 +617,7 @@ mod member_reconnect_regressions {
             .lock()
             .await
             .as_ref()
-            .unwrap()
+            .unwrap().as_legacy().unwrap()
             .load_server(1)
             .unwrap();
         let saved = Server::restore(

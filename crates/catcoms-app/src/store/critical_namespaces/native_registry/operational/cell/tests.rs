@@ -634,3 +634,215 @@ fn native_index2_cell_concrete_read_keeps_its_decoded_buffers_inside_the_guard()
     });
     assert_eq!(mounted.row_count_data().unwrap(), 1);
 }
+
+fn native_host(
+    mounted: mount::NativeIndexStore,
+) -> (
+    NativeTextVault,
+    NativeUiInvocationBudget,
+    Arc<std::sync::atomic::AtomicU64>,
+    Arc<std::sync::atomic::AtomicU64>,
+    Arc<AtomicBool>,
+) {
+    let budget = NativeUiInvocationBudget::new(
+        CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity()).unwrap(),
+    )
+    .unwrap();
+    let generation = Arc::new(std::sync::atomic::AtomicU64::new(7));
+    let authorized = Arc::new(std::sync::atomic::AtomicU64::new(7));
+    let requested = Arc::new(AtomicBool::new(false));
+    let vault = NativeTextVault::from_trusted_host(
+        mounted,
+        generation.clone(),
+        authorized.clone(),
+        requested.clone(),
+        budget.clone(),
+    )
+    .unwrap();
+    (vault, budget, generation, authorized, requested)
+}
+
+#[test]
+fn native_index2_facade_reauthorizes_ui_on_same_original_physical_mount() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc230);
+    let (vault, budget, generation, authorized, requested) =
+        native_host(mount(dir.path(), &mut rng));
+    let mut candidate = vault
+        .capture_ui(7, budget.prepare().unwrap())
+        .finish()
+        .unwrap();
+    let original = vault.admit_ui(&mut candidate).unwrap();
+    assert!(vault.require_ui(&original).is_ok());
+    generation.store(8, Ordering::SeqCst);
+    requested.store(true, Ordering::SeqCst);
+    assert!(vault.require_ui(&original).is_err());
+    let retirement = vault.begin_ui_retirement(7).unwrap();
+    assert_eq!(retirement.state(), NativeTextUiRetirementState::Started);
+    futures::executor::block_on(retirement.into_batch().unwrap().retire());
+    drop(vault.collect_retired_ui().unwrap());
+    assert_eq!(vault.row_count_data().unwrap(), 1); // Lock did not unmount it.
+    authorized.store(8, Ordering::SeqCst);
+    requested.store(false, Ordering::SeqCst);
+    let mut next = vault
+        .capture_ui(8, budget.prepare().unwrap())
+        .finish()
+        .unwrap();
+    let fresh = vault.admit_ui(&mut next).unwrap();
+    assert!(vault.require_ui(&fresh).is_ok());
+    assert!(vault.require_ui(&original).is_err());
+}
+
+#[test]
+fn native_index2_facade_drop_fences_ui_and_original_index_before_late_metadata_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc231);
+    let mounted = mount(dir.path(), &mut rng);
+    let physical = mounted.physical.clone();
+    let (vault, budget, _, _, _) = native_host(mounted);
+    let late = vault.capture_ui(7, budget.prepare().unwrap());
+    assert!(physical.handler.gate.idle());
+    drop(vault);
+    assert!(!physical.handler.gate.idle());
+    assert!(physical.handler.gate.claim().is_err());
+    assert!(late.finish().is_err());
+    // Finite historical DATA custody still grants no new native/key admission.
+    assert_eq!(physical.row_count_data().unwrap(), 1);
+}
+
+#[test]
+fn native_index2_facade_equal_generation_cannot_select_a_replacement_vault() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc232);
+    let (first, first_budget, _, _, _) = native_host(mount(left.path(), &mut rng));
+    let (other, other_budget, _, _, _) = native_host(mount(right.path(), &mut rng));
+    let mut candidate = first
+        .capture_ui(7, first_budget.prepare().unwrap())
+        .finish()
+        .unwrap();
+    assert!(other.admit_ui(&mut candidate).is_err());
+    let original = first.admit_ui(&mut candidate).unwrap();
+    assert!(other.require_ui(&original).is_err());
+    let mut foreign_fee = first
+        .capture_ui(7, other_budget.prepare().unwrap())
+        .finish()
+        .unwrap();
+    assert!(first.admit_ui(&mut foreign_fee).is_err());
+}
+
+struct OrderingDropNotice(Arc<AtomicBool>);
+impl Drop for OrderingDropNotice {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn native_index2_mounted_legacy_leases_keep_the_original_native_mutex_and_ordering() {
+    use crate::store::MountedVault;
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc240);
+    let store = crate::ServerStore::open(dir.path(), SECRET, &mut rng).unwrap();
+    let mounted = Arc::new(tokio::sync::Mutex::new(Some(MountedVault::from(store))));
+    for family in 0..3 {
+        let notice = Arc::new(AtomicBool::new(false));
+        let guard = futures::executor::block_on(mounted.clone().lock_owned());
+        let ordering = OrderingDropNotice(notice.clone());
+        let lease: Box<dyn Send> = match family {
+            0 => Box::new(
+                crate::durable_chat::DurableSendLease::new_mounted(guard, 1, ordering).unwrap(),
+            ),
+            1 => Box::new(crate::shutdown::ShutdownLease::new_mounted(guard, 1, ordering).unwrap()),
+            2 => {
+                Box::new(crate::studio::StudioVaultLease::new_mounted(guard, 1, ordering).unwrap())
+            }
+            _ => unreachable!(),
+        };
+        assert!(mounted.try_lock().is_err());
+        assert!(!notice.load(Ordering::SeqCst));
+        drop(lease);
+        assert!(mounted.try_lock().is_ok());
+        assert!(notice.load(Ordering::SeqCst));
+    }
+}
+
+fn refused_legacy_family(
+    family: u8,
+    guard: tokio::sync::OwnedMutexGuard<Option<crate::store::MountedVault>>,
+    notice: Arc<AtomicBool>,
+) -> crate::store::MountedLeaseRefusal {
+    let ordering = OrderingDropNotice(notice);
+    match family {
+        0 => crate::durable_chat::DurableSendLease::new_mounted(guard, 1, ordering)
+            .err()
+            .unwrap(),
+        1 => crate::shutdown::ShutdownLease::new_mounted(guard, 1, ordering)
+            .err()
+            .unwrap(),
+        2 => crate::studio::StudioVaultLease::new_mounted(guard, 1, ordering)
+            .err()
+            .unwrap(),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn native_index2_mounted_absent_lease_refusal_retains_original_custody() {
+    let mounted = Arc::new(tokio::sync::Mutex::new(None));
+    for family in 0..3 {
+        let notice = Arc::new(AtomicBool::new(false));
+        let guard = futures::executor::block_on(mounted.clone().lock_owned());
+        let refused = refused_legacy_family(family, guard, notice.clone());
+        assert_eq!(
+            refused.kind(),
+            crate::store::MountedLeaseRefusalKind::NotMounted
+        );
+        assert!(mounted.try_lock().is_err());
+        assert!(!notice.load(Ordering::SeqCst));
+        drop(refused);
+        assert!(mounted.try_lock().is_ok());
+        assert!(notice.load(Ordering::SeqCst));
+    }
+}
+
+#[test]
+fn native_index2_mounted_v2_cannot_supply_a_legacy_send_shutdown_or_studio_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc241);
+    let (vault, _, _, _, _) = native_host(mount(dir.path(), &mut rng));
+    let original = fs::read(file(
+        dir.path(),
+        super::super::super::preparation::INDEX_NAME,
+    ))
+    .unwrap();
+    let mounted = Arc::new(tokio::sync::Mutex::new(Some(
+        crate::store::MountedVault::TextV2(vault),
+    )));
+    for family in 0..3 {
+        let notice = Arc::new(AtomicBool::new(false));
+        let guard = futures::executor::block_on(mounted.clone().lock_owned());
+        let refused = refused_legacy_family(family, guard, notice.clone());
+        assert_eq!(
+            refused.kind(),
+            crate::store::MountedLeaseRefusalKind::DifferentBackend
+        );
+        assert_ne!(refused.message(), "The vault is not open.");
+        assert!(mounted.try_lock().is_err());
+        assert!(!notice.load(Ordering::SeqCst));
+        drop(refused);
+        assert!(notice.load(Ordering::SeqCst));
+        let guard = mounted.try_lock().unwrap();
+        let vault = guard.as_ref().unwrap();
+        assert!(vault.as_legacy().is_none());
+        assert_eq!(vault.as_text_v2().unwrap().row_count_data().unwrap(), 1);
+        assert_eq!(
+            fs::read(file(
+                dir.path(),
+                super::super::super::preparation::INDEX_NAME
+            ))
+            .unwrap(),
+            original
+        );
+    }
+}

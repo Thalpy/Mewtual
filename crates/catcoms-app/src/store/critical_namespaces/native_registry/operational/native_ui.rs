@@ -7,8 +7,8 @@
 //! neither the affine binding nor generation close owners enter a worker.
 use super::*;
 use catcoms_rt::{
-    NativeChatKeyDrain, NativeChatUiBinding, NativeChatUiCommand, NativeChatUiSessionOwner,
-    NativeChatUiSessionPreparation,
+    NativeChatKeyDrain, NativeChatUiBinding, NativeChatUiCommand, NativeChatUiCurrentCheck,
+    NativeChatUiSessionOwner, NativeChatUiSessionPreparation,
 };
 use std::sync::{
     atomic::{AtomicBool, AtomicU64},
@@ -28,6 +28,11 @@ pub struct NativeUiInvocationBudget {
     pool: CriticalCatalogReadPool,
 }
 impl NativeUiInvocationBudget {
+    /// Process policy DATA; this minimum funds one mounted host and the bounded
+    /// independent candidate overlap. It grants no capture or native access.
+    pub const fn required_capacity() -> usize {
+        MINIMUM_CAPACITY
+    }
     pub fn new(pool: CriticalCatalogReadPool) -> Result<Self, AppError> {
         if pool.capacity() < MINIMUM_CAPACITY {
             return Err(refused());
@@ -96,6 +101,7 @@ struct Generation {
 }
 struct RetirementRecord {
     drain: NativeChatKeyDrain,
+    retiring: AtomicBool,
     // Counter holds this FEE, never this record: record->drain->counter->record
     // would be a cycle. Unentered pins may outlive CLOSED+zero and slot GC.
     _fee: Arc<Fee>,
@@ -192,6 +198,7 @@ impl UiAdmissionOwner {
             }
             let capture = UiCapture {
                 command: owner.observe(),
+                current: owner.observe_current(),
                 expected: candidate.expected,
                 record: slot.record.clone(),
                 original: candidate.original.clone(),
@@ -211,6 +218,7 @@ impl UiAdmissionOwner {
         let owner = candidate.owner.take()?;
         let capture = UiCapture {
             command: owner.observe(),
+            current: owner.observe_current(),
             expected: candidate.expected,
             record: candidate.record.clone(),
             original: candidate.original.clone(),
@@ -261,6 +269,19 @@ impl UiAdmissionOwner {
         Ok(&capture.command)
     }
 
+    /// Final cached negatives only. Full payment/registry validation belongs
+    /// outside native commit. The actual capture stays owned outside that guard
+    /// through every return/unwind, so this cannot retire a last pin/payment.
+    pub(super) fn is_current_cached(&self, capture: &UiCapture) -> bool {
+        std::ptr::eq(capture.original.as_ptr(), Arc::as_ptr(&self.registry))
+            && self.binding.is_current(capture.expected)
+            && !capture
+                .record
+                .retiring
+                .load(std::sync::atomic::Ordering::SeqCst)
+            && capture.current.is_current()
+    }
+
     /// Called after native synchronously publishes its actual lock generation/
     /// request flag. Move close owners out BEFORE notifying or waiting. A batch
     /// is returned only if it owns at least one distinct generation/payment;
@@ -285,8 +306,14 @@ impl UiAdmissionOwner {
             if slot.generation > through {
                 continue;
             }
-            if let Some(owner) = slot.owner.take() {
-                batch.owners[index] = Some(owner);
+            if slot.owner.is_some() {
+                // Withdraw canonical admission BEFORE moving the close owner.
+                // The final cached edge must see this even before outside-
+                // guard notification/counter retirement has happened.
+                slot.record
+                    .retiring
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                batch.owners[index] = slot.owner.take();
                 moved = true;
             }
             pending |= !slot.record.drain.is_drained();
@@ -365,7 +392,9 @@ fn after_retirement_unlock() {
     }
 }
 
-pub(super) struct UiPreparation {
+/// Original paid UI metadata capture. Finish outside every native/Root guard.
+/// This preparation is not native caller, row or primitive authorization.
+pub struct UiPreparation {
     rt: NativeChatUiSessionPreparation,
     original: Weak<Registry>,
     expected: u64,
@@ -374,10 +403,11 @@ pub(super) struct UiPreparation {
 impl UiPreparation {
     /// Outside all guards. Current/retired capture failures release only their
     /// own independently paid candidate and cannot reclaim canonical work.
-    pub(super) fn finish(self) -> Result<UiCandidate, AppError> {
+    pub fn finish(self) -> Result<UiCandidate, AppError> {
         let owner = self.rt.finish().map_err(|_| refused())?;
         let record = Arc::new(RetirementRecord {
             drain: owner.observe_retirement(),
+            retiring: AtomicBool::new(false),
             _fee: self.fee.clone(),
         });
         Ok(UiCandidate {
@@ -390,7 +420,9 @@ impl UiPreparation {
         })
     }
 }
-pub(super) struct UiCandidate {
+/// Opaque independently paid candidate, retained outside native guard scopes
+/// even when a different canonical generation wins. Not a close capability.
+pub struct UiCandidate {
     owner: Option<NativeChatUiSessionOwner>,
     record: Arc<RetirementRecord>,
     original: Weak<Registry>,
@@ -398,15 +430,19 @@ pub(super) struct UiCandidate {
     fee: Arc<Fee>,
     used: bool,
 }
-pub(super) struct UiCapture {
+/// Original canonical lifecycle observation. Its private command cannot be
+/// extracted by an external caller or reconstructed from serialized labels.
+pub struct UiCapture {
     pub(super) command: NativeChatUiCommand,
+    current: NativeChatUiCurrentCheck,
     expected: u64,
     record: Arc<RetirementRecord>,
     original: Weak<Registry>,
     _invocation: Arc<Fee>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum UiRetirementState {
+/// Key-work-only retirement status, never whole native lock completion.
+pub enum UiRetirementState {
     Started,
     AlreadyRetiring,
     // Key work ONLY: not a completed native UI lock, physical/SDK/worker drain.
@@ -414,26 +450,29 @@ pub(super) enum UiRetirementState {
 }
 // Fixed stack custody avoids a large tagged variant AND avoids allocating a
 // Box during lock. Only Started carries the already-paid finite batch.
-pub(super) struct UiRetirement {
+/// Fixed already-paid retirement result. Only Started carries a batch; repeated
+/// callers must coalesce through the actual native owner's bounded waiter task.
+pub struct UiRetirement {
     state: UiRetirementState,
     batch: Option<RetirementBatch>,
 }
 impl UiRetirement {
-    pub(super) fn state(&self) -> UiRetirementState {
+    pub fn state(&self) -> UiRetirementState {
         self.state
     }
-    pub(super) fn into_batch(self) -> Option<RetirementBatch> {
+    pub fn into_batch(self) -> Option<RetirementBatch> {
         self.batch
     }
 }
-pub(super) struct RetirementBatch {
+/// Affine close/drain custody. Move out before any notification, Drop or wait.
+pub struct RetirementBatch {
     owners: [Option<NativeChatUiSessionOwner>; GENERATIONS],
     records: [Option<Arc<RetirementRecord>>; GENERATIONS],
 }
 impl RetirementBatch {
     /// Outside every guard. Never return success merely because a wait timed
     /// out. Caller owns/coalesces this task independently of its IPC reply.
-    pub(super) async fn retire(mut self) {
+    pub async fn retire(mut self) {
         for owner in &mut self.owners {
             if let Some(owner) = owner.take() {
                 drop(owner.retire());
@@ -446,9 +485,31 @@ impl RetirementBatch {
 }
 /// Drop outside guards. Unentered pins may retain their generation payment
 /// after this GC; work completion never means metadata/custody destruction.
-pub(super) struct UiGarbage {
+pub struct UiGarbage {
     _slots: [Option<Generation>; GENERATIONS],
 }
+
+// Public native-facing envelopes are deliberately opaque in diagnostics: no
+// original pointers, private atomics, paid internals or retained fields leak.
+macro_rules! opaque_debug {
+    ($($ty:ty),+ $(,)?) => { $(
+        impl std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct(stringify!($ty)).finish_non_exhaustive()
+            }
+        }
+    )+ };
+}
+opaque_debug!(
+    NativeUiInvocationBudget,
+    NativeUiInvocationMetadata,
+    UiPreparation,
+    UiCandidate,
+    UiCapture,
+    UiRetirement,
+    RetirementBatch,
+    UiGarbage
+);
 
 const _: () = assert!(
     std::mem::size_of::<RetirementBatch>()

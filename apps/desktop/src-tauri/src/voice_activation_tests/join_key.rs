@@ -124,7 +124,7 @@ async fn selected_join_key_lock_wins_before_admission_and_unlock_cannot_revive_i
     );
     assert!(admitted.is_err());
     lock_session_inner(&f.state, None).await.unwrap();
-    let generation = f.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = f.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&f.state, generation, false)
         .await
         .unwrap();
