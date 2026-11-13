@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## GRAFT-specific gossip repair (13 November; full validation pending)
+
+Parent native-registry source8cd87b32 now has5294 passing Linux Root cases,
+29 preexisting ignores and the one explicitly deferred catch-up cost case;
+both complete native jobs pass1042 library +6 ACL cases and Linux frontend3438
+passes. Windows Root is still running under its larger outer job budget. This
+is exact parent-source evidence, not the later dependency/GRAFT source sign-off.
+
+The compatible dependency subset is pushed in draft PR93 atdf1a1813. Its
+[Linux focused gate](https://github.com/Thalpy/Mewtual/actions/runs/43346932337)
+now passes the three exact real ACL/group cases, actual native >4KiB xattr/list
+integration, strict storage Clippy, all3438 frontend tests, types/build and native
+check. Windows native check and strict storage also pass locally, along with20
+external +87 export cases and the previously recorded frontend/browser checks.
+These focused results do not clear the remaining nine Hickory/three low npm
+findings, inherited workspace strict debt or full current-source acceptance.
+
+Review of the live network dependency found an additional GRAFT memory-growth
+defect despite inconsistent advisory metadata. The genuine TCP regression fails
+on0.49.4 with257 retained topics instead of1; compatible0.49.5 fixes it. Net uses
+the direct production minimum and both locks agree. Four real-wire tests also
+exercise the new2000/2000 incoming count defaults, duplicates, overflow and slot
+release, plus actual two-product-peer payload delivery at100/101/2000 topics.
+All four and strict Net Clippy pass on Windows; the complete Net suite also
+passes186 tests (165 unit +21 integration), zero failed/ignored, on final source.
+Final read-only review has no remaining finding in the GRAFT-only diff; its
+duplicate-boundary test observes both real admission events rather than inferring
+admission from unchanged cardinality alone.
+[Exact evidence and residual HIGH](communication-recovery/GOSSIP-GRAFT-REPAIR.md).
+
+This is a GRAFT-only repair. PRUNE still permits unknown-topic backoff growth and
+remains HIGH; it is not solved by0.49.5. The reviewed broader0.57 migration requires
+old identity/address/envelope fixtures, RNG/request-response adapters, a bounded
+supported topic policy and interoperability tests before changing API families.
+Native installation, physical registry writer/recovery, original command/key
+admission, cold operational ownership and joined/governing transport remain open.
+Chat V2 remains disabled; no completed plan/merge/physical claim is made.
+
 ## Compatible dependency repairs (13 November; Linux acceptance pending)
 
 The native-registry increment is pushed in draft PR92 at8cd87b32. Its final
