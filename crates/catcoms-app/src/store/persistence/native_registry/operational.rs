@@ -1,7 +1,8 @@
 //! Fixed-name index2 IO. The Root owner authenticates selected/candidate DATA,
-//! must retain one mount-wide transaction cell and its full prepaid overlap,
-//! and supply the actual original ServerStore. That warm producer is unfinished;
-//! current production uses the private cold roles. No renderer path reaches IO.
+//! retains one mount-wide transaction cell and its full prepaid overlap, and
+//! supplies the actual original ServerStore. The checked native founder producer
+//! remains unfinished; this private DATA cell grants no native/SDK authority.
+//! Cold recovery uses its distinct exact roles. No renderer path reaches IO.
 use super::*;
 
 pub(in crate::store) const UPGRADE_SEED_NAME: &str = "chat-critical-namespaces.native-index2.seed";
@@ -281,8 +282,8 @@ impl IndexSnapshot {
     }
 }
 
-/// Construct before any Stage effect. The future warm caller MUST retain this
-/// same object in its uncertain mount cell across caller loss and refusal. Drop
+/// Construct before any Stage effect. The owning warm IndexCell retains this
+/// same object across caller loss and refusal. Dropping the whole physical mount
 /// loses warm retry custody; a persisted WAL still requires exact cold recovery.
 pub(in crate::store) struct IndexCommitIo {
     stage: Option<critical::pending_join::CreatedStage>,
@@ -291,6 +292,17 @@ pub(in crate::store) struct IndexCommitIo {
     candidate: [u8; 32],
 }
 impl IndexCommitIo {
+    /// Last no-effect parent proof before the owning cell issues its claim.
+    /// A started writer cannot be repurposed as an unstarted preparation.
+    pub(in crate::store) fn require_unstarted_parent(
+        &self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        if self.promoted || self.stage.is_some() {
+            return Err(denied());
+        }
+        self.original.require_selected(store)
+    }
     pub(in crate::store) fn prepare(
         original: IndexSnapshot,
         expected: &[u8],

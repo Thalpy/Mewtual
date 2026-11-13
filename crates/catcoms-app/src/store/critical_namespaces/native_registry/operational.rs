@@ -6,6 +6,7 @@
 //! construct a network transport, sign, or install a native backend.
 mod capability;
 mod catalog;
+mod cell;
 mod data;
 mod interlock;
 mod mount;
@@ -56,6 +57,7 @@ const _: () = assert!(
         + std::mem::size_of::<interlock::IndexInterlock>()
         + std::mem::size_of::<Handler>()
         + std::mem::size_of::<payment::IndexPayment>())
+        + cell::CELL_METADATA_BYTES
         + 32 * (super::preparation::MAX_BASE_PATH + 256)
         + 64 * 1024
         <= CONTROL_METADATA_FEE

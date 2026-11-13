@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Retained native index cell (13 November; producer unfinished)
+
+The physical mount now retains one Pending-only transaction, exact IO/frame and
+JOIN claim through caller loss and normal IO refusal. Preparation before claim
+has no file/SDK/network effect; claim-to-cell publication is infallible. Unwind
+poison remains held for exact cold recovery. Covered outgoing buffers keep a
+negative retirement fence until their real destruction; fresh count/lookup data
+is derived under the same cell, with no owned-index escape.
+
+All101 surrounding storage cases pass. After the final test-only bounded
+handshake, all13 new cell regressions pass again. Re-review has no remaining
+B/H/M/LOW in this boundary. Review corrected retry consistency, outgoing-buffer
+accounting and an inherited owned-read escape; no
+native authorization is inferred. The actual Pending/network/founder producer,
+backend/commands and activation remain unfinished. [Scope](communication-recovery/CHAT-V2-NATIVE-INDEX-CELL.md).
+
 ## Canonical UI-generation kernel (13 November; native consumer unfinished)
 
 The native production WIP has independent affine candidate payments, original
@@ -43,6 +59,11 @@ native command or backend permission. Chat V2 remains disabled.
 [Exact reader, tests and limits](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
 
 ## Concrete native key cuts (13 November; production factory incomplete)
+
+Exact-source run43403553170 atPR99/ecb7472f now passes all four hosted Root/
+native jobs across Linux and Windows, plus full frontend/check/build. The agreed
+slow cost case and strict/dependency acceptance remain open. PR100/053ac72a also
+passes Root Linux and native Linux/Windows; its Windows Root is still running.
 
 The integration branch privately carries an immutable NativeRequired origin through
 SDK creation, encrypted SourceSaved, Current, empty promotion and the whole member

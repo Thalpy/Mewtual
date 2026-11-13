@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+The mount-wide native index cell prevents a lost reply or IO refusal from
+discarding its original claimed ciphertext. Every retained/disk Pending retry
+compares the full frozen input, including the generated signer and network frame.
+Outgoing completed buffers exclude new index allocations until their destructor
+acknowledges retirement; a shared payer alone is not capacity. Poison never
+resets to Idle. These private DATA roles grant no native/SDK authority.
+[Enforcement and unfinished producer](communication-recovery/CHAT-V2-NATIVE-INDEX-CELL.md).
+
 The private UI-generation registry cannot reopen a retired generation after GC.
 Each competing preparation owns an independent actual reservation. Host/counter
 metadata retains payment through unentered pins, and repeated retirement replies

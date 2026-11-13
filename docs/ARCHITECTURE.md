@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+The physical native index now retains its Pending-only write in one mount-wide
+cell. Actual IO/frame/claim survive caller loss; outgoing buffers keep an index
+retirement fence until destruction, and concrete DATA reads retire buffers before
+unlocking. This is a storage component; its actual native founder producer is
+still unfinished. [Cell contract](communication-recovery/CHAT-V2-NATIVE-INDEX-CELL.md).
+
 The private canonical UI-generation kernel pays for each transient candidate,
 shares one close owner per admitted generation and moves retirement custody out
 of registry guards before notifying or waiting. It is not yet connected to Tauri
@@ -14,7 +20,7 @@ ownership remain unfinished. [Contract](communication-recovery/CHAT-V2-NATIVE-KE
 Native index2 now has an explicit7/v2 descriptor and opaque storage upgrade/open
 path. It retains immutable create receipts independently of current metadata and
 uses exact old/new file roles for upgrade and index-WAL recovery. Its shared JOIN
-fence is negative only. The warm native producer/cell, actual key admission and
+fence is negative only. The native founder producer, actual key admission and
 backend installation remain unfinished; no actor can be built from its DATA
 status. [Storage scope](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
 The opaque facade now owns the affine admission fence separately from its private

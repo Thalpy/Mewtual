@@ -522,8 +522,7 @@ fn native_index2_owner_close_precedes_a_late_private_physical_loan() {
     // available to callers of the opaque public facade.
     assert!(!mount.is_cancelled());
     {
-        let _read = physical.read.try_lock().unwrap();
-        assert_eq!(physical.read_index().unwrap().rows.len(), 1);
+        assert_eq!(physical.row_count_data().unwrap(), 1);
     }
     assert!(NativeIndexStore::open(
         dir.path(),

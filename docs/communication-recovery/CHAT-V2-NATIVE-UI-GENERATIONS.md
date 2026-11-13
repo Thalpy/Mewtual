@@ -71,7 +71,8 @@ waiters and drain outside every native/registry/Store/Root guard. Public combine
 RT open_session is outside-guards only. None of those Tauri paths is implemented
 by this kernel.
 
-The native index cell/Pending/network/founder consumer, mounted/backend sum, cold
+The retained index cell is implemented separately; its actual Pending/network/
+founder consumer, mounted/backend sum, cold
 operational ownership, Leave/backup, joined pin/Add/archive/transport and UI/admin/
 combined acceptance remain unfinished. Native index2 currently models new founder
 births/activation only; a joined backend needs an explicit reviewed storage

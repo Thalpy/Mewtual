@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The opaque native index store now serializes concrete count/lookup projections
+with its retained Pending transaction and outgoing-buffer retirement. No owned
+index, raw Store/Current, generic publisher or SDK grant escapes. Completed
+storage debt moves out for destruction after guards; exact cold recovery handles
+poisoned warm custody. [Internal contract](communication-recovery/CHAT-V2-NATIVE-INDEX-CELL.md).
+
 RT now separates infallible `prepare_session` capture from allocating/checking
 `NativeChatUiSessionPreparation::finish` outside guards. The private Root kernel
 consumes independently paid invocation metadata and canonicalizes generations.
@@ -24,7 +30,7 @@ compare the actual constructed Mesh owner before handing it to a founder.
 `NativeIndexStore::{open,row_count_data,lookup_creation_data}` are the distinct
 namespace7/v2 storage APIs. The upgrade consumes a genuine opaque v1 G1 owner;
 no Store/Current getter or generic row-publish API is exposed. Status is historical
-DATA, never native/runtime authority. The actual warm transaction consumer remains
+DATA, never native/runtime authority. The actual native founder transaction consumer remains
 unfinished. [Contract and validation](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
 Its affine facade closes admission before releasing a private reference-counted
 physical allocation. No public physical loan, raw Store or Current is exposed;
