@@ -1,5 +1,35 @@
 # Mewtual; Handover
 
+## Native fixture contention follow-up (13 November; execution pending)
+
+Combined parent run43492056361 reports1027 passed/16 failed on Windows native.
+The first failure is candidate preparation in `integration/sdp_rows.rs`: its
+nonblocking parent/index checks legitimately return Capacity before a Candidate
+or publication. The later failures are the recovery fixture's fail-stop cascade.
+An earlier Linux failure at `maintenance/tests.rs` likewise assumed an admitted
+discovery worker must succeed. Neither log identifies the winning lock or proves
+a production deadlock or authorization bypass.
+
+The test-only correction retries the same three SDP candidate preparations under
+their original Ready deadline, only on Capacity. A real parent-row lock oracle
+checks no new row/outcome/action and the same original Seal funding. Begin,
+RetryMismatch, SDK Release and actual actor/drop-order assertions remain intact.
+
+Discovery retries keep original-request DATA from the actual native Worker and
+completion: query cursor until selection, then a sticky exact actual selector
+before any effect. The whole completion drops before re-entry, with one shared
+10-second observer bound and32 attempts. The production Cursor is neither reset
+nor advanced by retries. An additional real map-held refusal and the existing
+alternate-peer/indexed-sibling assertions remain. A real refused completion plus
+ManualClock tests the sleep-to-deadline edge and actual native-position release.
+The cfg(test) metadata is included in the existing actual layout measurements;
+no fee, stack or timeout waiver was added.
+
+Read-only actual-diff review and re-review are clear. Formatting, diff and exact
+runner self-checks pass. Native compilation/runtime are pending. The focused CI
+runner requires seven real scenarios, the deadline regression and six ACL cases;
+it does not replace full suites or provide physical audio/network evidence.
+
 ## Private index3 physical roles (13 November; owning handoff still open)
 
 The private fixed3 I/O now holds the actual original marker pair, files,
