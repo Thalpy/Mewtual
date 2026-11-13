@@ -26,7 +26,10 @@ The cfg(test) metadata is included in the existing actual layout measurements;
 no fee, stack or timeout waiver was added.
 
 Read-only actual-diff review and re-review are clear. Formatting, diff and exact
-runner self-checks pass. Native compilation/runtime are pending. The focused CI
+runner self-checks pass. Local execution passes the deadline case (1.73s), all
+nine native-worker cases (0.29s), the actual SDP/SDK-order scenario (7.93s) and
+the actual discovery/alternate-peer scenario (51.51s). Native production checking
+passes (2m01s). Focused Linux/Windows run43505629044 remains in progress. Its
 runner requires seven real scenarios, the deadline regression and six ACL cases;
 it does not replace full suites or provide physical audio/network evidence.
 
