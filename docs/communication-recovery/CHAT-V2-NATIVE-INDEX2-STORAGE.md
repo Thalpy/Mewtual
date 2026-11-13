@@ -23,7 +23,11 @@ the existing private root. Upgrade first durably claims the seed name and an
 **empty old catalog Stage**, then completes the authenticated intent. It writes
 and syncs the two new temporary outputs, replaces index/marker, and selects the
 new catalog only afterward. Selection bits are cached before fallible covering
-barriers. The same held files and complete tuple are re-proved after large reads,
+barriers, so they do not prove those barriers completed. Every preselection retry,
+including cold mixed-tuple recovery, flushes the exact selected index and marker
+handles and their held directory again, then re-proves intent and tuple before
+writing any nonempty catalog Stage. Final post-selection barriers remain required.
+The same held files and complete tuple are re-proved after large reads,
 immediately before each replacement and before intent cleanup. Conversion rechecks
 the tuple around private-handler installation.
 

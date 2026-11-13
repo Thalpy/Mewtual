@@ -67,6 +67,10 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::rename(&marker_temp, &marker).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::rename(&stage, &current).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|selected.file.sync_all().map_err(io)?;']=1
+  # Repeat exact output/root coverage before catalog content on warm AND cold
+  # retries. These fixed non-epoch roles retain the original authenticated tuple.
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|cover_selected_outputs_before_catalog|output.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|cover_selected_outputs_before_catalog|self.original.root.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|self.original.root.file.sync_all().map_err(io)?;']=5
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|self.original.vault.file.sync_all().map_err(io)?;']=6
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|commit_index|fs::rename(&stage_path, &index_path).map_err(io)?;']=1
