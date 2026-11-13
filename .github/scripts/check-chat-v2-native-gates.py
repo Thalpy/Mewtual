@@ -1,8 +1,9 @@
 """Exact native acceptance regressions; no full-suite or physical audio claim.
 
-Every selector runs in the actual separate native workspace with Node/WebCrypto,
-real TCP and native row/custody paths. --self-test invokes no Cargo. The complete
-native suite is still required after focused corrections are coherent.
+The seven CASES scenarios exercise the separate native workspace with actual
+Node/WebCrypto, TCP and native row/custody paths. The ledger, ManualClock deadline
+and command-ACL cohorts are separate unit/command-contract evidence. --self-test
+invokes no Cargo. The complete native suite remains required.
 """
 from __future__ import annotations
 
@@ -33,6 +34,18 @@ def main() -> None:
         return
     directory = REPO / "logs/chat-v2-native-gates"
     directory.mkdir(parents=True, exist_ok=True)
+    # These two genuine ledger regressions pin missing-key selector retention,
+    # original-child filtering and actual child-mutex contention. Compile-only
+    # coverage would not prove that the snapshot remains nonblocking.
+    code, summaries, timed_out, _ = guard["run_logged"](
+        "original-scope-diagnostics",
+        ["cargo", "test", "--locked", "--manifest-path", "apps/desktop/src-tauri/Cargo.toml",
+         "--lib", "sdp_failure_diagnostics_", "--", "--nocapture"],
+        directory, limit=45 * 60,
+    )
+    if timed_out:
+        raise RuntimeError("original-scope-diagnostics: native cohort exceeded its process bound")
+    guard["validate"]("".join(summaries), code, 2)
     for name in CASES:
         selector = "six_client_recovery::voice_live::" + name
         code, summaries, timed_out, _ = guard["run_logged"](

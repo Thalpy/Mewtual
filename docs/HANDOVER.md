@@ -18,9 +18,17 @@ It uses nonblocking locks and formats after unlocking; no receipt, key, payload
 or owned result is exposed. Genuine child-reservation regressions cover foreign
 filtering and a held original child mutex without starting work.
 
-Read-only actual-diff review and re-review are clear. These follow-up runtime
-tests have not yet run; Linux's underlying failure is not fixed or explained
-by adding diagnostics. Full native validation remains open. Chat V2 is off.
+Read-only actual-diff review and re-review are clear. Exact-source focused
+CI43518027838 passes on Linux and Windows:7 real scenarios, the original deadline
+regression,6 command-ACL cases and native checking. Linux also runs the full
+frontend/check/build gates. The2 diagnostic regressions pass locally; the focused
+runner now executes their exact2-case cohort before the7 scenarios. Local runs
+also pass the exact history-retirement case (38.07s), failed-media preservation
+case (66.70s) and native production check (1m07s).
+
+Linux's earlier intermittent timeout was not reproduced in these runs; adding
+diagnostics does not establish its cause or a production fix. Full exact-source
+native validation remains open. Chat V2 is off.
 
 ## Native fixture contention follow-up (13 November; execution pending)
 
