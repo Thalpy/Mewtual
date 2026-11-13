@@ -31,7 +31,7 @@ COHORTS = (
     ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
-    ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform == "win32" else 4),
+    ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform in ("win32", "linux") else 4),
     ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 80),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
@@ -43,7 +43,7 @@ def fresh_founder_cohort(cohorts: tuple) -> list:
     selected = [cohort for cohort in cohorts if cohort[0].startswith("fresh-founder-")]
     if selected != [
         ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
-        ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform == "win32" else 4),
+        ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform in ("win32", "linux") else 4),
     ]:
         raise RuntimeError("fresh-founder mode requires both exact nonempty pinned cohorts")
     return selected
@@ -81,6 +81,18 @@ def main() -> None:
     cohorts = fresh_founder_cohort(COHORTS) if args.fresh_founder_only else list(COHORTS)
     if sys.platform == "win32" and not args.fresh_founder_only:
         cohorts.append(("negative-retirement-bound", "catcoms-app", "negative_retirement_reserves_the_last_slot", 1))
+    if sys.platform == "linux":
+        # Actual Linux reader and role checks must run before accepting its now
+        # enabled positive whole warm factory path. Never accept a zero selector.
+        cohorts.extend([
+            ("linux-fixed-inventory", "catcoms-app", "exact_inventory_linux::tests", 12),
+            ("linux-genesis-inventory", "catcoms-app", "genesis_inventory::tests", 4),
+            ("linux-initializing-inventory", "catcoms-app", "actual_initializing_inventory_requires_", 1),
+            ("linux-pre-initializing-inventory", "catcoms-app", "actual_pre_initializing_inventory_never_", 1),
+            ("linux-seed-settlement", "catcoms-app", "genesis_seed::current::tests::seed_settlement", 8),
+            ("linux-covering-scope", "catcoms-app", "genesis_seed::current::tests::settlement_scope", 3),
+            ("linux-promotion-recovery", "catcoms-app", "genesis_seed::current::tests::linux_inventory", 2),
+        ])
     for name, crate, selector, expected in cohorts:
         command = [
             "cargo", "test", "--locked", "-p", crate, "--all-features", "--lib", selector,

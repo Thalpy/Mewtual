@@ -28,6 +28,10 @@ thread_local! {
 
 pub(in crate::store) const TEXT_READ_METADATA_FEE: usize = 1024 * 1024;
 pub(in crate::store) const TEXT_WORK_BUFFER_FEE: usize = 16 * 1024 * 1024;
+// The bounded Linux iterator runs only while this actual active work fee is held.
+#[cfg(target_os = "linux")]
+const _: () =
+    assert!(super::super::exact_inventory_linux::FIXED_INVENTORY_BYTES < TEXT_WORK_BUFFER_FEE / 4);
 
 struct ReadResourceBody {
     original_read: OriginalBootstrapReadObservation,

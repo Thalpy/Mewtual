@@ -569,6 +569,8 @@ mod persistence {
     type OpenedArchiveObject = (File, Zeroizing<Vec<u8>>);
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
     mod cold_source_read;
+    #[cfg(target_os = "linux")]
+    mod exact_inventory_linux;
     pub(in crate::store) use cold_source_read::{
         OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
         PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,

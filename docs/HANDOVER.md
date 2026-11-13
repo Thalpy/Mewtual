@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Linux founder inventory (13 November; execution pending)
+
+A fixed-buffer Linux RawDir reader now supplies the previously unsupported
+settlement/repair/promotion inventory. It uses original held directories,
+independent offsets, exact byte names, nofollow type checks and bounded work;
+unknown objects stay untouched. Four existing inventory cases, two role matrices,
+eight seed cleanup and three covering-write cases, two focused promotion recovery
+cases and the ten whole warm driver cases now have actual Linux positive paths.
+Windows mount/warm compatibility passes; Linux execution is pending. Review has no
+production blocker/high/medium; the Stat invoice LOW is fixed. This supplies no
+native command or backend permission. Chat V2 remains disabled.
+[Exact reader, tests and limits](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
+
 ## Concrete native key cuts (13 November; production factory incomplete)
 
 The integration branch privately carries an immutable NativeRequired origin through

@@ -463,7 +463,7 @@ impl V2MemberLane {
     }
 
     /// Save-source lifecycle, for regressions only.
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(super) fn save_source_for_test(&self) -> &V2MemberSaveSource {
         &self.save_source
     }

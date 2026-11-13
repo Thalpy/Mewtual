@@ -48,7 +48,7 @@ pub(in crate::store) use recovery::V2TextPromotionRecoveryResources;
 pub(in crate::store) use scratch::{
     CapturedV2TextPromotionScratch, PreparedV2TextPromotionScratch,
 };
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use work::V2TextPromotionTestCut;
 
 const FULL_CREATE_RESERVED_BYTES: u128 = 1_614_671;
@@ -307,7 +307,7 @@ pub(in crate::store) struct SavedV2TextPromotion {
 }
 
 impl PreparedV2TextPromotion {
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn set_work_fault_for_test(&mut self, point: V2TextPromotionTestCut) {
         self.hooks.fault = Some(point);
     }

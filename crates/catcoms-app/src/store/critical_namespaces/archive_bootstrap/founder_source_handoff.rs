@@ -69,7 +69,7 @@ impl ManagedChatScopeRevocation for BothRevokers {
 }
 
 impl CompletedWarmFounderOrigin {
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn negative_for_test(&self) -> RequestCancellation {
         self.negative.clone()
     }
@@ -129,7 +129,7 @@ impl CompletedWarmFounderOrigin {
     }
 }
 impl WarmFounderCurrentReservation {
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn corrupt_current_identity_for_test(&mut self) {
         self.current_identity = Arc::new(());
     }

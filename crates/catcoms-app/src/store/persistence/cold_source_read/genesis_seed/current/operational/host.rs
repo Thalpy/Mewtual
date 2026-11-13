@@ -100,7 +100,7 @@ pub struct PreparedV2TextHost<T, R> {
     retired: Option<RetiredV2TextPromotionLane>,
     selected: Option<Arc<SavedV2TextPromotion>>,
     policy: V2TextQuotaPolicy,
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     next_work_fault: Option<crate::store::persistence::v2_text::V2TextPromotionTestCut>,
     // Whole original wrapper/payment remains intact. Drop below cancels before ANY debt
     // fields drain; destruction is not an acknowledgment that a running worker has ended.
@@ -173,7 +173,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
             retired: None,
             selected: None,
             policy: policy.quota,
-            #[cfg(all(test, windows))]
+            #[cfg(all(test, any(windows, target_os = "linux")))]
             next_work_fault: None,
             owner: read.owner,
         }
@@ -262,7 +262,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
         }
         let prepared = self.prepared.as_mut().ok_or_else(refused)?;
         prepared.prepare_candidates(store, owner.source(), rng)?;
-        #[cfg(all(test, windows))]
+        #[cfg(all(test, any(windows, target_os = "linux")))]
         if let Some(cut) = self.next_work_fault.take() {
             prepared.set_work_fault_for_test(cut);
         }
@@ -492,7 +492,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
 
     /// Inject only a real finite-IO cut in the next original worker. Production has no
     /// caller-selected phase, admission bypass or error-to-absence substitution.
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn fail_next_promotion_work_for_test(
         &mut self,
         cut: crate::store::persistence::v2_text::V2TextPromotionTestCut,

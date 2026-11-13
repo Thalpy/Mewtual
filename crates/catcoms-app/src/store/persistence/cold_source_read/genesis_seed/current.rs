@@ -510,7 +510,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
     /// Exercise the actual installed node's ordinary-member source predicate,
     /// not merely the adapter's copy of the cancellation observation.

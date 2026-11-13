@@ -638,6 +638,7 @@ dependencies = [
  "catcoms-sync",
  "catcoms-wire",
  "hex",
+ "rustix",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

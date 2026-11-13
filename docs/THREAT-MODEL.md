@@ -1,5 +1,12 @@
 # Threat model; client integrity & enforcement boundaries
 
+The Linux founder inventory uses a fixed paid getdents buffer, independently opened
+original directory descriptors and exact borrowed names. Unknown/kind-mismatched
+objects refuse without cleanup; named identities are repeated after enumeration.
+This replaces early platform refusal with the same negative proof boundary, not
+new source or write authority. Linux execution remains pending.
+[Contract](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
+
 Concrete native cuts precede actual SDK/Profile/Header/member primitive entry.
 They require the same source, purpose, captured UI generation and live owners,
 retaining partial/full Ends outside writers through caching and unwind. Cached

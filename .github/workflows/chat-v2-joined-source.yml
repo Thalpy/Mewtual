@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/scripts/check-chat-v2-native-index2.py'
       - '.github/predecessor/native_index2_gate.rs'
+      - 'crates/catcoms-app/src/store/persistence/exact_inventory_linux/**'
+      - 'crates/catcoms-app/src/store/persistence/exact_inventory_linux.rs'
       - 'crates/catcoms-net/src/seeded_identity.rs'
       - 'crates/catcoms-net/src/lib.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native2_predecessor_tests.rs'

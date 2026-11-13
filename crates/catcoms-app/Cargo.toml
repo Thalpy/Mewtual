@@ -36,6 +36,11 @@ bytes.workspace = true
 # Keep this target-specific: Unix uses the standard File directory handle below.
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Fixed-buffer getdents on an independently opened held directory. Unlike std's
+# libc directory iterator this has an explicit, prepaid application buffer.
+rustix = { version = "1.1.6", features = ["fs"] }
+
 [dev-dependencies]
 # Deterministic single-poll assertions in actual cancellation/commit-boundary tests.
 futures.workspace = true
