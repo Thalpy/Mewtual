@@ -9,7 +9,12 @@ Its opaque result exposes an exclusively borrowed row count, no raw Store,
 native issuer, Source, SDK grant or generic publisher. Preparation still performs
 no writes. Cold inspection retains the original selected files and required JOIN
 catalog role through the common opener; first-torn cleanup leaving2 refuses the
-strict3 open. Normal3 index WAL and actual native consumers remain unfinished.
+strict3 open. The private normal3 metadata method retains one exact Rename in
+a poisoned-on-unwind cell and returns finite completed debt whose last field
+releases the claim after actual retirement. Cold normal3 recovery retains its
+original IO evidence through exposure. This is under validation; actual native
+consumers remain unfinished.
+[Metadata/WAL contract](communication-recovery/CHAT-V2-NATIVE-INDEX3-WAL.md).
 [Contract and remaining work](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
 
 Warm saved-source SDK reopen has a distinct `NativeChatWarmSdkReopenCut` and

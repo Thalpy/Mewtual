@@ -10,6 +10,9 @@ mod data;
 pub(in crate::store::critical_namespaces) mod lifecycle;
 pub(in crate::store) use lifecycle::preparation::first_torn::VerifiedFirstTorn as VerifiedNativeIndex3FirstTorn;
 pub(in crate::store) use lifecycle::preparation::VerifiedColdCatalog as VerifiedNativeIndex3ColdCatalog;
+pub(in crate::store) use lifecycle::wal::{
+    Decision as NativeIndex3WalDecision, VerifiedWal as VerifiedNativeIndex3Wal,
+};
 // Named full invoice shared with the closed physical reader. Publishing its
 // size grants no policy, reserve, handler or physical/native authority.
 pub(in crate::store) const NATIVE_INDEX3_FULL_FEE: usize = lifecycle::preparation::PREPARATION_FEE;

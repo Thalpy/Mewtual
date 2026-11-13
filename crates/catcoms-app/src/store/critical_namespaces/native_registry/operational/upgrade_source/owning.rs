@@ -17,6 +17,8 @@ pub(in crate::store::critical_namespaces) enum Edge {
     AfterDestination,
     AfterInspection,
     BeforeColdExposure,
+    BeforeMetadataAdmission,
+    AfterMetadataCommit,
 }
 #[cfg(test)]
 thread_local! {
@@ -299,6 +301,9 @@ impl Upgrade {
 /// command, Source or SDK authority is exposed by successful storage upgrade.
 pub(in crate::store::critical_namespaces) struct Store {
     _close: lifecycle_admission::AdmissionOwner,
+    // Real mutex poisoning survives an unwind after an admitted normal3 effect.
+    // Closure is published before this cell, its IO, then Current retire.
+    cell: std::sync::Mutex<super::super::super::lifecycle::cell::Cell>,
     current: V2CurrentLayoutStore,
     handler: lifecycle_admission::Handler,
 }
@@ -308,6 +313,12 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Store {
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn handler_for_test(
+        &self,
+    ) -> lifecycle_admission::Handler {
+        self.handler.clone()
+    }
     #[cfg(test)]
     pub(in crate::store::critical_namespaces) fn actual_store_for_test(
         &self,
@@ -342,6 +353,7 @@ impl Store {
             .map_err(|_| refused())?;
         let mut value = Self {
             _close: lifecycle_admission::AdmissionOwner::new(&handler),
+            cell: std::sync::Mutex::default(),
             current,
             handler,
         };
@@ -354,6 +366,8 @@ impl Store {
     pub(in crate::store::critical_namespaces) fn row_count_data(
         &mut self,
     ) -> Result<usize, AppError> {
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
         self.handler.require()?;
         self.handler.require_idle_cached()?;
         let store = self.current.checked_store()?;
@@ -376,6 +390,28 @@ impl Store {
         drop(guard);
         drop(inventory);
         Ok(count)
+    }
+
+    /// Private local metadata CAS. No native caller/SDK authority is implied.
+    /// The returned finite debt must retire outside every enclosing guard.
+    pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata_data(
+        &mut self,
+        request: &super::super::super::lifecycle::rename::Request,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::super::lifecycle::rename::Metadata,
+            Option<super::super::super::lifecycle::cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        super::super::super::lifecycle::cell::rename_metadata(
+            &self.cell,
+            &self.current,
+            &self.handler,
+            request,
+            rng,
+        )
     }
 }
 
@@ -453,6 +489,7 @@ impl Upgrade {
         // Its existing affine closer travels here without creating a new gate.
         let destination = Store {
             _close: new,
+            cell: std::sync::Mutex::default(),
             current,
             handler: destination_handler,
         };

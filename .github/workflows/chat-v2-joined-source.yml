@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/scripts/check-chat-v2-native-index2.py'
       - '.github/predecessor/native_index2_gate.rs'
+      - '.github/scripts/check-chat-v2-native-index3.py'
+      - '.github/predecessor/native_index3_gate.rs'
       - 'crates/catcoms-app/src/store/persistence/exact_inventory_linux/**'
       - 'crates/catcoms-app/src/store/persistence/exact_inventory_linux.rs'
       - 'crates/catcoms-net/src/seeded_identity.rs'
@@ -78,6 +80,12 @@ jobs:
       - name: Execute the actual native1-aware index2 predecessor gate
         if: ${{ !inputs.fresh_founder_only }}
         run: python .github/scripts/check-chat-v2-native-index2.py
+      - name: Check native-index3 predecessor count guards
+        if: ${{ !inputs.fresh_founder_only }}
+        run: python .github/scripts/check-chat-v2-native-index3.py --self-test
+      - name: Execute the actual pre-normal-WAL index3 predecessor gate
+        if: ${{ !inputs.fresh_founder_only }}
+        run: python .github/scripts/check-chat-v2-native-index3.py
       - uses: actions/setup-node@v4
         if: runner.os == 'Linux'
         with:
@@ -110,3 +118,4 @@ jobs:
             logs/chat-v2-joined-source/
             logs/chat-v2-native-registry/
             logs/chat-v2-native-index2/
+            logs/chat-v2-native-index3/

@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Private normal3 metadata WAL (13 November; validation in progress)
+
+The first owning normal3 producer retains one exact local-name CAS, sealed
+candidate, original claim and IO in a real mutex cell. Uncertain retry does not
+draw RNG; actual post-effect unwind poisons the cell until cold reopen. Completed
+debt keeps the claim active through file/buffer/session retirement. The final
+nested acknowledgement releases it outside guards. No Handler/cold cycle or new
+invoice is introduced.
+
+Strict3 cold recovery retains the same original inventory through Rename or
+qualified cleanup and common opening. Authenticated unsupported/future records
+are preserved. The new writer needs a dedicated own-Stage exclusion: reusing
+the older declaration helper made all5 first end-to-end tests fail. That
+regression is fixed, and those5 now pass (61.67s); the3 classifier cases also
+pass (11.42s). Review additionally found a late marker/catalog object proof gap;
+the check, replacement regressions and cleanup cuts now pass in8 cases (82.36s).
+The actual pinned cfd837a7 predecessor now passes9×3 probes (14.18s), and the
+head verifies all9 round trips (10.18s). The coherent79-case lifecycle run is
+in progress, including the later barrier-observation strengthening. The actual
+compiled registry cohort contains188 ordinary cases plus2 explicit ignored
+compatibility cases; its CI count guard is updated. All3,441 frontend tests,
+Svelte checking and the production build pass. Static adversarial re-review,
+formatting, ambient, raw-fs and script self-checks pass. Full Root/native and
+strict lint/dependency gates remain open.
+
+See [the storage contract](communication-recovery/CHAT-V2-NATIVE-INDEX3-WAL.md).
+Native command/backend consumers, cold SDK source and joined provenance remain
+unfinished. Chat V2 is off. This is not full-suite or final acceptance evidence.
+
 ## Private owning index3 upgrade (13 November; validation in progress)
 
 The next storage increment owns the genuine index2 allocation, both distinct

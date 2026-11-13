@@ -16,7 +16,8 @@ use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 pub(in crate::store::critical_namespaces::native_registry) mod first_torn;
 
-const INDEX_KEY: &str = "catcoms/private-native-backend-index-key/v3";
+pub(in crate::store::critical_namespaces::native_registry) const INDEX_KEY: &str =
+    "catcoms/private-native-backend-index-key/v3";
 const MARKER_KEY: &str = "catcoms/private-native-backend-marker-key/v3";
 const SEED_KEY: &str = "catcoms/private-native-backend-upgrade-key/v3";
 const SEED_TAG: &[u8] = b"catcoms/private-native-backend-upgrade/v3\0";
@@ -60,6 +61,7 @@ const _: () = assert!(
         + 32 * (v1::MAX_BASE_PATH + 256)
         + 64 * 1024
         + super::super::operational::upgrade_source::owning::OWNERSHIP_METADATA
+        + super::cell::METADATA_BYTES
         + 8 * (std::mem::size_of::<super::admission::Handler>()
             + std::mem::size_of::<std::sync::Mutex<Option<super::inspection::Observation>>>()
             + std::mem::size_of::<VerifiedColdCatalog>()
@@ -171,6 +173,16 @@ pub(in crate::store::critical_namespaces::native_registry) fn authenticate_selec
     store: &crate::store::ServerStore,
     inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
 ) -> Result<(usize, VerifiedColdCatalog), AppError> {
+    let (index, catalog) = decode_selected_data(store, inventory)?;
+    Ok((index.rows.len(), catalog))
+}
+
+/// Internal paid decoder for the retained normal3 cell/inspector. The full
+/// index stays inside the lifecycle implementation, never a public snapshot.
+pub(super) fn decode_selected_data(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+) -> Result<(Index, VerifiedColdCatalog), AppError> {
     inventory.require(store)?;
     let layout = inventory.authenticate_expected(store)?;
     let original = NativeCapabilityData::for_current_data(layout, &layout.encode_data()?)?;
@@ -208,7 +220,7 @@ pub(in crate::store::critical_namespaces::native_registry) fn authenticate_selec
         inventory.catalog()
     };
     Ok((
-        index.rows.len(),
+        index,
         VerifiedColdCatalog {
             original: inventory.first_torn_witness(),
             selected: *blake3::hash(selected).as_bytes(),
