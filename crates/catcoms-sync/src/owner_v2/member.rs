@@ -41,6 +41,9 @@ pub enum V2MemberSignRefusal {
     /// A once-only seam already entered without a result (lost/unwound return) or the device
     /// refused after the key entry. The original request can never draw or sign again.
     Terminal,
+    /// Proven local native refusal BEFORE Core key entry. The same Prepared
+    /// plan remains retryable; this is not an unknown signer result or refund.
+    Native(catcoms_rt::NativeChatKeyRefusal),
 }
 
 // Each seam is marked BEFORE the external call. An unwind or lost return between the mark
@@ -213,6 +216,30 @@ pub(crate) fn sign_admitted_with_device<'a>(
     inputs: &V2MemberDraftInputs,
     guard: V2OrdinarySigningGuard<'a>,
 ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
+    sign_admitted_with_device_inner(device, inputs, guard, None)
+}
+
+pub(crate) struct NativeMemberSigning<'a> {
+    pub(crate) original: &'a catcoms_rt::NativeChatSourceObservation,
+    pub(crate) cut: &'a mut catcoms_rt::NativeChatPreparedKeyCut,
+    pub(crate) ends: &'a mut catcoms_rt::NativeChatKeyEnds,
+}
+
+pub(crate) fn sign_admitted_with_device_native<'a>(
+    device: &MlsDevice,
+    inputs: &V2MemberDraftInputs,
+    guard: V2OrdinarySigningGuard<'a>,
+    native: NativeMemberSigning<'_>,
+) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
+    sign_admitted_with_device_inner(device, inputs, guard, Some(native))
+}
+
+fn sign_admitted_with_device_inner<'a>(
+    device: &MlsDevice,
+    inputs: &V2MemberDraftInputs,
+    guard: V2OrdinarySigningGuard<'a>,
+    native: Option<NativeMemberSigning<'_>>,
+) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
     let spec = guard.spec_data();
     if inputs.drawn_data() != Some((spec.presented_ms, spec.nonce)) {
         // Not this request's draw. The Plan stays Prepared; nothing was consumed.
@@ -227,6 +254,21 @@ pub(crate) fn sign_admitted_with_device<'a>(
     if guard.cached_raw64_data().is_some() {
         // Exact retry after a lost reply: the original raw is reused, the key is not called.
         return Ok(guard);
+    }
+    if let Some(native) = native {
+        #[cfg(test)]
+        before_native_member_key();
+        // All draw/source/retained-key/Core proofs precede this final concrete
+        // edge. Refusal drops the reader with its Plan still Prepared; only a
+        // successful edge may reach the irreversible begin_key below.
+        native
+            .cut
+            .enter(
+                native.original,
+                catcoms_rt::NativeChatKeyPurpose::MemberAction,
+                native.ends,
+            )
+            .map_err(V2MemberSignRefusal::Native)?;
     }
     let call = guard
         .begin_key()
@@ -308,6 +350,48 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
         inputs.require_joined_origin(self)?;
         sign_admitted_with_device(&self.device, inputs, guard)
+    }
+
+    /// Concrete native member cut after the original-node negatives and held
+    /// Core proofs. Root must additionally bind this observation to its actual
+    /// NativeRequired Host; synthetic lifecycle objects authenticate no host.
+    /// Caller retains cut pins/Ends outside the outer Current guard on ALL exits.
+    /// Cached raw returns without validating native source/purpose/UI, including
+    /// after retirement: `Ok` is DATA, never current command/save authority.
+    /// Root must still run its pinned NativeRequired preflight and final fence.
+    pub fn sign_ordinary_admitted_native<'a>(
+        &self,
+        inputs: &V2MemberDraftInputs,
+        guard: V2OrdinarySigningGuard<'a>,
+        original: &catcoms_rt::NativeChatSourceObservation,
+        cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+    ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
+        inputs.require_joined_origin(self)?;
+        sign_admitted_with_device_native(
+            &self.device,
+            inputs,
+            guard,
+            NativeMemberSigning {
+                original,
+                cut,
+                ends,
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_NATIVE_MEMBER_KEY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+#[cfg(test)]
+fn before_native_member_key() {
+    let hook = BEFORE_NATIVE_MEMBER_KEY.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
     }
 }
 

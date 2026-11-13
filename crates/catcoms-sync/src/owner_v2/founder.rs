@@ -164,7 +164,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// A host using a native scope must reserve/stage/attach it FIRST, so freeze observes the
     /// same original reservation. Preparing unmanaged DATA then changing scope cannot rebind.
     pub fn prepare_owner_v2_founder(&self) -> Result<PreparedFounder, SyncError> {
-        self.prepare_owner_v2_founder_with_cache(None)
+        self.prepare_owner_v2_founder_with_cache(None, None)
     }
 
     /// Begin a retained preparation on this ACTUAL original node/scope. The host must
@@ -182,12 +182,38 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         signing: &mut RetainedFounderSigning,
     ) -> Result<PreparedFounder, SyncError> {
         signing.validate_original(self)?;
-        self.prepare_owner_v2_founder_with_cache(Some(signing))
+        self.prepare_owner_v2_founder_with_cache(Some(signing), None)
+    }
+
+    /// Concrete native Profile/Header cuts at each actual primitive. This is
+    /// still a private-record producer, not native command authentication: the
+    /// Root NativeRequired owner must bind `original` to its actual retained
+    /// creator and reject all library advancing paths. The caller owns `ends`
+    /// outside every Root writer, including refusal and unwind.
+    pub fn prepare_owner_v2_founder_native_retained(
+        &self,
+        signing: &mut RetainedFounderSigning,
+        original: &catcoms_rt::NativeChatSourceObservation,
+        profile: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        header: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+    ) -> Result<PreparedFounder, SyncError> {
+        signing.validate_original(self)?;
+        self.prepare_owner_v2_founder_with_cache(
+            Some(signing),
+            Some(&mut NativeBootstrapSigning {
+                original,
+                profile,
+                header,
+                ends,
+            }),
+        )
     }
 
     fn prepare_owner_v2_founder_with_cache(
         &self,
         mut signing: Option<&mut RetainedFounderSigning>,
+        mut native: Option<&mut NativeBootstrapSigning<'_>>,
     ) -> Result<PreparedFounder, SyncError> {
         let source = self.fresh_chat_admission().ok_or_else(unavailable)?;
         let origin = source
@@ -218,7 +244,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     signing
                         .validate_original(self)
                         .map_err(|_| catcoms_replication::chat::ChatError::Signature)?;
-                    return signing.profile.sign(&self.device, bytes);
+                    let cut = native
+                        .as_deref_mut()
+                        .map(|native| (native.original, &mut *native.profile, &mut *native.ends));
+                    return signing.profile.sign(&self.device, bytes, cut);
                 }
                 self.device
                     .sign(bytes)
@@ -282,7 +311,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     signing
                         .validate_original(self)
                         .map_err(|_| catcoms_replication::chat::ChatError::Signature)?;
-                    return signing.header.sign(&self.device, bytes);
+                    let cut = native
+                        .map(|native| (native.original, &mut *native.header, &mut *native.ends));
+                    return signing.header.sign(&self.device, bytes, cut);
                 }
                 self.device
                     .sign(bytes)
@@ -304,6 +335,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(result)
     }
 }
+
+// Borrowed concrete custody only; no callback can run at the final key edge.
+struct NativeBootstrapSigning<'a> {
+    original: &'a catcoms_rt::NativeChatSourceObservation,
+    profile: &'a mut catcoms_rt::NativeChatPreparedKeyCut,
+    header: &'a mut catcoms_rt::NativeChatPreparedKeyCut,
+    ends: &'a mut catcoms_rt::NativeChatKeyEnds,
+}
+
 impl PreparedFounder {
     /// Inert semantic label only; native/root/current authority is not created by reading it.
     pub fn profile_id(&self) -> OwnerFactId {

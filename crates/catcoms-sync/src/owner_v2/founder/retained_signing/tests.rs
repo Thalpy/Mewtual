@@ -150,3 +150,236 @@ fn retained_bootstrap_does_not_change_the_stateless_library_contract() {
     }
     assert_eq!(counts(&signing), (1, 1));
 }
+
+// Actual MLS primitives and concrete lifecycle cuts, but synthetic host atomics:
+// these are not evidence for the absent native checked factory/Root origin.
+struct NativeFixture {
+    binding: catcoms_rt::NativeChatUiBinding,
+    ui: Option<catcoms_rt::NativeChatUiSessionOwner>,
+    source: Option<catcoms_rt::NativeChatSourceOwner>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    authorized: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl NativeFixture {
+    fn new() -> Self {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU64},
+            Arc,
+        };
+        let generation = Arc::new(AtomicU64::new(7));
+        let authorized = Arc::new(AtomicU64::new(7));
+        let requested = Arc::new(AtomicBool::new(false));
+        let binding = catcoms_rt::NativeChatUiBinding::from_trusted_host(
+            generation.clone(),
+            authorized.clone(),
+            requested.clone(),
+        );
+        let ui = binding.open_session(7).unwrap();
+        let source =
+            catcoms_rt::NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(()))
+                .unwrap();
+        Self {
+            binding,
+            ui: Some(ui),
+            source: Some(source),
+            generation,
+            authorized,
+            requested,
+        }
+    }
+    fn cuts(
+        &self,
+    ) -> (
+        catcoms_rt::NativeChatPreparedKeyCut,
+        catcoms_rt::NativeChatPreparedKeyCut,
+    ) {
+        use catcoms_rt::NativeChatKeyPurpose::{BootstrapHeader, BootstrapProfile};
+        let source = self.source.as_ref().unwrap();
+        let command = self.ui.as_ref().unwrap().observe();
+        (
+            source.prepare_cut(&command, BootstrapProfile).unwrap(),
+            source.prepare_cut(&command, BootstrapHeader).unwrap(),
+        )
+    }
+    fn reauthenticate(&mut self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let generation = self.generation.load(SeqCst);
+        self.authorized.store(generation, SeqCst);
+        self.requested.store(false, SeqCst);
+        self.ui = Some(self.binding.open_session(generation).unwrap());
+    }
+}
+
+#[test]
+fn native_retained_bootstrap_lock_at_each_actual_primitive_leaves_it_unentered() {
+    for kind in [0, 1] {
+        use std::sync::atomic::Ordering::SeqCst;
+        let node = found(0x3c00 + u64::from(kind));
+        let mut signing = node.begin_owner_v2_founder_signing().unwrap();
+        let mut native = NativeFixture::new();
+        let original = native.source.as_ref().unwrap().observe();
+        let (mut profile, mut header) = native.cuts();
+        let generation = native.generation.clone();
+        NATIVE_KEY_BOUNDARY.with(|slot| {
+            *slot.borrow_mut() = Some((
+                kind,
+                Box::new(move || {
+                    // Actual final native entry sees generation publication AFTER the
+                    // node/SDK source checks and canonical full-key hashing.
+                    generation.fetch_add(1, SeqCst);
+                }),
+            ))
+        });
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        assert!(node
+            .prepare_owner_v2_founder_native_retained(
+                &mut signing,
+                &original,
+                &mut profile,
+                &mut header,
+                &mut ends
+            )
+            .is_err());
+        assert!(NATIVE_KEY_BOUNDARY.with(|slot| slot.borrow().is_none()));
+        assert_eq!(counts(&signing), if kind == 0 { (0, 0) } else { (1, 0) });
+        assert!(if kind == 0 {
+            signing.profile.entered.is_none()
+        } else {
+            signing.header.entered.is_none()
+        });
+        drop(ends);
+        native.reauthenticate();
+        let (mut profile, mut header) = native.cuts();
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        let prepared = node
+            .prepare_owner_v2_founder_native_retained(
+                &mut signing,
+                &original,
+                &mut profile,
+                &mut header,
+                &mut ends,
+            )
+            .unwrap();
+        prepared.freeze(&node).unwrap();
+        assert_eq!(counts(&signing), (1, 1));
+    }
+}
+
+#[test]
+fn native_retained_bootstrap_source_close_at_each_primitive_does_not_enter_the_key() {
+    for kind in [0, 1] {
+        let node = found(0x3c10 + u64::from(kind));
+        let mut signing = node.begin_owner_v2_founder_signing().unwrap();
+        let mut native = NativeFixture::new();
+        let original = native.source.as_ref().unwrap().observe();
+        let (mut profile, mut header) = native.cuts();
+        let source = native.source.take().unwrap();
+        NATIVE_KEY_BOUNDARY
+            .with(|slot| *slot.borrow_mut() = Some((kind, Box::new(move || drop(source)))));
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        assert!(node
+            .prepare_owner_v2_founder_native_retained(
+                &mut signing,
+                &original,
+                &mut profile,
+                &mut header,
+                &mut ends
+            )
+            .is_err());
+        assert!(NATIVE_KEY_BOUNDARY.with(|slot| slot.borrow().is_none()));
+        assert_eq!(counts(&signing), if kind == 0 { (0, 0) } else { (1, 0) });
+        for _ in 0..3 {
+            assert!(node
+                .prepare_owner_v2_founder_native_retained(
+                    &mut signing,
+                    &original,
+                    &mut profile,
+                    &mut header,
+                    &mut ends
+                )
+                .is_err());
+        }
+        assert_eq!(counts(&signing), if kind == 0 { (0, 0) } else { (1, 0) });
+    }
+}
+
+#[test]
+fn native_retained_bootstrap_wrong_source_or_purpose_never_reaches_the_primitive() {
+    let node = found(0x3c20);
+    let mut signing = node.begin_owner_v2_founder_signing().unwrap();
+    let native = NativeFixture::new();
+    let other = NativeFixture::new();
+    let original = native.source.as_ref().unwrap().observe();
+    let foreign = other.source.as_ref().unwrap().observe();
+    let (mut profile, mut header) = native.cuts();
+    let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+    assert!(node
+        .prepare_owner_v2_founder_native_retained(
+            &mut signing,
+            &foreign,
+            &mut profile,
+            &mut header,
+            &mut ends
+        )
+        .is_err());
+    assert_eq!(counts(&signing), (0, 0));
+    assert!(node
+        .prepare_owner_v2_founder_native_retained(
+            &mut signing,
+            &original,
+            &mut header,
+            &mut profile,
+            &mut ends
+        )
+        .is_err());
+    assert_eq!(counts(&signing), (0, 0));
+}
+
+#[test]
+fn native_retained_bootstrap_primitive_unwind_keeps_end_until_outer_return_and_never_resigns() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    for kind in [0, 1] {
+        let node = found(0x3c30 + u64::from(kind));
+        let mut signing = node.begin_owner_v2_founder_signing().unwrap();
+        let mut native = NativeFixture::new();
+        let original = native.source.as_ref().unwrap().observe();
+        let (mut profile, mut header) = native.cuts();
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        FAULT.with(|fault| fault.set(Some((kind, Fault::UnwindBeforeReturn))));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = node.prepare_owner_v2_founder_native_retained(
+                &mut signing,
+                &original,
+                &mut profile,
+                &mut header,
+                &mut ends,
+            );
+        }));
+        assert!(result.is_err());
+        let expected = if kind == 0 { (1, 0) } else { (1, 1) };
+        assert_eq!(counts(&signing), expected);
+        let drain = native.ui.take().unwrap().retire();
+        let mut waiting = Box::pin(drain.wait());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+        for _ in 0..3 {
+            assert!(node
+                .prepare_owner_v2_founder_native_retained(
+                    &mut signing,
+                    &original,
+                    &mut profile,
+                    &mut header,
+                    &mut ends
+                )
+                .is_err());
+        }
+        assert_eq!(counts(&signing), expected);
+        drop(ends);
+        assert!(matches!(
+            waiting.as_mut().poll(&mut context),
+            Poll::Ready(())
+        ));
+    }
+}
