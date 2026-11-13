@@ -12,10 +12,10 @@ mod joined_source;
 // certification, Append lane, export or publication is reachable through them.
 mod member;
 pub use founder::{
-    open_bootstrap_source_data, prepare_v2_genesis_seed, ArchiveSourceRefusal,
-    BootstrapSourceContextData, BootstrapSourceContextSpec, BootstrapSourceDataView,
-    BootstrapSourceId, BootstrapSourceRefusal, DetachedV2AppendData, DetachedV2CreateData,
-    FounderArchivePreparation, FounderBootstrapPreparation, FounderDataView,
+    open_bootstrap_source_data, prepare_v2_genesis_seed, prepare_v2_genesis_seed_native_warm,
+    ArchiveSourceRefusal, BootstrapSourceContextData, BootstrapSourceContextSpec,
+    BootstrapSourceDataView, BootstrapSourceId, BootstrapSourceRefusal, DetachedV2AppendData,
+    DetachedV2CreateData, FounderArchivePreparation, FounderBootstrapPreparation, FounderDataView,
     FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits, FrozenFounder,
     GenesisArchiveView, OpenedBootstrapSourceData, OriginalV2GenesisSeedObservation,
     PreparedBootstrapSource, PreparedFounder, PreparedUnboundV2GenesisNode, PreparedV2AppendData,

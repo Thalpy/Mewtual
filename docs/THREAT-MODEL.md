@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+The warm native SDK reopen path must own the successful original SDK-drained
+handoff, its saved terminal provenance and the same paid source read. A decoded
+SourceSaved/Pending label, copied currentness flag or fresh SDK cut cannot issue
+that evidence. A distinct UI/source counter entry follows semantic verification
+at the actual loader. Partial Ends stay outside writers, and a returned graph is
+cached with its fees before late cancellation checks. Reauthentication may reuse
+that graph; it must not repeat the successful decode. This does not authorize
+cold Pending, advanced Current, a background signer or native command activation.
+
 A native source may now close key admission with SC atomics before acquiring
 row/operation locks. Outside-guard retirement must still notify idle observers
 when admission was already fenced. End counts preserve admitted work, and closing

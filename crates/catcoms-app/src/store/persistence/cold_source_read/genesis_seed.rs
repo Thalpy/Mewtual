@@ -3,6 +3,9 @@
 //! All decode/partial cleanup occurs outside admission/pin/Root/SDK host writers.
 use super::*;
 mod current;
+use crate::store::critical_namespaces::archive_bootstrap::founder::{
+    plan::WarmSavedSourceSdkReopenEvidence, NativeFounderKeys,
+};
 use catcoms_mls::persist::{
     OwnerSdkGraphReservation, OwnerSdkRestoreAdmission, OwnerSdkRestoreLimits,
 };
@@ -238,7 +241,23 @@ impl RetainedBootstrapGenesisSeed {
     }
 }
 
+/// Closed entry routes. The native warm variant can be constructed only inside
+/// Store, from a real completed handoff; it never falls back to library decode.
+enum GenesisSeedEntry<'a> {
+    Library,
+    NativeWarm {
+        evidence: &'a WarmSavedSourceSdkReopenEvidence<'a>,
+        keys: &'a mut NativeFounderKeys,
+    },
+}
+
 impl ServerStore {
+    /// Root decoder calls, not proof of native entry or a successful SDK load.
+    /// Sync's own primitive tests independently count actual loader entries.
+    #[cfg(test)]
+    pub(in crate::store) fn genesis_decode_calls_for_test() -> usize {
+        SDK_ENTRIES.with(|entries| entries.get())
+    }
     /// Actual owning source→SDK DATA consumer. Invoke OUTSIDE all host writers: the bounded
     /// SDK decoder and every partial/refused graph can release payments only after its locks
     /// drain. Caller-supplied negative caps do not stand in for the two real debits below.
@@ -246,6 +265,33 @@ impl ServerStore {
         &self,
         source: RetainedBootstrapSourceData,
         budget: GenesisSeedBudget,
+    ) -> Result<RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData> {
+        self.prepare_genesis_seed_with_entry(source, budget, GenesisSeedEntry::Library)
+    }
+
+    /// The owning warm driver MUST cache the returned graph before any late
+    /// source/UI observation. This function performs no late native validation
+    /// after SDK return, so a successful graph cannot be lost to that check and
+    /// decoded again on a subsequent command. No public native constructor.
+    pub(in crate::store) fn prepare_warm_native_genesis_seed(
+        &self,
+        source: RetainedBootstrapSourceData,
+        budget: GenesisSeedBudget,
+        evidence: &WarmSavedSourceSdkReopenEvidence<'_>,
+        keys: &mut NativeFounderKeys,
+    ) -> Result<RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData> {
+        self.prepare_genesis_seed_with_entry(
+            source,
+            budget,
+            GenesisSeedEntry::NativeWarm { evidence, keys },
+        )
+    }
+
+    fn prepare_genesis_seed_with_entry(
+        &self,
+        source: RetainedBootstrapSourceData,
+        budget: GenesisSeedBudget,
+        mut entry: GenesisSeedEntry<'_>,
     ) -> Result<RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData> {
         let result = (|| {
             source
@@ -291,10 +337,35 @@ impl ServerStore {
             source
                 .validate_original(self)
                 .map_err(|_| GenesisSeedRefusal::SourceUnavailable)?;
+            if let GenesisSeedEntry::NativeWarm { evidence, keys } = &entry {
+                evidence
+                    .require_read(&source)
+                    .map_err(|_| GenesisSeedRefusal::SourceUnavailable)?;
+                keys.preflight(evidence.origin())
+                    .map_err(|_| GenesisSeedRefusal::SourceUnavailable)?;
+            }
             #[cfg(test)]
             SDK_ENTRIES.with(|entries| entries.set(entries.get() + 1));
-            let seed = prepare_v2_genesis_seed(source.data(), limits, sdk)
-                .map_err(|_| GenesisSeedRefusal::SeedUnavailable)?;
+            let seed = match &mut entry {
+                GenesisSeedEntry::Library => prepare_v2_genesis_seed(source.data(), limits, sdk),
+                GenesisSeedEntry::NativeWarm { evidence, keys } => {
+                    let (original, cut, ends) = keys.warm_sdk_entry();
+                    catcoms_sync::owner_v2::prepare_v2_genesis_seed_native_warm(
+                        source.data(),
+                        limits,
+                        sdk,
+                        original,
+                        cut,
+                        ends,
+                        [
+                            evidence.negative(),
+                            &source.capture.negative,
+                            &source.capture.root_negative,
+                        ],
+                    )
+                }
+            }
+            .map_err(|_| GenesisSeedRefusal::SeedUnavailable)?;
             #[cfg(test)]
             let hook = self
                 .genesis_after_sdk
@@ -307,9 +378,11 @@ impl ServerStore {
             }
             // A source/control/mount may change while decoding. A paid graph is not enough
             // for a stale source return, much less a Current/head/scope admission.
-            source
-                .validate_original(self)
-                .map_err(|_| GenesisSeedRefusal::SourceUnavailable)?;
+            if matches!(entry, GenesisSeedEntry::Library) {
+                source
+                    .validate_original(self)
+                    .map_err(|_| GenesisSeedRefusal::SourceUnavailable)?;
+            }
             Ok((seed, metadata))
         })();
         match result {

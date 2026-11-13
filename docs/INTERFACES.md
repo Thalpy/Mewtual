@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Warm saved-source SDK reopen has a distinct `NativeChatWarmSdkReopenCut` and
+single-operation `NativeChatSdkRestoreEnds`. The private Root path requires
+evidence borrowed from the real completed warm handoff and its exact paid read;
+the corresponding Sync entry checks original negatives and enters immediately
+before the actual SDK loader. Native callers cannot select library fallback.
+The owning driver caches the returned seed with all fees before late checks.
+This is epoch-zero warm reopen only; cold Current restore, background protocol
+entry and the checked native factory remain separate unfinished consumers.
+
 `NativeChatSourceOwner::close` is SC-only admission closure. Its preissued
 `observe_retirement` is negative key-work state; consuming retire/Drop notify
 outside guards, even after an idle pre-close. None proves durable Leave, worker

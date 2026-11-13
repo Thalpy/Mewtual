@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use tokio::sync::Notify;
 
+mod sdk_restore;
+pub use sdk_restore::{NativeChatSdkRestoreEnds, NativeChatWarmSdkReopenCut};
+
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;
 const PURPOSES: usize = 5;
@@ -617,7 +620,9 @@ redacted_debug!(
     NativeChatSourceObservation,
     NativeChatPreparedKeyCut,
     NativeChatKeyEnds,
-    NativeChatKeyDrain
+    NativeChatKeyDrain,
+    NativeChatWarmSdkReopenCut,
+    NativeChatSdkRestoreEnds
 );
 
 // Deterministic negative scheduling controls only. Neither callbacks nor the

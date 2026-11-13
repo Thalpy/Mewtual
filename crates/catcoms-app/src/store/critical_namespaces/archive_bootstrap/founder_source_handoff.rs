@@ -10,12 +10,40 @@ use catcoms_sync::owner_v2::V2GenesisRuntimeParts;
 /// Issued only below actual SavedTerminal/read checks. This inert bridge keeps
 /// the old reservation identity and COMPLETE negative; it grants no Current.
 pub(in crate::store) struct CompletedWarmFounderOrigin {
+    native_origin: FounderOrigin,
     identity: Arc<()>,
     negative: RequestCancellation,
     revoker: Arc<dyn ManagedChatScopeRevocation>,
     context: BootstrapSourceContextData,
     source: BootstrapSourceId,
     read: OriginalBootstrapReadObservation,
+}
+
+/// Borrowed from the real successful handoff, after old SDK transfer/drain.
+/// No public constructor, decoded source ID or `parts.is_some()` can issue it.
+pub(in crate::store) struct WarmSavedSourceSdkReopenEvidence<'a> {
+    completed: &'a CompletedWarmFounderOrigin,
+}
+impl WarmSavedSourceSdkReopenEvidence<'_> {
+    pub(in crate::store) fn require_read(
+        &self,
+        read: &RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
+        self.completed.read.require_same_original(read)?;
+        if self.completed.negative.is_cancelled()
+            || read.data().source_id_data() != self.completed.source
+            || read.data().view_data().context != &self.completed.context
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    pub(in crate::store) fn origin(&self) -> &FounderOrigin {
+        &self.completed.native_origin
+    }
+    pub(in crate::store) fn negative(&self) -> &RequestCancellation {
+        &self.completed.negative
+    }
 }
 
 /// A reservation-only alias for receiver attachment. Real Current proofs keep
@@ -69,6 +97,20 @@ impl ManagedChatScopeRevocation for BothRevokers {
 }
 
 impl CompletedWarmFounderOrigin {
+    pub(in crate::store) fn warm_sdk_evidence(
+        &self,
+        expected: &FounderOrigin,
+        read: &RetainedBootstrapSourceData,
+    ) -> Result<WarmSavedSourceSdkReopenEvidence<'_>, AppError> {
+        match (&self.native_origin, expected) {
+            (FounderOrigin::NativeRequired(a), FounderOrigin::NativeRequired(b))
+                if a.same_original(b) => {}
+            _ => return Err(refused()),
+        }
+        let evidence = WarmSavedSourceSdkReopenEvidence { completed: self };
+        evidence.require_read(read)?;
+        Ok(evidence)
+    }
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn negative_for_test(&self) -> RequestCancellation {
         self.negative.clone()
@@ -255,6 +297,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
             return Err(refused());
         };
         let origin = CompletedWarmFounderOrigin {
+            native_origin: self.original.creator.origin.clone(),
             identity: reservation.owner_identity(),
             negative: reservation.reservation_observer(),
             revoker: reservation.revocation(),

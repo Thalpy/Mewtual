@@ -3,8 +3,9 @@ use super::handoff::{bridge_layout_bytes, CompletedWarmFounderOrigin};
 use super::*;
 use crate::store::{
     GenesisSeedBudget, MemberSaveJob, MemberSaveNativeAdmission, PreparedV2GenesisCurrent,
-    PreparedV2TextHost, PreparedV2TextRead, RetainedBootstrapSourceData, V2CurrentLayoutStore,
-    V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest, V2TextHostPolicy,
+    PreparedV2TextHost, PreparedV2TextRead, RetainedBootstrapGenesisSeed,
+    RetainedBootstrapSourceData, V2CurrentLayoutStore, V2MemberSaveOutcome, V2MemberSaveRefusal,
+    V2MemberSignRequest, V2TextHostPolicy,
 };
 use catcoms_rt::RequestCancellation;
 use catcoms_sync::owner_v2::V2GenesisRuntimeParts;
@@ -108,6 +109,7 @@ pub struct PreparedFreshV2TextFounder<T: MeshTransport, R: CryptoRngCore> {
     // Resource consumers drain before the creator and this driver's extra fee.
     host: Option<Box<PreparedV2TextHost<T, R>>>,
     current: Option<Box<PreparedV2GenesisCurrent<T, R>>>,
+    seed: Option<RetainedBootstrapGenesisSeed>,
     read: Option<RetainedBootstrapSourceData>,
     parts: Option<V2GenesisRuntimeParts<T, R>>,
     warm_origin: Option<CompletedWarmFounderOrigin>,
@@ -248,14 +250,44 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             // The original SDK has drained in take_completed_runtime before
             // this independent paid restore. A refused restore returns the exact
             // original read, never another physical read or source-write grant.
-            let read = self.read.take().ok_or_else(refused)?;
-            let seed = match store.prepare_genesis_seed(read, self.policy.seed) {
-                Ok(seed) => seed,
-                Err(returned) => {
-                    self.read = Some(returned.into_parts().0);
-                    return Err(refused());
+            if self.seed.is_none() {
+                let result = match &mut access {
+                    FounderAccess::Library => {
+                        let read = self.read.take().ok_or_else(refused)?;
+                        store.prepare_genesis_seed(read, self.policy.seed)
+                    }
+                    FounderAccess::Native(keys) => {
+                        let completed = self.warm_origin.as_ref().ok_or_else(refused)?;
+                        let evidence = completed.warm_sdk_evidence(
+                            &self.origin,
+                            self.read.as_ref().ok_or_else(refused)?,
+                        )?;
+                        let read = self.read.take().ok_or_else(refused)?;
+                        store.prepare_warm_native_genesis_seed(
+                            read,
+                            self.policy.seed,
+                            &evidence,
+                            keys,
+                        )
+                    }
+                };
+                match result {
+                    // Cache actual graph+source+all fees BEFORE any late
+                    // original/UI check. A refusal retains this same seed.
+                    Ok(seed) => self.seed = Some(seed),
+                    Err(returned) => {
+                        self.read = Some(returned.into_parts().0);
+                        return Err(refused());
+                    }
                 }
-            };
+            }
+            self.seed
+                .as_ref()
+                .ok_or_else(refused)?
+                .validate_original(store)?;
+            source.original.creator.original.validate_original(store)?;
+            access.require(&self.origin)?;
+            let seed = self.seed.take().ok_or_else(refused)?;
             let parts = self.parts.take().ok_or_else(refused)?;
             let origin = self.warm_origin.take().ok_or_else(refused)?;
             self.current = Some(Box::new(PreparedV2GenesisCurrent::from_original_runtime(
@@ -462,6 +494,7 @@ impl V2CurrentLayoutStore {
                     host: None,
                     current: None,
                     read: None,
+                    seed: None,
                     parts: None,
                     warm_origin: None,
                     binding: None,

@@ -32,7 +32,8 @@ tail. These application counters are not SDK allocation or process RSS bounds.
 The public trusted-host constructors authenticate neither arbitrary atomics nor
 an arbitrary custody box. Only the missing checked native factory can supply
 that binding. Participating generation/authorization/close publications must use
-sequential consistency; existing native publication sites are not yet wired.
+sequential consistency. The native participating atomics now use that ordering;
+the concrete command factory and its checked Root capture remain unfinished.
 
 Root retains an immutable private `Library` or `NativeRequired` origin through
 creation, planning, source save, Current, empty promotion and the whole member
@@ -69,10 +70,32 @@ bounded settlement/promotion directory inventory needed for the whole warm path.
 
 ## Remaining production work
 
-The owning native index transaction cell, durable Pending/network reservation,
-checked command capture, actual source/row/mount/key binding and device factory
-are unfinished. No runtime row or native issuer can be constructed from these
-private library routes alone. The backend/mounted-vault sum, cold operational
+The next implementation closes the additional warm SourceSaved SDK load, which
+previously used the generic decoder after the original SDK drained. It has its
+own `NativeChatWarmSdkReopenCut` and fixed single-operation Ends; the five existing
+UI key purposes are unchanged. The private borrowed evidence comes only from
+the successful completed runtime handoff and binds its creator's NativeRequired
+source, original read, full context and source identity. Sync rechecks handoff,
+read and archive-root negatives after framing/genesis checks and enters the
+native cut immediately before the actual loader. Neither native failure nor
+cold Pending selects Library.
+
+The driver stores the actual independently paid returned seed before late
+source/UI checks. A later generation may continue the same warm creator with
+that retained graph, without another decode. Library decode retains its previous
+late-read validation behavior. The new RT, Sync primitive and whole warm ordering
+regressions pass locally:25 RT lifecycle cases, one Sync loader case with eight
+positive/rejection orderings, all11 whole warm factory cases and eight existing
+Root read/SDK cases. Strict RT/Sync Clippy passes. Read-only re-review has no
+remaining blocker/high/medium/low; it corrected the original-negative check
+after counter admission and added the final Source-close regression. Exact-head
+full validation remains pending. Cold existing-Current restore, arbitrary later
+epochs and protocol signing are not implemented by this warm-only entry.
+
+The owning native index transaction cell and mounted-vault sum now exist, but
+durable Pending/network production, checked command capture, actual source/row/
+mount/key binding and the device factory are unfinished. No runtime row or native issuer can be constructed from these
+private library routes alone. Per-group backend ownership, cold operational
 owner and Leave, joined pins/Add/archive/transport, later-prefix/multi-member
 authoring, UI/admin exposure and combined acceptance are also open. The weak
 Root origin identifies one live lifecycle; it is not a persisted birth receipt.

@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Warm native saved-source SDK admission (13 November; factory still open)
+
+The real warm handoff now binds its retained creator's native origin. A distinct
+warm-SDK cut and fixed End holder guard the saved-source reload at the actual
+Sync loader, separately from fresh SDK creation. The completed handoff, original
+paid read and archive-root negatives are checked again after counter admission.
+The driver caches the returned SDK graph/source/fees before late source or UI
+checks; reauthentication continues that same graph without another decode.
+
+Local execution passes25 RT lifecycle cases, the eight-ordering Sync primitive
+case, all11 whole warm factory cases and eight existing Root read/SDK cases.
+Strict RT/Sync Clippy passes. Read-only design/diff/re-review has no remaining
+B/H/M/LOW after fixing the final original-negative interval and adding final
+Source-closure coverage. Full exact-head Root/native execution remains required.
+The future native invocation invoice must separately cover NativeFounderKeys;
+the enlarged driver and bridge fields are included by their existing size checks.
+No cold Current restore, background protocol signer, native issuer or activation
+is supplied by this warm-only path.
+
 ## Mounted native vault boundary (13 November; inactive integration)
 
 The production branch carries one Root-owned `MountedVault` sum through the
@@ -24,14 +43,20 @@ The subsequent full local native run passed1012 and failed30: the first media
 fixture capacity refusal poisoned28 later recovery fixtures, and the Studio
 Node export child exited because this worktree lacked frontend dependencies.
 Dependencies are now installed. The new native unlock regression and all three
-shared Root Studio fixture cases pass. All3438 frontend tests, frontend static
-checking and the production build pass; these are not a full-suite sign-off.
+shared Root Studio fixture cases pass. All3441 frontend tests, frontend static
+checking, production build and real-browser flow checks pass; these are not a
+full-suite sign-off. The first sandboxed flow run lost its CDP connection; the
+unrestricted headless Edge rerun passed every flow.
 Windows CI at9d3a3dd2 independently failed a fresh-Current assertion after media
 retirement. Static review traced both media failures to one-shot fixture
 assumptions around valid local refusal/joined attempts, rather than establishing
-a production regression. Corrections and three passing framed browser regressions
-are pending actual native reruns. Other one-shot affine media setup sites remain
-explicit coverage follow-ups.
+a production regression. All18 matching native/browser cases now pass, including
+both failing paths; the actual Studio export case also passes. CI on29dc358c
+then exposed five Root unit-test type errors in the shared inspection fixture's
+remaining callers. Commit6a280f76 fixes those while preserving the same guard;
+all four inspection cases pass. Other one-shot affine media setup sites remain
+explicit coverage follow-ups. The parent9d3a3dd2 run finished with both Root jobs
+and Linux native passing; its Windows native failure is the corrected oracle.
 
 The mounted sum is not backend activation: per-group backend ownership, native
 founder/network publication, cold restore, joined provenance, transport and UI

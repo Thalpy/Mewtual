@@ -24,14 +24,15 @@ COHORTS = (
     # must not vanish behind a selector typo or a platform-only fixture.
     ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 10),
     ("retained-bootstrap-owner", "catcoms-app", "retained_bootstrap", 3),
-    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::tests", 21),
+    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::", 25),
+    ("native-warm-sdk-tail", "catcoms-sync", "native_warm_sdk_tail_", 1),
     ("native-founder-sdk", "catcoms-app", "native_sdk_", 5),
     ("native-network-identity", "catcoms-net", "seeded_transport_identity_data", 3),
     ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),
     ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
-    ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform in ("win32", "linux") else 4),
+    ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 11 if sys.platform in ("win32", "linux") else 4),
     ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 109),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
@@ -43,7 +44,7 @@ def fresh_founder_cohort(cohorts: tuple) -> list:
     selected = [cohort for cohort in cohorts if cohort[0].startswith("fresh-founder-")]
     if selected != [
         ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
-        ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform in ("win32", "linux") else 4),
+        ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 11 if sys.platform in ("win32", "linux") else 4),
     ]:
         raise RuntimeError("fresh-founder mode requires both exact nonempty pinned cohorts")
     return selected

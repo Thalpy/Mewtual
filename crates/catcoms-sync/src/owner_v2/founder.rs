@@ -16,21 +16,21 @@ pub use retained_signing::{RetainedFounderSigning, RETAINED_FOUNDER_SIGNING_INVO
 pub use snapshot::{FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits};
 mod archive_candidate;
 pub use archive_candidate::{
-    open_bootstrap_source_data, prepare_v2_genesis_seed, ArchiveSourceRefusal,
-    BootstrapSourceContextData, BootstrapSourceContextSpec, BootstrapSourceDataView,
-    BootstrapSourceId, BootstrapSourceRefusal, DetachedV2AppendData, DetachedV2CreateData,
-    FounderArchivePreparation, FounderBootstrapPreparation, GenesisArchiveView,
-    OpenedBootstrapSourceData, OriginalV2GenesisSeedObservation, PreparedBootstrapSource,
-    PreparedUnboundV2GenesisNode, PreparedV2AppendData, PreparedV2CreateData,
-    ReturnedV2GenesisAttach, UnboundV2GenesisNode, UnboundV2GenesisSeed, V2AppendDataView,
-    V2AppendPlanObservation, V2CreateDataView, V2CreatePacketId, V2CreateRefusal, V2CreateRequest,
-    V2GenesisRuntimeParts, V2GenesisRuntimeRefusal, V2GenesisSeedData, V2GenesisSeedLimits,
-    V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE,
-    BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES, BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES,
-    CREATE_DATA_BUFFER_BYTES, GENESIS_ARCHIVE_PRIVATE_INVOICE, MAX_BOOTSTRAP_SOURCE_FRAME_BYTES,
-    MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, MAX_CREATE_ACTION_BYTES, MAX_CREATE_CIPHERTEXT_BYTES,
-    MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES, MAX_CREATE_PADDED_BYTES,
-    V2_GENESIS_SEED_METADATA_BYTES,
+    open_bootstrap_source_data, prepare_v2_genesis_seed, prepare_v2_genesis_seed_native_warm,
+    ArchiveSourceRefusal, BootstrapSourceContextData, BootstrapSourceContextSpec,
+    BootstrapSourceDataView, BootstrapSourceId, BootstrapSourceRefusal, DetachedV2AppendData,
+    DetachedV2CreateData, FounderArchivePreparation, FounderBootstrapPreparation,
+    GenesisArchiveView, OpenedBootstrapSourceData, OriginalV2GenesisSeedObservation,
+    PreparedBootstrapSource, PreparedUnboundV2GenesisNode, PreparedV2AppendData,
+    PreparedV2CreateData, ReturnedV2GenesisAttach, UnboundV2GenesisNode, UnboundV2GenesisSeed,
+    V2AppendDataView, V2AppendPlanObservation, V2CreateDataView, V2CreatePacketId, V2CreateRefusal,
+    V2CreateRequest, V2GenesisRuntimeParts, V2GenesisRuntimeRefusal, V2GenesisSeedData,
+    V2GenesisSeedLimits, V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES,
+    BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE, BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES,
+    BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES, CREATE_DATA_BUFFER_BYTES, GENESIS_ARCHIVE_PRIVATE_INVOICE,
+    MAX_BOOTSTRAP_SOURCE_FRAME_BYTES, MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, MAX_CREATE_ACTION_BYTES,
+    MAX_CREATE_CIPHERTEXT_BYTES, MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES,
+    MAX_CREATE_PADDED_BYTES, V2_GENESIS_SEED_METADATA_BYTES,
 };
 
 /// Conservative logical invoice for the named private public-record/scope/watch/signature
