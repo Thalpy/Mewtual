@@ -769,6 +769,8 @@ pub fn build_tcp_swarm_with_key_and_port_mapping(
 
 #[cfg(test)]
 mod gossip_resource_tests;
+#[cfg(test)]
+mod quic_compatibility_tests;
 
 // ----- mapping helpers -------------------------------------------------------
 

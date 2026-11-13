@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+QUIC handshake/packet parsing occurs before MLS/member checks, so inactive Chat
+V2 cannot mitigate those lower-stack vulnerabilities. The compatible patch set
+updates actual locked libp2p-quic/quinn-proto/quinn-udp versions, preserves
+unrelated resolution edges and keeps Tokio/rustls-ring. The UDP-only functional
+test requires authenticated QUIC paths and exact-peer refusal after withdrawal;
+it is neither exploit reproduction nor physical-network/joined-drain evidence.
+The thirteen Hickory/PRUNE audit findings remain a separate migration obligation.
+[Patch scope and primary sources](communication-recovery/QUIC-SECURITY-PATCHES.md).
+
 The non-writing index2-to3 preparation requires atomic strong-and-weak physical
 uniqueness, unpoisoned settled cell custody and the original gate. It independently
 pays before reading or sealing, authenticates the held tuple, and repeats exact

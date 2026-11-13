@@ -1,5 +1,31 @@
 # Mewtual; Handover
 
+## Compatible QUIC patches (13 November; validation in progress)
+
+`chat-v2-quic-security-patches` is based on1ad844c8/PR102. Both application locks
+select quinn-proto0.11.19 and quinn-udp0.5.16; Root also selects libp2p-quic0.13.1,
+already present natively. Each workspace retains its original Quinn version and
+all unrelated dependency blocks/edges. Both scoped graphs pass locked resolution.
+Production feature evidence includes actual Net/native-App selections, Tokio,
+rustls-ring and Root's new bloom dependencies. No manifest island/ignore is added.
+
+The new real UDP-only Mesh regression passes, covering authenticated QUIC paths,
+bidirectional connected requests, remote-path withdrawal and exact-peer refusal
+after loss. Its initial tuple-pattern compile error was corrected. All190 Net
+unit/integration cases, strict Net Clippy and the separate native production check
+pass. Both dependency audits now report13 remaining Hickory/PRUNE advisories;
+their bans/licenses/sources checks pass. Actual diff/re-review has no remaining B/H/M/LOW
+after tightening lock scope and feature evidence. The full suites remain required.
+[Version scope, official fixes and limits](communication-recovery/QUIC-SECURITY-PATCHES.md).
+
+The prior1ad code passes36 lifecycle cases, all3441 frontend cases and native
+production checking. Its surrounding145-case run predates the seed-decoder delta.
+Strict Clippy fails607 errors, including unused inactive APIs and inherited debt;
+the dependency audit at1ad reports17 advisories. Neither gate is waived. The
+narrow QUIC patch targets four Root/three native findings; the thirteen
+Hickory/PRUNE findings require the separately reviewed0.57 migration. Chat V2
+is still off and production storage/native/joined/transport/UI work remains open.
+
 ## Index3 owning preparation (13 November; writing/recovery still open)
 
 The private upgrade source consumes the genuine opaque index2 owner. Atomic
