@@ -6,7 +6,9 @@
 //! saved permission to write or enter an SDK.
 use super::super::lifecycle::preparation::{Output, Policy};
 use super::*;
-use crate::store::persistence::native_registry::lifecycle::UpgradeSnapshot;
+use crate::store::persistence::native_registry::lifecycle::{
+    ExpectedCurrentInputs, UpgradeSnapshot,
+};
 use catcoms_rt::CryptoRngCore;
 use zeroize::Zeroizing;
 
@@ -52,6 +54,10 @@ impl NativeIndexStore {
 /// Later admission MUST repeat these negative checks under the original catalog
 /// mutex and retain an original index2 claim before the first file effect.
 pub(in crate::store::critical_namespaces::native_registry) struct PreparedUpgrade {
+    // Retained separately from mounted Current: cold inspection runs before
+    // Current/JOIN openers, and no remembered descriptor substitutes for these
+    // original authenticated marker objects at final admission or exposure.
+    expected_current: ExpectedCurrentInputs,
     pub(super) snapshot: UpgradeSnapshot,
     pub(super) output: Output,
     // After BOTH real file/buffer fields, before the old mount and new fee.
@@ -101,6 +107,8 @@ impl UpgradeSource {
             let store = physical.current.checked_store()?;
             physical.handler.require()?;
             physical.handler.require_index_idle_cached()?;
+            let expected_current = ExpectedCurrentInputs::capture(store, &fee, &policy.pool)?;
+            let observed_layout = expected_current.authenticate(store)?;
             let snapshot = UpgradeSnapshot::capture(store)?;
             let key = Zeroizing::new(store.keys.db_key()?);
             // Expected Current comes from the original mounted marker, not an
@@ -113,6 +121,9 @@ impl UpgradeSource {
                 }
                 mounted.layout
             };
+            if observed_layout != layout {
+                return Err(refused());
+            }
             let expected = super::super::capability::NativeCapabilityData::for_current_data(
                 layout,
                 &layout.encode_data()?,
@@ -135,11 +146,13 @@ impl UpgradeSource {
                 physical.handler.require_index_idle_cached()?;
                 physical.current.cached_store()?;
                 snapshot.require(store)?;
+                expected_current.require(store)?;
             }
-            Ok((snapshot, output, fee))
+            Ok((expected_current, snapshot, output, fee))
         })();
         match parts {
-            Ok((snapshot, output, fee)) => Ok(PreparedUpgrade {
+            Ok((expected_current, snapshot, output, fee)) => Ok(PreparedUpgrade {
+                expected_current,
                 snapshot,
                 output,
                 #[cfg(test)]
@@ -149,6 +162,40 @@ impl UpgradeSource {
             }),
             Err(_) => Err(self),
         }
+    }
+}
+
+#[cfg(test)]
+impl PreparedUpgrade {
+    pub(super) fn inventory_for_test(
+        &self,
+        pool: &CriticalCatalogReadPool,
+    ) -> crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory {
+        self.try_inventory_for_test(pool).unwrap()
+    }
+    pub(super) fn try_inventory_for_test(
+        &self,
+        pool: &CriticalCatalogReadPool,
+    ) -> Result<
+        crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+        AppError,
+    > {
+        crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory::capture(
+            self.original_store_for_test(),
+            &self._fee,
+            pool,
+        )
+    }
+    pub(super) fn expected_current_for_test(&self) -> &ExpectedCurrentInputs {
+        &self.expected_current
+    }
+    pub(super) fn original_store_for_test(&self) -> &crate::store::ServerStore {
+        self.original
+            .original
+            .physical
+            .current
+            .cached_store()
+            .unwrap()
     }
 }
 

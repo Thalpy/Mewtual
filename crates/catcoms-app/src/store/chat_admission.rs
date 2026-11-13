@@ -347,6 +347,14 @@ pub(super) struct MountOwner {
     #[cfg(test)]
     before_writer: Mutex<Option<BeforeWriterHook>>,
 }
+
+/// Paid negative metadata for private physical IO. This keeps only an original
+/// identity and cancellation observer, never the mount's revoking sender, a
+/// Store loan or any membership/key/publication authority.
+pub(in crate::store) struct PhysicalMountNegative {
+    identity: Arc<()>,
+    negative: RequestCancellation,
+}
 impl MountOwner {
     /// Negative test observation only; never returns Runtime, a permit or a new owner.
     #[cfg(test)]
@@ -594,6 +602,24 @@ impl ServerStore {
     /// The returned weak negative handle cannot keep the Store/session alive or affect a new mount.
     pub fn chat_mount_revoker(&self) -> ChatMountRevoker {
         ChatMountRevoker(self.chat_mount.life.handle())
+    }
+
+    pub(in crate::store) fn capture_physical_mount_negative(&self) -> PhysicalMountNegative {
+        PhysicalMountNegative {
+            identity: self.chat_mount.identity.clone(),
+            negative: self.chat_mount.observer(),
+        }
+    }
+    pub(in crate::store) fn require_original_physical_mount(
+        &self,
+        original: &PhysicalMountNegative,
+    ) -> Result<(), AppError> {
+        if !Arc::ptr_eq(&original.identity, &self.chat_mount.identity)
+            || original.negative.is_cancelled()
+        {
+            return Err(refused());
+        }
+        Ok(())
     }
 
     /// Nonsecret comparison domain, not a runtime binding or source of admission authority.

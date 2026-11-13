@@ -8,6 +8,10 @@ mod data;
 // Private index3 contract under construction. No physical opener supports it
 // yet; registering this module must never widen the closed v1/v2 dispatch.
 pub(in crate::store::critical_namespaces) mod lifecycle;
+pub(in crate::store) use lifecycle::preparation::first_torn::VerifiedFirstTorn as VerifiedNativeIndex3FirstTorn;
+// Named full invoice shared with the closed physical reader. Publishing its
+// size grants no policy, reserve, handler or physical/native authority.
+pub(in crate::store) const NATIVE_INDEX3_FULL_FEE: usize = lifecycle::preparation::PREPARATION_FEE;
 pub(in crate::store::critical_namespaces) mod operational;
 pub(in crate::store) mod preparation;
 

@@ -33,13 +33,14 @@ COHORTS = (
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
     ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 11 if sys.platform in ("win32", "linux") else 4),
-    # Includes lifecycle3 DATA/non-writing preparation; no physical3 opener.
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 147),
+    # Includes private3 DATA, held IO and first-torn proofs; no owning3 opener.
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 157),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
     ("native-registry-join-lifecycle", "catcoms-app", "native_registry_actual_join_lifecycle", 1),
     ("native-index2-join-lifecycle", "catcoms-app", "native_index2_actual_join_lifecycle", 1),
     ("native-namespace-pair-preservation", "catcoms-app", "native_namespace_pair_", 2),
+    ("native-index3-interrupted-join", "catcoms-app", "lifecycle3_seed_claim_preserves_a_real_interrupted_join_stage", 1),
 )
 
 

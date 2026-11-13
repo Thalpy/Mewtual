@@ -1,5 +1,40 @@
 # Mewtual; Handover
 
+## Private index3 physical roles (13 November; owning handoff still open)
+
+The private fixed3 I/O now holds the actual original marker pair, files,
+directories and mount negative. Full independently paid inventory precedes
+capture. Warm preparation also retains its earlier expectation, and last-target
+proofs reject replacement even when bytes match. Old1/2 limits and openers stay
+unchanged. No production opener/handler3 or dual-claim handoff selects3 yet.
+
+The first-torn verifier authenticates every old2 role at any supported generation
+and binds its cleanup proof to the same inventory. Short claims/actual MAC
+failure may retire only attributable work; authenticated-invalid/future intent,
+oversized input and unknown JOIN stages are preserved. Empty fence removal is
+covered before seed unlink on every retry. A complete authenticated ordinary
+JOIN relation is preserved byte-for-byte while only the claim is removed.
+
+Focused execution passed46 of47 cases (210.05s); its sole failure was a fixture
+mistaking the persistent JOIN fault switch for a consumed one. After correcting
+that assumption, the real interrupted-JOIN case passes (54.79s), including the
+native2 version fix, and the actual repeat-fence-barrier case passes again
+(11.06s). Coverage includes all14 owned write cuts, reconstructed mixed roles,
+last-target replacements, same-files reopen, foreign authenticated markers,
+first-torn boundaries, unlink cuts, later index generation and proof transplant.
+This is not actual cold-opener, predecessor-binary, native command or SDK proof.
+
+Read-only design/diff/re-review is clear after the barrier-test and documentation
+corrections. Native compile passes (1m56s), as do formatting, ambient, raw-fs and
+exact-count self-checks (the compiled registry cohort contains157 cases). The
+browser flow gate passes with tracing outside the initial sandbox failure; the
+first attempt closed CDP before any app assertion. Strict Clippy fails625 errors
+and the actual dependency audit reports13 vulnerabilities; bans/licenses/sources
+pass. No exemptions were added. Full exact-head Root/native/frontend CI remains
+required. No owning3 release, scoped
+Legacy backend, native producer, joined-source transport or UI activation is
+claimed. Chat V2 remains disabled.
+
 ## Native key-adoption probe contention (13 November; execution pending)
 
 Full run43470275852 passed Linux native/frontend checking, but Windows native

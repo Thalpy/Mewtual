@@ -140,17 +140,30 @@ pub(super) fn open_marker_data(
     descriptor: &Descriptor,
     raw: &[u8],
 ) -> Result<(), AppError> {
+    if open_marker_descriptor_data(key, &descriptor.vault, raw)? != *descriptor {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Read authenticated marker DATA before any mounted archive/Current opener.
+/// The actual vault domain is external to the marker; no root/source, SDK or
+/// mounted capability is created by decoding its descriptor.
+pub(super) fn open_marker_descriptor_data(
+    key: &[u8; 32],
+    vault: &[u8; 32],
+    raw: &[u8],
+) -> Result<Descriptor, AppError> {
     if raw.len() < 40 || raw.len() > MAX_MARKER_FRAMED {
         return Err(refused());
     }
     let derived = Zeroizing::new(blake3::derive_key(MARKER_KEY, key));
     let plain = Zeroizing::new(unseal(&derived, &unframe(raw)?)?);
     let mut input = Decoder::new(&plain);
-    if input.get_str().map_err(|_| refused())? != MARKER_TAG
-        || Descriptor::parse(input.get_bytes().map_err(|_| refused())?, &descriptor.vault)?
-            != *descriptor
-    {
+    if input.get_str().map_err(|_| refused())? != MARKER_TAG {
         return Err(refused());
     }
-    input.finish().map_err(|_| refused())
+    let descriptor = Descriptor::parse(input.get_bytes().map_err(|_| refused())?, vault)?;
+    input.finish().map_err(|_| refused())?;
+    Ok(descriptor)
 }

@@ -1,10 +1,12 @@
 # Mewtual; Interfaces & Hooks Schema
 
 Private `native_registry::lifecycle` contains version3 DATA and non-writing
-owning output preparation. The consuming source preserves the original index2
+owning output preparation. Separate private persistence implements fixed3 roles,
+exact retry barriers and inventory-bound first-torn cleanup. No configured3
+opener or owning dual-claim handoff exists yet. The consuming source preserves the original index2
 allocation and independently funds complete old/new overlap. It authenticates
 the held tuple and repeats exact identities after sealing; no public extractor,
-claim or writer exists. The catalog successor retains complete JOIN payloads.
+claim or writer is issued by that preparation. The catalog successor retains complete JOIN payloads.
 Prepared-owner destruction closes the original gate before actual files/buffers.
 Its decoder and
 one-row successor checks confer no physical or runtime authority. Owned version2
