@@ -1,10 +1,29 @@
 # Mewtual; Handover
 
+## Concrete native key cuts (13 November; production factory incomplete)
+
+The integration branch privately carries an immutable NativeRequired origin through
+SDK creation, encrypted SourceSaved, Current, empty promotion and the whole member
+save Host. Concrete per-purpose cuts fence actual SDK/Profile/Header/member keys.
+Public library wrappers refuse that origin even on cached hits. Late final-save
+source/generation changes preserve the same prepared original; fresh authorization
+saves it without RNG. Focused local execution passes14 RT,10 Sync bootstrap,9 Sync
+member,5 Root SDK and2 new whole warm Windows cases. Strict rt/sync/net Clippy,
+ambient and raw-fs pass. Read-only reviews have no remaining blocker/high/medium.
+
+Synthetic UI atomics/test custody do not prove native command authorization. The
+checked factory, index cell/Pending/network reservation, mounted-vault/backend sum,
+cold owner, joined source/transport and UI/admin acceptance remain unfinished.
+Linux whole warm execution needs a bounded inventory. Exact-source full suites
+remain required. [Contract](communication-recovery/CHAT-V2-NATIVE-KEY-CUTS.md).
+
 ## Native founder integration (13 November; in progress)
 
 PR98 atb7803f83 is pushed with83 passing local surrounding storage tests and the
-actual18-fixture native1-aware predecessor gate. Exact-head full validation is
-run43384631617. It is storage evidence; the warm cell/producer is still absent.
+actual18-fixture native1-aware predecessor gate. Exact-head run43384631617 passes
+Root/native on Linux and Windows and all3438 frontend tests/check/build. The agreed
+slow test is deferred; inherited strict/dependency findings remain open. It is
+storage evidence; the warm cell/producer is still absent.
 
 The next isolated branch, `chat-v2-native-founder-integration`, has a reviewed
 affine-owner/private-physical split and bounded actual transport-identity DATA.
@@ -24,8 +43,9 @@ mount/payment retirement. Read-only review found and corrected the latter two
 boundaries. The real predecessor2 gate passes locally:18 fixtures, four public
 openers in unmodified382a30a0, and18 current-reader round trips. Its successful
 controls include v1/Current5 vaults and a deliberately unfenced complete intent.
-Complete current-source sign-off remains pending. No generic row publication or
-native backend is exposed.
+Exact-source run43384631617 passes complete Root/native Linux/Windows and frontend
+validation with the agreed slow test deferred. Strict/dependency findings remain
+open. No generic row publication or native backend is exposed.
 
 The warm cell/genuine native founder producer remains unfinished; its claim must
 retain original files, candidate and payment across uncertainty. Native command/
@@ -34,8 +54,8 @@ Add/archive/transport and UI/admin/combined acceptance remain activation gates.
 [Exact storage scope and pending work](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
 
 PR95's focused predecessor repair is green on both platforms (run43366761860).
-PR97's full native execution now passes on Linux and Windows (run43371944196),
-with Root runs still pending. PR96's Root and native jobs pass on both Linux and
+PR97's full Root/native execution passes on Linux and Windows (run43371944196).
+PR96's Root and native jobs pass on both Linux and
 Windows (run43369377314), with the agreed slow case deferred. These are parent/sibling-source
 results, not full validation of this new index2 work. Chat V2 stays disabled.
 

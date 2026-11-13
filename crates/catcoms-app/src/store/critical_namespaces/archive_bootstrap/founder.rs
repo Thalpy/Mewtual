@@ -23,6 +23,9 @@ pub use plan::{
     FreshV2TextFounderPolicy, PreparedFreshV2TextFounder, ReturnedArchiveFounderCreation,
     ReturnedArchiveFounderPlanning,
 };
+#[path = "founder_native.rs"]
+pub(in crate::store) mod native;
+pub(in crate::store) use native::{FounderAccess, NativeFounderKeys};
 
 /// Explicit trusted LOCAL configuration, never decoded limits or a paid/verified status flag.
 /// It supplies the original creation request's closed bounds. Existing retries retain it and
@@ -155,6 +158,10 @@ pub enum ArchiveFounderProgress {
 /// Error retries retain this object. Private fields are populated only by this real factory;
 /// decoded metadata cannot install a Server, create a RAM reservation or renew the sender.
 pub struct ArchiveFounderCreation<T: MeshTransport, R: CryptoRngCore> {
+    // Irreversible local provenance. A native original cannot advance through
+    // the combined library API, including a cached-success return. Its actual
+    // source owner lives in the private native operation, not in decoded DATA.
+    origin: FounderOrigin,
     inputs: Option<ArchiveFounderInputs<T, R>>,
     server: Option<Server<T, R>>,
     sealed_debit: Option<Zeroizing<Vec<u8>>>,
@@ -163,11 +170,52 @@ pub struct ArchiveFounderCreation<T: MeshTransport, R: CryptoRngCore> {
     debit_id: Option<codec::DebitId>,
     sdk_started: bool,
     sdk_failed: bool,
+    #[cfg(test)]
+    after_sdk_cache: Option<Box<dyn FnOnce() + Send>>,
     policy: ArchiveFounderPolicy,
     original: CapturedFounderInvocation,
     // All owned SDK/source/buffer fields above drain BEFORE the actual original creator fee.
     // This covers named retention/encoding/provider budgets, not all opaque SDK/allocator heaps.
     _creator_fee: CatalogReadReservation,
+}
+
+#[derive(Clone)]
+pub(in crate::store) enum FounderOrigin {
+    Library,
+    NativeRequired(catcoms_rt::NativeChatSourceObservation),
+}
+impl FounderOrigin {
+    pub(in crate::store) fn require_library(&self) -> Result<(), AppError> {
+        match self {
+            Self::Library => Ok(()),
+            Self::NativeRequired(_) => Err(refused()),
+        }
+    }
+}
+
+/// Borrowed concrete SDK cut. Root's private operation binds this to its SAME
+/// actual creator. Both prepared metadata and Ends belong to the outer native
+/// frame, so no refusal/unwind drops them under the Root's file/source guards.
+pub(in crate::store) struct NativeFounderSdkEntry<'a> {
+    pub(in crate::store) original: &'a catcoms_rt::NativeChatSourceObservation,
+    pub(in crate::store) cut: &'a mut catcoms_rt::NativeChatPreparedKeyCut,
+    pub(in crate::store) ends: &'a mut catcoms_rt::NativeChatKeyEnds,
+}
+impl NativeFounderSdkEntry<'_> {
+    fn preflight(&self) -> Result<(), AppError> {
+        self.cut
+            .preflight(self.original, catcoms_rt::NativeChatKeyPurpose::FounderSdk)
+            .map_err(|_| refused())
+    }
+    pub(in crate::store) fn enter(&mut self) -> Result<(), AppError> {
+        self.cut
+            .enter(
+                self.original,
+                catcoms_rt::NativeChatKeyPurpose::FounderSdk,
+                self.ends,
+            )
+            .map_err(|_| refused())
+    }
 }
 impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for ArchiveFounderCreation<T, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -193,6 +241,29 @@ impl ServerStore {
         name: &str,
         policy: ArchiveFounderPolicy,
         inputs: ArchiveFounderInputs<T, R>,
+    ) -> Result<ArchiveFounderBegin<T, R>, ReturnedArchiveFounderInputs<T, R>> {
+        self.prepare_archive_founder_with_origin(
+            invocation,
+            name,
+            policy,
+            inputs,
+            FounderOrigin::Library,
+        )
+    }
+
+    // Keep owned caller inputs inline on refusal, as in the public factory. This
+    // constructor is private to Store; no decoded mode bit selects native work.
+    #[allow(clippy::result_large_err)]
+    pub(in crate::store) fn prepare_archive_founder_with_origin<
+        T: MeshTransport,
+        R: CryptoRngCore,
+    >(
+        &self,
+        invocation: [u8; 32],
+        name: &str,
+        policy: ArchiveFounderPolicy,
+        inputs: ArchiveFounderInputs<T, R>,
+        origin: FounderOrigin,
     ) -> Result<ArchiveFounderBegin<T, R>, ReturnedArchiveFounderInputs<T, R>> {
         let result = (|| {
             let original_mount = self.chat_mount.observer();
@@ -244,6 +315,7 @@ impl ServerStore {
         match result {
             Ok((InvocationDisposition::Original(original), creator_fee)) => {
                 Ok(ArchiveFounderBegin::Original(ArchiveFounderCreation {
+                    origin,
                     inputs: Some(inputs),
                     server: None,
                     sealed_debit: None,
@@ -252,6 +324,8 @@ impl ServerStore {
                     debit_id: None,
                     sdk_started: false,
                     sdk_failed: false,
+                    #[cfg(test)]
+                    after_sdk_cache: None,
                     policy,
                     original,
                     _creator_fee: creator_fee,
@@ -280,6 +354,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderCreation<T, R> {
         &mut self,
         store: &ServerStore,
         io_rng: &mut dyn CryptoRngCore,
+    ) -> Result<ArchiveFounderProgress, AppError> {
+        self.origin.require_library()?;
+        self.advance_inner(store, io_rng, None)
+    }
+
+    pub(in crate::store) fn advance_native(
+        &mut self,
+        store: &ServerStore,
+        io_rng: &mut dyn CryptoRngCore,
+        entry: &mut NativeFounderSdkEntry<'_>,
+    ) -> Result<ArchiveFounderProgress, AppError> {
+        match &self.origin {
+            FounderOrigin::NativeRequired(original) if original.same_original(entry.original) => {}
+            _ => return Err(refused()),
+        }
+        entry.preflight()?;
+        self.advance_inner(store, io_rng, Some(entry))
+    }
+
+    fn advance_inner(
+        &mut self,
+        store: &ServerStore,
+        io_rng: &mut dyn CryptoRngCore,
+        native: Option<&mut NativeFounderSdkEntry<'_>>,
     ) -> Result<ArchiveFounderProgress, AppError> {
         self.original.validate_original(store)?;
         if self.sdk_failed {
@@ -315,10 +413,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderCreation<T, R> {
                 self.prepared_debit.as_mut().ok_or_else(refused)?,
             )?);
         }
-        let saved = self.saved_debit.take().ok_or_else(refused)?;
+        // A local native refusal before the SDK CAS retains this SAME saved
+        // unit. It must not redraw/reseal, spend another write allowance, or
+        // turn an unentered original into an uncertain spent attempt.
+        let saved = self.saved_debit.as_ref().ok_or_else(refused)?;
         self.debit_id = Some(saved.id());
-        saved.consume_for_sdk(store, &self.original)?;
+        saved.consume_for_sdk(store, &self.original, native)?;
         self.sdk_started = true; // before taking inputs/calling SDK; no error path may re-enter
+        drop(self.saved_debit.take());
         let inputs = self.inputs.take().ok_or_else(refused)?;
         #[cfg(test)]
         SDK_ENTRIES.with(|n| n.set(n.get() + 1));
@@ -331,6 +433,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderCreation<T, R> {
         ) {
             Ok(server) => {
                 self.server = Some(server);
+                #[cfg(test)]
+                if let Some(hook) = self.after_sdk_cache.take() {
+                    hook();
+                }
                 self.original.validate_original(store)?;
                 self.group_data()?;
                 Ok(ArchiveFounderProgress::GroupCreatedUnexposed)

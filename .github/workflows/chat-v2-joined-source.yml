@@ -99,7 +99,7 @@ jobs:
       # This does not replace or relax the required workspace-wide Clippy job.
       - name: Strict Clippy for the affected protocol crates
         if: ${{ !cancelled() }}
-        run: cargo clippy --locked -p catcoms-replication -p catcoms-sync -p catcoms-net --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p catcoms-rt -p catcoms-replication -p catcoms-sync -p catcoms-net --all-targets --all-features -- -D warnings
       - uses: actions/upload-artifact@v4
         if: always()
         with:

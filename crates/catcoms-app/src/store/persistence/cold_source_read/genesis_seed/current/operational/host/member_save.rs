@@ -41,7 +41,7 @@
 //! authorization; that needs the native consumer's checked factory and its own barrier tests.
 use super::member::{canonical_member_parents, V2MemberSignRequest};
 use super::projection::V2TextProjectionNegative;
-use super::PreparedV2TextHost;
+use super::{FounderAccess, PreparedV2TextHost};
 use crate::store::critical_namespaces::archive_current_namespace_codec::CurrentLayoutData;
 use crate::store::critical_namespaces::current_layout::V2CurrentLayoutStore;
 use crate::store::critical_namespaces::read_pool::{
@@ -270,6 +270,19 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         negative: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        self.prepare_member_save_with_access(layout, request, negative, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn prepare_member_save_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: V2MemberSignRequest<'_>,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
         if negative.is_cancelled() {
             return Err(V2MemberSaveRefusal::Cancelled);
         }
@@ -417,7 +430,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             lane.bind_outbox_context(id)
                 .map_err(|_| V2MemberSaveRefusal::Stale)?;
         }
-        self.retry_sign_member_request(layout, request)
+        self.retry_sign_member_request_with_access(layout, request, access)
             .map_err(|_| V2MemberSaveRefusal::Signing)?;
         self.member
             .as_deref_mut()
@@ -483,6 +496,18 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         token: [u8; 32],
         native: MemberSaveNativeAdmission,
     ) -> Result<MemberSaveJob, (MemberSaveNativeAdmission, V2MemberSaveRefusal)> {
+        self.admit_member_save_with_access(layout, token, native, FounderAccess::Library)
+    }
+    pub(in crate::store) fn admit_member_save_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        token: [u8; 32],
+        native: MemberSaveNativeAdmission,
+        access: FounderAccess<'_>,
+    ) -> Result<MemberSaveJob, (MemberSaveNativeAdmission, V2MemberSaveRefusal)> {
+        if access.require(&self.origin).is_err() {
+            return Err((native, V2MemberSaveRefusal::Unavailable));
+        }
         let token = MemberRequestToken::from_bytes(token);
         let Ok(store) = layout.cached_store() else {
             return Err((native, V2MemberSaveRefusal::Unavailable));
@@ -536,6 +561,16 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             return Err((native, V2MemberSaveRefusal::Stale));
         };
         if mount.require_live(store).is_err() {
+            drop(guard);
+            drop(source);
+            return Err((native, V2MemberSaveRefusal::Unavailable));
+        }
+        #[cfg(all(test, windows))]
+        before_native_member_save_edge_for_test();
+        // The first mode/source check preceded cell and source acquisition.
+        // Repeat its pinned, allocation-free native negatives at this actual
+        // edge; a live legacy cancellation object cannot replace that binding.
+        if access.require(&self.origin).is_err() {
             drop(guard);
             drop(source);
             return Err((native, V2MemberSaveRefusal::Unavailable));
@@ -1121,6 +1156,14 @@ impl Drop for V2MemberSaveSourceEnd {
 #[cfg(all(test, windows))]
 thread_local! {
     static BEFORE_MEMBER_PRESEAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_NATIVE_MEMBER_SAVE_EDGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, windows))]
+fn before_native_member_save_edge_for_test() {
+    let hook = BEFORE_NATIVE_MEMBER_SAVE_EDGE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 #[cfg(all(test, windows))]
 fn before_member_preseal_for_test() {
@@ -1132,6 +1175,26 @@ fn before_member_preseal_for_test() {
 
 #[cfg(all(test, windows))]
 impl<T, R> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn with_native_member_save_edge_for_test<Output>(
+        hook: Box<dyn FnOnce()>,
+        run: impl FnOnce() -> Output,
+    ) -> Output {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                BEFORE_NATIVE_MEMBER_SAVE_EDGE.with(|slot| drop(slot.borrow_mut().take()));
+            }
+        }
+        BEFORE_NATIVE_MEMBER_SAVE_EDGE.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "one native final-edge hook at a time"
+            );
+            *slot.borrow_mut() = Some(hook);
+        });
+        let _clear = Clear;
+        run()
+    }
     pub(in crate::store) fn with_member_preseal_hook_for_test<Output>(
         hook: Box<dyn FnOnce()>,
         run: impl FnOnce() -> Output,

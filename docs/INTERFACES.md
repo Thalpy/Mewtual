@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The closed native key purposes and affine lifecycle owners are defined in
+`catcoms-rt::native_chat_key`. Root privately carries NativeRequired through the
+whole founder/member Host and accepts concrete prepared cuts. Cached Sync raw
+remains DATA, requiring current Root/native checks. The checked native command
+factory is unfinished. [Ordering and limits](communication-recovery/CHAT-V2-NATIVE-KEY-CUTS.md).
+
 Net's `seeded_transport_identity_data(&[u8;32])` returns only bounded public
 `SeededTransportIdentityData`: the full canonical Ed25519 protobuf public key,
 canonical libp2p/Phase-0 IDs and a domain-separated full-key commitment. It uses

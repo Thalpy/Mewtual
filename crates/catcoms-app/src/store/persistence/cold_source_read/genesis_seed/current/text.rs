@@ -159,6 +159,21 @@ macro_rules! node_call_throughs {
             > {
                 self.node.sign_ordinary_admitted(inputs, guard)
             }
+
+            /// Concrete native edge on the SAME family/node; caller retains
+            /// the native pins and Ends outside Current/Core guards.
+            pub(in crate::store::persistence::cold_source_read::genesis_seed::current)
+            fn sign_text_ordinary_admitted_native<'a>(
+                &self,
+                inputs: &catcoms_sync::owner_v2::V2MemberDraftInputs,
+                guard: catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+                original: &catcoms_rt::NativeChatSourceObservation,
+                cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+                ends: &mut catcoms_rt::NativeChatKeyEnds,
+            ) -> Result<catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+                catcoms_sync::owner_v2::V2MemberSignRefusal> {
+                self.node.sign_ordinary_admitted_native(inputs, guard, original, cut, ends)
+            }
         }
     };
 }

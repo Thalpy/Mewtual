@@ -132,7 +132,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
         self,
         store: &ServerStore,
     ) -> Result<ArchiveFounderSourcePreparation<T, R>, ReturnedArchiveFounderPlanning<T, R>> {
+        self.into_source_preparation_with_access(store, FounderAccess::Library)
+    }
+    #[allow(clippy::result_large_err)] // preserve the same prepaid owner on refusal
+    pub(in crate::store) fn into_source_preparation_with_access(
+        self,
+        store: &ServerStore,
+        access: FounderAccess<'_>,
+    ) -> Result<ArchiveFounderSourcePreparation<T, R>, ReturnedArchiveFounderPlanning<T, R>> {
         let result = (|| {
+            access.require(&self.creator.origin)?;
             let source = ActualFounderSource::founding(&self.creator);
             source.validate_original(store)?;
             source.untouched_scope()?;
@@ -263,6 +272,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
         store: &ServerStore,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ArchiveFounderSourceProgress, AppError> {
+        self.prepare_private_source_with_access(store, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn prepare_private_source_with_access(
+        &mut self,
+        store: &ServerStore,
+        rng: &mut dyn CryptoRngCore,
+        mut access: FounderAccess<'_>,
+    ) -> Result<ArchiveFounderSourceProgress, AppError> {
+        access.require(&self.original.creator.origin)?;
         self.original.creator.original.validate_original(store)?;
         self.validate_pending()?;
         if matches!(self.phase, SourcePhase::HeldConsumingRefusal) {
@@ -313,7 +331,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
         }
         if let SourcePhase::Signing { signing, .. } = &mut self.phase {
             let server = self.original.creator.server.as_ref().ok_or_else(refused)?;
-            let prepared = server.sync.prepare_owner_v2_founder_retained(signing)?;
+            let prepared = access.prepare_bootstrap(&server.sync, signing)?;
             #[cfg(test)]
             {
                 FOUNDERS_PREPARED.with(|count| count.set(count.get() + 1));
@@ -418,8 +436,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
         &mut self,
         store: &ServerStore,
         rng: &mut dyn CryptoRngCore,
+        access: FounderAccess<'_>,
     ) -> Result<(), AppError> {
-        self.prepare_private_source(store, rng)?;
+        self.prepare_private_source_with_access(store, rng, access)?;
         if matches!(self.phase, SourcePhase::Transferred { .. }) {
             return Ok(());
         }
@@ -499,7 +518,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
         store: &ServerStore,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ArchiveFounderSourceProgress, AppError> {
-        self.detach_for_root(store, rng)?;
+        self.register_private_source_with_access(store, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn register_private_source_with_access(
+        &mut self,
+        store: &ServerStore,
+        rng: &mut dyn CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<ArchiveFounderSourceProgress, AppError> {
+        access.require(&self.original.creator.origin)?;
+        self.detach_for_root(store, rng, access)?;
         let key = Zeroizing::new(store.keys.db_key()?);
         let SourcePhase::Transferred {
             source: bootstrap,

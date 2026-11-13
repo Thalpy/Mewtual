@@ -231,6 +231,29 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
             OwnedCurrent::Repaired(c) => c.sign_text_ordinary_admitted(inputs, guard),
         }
     }
+    pub(super) fn sign_ordinary_admitted_native<'a>(
+        &self,
+        inputs: &catcoms_sync::owner_v2::V2MemberDraftInputs,
+        guard: catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+        original: &catcoms_rt::NativeChatSourceObservation,
+        cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+    ) -> Result<
+        catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+        catcoms_sync::owner_v2::V2MemberSignRefusal,
+    > {
+        match &self.core {
+            OwnedCurrent::Warm(c) => {
+                c.sign_text_ordinary_admitted_native(inputs, guard, original, cut, ends)
+            }
+            OwnedCurrent::Cold(c) => {
+                c.sign_text_ordinary_admitted_native(inputs, guard, original, cut, ends)
+            }
+            OwnedCurrent::Repaired(c) => {
+                c.sign_text_ordinary_admitted_native(inputs, guard, original, cut, ends)
+            }
+        }
+    }
     pub(super) fn borrow_unsigned_append<'a>(
         &'a self,
         store: &ServerStore,

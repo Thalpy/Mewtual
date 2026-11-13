@@ -6,6 +6,7 @@
 use super::negative::{PreparedV2TextSourceObserver, V2TextSourceNegativeObserver};
 use super::owner::V2TextOwnedCurrent;
 use super::PreparedV2TextRead;
+use crate::store::critical_namespaces::archive_bootstrap::founder::{FounderAccess, FounderOrigin};
 use crate::store::critical_namespaces::current_layout::{
     AdmittedV2TextPromotionCommit, AdmittedV2TextPromotionStage, PreparedV2TextPhysicalLease,
     V2CurrentLayoutStore,
@@ -74,6 +75,9 @@ impl V2TextHostPolicy {
 /// Actual original owner and all same-candidate first-promotion debt. No raw SDK/node or
 /// adopting constructor is exposed. This still cannot post or issue a projection token.
 pub struct PreparedV2TextHost<T, R> {
+    // Immutable provenance from the SAME retained native creator, not a mode
+    // inferred from a transient empty phase or a decoded source/status record.
+    origin: FounderOrigin,
     projection: Option<Arc<projection::V2TextProjectionDomain>>,
     // The ordinary-member lane owns its OWN member-role domain, verifier, request and fees.
     // Drops before `owner`; Drop below cancels its domain first. Exclusive with founder Create.
@@ -140,7 +144,15 @@ impl<T, R> PreparedV2TextHost<T, R> {
     /// Moving a read-only owner creates no allocation or permission. The trusted policy
     /// is fixed for this host; all actual captures and work acquire their own fees first.
     pub fn from_read(read: PreparedV2TextRead<T, R>, policy: V2TextHostPolicy) -> Self {
+        Self::from_read_with_origin(read, policy, FounderOrigin::Library)
+    }
+    pub(in crate::store) fn from_read_with_origin(
+        read: PreparedV2TextRead<T, R>,
+        policy: V2TextHostPolicy,
+        origin: FounderOrigin,
+    ) -> Self {
         Self {
+            origin,
             projection: None,
             member: None,
             resident: None,
@@ -174,6 +186,15 @@ impl<T, R> PreparedV2TextHost<T, R> {
         layout: &V2CurrentLayoutStore,
         rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<(), AppError> {
+        self.retry_original_seed_settlement_with_access(layout, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn retry_original_seed_settlement_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<(), AppError> {
+        access.require(&self.origin)?;
         if self.resident.is_some()
             || self.next_request_preparation.is_some()
             || self.capture.is_some()
@@ -193,10 +214,22 @@ impl<T, R> PreparedV2TextHost<T, R> {
         layout: &V2CurrentLayoutStore,
         rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<(), AppError> {
+        self.origin.require_library()?;
+        self.retry_empty_promotion_with_access(layout, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn retry_empty_promotion_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<(), AppError> {
         self.drain_admitted_promotion_work()?;
         // An outcome removed from the registry was cached before the late postcheck.
         // Its payload and refunds must drain OUTSIDE all host writers, even on retry.
         self.drain_cached_retirement();
+        // Finish already-admitted DATA first, then refuse any new/cached
+        // positive progress from a retired or foreign native command.
+        access.require(&self.origin)?;
 
         // Once the same verifier has moved into its completed resident, dropping
         // the old O1 receipt must never make genesis preparation available again.

@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+The private NativeRequired route reaches the actual SDK, Profile/Header and member
+keys and preserves its immutable origin through the whole warm Host. Concrete
+lifecycle cuts retain Ends outside writers; public library routes refuse that
+origin. Checked native capture, index cell/network reservation and live backend
+ownership remain unfinished. [Contract](communication-recovery/CHAT-V2-NATIVE-KEY-CUTS.md).
+
 Native index2 now has an explicit7/v2 descriptor and opaque storage upgrade/open
 path. It retains immutable create receipts independently of current metadata and
 uses exact old/new file roles for upgrade and index-WAL recovery. Its shared JOIN

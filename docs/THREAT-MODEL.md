@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+Concrete native cuts precede actual SDK/Profile/Header/member primitive entry.
+They require the same source, purpose, captured UI generation and live owners,
+retaining partial/full Ends outside writers through caching and unwind. Cached
+results supply no current authority; Root refuses library fallback even after
+runtime transfer. Host atomics/test custody do not authenticate native commands.
+The actual producer must bind the original mount/row/birth/full keys and publish
+participating negatives sequentially consistently before activation.
+[Enforcement and open boundaries](communication-recovery/CHAT-V2-NATIVE-KEY-CUTS.md).
+
 Native7/v2 storage binds every successor to its original framed index parent and
 preserves immutable birth receipts. Warm replacement re-proves its original
 destination after large reads; cold repair cannot recreate missing committed

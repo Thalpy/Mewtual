@@ -19,17 +19,19 @@ COHORTS = (
     # preexisting success controls, so they are not counted/run again as a separate cohort.
     ("owner-operations", "catcoms-sync", "owner_evidence::initial_tail::operation::tests", 11),
     ("owner-tenure", "catcoms-sync", "owner_tenure::tests", 17),
-    ("founder-member", "catcoms-sync", "owner_v2::member::tests", 6),
+    ("founder-member", "catcoms-sync", "owner_v2::member::tests", 9),
     # Exercise the real retained producer and its Root owner separately. Counts
     # must not vanish behind a selector typo or a platform-only fixture.
-    ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 6),
+    ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 10),
     ("retained-bootstrap-owner", "catcoms-app", "retained_bootstrap", 3),
+    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::tests", 14),
+    ("native-founder-sdk", "catcoms-app", "native_sdk_", 5),
     ("native-network-identity", "catcoms-net", "seeded_transport_identity_data", 3),
     ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),
     ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
-    ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 8 if sys.platform == "win32" else 4),
+    ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform == "win32" else 4),
     ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 80),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
@@ -41,7 +43,7 @@ def fresh_founder_cohort(cohorts: tuple) -> list:
     selected = [cohort for cohort in cohorts if cohort[0].startswith("fresh-founder-")]
     if selected != [
         ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
-        ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 8 if sys.platform == "win32" else 4),
+        ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 10 if sys.platform == "win32" else 4),
     ]:
         raise RuntimeError("fresh-founder mode requires both exact nonempty pinned cohorts")
     return selected

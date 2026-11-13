@@ -87,11 +87,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
         store: &ServerStore,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ArchiveFounderPlanningProgress, AppError> {
+        self.save_founding_intent_with_access(store, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn save_founding_intent_with_access(
+        &mut self,
+        store: &ServerStore,
+        rng: &mut dyn CryptoRngCore,
+        mut access: FounderAccess<'_>,
+    ) -> Result<ArchiveFounderPlanningProgress, AppError> {
+        access.require(&self.creator.origin)?;
         let source = ActualFounderSource::founding(&self.creator);
         source.validate_original(store)?;
         source.untouched_scope()?;
         if self.plan.as_ref().is_none_or(|plan| plan.data().is_err()) {
-            self.prepare_ram_plan(store, rng)?;
+            self.prepare_ram_plan_with_access(store, rng, access.reborrow())?;
         }
         {
             // Refuse already-known old-source conflicts BEFORE even small AEAD work. An
