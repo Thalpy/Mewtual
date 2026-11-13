@@ -1,6 +1,12 @@
 # Mewtual; Interfaces & Hooks Schema
 
-Private `native_registry::lifecycle` contains version3 DATA only. Its decoder and
+Private `native_registry::lifecycle` contains version3 DATA and non-writing
+owning output preparation. The consuming source preserves the original index2
+allocation and independently funds complete old/new overlap. It authenticates
+the held tuple and repeats exact identities after sealing; no public extractor,
+claim or writer exists. The catalog successor retains complete JOIN payloads.
+Prepared-owner destruction closes the original gate before actual files/buffers.
+Its decoder and
 one-row successor checks confer no physical or runtime authority. Owned version2
 conversion moves exact receipts, network ciphertext and highwater; a real upgrader
 must still authenticate the original held frame and prove all physical barriers.

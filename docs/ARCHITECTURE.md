@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+Index3 has non-writing preparation from an exclusively owned opaque index2
+mount. It independently funds authenticated held inputs and complete encrypted
+outputs, preserves JOIN history, and rechecks original identities after sealing.
+It installs no handler and writes no files; physical3 admission/recovery and the
+native command/backend consumers remain open. [Boundary and invoices](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
 The physical native index now retains its Pending-only write in one mount-wide
 cell. Actual IO/frame/claim survive caller loss; outgoing buffers keep an index
 retirement fence until destruction, and concrete DATA reads retire buffers before

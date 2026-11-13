@@ -1,4 +1,4 @@
-# Native index3 lifecycle design (private DATA in progress; no opener)
+# Native index3 lifecycle design (non-writing preparation; no opener)
 
 Text Chat V2 remains disabled. The reviewed index2 storage component is deliberately
 Founder-only. It does not provide joined provenance, Legacy retirement, rename or
@@ -8,12 +8,26 @@ a row's backend. The new unscoped mapped Legacy lease intentionally refuses a
 TextV2 vault. A scoped original-row path is required for mixed operation.
 
 The private version3 descriptor, row model, semantic successor checks and byte
-codec are now under development. They do not register a physical handler, select
+codec now have independently paid preparation from a genuine consumed index2
+owner. It captures/authenticates the original held tuple, derives the migration
+origin from that frame, and retains sealed successor/intent bytes without writing.
+It does not register a physical handler, select
 files, issue membership/source/native credentials or authorize an SDK. The owning
 upgrade, physical WAL, scoped Legacy bridge and real predecessor gates below are
 still required before use. Internal version2 DATA visibility is widened only
 within native_registry for the exact owned conversion; its parser, grammar and
 public Copy-only physical projections remain unchanged.
+
+Preparation uses atomic Arc uniqueness and an unpoisoned settled cell, preserves
+the whole original owner on refusal, and refuses weak worker tails and outgoing
+buffer debt. Its separate invoice includes both schema/frame bounds, complete
+intent, AEAD/encoding copies, decoded rows and checked control metadata. Final
+reproof checks actual Current/catalog summary, no Pending, the original gate and
+exact held objects. No claim is issued: the later writer must repeat these
+conditions under the original catalog mutex and retain the old2 gate claim.
+Prepared-owner destruction closes that gate first; actual file/buffer fields
+precede the old mount/payment and final new reservation. New3 scratch names are
+closed fixed roles; all readers without3 recovery preserve/refuse their presence.
 
 ## Explicit format boundary
 
@@ -122,10 +136,22 @@ debt. Active-to-retired preserves reserved length. IO/disk availability remains 
 separate concern, with retained exact retries; format exhaustion must not strand
 a previously admitted operation.
 
-These limits still need the physical frame/AEAD/metadata invoices, genuine owning
-conversion and persistent-capacity enforcement. DATA conversion regressions use
+Non-writing preparation now independently funds both schemas, complete intent,
+frame/AEAD/row/control overlap and a logical persistent ceiling. Actual writing
+roles and recovery still need their own inventory/barrier enforcement. DATA conversion regressions use
 the real version2 byte codec at its exact limit; they are not physical upgrade or
 SDK/native acceptance evidence.
+
+Intent decoding is a pure precursor to that physical recovery. It takes the
+original reader's expected Current rather than trusting an embedded catalog,
+validates six borrowed roles before allocating an Output, and checks the exact
+catalog successor and canonical full converted index using the original framed
+index hash. Both markers must match the same context. Held raw intent, opened
+plaintext and temporary AEAD/returned seed copies fit the separate4-seed term;
+semantic frame/row temporaries drain before output-role copies are allocated.
+Indeterminate pre-AEAD input, actual AEAD failure and authenticated invalid/future
+content are distinct outcomes. None alone permits cleanup; short self-created
+claims need their own continuously held physical first-torn proof.
 
 Native UI authorization, cold restore and locked protocol activity require distinct
 entry authority. UI-only cuts cannot restore before UI authorization is published;

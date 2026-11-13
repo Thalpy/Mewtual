@@ -17,6 +17,7 @@ mod native_ui;
 mod opening;
 mod payment;
 mod upgrade;
+pub(super) mod upgrade_source;
 pub use facade::NativeTextVault;
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
 pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};

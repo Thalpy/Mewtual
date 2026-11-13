@@ -586,6 +586,460 @@ fn native_index2_cell_retirement_ack_follows_real_file_and_buffer_destruction() 
 }
 
 #[test]
+fn lifecycle3_ownership_preserves_the_original_across_strong_and_weak_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc330);
+    let mounted = mount(dir.path(), &mut rng);
+    let address = Arc::as_ptr(&mounted.physical);
+    let fee = Arc::as_ptr(&mounted.physical.handler.fee);
+    let refunded = mounted.physical.handler.fee.refund_notice();
+    let worker = mounted.physical.clone();
+    let tail = Arc::downgrade(&worker);
+    let mounted = mounted.into_upgrade_source().unwrap_err();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert_eq!(fee, Arc::as_ptr(&mounted.physical.handler.fee));
+    assert!(mounted.physical.handler.gate.idle());
+    assert!(!refunded.load(Ordering::Acquire));
+    drop(worker);
+    // Exactly one strong owner is insufficient while the old weak tail exists.
+    assert_eq!(Arc::strong_count(&mounted.physical), 1);
+    assert_eq!(Arc::weak_count(&mounted.physical), 1);
+    let mounted = mounted.into_upgrade_source().unwrap_err();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert_eq!(fee, Arc::as_ptr(&mounted.physical.handler.fee));
+    assert!(mounted.physical.handler.gate.idle());
+    assert!(!refunded.load(Ordering::Acquire));
+    drop(tail);
+    let mounted = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .into_original_for_test();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert_eq!(fee, Arc::as_ptr(&mounted.physical.handler.fee));
+    assert!(mounted.physical.handler.gate.idle());
+    assert!(!refunded.load(Ordering::Acquire));
+    drop(mounted);
+    assert!(refunded.load(Ordering::Acquire));
+}
+
+#[test]
+fn lifecycle3_ownership_refuses_pending_and_retained_completed_debt() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc331);
+    let mounted = mount(dir.path(), &mut rng);
+    let address = Arc::as_ptr(&mounted.physical);
+    let fee = Arc::as_ptr(&mounted.physical.handler.fee);
+    let original = input();
+    mounted
+        .physical
+        .prepare_pending_birth(&original, &mut rng)
+        .unwrap();
+    let mounted = mounted.into_upgrade_source().unwrap_err();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert_eq!(fee, Arc::as_ptr(&mounted.physical.handler.fee));
+    // Preparing the original transaction already holds its negative JOIN claim.
+    assert!(!mounted.physical.handler.gate.idle());
+    let (_, debt) = mounted
+        .physical
+        .finish_pending_birth(original.birth.invocation, original.birth.request)
+        .unwrap();
+    assert!(mounted.physical.handler.gate.idle());
+    let mounted = mounted.into_upgrade_source().unwrap_err();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert_eq!(fee, Arc::as_ptr(&mounted.physical.handler.fee));
+    assert!(mounted.physical.handler.gate.idle());
+    drop(debt);
+    // The completed last-result cache and the acknowledged retirement marker
+    // are history, not unresolved work; neither should strand an idle upgrade.
+    let mounted = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .into_original_for_test();
+    assert_eq!(mounted.row_count_data().unwrap(), 2);
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+}
+
+#[test]
+fn lifecycle3_ownership_never_clears_poison_or_reopens_a_closed_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc332);
+    let mounted = mount(dir.path(), &mut rng);
+    let address = Arc::as_ptr(&mounted.physical);
+    let fee = Arc::as_ptr(&mounted.physical.handler.fee);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _cell = mounted.physical.cell.lock().unwrap();
+        panic!("poison the real original cell");
+    }))
+    .is_err());
+    let mounted = mounted.into_upgrade_source().unwrap_err();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert_eq!(fee, Arc::as_ptr(&mounted.physical.handler.fee));
+    assert!(mounted.physical.cell.is_poisoned());
+    assert!(mounted.physical.handler.gate.idle());
+    drop(mounted);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mounted = mount(dir.path(), &mut rng);
+    let address = Arc::as_ptr(&mounted.physical);
+    mounted.close_index_admission();
+    let mounted = mounted.into_upgrade_source().unwrap_err();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert!(!mounted.physical.handler.gate.idle());
+}
+
+fn lifecycle3_policy(
+    pool: CriticalCatalogReadPool,
+) -> super::super::super::lifecycle::preparation::Policy {
+    use super::super::super::lifecycle::preparation::Policy;
+    Policy::new(pool, Policy::required_persistent_capacity()).unwrap()
+}
+fn lifecycle3_pool() -> CriticalCatalogReadPool {
+    CriticalCatalogReadPool::new(super::super::super::lifecycle::preparation::PREPARATION_FEE)
+        .unwrap()
+}
+
+#[test]
+fn lifecycle3_preparation_authenticates_the_held_original_without_changing_any_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc333);
+    let mounted = mount(dir.path(), &mut rng);
+    let input = input();
+    mounted
+        .physical
+        .prepare_pending_birth(&input, &mut rng)
+        .unwrap();
+    finish(&mounted.physical, &input);
+    let key = Zeroizing::new(
+        mounted
+            .physical
+            .current
+            .cached_store()
+            .unwrap()
+            .keys
+            .db_key()
+            .unwrap(),
+    );
+    let domain = mounted
+        .physical
+        .current
+        .cached_store()
+        .unwrap()
+        .chat_vault_domain()
+        .unwrap();
+    let layout = mounted
+        .physical
+        .current
+        .cached_store()
+        .unwrap()
+        .current_layout
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .layout;
+    let expected = super::super::super::capability::NativeCapabilityData::for_current_data(
+        layout,
+        &layout.encode_data().unwrap(),
+    )
+    .unwrap();
+    let gate = Arc::downgrade(&mounted.physical.handler.gate);
+    let old_refund = mounted.physical.handler.fee.refund_notice();
+    let catalog_name = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Current.name());
+    let catalog_before = fs::read(&catalog_name).unwrap();
+    let index_name = file(dir.path(), super::super::super::preparation::INDEX_NAME);
+    let index_before = fs::read(&index_name).unwrap();
+    let pool = lifecycle3_pool();
+    let mut prepared = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+        .unwrap();
+    assert!(gate.upgrade().unwrap().idle()); // Preparation did NOT admit a writing claim.
+    assert!(!old_refund.load(Ordering::Acquire));
+    assert!(pool.charged_for_test() > 0);
+    let retired = Arc::new(AtomicBool::new(false));
+    prepared.retirement = Some(io::RetirementObservation::new(Box::new({
+        let retired = retired.clone();
+        let gate = gate.clone();
+        let pool = pool.clone();
+        let old_refund = old_refund.clone();
+        move || {
+            assert!(!gate.upgrade().unwrap().idle());
+            assert!(!old_refund.load(Ordering::Acquire));
+            assert!(pool.charged_for_test() > 0);
+            retired.store(true, Ordering::Release);
+        }
+    })));
+    prepared
+        .output
+        .assert_original_and_output_for_test(&key, &domain, &prepared.snapshot);
+    prepared
+        .output
+        .assert_seed_reader_matrix_for_test(&key, expected, &mut rng);
+    assert_eq!(fs::read(catalog_name).unwrap(), catalog_before);
+    assert_eq!(fs::read(index_name).unwrap(), index_before);
+    use crate::store::persistence::native_registry::lifecycle as new_io;
+    for name in [
+        dir.path().join(new_io::UPGRADE_SEED_NAME),
+        file(dir.path(), new_io::UPGRADE_INDEX_NAME),
+        file(dir.path(), new_io::UPGRADE_MARKER_NAME),
+    ] {
+        assert!(!name.exists());
+    }
+    drop(prepared);
+    assert!(retired.load(Ordering::Acquire));
+    assert!(gate.upgrade().is_none());
+    assert_eq!(pool.charged_for_test(), 0);
+    assert!(old_refund.load(Ordering::Acquire));
+}
+
+#[test]
+fn lifecycle3_preparation_refuses_one_byte_short_and_shared_accounts_before_rng() {
+    use super::super::super::lifecycle::preparation::{Policy, PREPARATION_FEE};
+    assert!(Policy::new(
+        CriticalCatalogReadPool::new(PREPARATION_FEE - 1).unwrap(),
+        Policy::required_persistent_capacity()
+    )
+    .is_err());
+    assert!(Policy::new(
+        lifecycle3_pool(),
+        Policy::required_persistent_capacity() - 1
+    )
+    .is_err());
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc334);
+    let mounted = mount(dir.path(), &mut rng);
+    let address = Arc::as_ptr(&mounted.physical);
+    let pool = lifecycle3_pool();
+    let occupied = pool.try_reserve(1).unwrap();
+    let source = mounted.into_upgrade_source().unwrap();
+    let source = source
+        .prepare(lifecycle3_policy(pool.clone()), &mut NeverRng)
+        .unwrap_err();
+    let mounted = source.into_original_for_test();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert!(mounted.physical.handler.gate.idle());
+    assert_eq!(pool.charged_for_test(), 1);
+    drop(occupied);
+    let shared = mounted
+        .physical
+        .current
+        .cached_store()
+        .unwrap()
+        .current_layout_policy
+        .as_ref()
+        .unwrap()
+        .archive
+        .pending
+        .pool
+        .clone();
+    let before = shared.charged_for_test();
+    let mounted = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(shared.clone()), &mut NeverRng)
+        .unwrap_err()
+        .into_original_for_test();
+    assert_eq!(address, Arc::as_ptr(&mounted.physical));
+    assert_eq!(shared.charged_for_test(), before);
+    assert!(mounted.physical.handler.gate.idle());
+    // Quota refusal did not consume/close the source; a genuine paid attempt works.
+    drop(
+        mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap(),
+    );
+    assert_eq!(pool.charged_for_test(), 0);
+}
+
+#[test]
+fn lifecycle3_preparation_refuses_tampered_originals_without_drawing_or_rewriting() {
+    for (number, name) in [
+        super::super::super::preparation::INDEX_NAME,
+        super::super::super::preparation::MARKER_NAME,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc335 + number as u64);
+        let mounted = mount(dir.path(), &mut rng);
+        let address = Arc::as_ptr(&mounted.physical);
+        let name = file(dir.path(), name);
+        let mut bytes = fs::read(&name).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        fs::write(&name, &bytes).unwrap();
+        let pool = lifecycle3_pool();
+        let mounted = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut NeverRng)
+            .unwrap_err()
+            .into_original_for_test();
+        assert_eq!(address, Arc::as_ptr(&mounted.physical));
+        assert!(mounted.physical.handler.gate.idle());
+        assert_eq!(pool.charged_for_test(), 0);
+        assert_eq!(fs::read(name).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn lifecycle3_preparation_preserves_every_unresolved_role_and_old_reader_refusal() {
+    use crate::store::persistence::native_registry::lifecycle as new_io;
+    for (root, name) in [
+        (false, new_io::UPGRADE_SEED_NAME),
+        (true, new_io::UPGRADE_INDEX_NAME),
+        (true, new_io::UPGRADE_MARKER_NAME),
+        (false, crate::store::critical_namespaces::Slot::Stage.name()),
+    ] {
+        for directory in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut rng = ChaCha20Rng::seed_from_u64(0xc337);
+            let mounted = mount(dir.path(), &mut rng);
+            let name = if root {
+                file(dir.path(), name)
+            } else {
+                dir.path().join(name)
+            };
+            if directory {
+                fs::create_dir(&name).unwrap();
+            } else {
+                fs::write(&name, []).unwrap();
+            }
+            let pool = lifecycle3_pool();
+            let mounted = mounted
+                .into_upgrade_source()
+                .unwrap()
+                .prepare(lifecycle3_policy(pool.clone()), &mut NeverRng)
+                .unwrap_err()
+                .into_original_for_test();
+            assert_eq!(pool.charged_for_test(), 0);
+            assert!(mounted.physical.handler.gate.idle());
+            assert!(name.exists());
+            assert_eq!(name.is_dir(), directory);
+            // A storage reader cannot silently ignore future upgrade objects.
+            assert!(mounted.row_count_data().is_err());
+        }
+    }
+}
+
+#[test]
+fn lifecycle3_preparation_rechecks_close_after_ownership_was_captured() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc338);
+    let mounted = mount(dir.path(), &mut rng);
+    let gate = mounted.physical.handler.gate.clone();
+    let source = mounted.into_upgrade_source().unwrap();
+    gate.close();
+    let pool = lifecycle3_pool();
+    let mounted = source
+        .prepare(lifecycle3_policy(pool.clone()), &mut NeverRng)
+        .unwrap_err()
+        .into_original_for_test();
+    assert!(!mounted.physical.handler.gate.idle());
+    assert_eq!(pool.charged_for_test(), 0);
+}
+
+/// The cut runs through the actual RNG seam after original authentication, at
+/// first output sealing. It creates no runtime callback or positive credential.
+struct Lifecycle3SealCut<'a> {
+    rng: &'a mut ChaCha20Rng,
+    cut: Option<Box<dyn FnOnce()>>,
+}
+impl Lifecycle3SealCut<'_> {
+    fn fire(&mut self) {
+        if let Some(cut) = self.cut.take() {
+            cut();
+        }
+    }
+}
+impl rand_core::RngCore for Lifecycle3SealCut<'_> {
+    fn next_u32(&mut self) -> u32 {
+        self.fire();
+        rand_core::RngCore::next_u32(self.rng)
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.fire();
+        rand_core::RngCore::next_u64(self.rng)
+    }
+    fn fill_bytes(&mut self, bytes: &mut [u8]) {
+        self.fire();
+        rand_core::RngCore::fill_bytes(self.rng, bytes);
+    }
+    fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fire();
+        rand_core::RngCore::try_fill_bytes(self.rng, bytes)
+    }
+}
+impl rand_core::CryptoRng for Lifecycle3SealCut<'_> {}
+
+#[test]
+fn lifecycle3_preparation_never_adopts_equal_replacement_after_authentication() {
+    for (root, name) in [
+        (true, super::super::super::preparation::INDEX_NAME),
+        (true, super::super::super::preparation::MARKER_NAME),
+        (
+            false,
+            crate::store::critical_namespaces::Slot::Current.name(),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let retained = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc339);
+        let mounted = mount(dir.path(), &mut rng);
+        let address = Arc::as_ptr(&mounted.physical);
+        let name = if root {
+            file(dir.path(), name)
+        } else {
+            dir.path().join(name)
+        };
+        let original = fs::read(&name).unwrap();
+        let moved = retained.path().join("original-object");
+        let fired = Arc::new(AtomicBool::new(false));
+        let mut cut = Lifecycle3SealCut {
+            rng: &mut rng,
+            cut: Some(Box::new({
+                let fired = fired.clone();
+                let name = name.clone();
+                let original = original.clone();
+                move || {
+                    fs::rename(&name, moved).unwrap();
+                    fs::write(&name, original).unwrap();
+                    fired.store(true, Ordering::Release);
+                }
+            })),
+        };
+        let pool = lifecycle3_pool();
+        let mounted = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut cut)
+            .unwrap_err()
+            .into_original_for_test();
+        assert!(fired.load(Ordering::Acquire));
+        assert_eq!(address, Arc::as_ptr(&mounted.physical));
+        assert!(mounted.physical.handler.gate.idle());
+        assert_eq!(pool.charged_for_test(), 0);
+        assert_eq!(fs::read(name).unwrap(), original);
+        // Before admission no file effect occurred. An explicitly new capture
+        // may authenticate this now-stable tuple; the old capture could not.
+        drop(
+            mounted
+                .into_upgrade_source()
+                .unwrap()
+                .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+                .unwrap(),
+        );
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+}
+
+#[test]
 fn native_index2_cell_concrete_read_keeps_its_decoded_buffers_inside_the_guard() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc222);

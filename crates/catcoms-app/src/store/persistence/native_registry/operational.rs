@@ -169,12 +169,14 @@ fn observe_before_target_proof(target: RenameTarget) {
 }
 
 pub(in crate::store) fn refuse_upgrade_debt(store: &ServerStore) -> Result<(), AppError> {
+    super::lifecycle::refuse_upgrade_debt(store)?;
     absent(&path(store, false, UPGRADE_SEED_NAME)?)?;
     absent(&path(store, true, UPGRADE_INDEX_NAME)?)?;
     absent(&path(store, true, UPGRADE_MARKER_NAME)?)
 }
 
 fn no_upgrade_debt(store: &ServerStore) -> Result<(), AppError> {
+    super::lifecycle::refuse_upgrade_debt(store)?;
     for (root, name) in [
         (false, native::SEED_NAME),
         (false, UPGRADE_SEED_NAME),
@@ -550,6 +552,7 @@ impl UpgradeInventory {
         Ok(self.base)
     }
     pub(in crate::store) fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        super::lifecycle::refuse_upgrade_debt(store)?;
         self.base.require_directories(store)?;
         for name in [
             critical::ARCHIVE_DECLARATION_SEED,

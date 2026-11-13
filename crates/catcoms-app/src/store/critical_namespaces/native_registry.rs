@@ -7,7 +7,7 @@ pub(in crate::store::critical_namespaces) mod capability;
 mod data;
 // Private index3 contract under construction. No physical opener supports it
 // yet; registering this module must never widen the closed v1/v2 dispatch.
-mod lifecycle;
+pub(in crate::store::critical_namespaces) mod lifecycle;
 pub(in crate::store::critical_namespaces) mod operational;
 pub(in crate::store) mod preparation;
 
