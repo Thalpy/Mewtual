@@ -10,7 +10,7 @@ pub(in crate::store) mod preparation;
 
 pub use operational::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
-    NativeIndexUpgrade,
+    NativeIndexUpgrade, NativeUiInvocationBudget, NativeUiInvocationMetadata,
 };
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,

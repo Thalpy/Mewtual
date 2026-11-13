@@ -1,10 +1,18 @@
 # Threat model; client integrity & enforcement boundaries
 
+The private UI-generation registry cannot reopen a retired generation after GC.
+Each competing preparation owns an independent actual reservation. Host/counter
+metadata retains payment through unentered pins, and repeated retirement replies
+hold no temporary records that could release the last payment under an outer
+native guard. Eight focused Root cases and eighteen RT cases pass; the checked
+Tauri/native producer is still absent. [Enforcement and gaps](communication-recovery/CHAT-V2-NATIVE-UI-GENERATIONS.md).
+
 The Linux founder inventory uses a fixed paid getdents buffer, independently opened
 original directory descriptors and exact borrowed names. Unknown/kind-mismatched
 objects refuse without cleanup; named identities are repeated after enumeration.
 This replaces early platform refusal with the same negative proof boundary, not
-new source or write authority. Linux execution remains pending.
+new source or write authority. Linux focused execution passes42 cases in run43407038976; complete exact-head
+validation at053ac72a is still running.
 [Contract](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
 
 Concrete native cuts precede actual SDK/Profile/Header/member primitive entry.

@@ -162,28 +162,36 @@ impl NativeChatUiBinding {
     /// worker must never call this with a later generation selected after await.
     /// Reserve generation metadata and its retirement slot BEFORE entry. Its
     /// fee-only custody follows actual pins, not just CLOSED+zero work status.
+    /// This combined prepare+finish call must run outside ALL native, registry,
+    /// Store and Root guards, including every refusal/drop path.
     pub fn open_session(
         &self,
         expected: u64,
         generation_metadata: Arc<dyn Send + Sync>,
     ) -> Result<NativeChatUiSessionOwner, NativeChatKeyRefusal> {
-        if !self.original.current(expected) {
-            return Err(NativeChatKeyRefusal::Unavailable);
+        self.prepare_session(expected, generation_metadata).finish()
+    }
+
+    /// Capture only original paid metadata and the invocation's expected
+    /// generation while borrowing the affine owner. No allocation, counter,
+    /// close, notification or current permission is issued. Finish AFTER all
+    /// native/registry/Store/Root guards have been released.
+    pub fn prepare_session(
+        &self,
+        expected: u64,
+        generation_metadata: Arc<dyn Send + Sync>,
+    ) -> NativeChatUiSessionPreparation {
+        NativeChatUiSessionPreparation {
+            host: self.original.clone(),
+            expected,
+            generation_metadata,
         }
-        let value = NativeChatUiSessionOwner {
-            original: Arc::new(UiSession {
-                host: self.original.clone(),
-                expected,
-                // CLOSED+zero ends admitted work, not unentered metadata pins.
-                // Counter custody preserves the actual generation payment in
-                // prepared cuts, Ends and drains after registry-slot reuse.
-                counter: Arc::new(Counter::new(Some(generation_metadata))),
-            }),
-        };
-        if !value.original.current() {
-            return Err(NativeChatKeyRefusal::Unavailable);
-        }
-        Ok(value)
+    }
+
+    /// Present-time negative check only. This cannot authorize a command,
+    /// source, row, device or SDK and must not replace their final admission.
+    pub fn is_current(&self, expected: u64) -> bool {
+        self.original.current(expected)
     }
 
     /// Irreversibly close this original mounted host BEFORE taking any native,
@@ -191,6 +199,39 @@ impl NativeChatUiBinding {
     /// UI lock retires its generations instead; it must retain the mounted host.
     pub fn close(&self) {
         self.original.closed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Original metadata preparation, never an affine close owner or permission.
+/// Retain/drop this outside guards too: its last fee/Host pin may retire there.
+/// It cannot be retargeted to the generation current when a worker later polls.
+pub struct NativeChatUiSessionPreparation {
+    host: Arc<Host>,
+    expected: u64,
+    generation_metadata: Arc<dyn Send + Sync>,
+}
+impl NativeChatUiSessionPreparation {
+    /// Allocate the original generation outside every native/registry/Store/
+    /// Root guard. Both refusals and owner destruction may release payment;
+    /// an eventual idle retirement may synchronously run arbitrary Wakers.
+    pub fn finish(self) -> Result<NativeChatUiSessionOwner, NativeChatKeyRefusal> {
+        if !self.host.current(self.expected) {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        let value = NativeChatUiSessionOwner {
+            original: Arc::new(UiSession {
+                host: self.host,
+                expected: self.expected,
+                // CLOSED+zero ends admitted work, not unentered metadata pins.
+                // Counter custody preserves the actual generation payment in
+                // prepared cuts, Ends and drains after registry-slot reuse.
+                counter: Arc::new(Counter::new(Some(self.generation_metadata))),
+            }),
+        };
+        if !value.original.current() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(value)
     }
 }
 impl Drop for NativeChatUiBinding {
@@ -476,6 +517,21 @@ impl Default for NativeChatKeyEnds {
 pub struct NativeChatKeyDrain {
     original: Arc<Counter>,
 }
+
+/// Fixed application-wrapper overlap for one Host/UI generation, including
+/// conservative Arc controls and preparation/negative owners. Caller custody,
+/// actual waiting tasks, SDK/OS heaps and allocator/RSS are separate invoices.
+/// Root adds its record, candidate, fixed retirement batch and registry storage.
+pub const NATIVE_CHAT_UI_FIXED_METADATA_BYTES: usize = std::mem::size_of::<Host>()
+    + std::mem::size_of::<UiSession>()
+    + std::mem::size_of::<Counter>()
+    + std::mem::size_of::<NativeChatUiBinding>()
+    + std::mem::size_of::<NativeChatUiSessionPreparation>()
+    + std::mem::size_of::<NativeChatUiSessionOwner>()
+    + std::mem::size_of::<NativeChatUiCommand>()
+    + std::mem::size_of::<NativeChatKeyDrain>()
+    + 8 * 64;
+
 impl NativeChatKeyDrain {
     /// No admitted key work remains on this CLOSED original. Unentered cuts,
     /// workers and metadata may still exist and retain their independent fees.
@@ -510,6 +566,7 @@ macro_rules! redacted_debug {
 redacted_debug!(
     NativeChatUiBinding,
     NativeChatUiSessionOwner,
+    NativeChatUiSessionPreparation,
     NativeChatUiCommand,
     NativeChatSourceOwner,
     NativeChatSourceObservation,

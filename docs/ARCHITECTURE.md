@@ -1,5 +1,10 @@
 # Mewtual; Architecture
 
+The private canonical UI-generation kernel pays for each transient candidate,
+shares one close owner per admitted generation and moves retirement custody out
+of registry guards before notifying or waiting. It is not yet connected to Tauri
+or the mounted native founder owner. [Lifecycle and limits](communication-recovery/CHAT-V2-NATIVE-UI-GENERATIONS.md).
+
 The private NativeRequired route reaches the actual SDK, Profile/Header and member
 keys and preserves its immutable origin through the whole warm Host. Concrete
 lifecycle cuts retain Ends outside writers; public library routes refuse that

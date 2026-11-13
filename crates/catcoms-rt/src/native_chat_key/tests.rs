@@ -786,3 +786,27 @@ fn native_chat_key_whole_binding_close_is_sc_only_before_separate_owner_retireme
         .poll(&mut Context::from_waker(&waker))
         .is_ready());
 }
+
+#[test]
+fn native_chat_key_session_preparation_never_owns_close_or_retargets_after_capture() {
+    for close_host in [false, true] {
+        let fixture = Fixture::new();
+        let preparation = fixture.binding.prepare_session(7, Arc::new(()));
+        if close_host {
+            fixture.binding.close();
+        } else {
+            fixture.lock();
+            fixture.unlock();
+        }
+        assert!(preparation.finish().is_err());
+        // The old captured generation never becomes a newly authorized one.
+        // A live original binding accepts only a genuinely new preparation.
+        let fresh = fixture.binding.prepare_session(8, Arc::new(())).finish();
+        assert_eq!(fresh.is_ok(), !close_host);
+        drop(fresh);
+    }
+    let fixture = Fixture::new();
+    let preparation = fixture.binding.prepare_session(7, Arc::new(()));
+    drop(fixture); // A metadata pin must not keep the affine binding open.
+    assert!(preparation.finish().is_err());
+}

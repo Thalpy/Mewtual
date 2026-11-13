@@ -9,10 +9,12 @@ mod catalog;
 mod data;
 mod interlock;
 mod mount;
+mod native_ui;
 mod opening;
 mod payment;
 mod upgrade;
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
+pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
 pub use upgrade::{NativeIndexPolicy, NativeIndexUpgrade};
 
 use super::super::{read_pool::CatalogReadReservation, refused};

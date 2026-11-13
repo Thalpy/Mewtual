@@ -1,5 +1,12 @@
 # Mewtual; Interfaces & Hooks Schema
 
+RT now separates infallible `prepare_session` capture from allocating/checking
+`NativeChatUiSessionPreparation::finish` outside guards. The private Root kernel
+consumes independently paid invocation metadata and canonicalizes generations.
+Its fixed retirement result carries a batch only for Started; AlreadyRetiring
+and KeyWorkDrained carry no temporary payment references. These are lifecycle
+components, not a native command credential. [Contract](communication-recovery/CHAT-V2-NATIVE-UI-GENERATIONS.md).
+
 The closed native key purposes and affine lifecycle owners are defined in
 `catcoms-rt::native_chat_key`. Root privately carries NativeRequired through the
 whole founder/member Host and accepts concrete prepared cuts. Cached Sync raw

@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Canonical UI-generation kernel (13 November; native consumer unfinished)
+
+The native production WIP has independent affine candidate payments, original
+capture/finish outside guards,32 canonical generations, monotone retirement/GC
+and no-budget-required lock batches. Actual reservations survive unentered pins.
+Read-only review found/fixed a repeated-retirement last-payer race and locked error
+allocation. Eight real-Root regressions pass, including concurrent final-End/GC;
+the fixed-stack result follow-up also passes. All18 RT lifecycle cases and
+current strict RT Clippy pass.
+This is a private library kernel, not checked Tauri capture or native activation.
+Its actual facade/founder/worker and bounded waiter consumers are still absent.
+Strict App Clippy remains failing (latest pre-follow-up574, including unconsumed
+integration code); no debt is waived. The joined native-row storage contract is
+also absent. [Detailed scope](communication-recovery/CHAT-V2-NATIVE-UI-GENERATIONS.md).
+
 ## Native generation metadata (13 November; integration in progress)
 
 The next native production branch ties Host and generation metadata payments to
@@ -12,7 +27,7 @@ and10 whole warm Host cases. Read-only review has no B/H/M; its public lifecycle
 doc LOW is fixed. Actual canonical native registry/waiter integration and the
 owning native Pending/network/founder producer remain unfinished. No activation.
 
-## Linux founder inventory (13 November; execution pending)
+## Linux founder inventory (13 November; focused execution passed)
 
 A fixed-buffer Linux RawDir reader now supplies the previously unsupported
 settlement/repair/promotion inventory. It uses original held directories,
@@ -20,7 +35,9 @@ independent offsets, exact byte names, nofollow type checks and bounded work;
 unknown objects stay untouched. Four existing inventory cases, two role matrices,
 eight seed cleanup and three covering-write cases, two focused promotion recovery
 cases and the ten whole warm driver cases now have actual Linux positive paths.
-Windows mount/warm compatibility passes; Linux execution is pending. Review has no
+Windows mount/warm compatibility passes. Hosted run43407038976 passes42 focused
+Linux cases and11 Windows cases, plus3438 frontend tests/check/build. The exact-head
+full run43416522284 at053ac72a remains in progress. Review has no
 production blocker/high/medium; the Stat invoice LOW is fixed. This supplies no
 native command or backend permission. Chat V2 remains disabled.
 [Exact reader, tests and limits](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
