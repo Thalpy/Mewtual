@@ -15,8 +15,11 @@ Preparation itself does not register a physical handler, select files, issue
 membership/source/native credentials or authorize an SDK. Dedicated private I/O
 now implements the fixed upgrade roles and exact retry/cleanup barriers. The
 private owning storage admission/handoff and strict cold3 opener are under
-validation; physical WAL, scoped Legacy bridge and real predecessor gates below
-are still required before use. Internal version2 DATA visibility is widened only
+validation. A normal3 Rename WAL now has retained owning/cold recovery and a
+real pinned pre-WAL3 predecessor round trip; its scope and current evidence are
+in [the normal WAL contract](CHAT-V2-NATIVE-INDEX3-WAL.md). Scoped Legacy,
+other operation producers, native consumers and full gates remain required.
+Internal version2 DATA visibility is widened only
 within native_registry for the exact owned conversion; its parser, grammar and
 public Copy-only physical projections remain unchanged.
 

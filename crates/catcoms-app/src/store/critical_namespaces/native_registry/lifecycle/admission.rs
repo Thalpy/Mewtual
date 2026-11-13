@@ -21,6 +21,12 @@ struct Payment {
     debit: CatalogReadReservation,
 }
 
+/// Narrow lifetime tail for finite files/buffers. In particular this does not
+/// retain Handler.cold, which could otherwise cycle back to cold evidence.
+pub(in crate::store::critical_namespaces::native_registry) struct PaymentTail {
+    _payment: Arc<Payment>,
+}
+
 #[derive(Clone)]
 pub(in crate::store) struct Handler {
     // Cold evidence has no Store back-reference. All original handles and its
@@ -30,6 +36,13 @@ pub(in crate::store) struct Handler {
     payment: Arc<Payment>,
 }
 impl Handler {
+    pub(in crate::store::critical_namespaces::native_registry) fn payment_tail(
+        &self,
+    ) -> PaymentTail {
+        PaymentTail {
+            _payment: self.payment.clone(),
+        }
+    }
     /// Consume the SAME already-reserved full preparation invoice. This does
     /// not clone a debit or infer new capacity from extending its lifetime.
     pub(in crate::store::critical_namespaces::native_registry) fn from_reserved(
@@ -147,6 +160,24 @@ pub(in crate::store::critical_namespaces::native_registry) struct FinishedClaim 
     _original: Arc<Gate>,
 }
 impl Claim {
+    pub(in crate::store::critical_namespaces::native_registry) fn require_active(
+        &self,
+    ) -> Result<(), AppError> {
+        if self.original.active.load(Ordering::SeqCst) != self.serial {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    /// Called only by the LAST completed-debt field after actual IO/buffer
+    /// retirement, outside all writers. Foreign completion must fail closed;
+    /// it cannot leave an unexpected successor admitted.
+    pub(in crate::store::critical_namespaces::native_registry) fn finish_after_retirement(self) {
+        let finished = self.finish();
+        if finished.state == Release::Foreign {
+            finished._original.active.store(CLOSED, Ordering::SeqCst);
+        }
+        drop(finished);
+    }
     pub(in crate::store::critical_namespaces::native_registry) fn finish(self) -> FinishedClaim {
         let state = match self.original.active.compare_exchange(
             self.serial,

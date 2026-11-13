@@ -1,5 +1,5 @@
-//! Dedicated version2 -> version3 fixed writing roles. Root's owning consumer
-//! and cold handler are still under construction; no public opener selects3.
+//! Dedicated version2 -> version3 fixed writing roles. The private owning
+//! consumer and strict3 handler retain original custody through completion.
 //! Root must authenticate the complete relation against the independently held
 //! Current expectation and retain the original gate claim before invoking IO.
 //! No generic byte ceiling, pathname, semantic validator or SDK authority is
@@ -11,6 +11,7 @@ use super::super::operational::{
 };
 use super::*;
 mod first_torn;
+pub(in crate::store) mod index;
 pub(in crate::store) use first_torn::FirstTornIo;
 #[cfg(test)]
 pub(in crate::store) use first_torn::{

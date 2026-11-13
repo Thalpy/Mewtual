@@ -97,6 +97,17 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|run|fs::remove_file(&seed).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|run|self.original.base.vault.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|cover_catalog_fence_before_seed|self.original.base.vault.file.sync_all().map_err(io)?;']=1
+  # Normal3 fixed index WAL only: a semantic proof binds this held inventory,
+  # exact selected parent and Stage hash. Original marker/Current/dirs are
+  # re-proved before selection or unlink; completed is set after coverage.
+  # These roles cannot write epochs, accept arbitrary paths or use v2 limits.
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|commit|self.original.base.root.file.sync_all().map_err(io)?;']=2
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|commit|fs::rename(&stage, &selected).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|commit|output.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|run|self.original.base.index.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|run|self.original.base.root.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|cover_removed_stage|self.original.base.root.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|run|fs::remove_file(&stage).map_err(io)?;']=1
   # Namespace4 declaration first creates/syncs the SAME empty legacy stage so
   # actual older readers refuse before any governance-only recovery debt exists.
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1

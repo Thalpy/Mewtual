@@ -19,7 +19,15 @@ Cold3 inspection retains original evidence through the common Current/JOIN
 opener. Its inventory-bound semantic proof requires the exact held JOIN successor
 when one was authenticated; disappearance cannot become an old-catalog success.
 No fresh capture substitutes for those identities at exposure. This remains
-storage DATA, grants no SDK/native authority and refuses normal3 index WAL.
+storage DATA and grants no SDK/native authority. The private normal3 inspector
+now supports only an exact Rename successor, raw duplicate, qualified short
+Stage or actual AEAD failure. Authenticated unsupported work stays untouched.
+Its proof binds the same inventory and actual selected/Stage hashes; original
+IO/cleanup survives common opening with no fresh post-effect adoption. A real
+mutex poisons warm admitted work after unwind. Its original claim stays active
+until completed files, buffers and finite session exclusion actually retire.
+The native consumer is unfinished, so native-guard retirement is not established.
+[Normal3 boundary](communication-recovery/CHAT-V2-NATIVE-INDEX3-WAL.md).
 
 JOIN catalog rewrites must conserve an admitted native namespace's version and
 descriptor together. Relabeling descriptor2 as entry version1 rejects a legitimate

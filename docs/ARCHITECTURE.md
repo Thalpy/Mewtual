@@ -4,8 +4,10 @@ Index3's private owning storage upgrade and strict cold opener are under
 validation. They consume the original opaque index2 mount, independently fund
 the overlap, hold both catalog claims through physical selection and handler
 installation, and retain original cold file proofs through Current/JOIN opening.
-The opaque result exposes storage DATA only. Normal3 index WAL, native command
-and backend consumers remain unfinished; Chat V2 stays disabled.
+The opaque result exposes storage DATA only. A private normal3 Rename WAL and
+continuous cold recovery are under validation; native command and backend
+consumers remain unfinished. Chat V2 stays disabled.
+[Normal WAL boundary](communication-recovery/CHAT-V2-NATIVE-INDEX3-WAL.md).
 [Boundary and invoices](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
 
 The physical native index now retains its Pending-only write in one mount-wide
