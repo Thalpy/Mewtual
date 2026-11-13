@@ -1,5 +1,12 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`NativeIndexPolicy`, `NativeIndexUpgrade::{prepare,retry,into_index_store}` and
+`NativeIndexStore::{open,row_count_data,lookup_creation_data}` are the distinct
+namespace7/v2 storage APIs. The upgrade consumes a genuine opaque v1 G1 owner;
+no Store/Current getter or generic row-publish API is exposed. Status is historical
+DATA, never native/runtime authority. The actual warm transaction consumer remains
+unfinished. [Contract and validation](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+
 Sync's `begin_owner_v2_founder_signing` and
 `prepare_owner_v2_founder_retained(&mut RetainedFounderSigning)` retain separate
 purpose/full-key/canonical-byte primitive results on the same original source.

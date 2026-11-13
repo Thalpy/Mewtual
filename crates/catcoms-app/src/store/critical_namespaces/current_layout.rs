@@ -499,30 +499,31 @@ impl V2CurrentLayoutStore {
             .ok_or_else(refused)?;
         let key = Zeroizing::new(self.store.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
-        let parsed = super::pending_join_codec::parse_native_registry_layout(
-            &plain,
-            &self.store.chat_vault_domain()?,
-            true,
-            false,
-        )?;
+        let parsed = handler.parse_layout(&plain, &self.store.chat_vault_domain()?, true)?;
         if parsed.native_registry_payload.is_none() || parsed.count != 0 {
             return Err(refused());
         }
-        let mut catalog = self
-            .store
-            .pending_join_catalog
-            .lock()
-            .map_err(|_| refused())?;
-        let catalog = catalog.as_mut().ok_or_else(refused)?;
-        if catalog.pending.is_some() {
-            return Err(refused());
-        }
-        catalog.current = parsed.summary(*blake3::hash(&raw).as_bytes());
-        self.store
-            .current_layout_policy
-            .as_mut()
-            .ok_or_else(refused)?
-            .native_registry = Some(handler);
+        let retired = {
+            let mut guard = self
+                .store
+                .pending_join_catalog
+                .lock()
+                .map_err(|_| refused())?;
+            let catalog = guard.as_mut().ok_or_else(refused)?;
+            if catalog.pending.is_some() {
+                return Err(refused());
+            }
+            catalog.current = parsed.summary(*blake3::hash(&raw).as_bytes());
+            self.store
+                .current_layout_policy
+                .as_mut()
+                .ok_or_else(refused)?
+                .native_registry
+                .replace(handler)
+        };
+        // An old handler's final debit may take its quota mutex on Drop. Retire
+        // it only after the catalog writer has ended, including v1→v2 upgrades.
+        drop(retired);
         Ok(())
     }
     /// Real historical SourceSaved DATA read. Checks the actual mandatory namespace marker on

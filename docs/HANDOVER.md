@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Native index2 storage (13 November; in progress)
+
+The isolated `chat-v2-native-index-admission` branch now has explicit7/v2 and
+index2, immutable birth receipts, a genuine opaque v1 G1 upgrade, cold role
+classification/repair, and cached negative JOIN checks. All30 local cases pass,
+including crash cuts, restart, four late target replacements and exact file/frame/
+mount/payment retirement. Read-only review found and corrected the latter two
+boundaries. The real predecessor2 gate passes locally:18 fixtures, four public
+openers in unmodified382a30a0, and18 current-reader round trips. Its successful
+controls include v1/Current5 vaults and a deliberately unfenced complete intent.
+Complete current-source sign-off remains pending. No generic row publication or
+native backend is exposed.
+
+The warm cell/genuine native founder producer remains unfinished; its claim must
+retain original files, candidate and payment across uncertainty. Native command/
+key admission, mounted-vault/backend sum, operational restart/Leave, joined pins/
+Add/archive/transport and UI/admin/combined acceptance remain activation gates.
+[Exact storage scope and pending work](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+
+PR95's focused predecessor repair is green on both platforms (run43366761860).
+PR97's full native execution now passes on Linux and Windows (run43371944196),
+with Root runs still pending. PR96's Root and native jobs pass on both Linux and
+Windows (run43369377314), with the agreed slow case deferred. These are parent/sibling-source
+results, not full validation of this new index2 work. Chat V2 stays disabled.
+
 ## Retained bootstrap signing (13 November; in progress)
 
 The next isolated branch `chat-v2-retained-bootstrap-signing` follows PR95. The

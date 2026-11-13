@@ -5,6 +5,10 @@ on:
     # Explicit integration-PR lane while inherited lint debt blocks ordinary CI's tests.
     # Full/strict gates remain required; this is not all-source coverage after merge.
     paths:
+      - '.github/scripts/check-chat-v2-native-index2.py'
+      - '.github/predecessor/native_index2_gate.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native2_predecessor_tests.rs'
+      - 'crates/catcoms-app/src/store/persistence/native_registry/**'
       - '.github/workflows/chat-v2-joined-source.yml'
       - '.github/scripts/check-chat-v2-joined-source.py'
       - '.github/scripts/check-chat-v2-native-registry.py'
@@ -65,6 +69,11 @@ jobs:
       - name: Execute the ID3 and ID5 aware native-registry predecessor gate
         if: ${{ !inputs.fresh_founder_only }}
         run: python .github/scripts/check-chat-v2-native-registry.py
+      - name: Check native-index2 predecessor count guards
+        run: python .github/scripts/check-chat-v2-native-index2.py --self-test
+      - name: Execute the actual native1-aware index2 predecessor gate
+        if: ${{ !inputs.fresh_founder_only }}
+        run: python .github/scripts/check-chat-v2-native-index2.py
       - uses: actions/setup-node@v4
         if: runner.os == 'Linux'
         with:
@@ -96,3 +105,4 @@ jobs:
           path: |
             logs/chat-v2-joined-source/
             logs/chat-v2-native-registry/
+            logs/chat-v2-native-index2/

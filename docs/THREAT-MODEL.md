@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native7/v2 storage binds every successor to its original framed index parent and
+preserves immutable birth receipts. Warm replacement re-proves its original
+destination after large reads; cold repair cannot recreate missing committed
+outputs or discard authenticated unknown DATA. Admission closes before files,
+buffers, mount and exact payment retire. These storage properties supply no
+native-session, SDK, key, joined-member or backend permission; those live consumers
+remain incomplete. [Enforcement and limits](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+
 The retained Root bootstrap producer records each Profile/Header key entry before
 the primitive and caches returned raw immediately. Unknown entered results are
 terminal; invalid cached signatures or foreign original node/scope bindings cannot
