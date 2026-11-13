@@ -74,8 +74,11 @@ four or eight driver cases), and rejects missing/duplicated/changed cohorts.
 
 Actual-diff design review found and corrected the warm identity mismatch and
 incompatible-budget failure. Static formatting, ambient/raw-filesystem gates
-and no-Cargo harness self-checks pass. Driver compilation/execution, all complete
-suites, workspace-wide strict Clippy and audit remain required. Final actual-diff
+and no-Cargo harness self-checks pass. [CI at6308c992](https://github.com/Thalpy/Mewtual/actions/runs/43334467995)
+compiles and passes exactly four Linux/eight Windows driver cases plus the actual
+mount prerequisite on both platforms. The real warm save/retry and independent
+revocation cases execute on Windows. All complete suites, workspace-wide strict
+Clippy and audit remain required. Final actual-diff
 re-review found no remaining findings in this slice; no runtime success is
 inferred from static review.
 

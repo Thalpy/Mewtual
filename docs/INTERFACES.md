@@ -1,12 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`NativeRegistryPreparationPolicy` and `PreparedNativeRegistryMigration::open`
+provide the non-writing startup preparation described in the
+[native registry contract](communication-recovery/CHAT-V2-NATIVE-REGISTRY-PREPARATION.md).
+The policy's independent full invoice precedes prerequisite opening. The opaque
+product retains its original private mount and exact input/candidate ownership;
+it exposes only historical row-count DATA and concrete original-input revalidation.
+It grants no physical writer, namespace7 handler, native row, key or runtime.
+
 The new `V2CurrentLayoutStore::prepare_fresh_v2_text_founder` consumes original
 runtime inputs only through a closed owning producer. Its product retains the
 whole Host and creator and exposes concrete member-save operations plus bounded
 historical binding DATA. It supplies no native credential, row or cold owner.
 The exact grammar/payment/refusal and reservation-bridge contract is in
 [the fresh-founder driver](communication-recovery/CHAT-V2-FRESH-FOUNDER-DRIVER.md);
-compilation and execution are pending.
+focused compilation and execution pass on Linux and Windows at6308c992.
 
 ## Governance capability (7 November; private metadata handler)
 
