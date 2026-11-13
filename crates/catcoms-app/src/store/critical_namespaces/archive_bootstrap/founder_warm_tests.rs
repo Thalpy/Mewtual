@@ -9,10 +9,9 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 
-// The genuine whole-chain path still requires the audited settlement/promotion
-// directory profile, which currently refuses Linux. Keep that support gap
-// explicit; enabling the Linux profile must make this exact positive case run.
-#[cfg(windows)]
+// These whole-chain cases require an implemented, paid directory profile.
+// Run the same positive path on Windows and fixed-buffer Linux inventories.
+#[cfg(any(windows, target_os = "linux"))]
 #[path = "founder_warm_native_tests.rs"]
 mod native;
 
@@ -229,7 +228,7 @@ fn fresh_incompatible_seed_caps_refuse_before_spending_invocation_or_sdk() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn fresh_whole_warm_factory_saves_without_replacing_runtime_or_creator() {
     use crate::store::MemberSaveJobReport;
@@ -325,7 +324,7 @@ fn fresh_whole_warm_factory_saves_without_replacing_runtime_or_creator() {
 
 /// Stop only AFTER the actual saved Current2 and checked warm Node exist. The
 /// test flag grants no authority and does not fabricate a receipt or bridge.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn paused_current(seed: u64) -> (Driver, V2CurrentLayoutStore, ChaCha20Rng, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let shared = pool();
@@ -367,7 +366,7 @@ fn paused_current(seed: u64) -> (Driver, V2CurrentLayoutStore, ChaCha20Rng, temp
     (driver, layout, rng, directory)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn fresh_warm_bridge_original_revocation_leaves_current_live_but_closes_attachment() {
     let (mut driver, layout, _rng, _directory) = paused_current(0x34f5);
@@ -395,7 +394,7 @@ fn fresh_warm_bridge_original_revocation_leaves_current_live_but_closes_attachme
     assert!(!driver.is_ready_data());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn fresh_warm_bridge_current_revocation_leaves_original_live_but_closes_attachment() {
     let (mut driver, layout, _rng, _directory) = paused_current(0x34f6);
@@ -414,7 +413,7 @@ fn fresh_warm_bridge_current_revocation_leaves_original_live_but_closes_attachme
     assert!(!driver.is_ready_data());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn fresh_warm_bridge_cached_identity_cannot_rebind_despite_live_same_labels() {
     let (mut driver, layout, _rng, _directory) = paused_current(0x34f7);

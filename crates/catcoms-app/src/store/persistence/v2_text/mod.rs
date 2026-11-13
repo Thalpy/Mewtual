@@ -49,7 +49,7 @@ pub(in crate::store) use ordinary_data::{
     PreparedV2RetainOriginalCustody, TextUnsignedIntentBindingsData, TextUnsignedIntentFrameData,
     V2TextRetainWorkspaceClaim, V2TextTransactionMetadataResources, TEXT_TRANSACTION_METADATA_FEE,
 };
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use promotion::V2TextPromotionTestCut;
 pub(in crate::store) use promotion::{
     CapturedV2TextPromotionScratch, CapturedV2TextPromotionSeedRepair,

@@ -1,6 +1,6 @@
 //! Real warm SourceSaved -> paid SDK/node -> actual scope2/writer -> seed cleanup faults.
 //! These tests never construct a Saved/Current receipt or raw task/owner flag. The supported
-//! native inventory profile is explicitly Windows-only; other-platform refusal is covered
+//! native inventory profile supports Windows and Linux; other-platform refusal is covered
 //! in the shared inventory tests rather than presented as successful cleanup coverage.
 use super::*;
 use crate::store::persistence::v2_genesis_activation::settlement::{
@@ -9,7 +9,7 @@ use crate::store::persistence::v2_genesis_activation::settlement::{
 use catcoms_sync::local_chat_scope::ManagedChatScopeReservation;
 use std::sync::atomic::Ordering;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn saved(number: u64) -> (Fixture, UnexposedV2GenesisCurrent<MemNetwork, ChaCha20Rng>) {
     let mut f = fixture(number);
     f.preparation.retry(&f.layout, &mut f.rng).unwrap();
@@ -18,7 +18,7 @@ fn saved(number: u64) -> (Fixture, UnexposedV2GenesisCurrent<MemNetwork, ChaCha2
     (f, current)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn genuine_original_node_settles_only_activation_seed_and_keeps_all_other_artifacts() {
     let (mut f, mut current) = saved(0x5e710);
@@ -63,7 +63,7 @@ fn genuine_original_node_settles_only_activation_seed_and_keeps_all_other_artifa
         .unwrap();
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn every_actual_cleanup_cut_retries_same_node_after_unlink_without_seed_present_fallback() {
     for point in 210..=215 {
@@ -126,7 +126,7 @@ fn every_actual_cleanup_cut_retries_same_node_after_unlink_without_seed_present_
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn equal_foreign_seed_is_preserved_until_same_original_object_returns() {
     let (mut f, mut current) = saved(0x5e730);
@@ -163,7 +163,7 @@ fn equal_foreign_seed_is_preserved_until_same_original_object_returns() {
     current.validate_original(&f.layout).unwrap();
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn possible_later_private_data_or_stage_refuses_cleanup_without_repairing_history() {
     for name in ["head.stage", "private-successor.bin"] {
@@ -197,7 +197,7 @@ fn possible_later_private_data_or_stage_refuses_cleanup_without_repairing_histor
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn one_byte_short_metadata_refuses_before_scope_rng_and_keeps_original_node() {
     let (f, mut current) = saved(0x5e750);

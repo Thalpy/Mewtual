@@ -510,7 +510,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
     /// Exercise the actual installed node's ordinary-member source predicate,
     /// not merely the adapter's copy of the cancellation observation.
@@ -606,7 +606,7 @@ pub(in crate::store) use operational::negative::{
     PreparedV2TextSourceObserver, V2TextSourceNegativeObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
 };
 pub(in crate::store) use operational::owner::{V2TextOwnedCurrent, V2TextOwnerRef};
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 use operational::{
     arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
     member_close_drained_during_sign_for_test, member_sign_dispatches_for_test,

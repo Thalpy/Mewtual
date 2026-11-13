@@ -313,7 +313,7 @@ impl CapturedV2TextPromotionScratch {
                 TextControlMacInspectionData::Authenticated => return Err(refused()),
             }
         }
-        work::require_exact_inventory(guard.directory_data().0, &["pin.bin"], false)?;
+        work::require_exact_inventory(guard.directory_data(), &["pin.bin"], false)?;
         let names = [
             "origin",
             "source.seed",
@@ -324,7 +324,7 @@ impl CapturedV2TextPromotionScratch {
             "text.seed.stage.v1",
         ];
         work::require_exact_inventory(
-            &self.plan.target,
+            guard.target_directory_data(),
             &names[..if matches!(self.stage, ScratchStage::Present(_)) {
                 7
             } else {

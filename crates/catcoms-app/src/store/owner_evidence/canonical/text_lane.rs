@@ -345,7 +345,7 @@ redacted_debug!(
 );
 
 /// Negative test observation only; no slot/Runtime/permission escapes this bounded count.
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) fn active_text_lane_count_for_test(store: &ServerStore) -> usize {
     let canonical = store.owner_evidence.canonical.lock().unwrap();
     canonical

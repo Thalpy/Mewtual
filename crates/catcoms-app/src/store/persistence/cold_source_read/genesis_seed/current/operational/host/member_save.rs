@@ -457,7 +457,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             original,
             lost: false,
         });
-        #[cfg(all(test, windows))]
+        #[cfg(all(test, any(windows, target_os = "linux")))]
         before_member_preseal_for_test();
         let fee = match mount.pay(MEMBER_OUTBOX_APPEND_FEE) {
             Ok(fee) => fee,
@@ -565,7 +565,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             drop(source);
             return Err((native, V2MemberSaveRefusal::Unavailable));
         }
-        #[cfg(all(test, windows))]
+        #[cfg(all(test, any(windows, target_os = "linux")))]
         before_native_member_save_edge_for_test();
         // The first mode/source check preceded cell and source acquisition.
         // Repeat its pinned, allocation-free native negatives at this actual
@@ -1104,7 +1104,7 @@ impl V2MemberSaveSource {
     }
 
     /// Ends dropped so far (monotone). Regression DATA only; never a permission.
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(super) fn completed_for_test(&self) -> u64 {
         self.body.completed.load(Ordering::Acquire)
     }
@@ -1153,19 +1153,19 @@ impl Drop for V2MemberSaveSourceEnd {
 // Regression observations only (`current/tests/text_group_guard/host/member_save.rs`). They
 // read DATA through the same derivation phase 1 uses and grant nothing. This is a macro
 // invocation, so keep these as ordinary comments rather than unattached rustdoc.
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 thread_local! {
     static BEFORE_MEMBER_PRESEAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_NATIVE_MEMBER_SAVE_EDGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 fn before_native_member_save_edge_for_test() {
     let hook = BEFORE_NATIVE_MEMBER_SAVE_EDGE.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
     }
 }
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 fn before_member_preseal_for_test() {
     let hook = BEFORE_MEMBER_PRESEAL.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
@@ -1173,7 +1173,7 @@ fn before_member_preseal_for_test() {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 impl<T, R> PreparedV2TextHost<T, R> {
     pub(in crate::store) fn with_native_member_save_edge_for_test<Output>(
         hook: Box<dyn FnOnce()>,
