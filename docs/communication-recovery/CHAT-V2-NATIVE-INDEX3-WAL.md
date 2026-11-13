@@ -97,6 +97,9 @@ admission sides, post-effect poisoning, debt exclusion, cleanup covering barrier
 and equal-byte object replacement. All eight owning cases pass before the final
 barrier-observation strengthening. The actual cfd837a7 predecessor passed all
 9×3 probes (14.18s), and this head verified all9 round trips (10.18s). The complete
-79-case lifecycle regression run is in progress. All3,441 frontend tests, Svelte
-checking and the production build pass. Full Root/native, strict lint and
-dependency gates remain required. This does not close Chat V2 acceptance.
+79-case lifecycle regression run passes (357.93s). After narrowing three internal
+items to their actual Lifecycle callers, all8 affected cases pass again (76.47s).
+All3,441 frontend tests, Svelte checking and the production build pass. Strict
+Clippy remains red with600 errors, including unconnected integration code; the
+dependency audit still reports13 vulnerabilities. No gates are waived. Full
+Root/native validation remains open. This does not close Chat V2 acceptance.

@@ -17,8 +17,12 @@ regression is fixed, and those5 now pass (61.67s); the3 classifier cases also
 pass (11.42s). Review additionally found a late marker/catalog object proof gap;
 the check, replacement regressions and cleanup cuts now pass in8 cases (82.36s).
 The actual pinned cfd837a7 predecessor now passes9×3 probes (14.18s), and the
-head verifies all9 round trips (10.18s). The coherent79-case lifecycle run is
-in progress, including the later barrier-observation strengthening. The actual
+head verifies all9 round trips (10.18s). The coherent79-case lifecycle run passes
+(357.93s), including the later barrier-observation strengthening. Three internal
+items were then narrowed back to Lifecycle visibility, fixing4 new private-type
+lint errors; all8 affected cases pass again (76.47s). Strict Clippy still fails
+600 errors and the actual audit still reports13 vulnerabilities, with
+bans/licenses/sources passing. No suppression or new exemption was added. The actual
 compiled registry cohort contains188 ordinary cases plus2 explicit ignored
 compatibility cases; its CI count guard is updated. All3,441 frontend tests,
 Svelte checking and the production build pass. Static adversarial re-review,

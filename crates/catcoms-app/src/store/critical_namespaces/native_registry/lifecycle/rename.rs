@@ -21,7 +21,7 @@ pub(in crate::store::critical_namespaces::native_registry) struct Metadata {
     pub(in crate::store::critical_namespaces::native_registry) identity: [u8; 32],
     pub(in crate::store::critical_namespaces::native_registry) revision: u64,
 }
-pub(in crate::store::critical_namespaces::native_registry) enum Plan {
+pub(super) enum Plan {
     NoChange(Metadata),
     Change {
         selected: Box<Index>,
@@ -33,7 +33,7 @@ pub(in crate::store::critical_namespaces::native_registry) enum Plan {
 /// Called only inside one paid retained-cell operation. These owned decoded
 /// indexes must never escape as independently reusable unpaid preparations.
 /// `parent` is DATA; the actual writer still proves the original held frame.
-pub(in crate::store::critical_namespaces::native_registry) fn prepare(
+pub(super) fn prepare(
     selected: Index,
     request: &Request,
     parent: [u8; 32],

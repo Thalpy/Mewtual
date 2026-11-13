@@ -140,7 +140,7 @@ pub(super) fn classify(
 /// Issue warm IO proof only for the actual selected3 parent and the SAME
 /// sealed canonical candidate. Caller keeps all preparation inside its paid
 /// cell; neither the candidate nor a remembered hash authorizes physical IO.
-pub(in crate::store::critical_namespaces::native_registry) fn verify_warm_rename(
+pub(super) fn verify_warm_rename(
     store: &ServerStore,
     inventory: &UpgradeInventory,
     candidate: &Index,
