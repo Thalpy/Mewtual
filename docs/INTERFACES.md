@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Sync's `begin_owner_v2_founder_signing` and
+`prepare_owner_v2_founder_retained(&mut RetainedFounderSigning)` retain separate
+purpose/full-key/canonical-byte primitive results on the same original source.
+Root owns that signer and its separate invoice in SourcePhase::Signing until a
+complete FrozenFounder replaces it. The stateless API remains compatible; neither
+API is native authorization. Future NativeRequired must use distinct concrete
+Profile/Header cuts rather than either combined library method.
+
 `NativeRegistryPolicy`, `NativeRegistryInstallation::{prepare,retry,into_native_registry}`
 and `NativeRegistryStore::{open,row_count_data}` implement the private physical
 namespace7 transaction described in the [installation contract](communication-recovery/CHAT-V2-NATIVE-REGISTRY-INSTALLATION.md).

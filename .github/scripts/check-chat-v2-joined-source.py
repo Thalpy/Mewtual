@@ -20,6 +20,10 @@ COHORTS = (
     ("owner-operations", "catcoms-sync", "owner_evidence::initial_tail::operation::tests", 11),
     ("owner-tenure", "catcoms-sync", "owner_tenure::tests", 17),
     ("founder-member", "catcoms-sync", "owner_v2::member::tests", 6),
+    # Exercise the real retained producer and its Root owner separately. Counts
+    # must not vanish behind a selector typo or a platform-only fixture.
+    ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 6),
+    ("retained-bootstrap-owner", "catcoms-app", "retained_bootstrap", 3),
     ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),
     ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),

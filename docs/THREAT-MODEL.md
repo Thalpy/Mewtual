@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+The retained Root bootstrap producer records each Profile/Header key entry before
+the primitive and caches returned raw immediately. Unknown entered results are
+terminal; invalid cached signatures or foreign original node/scope bindings cannot
+trigger another key call. Consuming-freeze errors retain that cache without
+reviving a retired source. This removes retry re-signing for one retained original;
+it supplies no native/UI permission. NativeRequired and its concrete per-purpose
+key cuts are still required before activation.
+[Guarantee and limits](communication-recovery/CHAT-V2-RETAINED-BOOTSTRAP-SIGNING.md).
+
 Private namespace7 initial installation now has an independent paid physical
 handler. Ordinary openers remain fenced before older cleanup; the private existing-
 vault route checks the authenticated format before any repair. Continuous actual

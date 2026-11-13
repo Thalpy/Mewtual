@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
 mod snapshot_tests;
-fn found(seed: u64) -> Node {
+pub(super) fn found(seed: u64) -> Node {
     ChannelSync::found(
         Hub::new().join(PeerId::from_u64(seed)),
         MlsDevice::generate().unwrap(),
@@ -164,7 +164,7 @@ fn taken_original_token_actual_add_wrong_signer_and_retained_work_refuse_old_sou
     );
 }
 
-struct Reservation {
+pub(super) struct Reservation {
     group: Vec<u8>,
     signer: [u8; 32],
     identity: Arc<()>,
@@ -201,7 +201,7 @@ impl local_chat_scope::ManagedChatScopeReservation for Reservation {
         Arc::new(Revoker(Arc::downgrade(&self.owner)))
     }
 }
-fn reserve(node: &mut Node) -> Reservation {
+pub(super) fn reserve(node: &mut Node) -> Reservation {
     let reservation = Reservation {
         group: node.group_id(),
         signer: node.my_public_key().try_into().unwrap(),
