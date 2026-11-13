@@ -9,6 +9,14 @@ The descriptor commits through the complete canonical version1 descriptor to the
 validated full Current3 descriptor. Namespace6 remains reserved for joined pins.
 Version1 APIs and grammars remain closed.
 
+JOIN rewrites retain the actual admitted native entry version together with its
+exact descriptor. Previously the shared writer hardcoded entry version1 around
+descriptor2, so an index2 JOIN candidate failed its own configured parser before
+any stage write. The parser retains this version only after closed descriptor
+validation; the writer rejects missing/unknown pairs before output. Genuine
+save, pause/resume, execution migration/arming and cold reopen are the relevant
+acceptance path. This correction does not enable a version3 physical handler.
+
 `NativeIndexUpgrade` consumes a genuine opaque `NativeRegistryStore`. The only
 supported upgrade input is a settled, Legacy-only generation1 index with no JOIN
 rows. It preserves every legacy numeric ID, stable identity, name, invite and DM
