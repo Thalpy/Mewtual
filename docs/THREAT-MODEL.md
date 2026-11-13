@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native index upgrade rename flags record visible progress, not durable directory
+coverage. A warm retry or cold mixed tuple must re-flush the exact selected index
+and marker handles and their original directory before any nonempty catalog Stage
+write. Otherwise a crash after catalog selection could expose a catalog whose
+marker rename was never covered. Actual marker-rename fault regressions pin this
+ordering for both retry paths; final post-selection barriers remain necessary.
+This correction adds no new format, cleanup authority or native/SDK permission.
+
 QUIC handshake/packet parsing occurs before MLS/member checks, so inactive Chat
 V2 cannot mitigate those lower-stack vulnerabilities. The compatible patch set
 updates actual locked libp2p-quic/quinn-proto/quinn-udp versions, preserves
