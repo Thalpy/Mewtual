@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+Private selected3 storage now separates affine admission from one bounded finite
+physical-work capsule. Count/Rename still serialize through the original cell;
+closing the facade cannot free physical custody before its worker/debt drains.
+Capture borrows the actual mount's revocation atomic without constructing an
+observer. This is under validation, with no native/SDK activation.
+[Custody and limits](communication-recovery/CHAT-V2-NATIVE-INDEX3-PHYSICAL-WORK.md).
+
 Index3's private owning storage upgrade and strict cold opener are under
 validation. They consume the original opaque index2 mount, independently fund
 the overlap, hold both catalog claims through physical selection and handler

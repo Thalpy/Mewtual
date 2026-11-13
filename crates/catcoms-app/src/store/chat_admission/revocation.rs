@@ -6,6 +6,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tokio::sync::{watch, Notify};
 
+#[cfg(test)]
+thread_local! {
+    static OBSERVER_CONSTRUCTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(super) fn take_observer_constructions() -> u64 {
+    OBSERVER_CONSTRUCTIONS.with(|count| count.replace(0))
+}
+
 pub(super) struct Owner {
     identity: Arc<()>,
     revoked: AtomicBool,
@@ -52,6 +61,8 @@ impl Owner {
         self: &Arc<Self>,
         custody: Option<SharedRequestKeepalive>,
     ) -> RequestCancellation {
+        #[cfg(test)]
+        OBSERVER_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         // Both chains retain the SAME payment: a lower layer may replace effect authority
         // while preserving the native receiver/keepalive; either original tail remains paid.
         RequestCancellation::new(self.signal.subscribe(), custody.clone())
