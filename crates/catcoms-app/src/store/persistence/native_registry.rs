@@ -5,6 +5,7 @@ use super::*;
 use crate::store::critical_namespaces::{self as critical, native_registry::preparation as native};
 use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
 use critical::read_pool::CatalogReadReservation;
+pub(in crate::store) mod lifecycle;
 pub(in crate::store) mod operational;
 
 fn denied() -> AppError {
@@ -42,6 +43,7 @@ pub(in crate::store) fn refuse_unsupported_storage(dir: &Path) -> Result<(), App
     }
     absent(&dir.join(native::SEED_NAME))?;
     absent(&dir.join(operational::UPGRADE_SEED_NAME))?;
+    absent(&dir.join(lifecycle::UPGRADE_SEED_NAME))?;
     let root = dir.join(critical::ARCHIVE_BOOTSTRAP_ROOT);
     for name in [
         native::MARKER_NAME,
@@ -49,6 +51,8 @@ pub(in crate::store) fn refuse_unsupported_storage(dir: &Path) -> Result<(), App
         native::INDEX_STAGE_NAME,
         operational::UPGRADE_INDEX_NAME,
         operational::UPGRADE_MARKER_NAME,
+        lifecycle::UPGRADE_INDEX_NAME,
+        lifecycle::UPGRADE_MARKER_NAME,
     ] {
         absent(&root.join(name))?;
     }

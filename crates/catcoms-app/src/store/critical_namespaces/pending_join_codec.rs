@@ -272,6 +272,24 @@ pub(super) fn parse_operational_native_registry_layout<'a>(
     )
 }
 
+/// Explicit version3 DATA grammar for the owning lifecycle upgrade. Existing
+/// version1/2 handlers never select it; a descriptor cannot install a handler.
+/// Historical JOIN rows remain part of the catalog, including paused rows.
+pub(super) fn parse_lifecycle_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::CURRENT_LAYOUT
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(Some(3)),
+    )
+}
+
 /// Only the concrete Current-layout physical inspector may select this grammar. The default,
 /// Pending and ID2-only inspectors still reject namespace3 in EITHER fixed source before old
 /// cleanup. No parsed label or external flag can install this actual constructor policy.
@@ -515,6 +533,14 @@ fn parse_known<'a>(
             }
             7 if layout.native_registry == Some(2) && entry.version == 2 => {
                 super::native_registry::operational::validate_descriptor_data(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    current_payload.ok_or_else(refused)?,
+                )?;
+                native_registry_payload = Some(entry.payload);
+            }
+            7 if layout.native_registry == Some(3) && entry.version == 3 => {
+                super::native_registry::lifecycle::validate_descriptor_data(
                     entry.payload,
                     current_layout.ok_or_else(refused)?,
                     current_payload.ok_or_else(refused)?,

@@ -33,7 +33,8 @@ COHORTS = (
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
     ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 11 if sys.platform in ("win32", "linux") else 4),
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 109),
+    # Includes lifecycle3 DATA/non-writing preparation; no physical3 opener.
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 145),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
     ("native-registry-join-lifecycle", "catcoms-app", "native_registry_actual_join_lifecycle", 1),

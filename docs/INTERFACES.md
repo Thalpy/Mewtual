@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Private `native_registry::lifecycle` contains version3 DATA and non-writing
+owning output preparation. The consuming source preserves the original index2
+allocation and independently funds complete old/new overlap. It authenticates
+the held tuple and repeats exact identities after sealing; no public extractor,
+claim or writer exists. The catalog successor retains complete JOIN payloads.
+Prepared-owner destruction closes the original gate before actual files/buffers.
+Its decoder and
+one-row successor checks confer no physical or runtime authority. Owned version2
+conversion moves exact receipts, network ciphertext and highwater; a real upgrader
+must still authenticate the original held frame and prove all physical barriers.
+Actual/reserved lengths protect already-admitted activation/terminal capacity.
+No public index snapshot setter, Store loan, native issuer or version3 opener is
+provided. [Contract and remaining work](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
 Warm saved-source SDK reopen has a distinct `NativeChatWarmSdkReopenCut` and
 single-operation `NativeChatSdkRestoreEnds`. The private Root path requires
 evidence borrowed from the real completed warm handoff and its exact paid read;

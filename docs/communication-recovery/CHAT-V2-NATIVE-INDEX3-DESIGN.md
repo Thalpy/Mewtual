@@ -1,4 +1,4 @@
-# Native index3 lifecycle design (not implemented or enabled)
+# Native index3 lifecycle design (non-writing preparation; no opener)
 
 Text Chat V2 remains disabled. The reviewed index2 storage component is deliberately
 Founder-only. It does not provide joined provenance, Legacy retirement, rename or
@@ -6,6 +6,28 @@ invite refresh. A mounted physical vault can contain imported Legacy rows as wel
 as native rows; neither the old flat registry nor the physical vault tag may select
 a row's backend. The new unscoped mapped Legacy lease intentionally refuses a
 TextV2 vault. A scoped original-row path is required for mixed operation.
+
+The private version3 descriptor, row model, semantic successor checks and byte
+codec now have independently paid preparation from a genuine consumed index2
+owner. It captures/authenticates the original held tuple, derives the migration
+origin from that frame, and retains sealed successor/intent bytes without writing.
+It does not register a physical handler, select
+files, issue membership/source/native credentials or authorize an SDK. The owning
+upgrade, physical WAL, scoped Legacy bridge and real predecessor gates below are
+still required before use. Internal version2 DATA visibility is widened only
+within native_registry for the exact owned conversion; its parser, grammar and
+public Copy-only physical projections remain unchanged.
+
+Preparation uses atomic Arc uniqueness and an unpoisoned settled cell, preserves
+the whole original owner on refusal, and refuses weak worker tails and outgoing
+buffer debt. Its separate invoice includes both schema/frame bounds, complete
+intent, AEAD/encoding copies, decoded rows and checked control metadata. Final
+reproof checks actual Current/catalog summary, no Pending, the original gate and
+exact held objects. No claim is issued: the later writer must repeat these
+conditions under the original catalog mutex and retain the old2 gate claim.
+Prepared-owner destruction closes that gate first; actual file/buffer fields
+precede the old mount/payment and final new reservation. New3 scratch names are
+closed fixed roles; all readers without3 recovery preserve/refuse their presence.
 
 ## Explicit format boundary
 
@@ -18,6 +40,14 @@ lifecycle. Imported Legacy origin has no invented invocation receipt. New Founde
 Joined and compatibility Legacy admissions need distinct immutable request kinds
 and real owning producers. Every new numeric ID advances a retained highwater;
 terminal rows and creation receipts remain in the ledger.
+
+Generation1 is exactly the version2 migration shape: metadata revision0 and only
+imported Legacy or Founder pending/active/retired/abandoned states. A predecessor
+which was itself generation1 is additionally Legacy-only with exact highwater.
+Joined facts are explicitly initial installed source/own-Add facts, never current
+live membership. Founder abandonment keeps its real creation-journal meanings;
+Joined/LegacyJoin need separate actual terminal-journal contracts before their
+abandonment may be added to an enabled format.
 
 Joined bindings must name the genuine durable joined pin (namespace6), group,
 full signer, source/Profile/root and selected Current basis. Its Pending receipt
@@ -87,6 +117,41 @@ all actual upgrade/WAL/barrier/rename/cancellation cuts, no-effect refusal versu
 uncertain admission, retained buffers and exact restart recovery. The1024-row
 bound includes retained terminal receipts; receipt compaction and general history
 pruning remain separate work.
+
+## Mandatory completion capacity
+
+Round-trip fit is insufficient: an admitted row must retain room for activation
+and its terminal record. The version3 byte bound includes the original4MiB,
+45 migration-header bytes,9 bytes per predecessor row for metadata/imported origin,
+36 first-parent bytes and468 bytes per predecessor row for worst mandatory growth.
+The latter is max Founder binding476 plus terminal36 minus minimum framed network44;
+it dominates imported Legacy and already-active retirement growth.
+
+Admission computes both actual and reserved lengths. The reserved header always
+includes a parent. Pending Founder/Joined reserve their maximum final binding and
+terminal, while Pending LegacyJoin reserves its own maximum admitted invite and
+terminal. Active rows reserve their exact current payload plus terminal. A new
+birth or optional metadata expansion cannot consume this existing completion
+debt. Active-to-retired preserves reserved length. IO/disk availability remains a
+separate concern, with retained exact retries; format exhaustion must not strand
+a previously admitted operation.
+
+Non-writing preparation now independently funds both schemas, complete intent,
+frame/AEAD/row/control overlap and a logical persistent ceiling. Actual writing
+roles and recovery still need their own inventory/barrier enforcement. DATA conversion regressions use
+the real version2 byte codec at its exact limit; they are not physical upgrade or
+SDK/native acceptance evidence.
+
+Intent decoding is a pure precursor to that physical recovery. It takes the
+original reader's expected Current rather than trusting an embedded catalog,
+validates six borrowed roles before allocating an Output, and checks the exact
+catalog successor and canonical full converted index using the original framed
+index hash. Both markers must match the same context. Held raw intent, opened
+plaintext and temporary AEAD/returned seed copies fit the separate4-seed term;
+semantic frame/row temporaries drain before output-role copies are allocated.
+Indeterminate pre-AEAD input, actual AEAD failure and authenticated invalid/future
+content are distinct outcomes. None alone permits cleanup; short self-created
+claims need their own continuously held physical first-torn proof.
 
 Native UI authorization, cold restore and locked protocol activity require distinct
 entry authority. UI-only cuts cannot restore before UI authorization is published;

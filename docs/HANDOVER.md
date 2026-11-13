@@ -1,5 +1,74 @@
 # Mewtual; Handover
 
+## Index3 owning preparation (13 November; writing/recovery still open)
+
+The private upgrade source consumes the genuine opaque index2 owner. Atomic
+Arc uniqueness rejects both active workers and weak tails; an unpoisoned idle
+cell and open original gate are required. Refusal returns the identical whole
+owner and payment, without resetting completed history or retirement markers.
+
+Non-writing preparation reserves a separate complete old/new-schema invoice
+before reads, AEAD or candidates. It holds the original catalog/index/marker,
+authenticates the actual2 tuple, derives migration origin from its held frame,
+and retains complete encrypted3 output/intent. The catalog builder changes only
+ID7 and preserves all other payloads, including active/paused/spent JOIN history.
+After sealing, it repeats original file identity, Current, catalog-summary,
+Pending absence and original-gate checks. A byte-identical replacement is refused.
+Whole prepared-owner drop closes the old gate before actual files/buffers, then
+retires the old mount/invoice and finally the new reservation. Older configured
+readers preserve/refuse every new3 scratch role, even empty files/directories.
+
+Local execution passes all145 surrounding registry cases, including the two
+final ownership/retirement/equal-replacement regressions. A subsequent private
+intent decoder validates borrowed roles before copying, checks the exact full
+conversion against an external mounted Current expectation, and distinguishes
+pre-authentication indeterminate input, actual AEAD failure and authenticated
+invalid/future content. Its regression matrix adds typed short/cap boundaries,
+every raw/authenticated truncation and AEAD-valid semantic substitutions. All36
+focused lifecycle cases pass after correcting the reviewed error-type conversion;
+the145-case result predates this decoder delta.
+Read-only design/diff/re-review is clear after fixing sibling visibility and
+adding real buffer-retirement/equal-replacement controls. No claim, file write,
+version3 handler/opener, cold recovery, SDK or native admission is supplied yet.
+Real JOIN-producing physical handoff and pinned predecessor-binary acceptance
+remain required. Chat V2 stays disabled; complete exact-head suites, strict
+Clippy and dependency sign-off remain pending.
+
+## Index3 lifecycle DATA (13 November; physical upgrade not implemented)
+
+`chat-v2-native-index3-lifecycle`, based on PR101/bdf1a462, adds a private version3
+descriptor/model/codec and exact owned version2 DATA conversion. No opener or
+physical writer supports3 yet. Existing1/2 parsers and public Copy projections
+retain their contracts; only internal DATA visibility is expanded for conversion.
+
+The model preserves original receipts/highwater, imported Legacy provenance and
+immutable group/DM classification. Rename and Legacy invite refresh are separate
+revision-checked operations. Terminal records preserve bindings and receipts and
+cannot resurrect. Generation1 permits only genuine predecessor shapes, with
+the predecessor's own G1 restrictions retained. Joined fields are initial facts;
+actual namespace6/own-Add/live replay proofs are still required. Founder journal
+abandonment reasons cannot be reinterpreted for Joined or LegacyJoin attempts.
+
+Admission reserves future parent, activation and terminal bytes, independently
+of actual current size. A valid full4MiB version2 table converts with enough
+space to complete its old rows. New birth/optional metadata cannot spend those
+promised completion bytes. See [the design and scope](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
+Local execution passes all133 surrounding native-registry cases. After final
+test-only assertion improvements, all24 new lifecycle cases pass again. They
+exercise the actual version2 canonical codec at its exact size limit, short-name
+rename/all64 Legacy retirements, minimum-frame Founder activation/retirement,
+exact moved ciphertext, every conversion field and terminal reason, full3 table
+reservation refusal and strict malformed/cross-context inputs. Read-only design,
+diff and re-review have no B/H/M/LOW remaining after migration-shape and completion-
+capacity fixes. These are DATA tests, not physical3/native/SDK acceptance.
+
+Next: actual old-gate claim admission, dedicated writing roles, version3 handler,
+crash recovery and real predecessor refusal gates. Non-writing ownership,
+fixed input roles/invoice and catalog/JOIN-byte preservation are implemented above.
+The checked native producer, mixed Legacy operation, cold restore, joined source,
+transport and UI/admin acceptance remain open. Chat V2 remains disabled.
+
 ## Warm native saved-source SDK admission (13 November; factory still open)
 
 The real warm handoff now binds its retained creator's native origin. A distinct

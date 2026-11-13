@@ -1,5 +1,32 @@
 # Threat model; client integrity & enforcement boundaries
 
+The non-writing index2-to3 preparation requires atomic strong-and-weak physical
+uniqueness, unpoisoned settled cell custody and the original gate. It independently
+pays before reading or sealing, authenticates the held tuple, and repeats exact
+object identities plus Current/catalog/Pending/gate negatives after sealing.
+No stored readiness snapshot authorizes later admission. Refusal preserves the
+original owner; whole prepared-owner destruction closes first, drains actual
+files/buffers, then the old owner/invoice and new reservation. New3 scratch roles
+are preserved/refused by readers without3 recovery. Writing still needs an old2
+gate claim under the original catalog mutex, covering barriers, exact recovery
+and a concrete3 handler. These missing consumers cannot be inferred from DATA.
+The private intent decoder takes the independently observed expected Current;
+it cannot infer trust from its own catalog. It validates borrowed bounded roles
+before cloning output, rebuilds the exact catalog and full canonical converted
+index, and checks both markers. Pre-authentication indeterminate size/framing
+errors and authenticated empty/future/inconsistent records remain preserved;
+only actual AEAD failure is classified unauthenticated. No decoder error grants
+cleanup. A short self-created claim needs a separate held physical proof.
+
+Index3 DATA cannot authorize a joined member or manufacture a migration. G1
+accepts only predecessor shapes/revision0; a real owning upgrade must additionally
+prove exact old-to-new bytes and held destinations. Imported Legacy receives no
+invented birth receipt. Terminal/native initial bindings and group/DM class stay
+immutable. Birth/metadata admission reserves mandatory future completion space,
+so it cannot strand an earlier operation by consuming its terminal budget.
+The private codec/converter has no physical opener or SDK/native grant; those
+consumers and their persistence/resource proofs remain implementation work.
+
 The warm native SDK reopen path must own the successful original SDK-drained
 handoff, its saved terminal provenance and the same paid source read. A decoded
 SourceSaved/Pending label, copied currentness flag or fresh SDK cut cannot issue
