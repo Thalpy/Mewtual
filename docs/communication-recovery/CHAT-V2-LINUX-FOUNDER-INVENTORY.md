@@ -48,8 +48,10 @@ factory and three bridge-negative cases, plus the two native Host save-ordering
 cases, are enabled on Linux. No large Windows-only query graph or share-mode test
 was relabelled as portable.
 
-Windows compatibility cohorts pass: one actual mount and all ten warm driver
-cases. Linux compilation and execution remain pending. Focused hosted count
+Windows compatibility cohorts pass: one actual mount, all ten warm driver
+cases,41 genesis controls, eight seed-settlement and three covering-scope cases.
+The first Linux compile caught a mismatched test-only export; its platform gate
+is corrected. Linux compilation and execution remain pending. Focused hosted count
 guards require nonempty exact cohorts; complete exact-source Root/native/frontend,
 strict lint and dependency gates remain required. Read-only design/diff review
 found no production blocker/high/medium; the Stat invoice LOW was corrected.

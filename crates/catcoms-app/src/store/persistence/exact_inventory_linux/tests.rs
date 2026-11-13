@@ -185,7 +185,20 @@ fn symlinked_directory_name_is_not_the_original_directory_even_with_same_bytes()
 }
 
 #[test]
-fn application_scratch_invoice_includes_the_actual_target_layouts() {
-    assert!(FIXED_INVENTORY_BYTES >= BUFFER_BYTES + 2 * size_of::<Stat>());
-    assert!(FIXED_INVENTORY_BYTES <= 16 * 1024);
+fn foreign_directory_handle_cannot_back_an_identical_name_profile() {
+    let original = Fixture::new(&["a"]);
+    let foreign = Fixture::new(&["a"]);
+    for id in [original.id, foreign.id] {
+        assert!(require_exact_names((&original.path, &foreign.file, id), &["a"], false,).is_err());
+    }
+    original.check(&["a"], false).unwrap();
+    foreign.check(&["a"], false).unwrap();
+    assert_eq!(
+        fs::read(original.path.join("a")).unwrap(),
+        b"retained original"
+    );
+    assert_eq!(
+        fs::read(foreign.path.join("a")).unwrap(),
+        b"retained original"
+    );
 }

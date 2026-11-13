@@ -606,7 +606,7 @@ pub(in crate::store) use operational::negative::{
     PreparedV2TextSourceObserver, V2TextSourceNegativeObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
 };
 pub(in crate::store) use operational::owner::{V2TextOwnedCurrent, V2TextOwnerRef};
-#[cfg(all(test, any(windows, target_os = "linux")))]
+#[cfg(all(test, windows))]
 use operational::{
     arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
     member_close_drained_during_sign_for_test, member_sign_dispatches_for_test,
