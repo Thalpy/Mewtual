@@ -63,13 +63,14 @@ async fn browser_endpoint(
     index: usize,
     paused: bool,
 ) -> Result<Endpoint, Failure> {
-    browser_endpoint_mode(scenario, index, paused, false).await
+    browser_endpoint_mode(scenario, index, paused, false, false).await
 }
 async fn browser_endpoint_mode(
     scenario: &Scenario,
     index: usize,
     paused: bool,
     deferred: bool,
+    initial_auto_consumer: bool,
 ) -> Result<Endpoint, Failure> {
     let state = scenario.online(index).state.clone();
     let owner = catch_fixture(async {
@@ -88,7 +89,9 @@ async fn browser_endpoint_mode(
     })
     .await?;
     match catch_fixture(async {
-        if deferred {
+        if initial_auto_consumer {
+            Endpoint::prepare_initial_automatic(state, owner).await
+        } else if deferred {
             Endpoint::prepare_deferred_discovery(state, owner).await
         } else if paused {
             Endpoint::prepare_paused(state, owner).await
@@ -119,8 +122,20 @@ async fn native_webcrypto_cycle(
     // B owns no controller, endpoint key, call owner or crypto broker. Actual TCP policy
     // forbids A-C; only the original member helper path can deliver the signed envelopes.
     let endpoints = tokio::join!(
-        browser_endpoint(&scenario, 1, false),
-        browser_endpoint(&scenario, 2, false)
+        browser_endpoint_mode(
+            &scenario,
+            1,
+            false,
+            false,
+            automatic_browser && !end_before_input
+        ),
+        browser_endpoint_mode(
+            &scenario,
+            2,
+            false,
+            false,
+            automatic_browser && !end_before_input
+        )
     );
     let (mut a, mut c) = match endpoints {
         (Ok(a), Ok(c)) => (a, c),
@@ -140,6 +155,12 @@ async fn native_webcrypto_cycle(
         let ag = a_selected.grant().unwrap();
         let cg = c_selected.grant().unwrap();
         let discovered = both_fresh(&scenario, &a_selected, &c_selected, &ag, &cg, None, 0).await;
+        a.observe_discovered_pair(discovered[0].1);
+        c.observe_discovered_pair(discovered[1].1);
+        if automatic_browser && !end_before_input {
+            a.assert_initial_consumer_fenced(discovered[0].1);
+            c.assert_initial_consumer_fenced(discovered[1].1);
+        }
         if end_before_input {
             let (ap, cp) = tokio::join!(
                 a.wait_native_derivation(discovered[0].1),
@@ -373,8 +394,8 @@ async fn coordinated_browser_cycle() {
         enable(&scenario, index).await;
     }
     let endpoints = tokio::join!(
-        Box::pin(browser_endpoint(&scenario, 1, false)),
-        Box::pin(browser_endpoint(&scenario, 2, false))
+        Box::pin(browser_endpoint_mode(&scenario, 1, false, false, true)),
+        Box::pin(browser_endpoint_mode(&scenario, 2, false, false, true))
     );
     let (mut a, mut c) = match endpoints {
         (Ok(a), Ok(c)) => (a, c),
@@ -549,7 +570,15 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
         scenario.reopen(&[3]).await;
         enable(&scenario, 3).await;
         eprintln!("two-peer fixture: newcomer setup");
-        let c = match Box::pin(browser_endpoint_mode(&scenario, 3, true, forced_refusal)).await {
+        let c = match Box::pin(browser_endpoint_mode(
+            &scenario,
+            3,
+            true,
+            forced_refusal,
+            false,
+        ))
+        .await
+        {
             Ok(c) => c,
             Err(error) => std::panic::resume_unwind(error),
         };
