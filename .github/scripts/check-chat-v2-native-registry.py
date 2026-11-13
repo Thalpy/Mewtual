@@ -25,8 +25,16 @@ VERIFIED = re.compile(r"namespace7 predecessor round trip: (\d+) verified")
 
 
 def git(*arguments: str, cwd: Path = REPO) -> str:
-    return subprocess.run(["git", "-C", str(cwd), "-c", f"safe.directory={cwd}", *arguments],
-                          check=True, capture_output=True, text=True).stdout.strip()
+    # The pinned predecessor contains a 228-character relative filename. A normal
+    # Windows RUNNER_TEMP checkout can exceed MAX_PATH; do not rely on the user's
+    # global Git configuration (the local developer machine already enables this).
+    result = subprocess.run(["git", "-C", str(cwd), "-c", f"safe.directory={cwd}",
+                             "-c", "core.longpaths=true", *arguments],
+                            capture_output=True, text=True)
+    if result.returncode:
+        print(result.stderr.strip(), file=sys.stderr, flush=True)
+        result.check_returncode()
+    return result.stdout.strip()
 
 
 def self_test() -> None:
@@ -52,20 +60,19 @@ def run() -> None:
     directory.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
     # Only a fresh owned temporary directory is ever cleaned. No preexisting path is deleted.
-    with tempfile.TemporaryDirectory(prefix="mewtual-native7-", dir=os.environ.get("RUNNER_TEMP")) as temporary:
+    with tempfile.TemporaryDirectory(prefix="n7-", dir=os.environ.get("RUNNER_TEMP")) as temporary:
         owned = Path(temporary).resolve()
         env = dict(os.environ, MEWTUAL_NAMESPACE7_FIXTURES=str(owned / "fixtures"),
                    CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(REPO / "target")))
         try:
             BASE["ignored_head_case"]("native7-fixtures", PREFIX + "generate_native7_fixtures", directory,
                                       env, WRITTEN, ("16",), results)
-            worktree = owned / "predecessor"
+            worktree = owned / "p"
             if not worktree.resolve().is_relative_to(owned):
                 raise RuntimeError("predecessor path escaped owned temporary directory")
-            try:
-                git("cat-file", "-e", f"{PREDECESSOR}^{{commit}}")
-            except subprocess.CalledProcessError:
-                git("fetch", "--no-tags", "--depth=1", "origin", PREDECESSOR)
+            # A commit object alone is not proof that a shallow/partial checkout has its
+            # whole tree. Fetch this exact pinned object closure, never a movable branch.
+            git("fetch", "--no-tags", "--depth=1", "origin", PREDECESSOR)
             git("worktree", "add", "--detach", str(worktree), PREDECESSOR)
             try:
                 if git("rev-parse", "HEAD", cwd=worktree) != PREDECESSOR:
