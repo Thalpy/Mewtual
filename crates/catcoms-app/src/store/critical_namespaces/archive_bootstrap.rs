@@ -137,7 +137,9 @@ pub use founder::{
     ArchiveFounderBegin, ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs,
     ArchiveFounderPlanning, ArchiveFounderPlanningProgress, ArchiveFounderPolicy,
     ArchiveFounderProgress, ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress,
-    ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
+    FreshV2TextFounderBegin, FreshV2TextFounderBinding, FreshV2TextFounderPolicy,
+    PreparedFreshV2TextFounder, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ReturnedArchiveFounderPlanning,
 };
 
 impl ServerStore {

@@ -23,25 +23,52 @@ COHORTS = (
     ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),
     ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
+    ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
+    ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 8 if sys.platform == "win32" else 4),
 )
+
+
+def fresh_founder_cohort(cohorts: tuple) -> list:
+    selected = [cohort for cohort in cohorts if cohort[0].startswith("fresh-founder-")]
+    if selected != [
+        ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
+        ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 8 if sys.platform == "win32" else 4),
+    ]:
+        raise RuntimeError("fresh-founder mode requires both exact nonempty pinned cohorts")
+    return selected
+
+
+def selection_self_test() -> None:
+    selected = fresh_founder_cohort(COHORTS)
+    for invalid in ((), tuple(selected[:1]), tuple(selected * 2),
+                    (selected[0], (selected[1][0], selected[1][1], "missing-selector", selected[1][3])),
+                    (selected[0], (*selected[1][:3], 0))):
+        try:
+            fresh_founder_cohort(invalid)
+        except RuntimeError:
+            continue
+        raise AssertionError("an empty, duplicated or changed fresh cohort was accepted")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--fresh-founder-only", action="store_true",
+                        help="Run only fresh-founder library regressions; not native acceptance.")
     args = parser.parse_args()
     # Reuse the existing bounded process owner and rejection tests. run_path does not
     # execute that script's main or its member/predecessor Cargo commands.
     guard = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-member-save.py"))
     guard["self_test"]()
+    selection_self_test()
     assert len({name for name, *_ in COHORTS}) == len(COHORTS)
     assert all(expected > 0 for *_, expected in COHORTS)
     if args.self_test:
         return
     directory = REPO / "logs/chat-v2-joined-source"
     directory.mkdir(parents=True, exist_ok=True)
-    cohorts = list(COHORTS)
-    if sys.platform == "win32":
+    cohorts = fresh_founder_cohort(COHORTS) if args.fresh_founder_only else list(COHORTS)
+    if sys.platform == "win32" and not args.fresh_founder_only:
         cohorts.append(("negative-retirement-bound", "catcoms-app", "negative_retirement_reserves_the_last_slot", 1))
     for name, crate, selector, expected in cohorts:
         command = [

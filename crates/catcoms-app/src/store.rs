@@ -57,11 +57,13 @@ pub use critical_namespaces::{
     ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
     ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress,
     CanonicalFilenameInventoryPolicy, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
-    CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, JournalledCheckpointJoinPreparation,
-    PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore, PreparedV2CurrentLayoutStore,
-    PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
-    ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
-    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
+    CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, FreshV2TextFounderBegin,
+    FreshV2TextFounderBinding, FreshV2TextFounderPolicy, JournalledCheckpointJoinPreparation,
+    PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore, PreparedFreshV2TextFounder,
+    PreparedV2CurrentLayoutStore, PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation,
+    ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation,
+    V2CurrentLayoutPolicy, V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
+    V2MemberOutboxPolicy,
 };
 mod owner_evidence;
 pub use chat_admission::{

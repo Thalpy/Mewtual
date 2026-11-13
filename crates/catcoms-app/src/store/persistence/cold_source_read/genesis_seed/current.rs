@@ -7,6 +7,9 @@
 //! later remove it under its actual covering barrier; later operational heads remain separate.
 use super::*;
 use crate::store::chat_admission::v2_current::V2CurrentPreparation;
+use crate::store::critical_namespaces::archive_bootstrap::founder::plan::{
+    CompletedWarmFounderOrigin, WarmFounderCurrentReservation,
+};
 use crate::store::critical_namespaces::{
     current_layout::{PreparedV2GenesisGroupNamespace, V2CurrentLayoutStore},
     read_pool::CatalogReadReservation,
@@ -61,6 +64,8 @@ pub struct PreparedV2GenesisCurrent<T, R> {
     graph: Graph<T, R>,
     inputs: Option<RuntimeInputs<T, R>>,
     parts: Option<V2GenesisRuntimeParts<T, R>>,
+    warm_origin: Option<CompletedWarmFounderOrigin>,
+    warm_reservation: Option<WarmFounderCurrentReservation>,
     activation: Option<PreparedV2GenesisActivation>,
     task: Option<PreparedV2GenesisGroupNamespace>,
     scope: Option<V2CurrentPreparation>,
@@ -138,14 +143,41 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
         rng: R,
         clock: Arc<dyn Clock + Send>,
     ) -> Self {
-        Self {
-            graph: Graph::Seed(seed),
-            inputs: Some(RuntimeInputs {
+        Self::with_runtime(
+            seed,
+            Some(RuntimeInputs {
                 transport,
                 rng,
                 clock,
             }),
-            parts: None,
+            None,
+        )
+    }
+
+    /// Only the closed fresh-founder driver supplies original warm runtime
+    /// custody. Checked scope pairing still occurs AFTER actual Current storage.
+    /// This constructor allocates nothing and confers no positive authority.
+    pub(in crate::store) fn from_original_runtime(
+        seed: RetainedBootstrapGenesisSeed,
+        parts: V2GenesisRuntimeParts<T, R>,
+        origin: CompletedWarmFounderOrigin,
+    ) -> Self {
+        let mut prepared = Self::with_runtime(seed, None, Some(parts));
+        prepared.warm_origin = Some(origin);
+        prepared
+    }
+
+    fn with_runtime(
+        seed: RetainedBootstrapGenesisSeed,
+        inputs: Option<RuntimeInputs<T, R>>,
+        parts: Option<V2GenesisRuntimeParts<T, R>>,
+    ) -> Self {
+        Self {
+            graph: Graph::Seed(seed),
+            inputs,
+            parts,
+            warm_origin: None,
+            warm_reservation: None,
             activation: None,
             task: None,
             scope: None,
@@ -206,7 +238,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
             // only the already-authorized latest inventory; all own proofs still follow.
             store.resync_v2_current_scope_inventory(&buffers, rng)?;
             self.advance_storage(layout, store, &buffers, rng)?;
-            self.pair_runtime()?;
+            self.pair_runtime(store)?;
             let source = self.graph.source()?;
             store.resync_v2_genesis_current(
                 self.scope
@@ -308,9 +340,30 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
         })
     }
 
-    fn pair_runtime(&mut self) -> Result<(), AppError> {
+    fn pair_runtime(&mut self, store: &ServerStore) -> Result<(), AppError> {
         if matches!(self.graph, Graph::Node { .. }) {
             return Ok(());
+        }
+        if let Some(origin) = self.warm_origin.as_ref() {
+            // Genuine storage/head/writer proof BEFORE allocating the alias.
+            // Unlike validate_ready this accepts the original still-unbound Seed;
+            // it cannot extract a Node or issue positive operational authority.
+            self.validate_storage_ready(store)?;
+            let scope = self
+                .scope
+                .as_ref()
+                .ok_or_else(critical_namespaces::refused)?;
+            let source = self.graph.source()?;
+            if self.warm_reservation.is_none() {
+                self.warm_reservation = Some(origin.prepare_current(scope, &source)?);
+            }
+            self.warm_reservation
+                .as_ref()
+                .ok_or_else(critical_namespaces::refused)?
+                .validate_current(origin, scope, &source)?;
+            // Allocations/authority observations above can wait. Reprove the
+            // SAME real Current association before entering the SDK attachment.
+            self.validate_storage_ready(store)?;
         }
         let scope = self
             .scope
@@ -321,7 +374,11 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
         };
         // Scope/authority attachment can allocate or wait. It is outside ALL host writers,
         // and the later node-derived full Current proof must follow every such callback.
-        seed.seed.prepare_scope(scope)?;
+        if let Some(warm) = self.warm_reservation.as_ref() {
+            seed.seed.prepare_scope(warm)?;
+        } else {
+            seed.seed.prepare_scope(scope)?;
+        }
         if self.parts.is_none() {
             let inputs = self
                 .inputs
@@ -372,6 +429,15 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
         {
             return Err(critical_namespaces::refused());
         }
+        if self.warm_origin.is_some() && self.warm_reservation.is_none() {
+            return Err(critical_namespaces::refused());
+        }
+        self.validate_storage_ready(store)
+    }
+
+    /// Actual source/head/task/writer proof shared by the warm pre-pair cut and
+    /// the final Node gate. This never relaxes validate_ready's Node requirement.
+    fn validate_storage_ready(&self, store: &ServerStore) -> Result<(), AppError> {
         let scope = self
             .scope
             .as_ref()
@@ -400,6 +466,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
             .ok_or_else(critical_namespaces::refused)?
             .validate(pool, WRAPPER_FEE)?;
         let source = self.graph.source()?;
+        if let (Some(origin), Some(warm)) = (&self.warm_origin, &self.warm_reservation) {
+            warm.validate_current(origin, scope, &source)?;
+        }
         store.validate_v2_genesis_current(
             scope,
             &source,
@@ -438,6 +507,48 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
             seed_settlement: None,
             fee: self.fee.take().expect("validated wrapper account"),
         }))
+    }
+}
+
+#[cfg(all(test, windows))]
+impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
+    /// Exercise the actual installed node's ordinary-member source predicate,
+    /// not merely the adapter's copy of the cancellation observation.
+    pub(in crate::store) fn warm_member_source_for_test(
+        &self,
+    ) -> Result<[u8; 32], catcoms_sync::owner_v2::V2MemberSignRefusal> {
+        match &self.graph {
+            Graph::Node { node, .. } => node.ordinary_member_signer_data(),
+            _ => Err(catcoms_sync::owner_v2::V2MemberSignRefusal::Source),
+        }
+    }
+    /// Read-only negatives from the REAL original/Current bridge; no fixture authority.
+    pub(in crate::store) fn warm_negatives_for_test(
+        &self,
+    ) -> Option<(
+        catcoms_rt::RequestCancellation,
+        catcoms_rt::RequestCancellation,
+        catcoms_rt::RequestCancellation,
+    )> {
+        use catcoms_sync::local_chat_scope::ManagedChatScopeReservation;
+        Some((
+            self.warm_origin.as_ref()?.negative_for_test(),
+            self.scope.as_ref()?.reservation_observer(),
+            self.warm_reservation.as_ref()?.reservation_observer(),
+        ))
+    }
+    pub(in crate::store) fn cancel_warm_current_for_test(&self) {
+        self.scope
+            .as_ref()
+            .expect("genuine Current")
+            .cancel_original();
+    }
+    /// Negative corruption only: it cannot produce a Current or make an owner live.
+    pub(in crate::store) fn corrupt_warm_identity_for_test(&mut self) {
+        self.warm_reservation
+            .as_mut()
+            .expect("genuine bridge")
+            .corrupt_current_identity_for_test();
     }
 }
 
