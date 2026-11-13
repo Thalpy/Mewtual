@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Compatible dependency repairs (13 November; Linux acceptance pending)
+
+The native-registry increment is pushed in draft PR92 at8cd87b32. Its final
+Windows28 focused +18 surrounding storage cases pass; all3438 frontend tests,
+types and build also pass. Current-source Linux/Windows focused and complete
+root/native/frontend CI runs independently; Chat V2 stays disabled. The earlier
+strict workspace check reports531 existing App errors, none in the new native-
+registry files. It is not a completed workspace strict sign-off.
+
+A separate compatible dependency repair raises the DOMPurify/Vite/rustix floors,
+updates named npm transitives within their parent ranges and pairs rustix1.1.6
+with native xattr1.7.0. The ACL detector uses the explicit size-query API without
+changing its conservative outcomes. Real Linux ACL and >4KiB native xattr/list
+regressions are authored, not credited as executed on Windows. Read-only design
+and actual-diff review reports no remaining source findings; scoped lock drift
+was removed and native locked metadata passes.
+
+Windows20 storage cases,98 renderer/wiki/infobox cases, full3438 frontend tests,
+Svelte0/0, build and actual browser flows pass after the dependency updates.
+Native compilation, Linux syscall/large-xattr execution and complete current-
+source Rust validation remain pending. Npm audit improves10 ->3LOW; both Cargo
+audits improve10 ->9 Hickory findings. No new ignore/waiver or clean-audit claim.
+[Exact versions, compatibility boundary and outstanding gates](communication-recovery/COMMUNICATION-DEPENDENCY-REPAIRS.md).
+
 ## Native registry preparation (13 November; local focused tests pass)
 
 The fresh-founder driver in draft PR91 is now green at6308c992 on

@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+The compatible dependency repair preserves the existing sanitizer allow-list
+and string-output mode. The POSIX ACL detector uses rustix's explicit size query
+with the same fail-closed error folding; native tar's xattr dependency is updated
+together to retain large-attribute/list behavior. New Linux regressions require
+actual filesystem evidence. Nine Hickory and three low npm findings remain;
+this is not clean audit or activation evidence.
+[Versions and exact limits](communication-recovery/COMMUNICATION-DEPENDENCY-REPAIRS.md).
+
 The native-registry preparation is a bounded read/seal transaction, not native
 authorization or a physical commit. It owns a newly opened private Current3/member5
 mount, retains exact original file/directory identities and authenticated bytes,
