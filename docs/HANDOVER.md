@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Native index upgrade output barrier (13 November; validation in progress)
+
+Adversarial inspection found that a real marker-rename failure cached the rename
+before its directory barrier. Warm retry and cold mixed-tuple recovery could then
+select catalog2 without covering that output again. The writer now flushes the
+exact selected index/marker handles and held root, verifies the complete intent
+and tuple, and only then writes a nonempty catalog Stage on every preselection
+attempt. Existing post-selection barriers remain unchanged.
+
+Both actual marker-rename regressions failed before the correction and pass
+afterward (2 cases, 6.80s). The cold case goes through the real opener with
+NeverRng. All19 upgrade cases also pass (187.22s), including every warm/cold cut
+and missing-selected-output refusal. Formatting, ambient dependency, exact-count
+self-check and the raw-fs gate pass. Read-only final actual-diff review is clear
+with no remaining findings. Exact-head full CI is pending; neither this fix nor
+the prior green baseline enables Chat V2. Strict Clippy and the thirteen remaining
+dependency advisories are still open. The new index3 writer needs the same rule
+and remains a separate unfinished component.
+
 ## Compatible QUIC patches (13 November; validation in progress)
 
 `chat-v2-quic-security-patches` is based on1ad844c8/PR102. Both application locks

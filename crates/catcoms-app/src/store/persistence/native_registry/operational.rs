@@ -127,6 +127,17 @@ type RenameHook = (RenameTarget, Box<dyn FnOnce()>);
 thread_local! {
     static BEFORE_TARGET_PROOF: std::cell::RefCell<Option<RenameHook>> = const { std::cell::RefCell::new(None) };
     static RENAME_HOOK_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Observe the actual output-root covering path, never an inferred phase
+    // flag or a merely successful file rename. Reset between fault and retry.
+    static OUTPUT_ROOT_COVERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(in crate::store) fn reset_output_root_covers() {
+    OUTPUT_ROOT_COVERS.with(|count| count.set(0));
+}
+#[cfg(test)]
+pub(in crate::store) fn output_root_covers() -> u64 {
+    OUTPUT_ROOT_COVERS.with(std::cell::Cell::get)
 }
 #[cfg(test)]
 pub(in crate::store) fn before_target_proof(target: RenameTarget, hook: Box<dyn FnOnce()>) {
@@ -885,6 +896,36 @@ impl UpgradeIo {
         self.original.require_directories(store)
     }
 
+    /// A recorded rename does not prove its directory barrier completed. Warm
+    /// retry and cold mixed-tuple recovery may both enter with promoted=true
+    /// after the original marker-root sync failed or was never reached.
+    /// Re-cover the SAME exact output handles before writing/selecting catalog2.
+    fn cover_selected_outputs_before_catalog(
+        &self,
+        store: &ServerStore,
+        bytes: &UpgradeBytes<'_>,
+    ) -> Result<(), AppError> {
+        self.require_selected_parts(store, bytes)?;
+        for (name, slot, expected) in [
+            (native::INDEX_NAME, &self.index, bytes.index),
+            (native::MARKER_NAME, &self.marker, bytes.marker),
+        ] {
+            let output = slot.as_ref().ok_or_else(denied)?;
+            exact(&path(store, true, name)?, output, expected)?;
+            output.file.sync_all().map_err(io)?;
+        }
+        self.original.root.file.sync_all().map_err(io)?;
+        exact(
+            &path(store, false, UPGRADE_SEED_NAME)?,
+            self.seed.as_ref().ok_or_else(denied)?,
+            bytes.seed,
+        )?;
+        self.require_selected_parts(store, bytes)?;
+        #[cfg(test)]
+        OUTPUT_ROOT_COVERS.with(|count| count.set(count.get() + 1));
+        Ok(())
+    }
+
     pub(in crate::store) fn advance_upgrade(
         &mut self,
         store: &ServerStore,
@@ -964,6 +1005,7 @@ impl UpgradeIo {
                 trip(Fault::UpgradeMarkerRename)?;
                 self.original.root.file.sync_all().map_err(io)?;
             }
+            self.cover_selected_outputs_before_catalog(store, bytes)?;
             complete_with_cut(
                 &stage,
                 &mut self.catalog,
