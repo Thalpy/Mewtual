@@ -1,5 +1,10 @@
 # Threat model; client integrity & enforcement boundaries
 
+A native source may now close key admission with SC atomics before acquiring
+row/operation locks. Outside-guard retirement must still notify idle observers
+when admission was already fenced. End counts preserve admitted work, and closing
+one source does not revoke another. This is not a durable Leave or worker drain.
+
 The mount-wide native index cell prevents a lost reply or IO refusal from
 discarding its original claimed ciphertext. Every retained/disk Pending retry
 compares the full frozen input, including the generated signer and network frame.

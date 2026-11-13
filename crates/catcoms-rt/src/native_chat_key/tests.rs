@@ -193,7 +193,7 @@ fn native_chat_key_final_checks_refuse_each_close_after_both_counter_entries() {
         assert_eq!(ui_counter.state.load(Ordering::SeqCst) & !CLOSED, 1);
         // Refusal retains BOTH increments outside the simulated primitive frame.
         // Removing the final checks would return Ok above for every action.
-        ui_counter.close();
+        ui_counter.close_and_notify();
         let drain = NativeChatKeyDrain {
             original: ui_counter,
         };
@@ -682,13 +682,106 @@ fn native_chat_key_preissued_drain_waits_for_close_and_wakes_on_idle_retirement(
     assert_eq!(
         wakes.0.load(Ordering::SeqCst),
         1,
-        "first idle close wakes; Drop's repeated close does not"
+        "the preissued waiter wakes once across retirement and repeated Drop"
     );
     assert!(other.is_drained() && retired.is_drained());
     assert!(wait
         .as_mut()
         .poll(&mut Context::from_waker(&waker))
         .is_ready());
+}
+
+#[test]
+fn native_chat_key_source_sc_close_defers_idle_wake_until_outside_guard_retirement() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let source = fixture.source(&ui);
+    let mut cut = source
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::MemberAction)
+        .unwrap();
+    let observation = source.observe();
+    let drain = source.observe_retirement();
+    let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wakes.clone());
+    let mut wait = Box::pin(drain.wait());
+    assert!(wait
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+    let guard = std::sync::Mutex::new(());
+    {
+        let _held = guard.lock().unwrap();
+        source.close();
+        source.close(); // Repeated pre-fencing is still only atomics.
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        assert!(cut.is_cancelled());
+        assert_eq!(
+            cut.enter(
+                &observation,
+                NativeChatKeyPurpose::MemberAction,
+                &mut NativeChatKeyEnds::new()
+            ),
+            Err(NativeChatKeyRefusal::Unavailable)
+        );
+    }
+    let retired = source.retire();
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert!(retired.is_drained());
+    assert!(wait
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_ready());
+}
+
+#[test]
+fn native_chat_key_source_sc_close_keeps_admitted_ends_and_other_sources_independent() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let first = fixture.source(&ui);
+    let other = fixture.source(&ui);
+    let mut first_cut = first
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::MemberAction)
+        .unwrap();
+    let mut other_cut = other
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::MemberAction)
+        .unwrap();
+    let mut first_ends = NativeChatKeyEnds::new();
+    first_cut
+        .enter(
+            &first.observe(),
+            NativeChatKeyPurpose::MemberAction,
+            &mut first_ends,
+        )
+        .unwrap();
+    let drain = first.observe_retirement();
+    let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wakes.clone());
+    let mut wait = Box::pin(drain.wait());
+    assert!(wait
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+    first.close();
+    let retired = first.retire();
+    assert!(!retired.is_drained());
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+    assert!(!other_cut.is_cancelled());
+    let mut other_ends = NativeChatKeyEnds::new();
+    other_cut
+        .enter(
+            &other.observe(),
+            NativeChatKeyPurpose::MemberAction,
+            &mut other_ends,
+        )
+        .unwrap();
+    drop(first_ends);
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert!(wait
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_ready());
+    assert!(!other_cut.is_cancelled());
+    drop(other_ends);
 }
 
 #[test]

@@ -24,7 +24,7 @@ COHORTS = (
     # must not vanish behind a selector typo or a platform-only fixture.
     ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 10),
     ("retained-bootstrap-owner", "catcoms-app", "retained_bootstrap", 3),
-    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::tests", 18),
+    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::tests", 20),
     ("native-founder-sdk", "catcoms-app", "native_sdk_", 5),
     ("native-network-identity", "catcoms-net", "seeded_transport_identity_data", 3),
     ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),

@@ -1,5 +1,14 @@
 # Mewtual; Handover
 
+## Native source close fence (13 November; consumer still unfinished)
+
+SourceOwner now supports SC-only close before native row/operation locks, with
+preissued negative key-work drains. Retire/Drop notify outside guards, including
+a prefenced idle source; admitted Ends still drain independently. All20 RT cases
+and strict RT Clippy pass; read-only diff review has no B/H/M/LOW. This grants no
+durable Leave, physical/worker/SDK drainage or key-erasure proof. Native owner and
+command integration remain open.
+
 ## Retained native index cell (13 November; producer unfinished)
 
 The physical mount now retains one Pending-only transaction, exact IO/frame and

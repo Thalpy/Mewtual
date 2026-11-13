@@ -89,13 +89,18 @@ impl Counter {
                 }
             })
     }
-    fn close(&self) {
-        let previous = self.state.fetch_or(CLOSED, Ordering::SeqCst);
-        // A negative observer may be installed at issuance, before retirement.
-        // Closing an idle counter must wake it too. Only the first close needs
-        // this notification; admitted work is covered by its final End.
-        // Owners MUST retire/drop outside writers: Wakers can run inline.
-        if previous == 0 {
+    fn close_admission_sc(&self) {
+        self.state.fetch_or(CLOSED, Ordering::SeqCst);
+    }
+    fn close_and_notify(&self) {
+        self.close_admission_sc();
+        // A source may have been fenced under its native registry guard before
+        // reaching this outside-guard retirement. Notify idle observers even
+        // then: testing only the previous==0 transition would lose that wake.
+        // Repeated idle notifications are harmless; registered waiters leave
+        // the list on notification, and later waiters recheck CLOSED+zero.
+        // Nonzero admitted work is covered by its final End.
+        if self.state.load(Ordering::SeqCst) == CLOSED {
             self.drained.notify_waiters();
         }
     }
@@ -278,7 +283,7 @@ impl NativeChatUiSessionOwner {
     /// owner, and wait outside every native UI/registry/Store and Root guard.
     /// Retirement may synchronously wake observers; no timeout is drainage.
     pub fn retire(self) -> NativeChatKeyDrain {
-        self.original.counter.close();
+        self.original.counter.close_and_notify();
         NativeChatKeyDrain {
             original: self.original.counter.clone(),
         }
@@ -286,7 +291,7 @@ impl NativeChatUiSessionOwner {
 }
 impl Drop for NativeChatUiSessionOwner {
     fn drop(&mut self) {
-        self.original.counter.close();
+        self.original.counter.close_and_notify();
     }
 }
 
@@ -337,6 +342,21 @@ impl NativeChatSourceOwner {
             original: Arc::downgrade(&self.original),
         }
     }
+    /// Stop new key entry before taking a native row/operation/Store guard.
+    /// This is SC atomics only: it neither notifies arbitrary Wakers nor drops
+    /// payment/custody. It grants no completed Leave, worker/IO/SDK drainage or
+    /// key-erasure proof. Move/retire the owner outside guards afterward.
+    pub fn close(&self) {
+        self.original.counter.close_admission_sc();
+    }
+    /// Negative key-work observation, preissued with the paid source metadata.
+    /// It is not a source-close capability, metadata retirement or worker drain.
+    /// Actual waiting tasks must be independently bounded by the native owner.
+    pub fn observe_retirement(&self) -> NativeChatKeyDrain {
+        NativeChatKeyDrain {
+            original: self.original.counter.clone(),
+        }
+    }
     /// Prepare before taking Root writers. No counter/key admission occurs here.
     pub fn prepare_cut(
         &self,
@@ -366,7 +386,7 @@ impl NativeChatSourceOwner {
     /// Irreversibly retire this source before waiting on an escaping worker.
     /// Call/Drop outside native/registry/Store/Root guards: closure can run Wakers.
     pub fn retire(self) -> NativeChatKeyDrain {
-        self.original.counter.close();
+        self.original.counter.close_and_notify();
         NativeChatKeyDrain {
             original: self.original.counter.clone(),
         }
@@ -374,7 +394,7 @@ impl NativeChatSourceOwner {
 }
 impl Drop for NativeChatSourceOwner {
     fn drop(&mut self) {
-        self.original.counter.close();
+        self.original.counter.close_and_notify();
     }
 }
 

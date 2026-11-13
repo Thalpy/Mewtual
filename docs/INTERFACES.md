@@ -1,5 +1,10 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`NativeChatSourceOwner::close` is SC-only admission closure. Its preissued
+`observe_retirement` is negative key-work state; consuming retire/Drop notify
+outside guards, even after an idle pre-close. None proves durable Leave, worker
+or SDK/physical teardown.
+
 The opaque native index store now serializes concrete count/lookup projections
 with its retained Pending transaction and outgoing-buffer retirement. No owned
 index, raw Store/Current, generic publisher or SDK grant escapes. Completed
