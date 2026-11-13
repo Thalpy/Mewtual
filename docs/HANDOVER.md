@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Native namespace version during JOIN (13 November; validation in progress)
+
+A real index2/JOIN regression exposed that the shared catalog writer emitted
+descriptor2 under entry version1. Its configured parser refused the candidate
+before IO, blocking the first saved JOIN. The parser now retains the actual
+validated version, and the common writer checks and conserves the complete
+version/payload pair. Closed descriptor acceptance remains unchanged.
+
+The new genuine installation-to-upgrade-to-JOIN-to-cold-open test failed before
+the correction (1 case, 7.37s). It covers save, pause/resume, execution migration,
+arming, exact5/7 descriptor retention, explicit version2 and unchanged-tree cold
+reopen with NeverRng. Two narrow encoder-pair tests cover known versions and
+inconsistent/unknown pair refusal; the existing real version1 control is retained.
+Post-fix execution passes both encoder cases and the genuine index2 lifecycle
+(10.14s); the unchanged genuine version1 control also passes. Formatting, ambient,
+raw-fs, exact-count self-check and diff checks pass. Read-only actual-diff re-review
+has no remaining findings. Exact-head full CI is pending. Strict Clippy debt and
+dependency findings remain open; Chat V2 stays disabled.
+
 ## Native index upgrade output barrier (13 November; validation in progress)
 
 Adversarial inspection found that a real marker-rename failure cached the rename

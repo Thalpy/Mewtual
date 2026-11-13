@@ -38,6 +38,8 @@ COHORTS = (
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
     ("native-registry-join-lifecycle", "catcoms-app", "native_registry_actual_join_lifecycle", 1),
+    ("native-index2-join-lifecycle", "catcoms-app", "native_index2_actual_join_lifecycle", 1),
+    ("native-namespace-pair-preservation", "catcoms-app", "native_namespace_pair_", 2),
 )
 
 

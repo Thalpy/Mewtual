@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+JOIN catalog rewrites must conserve an admitted native namespace's version and
+descriptor together. Relabeling descriptor2 as entry version1 rejects a legitimate
+write before IO; inferring a new version from a caller's mode would cross the
+format boundary. The closed configured parser now retains the actual version
+only after exact descriptor validation. The common writer requires a consistent
+known pair and re-emits it unchanged. Existing1/2/3 parsing rules are unchanged;
+this supplies no handler3, source, native command or SDK authority.
+
 Native index upgrade rename flags record visible progress, not durable directory
 coverage. A warm retry or cold mixed tuple must re-flush the exact selected index
 and marker handles and their original directory before any nonempty catalog Stage
