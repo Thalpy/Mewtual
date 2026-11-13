@@ -62,6 +62,41 @@ impl Claim {
     }
 }
 impl ResolvedRow {
+    /// Deterministic real-lock oracle for the native framed negative probes.
+    /// Nonblocking recovery may refuse Capacity before reading the claim; it
+    /// must create no key custody while that SAME real row guard is held.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn assert_key_recovery_contention_for_test(
+        &self,
+        session: &Arc<SessionIdentity>,
+        action: Action,
+        handshake: [u8; 32],
+        wrong_claim: [u8; 32],
+    ) {
+        let state = self.row.state.lock().unwrap();
+        assert!(state
+            .plan()
+            .unwrap()
+            .transition
+            .as_ref()
+            .unwrap()
+            .key
+            .is_none());
+        assert!(matches!(
+            self.recover_key_session(session, action, handshake, wrong_claim),
+            Err(VoiceError::Capacity)
+        ));
+        assert!(state
+            .plan()
+            .unwrap()
+            .transition
+            .as_ref()
+            .unwrap()
+            .key
+            .is_none());
+        // The SAME guard drops on return. The framed probe below must still
+        // obtain terminal Unauthorized, and only the correct original may adopt.
+    }
     /// Retain the SAME paid Root observer for release-ordering tests. A Released receipt
     /// alone would not prove that an already parked Root continuation was fenced.
     #[cfg(test)]

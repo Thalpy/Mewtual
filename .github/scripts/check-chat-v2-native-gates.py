@@ -12,6 +12,7 @@ import runpy
 
 REPO = Path(__file__).resolve().parents[2]
 CASES = (
+    "native_v2_pc_intent_original_sdp_worker_retries_local_refusal_and_collects_after_waiter_loss",
     "native_v2_original_sdp_result_uses_actual_actor_and_survives_eager_cancellation_lock_and_history_retries",
     "native_browser_original_round_retries_lost_http_results_applied_and_return",
     "native_browser_failed_media_peer_preserves_original_session_and_indexed_sibling",
@@ -25,7 +26,7 @@ def main() -> None:
     args = parser.parse_args()
     guard = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-member-save.py"))
     guard["self_test"]()
-    assert len(set(CASES)) == 4
+    assert len(set(CASES)) == 5
     if args.self_test:
         return
     directory = REPO / "logs/chat-v2-native-gates"
