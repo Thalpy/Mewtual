@@ -185,8 +185,8 @@ fn fresh_incompatible_seed_caps_refuse_before_spending_invocation_or_sdk() {
     let layout = mount(directory.path(), &shared, &mut rng, true, true);
     let matching = policy();
     let too_small = GenesisSeedBudget::new(
-        8 * 1024 * 1024 + 64 * 1024 - 1,
-        8 * 1024 * 1024,
+        8 * 1024 * 1024 + 64 * 1024,
+        8 * 1024 * 1024 - 1,
         8 * 1024 * 1024,
         1024 * 1024,
         16 * 1024 * 1024,
