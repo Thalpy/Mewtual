@@ -59,6 +59,11 @@ const _: () = assert!(
         >())
         + 32 * (v1::MAX_BASE_PATH + 256)
         + 64 * 1024
+        + super::super::operational::upgrade_source::owning::OWNERSHIP_METADATA
+        + 8 * (std::mem::size_of::<super::admission::Handler>()
+            + std::mem::size_of::<std::sync::Mutex<Option<super::inspection::Observation>>>()
+            + std::mem::size_of::<VerifiedColdCatalog>()
+            + 512)
         <= CONTROL_METADATA
 );
 const _: () = assert!(
@@ -156,6 +161,91 @@ fn sealed(
     }
     let derived = Zeroizing::new(blake3::derive_key(domain, key));
     Ok(Zeroizing::new(frame(&seal(&derived, bytes, rng)?)))
+}
+
+/// Authenticate a selected3 tuple against its independently held real Current
+/// marker pair. Only an inert count and inventory-bound catalog-role proof
+/// escape; neither grants a physical loan or native backend credential. A supported Stage is
+/// left byte-identical for ordinary JOIN successor classification.
+pub(in crate::store::critical_namespaces::native_registry) fn authenticate_selected(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+) -> Result<(usize, VerifiedColdCatalog), AppError> {
+    inventory.require(store)?;
+    let layout = inventory.authenticate_expected(store)?;
+    let original = NativeCapabilityData::for_current_data(layout, &layout.encode_data()?)?;
+    let key = Zeroizing::new(store.keys.db_key()?);
+    let plain = Zeroizing::new(unseal(&key, &unframe(inventory.catalog())?)?);
+    let parsed = grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?;
+    let cap = Capability { original };
+    Capability::decode_exact(parsed.native_registry_payload.ok_or_else(refused)?, cap)?;
+    Capability::decode_exact(
+        &open(&key, MARKER_KEY, inventory.marker(), v1::MAX_MARKER_FRAME)?,
+        cap,
+    )?;
+    let index = Index::decode_data(
+        &open(&key, INDEX_KEY, inventory.index(), super::codec::MAX_FRAME)?,
+        cap,
+    )?;
+    let mut successor = false;
+    if let Some(stage) = inventory.catalog_stage() {
+        let next_plain = Zeroizing::new(unseal(&key, &unframe(stage)?)?);
+        let next =
+            grammar::parse_lifecycle_native_registry_layout(&next_plain, &original.vault, true)?;
+        Capability::decode_exact(next.native_registry_payload.ok_or_else(refused)?, cap)?;
+        if next_plain.as_slice() != plain.as_slice() {
+            grammar::successor(
+                &parsed.summary(*blake3::hash(inventory.catalog()).as_bytes()),
+                &next.summary(*blake3::hash(stage).as_bytes()),
+            )?;
+            successor = true;
+        }
+    }
+    inventory.require(store)?;
+    let selected = if successor {
+        inventory.catalog_stage().ok_or_else(refused)?
+    } else {
+        inventory.catalog()
+    };
+    Ok((
+        index.rows.len(),
+        VerifiedColdCatalog {
+            original: inventory.first_torn_witness(),
+            selected: *blake3::hash(selected).as_bytes(),
+            successor,
+        },
+    ))
+}
+
+/// Closed semantic decision bound to THIS held inventory. An authenticated
+/// successor must become Current: losing Stage cannot become a successful
+/// old-catalog open. This grants no native, SDK or write authority.
+pub(in crate::store) struct VerifiedColdCatalog {
+    original:
+        crate::store::persistence::native_registry::lifecycle::upgrade::FirstTornInventoryWitness,
+    selected: [u8; 32],
+    successor: bool,
+}
+impl VerifiedColdCatalog {
+    pub(in crate::store) fn requires_successor(&self) -> bool {
+        self.successor
+    }
+    pub(in crate::store) fn require_inventory(
+        &self,
+        inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+    ) -> Result<(), AppError> {
+        let selected = if self.successor {
+            inventory.catalog_stage().ok_or_else(refused)?
+        } else {
+            inventory.catalog()
+        };
+        if !inventory.matches_first_torn_witness(&self.original)
+            || self.selected != *blake3::hash(selected).as_bytes()
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
 }
 
 impl Output {

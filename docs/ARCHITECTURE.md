@@ -1,11 +1,11 @@
 # Mewtual; Architecture
 
-Index3 has non-writing preparation from an exclusively owned opaque index2
-mount and separate private fixed-name physical I/O. Preparation independently
-funds held inputs and encrypted outputs, preserves JOIN history and rechecks
-identities after sealing. The I/O retains actual marker/file proofs across
-retries and proof-bound first-torn cleanup. No opener or owning admission/handoff
-selects3 yet; native command/backend consumers remain open.
+Index3's private owning storage upgrade and strict cold opener are under
+validation. They consume the original opaque index2 mount, independently fund
+the overlap, hold both catalog claims through physical selection and handler
+installation, and retain original cold file proofs through Current/JOIN opening.
+The opaque result exposes storage DATA only. Normal3 index WAL, native command
+and backend consumers remain unfinished; Chat V2 stays disabled.
 [Boundary and invoices](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
 
 The physical native index now retains its Pending-only write in one mount-wide

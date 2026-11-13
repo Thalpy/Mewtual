@@ -476,6 +476,17 @@ impl PreparedV2CurrentLayoutStore {
     }
 }
 impl V2CurrentLayoutStore {
+    /// Closed owning index3 handoff only. The controller cannot extract Store
+    /// or submit a callback: this concrete edge owns the catalog critical
+    /// section and repeats its original physical and affine-claim proofs.
+    pub(in crate::store::critical_namespaces) fn finish_native_index3(
+        &mut self,
+        handoff: &mut super::native_registry::operational::upgrade_source::owning::CatalogHandoff<
+            '_,
+        >,
+    ) -> Result<(), AppError> {
+        handoff.install(&mut self.store)
+    }
     /// Private owner transfer after the original native declaration completed. Public
     /// Current callers cannot obtain the handler or extract this wrapper from its new owner.
     pub(in crate::store) fn install_native_registry_handler(

@@ -5,10 +5,11 @@
 //! consumers. No default opener may infer support from decoded descriptor bytes.
 pub(in crate::store::critical_namespaces) mod capability;
 mod data;
-// Private index3 contract under construction. No physical opener supports it
-// yet; registering this module must never widen the closed v1/v2 dispatch.
+// The private owning3 upgrade/strict opener selects its concrete handler;
+// ordinary openers and the closed v1/v2 dispatch gain no implicit support.
 pub(in crate::store::critical_namespaces) mod lifecycle;
 pub(in crate::store) use lifecycle::preparation::first_torn::VerifiedFirstTorn as VerifiedNativeIndex3FirstTorn;
+pub(in crate::store) use lifecycle::preparation::VerifiedColdCatalog as VerifiedNativeIndex3ColdCatalog;
 // Named full invoice shared with the closed physical reader. Publishing its
 // size grants no policy, reserve, handler or physical/native authority.
 pub(in crate::store) const NATIVE_INDEX3_FULL_FEE: usize = lifecycle::preparation::PREPARATION_FEE;

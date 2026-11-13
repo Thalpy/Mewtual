@@ -90,6 +90,49 @@ pub(in crate::store) struct UpgradeInventory {
     base: IndexSnapshot,
 }
 impl UpgradeInventory {
+    /// Final cold proof after supported JOIN recovery. Only the continuously
+    /// held original catalog (no successor) OR the specifically required exact
+    /// JOIN successor may occupy Current; native index/marker and Current pair
+    /// remain the SAME objects. No fresh capture can authorize replacements.
+    pub(in crate::store) fn require_after_join(
+        &self,
+        store: &ServerStore,
+        catalog: &critical::native_registry::VerifiedNativeIndex3ColdCatalog,
+    ) -> Result<(), AppError> {
+        catalog.require_inventory(self)?;
+        self.expected_current.require(store)?;
+        store.require_original_physical_mount(&self.mount)?;
+        self.base.require_directories(store)?;
+        require_no_old_upgrade(store)?;
+        require_no_other_declaration(store)?;
+        for (root, name) in [
+            (false, native::SEED_NAME),
+            (false, UPGRADE_SEED_NAME),
+            (false, critical::Slot::Stage.name()),
+            (true, UPGRADE_INDEX_NAME),
+            (true, UPGRADE_MARKER_NAME),
+            (true, native::INDEX_STAGE_NAME),
+        ] {
+            absent(&path(store, root, name)?)?;
+        }
+        self.base
+            .index
+            .require(&path(store, true, native::INDEX_NAME)?)?;
+        self.base
+            .marker
+            .require(&path(store, true, native::MARKER_NAME)?)?;
+        let current = path(store, false, critical::Slot::Current.name())?;
+        if catalog.requires_successor() {
+            self.catalog_stage
+                .as_ref()
+                .ok_or_else(denied)?
+                .require(&current)?;
+        } else {
+            self.base.catalog.require(&current)?;
+        }
+        self.base.require_directories(store)?;
+        self.expected_current.require(store)
+    }
     pub(in crate::store) fn capture(
         store: &ServerStore,
         debit: &CatalogReadReservation,
@@ -263,11 +306,64 @@ pub(in crate::store) struct UpgradeIo {
     marker_promoted: bool,
     catalog_promoted: bool,
     seed_removed: bool,
+    // Visible renames/unlinks are not a covering barrier. Set ONLY after a
+    // successful final directory sync and the last original-input proof.
+    complete: bool,
     // MUST remain last: observes retirement after every actual File/input buffer.
     #[cfg(test)]
     retirement: Option<RetirementObservation>,
 }
 impl UpgradeIo {
+    /// Final non-mutating proof for the owning handoff. Cached rename flags
+    /// alone cannot prove completion: require the same held selected files,
+    /// original marker pair, absence of every temporary, and the removed seed.
+    /// This never redraws or recreates output after selection.
+    pub(in crate::store) fn require_complete(
+        &self,
+        store: &ServerStore,
+        bytes: &UpgradeBytes<'_>,
+    ) -> Result<(), AppError> {
+        if !self.complete
+            || !self.catalog_promoted
+            || !self.index_promoted
+            || !self.marker_promoted
+            || !self.seed_removed
+            || bytes.identities()? != self.expected
+        {
+            return Err(denied());
+        }
+        self.require_selected_parts(store, bytes)?;
+        for (root, name, observed, expected) in [
+            (
+                false,
+                critical::Slot::Current.name(),
+                self.catalog.as_ref(),
+                bytes.catalog,
+            ),
+            (true, native::INDEX_NAME, self.index.as_ref(), bytes.index),
+            (
+                true,
+                native::MARKER_NAME,
+                self.marker.as_ref(),
+                bytes.marker,
+            ),
+        ] {
+            exact(
+                &path(store, root, name)?,
+                observed.ok_or_else(denied)?,
+                expected,
+            )?;
+        }
+        for (root, name) in [
+            (false, UPGRADE_SEED_NAME),
+            (false, critical::Slot::Stage.name()),
+            (true, UPGRADE_INDEX_NAME),
+            (true, UPGRADE_MARKER_NAME),
+        ] {
+            absent(&path(store, root, name)?)?;
+        }
+        self.expected_current.require(store)
+    }
     #[cfg(test)]
     pub(in crate::store) fn observe_retirement(&mut self, check: Box<dyn FnOnce() + Send>) {
         self.retirement = Some(RetirementObservation::new(check));
@@ -302,6 +398,7 @@ impl UpgradeIo {
             marker_promoted: false,
             catalog_promoted: false,
             seed_removed: false,
+            complete: false,
             #[cfg(test)]
             retirement: None,
         })
@@ -413,6 +510,7 @@ impl UpgradeIo {
             marker_promoted,
             catalog_promoted,
             seed_removed: false,
+            complete: false,
             #[cfg(test)]
             retirement: None,
         })
@@ -514,6 +612,7 @@ impl UpgradeIo {
         store: &ServerStore,
         bytes: &UpgradeBytes<'_>,
     ) -> Result<(), AppError> {
+        self.complete = false;
         if bytes.identities()? != self.expected {
             return Err(denied());
         }
@@ -646,6 +745,7 @@ impl UpgradeIo {
         absent(&seed)?;
         self.original.vault.file.sync_all().map_err(io)?;
         self.require_selected_parts(store, bytes)?;
+        self.complete = true;
         Ok(())
     }
 }

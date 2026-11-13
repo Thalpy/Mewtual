@@ -8,7 +8,18 @@ First-torn disposal requires full valid old2 roles plus a proof bound to the sam
 inventory, not just a decoder error. Empty-fence removal is covered again on every
 retry before seed unlink. A supported authenticated JOIN stage from the initial
 claim window is preserved in full; unknown or authenticated-invalid work refuses.
-The component has no owning3 opener/handoff yet and grants no SDK/native authority.
+The private owning3 storage handoff is under validation. It holds distinct old2
+and new3 claims through the actual catalog-locked handler installation. A closed
+claim closes both gates before unlock; post-effect refusal cannot return an old2
+owner. Completion requires a successful final directory barrier, not visible
+unlink flags. Unwind closes admission before retained I/O; the original physical
+session lease prevents a successor opener until finite retirement drains.
+
+Cold3 inspection retains original evidence through the common Current/JOIN
+opener. Its inventory-bound semantic proof requires the exact held JOIN successor
+when one was authenticated; disappearance cannot become an old-catalog success.
+No fresh capture substitutes for those identities at exposure. This remains
+storage DATA, grants no SDK/native authority and refuses normal3 index WAL.
 
 JOIN catalog rewrites must conserve an admitted native namespace's version and
 descriptor together. Relabeling descriptor2 as entry version1 rejects a legitimate

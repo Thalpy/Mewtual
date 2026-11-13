@@ -1,20 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
-Private `native_registry::lifecycle` contains version3 DATA and non-writing
-owning output preparation. Separate private persistence implements fixed3 roles,
-exact retry barriers and inventory-bound first-torn cleanup. No configured3
-opener or owning dual-claim handoff exists yet. The consuming source preserves the original index2
-allocation and independently funds complete old/new overlap. It authenticates
-the held tuple and repeats exact identities after sealing; no public extractor,
-claim or writer is issued by that preparation. The catalog successor retains complete JOIN payloads.
-Prepared-owner destruction closes the original gate before actual files/buffers.
-Its decoder and
-one-row successor checks confer no physical or runtime authority. Owned version2
-conversion moves exact receipts, network ciphertext and highwater; a real upgrader
-must still authenticate the original held frame and prove all physical barriers.
-Actual/reserved lengths protect already-admitted activation/terminal capacity.
-No public index snapshot setter, Store loan, native issuer or version3 opener is
-provided. [Contract and remaining work](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+Private `native_registry::lifecycle` now has a storage-only owning upgrade and
+strict cold opener under validation. `PreparedUpgrade::admit` keeps the whole
+original index2 allocation and issues both distinct claims under its catalog
+mutex. `Upgrade` retains them through exact I/O and the concrete Current handoff;
+post-installation refusal keeps the same installed handler and debt for retry.
+Its opaque result exposes an exclusively borrowed row count, no raw Store,
+native issuer, Source, SDK grant or generic publisher. Preparation still performs
+no writes. Cold inspection retains the original selected files and required JOIN
+catalog role through the common opener; first-torn cleanup leaving2 refuses the
+strict3 open. Normal3 index WAL and actual native consumers remain unfinished.
+[Contract and remaining work](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
 
 Warm saved-source SDK reopen has a distinct `NativeChatWarmSdkReopenCut` and
 single-operation `NativeChatSdkRestoreEnds`. The private Root path requires

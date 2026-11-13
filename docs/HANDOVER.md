@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Private owning index3 upgrade (13 November; validation in progress)
+
+The next storage increment owns the genuine index2 allocation, both distinct
+catalog claims, exact upgrade I/O and the concrete handler3 installation. An
+uncertain attempt retains its original work; an installed handler is recognized
+on retry rather than reparsed as2. The final handoff drains one whole retirement
+bundle before exposing the opaque DATA owner, with both real payments retained.
+Close-first unwind and an original physical-work lease cover file retirement.
+
+The strict3 cold opener retains original native files and independent marker
+proofs across the common Current/JOIN opener. Its closed inventory-bound catalog
+proof distinguishes duplicate from required successor. First-torn cleanup that
+leaves2 refuses this opener. Missing selected output is never recreated. Normal3
+WAL, real predecessor-process gates, native commands/backend composition and Chat
+V2 activation are still unfinished.
+
+All65 coherent focused lifecycle3 tests pass before the final error-owner boxing
+(411.52s), including six admission,
+seven owning, four strict-cold and the genuine shared-JOIN catalog-role case.
+Review found and corrected final-unlink completion, admission and destination
+unwind, cold proof continuity, and required-successor handling. Final actual-diff
+re-review is clear. Exact compiled registry selection is174; the genuine3 JOIN
+role is a separate1-case cohort. Formatting/ambient/raw-fs/exact-count checks
+pass. After boxing the same refused owners outside writers, all seven owning
+cases pass again (44.14s); no suppression was added. Strict Clippy reports597
+errors before those two large-error fixes, including inactive APIs, and the
+actual dependency audit reports13 vulnerabilities. Full validation and strict
+sign-off remain open. The separate native fixture PR106 focused Linux/Windows run
+43489175508 passes. Broader prior native CI exposed another maintenance-fixture
+Capacity assumption, still open; no specific lock or production deadlock was
+established. Exact-head full suites, strict Clippy and dependency sign-off remain
+required. Chat V2 stays disabled.
+
 ## Private index3 physical roles (13 November; owning handoff still open)
 
 The private fixed3 I/O now holds the actual original marker pair, files,
