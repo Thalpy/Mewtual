@@ -1,6 +1,6 @@
 # Native member saves: production prerequisites
 
-11 November design handoff. This document records implementation work still to
+13 November update to the design handoff. This document records implementation work still to
 do; it introduces no API, factory, native command or activation. The root member
 save driver is in draft PR #86. Its test native custody is not authentication.
 See [HANDOVER](../HANDOVER.md) for execution evidence and the
@@ -15,9 +15,14 @@ transport producers. None is completed by the design handoff.
 
 - Native `unlock_cold` opens `ServerStore::open`, and `AppState.store` retains
   `Option<ServerStore>`. `ServerEntry` requires a legacy `ServerActor`.
-- `V2CurrentLayoutStore` owns its private Store. Its public historical source
-  reader does not provide a complete public source-to-seed/bootstrap driver.
-  Existing root fixtures reach Store-private methods unavailable to native code.
+- `V2CurrentLayoutStore` owns its private Store. The closed
+  [fresh-founder driver](CHAT-V2-FRESH-FOUNDER-DRIVER.md) now provides the genuine
+  same-mount source/runtime/Current/member Host chain; focused CI at6308c992
+  passes on Linux and Windows. It grants no native backend or command authority.
+- [Native registry preparation](CHAT-V2-NATIVE-REGISTRY-PREPARATION.md) now owns a
+  private mount and its bounded, authenticated migration inputs/cached outputs.
+  It writes no native format. Physical declaration/recovery, the mounted-vault
+  backend and production row installation remain unfinished.
 - A whole `PreparedV2TextHost` retains its unbound node. That node deliberately
   provides no runnable legacy `Server` extraction. Cloning a legacy actor's SDK
   or adding a host alongside that SDK is not the missing integration.
@@ -39,11 +44,13 @@ wrapper alone does not close these gaps.
 
 ## Required coherent implementation
 
-1. Provide a closed typed Root bootstrap driver using the real existing
+1. The closed typed Root bootstrap driver now uses the real existing
    archive/source/current owners. Its owning retries retain the same source,
-   device, clock/RNG inputs, outputs and payments. Return the actual whole Host
+   device, clock/RNG inputs, outputs and payments. It retains the actual whole Host
    with a narrow historical source binding, not a raw Store/SDK/node accessor,
-   generic effect callback or caller-constructed selection receipt.
+   generic effect callback or caller-constructed selection receipt. Native
+   installation must consume this genuine producer; Root test custody is not
+   native authorization.
 2. Give the native vault and row explicit V2 backend custody. One physical mount
    must serve its actual owner; do not open the same vault twice to obtain the
    typed wrapper or silently interpret a V2 row as a legacy actor. Persist the

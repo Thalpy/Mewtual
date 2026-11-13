@@ -37,6 +37,8 @@ pub(in crate::store) mod governance_namespace_codec;
 // configured handler in `member_outbox_layout` is the only physical interpreter.
 pub(in crate::store) mod member_outbox_layout;
 pub(in crate::store) mod member_outbox_namespace_codec;
+// Original, non-writing native-registry preparation. No namespace7 physical handler yet.
+pub(in crate::store) mod native_registry;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
     ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -54,6 +56,7 @@ pub use governance_layout::{
     PreparedV2GovernanceLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
 };
 pub use member_outbox_layout::V2MemberOutboxPolicy;
+pub use native_registry::{NativeRegistryPreparationPolicy, PreparedNativeRegistryMigration};
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
@@ -137,6 +140,7 @@ impl ValidatedEmptyCatalog {
 /// Inspect fixed metadata BEFORE lower vault opening could allocate a new identity. In
 /// particular a dangling vault link is present/unsupported, not permission to create a DEK.
 pub(super) fn refuse_orphan_before_vault_creation(dir: &Path) -> Result<(), AppError> {
+    super::persistence::native_registry::refuse_unsupported_storage(dir)?;
     match fs::symlink_metadata(dir.join("vault.bin")) {
         Ok(metadata) if metadata.file_type().is_file() => return Ok(()),
         Ok(_) => return Err(refused()),
@@ -213,6 +217,9 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        // Namespace7 has no physical handler yet, in any configuration. Reserve
+        // its fixed artifacts before every older inspector/cleaner below.
+        super::persistence::native_registry::refuse_unsupported_storage(&self.dir)?;
         // Every opener WITHOUT the concrete namespace5 handler refuses its fixed artifacts
         // before any gate below can settle, clean or reinterpret them. The configured handler
         // instead inspects them first inside the Current3 (and governance) gate.

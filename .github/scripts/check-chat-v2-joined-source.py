@@ -25,6 +25,9 @@ COHORTS = (
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
     ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 8 if sys.platform == "win32" else 4),
+    ("native-registry-preparation", "catcoms-app", "critical_namespaces::native_registry", 26),
+    ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
+    ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
 )
 
 

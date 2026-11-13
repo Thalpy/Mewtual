@@ -1107,6 +1107,61 @@ fn actual_join_lifecycle_on_current3_preserves_five_exactly_without_four() {
     assert_eq!(files(path), snapshot);
 }
 
+/// A paused row is retained JOIN work, not a vacant startup catalog. The native
+/// preparation must preserve both active and paused genuine sources unchanged.
+#[test]
+fn native_registry_preparation_refuses_real_active_and_paused_join_rows() {
+    use crate::store::{NativeRegistryPreparationPolicy, PreparedNativeRegistryMigration};
+    use catcoms_mls::MlsDevice;
+    for paused in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let shared = pool();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x7790 + u64::from(paused));
+        let source = join_source(0x7790, &mut rng);
+        let invite = source
+            .owner
+            .mint_owner_checkpoint_invite(&source.store, [74; 16], 100_000, vec![])
+            .unwrap();
+        let ready = five_with_join_execution(path, &shared, &source, &mut rng);
+        let store = ready.checked_store().unwrap();
+        let mut joined = store
+            .prepare_journalled_owner_checkpoint_join(
+                &source.store,
+                &source.owner,
+                MlsDevice::generate().unwrap(),
+                invite,
+                &mut rng,
+            )
+            .unwrap();
+        joined.save_pending(store, &mut rng).unwrap();
+        if paused {
+            joined.pause_pending(store, &mut rng).unwrap();
+        }
+        let current = fs::read(path.join(Slot::Current.name())).unwrap();
+        assert_eq!(catalog_facts(store, &current).2, 1);
+        drop(joined);
+        drop(ready);
+        let native = NativeRegistryPreparationPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPreparationPolicy::required_capacity())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(PreparedNativeRegistryMigration::open(
+            path,
+            SECRET,
+            &mut NeverRng,
+            member_execution_policy(&shared),
+            native
+        )
+        .is_err());
+        assert_eq!(fs::read(path.join(Slot::Current.name())).unwrap(), current);
+        assert!(!path
+            .join("chat-critical-namespaces.native-registry.seed")
+            .exists());
+    }
+}
+
 /// An ordinary JOIN write interrupted on a namespace5 vault (no governance4), then a cold open.
 /// The JOIN writer's own cuts: 1 leaves a complete synced stage before the rename (the cold
 /// JOIN settlement promotes it), 2 fails the directory barrier AFTER the rename (no stage; the

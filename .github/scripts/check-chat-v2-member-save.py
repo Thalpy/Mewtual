@@ -44,7 +44,7 @@ COHORTS = (
     ("sorted-declarations", "critical_namespaces::catalog_declaration", 4),
     ("namespace-codec", "critical_namespaces::member_outbox_namespace_codec", 6),
     ("join-producer", "critical_namespaces::pending_join::producer::member_outbox_tests", 2),
-    ("current-mount", "critical_namespaces::current_layout::tests::member_outbox", 17),
+    ("current-mount", "critical_namespaces::current_layout::tests::member_outbox", 18),
     ("governance-mount", "critical_namespaces::governance_layout::tests::member_outbox", 8),
     ("outbox-engine", "v2_member_outbox", 32),
 )

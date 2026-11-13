@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Native registry preparation (13 November; local focused tests pass)
+
+The fresh-founder driver in draft PR91 is now green at6308c992 on
+[Linux and Windows](https://github.com/Thalpy/Mewtual/actions/runs/43334467995):
+one genuine mount prerequisite plus four/eight driver cases respectively. The
+Windows cases execute the actual whole warm factory, member durable save/retry,
+independent original/Current revocations and corrupted cached-identity refusal.
+Root test-native custody does not establish native authentication.
+
+The next increment prepares the independent native registry on a newly opened
+private Current3/member5 mount, holding original authenticated inputs and caching
+strict initial index/catalog/marker/seed outputs under a full independent invoice.
+It writes no namespace7 output, exports no Store/key/runtime, and grants no
+physical commit or native authority. Existing openers refuse reserved native
+artifacts before older cleaners. [Contract and remaining physical work](communication-recovery/CHAT-V2-NATIVE-REGISTRY-PREPARATION.md).
+
+Local Windows `cargo test --offline -p catcoms-app --all-features --lib
+native_registry -- --test-threads=2` passes28 cases on the final reviewed source,
+zero failed/ignored. The default-feature run also passes28. This includes actual active
+and paused JOIN refusal, replaced files/directories, in-place byte changes,
+authenticated inconsistent seed/index contents, strict absence, final original
+revocation and retained/refunded payment. Root formatting, ambient/raw-filesystem
+gates, whitespace and the exact-count harness self-check pass. Final read-only
+review reports no remaining blocker/high/medium/low. The surrounding18 storage
+regressions are running; complete current-source suites, strict Clippy and audit
+remain open. Only one local Cargo build/test owner runs at a time.
+
+Native physical declaration/recovery/CAS, mounted-vault/backend installation,
+command/key/save admission, durable Leave and cold operational ownership remain
+unfinished. Joined App source, durable governing archive/transport and combined
+acceptance remain required. Chat V2 is disabled; none of these drafts is accepted
+or merged based only on the focused evidence.
+
 ## External reviews 84–88 corrected (12 November; focused CI green, drafts remain)
 
 All six reported code defects are fixed and pushed through the scoped PR stack.

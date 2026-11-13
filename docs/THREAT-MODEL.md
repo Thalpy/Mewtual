@@ -1,12 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+The native-registry preparation is a bounded read/seal transaction, not native
+authorization or a physical commit. It owns a newly opened private Current3/member5
+mount, retains exact original file/directory identities and authenticated bytes,
+and refuses active/paused JOIN work, unknown artifacts, replacement associations
+and late mount cancellation. All inputs and overlap have independent prepaid
+capacity. Its candidate/index/marker/seed remain memory-only; later installation
+still requires actual startup exclusion, physical recovery/CAS and command/key
+admission. All existing openers refuse reserved native artifacts before older
+cleaners. [Contract](communication-recovery/CHAT-V2-NATIVE-REGISTRY-PREPARATION.md).
+
 The authored fresh-founder library bridge is reservation-only. It preserves
 Sync's old owner-pointer check and combines complete original/Current negatives,
 while actual stored Current/source/head/writer proofs validate the distinct
 successor identity before and after bridge allocation. No callback, decoded
 label or historical binding DATA can issue this bridge or a native row. There is
 no native key/command admission or cold operational owner yet, and the new driver
-has not been executed. [Contract and limits](communication-recovery/CHAT-V2-FRESH-FOUNDER-DRIVER.md).
+has focused Linux/Windows execution evidence at6308c992.
+[Contract and limits](communication-recovery/CHAT-V2-FRESH-FOUNDER-DRIVER.md).
 
 The inactive joined-node source fence now distinguishes unverified input refusal
 from a failed current-epoch MLS commit. The latter cannot leave the old selected

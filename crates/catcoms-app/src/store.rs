@@ -59,11 +59,11 @@ pub use critical_namespaces::{
     CanonicalFilenameInventoryPolicy, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
     CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, FreshV2TextFounderBegin,
     FreshV2TextFounderBinding, FreshV2TextFounderPolicy, JournalledCheckpointJoinPreparation,
-    PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore, PreparedFreshV2TextFounder,
-    PreparedV2CurrentLayoutStore, PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation,
-    ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation,
-    V2CurrentLayoutPolicy, V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
-    V2MemberOutboxPolicy,
+    NativeRegistryPreparationPolicy, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
+    PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
+    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
 };
 mod owner_evidence;
 pub use chat_admission::{
@@ -576,6 +576,8 @@ mod persistence {
     pub(in crate::store) mod governance_layout;
     /// Namespace5 (member outbox layout) declaration and mount I/O.
     mod member_outbox_layout;
+    /// Strict bounded native-registry migration reads; deliberately no writer yet.
+    pub(in crate::store) mod native_registry;
     mod v2_group_directory;
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
