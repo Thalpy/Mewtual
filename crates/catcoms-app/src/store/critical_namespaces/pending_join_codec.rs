@@ -101,6 +101,10 @@ pub(super) struct Parsed<'a> {
         Option<super::member_outbox_namespace_codec::MemberOutboxCapabilityData>,
     pub(super) member_outbox_payload: Option<&'a [u8]>,
     pub(super) native_registry_payload: Option<&'a [u8]>,
+    // Captured only after the matching closed reader validates this actual
+    // entry. JOIN must conserve its version as well as its descriptor bytes;
+    // choosing the writer's historical default would relabel index2 as1.
+    pub(super) native_registry_version: Option<u32>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -437,6 +441,7 @@ fn parse_known<'a>(
             member_outbox: None,
             member_outbox_payload: None,
             native_registry_payload: None,
+            native_registry_version: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -451,6 +456,7 @@ fn parse_known<'a>(
     let mut member_outbox = None;
     let mut member_outbox_payload = None;
     let mut native_registry_payload = None;
+    let mut native_registry_version = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -530,6 +536,7 @@ fn parse_known<'a>(
                     expected,
                 )?;
                 native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
             }
             7 if layout.native_registry == Some(2) && entry.version == 2 => {
                 super::native_registry::operational::validate_descriptor_data(
@@ -538,6 +545,7 @@ fn parse_known<'a>(
                     current_payload.ok_or_else(refused)?,
                 )?;
                 native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
             }
             7 if layout.native_registry == Some(3) && entry.version == 3 => {
                 super::native_registry::lifecycle::validate_descriptor_data(
@@ -546,6 +554,7 @@ fn parse_known<'a>(
                     current_payload.ok_or_else(refused)?,
                 )?;
                 native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
             }
             _ => return Err(refused()),
         }
@@ -566,6 +575,7 @@ fn parse_known<'a>(
         member_outbox,
         member_outbox_payload,
         native_registry_payload,
+        native_registry_version,
     })
 }
 

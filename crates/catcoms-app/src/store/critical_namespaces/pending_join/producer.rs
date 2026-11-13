@@ -870,11 +870,14 @@ fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError>
         (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
         _ => return Err(refused()),
     };
-    let native_registry = current
-        .native_registry_payload
-        .map(|payload| 12usize.checked_add(payload.len()).ok_or_else(refused))
-        .transpose()?
-        .unwrap_or(0);
+    let native_registry = match (
+        current.native_registry_version,
+        current.native_registry_payload,
+    ) {
+        (None, None) => 0,
+        (Some(1..=3), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
+        _ => return Err(refused()),
+    };
     archive
         .checked_add(current_layout)
         .and_then(|n| n.checked_add(governance))
@@ -937,7 +940,12 @@ fn append_original_archive(
         output.put_bytes(payload).map_err(|_| refused())?;
     }
     if let Some(payload) = current.native_registry_payload {
-        output.put_u32(7).put_u32(1);
+        // archive_suffix_length above rejects missing/unknown/mismatched pair
+        // states. Re-emit the actual admitted entry, never a caller's mode or
+        // a version inferred from ciphertext/descriptor contents.
+        output
+            .put_u32(7)
+            .put_u32(current.native_registry_version.ok_or_else(refused)?);
         output.put_bytes(payload).map_err(|_| refused())?;
     }
     Ok(())

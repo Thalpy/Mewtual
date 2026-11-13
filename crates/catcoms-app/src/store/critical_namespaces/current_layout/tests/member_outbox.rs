@@ -1228,6 +1228,143 @@ fn native_registry_actual_join_lifecycle_preserves_seven_and_cold_reopens() {
     assert_eq!(parsed.member_outbox_payload.unwrap(), five);
 }
 
+/// A genuine index2 mount must preserve its explicit namespace version through
+/// saved JOIN, pause/resume, execution migration/arming and a real cold opener.
+#[test]
+fn native_index2_actual_join_lifecycle_preserves_version_and_cold_reopens() {
+    use crate::store::{
+        CheckpointJoinSubmissionStatus, NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade,
+        NativeRegistryInstallation, NativeRegistryPolicy,
+    };
+    use catcoms_mls::MlsDevice;
+    use catcoms_rt::{ManualClock, PeerId};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x77b0);
+    let source = join_source(0x77b0, &mut rng);
+    let invite = source
+        .owner
+        .mint_owner_checkpoint_invite(&source.store, [77; 16], 100_000, vec![])
+        .unwrap();
+    drop(five_with_join_execution(path, &shared, &source, &mut rng));
+    let native_policy = || {
+        NativeRegistryPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+            NativeRegistryPolicy::required_persistent_capacity(),
+        )
+        .unwrap()
+    };
+    let index_policy = || {
+        NativeIndexPolicy::new(
+            CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+            NativeIndexPolicy::required_persistent_capacity(),
+        )
+        .unwrap()
+    };
+    let mut installation = NativeRegistryInstallation::prepare(
+        path,
+        SECRET,
+        &mut rng,
+        member_execution_policy(&shared),
+        native_policy(),
+    )
+    .unwrap();
+    installation.retry().unwrap();
+    let mut upgrade = NativeIndexUpgrade::prepare(
+        installation.into_native_registry().unwrap(),
+        index_policy(),
+        &mut rng,
+    )
+    .unwrap();
+    upgrade.retry().unwrap();
+    let native = upgrade.into_index_store().unwrap();
+    let store = native.actual_store_for_test().unwrap();
+    // This is a newly opened physical mount; the old fixture's trusted runtime budget
+    // was deliberately not persisted or inherited through decoded registry DATA.
+    store
+        .configure_owner_evidence_budget(source.budget)
+        .unwrap();
+    let key = store.keys.db_key().unwrap();
+    let domain = store.chat_vault_domain().unwrap();
+    let namespaces = || {
+        let raw = fs::read(path.join(Slot::Current.name())).unwrap();
+        let plain = Zeroizing::new(unseal(&key, &unframe(&raw).unwrap()).unwrap());
+        let parsed = store.parse_configured_join_catalog(&plain).unwrap();
+        assert_eq!(parsed.native_registry_version, Some(2));
+        (
+            parsed.member_outbox_payload.unwrap().to_vec(),
+            parsed.native_registry_payload.unwrap().to_vec(),
+            parsed.count,
+        )
+    };
+    let (five, seven, count) = namespaces();
+    assert_eq!(count, 0);
+    let check = || {
+        let (next_five, next_seven, count) = namespaces();
+        assert_eq!(next_five, five);
+        assert_eq!(next_seven, seven);
+        assert_eq!(count, 1);
+        assert!(!ids(&key, &domain, path).contains(&4));
+        store.validate_mounted_member_outbox_layout().unwrap();
+    };
+    let mut joined = store
+        .prepare_journalled_owner_checkpoint_join(
+            &source.store,
+            &source.owner,
+            MlsDevice::generate().unwrap(),
+            invite,
+            &mut rng,
+        )
+        .unwrap();
+    joined.save_pending(store, &mut rng).unwrap();
+    check();
+    joined.pause_pending(store, &mut rng).unwrap();
+    check();
+    joined.resume_pending(store, &mut rng).unwrap();
+    check();
+    let activated = joined
+        .activate_original_transport(
+            store,
+            source.hub.join(PeerId::from_u64(0x77b1)),
+            PeerId::from_u64(0x77b0),
+        )
+        .unwrap();
+    let mut network = activated.into_network_execution(store).unwrap();
+    network.ensure_initial_grant(store, &mut rng).unwrap();
+    check();
+    assert_eq!(
+        network
+            .ensure_submission_armed(store, &mut rng, Arc::new(ManualClock::new(1_000)))
+            .unwrap(),
+        CheckpointJoinSubmissionStatus::Armed
+    );
+    check();
+    drop(network);
+    drop(native);
+    let before = files(path);
+    let cold = NativeIndexStore::open(
+        path,
+        SECRET,
+        &mut NeverRng,
+        member_execution_policy(&shared),
+        index_policy(),
+    )
+    .unwrap();
+    assert_eq!(cold.row_count_data().unwrap(), 0);
+    assert_eq!(files(path), before);
+    let raw = fs::read(path.join(Slot::Current.name())).unwrap();
+    let plain = Zeroizing::new(unseal(&key, &unframe(&raw).unwrap()).unwrap());
+    let parsed = cold
+        .actual_store_for_test()
+        .unwrap()
+        .parse_configured_join_catalog(&plain)
+        .unwrap();
+    assert_eq!(parsed.native_registry_version, Some(2));
+    assert_eq!(parsed.native_registry_payload.unwrap(), seven);
+    assert_eq!(parsed.member_outbox_payload.unwrap(), five);
+}
+
 /// A paused row is retained JOIN work, not a vacant startup catalog. The native
 /// preparation must preserve both active and paused genuine sources unchanged.
 #[test]
