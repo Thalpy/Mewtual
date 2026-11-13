@@ -26,13 +26,27 @@ impl Ledger {
                 return Err("not a parent");
             };
             let state = row.state.try_lock().map_err(|_| "parent row contended")?;
-            let plan = state.plan().ok_or("parent has no plan")?;
-            let key = plan
-                .transition
-                .as_ref()
-                .and_then(|claim| claim.key.as_ref())
-                .ok_or("parent has no key")?;
-            let storage = key.sdp.as_ref().map(|sdp| {
+            // Missing Claim/key is exactly the boundary a stalled handoff needs
+            // to diagnose. Keep the actual original selector and parent/child
+            // history instead of discarding them at that absence. Every value
+            // below is a fixed flag/role; never print receipts, keys or payloads.
+            let plan = state.plan();
+            let claim = plan.and_then(|plan| plan.transition.as_ref());
+            let key = claim.and_then(|claim| claim.key.as_ref());
+            let parent = (
+                state.status.action.is_some(),
+                state.status.engine.settled,
+                state.status.acknowledged,
+                state.status.drained,
+                state.final_delivery().is_some(),
+                state.final_phase.is_some(),
+            );
+            let custody = (
+                plan.map(|plan| plan.local_is_low),
+                claim.map(|claim| claim.released),
+                key.map(|key| (key.ready as u8, key.released)),
+            );
+            let storage = key.and_then(|key| key.sdp.as_ref()).map(|sdp| {
                 (
                     sdp.closed,
                     sdp.worker(),
@@ -42,20 +56,44 @@ impl Ledger {
                     sdp.phase.as_ref().map(|phase| phase.try_status()),
                 )
             });
-            Ok((
-                selector,
-                (
-                    plan.local_is_low,
-                    key.ready as u8,
-                    key.released,
-                    state.final_delivery().is_some(),
-                    state.final_phase.is_some(),
-                ),
-                storage,
-            ))
+            drop(state);
+            // The finite native index has ROWS slots. No new owners, query,
+            // allocation or blocking lock is created by this snapshot.
+            let mut children = [None; ROWS];
+            for (slot, child) in index.rows.iter().enumerate() {
+                let Some(child) = child else { continue };
+                let Purpose::Confirmation { parent, request } = child.key.purpose else {
+                    continue;
+                };
+                if parent != id || !child.key.matches(selected, child.key.purpose) {
+                    continue;
+                }
+                let role = match request {
+                    ConfirmationPurpose::Start(_) => "start",
+                    ConfirmationPurpose::Respond(_) => "respond",
+                    ConfirmationPurpose::Incoming(_) => "incoming",
+                };
+                let flags = child.state.try_lock().ok().map(|state| {
+                    (
+                        state.child.map(|metadata| metadata.role),
+                        state.status.action.is_some(),
+                        state.status.engine.settled,
+                        state.status.engine.receipt.as_ref().map(|receipt| {
+                            !matches!(
+                                receipt.outcome,
+                                catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Rejected(_)
+                            )
+                        }),
+                        state.status.acknowledged,
+                        state.status.drained,
+                    )
+                });
+                children[slot] = Some((role, flags));
+            }
+            Ok((selector, parent, custody, storage, children))
         })();
         match observed {
-            Ok((selector, flags, storage)) => (Some(selector), format!("original parent LOW/Ready/key_released/final_delivery/final_phase={flags:?}; storage closed/worker/phase/sdk_preparing/sdk_released/phase_status={storage:?}")),
+            Ok((selector, parent, custody, storage, children)) => (Some(selector), format!("original parent action/settled/ack/drained/final_delivery/final_phase={parent:?}; custody LOW/claim_released/key_Ready_released={custody:?}; storage closed/worker/phase/sdk_preparing/sdk_released/phase_status={storage:?}; children request/role_action_settled_accepted_ack_drained={children:?}")),
             Err(reason) => (None, reason.into()),
         }
     }

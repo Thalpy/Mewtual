@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## Native acceptance follow-up (13 November; execution pending)
+
+Focused CI43505629044 reached new later failures after the initial SDP/discovery
+corrections. Windows refused the second exact collected-history lookup with
+Capacity. That nonblocking lookup can contend even after its first success.
+The fixture now retries only the same Target on Capacity under its original
+deadline, retaining all proof/absence/tombstone assertions. A deterministic
+probe holds the actual entry mutex and proves that same refusal before retry.
+No SDK Release or production authorization retry was added.
+
+Linux's failed-media preservation case timed out while the original parent had
+no adopted key. Its earlier diagnostic discarded the actual selector at that
+absence. The test-only snapshot now retains original parent/Claim/key flags
+and the bounded original confirmation-child roles/status, including contention.
+It uses nonblocking locks and formats after unlocking; no receipt, key, payload
+or owned result is exposed. Genuine child-reservation regressions cover foreign
+filtering and a held original child mutex without starting work.
+
+Read-only actual-diff review and re-review are clear. These follow-up runtime
+tests have not yet run; Linux's underlying failure is not fixed or explained
+by adding diagnostics. Full native validation remains open. Chat V2 is off.
+
 ## Native fixture contention follow-up (13 November; execution pending)
 
 Combined parent run43492056361 reports1027 passed/16 failed on Windows native.
