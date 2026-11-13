@@ -820,7 +820,7 @@ async fn complete_browser_media_pair(
 
 async fn enable(scenario: &Scenario, index: usize) {
     let running = scenario.online(index);
-    let generation = running.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = running.state.ui_session_generation.load(Ordering::SeqCst);
     bounded(
         "actual native unlock/voice actor attachment",
         finalize_unlock_session(&running.state, generation, false),

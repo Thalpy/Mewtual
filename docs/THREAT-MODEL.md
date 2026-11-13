@@ -1,10 +1,40 @@
 # Threat model; client integrity & enforcement boundaries
 
+The warm native SDK reopen path must own the successful original SDK-drained
+handoff, its saved terminal provenance and the same paid source read. A decoded
+SourceSaved/Pending label, copied currentness flag or fresh SDK cut cannot issue
+that evidence. A distinct UI/source counter entry follows semantic verification
+at the actual loader. Partial Ends stay outside writers, and a returned graph is
+cached with its fees before late cancellation checks. Reauthentication may reuse
+that graph; it must not repeat the successful decode. This does not authorize
+cold Pending, advanced Current, a background signer or native command activation.
+
+A native source may now close key admission with SC atomics before acquiring
+row/operation locks. Outside-guard retirement must still notify idle observers
+when admission was already fenced. End counts preserve admitted work, and closing
+one source does not revoke another. This is not a durable Leave or worker drain.
+
+The mount-wide native index cell prevents a lost reply or IO refusal from
+discarding its original claimed ciphertext. Every retained/disk Pending retry
+compares the full frozen input, including the generated signer and network frame.
+Outgoing completed buffers exclude new index allocations until their destructor
+acknowledges retirement; a shared payer alone is not capacity. Poison never
+resets to Idle. These private DATA roles grant no native/SDK authority.
+[Enforcement and unfinished producer](communication-recovery/CHAT-V2-NATIVE-INDEX-CELL.md).
+
+The private UI-generation registry cannot reopen a retired generation after GC.
+Each competing preparation owns an independent actual reservation. Host/counter
+metadata retains payment through unentered pins, and repeated retirement replies
+hold no temporary records that could release the last payment under an outer
+native guard. Eight focused Root cases and eighteen RT cases pass; the checked
+Tauri/native producer is still absent. [Enforcement and gaps](communication-recovery/CHAT-V2-NATIVE-UI-GENERATIONS.md).
+
 The Linux founder inventory uses a fixed paid getdents buffer, independently opened
 original directory descriptors and exact borrowed names. Unknown/kind-mismatched
 objects refuse without cleanup; named identities are repeated after enumeration.
 This replaces early platform refusal with the same negative proof boundary, not
-new source or write authority. Linux execution remains pending.
+new source or write authority. Linux focused execution passes42 cases in run43407038976; complete exact-head
+validation at053ac72a is still running.
 [Contract](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
 
 Concrete native cuts precede actual SDK/Profile/Header/member primitive entry.

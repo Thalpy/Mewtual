@@ -33,7 +33,7 @@ impl LimitWriteCase {
         use catcoms_rt::{Hub, ManualClock};
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await = Some(store_in(root.path()));
+        *state.store.lock().await = Some((store_in(root.path())).into());
         *state.session_resumable.lock().await = true;
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(55_001)),
@@ -71,6 +71,8 @@ impl LimitWriteCase {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .save_cache_setting(
                 1,
@@ -119,7 +121,7 @@ async fn cache_limit_queued_before_lock_cannot_write_or_revive_after_unlock() {
         );
         lock_session_inner(&case.state, None).await.unwrap();
         if unlock_again {
-            let generation = case.state.ui_session_generation.load(Ordering::Acquire);
+            let generation = case.state.ui_session_generation.load(Ordering::SeqCst);
             finalize_unlock_session(&case.state, generation, false)
                 .await
                 .unwrap();
@@ -239,7 +241,7 @@ async fn cache_limit_cannot_recreate_a_record_after_committed_leave() {
     // The same order and real retirement/store operations used by leave_server. Store is
     // deliberately held until the old command has resumed, exposing the former late write.
     let persist = persist_lock_for(&case.state, 1).lock_owned().await;
-    let generation = case.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = case.state.ui_session_generation.load(Ordering::SeqCst);
     let session = require_ui_session_generation(&case.state, generation)
         .await
         .unwrap();
@@ -249,7 +251,13 @@ async fn cache_limit_cannot_recreate_a_record_after_committed_leave() {
     let removed = stopped
         .remove(&mut *case.state.servers.lock().await)
         .unwrap();
-    store.as_ref().unwrap().remove_server(1).unwrap();
+    store
+        .as_ref()
+        .unwrap()
+        .as_legacy()
+        .unwrap()
+        .remove_server(1)
+        .unwrap();
     drop((removed, store, session, persist));
     assert!(write.await.is_err());
     assert!(
@@ -308,6 +316,8 @@ async fn admitted_cache_limit_outlives_its_waiter_and_precedes_actual_lock() {
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .load_cache_setting(1, &case.group);
     assert_eq!(
@@ -408,7 +418,7 @@ async fn leave_cleanup_empties_the_namespace_under_a_claim_and_reports_freed_byt
     let namespace = store.cache_namespace_dir(&key).unwrap();
     assert!(mark_leaving(&store, &GROUP).unwrap());
     let state = AppState::default();
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
 
     let claim = state.cache.claim(&GROUP).unwrap();
     assert!(state.cache.claim(&GROUP).is_none(), "one cleanup per group");
@@ -440,7 +450,7 @@ async fn cleanup_never_empties_a_namespace_a_live_join_still_holds() {
     let claim = state.cache.claim(&GROUP).unwrap();
     assert!(mark_leaving(&store, &GROUP).unwrap());
     drop(running);
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
     let report = clean_namespace(&state, &claim, None, false).await;
     assert_eq!(report.freed_bytes, 0);
     assert!(report.failed > 0, "reported as not finished");
@@ -631,7 +641,7 @@ async fn the_sweep_finishes_marked_namespaces_but_skips_claimed_ones() {
     let busy_dir = store.cache_namespace_dir(&hex::encode(busy)).unwrap();
     let left_dir = store.cache_namespace_dir(&hex::encode(left)).unwrap();
     let state = AppState::default();
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
     let held = state.cache.claim(&busy).unwrap();
     sweep_leaving(&state, None).await;
     assert!(!left_dir.exists(), "an interrupted leave is finished");

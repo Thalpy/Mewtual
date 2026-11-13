@@ -186,6 +186,51 @@ pub fn prepare_v2_genesis_seed(
     limits: V2GenesisSeedLimits,
     sdk: OwnerSdkRestoreAdmission,
 ) -> Result<UnboundV2GenesisSeed, SyncError> {
+    prepare_genesis_seed(source, limits, sdk, GenesisSdkAccess::Library)
+}
+
+/// Native warm-source SDK re-entry. Root must retain the real completed warm
+/// handoff, exact paid read and original creator; these borrowed lifecycle
+/// values alone authenticate no saved source. This is NOT a cold Pending path.
+/// Keep cut/Ends outside all caller writers through caching the actual result.
+pub fn prepare_v2_genesis_seed_native_warm(
+    source: &OpenedBootstrapSourceData,
+    limits: V2GenesisSeedLimits,
+    sdk: OwnerSdkRestoreAdmission,
+    original: &catcoms_rt::NativeChatSourceObservation,
+    cut: &mut catcoms_rt::NativeChatWarmSdkReopenCut,
+    ends: &mut catcoms_rt::NativeChatSdkRestoreEnds,
+    negatives: [&catcoms_rt::RequestCancellation; 3],
+) -> Result<UnboundV2GenesisSeed, SyncError> {
+    prepare_genesis_seed(
+        source,
+        limits,
+        sdk,
+        GenesisSdkAccess::NativeWarm {
+            original,
+            cut,
+            ends,
+            negatives,
+        },
+    )
+}
+
+enum GenesisSdkAccess<'a> {
+    Library,
+    NativeWarm {
+        original: &'a catcoms_rt::NativeChatSourceObservation,
+        cut: &'a mut catcoms_rt::NativeChatWarmSdkReopenCut,
+        ends: &'a mut catcoms_rt::NativeChatSdkRestoreEnds,
+        negatives: [&'a catcoms_rt::RequestCancellation; 3],
+    },
+}
+
+fn prepare_genesis_seed(
+    source: &OpenedBootstrapSourceData,
+    limits: V2GenesisSeedLimits,
+    sdk: OwnerSdkRestoreAdmission,
+    access: GenesisSdkAccess<'_>,
+) -> Result<UnboundV2GenesisSeed, SyncError> {
     let view = source.view_data();
     let spec = view.context.spec_data();
     if spec.limits.max_snapshot_bytes() > limits.0.max_snapshot_bytes()
@@ -205,6 +250,37 @@ pub fn prepare_v2_genesis_seed(
             )
         })
         .map_err(|_| unavailable())?;
+    // All framing/genesis/payment proofs precede this final native entry. The
+    // SDK call below cannot fall back to Library after any native refusal.
+    if let GenesisSdkAccess::NativeWarm {
+        original,
+        cut,
+        ends,
+        negatives,
+    } = access
+    {
+        #[cfg(test)]
+        if let Some(hook) = NATIVE_SDK_ENTRY_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+        // Original completed handoff, paid read and archive-root lifetimes.
+        // These are additional negatives, never a substitute for the exact
+        // physical proofs or the final original native counter admission.
+        if negatives.iter().any(|negative| negative.is_cancelled()) {
+            return Err(unavailable());
+        }
+        cut.enter(original, ends).map_err(|_| unavailable())?;
+        #[cfg(test)]
+        if let Some(hook) = NATIVE_SDK_AFTER_COUNTERS_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+        // Counter admission can race closure of the distinct original saved
+        // handoff/read/root. Reprove those negatives too, retaining admitted
+        // Ends on refusal so the outer close still joins the actual entry.
+        if negatives.iter().any(|negative| negative.is_cancelled()) {
+            return Err(unavailable());
+        }
+    }
     #[cfg(test)]
     SDK_ENTRIES.with(|n| n.set(n.get() + 1));
     let (device, group) = catcoms_mls::persist::restore_server_owner_checkpoint_bounded(
@@ -549,6 +625,8 @@ impl std::fmt::Debug for UnboundV2GenesisSeed {
 #[cfg(test)]
 std::thread_local! {
     static SDK_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static NATIVE_SDK_ENTRY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static NATIVE_SDK_AFTER_COUNTERS_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(test)]
 mod tests;

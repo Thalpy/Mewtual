@@ -167,6 +167,89 @@ fn seed(opened: &OpenedBootstrapSourceData, count: &Arc<AtomicUsize>) -> Unbound
 }
 
 #[test]
+fn native_warm_sdk_tail_rejects_stale_ui_foreign_source_and_revoked_handoff_before_loader() {
+    use catcoms_rt::{NativeChatSdkRestoreEnds, NativeChatSourceOwner, NativeChatUiBinding};
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    for fault in 0..8 {
+        let f = fixture(0x61f0 + fault);
+        let generation = Arc::new(AtomicU64::new(7));
+        let binding = NativeChatUiBinding::from_trusted_host(
+            generation.clone(),
+            Arc::new(AtomicU64::new(7)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(()),
+        );
+        let ui = binding.open_session(7, Arc::new(())).unwrap();
+        let source =
+            NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap();
+        let foreign =
+            NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap();
+        let mut cut = source.prepare_warm_sdk_reopen(&ui.observe()).unwrap();
+        let mut ends = NativeChatSdkRestoreEnds::new();
+        let owners: [_; 3] = std::array::from_fn(|_| watch::channel(false).0);
+        let negatives = owners
+            .each_ref()
+            .map(|owner| RequestCancellation::new(owner.subscribe(), None));
+        let observation = if fault == 2 {
+            foreign.observe()
+        } else {
+            source.observe()
+        };
+        match fault {
+            1 => NATIVE_SDK_ENTRY_HOOK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || generation.store(8, Ordering::SeqCst)))
+            }),
+            3 => {
+                owners[0].send_replace(true);
+            }
+            4 => {
+                source.close();
+            }
+            5..=7 => {
+                let original = owners[(fault - 5) as usize].clone();
+                NATIVE_SDK_AFTER_COUNTERS_HOOK.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        original.send_replace(true);
+                    }));
+                });
+            }
+            _ => {}
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let before = SDK_ENTRIES.with(|entries| entries.get());
+        let result = prepare_v2_genesis_seed_native_warm(
+            &f.opened,
+            limits(),
+            admission(&count),
+            &observation,
+            &mut cut,
+            &mut ends,
+            [&negatives[0], &negatives[1], &negatives[2]],
+        );
+        assert_eq!(result.is_ok(), fault == 0);
+        assert_eq!(
+            SDK_ENTRIES.with(|entries| entries.get()),
+            before + usize::from(fault == 0)
+        );
+        drop(result);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "actual SDK lease is returned on every partial result"
+        );
+        let drain = ui.retire();
+        if fault >= 5 {
+            assert!(
+                !drain.is_drained(),
+                "late original refusal retains counter Ends"
+            );
+        }
+        drop(ends);
+        assert!(drain.is_drained());
+    }
+}
+
+#[test]
 fn actual_opener_retains_exact_genesis_and_seed_preserves_complete_allowed_metadata() {
     let f = fixture(0x61a0);
     let count = Arc::new(AtomicUsize::new(0));

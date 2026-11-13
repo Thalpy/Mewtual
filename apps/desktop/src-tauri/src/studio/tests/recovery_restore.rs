@@ -102,6 +102,10 @@ async fn native_recovery_preview_and_copy_use_real_actor_save_and_return_provisi
         .lock()
         .await
         .as_mut()
+        .and_then(|vault| match vault {
+            MountedVault::Legacy(store) => Some(store.as_mut()),
+            MountedVault::TextV2(_) => None,
+        })
         .unwrap()
         .update_epoch_recovery(
             7,

@@ -6,13 +6,24 @@
 //! construct a network transport, sign, or install a native backend.
 mod capability;
 mod catalog;
+mod cell;
 mod data;
+mod facade;
 mod interlock;
 mod mount;
+mod native_ui;
 mod opening;
 mod payment;
 mod upgrade;
+pub use facade::NativeTextVault;
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
+pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
+pub use native_ui::{
+    RetirementBatch as NativeTextUiRetirementBatch, UiCandidate as NativeTextUiCandidate,
+    UiCapture as NativeTextUiObservation, UiGarbage as NativeTextUiGarbage,
+    UiPreparation as NativeTextUiPreparation, UiRetirement as NativeTextUiRetirement,
+    UiRetirementState as NativeTextUiRetirementState,
+};
 pub use upgrade::{NativeIndexPolicy, NativeIndexUpgrade};
 
 use super::super::{read_pool::CatalogReadReservation, refused};
@@ -39,6 +50,7 @@ const _: () = assert!(
 const _: () = assert!(
     8 * (std::mem::size_of::<mount::NativeIndexStore>()
         + std::mem::size_of::<mount::NativeIndexPhysical>()
+        + std::mem::size_of::<facade::NativeTextVault>()
         + std::mem::size_of::<upgrade::NativeIndexUpgrade>()
         + std::mem::size_of::<crate::store::persistence::native_registry::operational::UpgradeIo>(
         )
@@ -54,6 +66,7 @@ const _: () = assert!(
         + std::mem::size_of::<interlock::IndexInterlock>()
         + std::mem::size_of::<Handler>()
         + std::mem::size_of::<payment::IndexPayment>())
+        + cell::CELL_METADATA_BYTES
         + 32 * (super::preparation::MAX_BASE_PATH + 256)
         + 64 * 1024
         <= CONTROL_METADATA_FEE

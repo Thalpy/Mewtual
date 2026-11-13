@@ -1,11 +1,9 @@
 //! Opaque version2 storage owner. Its DATA projections deliberately cannot
 //! construct a native backend, borrow Current/Store, or grant SDK/key entry.
 use super::*;
-use crate::store::persistence::native_registry::operational as io;
 use crate::store::{PreparedV2CurrentLayoutStore, V2CurrentLayoutPolicy, V2CurrentLayoutStore};
 use catcoms_rt::CryptoRngCore;
 use std::{path::Path, sync::Mutex};
-use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeCreationStateData {
@@ -33,7 +31,7 @@ pub struct NativeIndexStore {
 /// exists. Retained transaction cells must not own an Arc back to this object.
 pub(super) struct NativeIndexPhysical {
     // Retained cells/read metadata must drain before the actual mount and fee.
-    pub(super) read: Mutex<()>,
+    pub(super) cell: Mutex<super::cell::IndexCell>,
     pub(super) current: V2CurrentLayoutStore,
     pub(super) handler: Handler,
 }
@@ -63,7 +61,7 @@ impl NativeIndexStore {
             physical: Arc::new(NativeIndexPhysical {
                 current,
                 handler,
-                read: Mutex::new(()),
+                cell: Mutex::new(super::cell::IndexCell::default()),
             }),
         };
         value.row_count_data()?;
@@ -77,8 +75,7 @@ impl NativeIndexStore {
     }
 
     pub fn row_count_data(&self) -> Result<usize, AppError> {
-        let _read = self.physical.read.try_lock().map_err(|_| refused())?;
-        Ok(self.physical.read_index()?.rows.len())
+        self.physical.row_count_data()
     }
     /// Exact immutable receipt lookup. A conflicting request refuses; absence
     /// grants no permission to create a row, draw RNG, sign or start an SDK.
@@ -87,52 +84,22 @@ impl NativeIndexStore {
         invocation: [u8; 32],
         request: [u8; 32],
     ) -> Result<Option<NativeCreationStatusData>, AppError> {
-        let _read = self.physical.read.try_lock().map_err(|_| refused())?;
-        let index = self.physical.read_index()?;
-        let Some(row) = index.lookup_data(invocation, request)? else {
-            return Ok(None);
-        };
-        let state = match &row.backend {
-            data::Backend::Pending { .. } => NativeCreationStateData::Pending,
-            data::Backend::Founder { .. } => NativeCreationStateData::Founder,
-            data::Backend::Retired { .. } => NativeCreationStateData::Retired,
-            data::Backend::Abandoned { .. } => NativeCreationStateData::Abandoned,
-            data::Backend::Legacy { .. } => return Err(refused()),
-        };
-        Ok(Some(NativeCreationStatusData {
-            id: row.id,
-            identity: row.identity,
-            state,
-        }))
+        self.physical.lookup_creation_data(invocation, request)
     }
 }
 
-impl NativeIndexPhysical {
-    pub(super) fn read_index(&self) -> Result<data::Index, AppError> {
-        self.handler.require()?;
-        let store = self.current.checked_store()?;
-        let snapshot = io::IndexSnapshot::capture(store)?;
-        if snapshot.stage().is_some() {
-            return Err(refused());
-        }
-        let key = Zeroizing::new(store.keys.db_key()?);
-        let plain = upgrade::catalog_plain(&key, snapshot.catalog())?;
-        let cap = upgrade::capability_data(&plain, &store.chat_vault_domain()?)?;
-        capability::Capability::decode_exact(
-            &upgrade::authenticate(
-                &key,
-                upgrade::MARKER_KEY,
-                snapshot.marker(),
-                super::super::preparation::MAX_MARKER_FRAME,
-            )?,
-            cap,
-        )?;
-        let index = data::Index::decode_data(
-            &upgrade::authenticate(&key, upgrade::INDEX_KEY, snapshot.index(), data::MAX_FRAME)?,
-            cap,
-        )?;
-        snapshot.require_selected(store)?;
-        self.current.cached_store()?;
-        Ok(index)
-    }
+/// Historical projection only; never a runtime/SDK admission.
+pub(super) fn status_data(row: &data::Row) -> Result<NativeCreationStatusData, AppError> {
+    let state = match &row.backend {
+        data::Backend::Pending { .. } => NativeCreationStateData::Pending,
+        data::Backend::Founder { .. } => NativeCreationStateData::Founder,
+        data::Backend::Retired { .. } => NativeCreationStateData::Retired,
+        data::Backend::Abandoned { .. } => NativeCreationStateData::Abandoned,
+        data::Backend::Legacy { .. } => return Err(refused()),
+    };
+    Ok(NativeCreationStatusData {
+        id: row.id,
+        identity: row.identity,
+        state,
+    })
 }

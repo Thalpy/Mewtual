@@ -82,7 +82,7 @@ impl RequestAuthority for EntryAuthority {
 /// from admitting an old request in the meantime. Duplicate same-session unlocks reuse custody.
 pub(super) fn current(state: &AppState, expected: u64) -> Option<RequestCancellation> {
     let mut slot = state.keep_session.lock().unwrap_or_else(|e| e.into_inner());
-    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != expected {
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != expected {
         return None;
     }
     if slot
@@ -104,7 +104,7 @@ pub(super) fn current(state: &AppState, expected: u64) -> Option<RequestCancella
 /// Capture before the first authorization await. Waiting behind lock/unlock cannot adopt the
 /// new generation as authority for a native invocation that already started in the old one.
 pub(super) async fn invocation_generation(state: &AppState) -> Result<u64, String> {
-    let expected = state.ui_session_generation.load(Ordering::Acquire);
+    let expected = state.ui_session_generation.load(Ordering::SeqCst);
     authorize_invocation(state, expected).await
 }
 
@@ -213,8 +213,8 @@ mod tests {
         waiting.cancelled().await;
         state
             .ui_authorized_generation
-            .store(generation, Ordering::Release);
-        state.session_lock_requested.store(false, Ordering::Release);
+            .store(generation, Ordering::SeqCst);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
         let fresh = current(&state, generation).unwrap();
         assert!(!fresh.is_cancelled());
         assert!(
@@ -232,7 +232,7 @@ mod tests {
     fn keep_session_generation_alone_refuses_even_before_watch_retirement() {
         let state = AppState::default();
         let held = current(&state, 0).unwrap();
-        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         assert!(
             held.is_cancelled(),
             "actual driver gate does not depend on a propagation task"
@@ -265,7 +265,7 @@ mod entry_tests {
         assert!(!fresh.is_cancelled());
         assert!(old.is_cancelled());
         // Generation check remains synchronous before the account publisher is retired.
-        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         assert!(fresh.is_cancelled());
         assert!(
             account.keepalive().is_none(),
@@ -300,8 +300,9 @@ mod read_tests {
     async fn invocation_waiting_for_commit_cannot_adopt_an_intervening_unlock() {
         let state = AppState::default();
         let directory = tempfile::tempdir().unwrap();
-        *state.store.lock().await =
-            Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let held = state.ui_session_commit.lock().await;
         let mut old = Box::pin(invocation_generation(&state));
@@ -315,8 +316,8 @@ mod read_tests {
         // unlocked store is essential: otherwise either implementation would fail as locked.
         state
             .ui_authorized_generation
-            .store(fresh_generation, Ordering::Release);
-        state.session_lock_requested.store(false, Ordering::Release);
+            .store(fresh_generation, Ordering::SeqCst);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
         drop(held);
         assert!(old.await.is_err());
         assert_eq!(
@@ -329,18 +330,19 @@ mod read_tests {
     async fn entirely_unpolled_media_request_cannot_adopt_a_new_unlock() {
         let state = AppState::default();
         let directory = tempfile::tempdir().unwrap();
-        *state.store.lock().await =
-            Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
-        let captured = state.ui_session_generation.load(Ordering::Acquire);
+        let captured = state.ui_session_generation.load(Ordering::SeqCst);
         let path = format!("/1/{}", "a".repeat(64));
         let request = serve_media(&state, &path, None, captured);
         // Do NOT poll the future until an intervening authenticated unlock completed.
         let fresh = register_ui_lock_request(&state);
         state
             .ui_authorized_generation
-            .store(fresh, Ordering::Release);
-        state.session_lock_requested.store(false, Ordering::Release);
+            .store(fresh, Ordering::SeqCst);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
         let (scope, response) = request.await;
         assert!(scope.is_none());
         assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
@@ -375,7 +377,7 @@ mod read_tests {
                 }
                 1 => caller_owner.retire(),
                 2 => {
-                    state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+                    state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
                 }
                 _ => entry.retire(),
             }
@@ -395,8 +397,9 @@ mod read_tests {
     async fn retired_original_entry_cannot_publish_media_or_cache_in_the_same_account() {
         let state = AppState::default();
         let directory = tempfile::tempdir().unwrap();
-        *state.store.lock().await =
-            Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let entry = EntryOwner::new();
         let origin = entry.scope(current(&state, 0).unwrap());
@@ -452,8 +455,10 @@ mod read_tests {
         for edge in 0..4 {
             let state = AppState::default();
             let directory = tempfile::tempdir().unwrap();
-            *state.store.lock().await =
-                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.store.lock().await = Some(
+                (ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap())
+                    .into(),
+            );
             *state.session_resumable.lock().await = true;
             let path = directory.path().join("already-published.bin");
             std::fs::write(&path, b"verified file").unwrap();
@@ -508,8 +513,10 @@ mod read_tests {
         for edge in 0..4 {
             let state = AppState::default();
             let directory = tempfile::tempdir().unwrap();
-            *state.store.lock().await =
-                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.store.lock().await = Some(
+                (ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap())
+                    .into(),
+            );
             *state.session_resumable.lock().await = true;
             let path = directory.path().join("recovered.bin");
             std::fs::write(&path, b"verified file").unwrap();
@@ -576,8 +583,10 @@ mod read_tests {
         runtime.block_on(async {
             let state = AppState::default();
             let directory = tempfile::tempdir().unwrap();
-            *state.store.lock().await =
-                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.store.lock().await = Some(
+                (ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap())
+                    .into(),
+            );
             *state.session_resumable.lock().await = true;
             let path = directory.path().join("published.png");
             std::fs::write(&path, b"verified file").unwrap();
@@ -626,8 +635,9 @@ mod read_tests {
     async fn a_failed_cleanup_keeps_the_warnings_the_save_already_carried() {
         let state = AppState::default();
         let directory = tempfile::tempdir().unwrap();
-        *state.store.lock().await =
-            Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let entry = EntryOwner::new();
         let origin = entry.scope(current(&state, 0).unwrap());
@@ -661,8 +671,10 @@ mod read_tests {
         for edge in 0..3 {
             let state = AppState::default();
             let directory = tempfile::tempdir().unwrap();
-            *state.store.lock().await =
-                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.store.lock().await = Some(
+                (ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap())
+                    .into(),
+            );
             *state.session_resumable.lock().await = true;
             let path = directory.path().join("already-published.bin");
             std::fs::write(&path, b"verified file").unwrap();
@@ -720,7 +732,7 @@ mod read_tests {
         assert!(for_actor(&state, 1, &actor, 0).await.is_none());
         let replacement = for_actor(&state, 1, &replacement_actor, 0).await.unwrap();
         assert!(!replacement.is_cancelled());
-        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         assert!(replacement.is_cancelled());
         actor.shutdown().await;
         replacement_actor.shutdown().await;

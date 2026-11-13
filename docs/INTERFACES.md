@@ -1,5 +1,32 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Warm saved-source SDK reopen has a distinct `NativeChatWarmSdkReopenCut` and
+single-operation `NativeChatSdkRestoreEnds`. The private Root path requires
+evidence borrowed from the real completed warm handoff and its exact paid read;
+the corresponding Sync entry checks original negatives and enters immediately
+before the actual SDK loader. Native callers cannot select library fallback.
+The owning driver caches the returned seed with all fees before late checks.
+This is epoch-zero warm reopen only; cold Current restore, background protocol
+entry and the checked native factory remain separate unfinished consumers.
+
+`NativeChatSourceOwner::close` is SC-only admission closure. Its preissued
+`observe_retirement` is negative key-work state; consuming retire/Drop notify
+outside guards, even after an idle pre-close. None proves durable Leave, worker
+or SDK/physical teardown.
+
+The opaque native index store now serializes concrete count/lookup projections
+with its retained Pending transaction and outgoing-buffer retirement. No owned
+index, raw Store/Current, generic publisher or SDK grant escapes. Completed
+storage debt moves out for destruction after guards; exact cold recovery handles
+poisoned warm custody. [Internal contract](communication-recovery/CHAT-V2-NATIVE-INDEX-CELL.md).
+
+RT now separates infallible `prepare_session` capture from allocating/checking
+`NativeChatUiSessionPreparation::finish` outside guards. The private Root kernel
+consumes independently paid invocation metadata and canonicalizes generations.
+Its fixed retirement result carries a batch only for Started; AlreadyRetiring
+and KeyWorkDrained carry no temporary payment references. These are lifecycle
+components, not a native command credential. [Contract](communication-recovery/CHAT-V2-NATIVE-UI-GENERATIONS.md).
+
 The closed native key purposes and affine lifecycle owners are defined in
 `catcoms-rt::native_chat_key`. Root privately carries NativeRequired through the
 whole founder/member Host and accepts concrete prepared cuts. Cached Sync raw
@@ -17,7 +44,7 @@ compare the actual constructed Mesh owner before handing it to a founder.
 `NativeIndexStore::{open,row_count_data,lookup_creation_data}` are the distinct
 namespace7/v2 storage APIs. The upgrade consumes a genuine opaque v1 G1 owner;
 no Store/Current getter or generic row-publish API is exposed. Status is historical
-DATA, never native/runtime authority. The actual warm transaction consumer remains
+DATA, never native/runtime authority. The actual native founder transaction consumer remains
 unfinished. [Contract and validation](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
 Its affine facade closes admission before releasing a private reference-counted
 physical allocation. No public physical loan, raw Store or Current is exposed;

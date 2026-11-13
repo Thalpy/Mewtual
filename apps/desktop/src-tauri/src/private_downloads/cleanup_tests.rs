@@ -544,8 +544,9 @@ async fn a_real_resume_commits_its_intent_change_only_without_a_cleanup_claim() 
     let state = AppState::default();
     let vault = tempfile::tempdir().unwrap();
     *state.store.lock().await = Some(
-        catcoms_app::store::ServerStore::open(vault.path(), b"resume claim", &mut OsCryptoRng)
-            .unwrap(),
+        (catcoms_app::store::ServerStore::open(vault.path(), b"resume claim", &mut OsCryptoRng)
+            .unwrap())
+        .into(),
     );
     *state.session_resumable.lock().await = true;
     let (row, task, drain, cid) =

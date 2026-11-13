@@ -107,7 +107,7 @@ fn capture(state: &AppState, server: u64, generation: u64) -> Result<Captured, &
     let owner = active.as_ref().expect("installed above");
     if owner.origin.is_cancelled()
         || ui_session_closed(state)
-        || state.ui_session_generation.load(Ordering::Acquire) != generation
+        || state.ui_session_generation.load(Ordering::SeqCst) != generation
     {
         drop(active.take());
         return Err("session-unavailable");
@@ -394,7 +394,7 @@ fn router_with_spawn<R: tauri::Runtime>(
             let state = app.state::<AppState>();
             // Capture before even bounded argument inspection: a concurrent lock/unlock during
             // parsing cannot authorize the original invocation with the subsequently current epoch.
-            let generation = state.ui_session_generation.load(Ordering::Acquire);
+            let generation = state.ui_session_generation.load(Ordering::SeqCst);
             let request = arguments(command, invoke.message.payload());
             let captured = request
                 .as_ref()

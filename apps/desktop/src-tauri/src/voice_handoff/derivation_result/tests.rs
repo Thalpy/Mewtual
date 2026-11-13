@@ -445,7 +445,7 @@ async fn lock_winning_before_final_result_admission_refuses_without_a_worker_or_
         .native
         .state
         .ui_session_generation
-        .load(std::sync::atomic::Ordering::Acquire);
+        .load(std::sync::atomic::Ordering::SeqCst);
     crate::finalize_unlock_session(&case.native.state, generation, false)
         .await
         .unwrap();

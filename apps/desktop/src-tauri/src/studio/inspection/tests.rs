@@ -108,10 +108,10 @@ async fn native_studio_inspection_expiring_after_conversion_is_rejected() {
                 f.clock.advance_ms(5000);
                 assert!(!delivery.is_current());
                 assert_eq!(
-                    state.ui_session_generation.load(Ordering::Acquire),
+                    state.ui_session_generation.load(Ordering::SeqCst),
                     generation
                 );
-                assert!(!state.session_lock_requested.load(Ordering::Acquire));
+                assert!(!state.session_lock_requested.load(Ordering::SeqCst));
                 assert!(state.servers.try_lock().is_err());
                 assert!(state.ui_session_commit.try_lock().is_err());
                 Ok(value)
@@ -149,13 +149,13 @@ async fn native_studio_inspection_original_session_request_and_instance_span_bot
                 assert!(state.ui_session_commit.try_lock().is_ok());
                 assert!(original.view_request.as_ref().unwrap().is_current());
                 assert_eq!(
-                    state.ui_session_generation.load(Ordering::Acquire),
+                    state.ui_session_generation.load(Ordering::SeqCst),
                     original.generation
                 );
                 reached.set(true);
                 match mode {
                     0 => {
-                        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+                        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
                     }
                     1 => {
                         drop(requests::ViewRequest::begin(
@@ -243,7 +243,7 @@ async fn native_studio_inspection_session_and_request_changed_after_conversion_a
                 converted.set(true);
                 assert!(delivery.is_current());
                 if session {
-                    state.session_lock_requested.store(true, Ordering::Release);
+                    state.session_lock_requested.store(true, Ordering::SeqCst);
                 } else {
                     drop(requests::ViewRequest::begin(
                         &state,
@@ -270,7 +270,7 @@ async fn native_studio_inspection_session_and_request_changed_after_conversion_a
                 "Studio view request was superseded; refresh"
             }
         );
-        state.session_lock_requested.store(false, Ordering::Release);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
     }
     f.shutdown().await;
 }

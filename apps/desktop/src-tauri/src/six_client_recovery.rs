@@ -499,6 +499,8 @@ impl Scenario {
                 .await
                 .as_ref()
                 .unwrap()
+                .as_legacy()
+                .unwrap()
                 .load_server(1)
                 .unwrap();
             self.clients[index].driver_starting = true;

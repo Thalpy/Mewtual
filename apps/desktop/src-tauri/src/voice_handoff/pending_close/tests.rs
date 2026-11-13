@@ -404,7 +404,7 @@ async fn lock_unlock_never_revives_pending_but_original_historical_close_still_w
         .native
         .state
         .ui_session_generation
-        .load(std::sync::atomic::Ordering::Acquire);
+        .load(std::sync::atomic::Ordering::SeqCst);
     crate::finalize_unlock_session(&case.native.state, generation, false)
         .await
         .unwrap();

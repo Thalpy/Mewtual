@@ -31,8 +31,9 @@ impl Fixture {
     async fn held_events() -> Self {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"upload session", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"upload session", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let mut server = Server::found(
             Hub::new().join(PeerId::from_u64(701)),
@@ -92,7 +93,7 @@ impl Fixture {
         assert!(pending.is_complete());
         RegisteredUpload {
             pending,
-            generation: self.state.ui_session_generation.load(Ordering::Acquire),
+            generation: self.state.ui_session_generation.load(Ordering::SeqCst),
             instance: 70,
             actor: self.actor.clone(),
         }
@@ -123,7 +124,7 @@ impl Fixture {
         let store = self.state.store.clone().try_lock_owned().unwrap();
         let registry = self.state.servers.clone().try_lock_owned().unwrap();
         ready
-            .execute(StudioVaultLease::new(store, 1, (persist, commit, registry)))
+            .execute(StudioVaultLease::new_mounted(store, 1, (persist, commit, registry)).unwrap())
             .await
             .unwrap();
     }
@@ -260,10 +261,10 @@ async fn original_upload_generation_is_not_revived_by_unlock_or_a_wait_for_the_m
     // eventual authorized generation only to pin that equality of unlocked state is insufficient.
     f.state
         .ui_authorized_generation
-        .store(generation, Ordering::Release);
+        .store(generation, Ordering::SeqCst);
     f.state
         .session_lock_requested
-        .store(false, Ordering::Release);
+        .store(false, Ordering::SeqCst);
     drop(map);
     assert!(take.await.is_err());
     assert!(!staged.exists());
@@ -346,6 +347,8 @@ async fn admitted_publication_keeps_lock_waiting_even_after_outer_waiter_is_drop
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .load_server(1)
         .unwrap();
@@ -493,10 +496,10 @@ async fn an_event_waiting_on_its_short_fence_cannot_adopt_new_authorization() {
     // closed flag. Actual lock/unlock and original-upload custody are tested separately below.
     f.state
         .ui_authorized_generation
-        .store(replacement, Ordering::Release);
+        .store(replacement, Ordering::SeqCst);
     f.state
         .session_lock_requested
-        .store(false, Ordering::Release);
+        .store(false, Ordering::SeqCst);
     drop(fence);
     assert!(!old.await);
     assert!(crate::studio::forward_if_current(&f.state, 1, 70, || {}).await);
@@ -625,7 +628,7 @@ async fn a_completed_native_lock_unlock_cannot_authorize_an_old_begin() {
         .await;
     let old_generation = old.generation;
     lock_session_inner(&f.state, None).await.unwrap();
-    let fresh_generation = f.state.ui_session_generation.load(Ordering::Acquire);
+    let fresh_generation = f.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&f.state, fresh_generation, true)
         .await
         .unwrap();
@@ -652,7 +655,7 @@ async fn publication_releases_commit_before_waiting_for_the_same_persist_lock_as
     let upload = f.upload("leave order", b"published before leave").await;
     f.state.uploads.lock().await.insert(key.clone(), upload);
     let admitted = take(&f.state, &key).await.unwrap();
-    let generation = f.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = f.state.ui_session_generation.load(Ordering::SeqCst);
     // These are leave_server's real two locks, in its production order. The worker must
     // release commit before its persistence stage waits for the first one.
     let writing = persist_lock_for(&f.state, 1).lock_owned().await;

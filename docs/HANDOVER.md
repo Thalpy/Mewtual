@@ -1,6 +1,121 @@
 # Mewtual; Handover
 
-## Linux founder inventory (13 November; execution pending)
+## Warm native saved-source SDK admission (13 November; factory still open)
+
+The real warm handoff now binds its retained creator's native origin. A distinct
+warm-SDK cut and fixed End holder guard the saved-source reload at the actual
+Sync loader, separately from fresh SDK creation. The completed handoff, original
+paid read and archive-root negatives are checked again after counter admission.
+The driver caches the returned SDK graph/source/fees before late source or UI
+checks; reauthentication continues that same graph without another decode.
+
+Local execution passes25 RT lifecycle cases, the eight-ordering Sync primitive
+case, all11 whole warm factory cases and eight existing Root read/SDK cases.
+Strict RT/Sync Clippy passes. Read-only design/diff/re-review has no remaining
+B/H/M/LOW after fixing the final original-negative interval and adding final
+Source-closure coverage. Full exact-head Root/native execution remains required.
+The future native invocation invoice must separately cover NativeFounderKeys;
+the enlarged driver and bridge fields are included by their existing size checks.
+No cold Current restore, background protocol signer, native issuer or activation
+is supplied by this warm-only path.
+
+## Mounted native vault boundary (13 November; inactive integration)
+
+The production branch carries one Root-owned `MountedVault` sum through the
+original native Store mutex. Existing Legacy paths explicitly select Legacy;
+they cannot borrow the Store hidden by `NativeTextVault`. Durable send, shutdown
+and Studio leases preserve the same mutex and ordering token. Their unscoped
+constructors intentionally refuse TextV2; mixed Legacy rows in a native vault
+still need the scoped original-row bridge described in
+[the index3 design](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
+`NativeTextVault` owns the affine UI lifecycle and physical index. Its final UI
+check uses only the captured original metadata and SC atomics, without locking a
+registry, upgrading a Weak or touching a pool under final native guards. Actual
+native generation, authorized-generation and lock-request accesses participate
+in that ordering. An already mounted TextV2 vault explicitly refuses the Legacy
+unlock route; it must never fall through to a cold Legacy opener or replace its
+original owner. Native V2 opening is still unimplemented.
+
+Focused Root native-registry tests pass109 cases; RT passes21 cases and strict
+Clippy. The separate native library check and test-library compilation pass.
+The subsequent full local native run passed1012 and failed30: the first media
+fixture capacity refusal poisoned28 later recovery fixtures, and the Studio
+Node export child exited because this worktree lacked frontend dependencies.
+Dependencies are now installed. The new native unlock regression and all three
+shared Root Studio fixture cases pass. All3441 frontend tests, frontend static
+checking, production build and real-browser flow checks pass; these are not a
+full-suite sign-off. The first sandboxed flow run lost its CDP connection; the
+unrestricted headless Edge rerun passed every flow.
+Windows CI at9d3a3dd2 independently failed a fresh-Current assertion after media
+retirement. Static review traced both media failures to one-shot fixture
+assumptions around valid local refusal/joined attempts, rather than establishing
+a production regression. All18 matching native/browser cases now pass, including
+both failing paths; the actual Studio export case also passes. CI on29dc358c
+then exposed five Root unit-test type errors in the shared inspection fixture's
+remaining callers. Commit6a280f76 fixes those while preserving the same guard;
+all four inspection cases pass. Other one-shot affine media setup sites remain
+explicit coverage follow-ups. The parent9d3a3dd2 run finished with both Root jobs
+and Linux native passing; its Windows native failure is the corrected oracle.
+
+The mounted sum is not backend activation: per-group backend ownership, native
+founder/network publication, cold restore, joined provenance, transport and UI
+acceptance remain open. Chat V2 remains disabled. Unregistered index3 and sequence
+starter files are neither executed code nor acceptance evidence.
+
+## Native source close fence (13 November; consumer still unfinished)
+
+SourceOwner now supports SC-only close before native row/operation locks, with
+preissued negative key-work drains. Retire/Drop notify outside guards, including
+a prefenced idle source; admitted Ends still drain independently. All20 RT cases
+and strict RT Clippy pass; read-only diff review has no B/H/M/LOW. This grants no
+durable Leave, physical/worker/SDK drainage or key-erasure proof. Native owner and
+command integration remain open.
+
+## Retained native index cell (13 November; producer unfinished)
+
+The physical mount now retains one Pending-only transaction, exact IO/frame and
+JOIN claim through caller loss and normal IO refusal. Preparation before claim
+has no file/SDK/network effect; claim-to-cell publication is infallible. Unwind
+poison remains held for exact cold recovery. Covered outgoing buffers keep a
+negative retirement fence until their real destruction; fresh count/lookup data
+is derived under the same cell, with no owned-index escape.
+
+All101 surrounding storage cases pass. After the final test-only bounded
+handshake, all13 new cell regressions pass again. Re-review has no remaining
+B/H/M/LOW in this boundary. Review corrected retry consistency, outgoing-buffer
+accounting and an inherited owned-read escape; no
+native authorization is inferred. The actual Pending/network/founder producer,
+backend/commands and activation remain unfinished. [Scope](communication-recovery/CHAT-V2-NATIVE-INDEX-CELL.md).
+
+## Canonical UI-generation kernel (13 November; native consumer unfinished)
+
+The native production WIP has independent affine candidate payments, original
+capture/finish outside guards,32 canonical generations, monotone retirement/GC
+and no-budget-required lock batches. Actual reservations survive unentered pins.
+Read-only review found/fixed a repeated-retirement last-payer race and locked error
+allocation. Eight real-Root regressions pass, including concurrent final-End/GC;
+the fixed-stack result follow-up also passes. All18 RT lifecycle cases and
+current strict RT Clippy pass.
+This is a private library kernel, not checked Tauri capture or native activation.
+Its actual facade/founder/worker and bounded waiter consumers are still absent.
+Strict App Clippy remains failing (latest pre-follow-up574, including unconsumed
+integration code); no debt is waived. The joined native-row storage contract is
+also absent. [Detailed scope](communication-recovery/CHAT-V2-NATIVE-UI-GENERATIONS.md).
+
+## Native generation metadata (13 November; integration in progress)
+
+The next native production branch ties Host and generation metadata payments to
+their actual retained RT objects. An idle, closed session can still have unentered
+pins; reclaiming a registry record cannot refund those pins' payment. Preissued
+negative drains wait for CLOSED+zero and wake on first idle close. Whole Host
+close is SC-only; actual retirement/Drop and notifications run outside guards.
+All17 RT cases and strict RT Clippy pass, plus10 bootstrap,9 member,5 actual SDK
+and10 whole warm Host cases. Read-only review has no B/H/M; its public lifecycle
+doc LOW is fixed. Actual canonical native registry/waiter integration and the
+owning native Pending/network/founder producer remain unfinished. No activation.
+
+## Linux founder inventory (13 November; focused execution passed)
 
 A fixed-buffer Linux RawDir reader now supplies the previously unsupported
 settlement/repair/promotion inventory. It uses original held directories,
@@ -8,12 +123,20 @@ independent offsets, exact byte names, nofollow type checks and bounded work;
 unknown objects stay untouched. Four existing inventory cases, two role matrices,
 eight seed cleanup and three covering-write cases, two focused promotion recovery
 cases and the ten whole warm driver cases now have actual Linux positive paths.
-Windows mount/warm compatibility passes; Linux execution is pending. Review has no
+Windows mount/warm compatibility passes. Hosted run43407038976 passes42 focused
+Linux cases and11 Windows cases, plus3438 frontend tests/check/build. The exact-head
+full run43416522284 at053ac72a passes all four Root/native jobs on Linux and
+Windows. Review has no
 production blocker/high/medium; the Stat invoice LOW is fixed. This supplies no
 native command or backend permission. Chat V2 remains disabled.
 [Exact reader, tests and limits](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
 
 ## Concrete native key cuts (13 November; production factory incomplete)
+
+Exact-source run43403553170 atPR99/ecb7472f now passes all four hosted Root/
+native jobs across Linux and Windows, plus full frontend/check/build. The agreed
+slow cost case and strict/dependency acceptance remain open. PR100/053ac72a also
+passes all four Root/native jobs across Linux and Windows.
 
 The integration branch privately carries an immutable NativeRequired origin through
 SDK creation, encrypted SourceSaved, Current, empty promotion and the whole member

@@ -8,9 +8,9 @@ async fn detached_member_maintenance_quiet_legacy_pex_is_saved_before_another_ti
     const INSTANCE: u64 = 182;
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState::default());
-    *state.store.lock().await = Some(ServerStore::open(directory.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+    *state.store.lock().await = Some((ServerStore::open(directory.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into());
     // Networking and sealed persistence continue while UI access is locked.
-    state.session_lock_requested.store(true, Ordering::Release);
+    state.session_lock_requested.store(true, Ordering::SeqCst);
     let hub = Hub::new();
     let sender_lib_peer = libp2p::identity::Keypair::ed25519_from_bytes([181; 32]).unwrap().public().to_peer_id();
     let sender_peer = catcoms_net::phase0_peer_id(&sender_lib_peer);
@@ -56,7 +56,7 @@ async fn detached_member_maintenance_quiet_legacy_pex_is_saved_before_another_ti
     }).await.expect("late PEX record must wake sealed core persistence without another discovery tick");
     wait_for_clean_snapshot(&state, SERVER).await;
     // Read the saved snapshot BEFORE orderly close can checkpoint it as a side effect.
-    let saved = state.store.lock().await.as_ref().unwrap().load_server(SERVER).unwrap();
+    let saved = state.store.lock().await.as_ref().unwrap().as_legacy().unwrap().load_server(SERVER).unwrap();
     let mut offline = Server::restore(&saved, Hub::new().join(PeerId::from_u64(183)), ChaCha20Rng::seed_from_u64(183), Box::new(ManualClock::new(2_000)), "receiver").unwrap();
     let descriptor = offline.sync().known_peer_records().into_iter().find(|record| record.peer_id == *sender_peer.as_bytes()).expect("signed descriptor was durably saved");
     assert!(descriptor.verify_self());

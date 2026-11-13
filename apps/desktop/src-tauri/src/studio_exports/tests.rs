@@ -181,7 +181,7 @@ fn studio_export_link_is_committed_when_staging_cleanup_fails() {
 async fn unlocked_state(vault: &Path) -> (AppState, u64) {
     let state = AppState::default();
     *state.store.lock().await =
-        Some(ServerStore::open(vault, b"correct horse", &mut OsCryptoRng).unwrap());
+        Some((ServerStore::open(vault, b"correct horse", &mut OsCryptoRng).unwrap()).into());
     *state.session_resumable.lock().await = true;
     let generation = unlocked_ui_session_generation(&state).await.unwrap();
     (state, generation)
@@ -285,7 +285,7 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
     .await
     .is_err());
     let before_commit = async {
-        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
     };
     // The current instance, so the session fence after staging is what refuses publication.
     assert!(save_gif(
@@ -313,8 +313,8 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
         // This fixture already holds an unlocked vault. Explicitly model successful native
         // authentication before allowing fresh work; never restore authority to the old token.
         state.ui_authorized_generation.store(
-            state.ui_session_generation.load(Ordering::Acquire),
-            Ordering::Release,
+            state.ui_session_generation.load(Ordering::SeqCst),
+            Ordering::SeqCst,
         );
     }
     let current = unlocked_ui_session_generation(&state).await.unwrap();

@@ -137,8 +137,9 @@ mod tests {
         use rand_core::SeedableRng;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         // A regular file where the blob namespace directory belongs forces the real production
         // attachment helper down its best-effort memory fallback, without mocking that path.
         std::fs::write(root.path().join("blobs"), b"blocked").unwrap();
@@ -178,8 +179,9 @@ mod tests {
         use rand_core::SeedableRng;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let server = Server::found(
@@ -233,14 +235,14 @@ mod tests {
                 .unwrap(),
             42
         );
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert!(finish_response(&state, 12, 41, generation, || panic!(
             "locked bytes converted"
         ))
         .await
         .is_err());
-        state.session_lock_requested.store(false, Ordering::Release);
-        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
+        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         assert!(
             finish_response(&state, 12, 41, generation, || panic!("old session revived"))
                 .await

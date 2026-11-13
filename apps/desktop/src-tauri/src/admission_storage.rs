@@ -125,6 +125,7 @@ pub(super) async fn persist_server_net(
     }
     let observed = match guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .map(|store| store.load_server_net(server))
         .transpose()
     {
@@ -173,7 +174,7 @@ pub(super) async fn persist_server_net(
             },
         );
     }
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return pending(PersistFailure::StoreUnavailable);
     };
     write_net(state, store, server, instance, &candidate)
@@ -237,7 +238,7 @@ pub(super) async fn retry_server_net(
     if !matches_live_identity(entry, &retained.net) {
         return Some(pending(PersistFailure::WriteFailed));
     }
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return Some(pending(PersistFailure::StoreUnavailable));
     };
     let current = match store.load_server_net(server) {
@@ -288,7 +289,7 @@ pub(super) async fn retry_registry(state: &AppState) -> Option<PersistOutcome> {
 
 async fn write_registry(state: &AppState) -> PersistOutcome {
     let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return pending(PersistFailure::StoreUnavailable);
     };
     let registry = state.servers.lock().await;
@@ -359,6 +360,7 @@ pub(super) async fn load_or_init_server_net(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "vault is not mounted".to_string())?;
     let registry = state.servers.lock().await;
     if registry.contains_key(&server) {
@@ -445,7 +447,7 @@ mod tests {
 
     async fn mount(state: &AppState, path: &Path) {
         *state.store.lock().await =
-            Some(ServerStore::open(path, b"admission test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(path, b"admission test", &mut OsCryptoRng).unwrap()).into());
     }
 
     async fn saved_net(state: &AppState) -> ServerNet {
@@ -454,6 +456,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server_net(1)
             .unwrap()
@@ -551,6 +555,8 @@ mod tests {
             .await
             .as_ref()
             .unwrap()
+            .as_legacy()
+            .unwrap()
             .save_server_net(1, &newer, &mut OsCryptoRng)
             .unwrap();
         assert_eq!(
@@ -590,6 +596,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .save_server_net(1, &new_net, &mut OsCryptoRng)
             .unwrap();
@@ -669,6 +677,8 @@ mod tests {
             .await
             .as_ref()
             .unwrap()
+            .as_legacy()
+            .unwrap()
             .save_server_net(1, &foreign, &mut OsCryptoRng)
             .unwrap();
         assert_eq!(
@@ -719,6 +729,8 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
+                .unwrap()
+                .as_legacy()
                 .unwrap()
                 .load_registry()
                 .unwrap()[0]

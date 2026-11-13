@@ -67,7 +67,7 @@ impl SessionWriteCase {
         if matches!(action, SessionMutation::Reset) {
             std::fs::write(root.path().join("servers/1.saved"), b"damaged list").unwrap();
         }
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         state.servers.lock().await.insert(1, server);
         Self {
@@ -184,7 +184,12 @@ async fn saved_file_mutations_apply_while_the_original_session_is_open() {
             drop(servers);
             let store = case.state.store.lock().await;
             assert_eq!(
-                store.as_ref().unwrap().load_saved_files_limit(1, &owner),
+                store
+                    .as_ref()
+                    .unwrap()
+                    .as_legacy()
+                    .unwrap()
+                    .load_saved_files_limit(1, &owner),
                 SavedLimitLoad::Found(SavedLimit::clamped(16))
             );
         }
@@ -246,7 +251,7 @@ async fn saved_entry_reveal_holds_commit_and_an_unlock_cannot_revive_it() {
     .await
     .unwrap();
     lock_session_inner(&case.state, None).await.unwrap();
-    let generation = case.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = case.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&case.state, generation, false)
         .await
         .unwrap();
@@ -358,6 +363,8 @@ async fn stored(state: &AppState) -> SavedFilesLoad {
         .await
         .as_ref()
         .unwrap()
+        .as_legacy()
+        .unwrap()
         .load_saved_files(1, &owner)
 }
 
@@ -401,7 +408,7 @@ async fn a_save_is_recorded_only_for_the_incarnation_that_saved() {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("Downloads");
     let state = AppState::default();
-    *state.store.lock().await = Some(store_in(dir.path()));
+    *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(561);
     let actor = entry.actor.clone();
     state.servers.lock().await.insert(1, entry);
@@ -462,7 +469,7 @@ async fn a_list_this_build_cannot_read_is_never_written_over() {
     let store = store_in(dir.path());
     let record = store.backup_source_dir().join("servers").join("1.saved");
     std::fs::write(&record, b"written by a newer Mewtual, or damaged").unwrap();
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
     let (entry, task, drain) = crate::leaving::tests::running(562);
     let actor = entry.actor.clone();
     state.servers.lock().await.insert(1, entry);
@@ -491,7 +498,7 @@ async fn clearing_a_saved_private_row_forgets_only_its_own_entry() {
     let downloads = dir.path().join("Downloads");
     create_folder(&downloads).unwrap();
     let state = AppState::default();
-    *state.store.lock().await = Some(store_in(dir.path()));
+    *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(563);
     let actor = entry.actor.clone();
     state.servers.lock().await.insert(1, entry);
@@ -536,7 +543,7 @@ async fn a_rename_after_a_failed_forget_keeps_the_list_readable() {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("Downloads");
     let state = AppState::default();
-    *state.store.lock().await = Some(store_in(dir.path()));
+    *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(564);
     let actor = entry.actor.clone();
     state.servers.lock().await.insert(1, entry);
@@ -579,7 +586,7 @@ async fn a_save_is_recorded_within_the_stored_setting() {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("Downloads");
     let state = AppState::default();
-    *state.store.lock().await = Some(store_in(dir.path()));
+    *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(565);
     let actor = entry.actor.clone();
     state.servers.lock().await.insert(1, entry);
@@ -589,6 +596,8 @@ async fn a_save_is_recorded_within_the_stored_setting() {
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .save_saved_files_limit(1, &owner, SavedLimit::clamped(16), &mut OsCryptoRng)
         .unwrap();
@@ -803,7 +812,7 @@ async fn a_replace_plan_comes_from_the_same_locked_read_that_records_the_save() 
     create_folder(&downloads).unwrap();
     create_folder(&elsewhere).unwrap();
     let state = AppState::default();
-    *state.store.lock().await = Some(store_in(dir.path()));
+    *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(564);
     let actor = entry.actor.clone();
     state.servers.lock().await.insert(1, entry);

@@ -3617,6 +3617,41 @@ test("framed exact native history collection retains fixed browser graph and ori
   assert.throws(()=>f.f.broker.collectNativeNegotiationHistory(f.f.owner,f.child.channel,{...f.child.ready.chain}),/original native history/);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
 });
+for (const boundary of ["detached", "history", "compacted"] as const) test(`original media Current recovers lost and refused attempts after ${boundary}`, async t => {
+  const f = await framedMedia(t);
+  try {
+    await f.media(); f.remaining(0); await f.retireNegotiation();
+    const broker = f.f.broker, plan = f.child.ready.chain;
+    if (boundary === "history") assert.equal(await f.collectHistory(), true);
+    if (boundary === "compacted") assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), true);
+    type Session = { keys: unknown; bootstrap: unknown; tx: bigint };
+    const sessions = (broker as unknown as {ipcChannels: Map<string, Session>}).ipcChannels;
+    const session = sessions.get(f.f.owner.token)!, keys = session.keys, bootstrap = session.bootstrap;
+    const paid = broker.counts().bytes, admits = f.modes.filter(mode => mode === 0).length;
+    // Coalesced observers join one physical attempt; a void result is not a
+    // promise that this attempt obtained a positive Current.
+    const beforeHeld = f.modes.length, held = f.hold(4), flight = f.media();
+    assert.equal(f.media(), flight);
+    await until(() => f.modes.length > beforeHeld);
+    held.release(); await flight;
+    const before = f.modes.length, tx = session.tx;
+    f.lose(4); await f.media(); // Fixture loses the transport result before browser AEAD.
+    f.busy(4); await f.media(); // Real encrypted Capacity response, not malformed DATA.
+    assert.equal(f.sdk.calls.closed, 0); assert.equal(broker.counts().bytes, paid);
+    f.busy(-1); await f.media();
+    assert.deepEqual(f.modes.slice(before), [4, 4, 4]);
+    assert.equal(f.modes.filter(mode => mode === 0).length, admits, "no replacement Admit");
+    assert.equal(sessions.get(f.f.owner.token), session);
+    assert.equal(session.keys, keys); assert.equal(session.bootstrap, bootstrap); assert.ok(session.tx > tx);
+    assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0);
+    assert.equal(f.custody.effectCounts().sdkReleases, 1);
+    assert.equal(broker.counts().bytes, paid);
+  } finally {
+    f.f.owner.retire(); await f.child.channel.close();
+  }
+  assert.equal(f.f.broker.counts().bytes, 0);
+});
+
 test("framed lost history reply recovers original tombstone and keeps fixed fees", async t=>{
   const f=await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation(); f.lose(8);
   const paid=f.f.broker.counts().bytes; assert.equal(await f.collectHistory(),false);

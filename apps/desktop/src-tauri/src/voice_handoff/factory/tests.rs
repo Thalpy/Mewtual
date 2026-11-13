@@ -450,7 +450,7 @@ async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_
     let generation = f
         .state
         .ui_session_generation
-        .load(std::sync::atomic::Ordering::Acquire);
+        .load(std::sync::atomic::Ordering::SeqCst);
     finalize_unlock_session(&f.state, generation, false)
         .await
         .unwrap();
@@ -707,7 +707,7 @@ async fn indexed_current_rechecks_store_and_resumable_under_actual_ui_commit_wit
         let generation = f
             .state
             .ui_session_generation
-            .load(std::sync::atomic::Ordering::Acquire);
+            .load(std::sync::atomic::Ordering::SeqCst);
         let mounted = Arc::new(std::sync::Mutex::new(None));
         let saved = mounted.clone();
         let commit = f.state.ui_session_commit.clone();
@@ -730,7 +730,7 @@ async fn indexed_current_rechecks_store_and_resumable_under_actual_ui_commit_wit
         let generation_after = f
             .state
             .ui_session_generation
-            .load(std::sync::atomic::Ordering::Acquire);
+            .load(std::sync::atomic::Ordering::SeqCst);
         drop(hook);
         if remove_store {
             // Restore after releasing the synchronous observation guard; never retain
