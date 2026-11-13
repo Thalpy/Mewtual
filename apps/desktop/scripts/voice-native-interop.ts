@@ -77,11 +77,6 @@ function installCoordinatedRtc(): void {
   }
   globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
 }
-function currentObservations(): number {
-  const record = mediaRecords.find(record => record.plan === chain);
-  assert.ok(record, "original actual media record required");
-  return record.currents;
-}
 function mediaEvent(value: string): void { if (mediaEvents.length === 6) mediaEvents.shift(); mediaEvents.push(value + "@" + Math.floor(performance.now() - mediaStarted)); }
 // Test control only: Rust stops a long-lived automatic cycle after independently observing
 // actual native receipts/ACKs/Returns. No row, role, input or key is passed into this step.
@@ -660,8 +655,8 @@ async function step(value: Step): Promise<unknown> {
     case "media-retire-progress": {
       assert.ok(mediaPeerCalls); assert.ok(retirementWork); assert.equal(retirementFailed,false);
       await broker.completeNativeMediaHandoff(owner,channel,chain);
-      const before=currentObservations(); await broker.completeNativeMediaHandoff(owner,channel,chain);
-      assert.ok(currentObservations()>before); assert.equal(mediaPeerCalls.closed,0);
+      await freshOriginalMediaCurrent(mediaRecords.find(record => record.plan === chain)!);
+      assert.equal(mediaPeerCalls.closed,0);
       return {done:retirementDone,paid:broker.counts().bytes===retirementBefore,oldCurrent:chain.isCurrent(),closed:mediaPeerCalls.closed};
     }
     case "media-retire-finish": {
@@ -681,9 +676,8 @@ async function step(value: Step): Promise<unknown> {
       // First join any earlier flight, then require a NEW actual authenticated Current
       // after SDK/key/Plan retirement. A historical admitted receipt cannot satisfy this.
       await broker.completeNativeMediaHandoff(owner,channel,chain);
-      const observed=currentObservations();
-      await broker.completeNativeMediaHandoff(owner,channel,chain);
-      assert.ok(currentObservations()>observed); assert.equal(mediaPeerCalls.closed,0);
+      await freshOriginalMediaCurrent(mediaRecords.find(record => record.plan === chain)!);
+      assert.equal(mediaPeerCalls.closed,0);
       if(mediaLoss().detach) assert.ok(mediaLoss().modes.has(7));
       return {kind:"negotiation-retired",peers:1,closed:0,releasedBytes:65536};
     }
@@ -702,11 +696,10 @@ async function step(value: Step): Promise<unknown> {
       assert.ok(mediaLoss().modes.has(8),"actual completed authenticated mode8 reply was lost and recovered");
       assert.equal(broker.counts().bytes,paid,"native history does not refund browser fixed graph");
       // Join any timer/observer flight that began before native history disappeared.
-      // The second call must start its own physical Current after that join returned.
+      // A joined attempt may itself hit native contention. Require a positive,
+      // proof-checked Current within the existing bound, not one void attempt.
       await broker.completeNativeMediaHandoff(owner,channel,chain);
-      const before = currentObservations();
-      await broker.completeNativeMediaHandoff(owner,channel,chain);
-      assert.ok(currentObservations() > before, "fresh authenticated Current after native history removal");
+      await freshOriginalMediaCurrent(mediaRecords.find(record => record.plan === chain)!);
       assert.equal(mediaPeerCalls.closed,0);
       // Native independently held/collected the original parent and child, and the first
       // authenticated mode8 completion was lost above. Now exercise the actual browser
@@ -725,9 +718,8 @@ async function step(value: Step): Promise<unknown> {
       // Old metadata is gone; exact original media still resolves independently. Require
       // another physically started Current after compaction, not an old joined observer.
       await broker.completeNativeMediaHandoff(owner,channel,chain);
-      const afterCompaction=currentObservations();
-      await broker.completeNativeMediaHandoff(owner,channel,chain);
-      assert.ok(currentObservations()>afterCompaction); assert.equal(mediaPeerCalls.closed,0);
+      await freshOriginalMediaCurrent(mediaRecords.find(record => record.plan === chain)!);
+      assert.equal(mediaPeerCalls.closed,0);
       return { kind: "indexed-media-current", peers:1 };
     }
     case "advance-pair": {
