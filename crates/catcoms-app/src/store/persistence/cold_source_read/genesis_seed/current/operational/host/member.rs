@@ -695,6 +695,7 @@ impl V2MemberLane {
         store: &ServerStore,
         owner: &mut V2TextOwnedCurrent<T, R>,
         request: &V2MemberSignRequest<'_>,
+        mut access: FounderAccess<'_>,
     ) -> Result<(), AppError> {
         if self.retry_completed(request)? {
             return Ok(());
@@ -815,9 +816,14 @@ impl V2MemberLane {
                 let signing = plan.admit_signing(draft, &signer).map_err(|_| refused())?;
                 #[cfg(all(test, windows))]
                 note_member_sign_dispatch();
-                let signed = shared
-                    .sign_ordinary_admitted(inputs, signing)
-                    .map_err(|_| refused())?;
+                let signed = match &mut access {
+                    FounderAccess::Library => shared.sign_ordinary_admitted(inputs, signing),
+                    FounderAccess::Native(keys) => {
+                        let (original, cut, ends) = keys.member_entry();
+                        shared.sign_ordinary_admitted_native(inputs, signing, original, cut, ends)
+                    }
+                }
+                .map_err(|_| refused())?;
                 // The raw64 is already in the Plan. A close requested here (lock/Remove)
                 // must still wait for this admitted reader; see the regression cut.
                 #[cfg(all(test, windows))]
@@ -967,6 +973,15 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         layout: &V2CurrentLayoutStore,
         request: V2MemberSignRequest<'_>,
     ) -> Result<(), AppError> {
+        self.retry_sign_member_request_with_access(layout, request, FounderAccess::Library)
+    }
+    pub(in crate::store) fn retry_sign_member_request_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: V2MemberSignRequest<'_>,
+        access: FounderAccess<'_>,
+    ) -> Result<(), AppError> {
+        access.require(&self.origin)?;
         // A malformed request never creates a lane (which would exclude founder Create).
         require_request_shape(&request)?;
         // Pure DATA completion and exact retry BEFORE any positive gate.
@@ -985,7 +1000,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         }
         let store = layout.checked_store()?;
         if let Some(lane) = self.member.as_deref_mut() {
-            return lane.retry_request(store, &mut self.owner, &request);
+            return lane.retry_request(store, &mut self.owner, &request, access);
         }
         // A NEW lane is installed only once its anchor is bound and its verifier exists. If
         // it fails earlier (for example the anchor refuses beside a crash-left founder WAL),
@@ -997,7 +1012,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             let observer = self.observer.as_ref().ok_or_else(refused)?;
             V2MemberLane::prepare(store, &owner, observer)?
         };
-        let result = lane.retry_request(store, &mut self.owner, &request);
+        let result = lane.retry_request(store, &mut self.owner, &request, access);
         if lane.verifier.is_some() {
             self.member = Some(Box::new(lane));
         }

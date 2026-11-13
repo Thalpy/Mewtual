@@ -8,6 +8,9 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
 
+#[path = "native_tests.rs"]
+mod native;
+
 fn member_node(
     hub: &Arc<Hub>,
     seed: u64,

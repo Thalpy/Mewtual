@@ -1180,9 +1180,12 @@ mod persistence {
         /// Consume BEFORE taking the actual original SDK inputs. No error/SDK failure may
         /// mint another ticket or return this one to a captured/decoded invocation.
         pub(super) fn consume_for_sdk(
-            self,
+            &self,
             store: &ServerStore,
             captured: &CapturedFounderInvocation,
+            native: Option<
+                &mut critical_namespaces::archive_bootstrap::founder::NativeFounderSdkEntry<'_>,
+            >,
         ) -> Result<(), AppError> {
             use critical_namespaces::refused;
             if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
@@ -1226,6 +1229,12 @@ mod persistence {
             // Revalidate the SAME actual objects again; exact bytes at a replacement path do
             // not inherit this live creator's original SDK admission.
             validate_founder_original_root(store, &self.original, root)?;
+            if let Some(entry) = native {
+                // All blocking held-file/parent/full-byte proofs are finished.
+                // The caller retains End outside this Root guard through the
+                // actual Server::found result cache. Refusal spends no SDK unit.
+                entry.enter()?;
+            }
             // File/parent checks above can block. Sample the original negatives AFTER them,
             // immediately before the one irreversible SDK admission; no reread by logical key
             // can replace this creator when a close/unlock/new mount wins first.

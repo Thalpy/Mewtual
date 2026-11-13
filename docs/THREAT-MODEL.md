@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+Concrete native cuts precede actual SDK/Profile/Header/member primitive entry.
+They require the same source, purpose, captured UI generation and live owners,
+retaining partial/full Ends outside writers through caching and unwind. Cached
+results supply no current authority; Root refuses library fallback even after
+runtime transfer. Host atomics/test custody do not authenticate native commands.
+The actual producer must bind the original mount/row/birth/full keys and publish
+participating negatives sequentially consistently before activation.
+[Enforcement and open boundaries](communication-recovery/CHAT-V2-NATIVE-KEY-CUTS.md).
+
 Native7/v2 storage binds every successor to its original framed index parent and
 preserves immutable birth receipts. Warm replacement re-proves its original
 destination after large reads; cold repair cannot recreate missing committed
@@ -7,6 +16,13 @@ outputs or discard authenticated unknown DATA. Admission closes before files,
 buffers, mount and exact payment retire. These storage properties supply no
 native-session, SDK, key, joined-member or backend permission; those live consumers
 remain incomplete. [Enforcement and limits](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+The admission facade and private physical custody have distinct lifetimes: a late
+storage loan cannot reopen the original closed fence, while an already retained
+index write can finish its exact WAL/barriers. The final physical drop retires
+the mount; negative gate/claim metadata retains its exact invoice until released.
+This proves no absent native issuer lifecycle and no all-JOIN-after-close drain.
+The seeded transport commitment covers the full algorithm-tagged public key;
+mutable routes/ports and encrypted-frame identities cannot substitute for it.
 
 The retained Root bootstrap producer records each Profile/Header key entry before
 the primitive and caches returned raw immediately. Unknown entered results are

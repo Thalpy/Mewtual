@@ -45,6 +45,7 @@ pub mod metering;
 mod pcp_ipv6;
 pub mod relay_node;
 pub mod rendezvous_node;
+mod seeded_identity;
 
 pub use addr::{
     addr_has_dns, addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
@@ -65,6 +66,7 @@ pub use rendezvous_node::{
     run_rendezvous, QueryVerdict, RendezvousBehaviour, RendezvousBehaviourEvent, RendezvousLimits,
     RendezvousNode,
 };
+pub use seeded_identity::{seeded_transport_identity_data, SeededTransportIdentityData};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;

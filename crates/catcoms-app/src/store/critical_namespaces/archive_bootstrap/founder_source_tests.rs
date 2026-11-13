@@ -325,10 +325,14 @@ fn actual_transfer_once_keeps_original_fee_output_and_requires_exact_transferred
             })
             .unwrap();
     }
-    owner.detach_for_root(&store, &mut NeverRng).unwrap();
+    owner
+        .detach_for_root(&store, &mut NeverRng, FounderAccess::Library)
+        .unwrap();
     assert!(owner.source_fee.is_some());
     assert_eq!(owner.detached.as_ref().unwrap().as_bytes(), frame);
-    owner.detach_for_root(&store, &mut NeverRng).unwrap();
+    owner
+        .detach_for_root(&store, &mut NeverRng, FounderAccess::Library)
+        .unwrap();
     let SourcePhase::Transferred {
         source,
         context: original,
@@ -416,7 +420,9 @@ fn last_full_source_comparison_cannot_outlive_original_root_or_creator_return_ch
             let mut owner = source(&store, &mut rng, 48);
             owner.prepare_private_source(&store, &mut rng).unwrap();
             if transferred {
-                owner.detach_for_root(&store, &mut NeverRng).unwrap();
+                owner
+                    .detach_for_root(&store, &mut NeverRng, FounderAccess::Library)
+                    .unwrap();
             }
             let marker = path.path().join(ARCHIVE_BOOTSTRAP_ROOT).join(ROOT_MARKER);
             let original = fs::read(&marker).unwrap();

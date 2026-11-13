@@ -9,6 +9,13 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 
+// The genuine whole-chain path still requires the audited settlement/promotion
+// directory profile, which currently refuses Linux. Keep that support gap
+// explicit; enabling the Linux profile must make this exact positive case run.
+#[cfg(windows)]
+#[path = "founder_warm_native_tests.rs"]
+mod native;
+
 const SECRET: &[u8] = b"fresh whole original founder driver";
 type Driver = PreparedFreshV2TextFounder<MemNetwork, ChaCha20Rng>;
 

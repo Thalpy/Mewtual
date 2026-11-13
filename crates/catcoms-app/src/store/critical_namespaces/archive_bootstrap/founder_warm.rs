@@ -104,6 +104,7 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for FreshV2TextFounderB
 /// origin for the entire operation; native still must supply checked key/save
 /// admission and its actual row/session lifecycle. This is fresh-only and disabled.
 pub struct PreparedFreshV2TextFounder<T: MeshTransport, R: CryptoRngCore> {
+    origin: FounderOrigin,
     // Resource consumers drain before the creator and this driver's extra fee.
     host: Option<Box<PreparedV2TextHost<T, R>>>,
     current: Option<Box<PreparedV2GenesisCurrent<T, R>>>,
@@ -175,6 +176,15 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         layout: &V2CurrentLayoutStore,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        self.retry_with_access(layout, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn retry_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        rng: &mut impl CryptoRngCore,
+        mut access: FounderAccess<'_>,
+    ) -> Result<(), AppError> {
+        access.require(&self.origin)?;
         let store = layout.checked_store()?;
         let pool = &store
             .archive_bootstrap_policy
@@ -184,11 +194,17 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .pool;
         self.fee.validate(pool, Self::invoice()?)?;
         if let Some(creation) = self.creation.as_mut() {
-            if creation.advance(store, rng)? != ArchiveFounderProgress::GroupCreatedUnexposed {
+            let progress = match &mut access {
+                FounderAccess::Library => creation.advance(store, rng)?,
+                FounderAccess::Native(keys) => {
+                    creation.advance_native(store, rng, &mut keys.sdk_entry())?
+                }
+            };
+            if progress != ArchiveFounderProgress::GroupCreatedUnexposed {
                 return Err(refused());
             }
             let creation = *self.creation.take().ok_or_else(refused)?;
-            match creation.into_ram_plan(store) {
+            match creation.into_ram_plan_with_access(store, access.reborrow()) {
                 Ok(planning) => self.planning = Some(Box::new(planning)),
                 Err(returned) => {
                     let (creation, error) = returned.into_parts();
@@ -198,9 +214,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             }
         }
         if let Some(planning) = self.planning.as_mut() {
-            planning.save_founding_intent(store, rng)?;
+            planning.save_founding_intent_with_access(store, rng, access.reborrow())?;
             let planning = *self.planning.take().ok_or_else(refused)?;
-            match planning.into_source_preparation(store) {
+            match planning.into_source_preparation_with_access(store, access.reborrow()) {
                 Ok(source) => self.source = Some(Box::new(source)),
                 Err(returned) => {
                     let (planning, error) = returned.into_parts();
@@ -213,7 +229,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         source.original.creator.original.validate_original(store)?;
         if self.host.is_none() && self.current.is_none() {
             if self.parts.is_none() {
-                source.save_source_terminal(store, rng)?;
+                source.save_source_terminal_with_access(store, rng, access.reborrow())?;
                 if self.read.is_none() {
                     let group = source.original.creator.group_data()?;
                     let signer = source.original.creator.original.data().signer;
@@ -253,15 +269,16 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
                 return Err(refused());
             }
             let current = current.take_current(layout)?.ok_or_else(refused)?;
-            self.host = Some(Box::new(PreparedV2TextHost::from_read(
+            self.host = Some(Box::new(PreparedV2TextHost::from_read_with_origin(
                 PreparedV2TextRead::from_warm(current),
                 self.policy.host,
+                self.origin.clone(),
             )));
             drop(self.current.take());
         }
         let host = self.host.as_mut().ok_or_else(refused)?;
         if !self.seed_settled {
-            host.retry_original_seed_settlement(layout, rng)?;
+            host.retry_original_seed_settlement_with_access(layout, rng, access.reborrow())?;
             self.seed_settled = true;
         }
         // Cache DATA before the final selected-head proof; this cannot install
@@ -270,10 +287,11 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             self.binding = Some(host.fresh_founder_binding_data(layout)?);
         }
         source.original.creator.original.validate_original(store)?;
-        host.retry_empty_promotion(layout, rng)?;
+        host.retry_empty_promotion_with_access(layout, rng, access.reborrow())?;
         if source.original.creator.original.observer().is_cancelled() {
             return Err(refused());
         }
+        access.require(&self.origin)?;
         self.ready = true;
         Ok(())
     }
@@ -304,13 +322,26 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         negative: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        self.prepare_member_save_with_access(layout, request, negative, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn prepare_member_save_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: V2MemberSignRequest<'_>,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
         if !self.is_ready_data() {
             return Err(V2MemberSaveRefusal::Unavailable);
         }
         self.host
             .as_mut()
             .ok_or(V2MemberSaveRefusal::Unavailable)?
-            .prepare_member_save(layout, request, negative, rng)
+            .prepare_member_save_with_access(layout, request, negative, rng, access)
     }
 
     /// No IO/wait is added at the existing finite final edge. The actual
@@ -321,11 +352,23 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         token: [u8; 32],
         native: MemberSaveNativeAdmission,
     ) -> Result<MemberSaveJob, (MemberSaveNativeAdmission, V2MemberSaveRefusal)> {
+        self.admit_member_save_with_access(layout, token, native, FounderAccess::Library)
+    }
+    pub(in crate::store) fn admit_member_save_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        token: [u8; 32],
+        native: MemberSaveNativeAdmission,
+        access: FounderAccess<'_>,
+    ) -> Result<MemberSaveJob, (MemberSaveNativeAdmission, V2MemberSaveRefusal)> {
+        if access.require(&self.origin).is_err() {
+            return Err((native, V2MemberSaveRefusal::Unavailable));
+        }
         if !self.is_ready_data() {
             return Err((native, V2MemberSaveRefusal::Unavailable));
         }
         match self.host.as_mut() {
-            Some(host) => host.admit_member_save(layout, token, native),
+            Some(host) => host.admit_member_save_with_access(layout, token, native, access),
             None => Err((native, V2MemberSaveRefusal::Unavailable)),
         }
     }
@@ -362,6 +405,26 @@ impl V2CurrentLayoutStore {
         policy: FreshV2TextFounderPolicy,
         inputs: ArchiveFounderInputs<T, R>,
     ) -> Result<FreshV2TextFounderBegin<T, R>, ReturnedArchiveFounderInputs<T, R>> {
+        self.prepare_fresh_v2_text_founder_with_origin(
+            invocation,
+            name,
+            policy,
+            inputs,
+            FounderOrigin::Library,
+        )
+    }
+    #[allow(clippy::result_large_err)] // return the caller's owned inputs without another allocation
+    pub(in crate::store) fn prepare_fresh_v2_text_founder_with_origin<
+        T: MeshTransport,
+        R: CryptoRngCore,
+    >(
+        &self,
+        invocation: [u8; 32],
+        name: &str,
+        policy: FreshV2TextFounderPolicy,
+        inputs: ArchiveFounderInputs<T, R>,
+        origin: FounderOrigin,
+    ) -> Result<FreshV2TextFounderBegin<T, R>, ReturnedArchiveFounderInputs<T, R>> {
         let prepared = (|| {
             policy.validate()?;
             let store = self.checked_store()?;
@@ -386,9 +449,16 @@ impl V2CurrentLayoutStore {
             Ok(store) => store,
             Err(error) => return Err(ReturnedArchiveFounderInputs { inputs, error }),
         };
-        match store.prepare_archive_founder(invocation, name, policy.founder, inputs)? {
+        match store.prepare_archive_founder_with_origin(
+            invocation,
+            name,
+            policy.founder,
+            inputs,
+            origin.clone(),
+        )? {
             ArchiveFounderBegin::Original(creation) => Ok(FreshV2TextFounderBegin::Original(
                 PreparedFreshV2TextFounder {
+                    origin,
                     host: None,
                     current: None,
                     read: None,

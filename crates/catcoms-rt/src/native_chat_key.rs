@@ -1,0 +1,510 @@
+//! Concrete native text-key lifecycle primitives.
+//!
+//! These counters are not SDK, membership, file, or signing-plan authority. The
+//! actual Root producer must establish those independently at the primitive.
+//! The native private factory supplies the REAL AppState atomics at synchronous
+//! invocation capture. An arbitrary Rust caller supplying its own atomics has
+//! authenticated nothing. NativeRequired propagation and that checked consumer
+//! are mandatory before these primitives may enable a production path.
+//!
+//! All participating generation/authorization/request writes and admission/close
+//! operations use sequential consistency. A generation publication therefore
+//! participates in the same ordering proof as final counter admission; a later
+//! registry close is not a substitute for reading the actual original atomics.
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use tokio::sync::Notify;
+
+const CLOSED: usize = 1 << (usize::BITS - 1);
+const MAX_ENTRIES: usize = 32;
+const PURPOSES: usize = 5;
+
+/// Closed purposes selected by concrete producers, never a WebView permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeChatKeyPurpose {
+    Device,
+    FounderSdk,
+    BootstrapProfile,
+    BootstrapHeader,
+    MemberAction,
+}
+impl NativeChatKeyPurpose {
+    fn slot(self) -> usize {
+        match self {
+            Self::Device => 0,
+            Self::FounderSdk => 1,
+            Self::BootstrapProfile => 2,
+            Self::BootstrapHeader => 3,
+            Self::MemberAction => 4,
+        }
+    }
+}
+
+/// Refusal before primitive entry. This never refunds an SDK/Core/key attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeChatKeyRefusal {
+    Unavailable,
+    Busy,
+    Foreign,
+    WrongPurpose,
+    AlreadyEntered,
+}
+
+struct Counter {
+    state: AtomicUsize,
+    drained: Notify,
+    // Retains the actual payer/physical metadata, NOT a positive source owner.
+    // The Root factory must supply its real paid allocation, never a status flag.
+    _custody: Option<Arc<dyn Send + Sync>>,
+}
+impl Counter {
+    fn new(custody: Option<Arc<dyn Send + Sync>>) -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+            drained: Notify::new(),
+            _custody: custody,
+        }
+    }
+    fn enter(&self) -> Result<(), NativeChatKeyRefusal> {
+        let state = self.state.load(Ordering::SeqCst);
+        if state >= MAX_ENTRIES {
+            return Err(if state & CLOSED != 0 {
+                NativeChatKeyRefusal::Unavailable
+            } else {
+                NativeChatKeyRefusal::Busy
+            });
+        }
+        #[cfg(test)]
+        observe_cut_boundary(CutBoundary::BeforeCounterCas);
+        // Exactly one attempt at the Root-held final edge. Contention is a
+        // retryable local refusal, never an unbounded CAS loop or key debit.
+        self.state
+            .compare_exchange(state, state + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| ())
+            .map_err(|state| {
+                if state & CLOSED != 0 {
+                    NativeChatKeyRefusal::Unavailable
+                } else {
+                    NativeChatKeyRefusal::Busy
+                }
+            })
+    }
+    fn close(&self) {
+        self.state.fetch_or(CLOSED, Ordering::SeqCst);
+    }
+    fn open(&self) -> bool {
+        self.state.load(Ordering::SeqCst) & CLOSED == 0
+    }
+    fn leave(&self) {
+        let previous = self.state.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous & !CLOSED > 0, "original key End retired twice");
+        if previous & !CLOSED == 1 {
+            self.drained.notify_waiters();
+        }
+    }
+}
+
+struct Host {
+    generation: Arc<AtomicU64>,
+    authorized: Arc<AtomicU64>,
+    requested: Arc<AtomicBool>,
+    closed: AtomicBool,
+}
+impl Host {
+    fn current(&self, expected: u64) -> bool {
+        !self.closed.load(Ordering::SeqCst)
+            && !self.requested.load(Ordering::SeqCst)
+            && self.authorized.load(Ordering::SeqCst) == expected
+            && self.generation.load(Ordering::SeqCst) == expected
+    }
+}
+
+/// Non-Clone binding to one actual native host. Its destructor closes every
+/// observation before releasing the shared host metadata.
+pub struct NativeChatUiBinding {
+    original: Arc<Host>,
+}
+impl NativeChatUiBinding {
+    /// TRUSTED-HOST seam. Only native's private checked factory may supply these
+    /// actual atomics in production. This constructor does not authenticate the
+    /// caller, identify a vault, or prove that an unlock really occurred.
+    pub fn from_trusted_host(
+        generation: Arc<AtomicU64>,
+        authorized: Arc<AtomicU64>,
+        requested: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            original: Arc::new(Host {
+                generation,
+                authorized,
+                requested,
+                closed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Native's canonical per-generation registry owns the returned close owner.
+    /// Capture expected BEFORE parsing the original synchronous invocation; a
+    /// worker must never call this with a later generation selected after await.
+    pub fn open_session(
+        &self,
+        expected: u64,
+    ) -> Result<NativeChatUiSessionOwner, NativeChatKeyRefusal> {
+        if !self.original.current(expected) {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        let value = NativeChatUiSessionOwner {
+            original: Arc::new(UiSession {
+                host: self.original.clone(),
+                expected,
+                counter: Arc::new(Counter::new(None)),
+            }),
+        };
+        if !value.original.current() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(value)
+    }
+}
+impl Drop for NativeChatUiBinding {
+    fn drop(&mut self) {
+        self.original.closed.store(true, Ordering::SeqCst);
+    }
+}
+
+struct UiSession {
+    host: Arc<Host>,
+    expected: u64,
+    counter: Arc<Counter>,
+}
+impl UiSession {
+    fn current(&self) -> bool {
+        self.counter.open() && self.host.current(self.expected)
+    }
+}
+
+/// Native's affine owner for one original authenticated UI generation.
+pub struct NativeChatUiSessionOwner {
+    original: Arc<UiSession>,
+}
+impl NativeChatUiSessionOwner {
+    /// Weak command observation; it cannot keep this session open or replace
+    /// its generation after lock/unlock.
+    pub fn observe(&self) -> NativeChatUiCommand {
+        NativeChatUiCommand {
+            original: Arc::downgrade(&self.original),
+        }
+    }
+    /// Close synchronously, then return negative drainage. Wait outside every
+    /// native UI/registry/Store and Root guard. No timeout constitutes drainage.
+    pub fn retire(self) -> NativeChatKeyDrain {
+        self.original.counter.close();
+        NativeChatKeyDrain {
+            original: self.original.counter.clone(),
+        }
+    }
+}
+impl Drop for NativeChatUiSessionOwner {
+    fn drop(&mut self) {
+        self.original.counter.close();
+    }
+}
+
+/// Immutable weak observation captured by the real synchronous native router.
+#[derive(Clone)]
+pub struct NativeChatUiCommand {
+    original: Weak<UiSession>,
+}
+
+struct Source {
+    host: Arc<Host>,
+    counter: Arc<Counter>,
+}
+
+/// Non-Clone source-close owner. Root's private native operation must associate
+/// this exact owner with its real mount/row/invocation/request and creator.
+/// Merely constructing this lifecycle object establishes none of those facts.
+pub struct NativeChatSourceOwner {
+    original: Arc<Source>,
+}
+impl NativeChatSourceOwner {
+    /// TRUSTED-SOURCE seam for the concrete Root producer. `custody` only keeps
+    /// paid physical metadata alive; an arbitrary Arc is not authorization.
+    /// The UI host binding stays fixed across later authenticated generations.
+    pub fn for_trusted_source(
+        command: &NativeChatUiCommand,
+        custody: Arc<dyn Send + Sync>,
+    ) -> Result<Self, NativeChatKeyRefusal> {
+        let ui = command
+            .original
+            .upgrade()
+            .ok_or(NativeChatKeyRefusal::Unavailable)?;
+        if !ui.current() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(Self {
+            original: Arc::new(Source {
+                host: ui.host.clone(),
+                counter: Arc::new(Counter::new(Some(custody))),
+            }),
+        })
+    }
+    /// Weak observation to bind the actual retained creator/cache/Host.
+    pub fn observe(&self) -> NativeChatSourceObservation {
+        NativeChatSourceObservation {
+            original: Arc::downgrade(&self.original),
+        }
+    }
+    /// Prepare before taking Root writers. No counter/key admission occurs here.
+    pub fn prepare_cut(
+        &self,
+        command: &NativeChatUiCommand,
+        purpose: NativeChatKeyPurpose,
+    ) -> Result<NativeChatPreparedKeyCut, NativeChatKeyRefusal> {
+        let ui = command
+            .original
+            .upgrade()
+            .ok_or(NativeChatKeyRefusal::Unavailable)?;
+        if !Arc::ptr_eq(&ui.host, &self.original.host) {
+            return Err(NativeChatKeyRefusal::Foreign);
+        }
+        if !ui.current() || !self.original.counter.open() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(NativeChatPreparedKeyCut {
+            // Pin ONLY negative metadata before a Root writer can exist. An
+            // early refusal at the primitive must never drop a last temporary
+            // Arc and release physical/payment custody under that writer.
+            ui,
+            source: self.original.clone(),
+            purpose,
+            entered: false,
+        })
+    }
+    /// Irreversibly retire this source before waiting on an escaping worker.
+    pub fn retire(self) -> NativeChatKeyDrain {
+        self.original.counter.close();
+        NativeChatKeyDrain {
+            original: self.original.counter.clone(),
+        }
+    }
+}
+impl Drop for NativeChatSourceOwner {
+    fn drop(&mut self) {
+        self.original.counter.close();
+    }
+}
+
+/// Weak original-source identity, never a row label or decoded permission.
+#[derive(Clone)]
+pub struct NativeChatSourceObservation {
+    original: Weak<Source>,
+}
+impl NativeChatSourceObservation {
+    /// Actual original allocation equality, never a decoded row/source label.
+    /// Equality alone authenticates no mount, plan or native command.
+    pub fn same_original(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.original, &other.original)
+    }
+}
+
+/// One concrete per-purpose check at the actual SDK/key primitive. The owning
+/// caller prepares it before Root writers and keeps the End batch outside them.
+pub struct NativeChatPreparedKeyCut {
+    // Strong metadata pins, NEVER affine owners. Source/UI owner Drop still
+    // closes their counters immediately. Keep this cut outside Root writers.
+    ui: Arc<UiSession>,
+    source: Arc<Source>,
+    purpose: NativeChatKeyPurpose,
+    entered: bool,
+}
+impl NativeChatPreparedKeyCut {
+    /// Cached negative check with no temporary metadata upgrade/destructor.
+    /// It is not primitive, SDK, file or source admission.
+    pub fn is_cancelled(&self) -> bool {
+        !self.ui.current() || !self.source.counter.open()
+    }
+    /// Non-admitting check for cached native progress before IO/bookkeeping.
+    /// Actual primitive entry MUST still call `enter` after physical/Core
+    /// proofs. An already-entered cut may check cached DATA, but grants no new
+    /// key call and can never pass after its original host/session/source closes.
+    pub fn preflight(
+        &self,
+        original: &NativeChatSourceObservation,
+        purpose: NativeChatKeyPurpose,
+    ) -> Result<(), NativeChatKeyRefusal> {
+        if self.purpose != purpose {
+            return Err(NativeChatKeyRefusal::WrongPurpose);
+        }
+        if !std::ptr::eq(Arc::as_ptr(&self.source), original.original.as_ptr()) {
+            return Err(NativeChatKeyRefusal::Foreign);
+        }
+        if self.is_cancelled() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(())
+    }
+    /// Call AFTER actual file/source/Core proofs and BEFORE the irreversible
+    /// SDK consumed CAS or Core KeyEntered. No SDK, IO, callback or allocation
+    /// follows these final atomic checks before that local entry marker.
+    ///
+    /// Partial-entry refusal retains its End in `ends` too. The caller MUST own
+    /// that batch outside all nested Root/native guards, so refusal and unwind
+    /// cannot run a waiter wakeup inside those guards. This is not a refund.
+    pub fn enter(
+        &mut self,
+        original: &NativeChatSourceObservation,
+        purpose: NativeChatKeyPurpose,
+        ends: &mut NativeChatKeyEnds,
+    ) -> Result<(), NativeChatKeyRefusal> {
+        if self.entered || ends.slots[self.purpose.slot()].is_some() {
+            return Err(NativeChatKeyRefusal::AlreadyEntered);
+        }
+        if self.purpose != purpose {
+            return Err(NativeChatKeyRefusal::WrongPurpose);
+        }
+        if !std::ptr::eq(Arc::as_ptr(&self.source), original.original.as_ptr()) {
+            return Err(NativeChatKeyRefusal::Foreign);
+        }
+        if !Arc::ptr_eq(&self.ui.host, &self.source.host) {
+            return Err(NativeChatKeyRefusal::Foreign);
+        }
+        #[cfg(test)]
+        observe_cut_boundary(CutBoundary::BeforePrecheck);
+        if self.is_cancelled() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        #[cfg(test)]
+        observe_cut_boundary(CutBoundary::BeforeUiCounter);
+        self.ui.counter.enter()?;
+        self.entered = true;
+        let end = ends.slots[self.purpose.slot()].insert(KeyEnd {
+            ui: self.ui.clone(),
+            source: self.source.clone(),
+            source_entered: false,
+        });
+        #[cfg(test)]
+        observe_cut_boundary(CutBoundary::AfterUiCounter);
+        end.source.counter.enter()?;
+        end.source_entered = true;
+        #[cfg(test)]
+        observe_cut_boundary(CutBoundary::BeforeFinal);
+        if !end.ui.current() || !end.source.counter.open() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+struct KeyEnd {
+    ui: Arc<UiSession>,
+    source: Arc<Source>,
+    source_entered: bool,
+}
+impl Drop for KeyEnd {
+    fn drop(&mut self) {
+        if self.source_entered {
+            self.source.counter.leave();
+        }
+        self.ui.counter.leave();
+    }
+}
+
+/// Fixed-size caller-owned End custody. Construct OUTSIDE the outermost Root
+/// guard and keep it there through the call, including refusal/unwind. A Root
+/// method borrows it; it must not replace or drop its contents inside a writer.
+pub struct NativeChatKeyEnds {
+    slots: [Option<KeyEnd>; PURPOSES],
+}
+impl NativeChatKeyEnds {
+    pub fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| None),
+        }
+    }
+}
+impl Default for NativeChatKeyEnds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Negative-only closed counter drainage. It cannot issue another key cut.
+pub struct NativeChatKeyDrain {
+    original: Arc<Counter>,
+}
+impl NativeChatKeyDrain {
+    /// Register before observing zero, avoiding the final-End lost wakeup.
+    /// Call only outside every guard that an admitted operation can need.
+    pub async fn wait(&self) {
+        loop {
+            let notified = self.original.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.original.state.load(Ordering::SeqCst) & !CLOSED == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+macro_rules! redacted_debug {
+    ($($name:ty),+ $(,)?) => {$(
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($name), " { .. }"))
+            }
+        }
+    )+};
+}
+redacted_debug!(
+    NativeChatUiBinding,
+    NativeChatUiSessionOwner,
+    NativeChatUiCommand,
+    NativeChatSourceOwner,
+    NativeChatSourceObservation,
+    NativeChatPreparedKeyCut,
+    NativeChatKeyEnds,
+    NativeChatKeyDrain
+);
+
+// Deterministic negative scheduling controls only. Neither callbacks nor the
+// control inventory exist in a production primitive tail.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CutBoundary {
+    BeforeCounterCas,
+    BeforePrecheck,
+    BeforeUiCounter,
+    AfterUiCounter,
+    BeforeFinal,
+}
+#[cfg(test)]
+type CutBoundaryHook = Option<(CutBoundary, Box<dyn FnOnce()>)>;
+#[cfg(test)]
+thread_local! {
+    static CUT_BOUNDARY: std::cell::RefCell<CutBoundaryHook> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+#[cfg(test)]
+fn observe_cut_boundary(boundary: CutBoundary) {
+    let hook = CUT_BOUNDARY.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|(expected, _)| *expected == boundary)
+        {
+            slot.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+mod tests;

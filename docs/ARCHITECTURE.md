@@ -1,11 +1,23 @@
 # Mewtual; Architecture
 
+The private NativeRequired route reaches the actual SDK, Profile/Header and member
+keys and preserves its immutable origin through the whole warm Host. Concrete
+lifecycle cuts retain Ends outside writers; public library routes refuse that
+origin. Checked native capture, index cell/network reservation and live backend
+ownership remain unfinished. [Contract](communication-recovery/CHAT-V2-NATIVE-KEY-CUTS.md).
+
 Native index2 now has an explicit7/v2 descriptor and opaque storage upgrade/open
 path. It retains immutable create receipts independently of current metadata and
 uses exact old/new file roles for upgrade and index-WAL recovery. Its shared JOIN
 fence is negative only. The warm native producer/cell, actual key admission and
 backend installation remain unfinished; no actor can be built from its DATA
 status. [Storage scope](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+The opaque facade now owns the affine admission fence separately from its private
+reference-counted physical Current/handler. An admitted index DATA worker can
+retain physical custody after facade close without retaining admission authority.
+The owning native founder/worker consumer is still absent. Net's bounded seeded
+identity helper supplies complete actual-key DATA for that consumer, not a
+transport reservation or SDK permission.
 
 Root founder-source preparation now retains one paid bootstrap signer across
 Profile/Header preparation and consuming freeze. Exact raw64 results survive
