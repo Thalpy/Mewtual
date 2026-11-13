@@ -1,5 +1,21 @@
 # Native acceptance fixture corrections (12 November; pending CI)
 
+## Later full-run SDK preparation refusal
+
+Full native run43522590967 passed on Windows but failed on Linux: the original
+SDK preparation unwrap returned Protocol(Capacity), followed by17 failed-shutdown
+exclusion cases. A constructor-only fixture retry now retains the same physical
+position and request for at most32 attempts with sanctioned Clock sleeps of10ms.
+The actual parent mutex oracle proves refusal without changing SDK preparation
+or installed-obligation flags, and releases its guard before assertions.
+Allocation, attachment, final authorization and Release are unchanged.
+
+The primary scenario passes locally(6.49s), both closing-fence cases pass(13.96s),
+and native checking and formatting pass. Static design/diff review is clear.
+The next full Linux native run remains required. The former failed-media
+parent-without-key timeout remains unresolved; improved diagnostics are not a
+production correction. Chat V2 remains off.
+
 The broad native runs have genuine unresolved failures. They cannot be counted
 as passes because later cases fail through the shared shutdown gate. A static
 audit confirmed three independent fixture contract errors; it did not establish

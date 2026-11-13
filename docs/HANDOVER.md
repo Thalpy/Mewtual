@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## SDK preparation contention (13 November; full rerun pending)
+
+Full native CI43522590967 passes on Windows. Linux has1027 passing and18 failing
+cases: the first failure is `integration/sdk.rs`'s direct `begin_sdk` constructor
+unwrap on `Protocol(Capacity)`; the other17 are the fixture's explicit failed-
+shutdown exclusion. This is a local preparation refusal before SDK allocation,
+attachment or publication, not an SDK Release result.
+
+The fixture retains the same decoded request, original parent, Context/Route and
+PhysicalHold through at most32 constructor attempts, sleeping at most10ms through
+the injected Clock between attempts. Only exact protocol Capacity retries. Every
+attempt repeats production current-custody checks; successful/absent preparation
+and every other error return immediately. No preflight, physical-position capture,
+allocation, attach, final admission or Release is wrapped in this retry.
+
+A genuine parent-state mutex oracle now precedes recovery in all three fixture
+constructors. It calls the actual constructor under that lock and proves the
+preparing/installed flags remain false and the same Session counts unchanged.
+The guard drops before assertions or unexpected preparation destruction. Global
+pool counts are intentionally not compared while unrelated maintenance is active.
+
+The formerly failing exact scenario passes locally(6.49s), as do both real
+closing-fence scenarios(13.96s), native production checking(1m31s) and formatting.
+Read-only design and actual-diff review are clear. Linux full native rerun remains
+required; the earlier Linux failed-media timeout's root cause remains unresolved.
+No Chat V2 activation or final native acceptance is claimed.
+
 ## Native acceptance follow-up (13 November; execution pending)
 
 Focused CI43505629044 reached new later failures after the initial SDP/discovery
