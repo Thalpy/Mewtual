@@ -35,6 +35,29 @@ required. No owning3 release, scoped
 Legacy backend, native producer, joined-source transport or UI activation is
 claimed. Chat V2 remains disabled.
 
+## Native key-adoption probe contention (13 November; execution pending)
+
+Full run43470275852 passed Linux native/frontend checking, but Windows native
+reported1031 passed/12 failed. The initial failure was an invalid-claim probe
+requiring immediate Unauthorized while the real nonblocking ledger can first
+return authenticated Capacity. Eleven later failures came from the fixture's
+intentional fail-stop guard after that panic. No authorization bypass was found;
+the log does not identify which local lock was contended on that attempt.
+
+The test-only correction retries only authenticated Capacity under the existing
+32-attempt/10ms policy, preserving request body, route, row and original deadline.
+The held-UI contention probe remains single-attempt. All exact Unauthorized,
+receipt, release-history and Root-observer fencing assertions remain. A new
+oracle holds the actual row-state mutex and proves wrong-claim recovery returns
+Capacity without creating custody; the framed request after release must still
+obtain Unauthorized and leave no key. The correct original adoption follows.
+
+No production locking, wire or authorization behavior changes. Read-only actual
+review/re-review is clear. Native formatting/diff checks pass; runtime execution
+is pending. The exact failing scenario is added to the five-case focused native
+CI lane; the complete native suite is still required. Existing direct foreign-
+session probes outside these framed retries remain unchanged. Chat V2 is off.
+
 ## Native namespace version during JOIN (13 November; validation in progress)
 
 A real index2/JOIN regression exposed that the shared catalog writer emitted

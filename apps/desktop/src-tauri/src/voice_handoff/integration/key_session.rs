@@ -38,6 +38,29 @@ pub(super) async fn exchange(
     .unwrap();
     opened_reply(public, header, body, &reply)
 }
+
+/// Retry only authenticated local contention, with the SAME immutable request
+/// and original route/row. This follows the existing bounded PC probe policy;
+/// it grants no fresh Ready, authority, lifetime or protocol fallback. Any
+/// terminal reply, including unexpected success, remains visible to assertions.
+async fn exchange_after_contention(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+) -> Vec<u8> {
+    let clock = crate::voice_runtime(state).clock();
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    for attempt in 0..32 {
+        let reply = exchange(state, public, route, parent, body).await;
+        if reply != capacity || attempt == 31 {
+            return reply;
+        }
+        clock.sleep(std::time::Duration::from_millis(10)).await;
+    }
+    unreachable!("last bounded attempt returns its exact authenticated reply")
+}
 pub(super) async fn adopt(
     state: &AppState,
     public: &bootstrap::SetupOutput,
@@ -55,13 +78,30 @@ pub(super) async fn adopt(
         "real final UI admission contention cannot publish key custody"
     );
     drop(commit);
+    let (serial, version, input_tag) = parent.status().unwrap().action.unwrap();
+    let mut wrong_claim = claim;
+    wrong_claim[31] ^= 1;
+    parent.assert_key_recovery_contention_for_test(
+        route.session().identity(),
+        requests::Action {
+            serial,
+            version,
+            input_tag,
+        },
+        parent.confirmation_handshake().unwrap(),
+        wrong_claim,
+    );
     for offset in [1, 33, 65, 104, 105, 113, 152, 184, 186, 217] {
         let mut wrong = body.clone();
         wrong[offset] ^= 1;
         assert_eq!(
-            exchange(state, public, route, parent, &wrong).await,
+            exchange_after_contention(state, public, route, parent, &wrong).await,
             unauthorized,
             "changed original key adoption binding at {offset}"
+        );
+        assert!(
+            !parent.has_established_key_claim(),
+            "wrong binding created key custody at {offset}"
         );
     }
     let clock = crate::voice_runtime(state).clock();
@@ -83,7 +123,10 @@ pub(super) async fn adopt(
     assert_eq!(&first[170..202], &claim);
     let proof = first[202..234].try_into().unwrap();
     // Model an ignored authenticated reply: exact retry returns the one original receipt.
-    assert_eq!(exchange(state, public, route, parent, &body).await, first);
+    assert_eq!(
+        exchange_after_contention(state, public, route, parent, &body).await,
+        first
+    );
     assert!(matches!(parent.retire_plan(), Err(VoiceError::Capacity)));
     // Plan intent now closes first, even while this obligation awaits Release. It is
     // therefore destructive, not a harmless readiness probe. Without that intent no
@@ -133,7 +176,8 @@ pub(super) async fn release(
 ) {
     let original = parent.key_custody_for_test();
     let current_before = original.is_current();
-    let recovered = exchange(state, public, route, parent, &body(parent, claim, None)).await;
+    let recovered =
+        exchange_after_contention(state, public, route, parent, &body(parent, claim, None)).await;
     assert_eq!(&recovered[..2], &[4, if ended { 2 } else { 1 }]);
     assert_eq!(
         &recovered[202..234],
@@ -143,7 +187,7 @@ pub(super) async fn release(
     let mut wrong = proof;
     wrong[0] ^= 1;
     assert_eq!(
-        exchange(
+        exchange_after_contention(
             state,
             public,
             route,
@@ -159,7 +203,7 @@ pub(super) async fn release(
         "an invalid release must not close the original Root successor binding"
     );
     for _ in 0..2 {
-        let released = exchange(
+        let released = exchange_after_contention(
             state,
             public,
             route,
@@ -178,7 +222,8 @@ pub(super) async fn release(
             Err(VoiceError::Unauthorized)
         ));
     }
-    let terminal = exchange(state, public, route, parent, &body(parent, claim, None)).await;
+    let terminal =
+        exchange_after_contention(state, public, route, parent, &body(parent, claim, None)).await;
     assert_eq!(
         &terminal[..2],
         &[4, 3],
