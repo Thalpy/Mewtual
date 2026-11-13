@@ -17,7 +17,7 @@ mod native_ui;
 mod opening;
 mod payment;
 mod upgrade;
-pub(super) mod upgrade_source;
+pub(in crate::store::critical_namespaces) mod upgrade_source;
 pub use facade::NativeTextVault;
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
 pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
@@ -90,6 +90,9 @@ pub(in crate::store) struct Handler {
     fee: Arc<payment::IndexPayment>,
 }
 impl Handler {
+    pub(super) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.gate, &other.gate) && Arc::ptr_eq(&self.fee, &other.fee)
+    }
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         self.fee
             .debit
@@ -124,7 +127,7 @@ impl crate::store::ServerStore {
     /// mutex; startup callers are still private. Never take the index cell, read
     /// files, acquire payment or call an admission/SDK getter under that mutex.
     pub(in crate::store) fn require_native_index_idle_cached(&self) -> Result<(), AppError> {
-        if let Some(super::preparation::NativeRegistryHandler::Operational(handler)) = self
+        if let Some(handler) = self
             .current_layout_policy
             .as_ref()
             .and_then(|policy| policy.native_registry.as_ref())
@@ -132,7 +135,15 @@ impl crate::store::ServerStore {
             if self.chat_mount.observer().is_cancelled() {
                 return Err(refused());
             }
-            handler.require_index_idle_cached()?;
+            match handler {
+                super::preparation::NativeRegistryHandler::Operational(handler) => {
+                    handler.require_index_idle_cached()?
+                }
+                super::preparation::NativeRegistryHandler::Lifecycle(handler) => {
+                    handler.require_idle_cached()?
+                }
+                super::preparation::NativeRegistryHandler::Migration(_) => {}
+            }
         }
         Ok(())
     }

@@ -425,6 +425,9 @@ impl crate::store::ServerStore {
         if let NativeRegistryHandler::Operational(handler) = handler {
             return handler.inspect_storage(self);
         }
+        if let NativeRegistryHandler::Lifecycle(handler) = handler {
+            return handler.inspect_storage(self);
+        }
         crate::store::persistence::native_registry::operational::refuse_upgrade_debt(self)?;
         let present = crate::store::persistence::native_registry::native_artifacts_present(self)?;
         let raw = read_native_current(self)?.ok_or_else(refused)?;

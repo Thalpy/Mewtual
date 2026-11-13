@@ -4,6 +4,7 @@
 //! version3 payment, catalog/Stage checks and the original gate claim are still
 //! required at the actual upgrade admission. In particular, `idle` is never a
 //! saved permission to write or enter an SDK.
+use super::super::lifecycle::admission as lifecycle_admission;
 use super::super::lifecycle::preparation::{Output, Policy};
 use super::*;
 use crate::store::persistence::native_registry::lifecycle::{
@@ -11,6 +12,7 @@ use crate::store::persistence::native_registry::lifecycle::{
 };
 use catcoms_rt::CryptoRngCore;
 use zeroize::Zeroizing;
+pub(in crate::store::critical_namespaces) mod owning;
 
 /// Preserve the WHOLE original mount through non-writing preparation. Returning
 /// its inner Current, rebuilding its Arc or dropping its admission owner here
@@ -54,6 +56,9 @@ impl NativeIndexStore {
 /// Later admission MUST repeat these negative checks under the original catalog
 /// mutex and retain an original index2 claim before the first file effect.
 pub(in crate::store::critical_namespaces::native_registry) struct PreparedUpgrade {
+    // FIRST: an affine closer stays armed even when moved between wrappers.
+    // Plain moves never leave raw parts awaiting a later close-on-Drop owner.
+    close: Option<CloseOwners>,
     // Retained separately from mounted Current: cold inspection runs before
     // Current/JOIN openers, and no remembered descriptor substitutes for these
     // original authenticated marker objects at final admission or exposure.
@@ -64,20 +69,22 @@ pub(in crate::store::critical_namespaces::native_registry) struct PreparedUpgrad
     #[cfg(test)]
     pub(super) retirement:
         Option<crate::store::persistence::native_registry::operational::RetirementObservation>,
-    original: UpgradeSource,
+    #[cfg(test)]
+    pub(super) io_retirement: Option<Box<dyn FnOnce() + Send>>,
+    original: Option<UpgradeSource>,
     // LAST: new buffers/files must retire before their independent reservation.
-    _fee: CatalogReadReservation,
+    handler: lifecycle_admission::Handler,
+}
+
+/// Handler clones never close another owner's gate. These distinct affine
+/// owners close BOTH admissions before any original input/output destruction.
+struct CloseOwners {
+    old: interlock::AdmissionOwner,
+    new: lifecycle_admission::AdmissionOwner,
 }
 impl std::fmt::Debug for PreparedUpgrade {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedUpgrade").finish_non_exhaustive()
-    }
-}
-impl Drop for PreparedUpgrade {
-    fn drop(&mut self) {
-        // Close FIRST, before the actual snapshot/output destructors. The old
-        // owner stays whole until those paid buffers and File handles drain.
-        self.original.original.close_index_admission();
     }
 }
 impl UpgradeSource {
@@ -104,10 +111,12 @@ impl UpgradeSource {
                 return Err(refused());
             }
             let fee = policy.reserve()?;
+            let handler = lifecycle_admission::Handler::from_reserved(&policy, fee)?;
             let store = physical.current.checked_store()?;
             physical.handler.require()?;
             physical.handler.require_index_idle_cached()?;
-            let expected_current = ExpectedCurrentInputs::capture(store, &fee, &policy.pool)?;
+            let expected_current =
+                ExpectedCurrentInputs::capture(store, handler.debit(), handler.pool())?;
             let observed_layout = expected_current.authenticate(store)?;
             let snapshot = UpgradeSnapshot::capture(store)?;
             let key = Zeroizing::new(store.keys.db_key()?);
@@ -148,17 +157,25 @@ impl UpgradeSource {
                 snapshot.require(store)?;
                 expected_current.require(store)?;
             }
-            Ok((expected_current, snapshot, output, fee))
+            Ok((expected_current, snapshot, output, handler))
         })();
         match parts {
-            Ok((expected_current, snapshot, output, fee)) => Ok(PreparedUpgrade {
+            Ok((expected_current, snapshot, output, handler)) => Ok(PreparedUpgrade {
+                close: Some(CloseOwners {
+                    old: interlock::AdmissionOwner::new(
+                        self.original.physical.handler.gate.clone(),
+                    ),
+                    new: lifecycle_admission::AdmissionOwner::new(&handler),
+                }),
                 expected_current,
                 snapshot,
                 output,
                 #[cfg(test)]
                 retirement: None,
-                original: self,
-                _fee: fee,
+                #[cfg(test)]
+                io_retirement: None,
+                original: Some(self),
+                handler,
             }),
             Err(_) => Err(self),
         }
@@ -166,7 +183,47 @@ impl UpgradeSource {
 }
 
 #[cfg(test)]
+impl NativeIndexStore {
+    /// Genuine owning storage producer for cross-module JOIN regressions. These
+    /// test-only seams expose no production raw-Store/native credential API.
+    pub(in crate::store::critical_namespaces) fn into_lifecycle3_for_test(
+        self,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<owning::Store, AppError> {
+        let source = self.into_upgrade_source().map_err(|_| refused())?;
+        let prepared = source
+            .prepare(lifecycle3_policy_for_test(), rng)
+            .map_err(|_| refused())?;
+        prepared
+            .admit()
+            .map_err(|_| refused())?
+            .into_store()
+            .map_err(|_| refused())
+    }
+    pub(in crate::store::critical_namespaces) fn open_lifecycle3_for_test(
+        dir: &std::path::Path,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+    ) -> Result<owning::Store, AppError> {
+        owning::Store::open(dir, passphrase, rng, current, lifecycle3_policy_for_test())
+    }
+}
+#[cfg(test)]
+fn lifecycle3_policy_for_test() -> Policy {
+    Policy::new(
+        CriticalCatalogReadPool::new(super::super::lifecycle::preparation::PREPARATION_FEE)
+            .unwrap(),
+        Policy::required_persistent_capacity(),
+    )
+    .unwrap()
+}
+
+#[cfg(test)]
 impl PreparedUpgrade {
+    pub(super) fn lifecycle_handler_for_test(&self) -> lifecycle_admission::Handler {
+        self.handler.clone()
+    }
     pub(super) fn inventory_for_test(
         &self,
         pool: &CriticalCatalogReadPool,
@@ -182,7 +239,7 @@ impl PreparedUpgrade {
     > {
         crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory::capture(
             self.original_store_for_test(),
-            &self._fee,
+            self.handler.debit(),
             pool,
         )
     }
@@ -191,6 +248,8 @@ impl PreparedUpgrade {
     }
     pub(super) fn original_store_for_test(&self) -> &crate::store::ServerStore {
         self.original
+            .as_ref()
+            .unwrap()
             .original
             .physical
             .current

@@ -1,12 +1,14 @@
 //! Namespace7/version3 production lifecycle contract, under construction.
 //!
-//! This module is not yet registered by any opener. Version1/2 remain closed;
-//! no decoded descriptor/row here grants SDK, join, source or native authority.
+//! Only the private owning upgrade/strict3 opener registers this grammar.
+//! Version1/2 remain closed; decoded rows grant no SDK, join, source or native authority.
 //! See CHAT-V2-NATIVE-INDEX3-DESIGN.md for the reviewed upgrade boundary.
+pub(super) mod admission;
 mod capability;
 mod catalog;
 mod codec;
 mod data;
+mod inspection;
 mod migration;
 pub(super) mod preparation;
 

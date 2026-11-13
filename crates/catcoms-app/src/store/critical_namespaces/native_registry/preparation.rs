@@ -45,18 +45,21 @@ pub use installation::{NativeRegistryInstallation, NativeRegistryPolicy, NativeR
 pub(in crate::store) enum NativeRegistryHandler {
     Migration(NativeMigrationHandler),
     Operational(super::operational::Handler),
+    Lifecycle(super::lifecycle::admission::Handler),
 }
 impl NativeRegistryHandler {
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         match self {
             Self::Migration(handler) => handler.require(),
             Self::Operational(handler) => handler.require(),
+            Self::Lifecycle(handler) => handler.require(),
         }
     }
     pub(in crate::store) fn namespace_version(&self) -> u32 {
         match self {
             Self::Migration(_) => 1,
             Self::Operational(_) => 2,
+            Self::Lifecycle(_) => 3,
         }
     }
     pub(in crate::store::critical_namespaces) fn parse_layout<'a>(
@@ -71,6 +74,11 @@ impl NativeRegistryHandler {
             ),
             Self::Operational(_) => {
                 super::super::pending_join_codec::parse_operational_native_registry_layout(
+                    plain, domain, executing,
+                )
+            }
+            Self::Lifecycle(_) => {
+                super::super::pending_join_codec::parse_lifecycle_native_registry_layout(
                     plain, domain, executing,
                 )
             }

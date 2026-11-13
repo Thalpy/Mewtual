@@ -1,4 +1,4 @@
-# Native index3 lifecycle design (private I/O; owning opener still absent)
+# Native index3 lifecycle design (owning storage under validation)
 
 Text Chat V2 remains disabled. The reviewed index2 storage component is deliberately
 Founder-only. It does not provide joined provenance, Legacy retirement, rename or
@@ -13,10 +13,10 @@ owner. It captures/authenticates the original held tuple, derives the migration
 origin from that frame, and retains sealed successor/intent bytes without writing.
 Preparation itself does not register a physical handler, select files, issue
 membership/source/native credentials or authorize an SDK. Dedicated private I/O
-now implements the fixed upgrade roles and exact retry/cleanup barriers; no
-owning production admission/handoff or opener selects it. The owning
-upgrade, physical WAL, scoped Legacy bridge and real predecessor gates below are
-still required before use. Internal version2 DATA visibility is widened only
+now implements the fixed upgrade roles and exact retry/cleanup barriers. The
+private owning storage admission/handoff and strict cold3 opener are under
+validation; physical WAL, scoped Legacy bridge and real predecessor gates below
+are still required before use. Internal version2 DATA visibility is widened only
 within native_registry for the exact owned conversion; its parser, grammar and
 public Copy-only physical projections remain unchanged.
 
@@ -30,6 +30,38 @@ conditions under the original catalog mutex and retain the old2 gate claim.
 Prepared-owner destruction closes that gate first; actual file/buffer fields
 precede the old mount/payment and final new reservation. New3 scratch names are
 closed fixed roles; all readers without3 recovery preserve/refuse their presence.
+
+### Owning admission and final transfer
+
+The armed dual closer moves into the Upgrade before final admission calls. Its
+actual I/O is cached there before catalog checks/hooks and both original claims.
+Every pre-effect refusal returns the same prepared owner; admitted or ambiguous
+work can only retry or close. Old2 and new3 gates have distinct affine claims and
+retain their actual independent payers.
+
+The concrete Current handoff parses/funds outside the catalog writer, then
+checks Pending absence, original mount/marker/selected-file proofs and the actual
+old2 handler identity. It installs handler3 and the full JOIN-preserving summary
+under that writer; retry accepts only that same installed3 pair. Both original
+claims finish there. Closure wins before unlock and cannot be undone by retry.
+The older count-zero1-to2 installer remains unchanged.
+
+Visible rename/unlink flags do not prove durable completion. A private completion
+state is set only after the last vault-directory flush and original tuple proof
+succeed. Final transfer rechecks it without recreating outputs. One retirement
+bundle retains old I/O, inputs, cell, handlers and an extra new payer last, outside
+writers and before exposing the destination. The destination is already armed on
+unwind; the same resource-only physical-session lease keeps a competing opener
+out until old files and buffers finish retiring.
+
+Cold inspection retains its original inventory or completed repair I/O, plus a
+finite physical lease, across the common Current/JOIN opener. It never drops the
+original proof and recaptures a replacement. A closed semantic proof binds the
+required selected catalog to this inventory: duplicate/absent Stage requires the
+original Current; a genuine JOIN successor requires that exact held Stage at
+Current. Stage disappearance cannot downgrade the obligation. Evidence retires
+outside guards after final proof and before exposing the opaque owner. Normal3
+index WAL remains refused until its separate producer/recovery is implemented.
 
 ### Cold expectation before stateful openers
 
