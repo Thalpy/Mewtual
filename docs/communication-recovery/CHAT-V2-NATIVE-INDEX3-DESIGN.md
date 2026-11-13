@@ -1,4 +1,4 @@
-# Native index3 lifecycle design (non-writing preparation; no opener)
+# Native index3 lifecycle design (private I/O; owning opener still absent)
 
 Text Chat V2 remains disabled. The reviewed index2 storage component is deliberately
 Founder-only. It does not provide joined provenance, Legacy retirement, rename or
@@ -11,8 +11,10 @@ The private version3 descriptor, row model, semantic successor checks and byte
 codec now have independently paid preparation from a genuine consumed index2
 owner. It captures/authenticates the original held tuple, derives the migration
 origin from that frame, and retains sealed successor/intent bytes without writing.
-It does not register a physical handler, select
-files, issue membership/source/native credentials or authorize an SDK. The owning
+Preparation itself does not register a physical handler, select files, issue
+membership/source/native credentials or authorize an SDK. Dedicated private I/O
+now implements the fixed upgrade roles and exact retry/cleanup barriers; no
+owning production admission/handoff or opener selects it. The owning
 upgrade, physical WAL, scoped Legacy bridge and real predecessor gates below are
 still required before use. Internal version2 DATA visibility is widened only
 within native_registry for the exact owned conversion; its parser, grammar and
@@ -28,6 +30,29 @@ conditions under the original catalog mutex and retain the old2 gate claim.
 Prepared-owner destruction closes that gate first; actual file/buffer fields
 precede the old mount/payment and final new reservation. New3 scratch names are
 closed fixed roles; all readers without3 recovery preserve/refuse their presence.
+
+### Cold expectation before stateful openers
+
+Native inspection runs before the Current/JOIN openers and cannot depend on a
+MountedCurrentLayout cache. Its independently paid read-only capture retains the
+actual archive marker, Current marker, vault/root directories and original mount
+negative. It authenticates the archive descriptor against the actual vault domain,
+derives the complete Current descriptor and verifies the fixed Current marker.
+It does not install a mounted root, run cleanup or issue source/SDK authority.
+
+Warm preparation retains this capture in addition to its original tuple and
+compares its result with the genuine mounted Current. Same bytes in replacement
+files/directories do not satisfy the original proof; a new Store at the same path
+cannot adopt it. Original mount, identities and bytes are rechecked around marker
+authentication, after candidate construction and at the final non-writing check.
+The named twelve-marker-pair invoice covers the two retained pairs and temporary
+reread/AEAD overlap needed by the future physical Inventory-to-Io handoff.
+
+Rename progress is separate from durability. Before any nonempty catalog Stage
+write, every retry must flush the exact selected index/marker handles and their
+held root again, then re-prove the complete tuple. A prior marker-rename fault
+may have set the promotion flag without reaching its directory barrier. The
+post-selection barriers remain necessary even after this preselection coverage.
 
 ## Explicit format boundary
 
@@ -152,6 +177,26 @@ semantic frame/row temporaries drain before output-role copies are allocated.
 Indeterminate pre-AEAD input, actual AEAD failure and authenticated invalid/future
 content are distinct outcomes. None alone permits cleanup; short self-created
 claims need their own continuously held physical first-torn proof.
+
+The private first-torn verifier now authenticates the complete old2 catalog,
+index and marker against the independent held expectation at any supported
+generation. It accepts only an attributable short fixed claim or actual AEAD
+failure with no upgrade outputs/index WAL. A non-clone inventory witness binds
+that semantic proof to the same physical capture; equal bytes in a second
+inventory cannot adopt it. Unknown or incomplete JOIN stages and authenticated-
+invalid intents stay untouched. Cleanup caches unlink progress, covers the empty fence's removal
+before touching the seed and repeats that actual directory barrier on retry.
+
+A predecessor can start a JOIN after the seed-only claim and before the empty
+fence. A complete authenticated ordinary JOIN duplicate/successor with the same
+native descriptor is retained byte-for-byte; cleanup removes only the claim.
+This uses the existing complete JOIN successor rule, not a matching namespace
+or parent alone. Any nonempty stage without that verified JOIN relation stays
+refused. Empty interrupted
+stages contain no data and follow the empty-fence rule. A future strict3 opener
+must refuse or return an explicit abandoned-to2 outcome after this cleanup:
+selected old2 is never an implicit version3 result. Actual predecessor-binary,
+cold-opener and owning dual-gate acceptance are still required.
 
 Native UI authorization, cold restore and locked protocol activity require distinct
 entry authority. UI-only cuts cannot restore before UI authorization is published;

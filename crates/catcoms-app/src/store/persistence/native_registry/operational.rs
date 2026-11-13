@@ -50,6 +50,8 @@ pub(in crate::store) enum Fault {
     UpgradeCatalogRename,
     UpgradeCovered,
     UpgradeSeedUnlink,
+    UpgradeFenceUnlink,
+    UpgradeFenceUnlinkCovered,
     IndexStage,
     IndexRename,
     IndexStageUnlink,
@@ -92,14 +94,14 @@ fn fault_requested(point: Fault) -> bool {
 fn interrupted(point: Fault) -> AppError {
     AppError::Io(format!("index storage interrupted at {point:?}"))
 }
-fn trip(point: Fault) -> Result<(), AppError> {
+pub(super) fn trip(point: Fault) -> Result<(), AppError> {
     if fault_requested(point) {
         Err(interrupted(point))
     } else {
         Ok(())
     }
 }
-fn complete_with_cut(
+pub(super) fn complete_with_cut(
     name: &Path,
     slot: &mut Option<critical::pending_join::CreatedStage>,
     expected: &[u8],
@@ -155,7 +157,7 @@ pub(in crate::store) fn take_rename_hook_seen() -> bool {
     });
     RENAME_HOOK_SEEN.with(|seen| seen.replace(false))
 }
-fn observe_before_target_proof(target: RenameTarget) {
+pub(super) fn observe_before_target_proof(target: RenameTarget) {
     #[cfg(test)]
     {
         let hook = BEFORE_TARGET_PROOF.with(|slot| {
@@ -202,12 +204,12 @@ fn no_upgrade_debt(store: &ServerStore) -> Result<(), AppError> {
 /// Continuous physical custody, including the entire selected catalog. Even
 /// an equal-byte replacement cannot become this operation's selected parent.
 pub(in crate::store) struct IndexSnapshot {
-    stage: Option<HeldNativeInput>,
-    index: HeldNativeInput,
-    marker: HeldNativeInput,
-    catalog: HeldNativeInput,
-    root: HeldDirectory,
-    vault: HeldDirectory,
+    pub(super) stage: Option<HeldNativeInput>,
+    pub(super) index: HeldNativeInput,
+    pub(super) marker: HeldNativeInput,
+    pub(super) catalog: HeldNativeInput,
+    pub(super) root: HeldDirectory,
+    pub(super) vault: HeldDirectory,
 }
 impl IndexSnapshot {
     pub(in crate::store) fn capture(store: &ServerStore) -> Result<Self, AppError> {
@@ -237,6 +239,37 @@ impl IndexSnapshot {
             stage: HeldNativeInput::capture(
                 &path(store, true, native::INDEX_STAGE_NAME)?,
                 native::MAX_INDEX_FRAME,
+            )?,
+        };
+        value.require_directories(store)?;
+        Ok(value)
+    }
+    /// A separate closed physical inventory for the version3 upgrader only.
+    /// This is not reachable from Root's version2 reader or its ordinary WAL.
+    /// It supplies only held file/directory identity; the dedicated3 inspector
+    /// must authenticate/classify every original and scratch role itself.
+    pub(super) fn capture_lifecycle_inventory(store: &ServerStore) -> Result<Self, AppError> {
+        let value = Self {
+            vault: HeldDirectory::capture(&path(store, false, "")?)?,
+            root: HeldDirectory::capture(&path(store, true, "")?)?,
+            catalog: HeldNativeInput::capture(
+                &path(store, false, critical::Slot::Current.name())?,
+                native::MAX_CATALOG_FRAME,
+            )?
+            .ok_or_else(denied)?,
+            marker: HeldNativeInput::capture(
+                &path(store, true, native::MARKER_NAME)?,
+                native::MAX_MARKER_FRAME,
+            )?
+            .ok_or_else(denied)?,
+            index: HeldNativeInput::capture(
+                &path(store, true, native::INDEX_NAME)?,
+                super::lifecycle::MAX_INDEX_FRAME,
+            )?
+            .ok_or_else(denied)?,
+            stage: HeldNativeInput::capture(
+                &path(store, true, native::INDEX_STAGE_NAME)?,
+                super::lifecycle::MAX_INDEX_FRAME,
             )?,
         };
         value.require_directories(store)?;
@@ -275,7 +308,7 @@ impl IndexSnapshot {
             .require(&path(store, true, native::MARKER_NAME)?)?;
         self.require_directories(store)
     }
-    fn require_directories(&self, store: &ServerStore) -> Result<(), AppError> {
+    pub(super) fn require_directories(&self, store: &ServerStore) -> Result<(), AppError> {
         self.vault.require(&path(store, false, "")?)?;
         self.root.require(&path(store, true, "")?)?;
         if store.chat_mount.observer().is_cancelled() {

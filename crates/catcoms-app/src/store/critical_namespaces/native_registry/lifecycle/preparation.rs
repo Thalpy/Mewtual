@@ -14,6 +14,7 @@ use catcoms_crypto::{seal, unseal};
 use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
+pub(in crate::store::critical_namespaces::native_registry) mod first_torn;
 
 const INDEX_KEY: &str = "catcoms/private-native-backend-index-key/v3";
 const MARKER_KEY: &str = "catcoms/private-native-backend-marker-key/v3";
@@ -27,6 +28,13 @@ const SEED_FRAME: usize = 2 * CATALOG_FRAME
     + super::codec::MAX_FRAME
     + 2 * v1::MAX_MARKER_FRAME
     + 4096;
+const _: () = assert!(
+    super::codec::MAX_FRAME
+        == crate::store::persistence::native_registry::lifecycle::MAX_INDEX_FRAME
+);
+const _: () = assert!(
+    SEED_FRAME == crate::store::persistence::native_registry::lifecycle::MAX_UPGRADE_SEED_FRAME
+);
 // BOTH schemas, completion allowance, encoded/AEAD copies, complete intent,
 // original file buffers and decoded row metadata have separate terms. The old
 // owner's invoice remains held too; its Arc does not enlarge this reservation.
@@ -36,6 +44,18 @@ const _: () = assert!(
     8 * (std::mem::size_of::<super::super::operational::upgrade_source::PreparedUpgrade>()
         + std::mem::size_of::<
             crate::store::persistence::native_registry::lifecycle::UpgradeSnapshot,
+        >()
+        + std::mem::size_of::<
+            crate::store::persistence::native_registry::lifecycle::ExpectedCurrentInputs,
+        >()
+        + std::mem::size_of::<
+            crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+        >()
+        + std::mem::size_of::<
+            crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeIo,
+        >()
+        + std::mem::size_of::<
+            crate::store::persistence::native_registry::lifecycle::upgrade::FirstTornIo,
         >())
         + 32 * (v1::MAX_BASE_PATH + 256)
         + 64 * 1024
@@ -51,7 +71,8 @@ pub(in crate::store::critical_namespaces::native_registry) const PREPARATION_FEE
     + 12 * v1::MAX_MARKER_FRAME
     + 4 * SEED_FRAME
     + ROW_METADATA
-    + CONTROL_METADATA;
+    + CONTROL_METADATA
+    + crate::store::persistence::native_registry::lifecycle::EXPECTED_CURRENT_FEE;
 const PERSISTENT_MINIMUM: usize = 2 * CATALOG_FRAME
     + old_data::MAX_FRAME
     + super::codec::MAX_FRAME
@@ -138,6 +159,22 @@ fn sealed(
 }
 
 impl Output {
+    /// Fixed physical roles only, borrowed from the retained authenticated
+    /// candidate. This grants no IO role; the owning consumer must still hold
+    /// the original catalog claims and independently authenticated expectation.
+    pub(in crate::store::critical_namespaces::native_registry) fn bytes(
+        &self,
+    ) -> crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeBytes<'_> {
+        crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeBytes {
+            original: &self.original_catalog,
+            catalog: &self.catalog,
+            old_index: &self.old_index,
+            index: &self.index,
+            old_marker: &self.old_marker,
+            marker: &self.marker,
+            seed: &self.seed,
+        }
+    }
     /// Origin is derived from the authenticated, held original index2 frame,
     /// never from a caller's remembered generation/hash or a reconstructed row.
     pub(in crate::store::critical_namespaces::native_registry) fn prepare(

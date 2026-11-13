@@ -79,6 +79,24 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|fs::remove_file(&stage_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|self.original.index.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|self.original.root.file.sync_all().map_err(io)?;']=2
+  # Dedicated fixed7/v3 roles, with original marker expectation and exact held
+  # input/output identity. No generic path, epoch mutation or v2 parser widening.
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|cover_selected_outputs_before_catalog|output.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|cover_selected_outputs_before_catalog|self.original.root.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|self.original.vault.file.sync_all().map_err(io)?;']=6
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|self.original.root.file.sync_all().map_err(io)?;']=5
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::rename(&index_temp, &index).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::rename(&marker_temp, &marker).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::rename(&stage, &current).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|selected.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::remove_file(&seed).map_err(io)?;']=1
+  # First-torn3 requires an affine proof for THIS inventory, mutually valid old2
+  # outputs and independently authenticated Current. Empty fence is covered
+  # before seed unlink; an authenticated ordinary JOIN Stage is left untouched.
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|run|fs::remove_file(&stage).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|run|fs::remove_file(&seed).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|run|self.original.base.vault.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|cover_catalog_fence_before_seed|self.original.base.vault.file.sync_all().map_err(io)?;']=1
   # Namespace4 declaration first creates/syncs the SAME empty legacy stage so
   # actual older readers refuse before any governance-only recovery debt exists.
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1

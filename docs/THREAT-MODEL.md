@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+Private index3 I/O retains an independently authenticated original archive/Current
+marker pair, vault/root directories and physical mount negative. Complete new
+inventory payment precedes capture. Exact identities/bytes are repeated at the
+last replacement boundaries; promotion flags never replace directory barriers.
+First-torn disposal requires full valid old2 roles plus a proof bound to the same
+inventory, not just a decoder error. Empty-fence removal is covered again on every
+retry before seed unlink. A supported authenticated JOIN stage from the initial
+claim window is preserved in full; unknown or authenticated-invalid work refuses.
+The component has no owning3 opener/handoff yet and grants no SDK/native authority.
+
 JOIN catalog rewrites must conserve an admitted native namespace's version and
 descriptor together. Relabeling descriptor2 as entry version1 rejects a legitimate
 write before IO; inferring a new version from a caller's mode would cross the

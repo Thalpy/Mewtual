@@ -554,6 +554,17 @@ pub(in crate::store) fn verify_marker_frame(
     open_marker_data(key, descriptor, raw)
 }
 
+/// Authenticated descriptor DATA only, for the native pre-cleaner inspector.
+/// Callers retain/recheck the actual fixed marker and directory identities and
+/// independent payment; this never installs an archive or Current root.
+pub(in crate::store) fn read_marker_descriptor_data(
+    key: &[u8; 32],
+    vault: &[u8; 32],
+    raw: &[u8],
+) -> Result<Descriptor, AppError> {
+    seed::open_marker_descriptor_data(key, vault, raw)
+}
+
 /// Fixed name only. Frame the group length and full signer; no numeric alias, truncated
 /// device ID, peer endpoint or caller filename can select another logical target.
 pub(in crate::store) fn target_name(

@@ -1365,6 +1365,105 @@ fn native_index2_actual_join_lifecycle_preserves_version_and_cold_reopens() {
     assert_eq!(parsed.member_outbox_payload.unwrap(), five);
 }
 
+/// Disk-equivalent seed-claim/predecessor-JOIN interruption, using the genuine
+/// JOIN writer. A real pinned predecessor process is still a separate gate.
+/// A known complete stage is retained byte-for-byte; partial data stays refused.
+#[test]
+fn lifecycle3_seed_claim_preserves_a_real_interrupted_join_stage() {
+    use crate::store::{
+        NativeIndexPolicy, NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    };
+    use catcoms_mls::MlsDevice;
+    for cut in [1u8, 4, 5] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let shared = pool();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x77c0 + u64::from(cut));
+        let source = join_source(0x77c0 + u64::from(cut), &mut rng);
+        let invite = source
+            .owner
+            .mint_owner_checkpoint_invite(&source.store, [78; 16], 100_000, vec![])
+            .unwrap();
+        drop(five_with_join_execution(path, &shared, &source, &mut rng));
+        let policy1 = NativeRegistryPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+            NativeRegistryPolicy::required_persistent_capacity(),
+        )
+        .unwrap();
+        let mut declaration = NativeRegistryInstallation::prepare(
+            path,
+            SECRET,
+            &mut rng,
+            member_execution_policy(&shared),
+            policy1,
+        )
+        .unwrap();
+        declaration.retry().unwrap();
+        let policy2 = NativeIndexPolicy::new(
+            CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+            NativeIndexPolicy::required_persistent_capacity(),
+        )
+        .unwrap();
+        let mut upgrade = NativeIndexUpgrade::prepare(
+            declaration.into_native_registry().unwrap(),
+            policy2,
+            &mut rng,
+        )
+        .unwrap();
+        upgrade.retry().unwrap();
+        let mounted = upgrade.into_index_store().unwrap();
+        let store = mounted.actual_store_for_test().unwrap();
+        store
+            .configure_owner_evidence_budget(source.budget)
+            .unwrap();
+        let mut joined = store
+            .prepare_journalled_owner_checkpoint_join(
+                &source.store,
+                &source.owner,
+                MlsDevice::generate().unwrap(),
+                invite,
+                &mut rng,
+            )
+            .unwrap();
+        let original = fs::read(path.join(Slot::Current.name())).unwrap();
+        store.critical_namespace_fault.store(cut, Ordering::SeqCst);
+        let refused = joined.save_pending(store, &mut rng);
+        assert!(refused.is_err());
+        // This fault seam stays armed until explicitly reset; unlike the
+        // native-index cut it is not consumed. The actual retained Stage below
+        // pins that this was the physical IO cut, rather than an early refusal.
+        assert!(
+            matches!(refused, Err(crate::AppError::Io(_))),
+            "{refused:?}"
+        );
+        store.critical_namespace_fault.store(0, Ordering::SeqCst);
+        drop(joined);
+        let stage = fs::read(path.join(Slot::Stage.name())).unwrap();
+        let seed =
+            path.join(crate::store::persistence::native_registry::lifecycle::UPGRADE_SEED_NAME);
+        fs::write(&seed, []).unwrap();
+        // In the real predecessor ordering this claim was written first; its
+        // reader knew no3 name and could perform exactly the above JOIN write.
+        let result = store.settle_native_index3_claim_for_test();
+        assert_eq!(fs::read(path.join(Slot::Current.name())).unwrap(), original);
+        if cut == 4 {
+            assert!(result.is_err());
+            assert_eq!(fs::read(&seed).unwrap(), b"");
+            assert_eq!(fs::read(path.join(Slot::Stage.name())).unwrap(), stage);
+        } else {
+            result.unwrap();
+            assert!(!seed.exists());
+            if cut == 1 {
+                assert!(!stage.is_empty());
+                assert_eq!(fs::read(path.join(Slot::Stage.name())).unwrap(), stage);
+            } else {
+                assert!(stage.is_empty());
+                assert!(!path.join(Slot::Stage.name()).exists());
+            }
+        }
+    }
+}
+
 /// A paused row is retained JOIN work, not a vacant startup catalog. The native
 /// preparation must preserve both active and paused genuine sources unchanged.
 #[test]
