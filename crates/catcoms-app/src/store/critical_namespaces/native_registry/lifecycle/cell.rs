@@ -17,6 +17,19 @@ pub(in crate::store::critical_namespaces::native_registry) struct Cell {
     pending: Option<Transaction>,
 }
 impl Cell {
+    /// Actual pending IO destructor observer for whole-physical retirement
+    /// tests. No production callback, state getter or completion is exposed.
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn observe_pending_io_retirement_for_test(
+        &mut self,
+        hook: Box<dyn FnOnce() + Send>,
+    ) {
+        self.pending
+            .as_mut()
+            .expect("actual admitted transaction")
+            .io
+            .observe_retirement(hook);
+    }
     pub(in crate::store::critical_namespaces::native_registry) fn require_idle(
         &self,
     ) -> Result<(), AppError> {
@@ -210,4 +223,4 @@ pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata(
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::store::critical_namespaces::native_registry) mod tests;

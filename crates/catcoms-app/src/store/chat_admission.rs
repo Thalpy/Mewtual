@@ -24,6 +24,12 @@ pub use recovery::{OwnerUnexposedInitialization, OwnerUnexposedRetirement};
 pub(crate) mod restore;
 pub(crate) mod retired;
 mod revocation;
+/// Count the actual observer constructor, rather than infer allocation absence
+/// from a negative result. Used only to pin final cached-edge regressions.
+#[cfg(test)]
+pub(in crate::store) fn take_revocation_observer_constructions() -> u64 {
+    revocation::take_observer_constructions()
+}
 mod storage;
 pub(in crate::store) mod v2_current;
 pub(crate) use storage::ChatAdmissionStoragePermit;
@@ -356,6 +362,12 @@ pub(in crate::store) struct PhysicalMountNegative {
     negative: RequestCancellation,
 }
 impl MountOwner {
+    /// Borrow only this original owner's revocation atomic. Unlike observer(),
+    /// this neither allocates Authority nor subscribes/borrows a watch channel.
+    /// It is a negative check, never a permit or a retained lifetime witness.
+    pub(in crate::store) fn is_live_cached(&self) -> bool {
+        self.life.live()
+    }
     /// Negative test observation only; never returns Runtime, a permit or a new owner.
     #[cfg(test)]
     pub(in crate::store) fn writer_available_for_test(&self) -> bool {

@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+Physical custody cannot reopen native index admission. Selected3's finite work
+capsule retains the SAME original physical allocation; its slot acknowledgement
+follows actual cell/Current destruction and retains a narrow payer with no
+back-reference cycle. Active claim is not Idle: retained retry remains possible,
+but fresh decode/preparation is still serialized and completed outgoing buffers
+exclude new work. Whole-facade close precedes physical release.
+
+Cached Current mount checks now borrow the original revocation atomic directly.
+Creating a cancellation observer at that edge allocated/subscribed under final
+guards; the new boolean creates no observer, weak upgrade or formatted error.
+This is negative bookkeeping, not native/row/SDK authorization. The real native
+producer and outside-guard retirement proof remain unfinished.
+[Boundary and test status](communication-recovery/CHAT-V2-NATIVE-INDEX3-PHYSICAL-WORK.md).
+
 Private index3 I/O retains an independently authenticated original archive/Current
 marker pair, vault/root directories and physical mount negative. Complete new
 inventory payment precedes capture. Exact identities/bytes are repeated at the

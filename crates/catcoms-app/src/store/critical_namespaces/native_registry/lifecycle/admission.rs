@@ -89,6 +89,11 @@ impl Handler {
             Err(refused())
         }
     }
+    /// Custody-only negative. An ACTIVE retained transaction must still be
+    /// lendable for exact retry; this bit supplies no fresh index admission.
+    pub(in crate::store::critical_namespaces::native_registry) fn is_open_cached(&self) -> bool {
+        self.gate.active.load(Ordering::SeqCst) != CLOSED
+    }
     pub(in crate::store) fn close(&self) {
         self.gate.active.store(CLOSED, Ordering::SeqCst);
     }

@@ -1602,7 +1602,14 @@ fn lifecycle3_owning_admission_unwind_closes_before_actual_io_retirement() {
 
 #[test]
 fn lifecycle3_owning_destination_unwind_keeps_actual_vault_busy_until_io_drains() {
-    use super::super::upgrade_source::owning::{self, at_edge, Edge};
+    use super::super::upgrade_source::owning::Edge;
+    for edge in [Edge::BeforePhysicalInstall, Edge::AfterDestination] {
+        lifecycle3_destination_unwind_at(edge);
+    }
+}
+
+fn lifecycle3_destination_unwind_at(edge: super::super::upgrade_source::owning::Edge) {
+    use super::super::upgrade_source::owning::{self, at_edge};
     use std::sync::mpsc::sync_channel;
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
@@ -1618,18 +1625,29 @@ fn lifecycle3_owning_destination_unwind_keeps_actual_vault_busy_until_io_drains(
     let (release, wait) = sync_channel(1);
     let retirement = Arc::new(std::sync::atomic::AtomicU8::new(0));
     let retired = retirement.clone();
+    let admission = prepared.lifecycle_handler_for_test();
+    let retiring_pool = pool.clone();
     prepared.io_retirement = Some(Box::new(move || {
         // This destructor is already unwinding. Never assert/panic or make an
         // unbounded channel send; report the watchdog outcome to the test.
         let ready = entered.try_send(()).is_ok();
         let released = wait.recv_timeout(Duration::from_secs(10)).is_ok();
-        retired.store(if ready && released { 1 } else { 2 }, Ordering::Release);
+        let fenced = !admission.is_open_cached();
+        let funded = retiring_pool.charged_for_test() > 0;
+        retired.store(
+            if ready && released && fenced && funded {
+                1
+            } else {
+                2
+            },
+            Ordering::Release,
+        );
     }));
     let upgrade = prepared.admit().unwrap();
     let worker = std::thread::spawn(move || {
         at_edge(
-            Edge::AfterDestination,
-            Box::new(|| panic!("destination already constructed")),
+            edge,
+            Box::new(|| panic!("destination closer already armed")),
         );
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _ = upgrade.into_store();
@@ -1637,8 +1655,9 @@ fn lifecycle3_owning_destination_unwind_keeps_actual_vault_busy_until_io_drains(
         .is_err()
     });
     let ready = seen.recv_timeout(Duration::from_secs(10));
-    // The destination's real Current has already been destroyed. Only the
-    // resource-only lease may now exclude this actual competing constructor.
+    // AfterDestination has destroyed the real Current; only the finite lease
+    // excludes a successor then. BeforePhysicalInstall also exercises closure
+    // while Current is still an uninstalled local, before its later destructor.
     let busy = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ready.is_ok()
             && matches!(

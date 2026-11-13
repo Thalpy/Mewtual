@@ -164,4 +164,4 @@ pub(super) fn verify_warm_rename(
 }
 
 #[cfg(test)]
-pub(super) mod tests;
+pub(in crate::store::critical_namespaces::native_registry) mod tests;

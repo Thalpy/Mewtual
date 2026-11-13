@@ -8,6 +8,8 @@ use crate::store::critical_namespaces::{
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
 use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
+mod physical;
+pub(in crate::store::critical_namespaces::native_registry) use physical::MetadataWork;
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,6 +21,7 @@ pub(in crate::store::critical_namespaces) enum Edge {
     BeforeColdExposure,
     BeforeMetadataAdmission,
     AfterMetadataCommit,
+    BeforePhysicalInstall,
 }
 #[cfg(test)]
 thread_local! {
@@ -301,11 +304,8 @@ impl Upgrade {
 /// command, Source or SDK authority is exposed by successful storage upgrade.
 pub(in crate::store::critical_namespaces) struct Store {
     _close: lifecycle_admission::AdmissionOwner,
-    // Real mutex poisoning survives an unwind after an admitted normal3 effect.
-    // Closure is published before this cell, its IO, then Current retire.
-    cell: std::sync::Mutex<super::super::super::lifecycle::cell::Cell>,
-    current: V2CurrentLayoutStore,
-    handler: lifecycle_admission::Handler,
+    // Only finite custody is shared. No work capsule can clone this closer.
+    physical: Arc<physical::Physical>,
 }
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -317,13 +317,13 @@ impl Store {
     pub(in crate::store::critical_namespaces::native_registry) fn handler_for_test(
         &self,
     ) -> lifecycle_admission::Handler {
-        self.handler.clone()
+        self.physical.handler_for_test()
     }
     #[cfg(test)]
     pub(in crate::store::critical_namespaces) fn actual_store_for_test(
         &self,
     ) -> Result<&ServerStore, AppError> {
-        self.current.checked_store()
+        self.physical.actual_store_for_test()
     }
     /// Explicit strict3 cold open. Handler payment and original fixed-marker
     /// inspection precede Current/JOIN cleaners. First-torn cleanup that leaves
@@ -344,6 +344,9 @@ impl Store {
             return Err(refused());
         }
         let handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
+        // Allocate all physical control metadata before common opening moves
+        // a real Current. The unexposed empty physical rejects every operation.
+        let physical = physical::Physical::allocate(handler.clone());
         current.native_registry = Some(NativeRegistryHandler::Lifecycle(handler.clone()));
         let mut prepared =
             crate::store::PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current)?;
@@ -353,43 +356,21 @@ impl Store {
             .map_err(|_| refused())?;
         let mut value = Self {
             _close: lifecycle_admission::AdmissionOwner::new(&handler),
-            cell: std::sync::Mutex::default(),
-            current,
-            handler,
+            physical,
         };
+        Arc::get_mut(&mut value.physical)
+            .expect("unexposed original physical3")
+            .install(current);
         value.row_count_data()?;
         #[cfg(test)]
         observe_edge(Edge::BeforeColdExposure);
-        value.handler.finish_cold(value.current.checked_store()?)?;
+        value.physical.finish_cold()?;
         Ok(value)
     }
     pub(in crate::store::critical_namespaces) fn row_count_data(
         &mut self,
     ) -> Result<usize, AppError> {
-        let cell = self.cell.try_lock().map_err(|_| refused())?;
-        cell.require_idle()?;
-        self.handler.require()?;
-        self.handler.require_idle_cached()?;
-        let store = self.current.checked_store()?;
-        // The opaque owner is exclusively borrowed for the whole paid read.
-        // No external Current/worker loan exists; a future shared reader must
-        // add its own cell/fence rather than changing this to an unguarded &self.
-        let inventory =
-            UpgradeInventory::capture(store, self.handler.debit(), self.handler.pool())?;
-        let (count, _) =
-            super::super::super::lifecycle::preparation::authenticate_selected(store, &inventory)?;
-        let guard = store
-            .pending_join_catalog
-            .try_lock()
-            .map_err(|_| refused())?;
-        self.handler.require_idle_cached()?;
-        if guard.as_ref().ok_or_else(refused)?.pending.is_some() {
-            return Err(refused());
-        }
-        inventory.require(store)?;
-        drop(guard);
-        drop(inventory);
-        Ok(count)
+        self.physical.row_count_data()
     }
 
     /// Private local metadata CAS. No native caller/SDK authority is implied.
@@ -405,13 +386,15 @@ impl Store {
         ),
         AppError,
     > {
-        super::super::super::lifecycle::cell::rename_metadata(
-            &self.cell,
-            &self.current,
-            &self.handler,
-            request,
-            rng,
-        )
+        self.physical.rename_metadata_data(request, rng)
+    }
+    /// One prepaid original physical capsule, not admission or a native/SDK
+    /// credential. Cached capture performs no IO/allocation/account lock;
+    /// retire the returned WHOLE capsule outside all native/writer guards.
+    pub(in crate::store::critical_namespaces::native_registry) fn capture_metadata_work(
+        &self,
+    ) -> Option<MetadataWork> {
+        self.physical.capture()
     }
 }
 
@@ -438,6 +421,7 @@ pub(in crate::store::critical_namespaces::native_registry) const OWNERSHIP_METAD
         + std::mem::size_of::<Retirement>()
         + std::mem::size_of::<Claims>()
         + std::mem::size_of::<CatalogHandoff<'static>>())
+    + physical::METADATA
     + 512;
 impl Upgrade {
     pub(in crate::store::critical_namespaces::native_registry) fn into_store(
@@ -446,6 +430,10 @@ impl Upgrade {
         if self.retry().is_err() || !self.complete {
             return Err(Box::new(self));
         }
+        // Allocation precedes the last uniqueness proof and every original
+        // Current extraction. Both original affine closers remain armed here.
+        let destination_handler = self.prepared.handler.clone();
+        let destination_physical = physical::Physical::allocate(destination_handler.clone());
         let Some(source) = self.prepared.original.as_mut() else {
             return Err(Box::new(self));
         };
@@ -473,7 +461,6 @@ impl Upgrade {
             handler,
         } = physical;
         let CloseOwners { old, new } = self.close.take().unwrap();
-        let destination_handler = self.prepared.handler.clone();
         let retirement = Retirement {
             _old_close: old,
             _io: self.io.take().unwrap(),
@@ -487,12 +474,17 @@ impl Upgrade {
         // Destination is declared AFTER the complete retirement bundle. An
         // unwind therefore closes3 before any old input/buffer is destroyed.
         // Its existing affine closer travels here without creating a new gate.
-        let destination = Store {
+        let mut destination = Store {
             _close: new,
-            cell: std::sync::Mutex::default(),
-            current,
-            handler: destination_handler,
+            physical: destination_physical,
         };
+        // Destination's FIRST closer is already armed if this invariant ever
+        // regresses. No observer or weak loan exists before the plain move.
+        #[cfg(test)]
+        observe_edge(Edge::BeforePhysicalInstall);
+        Arc::get_mut(&mut destination.physical)
+            .expect("unexposed original physical3")
+            .install(current);
         #[cfg(test)]
         observe_edge(Edge::AfterDestination);
         drop(retirement);

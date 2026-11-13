@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The private index3 Store can capture one affine `MetadataWork` for its original
+physical allocation. Fixed negative capture is atomic/Arc-only; actual count and
+Rename still acquire the same cell and original claims. The capsule exposes no
+raw Store/Current, full index, Source or SDK credential. Its last acknowledgement
+releases its slot after physical destruction; completed debt keeps its separate
+claim/session custody. Actual native retirement consumers remain unfinished.
+[Private contract](communication-recovery/CHAT-V2-NATIVE-INDEX3-PHYSICAL-WORK.md).
+
 Private `native_registry::lifecycle` now has a storage-only owning upgrade and
 strict cold opener under validation. `PreparedUpgrade::admit` keeps the whole
 original index2 allocation and issues both distinct claims under its catalog

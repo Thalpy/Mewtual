@@ -558,10 +558,17 @@ impl V2CurrentLayoutStore {
     /// that may do IO uses [`Self::checked_store`], which re-proves the marker files; the edge's
     /// own consumers check their cached mount identities separately.
     pub(in crate::store) fn cached_store(&self) -> Result<&ServerStore, AppError> {
-        if self.store.chat_mount.observer().is_cancelled() {
+        if !self.physical_mount_is_live_cached() {
             return Err(refused());
         }
         Ok(&self.store)
+    }
+    /// Fixed negative for capture under a native guard. Borrow the already-owned
+    /// revocation atomic directly: no observer, weak upgrade, watch/account lock,
+    /// IO, allocation or formatted refusal. Original file/row/command checks
+    /// remain independently necessary before any actual operation.
+    pub(in crate::store::critical_namespaces) fn physical_mount_is_live_cached(&self) -> bool {
+        self.store.chat_mount.is_live_cached()
     }
 }
 

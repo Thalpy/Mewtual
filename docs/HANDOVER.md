@@ -1,5 +1,28 @@
 # Mewtual; Handover
 
+## Private finite physical3 work (13 November; validation in progress)
+
+The actual selected3 owner now closes admission separately from one fixed-slot
+finite physical capsule. It retains the original mutex cell/Current/handler;
+capsule destruction drains actual physical custody before releasing its slot.
+Completed debt independently keeps its claim and finite session until its own
+files/buffers retire. No public Store/Current or SDK/native grant is added.
+
+Design review also found that `cached_store()` constructed an observer/Authority
+at final cached edges. The genuine Current regression fails before the fix
+(count1 versus0, 1.97s) and passes after the direct original-atomic check (1.83s).
+Seven new physical cases plus the existing physical-session control pass
+(eight total, 22.66s); expanded assembly-unwind coverage passes both edges
+(10.82s). The independent known-negative capture case passes (8.56s), as does
+the coherent87-case run (364.97s). Native production checking compiles this
+actual worktree and passes (2m17s). The compiled registry count is196 ordinary
+cases plus2 explicit compatibility cases; focused CI adds the cached Current
+regression. Static checks and actual design/diff/re-reviews are clear. Strict
+Clippy still fails604 errors, including the unfinished consumer;13 dependency
+findings remain open, with no exemptions added. Full suites, actual native
+consumers and scoped Legacy/Source/SDK work remain open. Chat V2 is off.
+See [the custody contract](communication-recovery/CHAT-V2-NATIVE-INDEX3-PHYSICAL-WORK.md).
+
 ## Private normal3 metadata WAL (13 November; validation in progress)
 
 The first owning normal3 producer retains one exact local-name CAS, sealed
