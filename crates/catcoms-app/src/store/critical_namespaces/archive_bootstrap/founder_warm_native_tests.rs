@@ -22,8 +22,9 @@ fn native_whole_warm_source_keeps_its_origin_through_current_host_and_member_sav
         Arc::new(AtomicU64::new(7)),
         Arc::new(AtomicU64::new(7)),
         Arc::new(AtomicBool::new(false)),
+        Arc::new(()),
     );
-    let ui = binding.open_session(7).unwrap();
+    let ui = binding.open_session(7, Arc::new(())).unwrap();
     let source = NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap();
     let mut keys = NativeFounderKeys::prepare(&source, &ui.observe()).unwrap();
     keys.enter_device().unwrap();
@@ -174,8 +175,9 @@ fn native_whole_warm_final_save_refuses_late_source_close_or_generation_publicat
             generation.clone(),
             authorized.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(()),
         );
-        let ui = binding.open_session(7).unwrap();
+        let ui = binding.open_session(7, Arc::new(())).unwrap();
         let mut source =
             Some(NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap());
         let mut keys = NativeFounderKeys::prepare(source.as_ref().unwrap(), &ui.observe()).unwrap();
@@ -279,7 +281,9 @@ fn native_whole_warm_final_save_refuses_late_source_close_or_generation_publicat
         drop(ui);
         if !close_source {
             authorized.store(generation.load(SeqCst), SeqCst);
-            let fresh_ui = binding.open_session(generation.load(SeqCst)).unwrap();
+            let fresh_ui = binding
+                .open_session(generation.load(SeqCst), Arc::new(()))
+                .unwrap();
             let mut fresh =
                 NativeFounderKeys::prepare(source.as_ref().unwrap(), &fresh_ui.observe()).unwrap();
             assert_eq!(

@@ -24,8 +24,9 @@ impl NativeFixture {
             generation.clone(),
             authorized.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(()),
         );
-        let ui = binding.open_session(7).unwrap();
+        let ui = binding.open_session(7, Arc::new(())).unwrap();
         let source =
             NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap();
         Self {
@@ -44,7 +45,7 @@ impl NativeFixture {
     fn reauthenticate(&mut self) {
         let generation = self.generation.load(SeqCst);
         self.authorized.store(generation, SeqCst);
-        self.ui = Some(self.binding.open_session(generation).unwrap());
+        self.ui = Some(self.binding.open_session(generation, Arc::new(())).unwrap());
     }
 }
 

@@ -20,6 +20,7 @@ impl Fixture {
                 generation.clone(),
                 authorized.clone(),
                 requested.clone(),
+                Arc::new(()),
             ),
             generation,
             authorized,
@@ -28,7 +29,7 @@ impl Fixture {
     }
     fn session(&self) -> NativeChatUiSessionOwner {
         self.binding
-            .open_session(self.generation.load(Ordering::SeqCst))
+            .open_session(self.generation.load(Ordering::SeqCst), Arc::new(()))
             .unwrap()
     }
     fn source(&self, session: &NativeChatUiSessionOwner) -> NativeChatSourceOwner {
@@ -650,4 +651,138 @@ fn native_chat_key_contended_final_counter_makes_only_one_cas_attempt() {
     first
         .enter(&original, NativeChatKeyPurpose::FounderSdk, &mut refused)
         .unwrap();
+}
+
+struct CountWake(AtomicUsize);
+impl Wake for CountWake {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn native_chat_key_preissued_drain_waits_for_close_and_wakes_on_idle_retirement() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let drain = ui.observe_retirement();
+    let other = drain.clone();
+    assert!(!drain.is_drained(), "open+zero is not retirement");
+    let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wakes.clone());
+    let mut wait = Box::pin(drain.wait());
+    assert!(wait
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+    let retired = ui.retire();
+    assert_eq!(
+        wakes.0.load(Ordering::SeqCst),
+        1,
+        "first idle close wakes; Drop's repeated close does not"
+    );
+    assert!(other.is_drained() && retired.is_drained());
+    assert!(wait
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_ready());
+}
+
+#[test]
+fn native_chat_key_idle_retirement_keeps_actual_generation_and_host_custody_in_unentered_pins() {
+    struct Charge(Arc<AtomicUsize>);
+    impl Drop for Charge {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let host_dropped = Arc::new(AtomicUsize::new(0));
+    let generation_dropped = Arc::new(AtomicUsize::new(0));
+    let binding = NativeChatUiBinding::from_trusted_host(
+        Arc::new(AtomicU64::new(7)),
+        Arc::new(AtomicU64::new(7)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Charge(host_dropped.clone())),
+    );
+    let ui = binding
+        .open_session(7, Arc::new(Charge(generation_dropped.clone())))
+        .unwrap();
+    let counter = Arc::downgrade(&ui.original.counter);
+    let source = NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap();
+    let original = source.observe();
+    let mut cut = source
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::FounderSdk)
+        .unwrap();
+    let drain = ui.retire();
+    assert!(drain.is_drained(), "no primitive was entered");
+    drop(drain); // Canonical retirement may now reclaim its slot/record.
+    binding.close();
+    drop(binding);
+    drop(source);
+    assert!(counter.upgrade().is_some());
+    assert_eq!(host_dropped.load(Ordering::SeqCst), 0);
+    assert_eq!(generation_dropped.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        cut.enter(
+            &original,
+            NativeChatKeyPurpose::FounderSdk,
+            &mut NativeChatKeyEnds::new()
+        ),
+        Err(NativeChatKeyRefusal::Unavailable)
+    );
+    drop(cut);
+    assert!(counter.upgrade().is_none());
+    assert_eq!(host_dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(generation_dropped.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn native_chat_key_whole_binding_close_is_sc_only_before_separate_owner_retirement() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let source = fixture.source(&ui);
+    let original = source.observe();
+    let mut cut = source
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::FounderSdk)
+        .unwrap();
+    let drain = ui.observe_retirement();
+    let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wakes.clone());
+    let mut wait = Box::pin(drain.wait());
+    assert!(wait
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+    fixture.binding.close();
+    fixture.binding.close();
+    assert_eq!(
+        wakes.0.load(Ordering::SeqCst),
+        0,
+        "host fence must run no Wakers under its caller's guard"
+    );
+    assert!(
+        !drain.is_drained(),
+        "binding close is distinct from owner drainage"
+    );
+    assert_eq!(
+        cut.enter(
+            &original,
+            NativeChatKeyPurpose::FounderSdk,
+            &mut NativeChatKeyEnds::new()
+        ),
+        Err(NativeChatKeyRefusal::Unavailable)
+    );
+    assert!(fixture.binding.open_session(7, Arc::new(())).is_err());
+    assert!(source
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::BootstrapHeader)
+        .is_err());
+    drop(ui); // Actual owner batch closes/notifies outside every writer.
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert!(wait
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_ready());
 }

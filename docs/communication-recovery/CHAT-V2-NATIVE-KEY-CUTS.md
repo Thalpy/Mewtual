@@ -15,6 +15,16 @@ prevents new admission and waits for admitted Ends; it never reports a timeout
 as successful drainage. A fresh authenticated UI may access the same still-live
 source, while an old command cannot adopt the replacement session.
 
+Host and generation constructors now require independent fee-only custody. Host
+payment follows Host pins; generation payment follows its actual Counter through
+prepared cuts, Ends and drains. CLOSED+zero proves work ended, while an unentered
+cut can still retain metadata and its payment. The preissued retirement observer
+waits for CLOSED+zero; first idle retirement wakes it exactly once. Retire/owner
+Drop and notifications run outside native/registry/Store/Root guards. Whole Host
+close is SC-only and runs before locks. Records must not be stored in Counter
+custody, which would create a cycle through their drain. The actual native
+registry must still prepay retirement slots and bound/coalesce waiting tasks.
+
 The caller keeps the prepared cuts and fixed End batch outside all Root, Core,
 Store and native guards, on both success and unwind. Partial admission retains
 its End there too. No last metadata or custody destructor runs in the primitive
@@ -42,7 +52,7 @@ authority. A successful cached Sync return alone supplies no current permission.
 
 ## Executed focused evidence
 
-Windows local execution passes 14 runtime lifecycle cases, 10 retained bootstrap
+Windows local execution passes 17 runtime lifecycle cases, 10 retained bootstrap
 cases, nine member cases, five actual Root SDK/source cases and two new whole
 warm Host/member-save cases. The whole warm cases use real encrypted source and
 outbox storage, but synthetic host atomics and test native custody. They prove

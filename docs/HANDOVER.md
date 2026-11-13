@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Native generation metadata (13 November; integration in progress)
+
+The next native production branch ties Host and generation metadata payments to
+their actual retained RT objects. An idle, closed session can still have unentered
+pins; reclaiming a registry record cannot refund those pins' payment. Preissued
+negative drains wait for CLOSED+zero and wake on first idle close. Whole Host
+close is SC-only; actual retirement/Drop and notifications run outside guards.
+All17 RT cases and strict RT Clippy pass, plus10 bootstrap,9 member,5 actual SDK
+and10 whole warm Host cases. Read-only review has no B/H/M; its public lifecycle
+doc LOW is fixed. Actual canonical native registry/waiter integration and the
+owning native Pending/network/founder producer remain unfinished. No activation.
+
 ## Linux founder inventory (13 November; execution pending)
 
 A fixed-buffer Linux RawDir reader now supplies the previously unsupported

@@ -90,7 +90,14 @@ impl Counter {
             })
     }
     fn close(&self) {
-        self.state.fetch_or(CLOSED, Ordering::SeqCst);
+        let previous = self.state.fetch_or(CLOSED, Ordering::SeqCst);
+        // A negative observer may be installed at issuance, before retirement.
+        // Closing an idle counter must wake it too. Only the first close needs
+        // this notification; admitted work is covered by its final End.
+        // Owners MUST retire/drop outside writers: Wakers can run inline.
+        if previous == 0 {
+            self.drained.notify_waiters();
+        }
     }
     fn open(&self) -> bool {
         self.state.load(Ordering::SeqCst) & CLOSED == 0
@@ -109,6 +116,9 @@ struct Host {
     authorized: Arc<AtomicU64>,
     requested: Arc<AtomicBool>,
     closed: AtomicBool,
+    // Fee-only metadata custody, not a retirement record/issuer. It follows
+    // actual Host pins even after the affine binding leaves its registry.
+    _custody: Arc<dyn Send + Sync>,
 }
 impl Host {
     fn current(&self, expected: u64) -> bool {
@@ -128,10 +138,13 @@ impl NativeChatUiBinding {
     /// TRUSTED-HOST seam. Only native's private checked factory may supply these
     /// actual atomics in production. This constructor does not authenticate the
     /// caller, identify a vault, or prove that an unlock really occurred.
+    /// Supply the actual independent Host metadata payment, never a registry
+    /// record that owns a drain back to this metadata (which would make a cycle).
     pub fn from_trusted_host(
         generation: Arc<AtomicU64>,
         authorized: Arc<AtomicU64>,
         requested: Arc<AtomicBool>,
+        host_metadata: Arc<dyn Send + Sync>,
     ) -> Self {
         Self {
             original: Arc::new(Host {
@@ -139,6 +152,7 @@ impl NativeChatUiBinding {
                 authorized,
                 requested,
                 closed: AtomicBool::new(false),
+                _custody: host_metadata,
             }),
         }
     }
@@ -146,9 +160,12 @@ impl NativeChatUiBinding {
     /// Native's canonical per-generation registry owns the returned close owner.
     /// Capture expected BEFORE parsing the original synchronous invocation; a
     /// worker must never call this with a later generation selected after await.
+    /// Reserve generation metadata and its retirement slot BEFORE entry. Its
+    /// fee-only custody follows actual pins, not just CLOSED+zero work status.
     pub fn open_session(
         &self,
         expected: u64,
+        generation_metadata: Arc<dyn Send + Sync>,
     ) -> Result<NativeChatUiSessionOwner, NativeChatKeyRefusal> {
         if !self.original.current(expected) {
             return Err(NativeChatKeyRefusal::Unavailable);
@@ -157,7 +174,10 @@ impl NativeChatUiBinding {
             original: Arc::new(UiSession {
                 host: self.original.clone(),
                 expected,
-                counter: Arc::new(Counter::new(None)),
+                // CLOSED+zero ends admitted work, not unentered metadata pins.
+                // Counter custody preserves the actual generation payment in
+                // prepared cuts, Ends and drains after registry-slot reuse.
+                counter: Arc::new(Counter::new(Some(generation_metadata))),
             }),
         };
         if !value.original.current() {
@@ -165,10 +185,17 @@ impl NativeChatUiBinding {
         }
         Ok(value)
     }
+
+    /// Irreversibly close this original mounted host BEFORE taking any native,
+    /// registry, operation or Root guard. SC-only: no walk, wait or notification.
+    /// UI lock retires its generations instead; it must retain the mounted host.
+    pub fn close(&self) {
+        self.original.closed.store(true, Ordering::SeqCst);
+    }
 }
 impl Drop for NativeChatUiBinding {
     fn drop(&mut self) {
-        self.original.closed.store(true, Ordering::SeqCst);
+        self.close();
     }
 }
 
@@ -184,10 +211,21 @@ impl UiSession {
 }
 
 /// Native's affine owner for one original authenticated UI generation.
+/// Retire AND Drop outside native/registry/Store/Root guards: idle retirement
+/// may synchronously wake preissued observers through arbitrary Wakers.
 pub struct NativeChatUiSessionOwner {
     original: Arc<UiSession>,
 }
 impl NativeChatUiSessionOwner {
+    /// Negative retirement observation, allocated/paid with the generation
+    /// BEFORE commands may observe it. It grants no close or key authority and
+    /// waits for CLOSED+zero, including when first polled while still open.
+    /// The host must bound/coalesce its actual waiting tasks independently.
+    pub fn observe_retirement(&self) -> NativeChatKeyDrain {
+        NativeChatKeyDrain {
+            original: self.original.counter.clone(),
+        }
+    }
     /// Weak command observation; it cannot keep this session open or replace
     /// its generation after lock/unlock.
     pub fn observe(&self) -> NativeChatUiCommand {
@@ -195,8 +233,9 @@ impl NativeChatUiSessionOwner {
             original: Arc::downgrade(&self.original),
         }
     }
-    /// Close synchronously, then return negative drainage. Wait outside every
-    /// native UI/registry/Store and Root guard. No timeout constitutes drainage.
+    /// Close synchronously, then return negative drainage. Call this, drop the
+    /// owner, and wait outside every native UI/registry/Store and Root guard.
+    /// Retirement may synchronously wake observers; no timeout is drainage.
     pub fn retire(self) -> NativeChatKeyDrain {
         self.original.counter.close();
         NativeChatKeyDrain {
@@ -224,6 +263,8 @@ struct Source {
 /// Non-Clone source-close owner. Root's private native operation must associate
 /// this exact owner with its real mount/row/invocation/request and creator.
 /// Merely constructing this lifecycle object establishes none of those facts.
+/// Retire AND Drop outside native/registry/Store/Root guards; counter closure
+/// can synchronously run arbitrary Wakers.
 pub struct NativeChatSourceOwner {
     original: Arc<Source>,
 }
@@ -282,6 +323,7 @@ impl NativeChatSourceOwner {
         })
     }
     /// Irreversibly retire this source before waiting on an escaping worker.
+    /// Call/Drop outside native/registry/Store/Root guards: closure can run Wakers.
     pub fn retire(self) -> NativeChatKeyDrain {
         self.original.counter.close();
         NativeChatKeyDrain {
@@ -430,10 +472,17 @@ impl Default for NativeChatKeyEnds {
 }
 
 /// Negative-only closed counter drainage. It cannot issue another key cut.
+#[derive(Clone)]
 pub struct NativeChatKeyDrain {
     original: Arc<Counter>,
 }
 impl NativeChatKeyDrain {
+    /// No admitted key work remains on this CLOSED original. Unentered cuts,
+    /// workers and metadata may still exist and retain their independent fees.
+    /// This is not destruction, source authority or an SDK/physical drain.
+    pub fn is_drained(&self) -> bool {
+        self.original.state.load(Ordering::SeqCst) == CLOSED
+    }
     /// Register before observing zero, avoiding the final-End lost wakeup.
     /// Call only outside every guard that an admitted operation can need.
     pub async fn wait(&self) {
@@ -441,7 +490,7 @@ impl NativeChatKeyDrain {
             let notified = self.original.drained.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.original.state.load(Ordering::SeqCst) & !CLOSED == 0 {
+            if self.is_drained() {
                 return;
             }
             notified.await;
