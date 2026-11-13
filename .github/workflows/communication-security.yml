@@ -1,0 +1,74 @@
+name: Communication dependency compatibility
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/communication-security.yml'
+      - '.github/scripts/check-communication-security.py'
+      - 'crates/catcoms-storage/**'
+      - 'apps/desktop/src-tauri/tests/xattr_compat.rs'
+      - 'apps/desktop/package*.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: communication-security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUST_TEST_THREADS: 2
+
+jobs:
+  linux:
+    name: Linux ACL, native xattr and renderer compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check result rejection guards
+        run: python .github/scripts/check-communication-security.py self-test
+      - name: Exercise actual Linux ACL behavior and conservative error handling
+        run: python .github/scripts/check-communication-security.py storage
+      - name: Strict storage Clippy
+        run: cargo clippy --locked -p catcoms-storage --all-targets --all-features -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install frontend dependencies
+        run: npm --prefix apps/desktop ci
+      - name: Execute complete frontend tests
+        run: npm --prefix apps/desktop test
+      - name: Check frontend types
+        run: npm --prefix apps/desktop run check
+      - name: Build actual frontend assets
+        run: npm --prefix apps/desktop run build
+      - name: Install native build libraries
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Exercise native tar's actual large-xattr dependency
+        run: python .github/scripts/check-communication-security.py native
+      - name: Check native workspace
+        if: ${{ !cancelled() }}
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: communication-security-linux
+          path: logs/communication-security/

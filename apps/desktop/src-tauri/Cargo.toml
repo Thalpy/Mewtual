@@ -113,6 +113,12 @@ tempfile = "3"
 rand_chacha = "0.3"
 rand_core = "0.6"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# tar's xattr1.x dependency must use the explicit rustix>=1.1.6 query APIs.
+# The real >4KiB compatibility regression also pins this minimum in this
+# workspace; otherwise an older compatible-looking xattr can silently truncate.
+xattr = "1.7.0"
+
 # Own workspace so the heavy Tauri/webview deps stay out of the root `cargo test --all`.
 [workspace]
 
