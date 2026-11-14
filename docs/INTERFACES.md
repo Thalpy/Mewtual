@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Native warm bootstrap now privately pairs its original facade and removable
+Sources. Cached same-allocation comparison supports replacement refusal only.
+Close composes actual bootstrap, Source/SDK/TCP and metadata/UI retirement;
+native commands and Chat V2 remain disabled/incomplete.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-CONTROLLER.md).
+
 Original metadata/authentication and UI-state work now have a distinct closed
 drain under validation. Nine focused cases passed, including a post-CAS capture
 wakeup race fixed after review. This is separate from Source/SDK/TCP and actual

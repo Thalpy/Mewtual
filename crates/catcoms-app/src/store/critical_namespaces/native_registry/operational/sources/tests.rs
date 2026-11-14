@@ -100,6 +100,21 @@ fn selected_configured(
 }
 
 #[test]
+fn native_sources_original_vault_comparison_survives_close_and_refuses_foreign_facade() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let (vault, _) = selected(first.path());
+    let (foreign, _) = selected(second.path());
+    let owner = sources(&vault);
+    assert!(owner.is_from_original_vault_cached(&vault));
+    assert!(!owner.is_from_original_vault_cached(&foreign));
+    vault.close_admission();
+    owner.close_admission();
+    assert!(owner.is_from_original_vault_cached(&vault));
+    assert!(!owner.is_from_original_vault_cached(&foreign));
+}
+
+#[test]
 fn native_sources_data_only_mount_cannot_retain_an_authoring_entry_or_generate_a_device() {
     let dir = tempfile::tempdir().unwrap();
     let (vault, budget) = selected_configured(dir.path(), false);

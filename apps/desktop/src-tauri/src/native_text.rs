@@ -8,7 +8,9 @@ use tauri::ipc::{Invoke, InvokeBody};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
+mod boot_lifetime;
 pub(super) mod retirement;
+pub(super) mod sources;
 #[cfg(test)]
 mod tests;
 pub(super) mod ui_state;
@@ -25,10 +27,17 @@ pub(super) struct Registry {
     pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
+    sources: sources::Controller,
     #[cfg(test)]
     directory: Option<PathBuf>,
     #[cfg(test)]
     final_edge: Option<Arc<tests::AdmissionBarrier>>,
+    #[cfg(test)]
+    boot_return_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    source_work_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    source_work_waiting: tokio::sync::Notify,
     #[cfg(test)]
     reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
@@ -58,6 +67,11 @@ impl Default for Registry {
         .expect("fixed native UI capacity");
         let ui_state =
             ui_state::Controller::new(ui_budget.prepare().expect("UI-state control payment"));
+        let sources = sources::Controller::new(
+            ui_budget
+                .prepare()
+                .expect("source lifecycle control payment"),
+        );
         Self {
             selected: false,
             inflight: Arc::new(Semaphore::new(1)),
@@ -66,10 +80,17 @@ impl Default for Registry {
             ui_state,
             retirement,
             preludes,
+            sources,
             #[cfg(test)]
             directory: None,
             #[cfg(test)]
             final_edge: None,
+            #[cfg(test)]
+            boot_return_edge: StdMutex::new(None),
+            #[cfg(test)]
+            source_work_edge: StdMutex::new(None),
+            #[cfg(test)]
+            source_work_waiting: tokio::sync::Notify::new(),
             #[cfg(test)]
             reply_edge: StdMutex::new(None),
             #[cfg(test)]
@@ -92,6 +113,7 @@ impl Default for Registry {
 
 struct Captured {
     generation: u64,
+    lifetime: Arc<boot_lifetime::Control>,
     secret: Zeroizing<Vec<u8>>,
     _permit: OwnedSemaphorePermit,
 }
@@ -199,6 +221,7 @@ fn router<R: tauri::Runtime>(
             // BEFORE parsing or scheduling: a completely unpolled old invoke
             // cannot adopt the authorization of a subsequent lock/unlock cycle.
             let generation = state.ui_session_generation.load(Ordering::SeqCst);
+            let lifetime = state.native_text.sources.boot.clone();
             let captured = state
                 .native_text
                 .inflight
@@ -208,6 +231,7 @@ fn router<R: tauri::Runtime>(
                 .and_then(|permit| {
                     arguments(invoke.message.payload(), generation).map(|secret| Captured {
                         generation,
+                        lifetime,
                         secret,
                         _permit: permit,
                     })
@@ -319,12 +343,23 @@ async fn execute(
     directory: PathBuf,
     notice: &mut Option<ui_state::snapshots::Notice>,
 ) -> Result<Vec<ReloadedServer>, String> {
+    if !state
+        .native_text
+        .sources
+        .boot
+        .same_original(&captured.lifetime)
+        || state.native_text.sources.is_closing_cached()
+    {
+        return Err("This vault is closing. Try closing the window again.".into());
+    }
     let _mount = state.vault_mount.lock().await;
     // An older lock can publish this generation before revoking voice state.
     // Snapshot its original ticket only AFTER that mutation prelude ends, but
     // BEFORE KDF/verification, so authentication cannot adopt a later Host.
     state.native_text.preludes.wait_idle().await;
-    if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation {
+    if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation
+        || state.native_text.sources.is_closing_cached()
+    {
         return Err("Unlock was superseded. Try again.".into());
     }
     let ticket = voice_runtime(state).session_ticket();
@@ -337,7 +372,10 @@ async fn execute(
     }
     let mut authentication = authenticate_mounted(state, &captured.secret).await?;
     if authentication.is_none() {
-        let mut plan = {
+        // Count only actual bootstrap/file custody, never the complete unlock
+        // task that may later wait for close's prelude while owning vault_mount.
+        let boot_end = captured.lifetime.enter().map_err(str::to_string)?;
+        let plan = {
             let mut slot = state
                 .native_text
                 .bootstrap
@@ -352,14 +390,28 @@ async fn execute(
             state.session_lock_requested.clone(),
         );
         let budget = state.native_text.ui_budget.clone();
+        let source_policy = state.native_text.sources.policy();
         // Whole original storage work, outside store/UI/operation guards. A
         // waiter disappearing does not cancel this owned native router task.
+        // Construct BEFORE scheduling: an unpolled closure or panic in file
+        // work must drop the actual plan before retiring its End too.
+        let mut output = BootOutput {
+            plan: Some(plan),
+            outcome: Ok(()),
+            _end: boot_end,
+        };
         let result = tauri::async_runtime::spawn_blocking(move || {
-            let result = plan.advance(&directory, &secret, atoms, budget);
-            (plan, result)
+            output.outcome = output.plan.as_mut().expect("original boot plan").advance(
+                &directory,
+                &secret,
+                atoms,
+                budget,
+                source_policy,
+            );
+            output
         })
         .await;
-        let (mut plan, outcome) = match result {
+        let mut output = match result {
             Ok(result) => result,
             Err(_) => {
                 *state
@@ -370,28 +422,58 @@ async fn execute(
                 return Err("Vault startup failed. Its files have been kept.".into());
             }
         };
-        let ready = plan.take_ready();
+        #[cfg(test)]
+        {
+            let edge = state.native_text.boot_return_edge.lock().unwrap().clone();
+            if let Some(edge) = edge {
+                edge.wait_once().await;
+            }
+        }
+        let mut install_error = None;
+        // Own a losing whole pair OUTSIDE Store/controller even on unwind.
+        let mut ready = output.plan.as_mut().unwrap().take_ready();
+        {
+            let mut store = state.store.lock().await;
+            // Pair-install admission linearizes at these final checks while
+            // the SAME boot End remains live. Irreversible close fences the
+            // controller and waits that End before collecting an admitted pair.
+            if state.ui_session_generation.load(Ordering::SeqCst) == captured.generation
+                && !state.native_text.sources.is_closing_cached()
+                && state.native_text.preludes.is_idle_cached()
+            {
+                if ready.is_some() {
+                    if let Err(error) = state.native_text.sources.install(
+                        &mut store,
+                        &mut ready,
+                        &captured.lifetime,
+                    ) {
+                        install_error = Some(error.to_string());
+                    }
+                }
+            } else {
+                install_error = Some("Unlock was superseded. Try again.".into());
+            }
+        }
+        // Retain an uninstalled pair in the original canonical plan. This move
+        // and any destructor are outside Store/controller, including failure.
+        if let Some(ready) = ready {
+            *output.plan.as_mut().unwrap() = boot::Bootstrap::Ready(ready);
+        }
         {
             let mut slot = state
                 .native_text
                 .bootstrap
                 .lock()
                 .map_err(|_| "Vault startup is unavailable.")?;
-            *slot = Some(plan); // previous value is None; no owner destroyed here
+            if slot.is_some() {
+                return Err("The original vault startup changed.".into());
+            }
+            *slot = output.plan.take(); // None before move, no losing owner Drop here
         }
-        if let Some(vault) = ready {
-            let mut owner = Some(vault);
-            {
-                let mut guard = state.store.lock().await;
-                if guard.is_none() {
-                    *guard = owner.take().map(MountedVault::TextV2);
-                }
-            }
-            // Destruction of a losing actual owner is outside the store guard.
-            if owner.is_some() {
-                drop(owner);
-                return Err("The mounted vault changed.".into());
-            }
+        let outcome = std::mem::replace(&mut output.outcome, Ok(()));
+        drop(output); // returned owning plan transferred; End BEFORE finalizer wait
+        if let Some(error) = install_error {
+            return Err(error);
         }
         outcome?;
         // Retrying retained metadata work is NOT authentication. Even if a
@@ -409,7 +491,7 @@ async fn execute(
         captured.generation,
         false,
         &ticket,
-        || authentication.is_live_cached(),
+        || !state.native_text.sources.is_closing_cached() && authentication.is_live_cached(),
         Some(authentication.clone()),
         Some(notice),
     )
@@ -417,4 +499,13 @@ async fn execute(
     // This warm milestone admits only a fresh empty vault; no fake Legacy
     // actors are created from index DATA. Native authoring/restore come next.
     Ok(Vec::new())
+}
+
+/// Actual returned bootstrap ownership precedes its file-work End, including
+/// an unpolled/lost JoinHandle result. A timer or finished blocking closure
+/// alone cannot release a still-returned original facade/partial plan.
+struct BootOutput {
+    plan: Option<boot::Bootstrap>,
+    outcome: Result<(), String>,
+    _end: boot_lifetime::End,
 }

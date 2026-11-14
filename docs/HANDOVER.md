@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+Native canonical Sources, paired warm installation and whole-close composition
+are under validation. Original bootstrap work, retained plans, Source/SDK/TCP,
+metadata/UI work and actual facade disposal are separate obligations. Chat V2
+stays off; native commands, joined/Add sources, archive/transport/projection/cold
+restore and combined acceptance remain open.
+[Current contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-CONTROLLER.md).
+
+Runtime checkpoint `d4496bdd`: native-text 51/51, Root identity 1/1 and frontend
+3446/3446 passed, as did native lint/check/build/startup, UI flows, formatting,
+static gates and both audits. Root strict Clippy retains 564 existing failures;
+full Root/native CI run 43643841874 is pending (one user-deferred slow case).
+This does not complete or enable Chat V2. The follow-up is docs/test-comment only.
+
 Original metadata/authentication and UI-state work now have a distinct closed
 drain under validation. Nine focused cases passed, including a post-CAS capture
 wakeup race fixed after review. This is separate from Source/SDK/TCP and actual

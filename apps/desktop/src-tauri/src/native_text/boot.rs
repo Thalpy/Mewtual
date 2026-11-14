@@ -5,8 +5,8 @@ use super::*;
 use catcoms_app::store::{
     ArchiveBootstrapCatalogPolicy, CanonicalFilenameInventoryPolicy, CriticalCatalogReadPool,
     NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade, NativeRegistryInstallation,
-    NativeRegistryPolicy, NativeRegistryStore, NativeTextVault, NativeTextVaultUpgrade,
-    V2CurrentLayoutPolicy, V2MemberOutboxPolicy,
+    NativeRegistryPolicy, NativeRegistryStore, NativeTextVaultUpgrade, V2CurrentLayoutPolicy,
+    V2MemberOutboxPolicy,
 };
 
 pub(super) enum Bootstrap {
@@ -16,7 +16,7 @@ pub(super) enum Bootstrap {
     Upgrading2(Box<NativeIndexUpgrade>),
     Index2(NativeIndexStore),
     Upgrading3(Box<NativeTextVaultUpgrade>),
-    Ready(NativeTextVault),
+    Ready(super::sources::ReadyBundle),
     Mounted,
     /// Initial preparation/unwind cannot safely reconstruct warm custody. Keep
     /// every file and refuse; the eventual closed cold selector must handle it.
@@ -57,6 +57,7 @@ impl Bootstrap {
         secret: &[u8],
         atoms: Atoms,
         budget: NativeUiInvocationBudget,
+        source_policy: catcoms_app::store::NativeTextSourcePolicy,
     ) -> Result<(), String> {
         if secret.is_empty() || secret.len() > MAX_SECRET {
             return Err("Enter a valid vault secret.".into());
@@ -154,7 +155,12 @@ impl Bootstrap {
                         return Err(FAILED.into());
                     }
                     match (*original).into_vault() {
-                        Ok(owner) => *self = Self::Ready(owner),
+                        Ok(owner) => {
+                            *self = Self::Ready(super::sources::ReadyBundle::new(
+                                owner,
+                                &source_policy,
+                            )?)
+                        }
                         Err(original) => {
                             *self = Self::Upgrading3(Box::new(original));
                             return Err(FAILED.into());
@@ -174,7 +180,7 @@ impl Bootstrap {
         }
     }
 
-    pub(super) fn take_ready(&mut self) -> Option<NativeTextVault> {
+    pub(super) fn take_ready(&mut self) -> Option<super::sources::ReadyBundle> {
         match std::mem::replace(self, Self::Mounted) {
             Self::Ready(owner) => Some(owner),
             other => {

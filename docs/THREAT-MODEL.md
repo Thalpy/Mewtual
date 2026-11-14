@@ -1,5 +1,11 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native source-controller validation now separates actual bootstrap work and
+returned plans from complete unlock tasks. Irreversible close follows continuity
+admission, rejects replacement owners at each stage, and acknowledges disposal
+after outside-guard destructors. Native authoring, joined authority and wider
+Chat V2 acceptance remain open. [Boundary and pending evidence](communication-recovery/CHAT-V2-NATIVE-SOURCE-CONTROLLER.md).
+
 Original metadata/authentication and UI-state work now have a distinct closed
 drain under validation. Nine focused cases passed, including a post-CAS capture
 wakeup race fixed after review. This is separate from Source/SDK/TCP and actual
