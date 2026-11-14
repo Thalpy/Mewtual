@@ -125,3 +125,37 @@ follows: strict App debt and unfinished native/joined/transport consumers remain
 The pinned predecessor is retained independently of PR branch history by
 `compat/network-security-predecessor-944115c2`; the gate still verifies its full
 commit SHA, not a movable tag.
+
+## Subscription retry amplification follow-up (14 November)
+
+The exact939ea602 Windows peer job43553131480 completed QUIC authentication and
+bidirectional RR, then both endpoints timed out waiting for gossip. Its two
+logs contain no target subscription/publication observations. This is an open
+acceptance failure, not proof of a particular production cause or a flaky test.
+
+A separate confirmed amplification existed in the current actor: EVERY incoming
+Subscribed event synchronously retried the whole held-publication queue. Both
+upstream versions sign a complete payload before checking subscriber presence.
+An unrelated subscription burst could repeatedly sign up to 8 MiB on one actor.
+The callback now extracts only the exact canonical announced topic. Unmatched
+originals keep their order, Bytes ownership and byte charge. Malformed and
+uppercase aliases select nothing. The independent periodic retry is unchanged.
+No wire limits, deadlines, payload sizes or receipt assertions were reduced.
+
+All 177 Net tests pass (0.99s), including three new queue regressions; strict Net
+all-target/all-feature Clippy passes (11.62s). The new unchanged-source old-peer
+gate also passes locally: both actual runtimes adopted 2,000 topics, observed the
+target and received exact RR and near 60 KiB signed gossip. It still starts bulk
+after RR without waiting for a diagnostic subscription flag. Existing 15s/45s
+bounds are unchanged. This successful run does not establish the CI failure's
+cause or sustained-load fairness. An example-only fixed scalar subscriber now
+records adoption, post-sign attempts, successful publication, first-hold causes
+and actual gossip receipt without emitting full per-event logs or payloads.
+The predecessor's manifest/lock remain unchanged; its only addition remains
+the identical example.
+
+For the earlier `4935e25` runtime, full native tests/checks now pass on both OSes,
+and Linux frontend 3,441/check/build pass. The `939ea602` member-storage workflow
+43553131305 passes on both platforms after correcting genuine cohort counts.
+Root full tests are still running; these results are not full sign-off for the
+new retry correction. Native command and Chat V2 activation remain unfinished.

@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Network subscription retry continuation (14 November; validation ongoing)
+
+Fresh `939ea602` Windows old-peer CI43553131480 failed after genuine QUIC/RR; both
+endpoints timed out on gossip. The earlier passing pair does not resolve this
+run. Separately confirmed actor amplification is corrected: Subscribed now
+retries only exact-topic held originals; unrelated/invalid/uppercase aliases
+cannot cause wholesale re-signing. Periodic retries, limits and deadlines remain.
+All 177 Net tests and strict affected lint pass. Actual old/current process
+interop passes locally with new bounded scalar diagnostics and unchanged
+assertions. No target-subscription wait was added to the probe. No claim that
+this proves the CI cause, broader startup fairness or full Chat V2 is made.
+See [scope and evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
+Earlier combined `4935e25` full native/checks pass on both platforms; Linux
+frontend 3,441/check/build pass. Full Root runs remain active. Member-storage
+43553131305 passes both platforms at939ea602. Final checks for the new runtime
+correction and native/joined/transport/UI Chat V2 integration remain open.
+
+
 ## Combined network/native checkpoint (14 November; full CI running)
 
 PR113 integrates the separately reviewed native fixture correction from PR109.
@@ -39,7 +58,7 @@ Read-only design/diff review and re-review found no remaining blocker/high/mediu
 QUIC unavoidably moves to upstream explicit AWS-LC/hybrid TLS. WebSocket remains
 explicit ring, with no new global initializer. Fresh-process provider order,
 real WS TLS trust/name/DNS and wrong-peer QUIC regressions pass. A real pinned
-0.56/0.49.5 binary exchanges both RR directions and near60KiB signed gossip after
+0.56/0.49.5 binary exchanges both RR directions and near 60 KiB signed gossip after
 both queue2000 subscriptions; the last topic is observed, not every remote slot.
 The controller proves a live path before old Mesh Drop, then actual withdrawal
 and exact Unreachable while the old process stays alive. Binaries, unchanged old

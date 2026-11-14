@@ -7,7 +7,149 @@ use catcoms_rt::{
     Clock, ConnectionTransport, MeshTransport, ProtocolId, SystemClock, Topic, TransportError,
     TransportEvent,
 };
-use std::{future::Future, io::Write, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    io::Write,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
+// Example-only bounded observations from BOTH unmodified dependency stacks.
+// Never emit per-event tracing or format subscription arrays/payloads/keys.
+static COUNTERS: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+struct Diagnostics {
+    target: String,
+}
+struct FixedText {
+    bytes: [u8; 160],
+    len: usize,
+}
+impl Default for FixedText {
+    fn default() -> Self {
+        Self {
+            bytes: [0; 160],
+            len: 0,
+        }
+    }
+}
+impl std::fmt::Write for FixedText {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        if value.len() > self.bytes.len() - self.len {
+            return Err(std::fmt::Error);
+        }
+        self.bytes[self.len..self.len + value.len()].copy_from_slice(value.as_bytes());
+        self.len += value.len();
+        Ok(())
+    }
+}
+impl FixedText {
+    fn text(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap()
+    }
+}
+#[derive(Default)]
+struct Fields {
+    message: FixedText,
+    topic: FixedText,
+    error: FixedText,
+    held: u64,
+    bytes: u64,
+}
+impl tracing::field::Visit for Fields {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        match field.name() {
+            "held" => self.held = value,
+            "held_bytes" => self.bytes = value,
+            _ => (),
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        let output = match field.name() {
+            "message" => &mut self.message,
+            "topic" => &mut self.topic,
+            "error" => &mut self.error,
+            _ => return,
+        };
+        let _ = write!(output, "{value:?}");
+    }
+}
+// Implement the small core Subscriber directly: the pinned old Net manifest
+// has tracing but no tracing-subscriber. Its manifest and lock stay unchanged.
+impl tracing::Subscriber for Diagnostics {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        let fields = metadata.fields();
+        (metadata.target().starts_with("libp2p_gossipsub")
+            && ((fields.field("peer").is_some() && fields.field("topic").is_some())
+                || fields.field("message_id").is_some()))
+            || (metadata.target() == "catcoms_net"
+                && (fields.field("bytes").is_some() || fields.field("held").is_some())
+                && fields.field("data").is_none())
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        // No span context is observed or exported by this event-only probe.
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let metadata = event.metadata();
+        let fields = metadata.fields();
+        // In both stacks the selected subscription event has peer+topic; the
+        // post-sign event has message_id. Exclude source/subscriptions/rpc/data
+        // callsites BEFORE Visit, so embedded giant Debug messages are not run.
+        let gossip = metadata.target().starts_with("libp2p_gossipsub")
+            && ((fields.field("peer").is_some() && fields.field("topic").is_some())
+                || fields.field("message_id").is_some());
+        let net = metadata.target() == "catcoms_net"
+            && (fields.field("bytes").is_some() || fields.field("held").is_some())
+            && fields.field("data").is_none();
+        if !gossip && !net {
+            return;
+        }
+        let mut observed = Fields::default();
+        event.record(&mut observed);
+        let message = observed.message.text();
+        let increment = |i: usize| {
+            COUNTERS[i].fetch_add(1, Ordering::Relaxed);
+        };
+        match message {
+            "SUBSCRIPTION: Adding gossip peer to topic" => {
+                increment(0);
+                if observed.topic.text() == self.target {
+                    COUNTERS[1].store(1, Ordering::Relaxed);
+                }
+            }
+            "Publishing message" => increment(2),
+            "published" => increment(3),
+            "publish held for retry" => {
+                increment(4);
+                if observed.error.text().contains("NoPeers")
+                    || observed.error.text().contains("subscribed")
+                {
+                    increment(5);
+                }
+                if observed.error.text().contains("AllQueuesFull")
+                    || observed.error.text().contains("queues")
+                {
+                    increment(6);
+                }
+                COUNTERS[7].store(observed.bytes, Ordering::Relaxed);
+            }
+            "gossip received" => increment(8),
+            _ => (),
+        }
+    }
+}
+fn diagnostic_summary(label: &str) {
+    let read = |i: usize| COUNTERS[i].load(Ordering::Relaxed);
+    eprintln!("probe observation {label}: adopted={} target={} signed={} published={} first_holds={} first_no_peers={} first_queues_full={} last_first_hold_bytes={} gossip_received={}", read(0),read(1),read(2),read(3),read(4),read(5),read(6),read(7),read(8));
+}
 
 const PROTOCOL: ProtocolId = ProtocolId("/catcoms/rr/1");
 const TOPICS: usize = 2_000;
@@ -16,7 +158,10 @@ const PAYLOAD: usize = 60 * 1_024;
 async fn bounded<T>(label: &str, future: impl Future<Output = T>) -> T {
     tokio::select! {
         result = future => result,
-        _ = SystemClock.sleep(Duration::from_secs(15)) => panic!("network compatibility timeout: {label}"),
+        _ = SystemClock.sleep(Duration::from_secs(15)) => {
+            diagnostic_summary(label);
+            panic!("network compatibility timeout: {label}")
+        },
     }
 }
 
@@ -40,6 +185,10 @@ async fn command(expected: &'static str) {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
+    tracing::subscriber::set_global_default(Diagnostics {
+        target: hex::encode(format!("migration-topic-{:08}", TOPICS - 1)),
+    })
+    .unwrap();
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     let server = arguments.as_slice() == ["server"];
     assert!(server || (arguments.len() == 2 && arguments[0] == "client"));
@@ -219,5 +368,6 @@ async fn main() {
         publisher.abort();
         assert!(publisher.await.unwrap_err().is_cancelled());
     }
+    diagnostic_summary("completed");
     marker(&format!("COMPLETE {role}"));
 }

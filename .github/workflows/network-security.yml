@@ -63,7 +63,7 @@ jobs:
               ('vendor-regressions', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'mewtual_'], 6),
               ('vendor-protocol', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'protocol::'], 9),
               ('vendor-library', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib'], 159),
-              ('net', ['-p', 'catcoms-net', '--lib'], 174),
+              ('net', ['-p', 'catcoms-net', '--lib'], 177),
               ('protocol-rng', ['-p', 'catcoms-rt', '--lib', 'protocol_rng::tests'], 3),
           )
           for label, arguments, count in cohorts:

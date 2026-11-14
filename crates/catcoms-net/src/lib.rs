@@ -1848,11 +1848,46 @@ impl PendingPublish {
         depth > 0
     }
 
+    /// Extract only originals on the exact announced wire topic. A burst of
+    /// unrelated subscription events must not rehash/re-sign the entire held
+    /// queue on every callback. Preserve all unmatched bytes, order and charge;
+    /// the timer still retries transient queue pressure without a new SUB.
+    fn take_for_subscription(&mut self, hash: &gossipsub::TopicHash) -> Vec<(Topic, Bytes)> {
+        let bytes = &mut self.bytes;
+        self.items
+            .extract_if(.., |(topic, data)| {
+                if !subscription_matches_topic(hash, topic) {
+                    return false;
+                }
+                *bytes -= data.len();
+                true
+            })
+            .collect()
+    }
+
     /// Remove everything held, for a retry pass that re-holds whatever still cannot go out.
     fn take(&mut self) -> Vec<(Topic, Bytes)> {
         self.bytes = 0;
         std::mem::take(&mut self.items)
     }
+}
+
+/// `to_ident` uses canonical lowercase hex with identity hashing. Compare
+/// directly without allocating/decoding attacker-supplied strings or treating
+/// invalid hex as the empty application topic. Case is significant on the wire.
+fn subscription_matches_topic(hash: &gossipsub::TopicHash, topic: &Topic) -> bool {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let wire = hash.as_str().as_bytes();
+    if topic.as_bytes().len().checked_mul(2) != Some(wire.len()) {
+        return false;
+    }
+    topic
+        .as_bytes()
+        .iter()
+        .zip(wire.chunks_exact(2))
+        .all(|(byte, pair)| {
+            pair[0] == HEX[(byte >> 4) as usize] && pair[1] == HEX[(byte & 15) as usize]
+        })
 }
 
 /// A peer's last known transport identity, kept so a request can redial it after its connection
@@ -4961,15 +4996,25 @@ impl Actor {
     }
 
     fn flush_pending_publish(&mut self) {
+        let before = self.pending_publish.items.len();
         let held = self.pending_publish.take();
-        let attempted = held.len();
+        self.retry_held_publications(held, before);
+    }
+
+    fn flush_subscribed_topic(&mut self, topic: &gossipsub::TopicHash) {
+        let before = self.pending_publish.items.len();
+        let held = self.pending_publish.take_for_subscription(topic);
+        self.retry_held_publications(held, before);
+    }
+
+    fn retry_held_publications(&mut self, held: Vec<(Topic, Bytes)>, before: usize) {
         for (topic, data) in held {
             self.publish_or_hold(topic, data, PublishAttempt::Retry);
         }
         let still_held = self.pending_publish.items.len();
-        if attempted > still_held {
+        if before > still_held {
             tracing::info!(
-                released = attempted - still_held,
+                released = before - still_held,
                 still_held,
                 "held publications went out"
             );
@@ -5237,9 +5282,9 @@ impl Actor {
                 }
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(
-                gossipsub::Event::Subscribed { .. },
+                gossipsub::Event::Subscribed { topic, .. },
             )) => {
-                self.flush_pending_publish();
+                self.flush_subscribed_topic(&topic);
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
                 request_response::Event::Message { peer, message, .. },
@@ -7039,6 +7084,106 @@ mod tests {
             pending.bytes, 0,
             "a drained queue must not keep charging for what it handed back"
         );
+    }
+
+    #[test]
+    fn subscription_bursts_leave_unrelated_held_originals_unattempted() {
+        let target = Topic::new("held target");
+        let mut pending = PendingPublish::default();
+        let originals: Vec<_> = (0..128).map(|n| Bytes::from(vec![n; 60 * 1024])).collect();
+        for bytes in &originals {
+            pending.hold(target.clone(), bytes.clone());
+        }
+        let charged = pending.bytes;
+        for n in 0..2_000 {
+            let unrelated = to_ident(&Topic::new(format!("other-{n}"))).hash();
+            assert!(
+                pending.take_for_subscription(&unrelated).is_empty(),
+                "no original reaches the signer on an unrelated event"
+            );
+            assert_eq!(pending.items.len(), originals.len());
+            assert_eq!(pending.bytes, charged);
+        }
+        let selected = pending.take_for_subscription(&to_ident(&target).hash());
+        assert_eq!(selected.len(), originals.len());
+        for ((topic, bytes), original) in selected.iter().zip(&originals) {
+            assert_eq!(topic, &target);
+            assert_eq!(
+                bytes.as_ptr(),
+                original.as_ptr(),
+                "no payload copy or replacement"
+            );
+        }
+        assert!(pending.is_empty());
+        assert_eq!(pending.bytes, 0);
+    }
+
+    #[test]
+    fn subscription_selection_preserves_other_topics_and_rejects_noncanonical_aliases() {
+        let a = Topic::new(vec![0xab]);
+        let b = Topic::new("another");
+        let empty = Topic::new(Vec::<u8>::new());
+        let mut pending = PendingPublish::default();
+        for (topic, bytes) in [
+            (a.clone(), b"a1".as_slice()),
+            (b.clone(), b"b1".as_slice()),
+            (a.clone(), b"a2".as_slice()),
+            (empty.clone(), b"empty".as_slice()),
+        ] {
+            pending.hold(topic, Bytes::copy_from_slice(bytes));
+        }
+        for invalid in ["AB", "not-hex", "a", "abab"] {
+            assert!(pending
+                .take_for_subscription(&gossipsub::TopicHash::from_raw(invalid))
+                .is_empty());
+        }
+        let selected = pending.take_for_subscription(&to_ident(&a).hash());
+        assert_eq!(
+            selected
+                .iter()
+                .map(|(_, bytes)| bytes.as_ref())
+                .collect::<Vec<_>>(),
+            [b"a1".as_slice(), b"a2".as_slice()]
+        );
+        assert_eq!(
+            pending
+                .items
+                .iter()
+                .map(|(topic, _)| topic)
+                .collect::<Vec<_>>(),
+            [&b, &empty]
+        );
+        assert_eq!(pending.bytes, 7);
+        assert!(pending.should_report_depth());
+        // The independent timer can still attempt every remaining original.
+        assert_eq!(pending.take().len(), 2);
+        assert_eq!(pending.bytes, 0);
+    }
+
+    #[test]
+    fn failed_subscription_retry_retains_all_originals_and_exact_queue_charge() {
+        let target = Topic::new("retry target");
+        let unrelated = Topic::new("unrelated");
+        let original = Bytes::from(vec![1; 60 * 1024]);
+        let other = Bytes::from(vec![2; 60 * 1024]);
+        let mut pending = PendingPublish::default();
+        pending.hold(target.clone(), original.clone());
+        pending.hold(unrelated.clone(), other.clone());
+        for _ in 0..3 {
+            let selected = pending.take_for_subscription(&to_ident(&target).hash());
+            assert_eq!(selected.len(), 1);
+            assert_eq!(pending.bytes, other.len());
+            // The existing retry path re-holds the SAME bytes after a transient
+            // refusal. No new arrival or bound change can evict the untouched row.
+            for (topic, bytes) in selected {
+                pending.hold(topic, bytes);
+            }
+            assert_eq!(pending.bytes, other.len() + original.len());
+            assert_eq!(pending.items.len(), 2);
+            assert_eq!(pending.items[0].0, unrelated);
+            assert_eq!(pending.items[0].1.as_ptr(), other.as_ptr());
+            assert_eq!(pending.items[1].1.as_ptr(), original.as_ptr());
+        }
     }
 
     /// A queue that has not moved is not re-announced on every retry pass.
