@@ -36,12 +36,10 @@ COHORTS = (
     ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
     ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 11 if sys.platform in ("win32", "linux") else 4),
-    # Includes private owning3 storage/cold custody, not a native SDK/backend grant.
-    # Exact current inventory includes the actual fresh-factory, owning upgrade
-    # and founder birth/activation regressions, plus the two original-drain
-    # observer cases, four physical-slot/authentication checks and three UI-sidecar
-    # IO cases and the original-target refusal. None grants a live SDK.
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 231),
+    # Includes original physical custody and actual private native founder/SDK
+    # production. Synthetic UI captures still prove no checked Tauri caller,
+    # installed backend, joined source or operational cold SDK restore.
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 270),
     ("current-cached-mount", "catcoms-app", "current_cached_mount_check_never_constructs_a_revocation_observer", 1),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
@@ -54,35 +52,36 @@ COHORTS = (
 
 
 # These are artifact producers, not skipped acceptance regressions. Their real
-# --ignored --exact executions and eleven-fixture markers remain mandatory in
-# check-chat-v2-native-index3.py. The broad normal cohort must stay zero-ignored.
+# --ignored --exact executions remain mandatory in the index3/Native4 gates.
+# The broad normal cohort must stay zero-ignored.
 FIXTURE_PREFIX = "store::critical_namespaces::native_registry::lifecycle::cell::tests::compatibility::"
-INDEX3_FIXTURES = tuple(FIXTURE_PREFIX + suffix for suffix in (
+FIXTURE_TESTS = tuple(FIXTURE_PREFIX + suffix for suffix in (
     "generate_native3_fixtures", "verify_native3_predecessor_fixtures",
-))
+)) + tuple("store::critical_namespaces::native_registry::operational::sources::network::tests::compatibility::" + suffix
+           for suffix in ("generate_native4_fixtures", "verify_native4_predecessor_fixtures"))
 # The shared runner retains at most two matches PER pattern. Use one pattern
 # per skip string so an extra matching name always becomes a rejected second
 # match, even when a different ordinary test vanished and total count is equal.
 INVENTORY_MATCHES = tuple(re.compile(r"^(.*" + re.escape(name) + r".*): test$")
-                          for name in INDEX3_FIXTURES)
+                          for name in FIXTURE_TESTS)
 INVENTORY_COUNT = re.compile(r"^(\d+) tests, (\d+) benchmarks$")
 
 
 def validate_inventory(matches: list, counts: list, expected: int) -> None:
-    if (matches != [[(name,)] for name in INDEX3_FIXTURES]
+    if (matches != [[(name,)] for name in FIXTURE_TESTS]
             or counts != [(str(expected), "0")]):
         raise RuntimeError(f"native fixture inventory changed: {matches!r}, {counts!r}")
 
 
 def inventory_self_test() -> None:
-    good = [[(name,)] for name in INDEX3_FIXTURES]
+    good = [[(name,)] for name in FIXTURE_TESTS]
     validate_inventory(good, [("223", "0")], 223)
-    validate_inventory(good, [("2", "0")], 2)
+    validate_inventory(good, [("4", "0")], 4)
     for names, counts in (
         (good[:1], [("223", "0")]),
-        ([good[0] + good[0], good[1]], [("223", "0")]),
-        ([good[0] + [(INDEX3_FIXTURES[0] + "_extra",)], good[1]], [("223", "0")]),
-        ([good[0], good[1] + [("prefix_" + INDEX3_FIXTURES[1],)]], [("223", "0")]),
+        ([good[0] + good[0], *good[1:]], [("223", "0")]),
+        ([good[0] + [(FIXTURE_TESTS[0] + "_extra",)], *good[1:]], [("223", "0")]),
+        ([*good[:3], good[3] + [("prefix_" + FIXTURE_TESTS[3],)]], [("223", "0")]),
         (good, [("224", "0")]), (good, [("223", "0"), ("223", "0")]),
         ([], [("223", "0")]),
     ):
@@ -92,7 +91,7 @@ def inventory_self_test() -> None:
             continue
         raise AssertionError("missing/duplicate/expanded native fixture selection accepted")
     # Pin actual regex/runner composition as well as the result validator.
-    expanded = "\n".join(name + ": test" for name in (*INDEX3_FIXTURES, INDEX3_FIXTURES[1] + "_extra"))
+    expanded = "\n".join(name + ": test" for name in (*FIXTURE_TESTS, FIXTURE_TESTS[3] + "_extra"))
     # Per-line runner applies patterns to a line stripped of ANSI/newline.
     matches = [[m.groups() for line in expanded.splitlines()
                 for m in pattern.finditer(line)][:2] for pattern in INVENTORY_MATCHES]
@@ -105,14 +104,15 @@ def inventory_self_test() -> None:
 
 
 def check_normal_inventory(guard: dict, directory: Path, command: list[str], expected: int) -> None:
-    for label, extra, total in (("all", [], expected + 2), ("ignored", ["--ignored"], 2)):
+    for label, extra, total in (("all", [], expected + len(FIXTURE_TESTS)),
+                                ("ignored", ["--ignored"], len(FIXTURE_TESTS))):
         code, _, timed_out, found = guard["run_logged"](
             "native-registry-inventory-" + label, command + ["--", "--list", *extra],
             directory, limit=30 * 60, markers=(*INVENTORY_MATCHES, INVENTORY_COUNT),
         )
         if code or timed_out:
             raise RuntimeError("native registry inventory could not be established")
-        validate_inventory(found[:2], found[2], total)
+        validate_inventory(found[:-1], found[-1], total)
 
 
 def fresh_founder_cohort(cohorts: tuple) -> list:
@@ -176,7 +176,7 @@ def main() -> None:
         ]
         if name == "native-registry-physical":
             check_normal_inventory(guard, directory, command, expected)
-            command += ["--", "--skip", INDEX3_FIXTURES[0], "--skip", INDEX3_FIXTURES[1]]
+            command += ["--", *(value for name in FIXTURE_TESTS for value in ("--skip", name))]
         code, summaries, timed_out, _ = guard["run_logged"](
             name, command, directory, limit=30 * 60,
         )

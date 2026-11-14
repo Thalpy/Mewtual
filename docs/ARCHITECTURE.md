@@ -1,5 +1,10 @@
 # Mewtual; Architecture
 
+Native text authoring is adding the original device/network/whole founder and
+Native4 activation dependencies. The current source cohort passed 33 local
+regressions; broader gates and the actual native command consumer remain open.
+Chat V2 stays disabled and incomplete. [Scope and pending acceptance](communication-recovery/CHAT-V2-NATIVE-AUTHORING.md).
+
 Native lock snapshots now have bounded synchronous DATA custody, original-mount
 retry, exact close acknowledgements and response-bound warning receipts under
 adversarial validation. Chat V2 stays off; operational text authoring and

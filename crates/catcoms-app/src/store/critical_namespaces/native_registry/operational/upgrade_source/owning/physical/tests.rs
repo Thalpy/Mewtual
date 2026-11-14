@@ -37,6 +37,43 @@ fn busy(path: &Path) -> bool {
 }
 
 #[test]
+fn lifecycle3_source_work_retains_original_without_occupying_metadata_or_ui_slots() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc830);
+    let owner = mounted(dir.path(), &mut rng);
+    let source = owner.capture_source_work().unwrap();
+    let mut metadata = owner.capture_metadata_work().unwrap();
+    let ui = owner.capture_ui_work().unwrap();
+    assert!(source.is_live_cached());
+    assert_eq!(metadata.row_count_data().unwrap(), 1);
+    assert!(
+        source.metadata().is_none(),
+        "one index slot remains exclusive"
+    );
+    drop(metadata);
+    assert_eq!(source.metadata().unwrap().row_count_data().unwrap(), 1);
+    drop(ui);
+    assert!(owner.capture_ui_work().is_some());
+}
+
+#[test]
+fn lifecycle3_source_work_owner_close_is_negative_and_actual_files_retire_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc831);
+    let owner = mounted(dir.path(), &mut rng);
+    let source = owner.capture_source_work().unwrap();
+    drop(owner);
+    assert!(!source.is_live_cached());
+    assert!(source.metadata().is_none());
+    assert!(
+        busy(dir.path()),
+        "source custody still owns the actual files"
+    );
+    drop(source);
+    drop(reopen(dir.path()));
+}
+
+#[test]
 fn lifecycle3_physical_work_capture_uses_one_cached_slot_without_entering_the_cell() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc801);

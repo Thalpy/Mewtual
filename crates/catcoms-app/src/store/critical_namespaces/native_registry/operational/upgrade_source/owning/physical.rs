@@ -33,6 +33,34 @@ pub(in crate::store::critical_namespaces::native_registry) struct MetadataWork {
     physical: Arc<Physical>,
     _ack: SlotAck,
 }
+
+/// Long-lived original source custody, independent of the single metadata
+/// slot. Its caller separately prepays and bounds the source collection and
+/// each runtime. This is not a second affine close owner or a Current getter.
+/// Keep the entire value outside native/registry/operation guards on drop.
+pub(in crate::store::critical_namespaces::native_registry) struct SourceWork {
+    physical: Arc<Physical>,
+}
+
+/// Opaque prepared AEAD key; never exposes its key bytes. All fallible
+/// original Current/file proofs precede construction, so a local refusal is
+/// retryable before the owning job marks the actual seal attempt entered.
+pub(in crate::store::critical_namespaces::native_registry) struct NetworkSeal {
+    key: Zeroizing<[u8; 32]>,
+}
+#[cfg(test)]
+thread_local! { static NETWORK_SEAL_REFUSAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+impl NetworkSeal {
+    pub(in crate::store::critical_namespaces::native_registry) fn seal(
+        &self,
+        plain: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        Ok(Zeroizing::new(crate::store::frame(&catcoms_crypto::seal(
+            &self.key, plain, rng,
+        )?)))
+    }
+}
 struct SlotAck {
     original: Arc<Slot>,
     _payment: lifecycle_admission::PaymentTail,
@@ -146,6 +174,16 @@ impl Physical {
         }
         Some(work)
     }
+
+    pub(super) fn capture_source(self: &Arc<Self>) -> Option<SourceWork> {
+        if !self.open_for_custody() {
+            return None;
+        }
+        let work = SourceWork {
+            physical: self.clone(),
+        };
+        work.is_live_cached().then_some(work)
+    }
     pub(super) fn verify_native_passphrase(&self, passphrase: &[u8]) -> Result<(), AppError> {
         if !self.open_for_custody() {
             return Err(refused());
@@ -258,6 +296,214 @@ impl Physical {
         rng: &mut impl CryptoRngCore,
     ) -> Result<(rename::Metadata, Option<cell::CompletedDebt>), AppError> {
         cell::rename_metadata(&self.cell, self.current()?, &self.handler, request, rng)
+    }
+}
+
+impl SourceWork {
+    /// Configuration is negative only, but an incompatible DATA-only mount
+    /// must refuse BEFORE retaining an authoring entry or generating any key.
+    pub(in crate::store::critical_namespaces::native_registry) fn require_native_founder_configuration(
+        &self,
+    ) -> Result<(), AppError> {
+        let store = self.physical.current()?.checked_store()?;
+        let configured = store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?;
+        if configured.pending.execution.is_none() || store.member_outbox_policy().is_none() {
+            return Err(refused());
+        }
+        store.validate_mounted_member_outbox_layout()
+    }
+    /// Actual original mounted context, never a renderer/ciphertext's claim.
+    pub(in crate::store::critical_namespaces::native_registry) fn native_network_context(
+        &self,
+    ) -> Result<([u8; 32], [u8; 32]), AppError> {
+        let store = self.physical.current()?.checked_store()?;
+        let guard = store.current_layout.lock().map_err(|_| refused())?;
+        let layout = guard.as_ref().ok_or_else(refused)?.layout;
+        Ok((layout.vault, layout.root))
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_network_seal(
+        &self,
+    ) -> Result<NetworkSeal, AppError> {
+        #[cfg(test)]
+        if NETWORK_SEAL_REFUSAL.with(|slot| slot.replace(false)) {
+            return Err(AppError::Io(
+                "injected local network seal preparation refusal".into(),
+            ));
+        }
+        let store = self.physical.current()?.checked_store()?;
+        Ok(NetworkSeal {
+            key: Zeroizing::new(store.keys.db_key()?),
+        })
+    }
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn refuse_next_network_seal_for_test(
+        &self,
+    ) {
+        NETWORK_SEAL_REFUSAL.with(|slot| {
+            assert!(!slot.get());
+            slot.set(true);
+        });
+    }
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn native_network_plain_for_test(
+        &self,
+        frame: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        let store = self.physical.current()?.checked_store()?;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        Ok(Zeroizing::new(catcoms_crypto::unseal(
+            &key,
+            &crate::store::unframe(frame)?,
+        )?))
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn birth_native_network(
+        &self,
+        pending: &founder::Pending,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<crate::store::NativeCreationStatusData, AppError> {
+        let work = self.metadata().ok_or_else(refused)?;
+        let (status, debt) = work.physical.birth_founder_data(pending, rng)?;
+        drop(debt); // Actual IO/claim retirement OUTSIDE all cell/catalog writers.
+        Ok(status)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn activate_native_founder(
+        &self,
+        request: &founder::Activate,
+        network: &Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<crate::store::NativeCreationStatusData, AppError> {
+        let work = self.metadata().ok_or_else(refused)?;
+        let (status, debt) = cell::activate_native_founder(
+            &work.physical.cell,
+            work.physical.current()?,
+            &work.physical.handler,
+            request,
+            network,
+            rng,
+        )?;
+        drop(debt);
+        Ok(status)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_network_dependency(
+        &self,
+        io: &mut crate::store::persistence::native_registry::network::NetworkIo,
+        expected: crate::store::persistence::native_registry::network::NetworkExpected,
+        frame: &[u8],
+        payment: Arc<crate::store::critical_namespaces::native_registry::operational::sources::RuntimeMetadata>,
+    ) -> Result<Arc<crate::store::persistence::native_registry::network::NetworkDependency>, AppError>
+    {
+        io.dependency(
+            self.physical.current()?.checked_store()?,
+            expected,
+            frame,
+            payment,
+        )
+    }
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn activate_data_only_for_test(
+        &self,
+        request: &founder::Activate,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<crate::store::NativeCreationStatusData, AppError> {
+        let work = self.metadata().ok_or_else(refused)?;
+        let (status, debt) = work.physical.activate_founder_data(request, rng)?;
+        drop(debt);
+        Ok(status)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_network_io(
+        &self,
+        row: u64,
+        frame: &[u8],
+    ) -> Result<crate::store::persistence::native_registry::network::NetworkIo, AppError> {
+        crate::store::persistence::native_registry::network::NetworkIo::prepare(
+            self.physical.current()?.checked_store()?,
+            row,
+            frame,
+        )
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_native_network_io(
+        &self,
+        io: &mut crate::store::persistence::native_registry::network::NetworkIo,
+        frame: &[u8],
+    ) -> Result<(), AppError> {
+        io.cover(self.physical.current()?.checked_store()?, frame)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn lookup_creation(
+        &self,
+        invocation: [u8; 32],
+        request: [u8; 32],
+    ) -> Result<Option<crate::store::NativeCreationStatusData>, AppError> {
+        let work = self.metadata().ok_or_else(refused)?;
+        work.physical.lookup_creation_data(invocation, request)
+    }
+    /// The concrete source factory reserves its runtime invoice BEFORE asking
+    /// for this additional original pin. There is no public Clone/getter and
+    /// no second physical mount or affine admission owner is constructed.
+    pub(in crate::store::critical_namespaces::native_registry) fn for_paid_runtime(
+        &self,
+        _metadata: &crate::store::critical_namespaces::native_registry::operational::sources::RuntimeMetadata,
+    ) -> Option<Self> {
+        self.physical.capture_source()
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
+        self.physical.open_for_custody()
+    }
+
+    /// Capture short-lived index work only while actually advancing Birth or
+    /// Activate. A retained founder never holds this slot across its lifetime.
+    pub(in crate::store::critical_namespaces::native_registry) fn metadata(
+        &self,
+    ) -> Option<MetadataWork> {
+        self.physical.capture()
+    }
+
+    /// Concrete original-founder route only. Inputs are already owned by the
+    /// checked Root producer; its device cut must precede device generation.
+    /// Failure returns those same inputs. No library-origin fallback exists.
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_founder<T, R>(
+        &self,
+        invocation: [u8; 32],
+        name: &str,
+        policy: crate::store::FreshV2TextFounderPolicy,
+        inputs: crate::store::ArchiveFounderInputs<T, R>,
+        original: catcoms_rt::NativeChatSourceObservation,
+    ) -> Result<
+        crate::store::FreshV2TextFounderBegin<T, R>,
+        crate::store::ReturnedArchiveFounderInputs<T, R>,
+    >
+    where
+        T: catcoms_rt::MeshTransport,
+        R: CryptoRngCore,
+    {
+        // The retained Physical always contains this same Current. On closure
+        // the existing concrete factory refuses and returns untouched inputs;
+        // it does not reopen files or choose a different source grammar.
+        self.physical.current.as_ref().expect("installed original physical").prepare_fresh_v2_text_founder_with_origin(
+            invocation, name, policy, inputs,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderOrigin::NativeRequired(original),
+        )
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn retry_native_founder<T, R>(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        rng: &mut impl CryptoRngCore,
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<(), AppError>
+    where
+        T: catcoms_rt::MeshTransport,
+        R: CryptoRngCore,
+    {
+        driver.retry_with_access(
+            self.physical.current()?,
+            rng,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
+                keys,
+            ),
+        )
     }
 }
 /// One dedicated original UI-sidecar slot. Neither Clone nor a close owner.

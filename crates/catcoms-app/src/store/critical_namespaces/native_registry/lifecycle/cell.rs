@@ -178,6 +178,31 @@ pub(in crate::store::critical_namespaces::native_registry) fn activate_founder(
     )
     .map(creation_result)
 }
+pub(in crate::store::critical_namespaces::native_registry) fn activate_native_founder(
+    cell: &Mutex<Cell>,
+    current: &V2CurrentLayoutStore,
+    handler: &admission::Handler,
+    request: &founder::Activate,
+    network: &std::sync::Arc<
+        crate::store::persistence::native_registry::network::NetworkDependency,
+    >,
+    rng: &mut impl CryptoRngCore,
+) -> Result<
+    (
+        crate::store::NativeCreationStatusData,
+        Option<CompletedDebt>,
+    ),
+    AppError,
+> {
+    change_metadata(
+        cell,
+        current,
+        handler,
+        metadata::Input::NativeFounderActivate(request, network),
+        rng,
+    )
+    .map(creation_result)
+}
 fn creation_result(
     (result, debt): (metadata::Outcome, Option<CompletedDebt>),
 ) -> (
@@ -203,6 +228,7 @@ fn change_metadata(
     handler.require()?;
     let store = current.checked_store()?;
     if let Some(pending) = &cell.pending {
+        pending.io.require_network_identity(request.network())?;
         if !request.matches(&pending.request) {
             return Err(refused());
         }
@@ -217,6 +243,9 @@ fn change_metadata(
             return Err(refused());
         }
         let (selected, _) = preparation::decode_selected_data(store, &inventory)?;
+        if let metadata::Input::NativeFounderActivate(input, network) = request {
+            super::network::require_activation(store, &selected, input, network)?;
+        }
         let parent = *blake3::hash(inventory.index()).as_bytes();
         let plan = request.prepare(selected, parent)?;
         let metadata::Plan::Change {
@@ -239,6 +268,9 @@ fn change_metadata(
             }
             handler.require_idle_cached()?;
             inventory.require(store)?;
+            if let Some(network) = request.network() {
+                network.require(store)?;
+            }
             return Ok((result, None));
         };
         let key = Zeroizing::new(store.keys.db_key()?);
@@ -247,7 +279,10 @@ fn change_metadata(
         let frame = Zeroizing::new(crate::store::frame(&seal(&derived, &plain, rng)?));
         let proof =
             wal::verify_warm_metadata(store, &inventory, &candidate, &frame, request.kind())?;
-        let io = IndexCommitIo::prepare(store, inventory, proof, &frame)?;
+        let mut io = IndexCommitIo::prepare(store, inventory, proof, &frame)?;
+        if let Some(network) = request.network() {
+            io.attach_native_network(store, network.clone())?;
+        }
         // All allocations/preparation precede the writer and final claim.
         let mut transaction = Transaction {
             io,
@@ -278,6 +313,9 @@ fn change_metadata(
         super::super::operational::upgrade_source::owning::observe_edge(
             super::super::operational::upgrade_source::owning::Edge::BeforeMetadataAdmission,
         );
+        // The admission hook may replace the network output. Re-prove the
+        // same held dependency AFTER it, immediately before the claim.
+        transaction.io.require_unstarted_parent(store)?;
         transaction.claim = Some(handler.claim()?);
         // Infallible move after admission, before unlocking or any file effect.
         cell.pending = Some(transaction);

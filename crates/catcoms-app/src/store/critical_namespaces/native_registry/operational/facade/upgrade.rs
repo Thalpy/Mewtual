@@ -21,6 +21,7 @@ enum Phase {
 pub struct NativeTextVaultUpgrade {
     // UI admission closes before actual index file/policy owners are destroyed.
     ui: Option<UiAdmissionOwner>,
+    sources: Option<super::super::source_admission::SourceAdmission>,
     phase: Option<Phase>,
     policy: preparation::Policy,
     // LAST: pays this controller/phase boxes independently until they retire.
@@ -64,15 +65,17 @@ impl NativeTextVaultUpgrade {
                     + std::mem::size_of::<Phase>());
             let metadata = CriticalCatalogReadPool::new(METADATA)?.try_reserve(METADATA)?;
             let ui = UiAdmissionOwner::new(generation, authorized, requested, budget)?;
+            let sources = super::super::source_admission::SourceAdmission::new(ui.observe_mount())?;
             let policy = preparation::Policy::new(
                 CriticalCatalogReadPool::new(preparation::PREPARATION_FEE)?,
                 preparation::Policy::required_persistent_capacity(),
             )?;
-            Ok((metadata, ui, policy))
+            Ok((metadata, ui, sources, policy))
         })();
         match prepare {
-            Ok((metadata, ui, policy)) => Ok(Self {
+            Ok((metadata, ui, sources, policy)) => Ok(Self {
                 ui: Some(ui),
+                sources: Some(sources),
                 phase: Some(Phase::Index2(index)),
                 policy,
                 _metadata: metadata,
@@ -144,6 +147,10 @@ impl NativeTextVaultUpgrade {
         };
         Ok(NativeTextVault {
             ui: self.ui.take().expect("whole native UI owner"),
+            sources: self
+                .sources
+                .take()
+                .expect("original native source admission"),
             index: IndexOwner::Version3(index),
         })
     }
@@ -156,7 +163,7 @@ impl std::fmt::Debug for NativeTextVaultUpgrade {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::store::critical_namespaces::native_registry) mod tests {
     use super::*;
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, initialize, records, SECRET,
@@ -185,7 +192,17 @@ mod tests {
             panic!("retained factory drew RNG")
         }
     }
-    fn index2(path: &Path, rng: &mut ChaCha20Rng) -> mount::NativeIndexStore {
+    pub(in crate::store::critical_namespaces::native_registry) fn index2(
+        path: &Path,
+        rng: &mut ChaCha20Rng,
+    ) -> mount::NativeIndexStore {
+        index2_with_policy(path, rng, current_policy())
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn index2_with_policy(
+        path: &Path,
+        rng: &mut ChaCha20Rng,
+        current: crate::store::V2CurrentLayoutPolicy,
+    ) -> mount::NativeIndexStore {
         initialize(path, Some(&records()), rng);
         let policy = NativeRegistryPolicy::new(
             CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
@@ -193,8 +210,7 @@ mod tests {
         )
         .unwrap();
         let mut first =
-            NativeRegistryInstallation::prepare(path, SECRET, rng, current_policy(), policy)
-                .unwrap();
+            NativeRegistryInstallation::prepare(path, SECRET, rng, current, policy).unwrap();
         first.retry().unwrap();
         let policy = NativeIndexPolicy::new(
             CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),

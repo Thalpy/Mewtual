@@ -16,6 +16,14 @@ mod mount;
 mod native_ui;
 mod opening;
 mod payment;
+mod source_admission;
+mod sources;
+pub use sources::{
+    NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationProgress,
+    NativeTextCreationRefusal, NativeTextCreationRequest, NativeTextCreationSettings,
+    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
+    NativeTextSourcePreparation, NativeTextSources,
+};
 mod ui_state;
 mod upgrade;
 pub(in crate::store::critical_namespaces) mod upgrade_source;

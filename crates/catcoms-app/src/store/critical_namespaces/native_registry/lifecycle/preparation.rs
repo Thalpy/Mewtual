@@ -79,12 +79,21 @@ pub(in crate::store::critical_namespaces::native_registry) const PREPARATION_FEE
     + 4 * SEED_FRAME
     + ROW_METADATA
     + CONTROL_METADATA
+    // Retain one paid original native network dependency per possible active
+    // row through cold open, plus one bounded Pending decode/activation item.
+    // These are INCLUDED in this original debit; cold cannot seek extra quota
+    // after consuming an accepted exact-minimum pool. Payment tails have no
+    // handler/cold-cell backreference and do not create capacity.
+    + (super::super::data::MAX_ROWS + 1) * crate::store::persistence::native_registry::network::COLD_FEE
     + crate::store::persistence::native_registry::lifecycle::EXPECTED_CURRENT_FEE;
 const PERSISTENT_MINIMUM: usize = 2 * CATALOG_FRAME
     + old_data::MAX_FRAME
     + super::codec::MAX_FRAME
     + 2 * v1::MAX_MARKER_FRAME
-    + SEED_FRAME;
+    + SEED_FRAME
+    // Active/terminal native rows no longer retain an inline network frame,
+    // but their immutable initial files still occupy this fixed namespace.
+    + super::super::data::MAX_ROWS * super::founder::MAX_NETWORK_FRAME;
 
 /// Distinct logical account, never the index2, member or archive account.
 /// Persistent capacity bounds overlap; it does not promise free disk space.
