@@ -48,6 +48,67 @@ fn native_sources_retirement_one_prepaid_capture_drop_never_reopens_original() {
 }
 
 #[test]
+fn native_sources_capture_retirement_busy_weak_tail_keeps_original_control_payment() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, _) = selected(dir.path());
+    let policy = policy();
+    let pool = policy.pool.clone();
+    let owner = vault
+        .capture_native_sources(policy.prepare::<MemNetwork, ChaCha20Rng>().unwrap())
+        .finish()
+        .unwrap();
+    let worker = owner.capture_retirement().finish().unwrap();
+    let busy = owner.capture_retirement();
+    drop(owner);
+    drop(vault);
+    drop(worker);
+    assert_eq!(
+        pool.charged_for_test(),
+        CONTROL_BYTES,
+        "Busy's original weak allocation must still be paid"
+    );
+    assert!(matches!(
+        busy.finish(),
+        Err(NativeTextSourceRetirementRefusal::Busy)
+    ));
+    assert_eq!(pool.charged_for_test(), 0);
+}
+
+#[test]
+fn native_sources_capture_retirement_missing_book_refunds_after_actual_weak_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, _) = selected(dir.path());
+    let refunded = Arc::new(AtomicBool::new(false));
+    let observed = Arc::new(AtomicBool::new(false));
+    let covered = Arc::new(AtomicBool::new(false));
+    let mut budget = policy().prepare::<MemNetwork, ChaCha20Rng>().unwrap();
+    budget.metadata.observe_drop_for_test(refunded.clone());
+    let owner = vault.capture_native_sources(budget).finish().unwrap();
+    let mut preparation = owner.capture_retirement();
+    preparation.weak_drop_order = Some(WeakDropOrder {
+        refunded: refunded.clone(),
+        observed: observed.clone(),
+        covered: covered.clone(),
+    });
+    drop(owner);
+    drop(vault);
+    assert!(!refunded.load(Ordering::SeqCst));
+    assert!(matches!(
+        preparation.finish(),
+        Err(NativeTextSourceRetirementRefusal::Unknown)
+    ));
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "actual original Weak field must drop before observation"
+    );
+    assert!(
+        covered.load(Ordering::SeqCst),
+        "CONTROL debit refunded before that actual Weak field dropped"
+    );
+    assert!(refunded.load(Ordering::SeqCst));
+}
+
+#[test]
 fn native_sources_retirement_idle_keys_cannot_overtake_an_unentered_whole_loan() {
     let dir = tempfile::tempdir().unwrap();
     let (vault, budget) = selected(dir.path());
@@ -172,7 +233,9 @@ fn native_sources_retirement_after_key_capture_fences_the_late_body_borrow() {
             let mut capture = closing.prepare_retirement().unwrap();
             assert_eq!(
                 capture.try_retire().unwrap(),
-                NativeTextSourceRetirementStatus::Drained
+                // The row body can close, but this older in-progress
+                // preparation's End has not yet handed off or retired.
+                NativeTextSourceRetirementStatus::Pending
             );
         }))
     });
@@ -183,6 +246,10 @@ fn native_sources_retirement_after_key_capture_fences_the_late_body_borrow() {
     let cell = owner.entries.lock().unwrap()[0].runtime.clone();
     assert!(cell.state.lock().unwrap().body.is_none());
     assert!(cell.state.lock().unwrap().retirement.complete());
+    assert_eq!(
+        owner.prepare_retirement().unwrap().try_retire().unwrap(),
+        NativeTextSourceRetirementStatus::Drained
+    );
 }
 
 struct PanicRng {
