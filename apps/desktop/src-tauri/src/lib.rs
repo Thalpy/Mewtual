@@ -12259,10 +12259,12 @@ async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
         .as_ref()
         .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before loading UI state".to_string())?;
-    let bytes = store.load_ui_state().map_err(|error| error.to_string())?;
-    if bytes.is_empty() {
+    let Some(bytes) = store
+        .load_ui_state_record()
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into());
-    }
+    };
     let json = String::from_utf8(bytes).map_err(|_| "UI continuity state is not UTF-8")?;
     validate_ui_state_json(&json)?;
     Ok(json)
@@ -12283,6 +12285,7 @@ async fn save_ui_state_for_generation(
     json: &str,
     generation: u64,
 ) -> Result<(), String> {
+    let _io = state.native_text.ui_state.lane.clone().lock_owned().await;
     let _session_commit = require_ui_session_generation(state, generation).await?;
     let guard = state.store.lock().await;
     let store = guard
@@ -16311,6 +16314,7 @@ async fn finalize_unlock_session_with_voice_checked(
     // Root's retirement bound is inclusive: preserve this NEW generation.
     native_text::retirement::older_than(state, expected_generation).await?;
     reattach_voice_actors(state, expected_generation, voice_ticket).await?;
+    let _io = state.native_text.ui_state.lane.clone().lock_owned().await;
     #[cfg(test)]
     state.native_text.unlock_commit_wait.notify_one();
     let _commit = state.ui_session_commit.lock().await;
@@ -16961,6 +16965,7 @@ async fn lock_session_with_generation_inner(
             edge.wait_once().await;
         }
     }
+    let _io = state.native_text.ui_state.lock_lane().await;
     let _session_commit = state.ui_session_commit.lock().await;
     // A correct same/newer-generation authentication may have acquired commit
     // first after all lock preludes completed. Its finalizer already settled

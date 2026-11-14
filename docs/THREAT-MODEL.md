@@ -1,5 +1,11 @@
 # Threat model; client integrity & enforcement boundaries
 
+The disabled native UI-state path fences old replies after actual lock registration,
+keeps admitted IO custody after observer loss and distinguishes missing from
+malformed records. It is logical-mount custody, not filesystem-path identity or
+completed lock-snapshot continuity.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-STATE.md).
+
 The disabled native authentication continuation retains original gate/Life/Host
 negatives after destroying its actual physical work. It cannot keep a revoking
 Owner/Sender alive, use a replacement mount, refund refusal credit under Store,

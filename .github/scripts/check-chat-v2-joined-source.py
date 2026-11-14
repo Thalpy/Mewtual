@@ -39,8 +39,9 @@ COHORTS = (
     # Includes private owning3 storage/cold custody, not a native SDK/backend grant.
     # Exact current inventory includes the actual fresh-factory, owning upgrade
     # and founder birth/activation regressions, plus the two original-drain
-    # observer cases and four physical-slot/authentication checks. None grants a live SDK.
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 227),
+    # observer cases, four physical-slot/authentication checks and three UI-sidecar
+    # IO cases. None grants a live SDK.
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 230),
     ("current-cached-mount", "catcoms-app", "current_cached_mount_check_never_constructs_a_revocation_observer", 1),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),

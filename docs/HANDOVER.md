@@ -1,5 +1,11 @@
 # Mewtual; Handover
 
+Ordinary native UI-state IO is implemented and under validation; Chat V2 is off.
+The same original physical slot/lane remains owned through response or caller
+loss. Native lock snapshots, original-target pending retries and authentication
+continuity still need implementation before this path is usable.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-STATE.md).
+
 ## Native authentication slot continuation (14 November, under validation)
 
 The real native verifier now returns a paid original cached-negative Check after

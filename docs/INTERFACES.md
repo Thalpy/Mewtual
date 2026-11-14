@@ -1,5 +1,10 @@
 # Mewtual; Interfaces & Hooks Schema
 
+NativeUiStatePreparation is an infallible owning capture. Its Read/Saved results
+retain original physical custody and unique credit through native publication;
+no raw Store/Current or command authority escapes. Lock continuity remains open.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-STATE.md).
+
 `prepare_native_authentication(credit)` now returns an infallible owning capture,
 including Busy/closed/version2 refusals. Outside guards, verify validates the
 original pool and secret, destroys whole physical work, and returns an opaque

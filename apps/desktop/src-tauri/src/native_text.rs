@@ -11,6 +11,7 @@ mod boot;
 pub(super) mod retirement;
 #[cfg(test)]
 mod tests;
+pub(super) mod ui_state;
 
 const ENABLED: bool = false;
 const MAX_SECRET: usize = 4096;
@@ -20,6 +21,7 @@ pub(super) struct Registry {
     inflight: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     ui_budget: NativeUiInvocationBudget,
+    pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
     #[cfg(test)]
@@ -46,14 +48,18 @@ impl Default for Registry {
         use catcoms_app::store::CriticalCatalogReadPool;
         let retirement = retirement::Coalescer::default();
         let preludes = retirement.prelude();
+        let ui_budget = NativeUiInvocationBudget::new(
+            CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity())
+                .expect("fixed native UI policy"),
+        )
+        .expect("fixed native UI capacity");
+        let ui_state =
+            ui_state::Controller::new(ui_budget.prepare().expect("UI-state control payment"));
         Self {
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
-            ui_budget: NativeUiInvocationBudget::new(
-                CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity())
-                    .expect("fixed native UI policy"),
-            )
-            .expect("fixed native UI capacity"),
+            ui_budget,
+            ui_state,
             retirement,
             preludes,
             #[cfg(test)]
@@ -157,6 +163,9 @@ fn router<R: tauri::Runtime>(
     spawn: impl Fn(Task) + Send + Sync + 'static,
 ) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     move |invoke| {
+        if enabled && matches!(invoke.message.command(), "get_ui_state" | "save_ui_state") {
+            return ui_state::route(invoke, &spawn);
+        }
         if !enabled || invoke.message.command() != "unlock" {
             return fallback(invoke);
         }

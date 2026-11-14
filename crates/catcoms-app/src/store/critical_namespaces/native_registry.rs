@@ -26,6 +26,8 @@ pub use operational::{
     NativeTextUiRetirementDrain, NativeTextUiRetirementState, NativeTextVault,
     NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade,
     NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
+    NativeUiStateSaved,
 };
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,

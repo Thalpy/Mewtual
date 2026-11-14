@@ -68,7 +68,8 @@ pub use native_registry::{
     NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
     NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
     NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget,
-    NativeUiInvocationMetadata, PreparedNativeRegistryMigration,
+    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
+    NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;

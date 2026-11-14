@@ -513,4 +513,157 @@ mod tests {
         assert_eq!(wrapper_calls(), 0);
         assert_eq!(pool.charged_for_test(), baseline);
     }
+
+    fn ui_io_budget() -> (crate::store::NativeUiStateBudget, CriticalCatalogReadPool) {
+        let pool =
+            CriticalCatalogReadPool::new(crate::store::NativeUiStateBudget::required_capacity())
+                .unwrap();
+        (
+            crate::store::NativeUiStateBudget::new(pool.clone()).unwrap(),
+            pool,
+        )
+    }
+    #[test]
+    fn native_ui_state_io_uses_an_independent_slot_and_keeps_missing_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = auth_fixture(dir.path(), 0xce01);
+        let (budget, pool) = ui_io_budget();
+        let index = original_index(&f.vault);
+        let request =
+            crate::store::critical_namespaces::native_registry::lifecycle::cell::tests::request(
+                index,
+            );
+        let mut index_work = index.capture_metadata_work().unwrap();
+        // Leave an ACTUAL uncertain Rename WAL in the index cell, not merely
+        // an unused metadata loan. UI sidecar progress must not need Idle.
+        use crate::store::persistence::native_registry::operational as cuts;
+        cuts::arm_fault(cuts::Fault::IndexStage);
+        assert!(index_work
+            .rename_metadata_data(&request, &mut ChaCha20Rng::seed_from_u64(0xce04))
+            .is_err());
+        assert!(cuts::take_fault_seen());
+        assert!(f.vault.row_count_data().is_err());
+        let missing = f
+            .vault
+            .prepare_ui_state(budget.prepare().unwrap())
+            .read()
+            .unwrap();
+        assert!(missing.bytes().is_none());
+        assert!(
+            f.vault
+                .prepare_ui_state(budget.prepare().unwrap())
+                .read()
+                .is_err(),
+            "one UI slot remains held by its result"
+        );
+        drop(missing);
+        let json = br#"{"version":1,"drafts":{"room":"private"},"readMarks":{}}"#;
+        let saved = f
+            .vault
+            .prepare_ui_state(budget.prepare().unwrap())
+            .save(json, &mut ChaCha20Rng::seed_from_u64(0xce02))
+            .unwrap();
+        assert!(saved.is_live_cached());
+        drop(saved);
+        let read = f
+            .vault
+            .prepare_ui_state(budget.prepare().unwrap())
+            .read()
+            .unwrap();
+        assert_eq!(read.bytes(), Some(json.as_slice()));
+        drop(read);
+        let saved = f
+            .vault
+            .prepare_ui_state(budget.prepare().unwrap())
+            .save(b"", &mut ChaCha20Rng::seed_from_u64(0xce03))
+            .unwrap();
+        drop(saved);
+        let empty = f
+            .vault
+            .prepare_ui_state(budget.prepare().unwrap())
+            .read()
+            .unwrap();
+        assert_eq!(
+            empty.bytes(),
+            Some(b"".as_slice()),
+            "only Missing may become first-run defaults"
+        );
+        drop(empty);
+        assert!(
+            f.vault.row_count_data().is_err(),
+            "UI IO must not settle the index WAL"
+        );
+        let (covered, debt) = index_work
+            .rename_metadata_data(&request, &mut NeverRng)
+            .unwrap();
+        assert_eq!(covered.revision, request.expected_revision + 1);
+        drop(debt);
+        drop(index_work);
+        assert_eq!(f.vault.row_count_data().unwrap(), records().len());
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+    #[test]
+    fn native_ui_state_io_keeps_actual_session_and_all_buffer_credits_until_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = auth_fixture(dir.path(), 0xce10);
+        let (budget, pool) = ui_io_budget();
+        let read = f
+            .vault
+            .prepare_ui_state(budget.prepare().unwrap())
+            .read()
+            .unwrap();
+        drop(f.vault);
+        assert!(!read.is_live_cached());
+        assert!(matches!(
+            mount::NativeIndexStore::open_lifecycle3_for_test(
+                dir.path(),
+                SECRET,
+                &mut NeverRng,
+                current_policy()
+            ),
+            Err(AppError::Storage(catcoms_storage::StorageError::VaultBusy))
+        ));
+        assert!(pool.charged_for_test() > 0);
+        drop(read);
+        let _reopened = mount::NativeIndexStore::open_lifecycle3_for_test(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+        .unwrap();
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+    #[test]
+    fn native_ui_state_io_pays_each_position_before_capture_and_refunds_busy_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = auth_fixture(dir.path(), 0xce20);
+        let (budget, pool) = ui_io_budget();
+        let mut credits = Vec::new();
+        for _ in 0..4 {
+            credits.push(budget.prepare().unwrap());
+        }
+        assert!(budget.prepare().is_err());
+        assert_eq!(
+            pool.charged_for_test(),
+            crate::store::NativeUiStateBudget::required_capacity()
+        );
+        let held = f
+            .vault
+            .prepare_ui_state(credits.pop().unwrap())
+            .read()
+            .unwrap();
+        let busy = f.vault.prepare_ui_state(credits.pop().unwrap());
+        let before = pool.charged_for_test();
+        assert_eq!(
+            before,
+            crate::store::NativeUiStateBudget::required_capacity(),
+            "infallible capture must retain its caller's fee"
+        );
+        assert!(busy.read().is_err());
+        assert!(pool.charged_for_test() < before);
+        drop(held);
+        drop(credits);
+        assert_eq!(pool.charged_for_test(), 0);
+    }
 }

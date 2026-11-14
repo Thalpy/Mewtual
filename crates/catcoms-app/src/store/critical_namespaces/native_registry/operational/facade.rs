@@ -203,6 +203,22 @@ impl NativeTextVault {
         }
     }
 
+    pub(super) fn observe_ui_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
+        self.ui.observe_mount()
+    }
+    /// Capture only the original dedicated UI slot. No index-WAL/Idle proof is
+    /// substituted for local sidecar ownership. Native authenticates the caller.
+    pub fn prepare_ui_state(
+        &self,
+        credit: super::ui_state::UiStateCredit,
+    ) -> super::ui_state::UiStatePreparation {
+        let work = match &self.index {
+            IndexOwner::Version3(index) => index.capture_ui_work(),
+            IndexOwner::Version2(_) => None,
+        };
+        super::ui_state::UiStatePreparation::new(self, work, credit)
+    }
+
     /// Historical bounded DATA only, serialized with this original index's
     /// pending/outgoing-buffer debt. Neither method creates a live backend.
     pub fn row_count_data(&self) -> Result<usize, AppError> {

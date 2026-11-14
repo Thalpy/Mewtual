@@ -1,5 +1,10 @@
 # Mewtual; Architecture
 
+Ordinary native UI-state read/save is under validation on a separate original
+physical slot and owned IO lane. It remains disabled; final lock snapshots and
+authentication continuity are still unfinished.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-STATE.md).
+
 Native text authentication is releasing its physical slot before finalization
 while retaining independently paid original Host/index/mount cached negatives.
 The actual native consumer is under validation and remains disabled; typed UI

@@ -867,3 +867,268 @@ async fn native_text_shared_legacy_authentication_waits_before_its_pre_auth_voic
         Some(MountedVault::Legacy(_))
     ));
 }
+
+fn ui_request(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    command: &str,
+    json: Option<&str>,
+) -> Reply {
+    let (tx, rx) = oneshot::channel();
+    let mut request = self::request(window, "0", SECRET);
+    request.cmd = command.into();
+    request.body = InvokeBody::Json(match json {
+        None => serde_json::json!({}),
+        Some(json) => serde_json::json!({"json":json}),
+    });
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        request,
+        Box::new(move |_, _, response, _, _| {
+            let _ = tx.send(response);
+        }),
+    );
+    rx
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_state_real_router_roundtrip_and_old_unpolled_request_refusal() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    refused(ui_request(&main, "get_ui_state", None).await.unwrap());
+    unlock_current(&app, &main, &queue).await;
+    let first = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    let tauri::ipc::InvokeResponse::Ok(body) = first.await.unwrap() else {
+        panic!("first-run UI read failed");
+    };
+    assert_eq!(body.deserialize::<String>().unwrap(), ui_state::EMPTY);
+    let json = r#"{"version":3,"drafts":{"room":"kept draft"},"readMarks":{}}"#;
+    let saved = ui_request(&main, "save_ui_state", Some(json));
+    run(&queue).await;
+    assert!(matches!(
+        saved.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    let raw = std::fs::read(path.join("ui-state.bin")).unwrap();
+    assert!(!raw.windows(b"kept draft".len()).any(|w| w == b"kept draft"));
+    let read = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    let tauri::ipc::InvokeResponse::Ok(body) = read.await.unwrap() else {
+        panic!("saved UI read failed");
+    };
+    assert_eq!(body.deserialize::<String>().unwrap(), json);
+    let stale = ui_request(
+        &main,
+        "save_ui_state",
+        Some(r#"{"version":3,"drafts":{},"readMarks":{}}"#),
+    );
+    lock_session_outcome_inner(&app.state::<AppState>(), None).await;
+    run(&queue).await;
+    refused(stale.await.unwrap());
+    assert_eq!(std::fs::read(path.join("ui-state.bin")).unwrap(), raw);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_state_present_empty_is_refused_and_preserved_by_actual_router() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let budget = catcoms_app::store::NativeUiStateBudget::new(
+        catcoms_app::store::CriticalCatalogReadPool::new(
+            catcoms_app::store::NativeUiStateBudget::required_capacity(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let credit = budget.prepare().unwrap();
+    let prepared = {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().await;
+        store
+            .as_ref()
+            .unwrap()
+            .as_text_v2()
+            .unwrap()
+            .prepare_ui_state(credit)
+    };
+    let written =
+        tauri::async_runtime::spawn_blocking(move || prepared.save(b"", &mut OsCryptoRng))
+            .await
+            .unwrap()
+            .unwrap();
+    drop(written);
+    let before = std::fs::read(path.join("ui-state.bin")).unwrap();
+    let reply = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    refused(reply.await.unwrap());
+    assert_eq!(std::fs::read(path.join("ui-state.bin")).unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_state_actual_responder_panic_releases_commit_before_paid_output() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let outside = Arc::new(AtomicBool::new(false));
+    *state.native_text.ui_state.output_drop.lock().unwrap() = Some(outside.clone());
+    let mut request = self::request(&main, "0", SECRET);
+    request.cmd = "get_ui_state".into();
+    request.body = InvokeBody::Json(serde_json::json!({}));
+    let view: &tauri::Webview<MockRuntime> = main.as_ref();
+    view.clone().on_message(
+        request,
+        Box::new(|_, _, _, _, _| {
+            panic!("fixture panic in actual UI-state responder");
+        }),
+    );
+    let task = queue.lock().unwrap().pop().unwrap();
+    assert!(tokio::spawn(task).await.unwrap_err().is_panic());
+    assert!(
+        outside.load(Ordering::SeqCst),
+        "Root output/slot/payment dropped under UI commit"
+    );
+    assert!(state.native_text.ui_state.lane.try_lock().is_ok());
+    let next = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    assert!(
+        matches!(next.await.unwrap(), tauri::ipc::InvokeResponse::Ok(_)),
+        "actual Root UI slot must be reusable"
+    );
+}
+
+/// Scheduling-only pause inside the actual blocking IO owner. A scoped release
+/// always wakes it on a failed assertion/unwind; no test can strand the lane.
+pub(crate) struct BlockingIoBarrier {
+    arrived: Notify,
+    released: StdMutex<bool>,
+    changed: std::sync::Condvar,
+}
+struct ReleaseBlockingIo(Arc<BlockingIoBarrier>);
+impl Drop for ReleaseBlockingIo {
+    fn drop(&mut self) {
+        *self
+            .0
+            .released
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        self.0.changed.notify_all();
+    }
+}
+impl BlockingIoBarrier {
+    fn new() -> (Arc<Self>, ReleaseBlockingIo) {
+        let value = Arc::new(Self {
+            arrived: Notify::new(),
+            released: StdMutex::new(false),
+            changed: std::sync::Condvar::new(),
+        });
+        (value.clone(), ReleaseBlockingIo(value))
+    }
+    pub(crate) fn wait_once(&self) {
+        self.arrived.notify_one();
+        let (released, _) = self
+            .changed
+            .wait_timeout_while(
+                self.released.lock().unwrap(),
+                Duration::from_secs(60),
+                |released| !*released,
+            )
+            .unwrap();
+        let was_released = *released;
+        drop(released); // Timeout assertion must never poison the release path.
+        assert!(was_released, "blocking IO fixture was not released");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_state_completed_read_cannot_publish_after_actual_lock_registration() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.ui_state.after_io.lock().unwrap() = Some(edge.clone());
+    let reply = ui_request(&main, "get_ui_state", None);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let reading = tokio::spawn(task);
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let lock_edge = AdmissionBarrier::new();
+    *state.native_text.lock_prelude_edge.lock().unwrap() = Some(lock_edge.clone());
+    let handle = app.handle().clone();
+    let locking =
+        tokio::spawn(
+            async move { lock_session_outcome_inner(&handle.state::<AppState>(), None).await },
+        );
+    tokio::time::timeout(Duration::from_secs(60), lock_edge.arrived.notified())
+        .await
+        .unwrap();
+    // The plaintext has already been read and serialized. Only the actual final
+    // generation/auth/request check prevents it reaching the old WebView now.
+    edge.release.notify_one();
+    reading.await.unwrap();
+    refused(reply.await.unwrap());
+    lock_edge.release.notify_one();
+    assert!(locking.await.unwrap().continuity_error.is_none());
+    assert_locked(&state).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_state_lost_observer_keeps_blocking_io_lane_until_actual_work_drops() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let (edge, release) = BlockingIoBarrier::new();
+    *state.native_text.ui_state.before_io.lock().unwrap() = Some(edge.clone());
+    let reply = ui_request(&main, "get_ui_state", None);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let reading = tokio::spawn(task);
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    reading.abort();
+    assert!(reading.await.unwrap_err().is_cancelled());
+    assert!(reply.await.is_err(), "abandoned native observer replied");
+    assert!(
+        state.native_text.ui_state.lane.try_lock().is_err(),
+        "lost observer released lane before actual IO owner"
+    );
+    let lock_edge = AdmissionBarrier::new();
+    *state.native_text.lock_commit_edge.lock().unwrap() = Some(lock_edge.clone());
+    let handle = app.handle().clone();
+    let locking =
+        tokio::spawn(
+            async move { lock_session_outcome_inner(&handle.state::<AppState>(), None).await },
+        );
+    tokio::time::timeout(Duration::from_secs(60), lock_edge.arrived.notified())
+        .await
+        .unwrap();
+    lock_edge.release.notify_one();
+    // Receipt is issued only after THIS lock's real lane-acquisition future
+    // returned Pending. A merely unscheduled JoinHandle cannot satisfy it.
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.native_text.ui_state.lock_waiting.notified(),
+    )
+    .await
+    .unwrap();
+    assert!(!locking.is_finished());
+    drop(release); // always scoped: blocked work survives observer until HERE
+    assert!(tokio::time::timeout(Duration::from_secs(60), locking)
+        .await
+        .unwrap()
+        .unwrap()
+        .continuity_error
+        .is_none());
+    assert!(state.native_text.ui_state.lane.try_lock().is_ok());
+    *state.native_text.ui_state.before_io.lock().unwrap() = None;
+    unlock_current(&app, &main, &queue).await;
+    let next = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    assert!(matches!(
+        next.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+}
