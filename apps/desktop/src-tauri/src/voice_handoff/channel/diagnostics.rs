@@ -34,6 +34,13 @@ pub(in crate::voice_handoff) struct NativeDiagnostic {
     pub finished_selector: Option<PairSelector>,
     pub last_error: Option<VoiceError>,
 }
+impl NativeDiagnostic {
+    // Complete from one call's stack, independently of all best-effort progress
+    // writes. Keeping this pure also lets the regression avoid global contention.
+    fn finish_sdp(&mut self, parent: [u8; 16], sequence: u64, stage: u8, error: FactoryRefused) {
+        self.sdp_refusal = Some((stage, parent, sequence, classification(Some(error)).1));
+    }
+}
 fn classification(error: Option<FactoryRefused>) -> (usize, Option<VoiceError>) {
     match error {
         None => (0, None),
@@ -65,13 +72,6 @@ pub(in crate::voice_handoff) struct NativeObservation {
     missed: bool,
 }
 impl NativeObservation {
-    pub(in crate::voice_handoff) fn sdp_refusal(
-        self,
-    ) -> Option<(u8, [u8; 16], Option<VoiceError>)> {
-        self.diagnostic
-            .and_then(|diagnostic| diagnostic.sdp_refusal)
-            .map(|(stage, parent, _, error)| (stage, parent, error))
-    }
     /// A past refusal, even for this same intent, is not evidence about a later
     /// physical retry. Missing/contended observations remain absence of evidence.
     pub(in crate::voice_handoff) fn sdp_refusal_at(
@@ -128,19 +128,21 @@ impl Session {
             diagnostic.sdp_stage = stage;
         });
     }
-    pub(in crate::voice_handoff) fn fixture_sdp_finished(&self, error: Option<FactoryRefused>) {
+    pub(in crate::voice_handoff) fn fixture_sdp_finished(
+        &self,
+        parent: [u8; 16],
+        sequence: u64,
+        stage: u8,
+        error: Option<FactoryRefused>,
+    ) {
         let Some(error) = error else { return };
         // Even a pool snapshot could wait behind a stalled owner. Keep diagnostic
         // writes nonblocking and do not delay the original authenticated refusal.
         self.fixture_update_native(|diagnostic| {
-            diagnostic.sdp_refusal = Some((
-                diagnostic.sdp_stage,
-                diagnostic.sdp_parent,
-                diagnostic.sdp_sequence,
-                classification(Some(error)).1,
-            ));
+            diagnostic.finish_sdp(parent, sequence, stage, error);
         });
     }
+
     pub(in crate::voice_handoff) fn fixture_prepare_native_diagnostics() {
         TABLE.get_or_init(|| {
             Mutex::new(
@@ -294,4 +296,32 @@ mod request_tests {
             Some((4, parent, Some(VoiceError::Capacity)))
         );
     }
+}
+
+#[test]
+fn sdp_completed_diagnostic_uses_local_call_even_when_progress_was_missed() {
+    let mut value = NativeDiagnostic {
+        sdp_stage: 3,
+        sdp_parent: [7; 16],
+        sdp_sequence: 2,
+        ..NativeDiagnostic::default()
+    };
+    // The stage5 progress write never happened. Completion must not reuse the
+    // old request's stage, parent or physical sequence.
+    value.finish_sdp(
+        [5; 16],
+        3,
+        5,
+        FactoryRefused::Protocol(VoiceError::Capacity),
+    );
+    let observation = NativeObservation {
+        flags: None,
+        diagnostic: Some(value),
+        missed: true,
+    };
+    assert_eq!(observation.sdp_refusal_at(2), None);
+    assert_eq!(
+        observation.sdp_refusal_at(3),
+        Some((5, [5; 16], Some(VoiceError::Capacity)))
+    );
 }
