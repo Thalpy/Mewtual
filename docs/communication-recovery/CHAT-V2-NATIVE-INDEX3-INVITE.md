@@ -48,8 +48,10 @@ The initial nine cases pass (50.59s), and all 98 combined lifecycle cases pass
 (442.83s), including two additional actual-boundary regression controls from
 review. Design/diff review and re-review are clear. The compiled registry has
 207 ordinary cases plus two explicit compatibility cases. All 3,441 frontend
-tests, Svelte checking and production building pass. Actual predecessor/native
-checks, full exact-source suites and strict lint/dependency gates remain required
-before sign-off. Other normal3 operation
+tests, Svelte checking and production building pass. The real pinned predecessor passes all 11 x 3 probes (15.02s); head round trips
+pass for all 11 fixtures (13.83s). Native production checking passes (1m52s) on
+this exact source. Strict Clippy fails with 610 errors, including unfinished
+consumers, and the audit reports 13 vulnerabilities. Full exact-source suites
+and strict lint/dependency sign-off remain required; no gate is waived. Other normal3 operation
 producers, scoped Legacy/native consumers, joined-member provenance/transport and
 combined text Chat V2 acceptance remain unfinished.

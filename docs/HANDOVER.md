@@ -14,8 +14,12 @@ are fixed and re-reviewed clear; all 98 combined lifecycle cases pass (442.83s).
 The compiled registry contains 207 ordinary cases plus 2 explicit compatibility
 cases. All 3,441 frontend tests, Svelte checking and the production build pass. The real4f45d586 predecessor gate now
 has11 fixtures, including clean refresh success and unchanged Refresh-Stage
-refusal. Its self-check passes; actual predecessor execution, native checking, full suites and strict gates
-remain required. Chat V2 remains disabled; actual native/joined/transport/UI
+refusal. The actual pinned predecessor passes all 11 x 3 opener probes (15.02s), and the
+head recovers all 11 round trips (13.83s). Native production checking compiles
+this actual worktree and passes (1m52s). Strict Clippy fails with 610 errors,
+including unfinished native consumers; the audit reports 13 vulnerabilities.
+No suppressions or new exceptions were added. Full suites and integration remain
+required. Chat V2 remains disabled; actual native/joined/transport/UI
 consumers and the other lifecycle operations are still unfinished.
 [Scope](communication-recovery/CHAT-V2-NATIVE-INDEX3-INVITE.md).
 
