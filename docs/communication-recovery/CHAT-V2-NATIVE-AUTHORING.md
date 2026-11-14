@@ -122,8 +122,14 @@ Pending, complete activation Stage and Active must refuse without changing any
 file or directory. The head then reopens all six with a panic-on-use RNG. No
 acceptance manifest from the producer controls the predecessor verdicts.
 
-These focused results do not replace current-source complete Root/native/
-frontend suites, strict lint/audits, startup or flows. Still required in this
+Native compile checking, strict native Clippy and both dependency audits also
+passed. Root strict Clippy still fails with 564 errors in unfinished App paths;
+the one newly found unused test-only comparison was restricted to tests and
+its three source-admission regressions passed. No warning suppression was added.
+Complete Root/native/frontend CI is running at the original d0f2de20 checkpoint;
+this test-helper-only follow-up has focused evidence, not a newer complete-suite
+result. These checks do not replace current-source complete suites, startup
+or flows. Still required in this
 producer: broader cold-cut combinations, current-source complete gates, and
 native caller/shutdown integration. The
 remaining Chat V2 implementation and acceptance listed at the top stays open.

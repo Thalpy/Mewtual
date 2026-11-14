@@ -75,6 +75,7 @@ impl Scope {
 
     /// Paid cached original-mount comparison only. This is never a UI-session
     /// admission or proof that a founder/row exists.
+    #[cfg(test)]
     pub(super) fn matches(&self, host: &catcoms_rt::NativeChatUiMountObservation) -> bool {
         self.is_open() && self.host.same_original(host)
     }
