@@ -90,7 +90,22 @@ free-space promises. The persistent minimum also includes one maximum immutable
 network file per possible row, including terminal rows whose inline frame has
 been removed.
 
-## Evidence and pending gates
+## Transport-lifetime continuation (under validation)
+
+The owning producer now uses the separate tracked native TCP constructor. Actual
+Actor/Swarm/connection key futures and passive original physical custody outlive
+source destruction; a metadata-only drain does not pin the vault. Every attempt
+has a separate real debit, including old metadata retained beyond key-task zero.
+Only a proven constructor Err before returned Mesh/SDK, plus its same completed
+drain and fresh original command, permits a paid retry of the same identity.
+Unknown and returned-Mesh outcomes remain fenced. The current constructor omits
+DNS/WebSocket/QUIC; no live default-route or native activation claim follows.
+[Contract and current checks](CHAT-V2-NATIVE-TCP-LIFETIME.md).
+
+The earlier evidence below belongs to the founder checkpoint. The transport
+continuation's complete current-source and native acceptance remain open.
+
+## Founder-checkpoint evidence and pending gates
 
 The latest complete local source cohort passed 33 cases, including actual Mesh/
 whole SDK/activation, full-signer encrypted-frame checks, lost device/seed
