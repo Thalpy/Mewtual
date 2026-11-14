@@ -1,9 +1,9 @@
 # Native UI-state read and save
 
-Status: disabled implementation under focused validation. This checkpoint adds
-ordinary UI-state read/save to the native text owner. Lock snapshots, mount-bound
-pending retry and authentication continuity still need the next increment. Chat V2
-is off; no working text send or completed acceptance is claimed.
+Status: prior ordinary-IO checkpoint, disabled. Its snapshot gaps below are now
+being implemented and validated in [native lock snapshots](CHAT-V2-NATIVE-UI-SNAPSHOTS.md).
+This evidence does not validate that later increment. Chat V2 remains off; no
+working text send or completed acceptance is claimed.
 
 ## Original IO ownership
 
@@ -89,7 +89,7 @@ That run was superseded by the original-target increment atcc5e6d21:
 is queued. Only the previously named slow catch-up cost case remains deferred
 until final acceptance. This checkpoint is not ready to merge.
 
-The next implementation must capture each final snapshot's original authenticated
+At this earlier checkpoint, the next implementation still needed to capture each final snapshot's original authenticated
 mount before scheduling, retain its exact bytes and unique credit through lost
 waiters, retry only on that same mount, and record outcomes before releasing the
 IO lane. Newer capture failures must not be erased by older save successes.

@@ -18,6 +18,7 @@ const MAX_SECRET: usize = 4096;
 type Task = std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 pub(super) struct Registry {
+    pub(super) selected: bool,
     inflight: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     ui_budget: NativeUiInvocationBudget,
@@ -28,6 +29,8 @@ pub(super) struct Registry {
     directory: Option<PathBuf>,
     #[cfg(test)]
     final_edge: Option<Arc<tests::AdmissionBarrier>>,
+    #[cfg(test)]
+    reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     retirement_queue: StdMutex<Option<Arc<StdMutex<Vec<Task>>>>>,
     #[cfg(test)]
@@ -56,6 +59,7 @@ impl Default for Registry {
         let ui_state =
             ui_state::Controller::new(ui_budget.prepare().expect("UI-state control payment"));
         Self {
+            selected: false,
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
             ui_budget,
@@ -66,6 +70,8 @@ impl Default for Registry {
             directory: None,
             #[cfg(test)]
             final_edge: None,
+            #[cfg(test)]
+            reply_edge: StdMutex::new(None),
             #[cfg(test)]
             retirement_queue: StdMutex::new(None),
             #[cfg(test)]
@@ -138,7 +144,8 @@ pub(super) fn initial_state() -> AppState {
     initial_state_selected(ENABLED)
 }
 fn initial_state_selected(enabled: bool) -> AppState {
-    let state = AppState::default();
+    let mut state = AppState::default();
+    state.native_text.selected = enabled;
     if enabled {
         state.ui_session_generation.store(1, Ordering::SeqCst);
         state.ui_authorized_generation.store(0, Ordering::SeqCst);
@@ -163,6 +170,14 @@ fn router<R: tauri::Runtime>(
     spawn: impl Fn(Task) + Send + Sync + 'static,
 ) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     move |invoke| {
+        if enabled
+            && matches!(
+                invoke.message.command(),
+                "lock_session" | "close_vault_window"
+            )
+        {
+            return ui_state::snapshots::route(invoke, &spawn);
+        }
         if enabled && matches!(invoke.message.command(), "get_ui_state" | "save_ui_state") {
             return ui_state::route(invoke, &spawn);
         }
@@ -225,14 +240,43 @@ fn router<R: tauri::Runtime>(
         drop(invoke.message); // retain only one bounded secret, never arbitrary JSON
         spawn(Box::pin(async move {
             let state = app.state::<AppState>();
-            let result = execute(&state, &captured, directory).await;
+            let mut notice = None;
+            let result = execute(&state, &captured, directory, &mut notice).await;
+            #[cfg(test)]
+            {
+                let edge = state.native_text.reply_edge.lock().unwrap().clone();
+                if let Some(edge) = edge {
+                    edge.wait_once().await;
+                }
+            }
+            let mut _retired_notice = None;
             let _commit = state.ui_session_commit.lock().await;
             if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation {
                 resolver.reject("Unlock was superseded. Try again.");
             } else {
+                let current = if let Some(n) = notice.as_ref() {
+                    state.native_text.preludes.is_idle_cached()
+                        && state
+                            .native_text
+                            .ui_state
+                            .snapshots
+                            .notice_is_current(&state, n)
+                            .await
+                } else {
+                    false
+                };
                 match result {
                     Ok(rows) => resolver.resolve(rows),
                     Err(error) => resolver.reject(error),
+                }
+                if current
+                    && state.ui_session_generation.load(Ordering::SeqCst) == captured.generation
+                {
+                    _retired_notice = state
+                        .native_text
+                        .ui_state
+                        .snapshots
+                        .publish_notice(notice.as_ref().unwrap());
                 }
             }
         }));
@@ -273,6 +317,7 @@ async fn execute(
     state: &AppState,
     captured: &Captured,
     directory: PathBuf,
+    notice: &mut Option<ui_state::snapshots::Notice>,
 ) -> Result<Vec<ReloadedServer>, String> {
     let _mount = state.vault_mount.lock().await;
     // An older lock can publish this generation before revoking voice state.
@@ -366,6 +411,7 @@ async fn execute(
         &ticket,
         || authentication.is_live_cached(),
         Some(authentication.clone()),
+        Some(notice),
     )
     .await?;
     // This warm milestone admits only a fresh empty vault; no fake Legacy

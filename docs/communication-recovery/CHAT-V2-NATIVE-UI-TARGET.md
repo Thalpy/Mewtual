@@ -1,8 +1,9 @@
 # Original authenticated mount for native UI state
 
-Status: target-only implementation under validation. Chat V2 remains off. Native
-lock snapshot custody and authentication retry are still unfinished; this change
-must not be described as complete continuity or working text messaging.
+Status: prior target-only checkpoint, disabled. Its snapshot gaps are now being
+implemented and validated in [native lock snapshots](CHAT-V2-NATIVE-UI-SNAPSHOTS.md).
+This checkpoint evidence does not validate that increment. Chat V2 remains off;
+no complete continuity or working text messaging is claimed.
 
 ## Identity is not authorization
 

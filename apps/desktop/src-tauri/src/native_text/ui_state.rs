@@ -8,9 +8,12 @@ use catcoms_app::store::{
 };
 use tauri::ipc::InvokeResponseBody;
 
+pub(crate) mod snapshots;
+
 pub(super) const EMPTY: &str = r#"{"version":1,"drafts":{},"readMarks":{}}"#;
 pub(crate) struct Controller {
     pub(crate) lane: Arc<Mutex<()>>,
+    pub(crate) snapshots: snapshots::Snapshots,
     pub(super) target: StdMutex<Option<Arc<NativeTextVaultAuthenticationCheck>>>,
     waiters: Arc<Semaphore>,
     budget: NativeUiStateBudget,
@@ -21,6 +24,8 @@ pub(crate) struct Controller {
     #[cfg(test)]
     pub(super) before_io: StdMutex<Option<Arc<tests::BlockingIoBarrier>>>,
     #[cfg(test)]
+    pub(super) before_copy: StdMutex<Option<Arc<tests::BlockingIoBarrier>>>,
+    #[cfg(test)]
     pub(super) lock_waiting: tokio::sync::Notify,
     _metadata: NativeUiInvocationMetadata,
 }
@@ -28,6 +33,7 @@ impl Controller {
     pub(super) fn new(metadata: NativeUiInvocationMetadata) -> Self {
         Self {
             lane: Arc::new(Mutex::new(())),
+            snapshots: snapshots::Snapshots::default(),
             target: StdMutex::new(None),
             waiters: Arc::new(Semaphore::new(4)),
             budget: NativeUiStateBudget::new(
@@ -41,6 +47,8 @@ impl Controller {
             after_io: StdMutex::new(None),
             #[cfg(test)]
             before_io: StdMutex::new(None),
+            #[cfg(test)]
+            before_copy: StdMutex::new(None),
             #[cfg(test)]
             lock_waiting: tokio::sync::Notify::new(),
             _metadata: metadata,
@@ -205,12 +213,27 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                         let target = control
                             .original_target()
                             .ok_or("The native vault is unavailable.")?;
+                        // Rank every producer before copying, just as lock
+                        // snapshots do. A slow copy must not become newer by
+                        // finishing later. Failed parses only leave an order gap.
+                        let completion = save.then(|| {
+                            control
+                                .snapshots
+                                .ordinary_completion(generation, target.clone())
+                        });
+                        #[cfg(test)]
+                        if save {
+                            let edge = control.before_copy.lock().unwrap().clone();
+                            if let Some(edge) = edge {
+                                edge.wait_once();
+                            }
+                        }
                         parse(invoke.message.payload(), save)
-                            .map(|op| (generation, permit, credit, op, target))
+                            .map(|op| (generation, permit, credit, op, target, completion))
                     })
             })
     };
-    let (generation, _permit, credit, operation, target) = match captured {
+    let (generation, _permit, credit, operation, target, completion) = match captured {
         Ok(value) => value,
         Err(error) => {
             invoke.resolver.reject(error);
@@ -261,6 +284,9 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 edge.wait_once();
             }
             let result = (|| {
+                if completion.as_ref().is_some_and(|c| !c.may_write()) {
+                    return Err("A newer screen state has already been saved.".to_string());
+                }
                 let output = match operation {
                     Operation::Read => Output::Read(preparation.read().map_err(|e| e.to_string())?),
                     Operation::Save(json) => {
@@ -272,6 +298,11 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                         )
                     }
                 };
+                if matches!(output, Output::Saved(_)) {
+                    if let Some(completion) = completion.as_ref() {
+                        completion.saved();
+                    }
+                }
                 let serialized = match &output {
                     Output::Read(value) => {
                         let json = match value.bytes() {

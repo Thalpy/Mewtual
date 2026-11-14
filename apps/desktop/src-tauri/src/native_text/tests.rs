@@ -1337,3 +1337,563 @@ async fn native_ui_target_unpolled_command_cannot_adopt_a_replacement_at_the_sam
     };
     assert_eq!(body.deserialize::<String>().unwrap(), a);
 }
+
+fn snapshot_request(window: &tauri::WebviewWindow<MockRuntime>, json: Option<&str>) -> Reply {
+    let (tx, rx) = oneshot::channel();
+    let mut value = request(window, "0", SECRET);
+    value.cmd = "lock_session".into();
+    value.body = InvokeBody::Json(serde_json::json!({ "uiStateJson": json }));
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        value,
+        Box::new(move |_, _, reply, _, _| {
+            let _ = tx.send(reply);
+        }),
+    );
+    rx
+}
+async fn read_ui(window: &tauri::WebviewWindow<MockRuntime>, queue: &Queue) -> String {
+    let read = ui_request(window, "get_ui_state", None);
+    run(queue).await;
+    let tauri::ipc::InvokeResponse::Ok(body) = read.await.unwrap() else {
+        panic!("UI read refused");
+    };
+    body.deserialize::<String>().unwrap()
+}
+fn snapshot_result(reply: tauri::ipc::InvokeResponse) -> serde_json::Value {
+    let tauri::ipc::InvokeResponse::Ok(body) = reply else {
+        panic!("native lock bridge rejected");
+    };
+    body.deserialize::<serde_json::Value>().unwrap()
+}
+const SNAPSHOT: &str = r#"{"version":3,"drafts":{"room":"final native draft"},"readMarks":{}}"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_actual_lock_saves_and_locked_echo_cannot_replace_it() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let reply = snapshot_request(&main, Some(SNAPSHOT));
+    run(&queue).await;
+    assert!(snapshot_result(reply.await.unwrap())["continuity_error"].is_null());
+    assert_locked(&app.state::<AppState>()).await;
+    let echo = snapshot_request(&main, Some(r#"{"version":3,"drafts":{},"readMarks":{}}"#));
+    run(&queue).await;
+    assert!(snapshot_result(echo.await.unwrap())["continuity_error"].is_null());
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_storage_failure_retains_exact_bytes_and_unlock_retries() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    // Real atomic file publication refuses this directory, not a fake IO flag.
+    std::fs::create_dir(path.join("ui-state.bin")).unwrap();
+    let reply = snapshot_request(&main, Some(SNAPSHOT));
+    run(&queue).await;
+    assert!(snapshot_result(reply.await.unwrap())["continuity_error"].is_string());
+    assert_locked(&app.state::<AppState>()).await;
+    std::fs::remove_dir(path.join("ui-state.bin")).unwrap();
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_real_unpolled_job_drop_and_postwrite_panic_keep_retry_custody() {
+    for after_write in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (app, main, queue) = app(root.path().join("vault"), None, true);
+        unlock_current(&app, &main, &queue).await;
+        let state = app.state::<AppState>();
+        if after_write {
+            state
+                .native_text
+                .ui_state
+                .snapshots
+                .panic_after_write
+                .store(true, Ordering::SeqCst);
+        } else {
+            state
+                .native_text
+                .ui_state
+                .snapshots
+                .drop_job
+                .store(true, Ordering::SeqCst);
+        }
+        let reply = snapshot_request(&main, Some(SNAPSHOT));
+        run(&queue).await;
+        assert!(snapshot_result(reply.await.unwrap())["continuity_error"].is_string());
+        assert_locked(&state).await;
+        unlock_current(&app, &main, &queue).await;
+        assert_eq!(read_ui(&main, &queue).await, SNAPSHOT);
+    }
+}
+
+const NEWER_SNAPSHOT: &str =
+    r#"{"version":3,"drafts":{"room":"newer native draft"},"readMarks":{}}"#;
+
+fn close_request(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    json: Option<&str>,
+    token: Option<&str>,
+) -> Reply {
+    let (tx, rx) = oneshot::channel();
+    let mut request = self::request(window, "0", SECRET);
+    request.cmd = "close_vault_window".into();
+    request.body = InvokeBody::Json(serde_json::json!({ "uiStateJson": json,
+        "discardContinuityError": token.is_some(), "discardContinuityRevision": token }));
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        request,
+        Box::new(move |_, _, response, _, _| {
+            let _ = tx.send(response);
+        }),
+    );
+    rx
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_newer_unpolled_ingress_is_saved_by_older_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let older = snapshot_request(&main, Some(SNAPSHOT));
+    let newer = snapshot_request(&main, Some(NEWER_SNAPSHOT));
+    // Neither task has been polled. Its DATA must already be visible; a
+    // scheduled future is neither custody nor an ordering guarantee.
+    let older_task = queue.lock().unwrap().remove(0);
+    older_task.await;
+    assert!(snapshot_result(older.await.unwrap())["continuity_error"].is_null());
+    drop(queue.lock().unwrap().pop());
+    assert!(newer.await.is_err());
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, NEWER_SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_ordinary_actual_save_fences_a_slower_ingress_copy() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let (edge, release) = BlockingIoBarrier::new();
+    *state
+        .native_text
+        .ui_state
+        .snapshots
+        .before_publish
+        .lock()
+        .unwrap() = Some(edge.clone());
+    let window = main.clone();
+    let receiving = tokio::task::spawn_blocking(move || snapshot_request(&window, Some(SNAPSHOT)));
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    // No snapshot is published yet. A watermark that exists only while pending
+    // would miss this case and allow the older final copy to overwrite disk.
+    let saved = ui_request(&main, "save_ui_state", Some(NEWER_SNAPSHOT));
+    run(&queue).await;
+    assert!(matches!(
+        saved.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    drop(release);
+    let older = receiving.await.unwrap();
+    run(&queue).await;
+    assert!(snapshot_result(older.await.unwrap())["continuity_error"].is_null());
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, NEWER_SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_old_unpolled_close_cannot_close_a_reauthenticated_session() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let old = close_request(&main, Some(SNAPSHOT), None);
+    let state = app.state::<AppState>();
+    assert!(lock_session_outcome_inner(&state, None)
+        .await
+        .continuity_error
+        .is_none());
+    unlock_current(&app, &main, &queue).await;
+    let saved = ui_request(&main, "save_ui_state", Some(NEWER_SNAPSHOT));
+    run(&queue).await;
+    assert!(matches!(
+        saved.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    run(&queue).await; // first poll of the old authenticated close
+    let outcome = snapshot_result(old.await.unwrap());
+    assert_eq!(outcome["deferred"], true);
+    assert!(outcome["continuity_error"]
+        .as_str()
+        .unwrap()
+        .contains("older close"));
+    assert!(app.get_webview_window("main").is_some());
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, NEWER_SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_two_concurrent_closes_do_not_wait_on_each_others_long_fences() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    std::fs::create_dir(path.join("ui-state.bin")).unwrap();
+    let a = close_request(&main, Some(SNAPSHOT), None);
+    let b = close_request(&main, Some(NEWER_SNAPSHOT), None);
+    let mut tasks = queue.lock().unwrap().drain(..).collect::<Vec<_>>();
+    // Both real close preludes must coexist BEFORE either checks other finite
+    // producers. Merely spawning two tasks would not prove this interleaving.
+    let state = app.state::<AppState>();
+    let guard = register_vault_close(&state).await.unwrap();
+    let other = register_vault_close(&state).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            guard.wait_for_other_mutations(),
+            other.wait_for_other_mutations()
+        );
+    })
+    .await
+    .expect("long close fences deadlocked");
+    drop((guard, other));
+    tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(tasks.pop().unwrap(), tasks.pop().unwrap());
+    })
+    .await
+    .unwrap();
+    for result in [a.await.unwrap(), b.await.unwrap()] {
+        let outcome = snapshot_result(result);
+        assert_eq!(outcome["deferred"], true);
+        assert!(outcome["continuity_error"].is_string());
+    }
+    assert!(app.get_webview_window("main").is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_actual_close_requires_the_exact_displayed_loss_revision() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    std::fs::create_dir(path.join("ui-state.bin")).unwrap();
+    let first = close_request(&main, Some(SNAPSHOT), None);
+    run(&queue).await;
+    let first = snapshot_result(first.await.unwrap());
+    assert_eq!(first["deferred"], true);
+    assert_eq!(first["continuity_discardable"], true);
+    let token = first["continuity_revision"].as_str().unwrap();
+    // Wrong acknowledgements must retry IO, keep the window and issue a new
+    // revision. That new failure must not be discardable by the original token.
+    let wrong = close_request(&main, None, Some("0"));
+    run(&queue).await;
+    let wrong = snapshot_result(wrong.await.unwrap());
+    assert_eq!(wrong["deferred"], true);
+    assert_ne!(wrong["continuity_revision"], first["continuity_revision"]);
+    let stale = close_request(&main, None, Some(token));
+    run(&queue).await;
+    let stale = snapshot_result(stale.await.unwrap());
+    assert_eq!(stale["deferred"], true);
+    assert!(app.get_webview_window("main").is_some());
+    let exact = close_request(&main, None, stale["continuity_revision"].as_str());
+    run(&queue).await;
+    assert_eq!(snapshot_result(exact.await.unwrap())["deferred"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_overloaded_close_resolves_without_destroy_and_does_not_mask_disk_failure()
+{
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    std::fs::create_dir(path.join("ui-state.bin")).unwrap();
+    let failing = snapshot_request(&main, Some(SNAPSHOT));
+    run(&queue).await;
+    assert!(snapshot_result(failing.await.unwrap())["continuity_error"].is_string());
+    let held = (0..8)
+        .map(|_| snapshot_request(&main, None))
+        .collect::<Vec<_>>();
+    let overflow = close_request(&main, None, None);
+    assert_eq!(queue.lock().unwrap().len(), 8);
+    let result = snapshot_result(overflow.await.unwrap());
+    assert_eq!(result["deferred"], true);
+    assert_eq!(result["continuity_discardable"], false);
+    assert!(result["history_error"].is_string());
+    assert!(app.get_webview_window("main").is_some());
+    run(&queue).await;
+    // Drainage resolves the control-only Busy, but not the retained actual IO.
+    assert!(
+        snapshot_result(held.into_iter().last().unwrap().await.unwrap())["continuity_error"]
+            .is_string()
+    );
+    queue.lock().unwrap().clear();
+    std::fs::remove_dir(path.join("ui-state.bin")).unwrap();
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_stale_auth_reply_cannot_consume_an_unseen_loss_warning() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let bad = snapshot_request(&main, Some(r#"{"version":999}"#));
+    run(&queue).await;
+    assert!(snapshot_result(bad.await.unwrap())["continuity_error"].is_string());
+    let state = app.state::<AppState>();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.reply_edge.lock().unwrap() = Some(edge.clone());
+    let g = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let unseen = invoke(&main, &g, SECRET);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let answering = tokio::spawn(task);
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    lock_session_outcome_inner(&state, None).await;
+    edge.release.notify_one();
+    answering.await.unwrap();
+    refused(unseen.await.unwrap());
+    let g = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let warning = invoke(&main, &g, SECRET);
+    run(&queue).await;
+    let tauri::ipc::InvokeResponse::Err(error) = warning.await.unwrap() else {
+        panic!("unseen loss was acknowledged");
+    };
+    assert!(error.0.as_str().unwrap().contains("Unlock again"));
+    assert_locked(&state).await;
+    unlock_current(&app, &main, &queue).await; // only this explicit retry acknowledges it
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_slower_ordinary_copy_cannot_supersede_a_newer_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let (edge, release) = BlockingIoBarrier::new();
+    *state.native_text.ui_state.before_copy.lock().unwrap() = Some(edge.clone());
+    let window = main.clone();
+    let receiving =
+        tokio::task::spawn_blocking(move || ui_request(&window, "save_ui_state", Some(SNAPSHOT)));
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let newer = snapshot_request(&main, Some(NEWER_SNAPSHOT));
+    drop(release);
+    let older = receiving.await.unwrap();
+    run(&queue).await; // the earlier ordinary invocation copied/queued last
+    assert!(matches!(
+        older.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    run(&queue).await;
+    assert!(snapshot_result(newer.await.unwrap())["continuity_error"].is_null());
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, NEWER_SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_old_ordinary_writer_cannot_regress_a_superseding_durable_save() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let older = ui_request(&main, "save_ui_state", Some(SNAPSHOT));
+    let snapshot = snapshot_request(&main, Some(SNAPSHOT));
+    let newer = ui_request(&main, "save_ui_state", Some(NEWER_SNAPSHOT));
+    run(&queue).await; // actual newer ordinary IO supersedes the snapshot
+    assert!(matches!(
+        newer.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    let old = queue.lock().unwrap().remove(0);
+    old.await; // same authorized generation, but earlier ingress
+    refused(older.await.unwrap());
+    run(&queue).await;
+    assert!(snapshot_result(snapshot.await.unwrap())["continuity_error"].is_null());
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, NEWER_SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_lost_observer_retains_actual_io_and_unlock_waits_for_its_result() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let (edge, release) = BlockingIoBarrier::new();
+    *state
+        .native_text
+        .ui_state
+        .snapshots
+        .before_io
+        .lock()
+        .unwrap() = Some(edge.clone());
+    let reply = snapshot_request(&main, Some(SNAPSHOT));
+    let saving = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    saving.abort();
+    assert!(saving.await.unwrap_err().is_cancelled());
+    assert!(reply.await.is_err());
+    assert!(state.native_text.ui_state.lane.try_lock().is_err());
+    let g = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let reopened = invoke(&main, &g, SECRET);
+    let opening = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.native_text.ui_state.lock_waiting.notified(),
+    )
+    .await
+    .unwrap();
+    assert!(!opening.is_finished());
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(60), opening)
+        .await
+        .unwrap()
+        .unwrap();
+    success(reopened.await.unwrap());
+    assert_eq!(read_ui(&main, &queue).await, SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_old_admitted_success_cannot_erase_a_newer_delayed_capture_loss() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let earlier = snapshot_request(&main, Some(SNAPSHOT));
+    let (copy_edge, release_copy) = BlockingIoBarrier::new();
+    *state
+        .native_text
+        .ui_state
+        .snapshots
+        .before_publish
+        .lock()
+        .unwrap() = Some(copy_edge.clone());
+    let window = main.clone();
+    let copying = tokio::task::spawn_blocking(move || {
+        let oversized = "x".repeat(MAX_UI_STATE_BYTES + 1);
+        snapshot_request(&window, Some(&oversized))
+    });
+    tokio::time::timeout(Duration::from_secs(60), copy_edge.arrived.notified())
+        .await
+        .unwrap();
+    let (io_edge, release_io) = BlockingIoBarrier::new();
+    *state
+        .native_text
+        .ui_state
+        .snapshots
+        .before_io
+        .lock()
+        .unwrap() = Some(io_edge.clone());
+    let saving = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    tokio::time::timeout(Duration::from_secs(60), io_edge.arrived.notified())
+        .await
+        .unwrap();
+    // The older real Job is admitted. Publish the newer failed capture before
+    // allowing that actual disk write to succeed and record its outcome.
+    drop(release_copy);
+    let lost = copying.await.unwrap();
+    drop(release_io);
+    saving.await.unwrap();
+    assert!(snapshot_result(earlier.await.unwrap())["continuity_error"]
+        .as_str()
+        .unwrap()
+        .contains("too large"));
+    drop(queue.lock().unwrap().pop());
+    assert!(lost.await.is_err());
+    let close = close_request(&main, None, None);
+    run(&queue).await;
+    let close = snapshot_result(close.await.unwrap());
+    assert_eq!(close["deferred"], true);
+    assert!(close["continuity_error"]
+        .as_str()
+        .unwrap()
+        .contains("too large"));
+    let g = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let warning = invoke(&main, &g, SECRET);
+    run(&queue).await;
+    refused(warning.await.unwrap());
+    assert_locked(&state).await;
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, SNAPSHOT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing_either_vault() {
+    let root = tempfile::tempdir().unwrap();
+    let path_a = root.path().join("first");
+    let path_b = root.path().join("second");
+    let (first, main, queue) = app(path_a.clone(), None, true);
+    let (second, other, other_queue) = app(path_b.clone(), None, true);
+    unlock_current(&first, &main, &queue).await;
+    unlock_current(&second, &other, &other_queue).await;
+    for (window, requests, json) in [
+        (&main, &queue, SNAPSHOT),
+        (&other, &other_queue, NEWER_SNAPSHOT),
+    ] {
+        let saved = ui_request(window, "save_ui_state", Some(json));
+        run(requests).await;
+        assert!(matches!(
+            saved.await.unwrap(),
+            tauri::ipc::InvokeResponse::Ok(_)
+        ));
+    }
+    let before_a = std::fs::read(path_a.join("ui-state.bin")).unwrap();
+    let before_b = std::fs::read(path_b.join("ui-state.bin")).unwrap();
+    let old = snapshot_request(&main, Some(NEWER_SNAPSHOT));
+    let state = first.state::<AppState>();
+    let other_state = second.state::<AppState>();
+    let foreign = other_state.store.lock().await.take().unwrap();
+    let original = state.store.lock().await.replace(foreign).unwrap();
+    let original_target = state
+        .native_text
+        .ui_state
+        .install_target(other_state.native_text.ui_state.original_target().unwrap())
+        .unwrap();
+    let close = close_request(&main, None, None);
+    run(&queue).await;
+    let close = snapshot_result(close.await.unwrap());
+    assert_eq!(close["deferred"], true);
+    assert_eq!(close["continuity_discardable"], true);
+    assert!(close["continuity_error"].is_string());
+    drop(queue.lock().unwrap().pop());
+    assert!(old.await.is_err());
+    let acknowledged = close_request(&main, None, close["continuity_revision"].as_str());
+    run(&queue).await;
+    assert_eq!(
+        snapshot_result(acknowledged.await.unwrap())["deferred"],
+        false
+    );
+    assert_eq!(
+        std::fs::read(path_a.join("ui-state.bin")).unwrap(),
+        before_a
+    );
+    assert_eq!(
+        std::fs::read(path_b.join("ui-state.bin")).unwrap(),
+        before_b
+    );
+    let foreign = state.store.lock().await.replace(original).unwrap();
+    *other_state.store.lock().await = Some(foreign);
+    drop(state.native_text.ui_state.install_target(original_target));
+}

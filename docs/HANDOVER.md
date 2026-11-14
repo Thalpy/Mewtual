@@ -1,5 +1,13 @@
 # Mewtual; Handover
 
+Native lock snapshots now have bounded synchronous DATA custody, original-mount
+retry, exact close acknowledgements and response-bound warning receipts under
+adversarial validation. Chat V2 stays off; operational text authoring and
+acceptance remain unfinished. This continuation supersedes the older snapshot
+status paragraphs below. [Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-SNAPSHOTS.md).
+
+## Prior disabled checkpoints (before lock-snapshot integration)
+
 Original authenticated-mount binding for native ordinary UI-state IO is under
 validation. Same-root reauth retains canonical metadata; live foreign targets
 refuse. Native lock snapshots/pending retry are still unimplemented and V2 is off.

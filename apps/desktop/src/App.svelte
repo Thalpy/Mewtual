@@ -212,7 +212,7 @@
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import {
-    captureLockContinuity, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
+    captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
   import {
     DEFAULT_FILE_TRUST_POLICY, authorOverride, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
@@ -6670,6 +6670,7 @@
       const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret, expectedUiGeneration });
       if (!current()) return null;
       closeAfterContinuityError = false;
+      closeContinuityRevision = null;
       passphrase = "";
       revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
       sigilStrokes = [];
@@ -22316,6 +22317,7 @@
   // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
   // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
   let closeAfterContinuityError = false;
+  let closeContinuityRevision: string | null = null;
   // The live frontend-logging installation, kept so unmount can stop it. Not reactive state: it is
   // held purely so the teardown has something to call.
   let uiLogging: UiLogging | null = null;
@@ -22609,6 +22611,7 @@
           const result = await invoke<NativeVaultCloseOutcome>("close_vault_window", {
             uiStateJson: finalContinuityJson,
             discardContinuityError: closeAfterContinuityError,
+            discardContinuityRevision: closeContinuityRevision,
           });
           // A response means the window deliberately remained alive (continuity warning or native
           // destroy failure) and native locking is confirmed, so frontend teardown is now safe.
@@ -22616,10 +22619,15 @@
           releaseClose();
           if (result.history_error) {
             closeAfterContinuityError = false;
+            closeContinuityRevision = null;
             error = `The vault is locked, but message history has not finished saving. ${result.history_error}`;
           } else if (result.deferred) {
-            closeAfterContinuityError = true;
-            error = `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`;
+            const acknowledgement = closeContinuityAcknowledgement(result);
+            closeAfterContinuityError = acknowledgement.discard;
+            closeContinuityRevision = acknowledgement.revision;
+            error = acknowledgement.discard
+              ? `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`
+              : "The vault is locked. Screen state is still being saved. Try closing again.";
           } else if (result.destroy_error) {
             error = `The vault is locked, but the window could not close: ${result.destroy_error}`;
           }

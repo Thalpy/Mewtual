@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Native lock snapshots now have bounded synchronous DATA custody, original-mount
+retry, exact close acknowledgements and response-bound warning receipts under
+adversarial validation. Chat V2 stays off; operational text authoring and
+acceptance remain unfinished. This continuation supersedes the older snapshot
+status paragraphs below. [Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-SNAPSHOTS.md).
+
+## Prior disabled checkpoints (before lock-snapshot integration)
+
 prepare_ui_state_for_original retains an opaque authenticated-mount check
 through IO/publication. same_original compares the original Host allocation;
 it grants no current UI or SDK authority.
