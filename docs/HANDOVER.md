@@ -1,5 +1,12 @@
 # Mewtual; Handover
 
+Native text creation and retirement now have owning two-phase work captures
+under validation. Admitted preparations participate in original closure even
+when no row exists. Ten new regressions and all 56 affected source tests passed;
+the native controller/commands
+and wider Chat V2 remain unfinished and disabled.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-CAPTURE.md).
+
 Whole native text Source retirement is under validation. Cleanup now separates
 original key work, whole SDK/body destruction and original TCP drainage, retaining
 the same canonical evidence across lost workers. All 46 affected source tests
