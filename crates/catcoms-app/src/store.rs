@@ -65,13 +65,13 @@ pub use critical_namespaces::{
     NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextUiCandidate,
     NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
     NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultUpgrade,
-    NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget, NativeUiInvocationMetadata,
-    PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore, PreparedFreshV2TextFounder,
-    PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore, PreparedV2GovernanceLayoutStore,
-    ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
-    ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy, V2CurrentLayoutStore,
-    V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
+    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
+    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
+    PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
+    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
 };
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};

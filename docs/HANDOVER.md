@@ -1,5 +1,14 @@
 # Mewtual; Handover
 
+## Native authentication slot continuation (14 November, under validation)
+
+The real native verifier now returns a paid original cached-negative Check after
+releasing its MetadataWork slot. Root auth4/revocation5/native19 and frontend3441/
+check/build passed, as did native strict/check/build/startup/flows, both audits
+and static gates. Root strict fails582 unfinished-App errors; full Root/native CI
+remains pending. No typed UI persistence, operational send or completion is claimed.
+[Contract](communication-recovery/CHAT-V2-NATIVE-AUTH-CHECK.md).
+
 ## Native text UI lifecycle continuation (14 November, validation pending)
 
 Original-batch coalescing, failed-task original-counter recovery, prelude ordering

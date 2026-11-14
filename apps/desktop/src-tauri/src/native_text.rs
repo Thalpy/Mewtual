@@ -3,7 +3,7 @@
 //! The warm fixture uses this SAME synchronous router and authentication flow;
 //! its trusted Rust policy selects implementation, never grants authority.
 use super::*;
-use catcoms_app::store::{NativeTextVaultAuthentication, NativeUiInvocationBudget};
+use catcoms_app::store::{NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget};
 use tauri::ipc::{Invoke, InvokeBody};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -234,14 +234,19 @@ fn router<R: tauri::Runtime>(
 async fn authenticate_mounted(
     state: &AppState,
     secret: &[u8],
-) -> Result<Option<NativeTextVaultAuthentication>, String> {
+) -> Result<Option<NativeTextVaultAuthenticationCheck>, String> {
+    // Unique payment before capture; every early return drops it only AFTER
+    // the inner Store guard. Root returns an infallible whole capsule even Busy.
+    let credit = state
+        .native_text
+        .ui_budget
+        .prepare()
+        .map_err(|_| "Vault authentication is busy. Try again.")?;
     let work = {
         let guard = state.store.lock().await;
         match guard.as_ref() {
             None => return Ok(None),
-            Some(MountedVault::TextV2(vault)) => vault
-                .prepare_native_authentication()
-                .map_err(|_| "Vault authentication is busy or unavailable.")?,
+            Some(MountedVault::TextV2(vault)) => vault.prepare_native_authentication(credit),
             Some(MountedVault::Legacy(_)) => {
                 return Err("This vault is using the existing chat backend.".into())
             }
