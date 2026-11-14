@@ -361,7 +361,23 @@ pub(in crate::store) struct PhysicalMountNegative {
     identity: Arc<()>,
     negative: RequestCancellation,
 }
+/// Original physical lifetime atomic only. Unlike PhysicalMountNegative this
+/// performs no weak upgrade, sender observation or last-Owner destruction at
+/// a native final edge. Its retaining caller must independently pay metadata.
+pub(in crate::store) struct CachedPhysicalMountNegative {
+    life: revocation::CachedLife,
+}
+impl CachedPhysicalMountNegative {
+    pub(in crate::store) fn is_live_cached(&self) -> bool {
+        self.life.is_live()
+    }
+}
 impl MountOwner {
+    pub(in crate::store) fn capture_cached_physical_negative(&self) -> CachedPhysicalMountNegative {
+        CachedPhysicalMountNegative {
+            life: self.life.cached(),
+        }
+    }
     /// Borrow only this original owner's revocation atomic. Unlike observer(),
     /// this neither allocates Authority nor subscribes/borrows a watch channel.
     /// It is a negative check, never a permit or a retained lifetime witness.

@@ -43,6 +43,15 @@ impl Handler {
             _payment: self.payment.clone(),
         }
     }
+    /// Original cached gate only; never retain cold evidence or finite files
+    /// merely to check this negative after authentication releases its slot.
+    pub(in crate::store::critical_namespaces::native_registry) fn observe_open(
+        &self,
+    ) -> OpenNegative {
+        OpenNegative {
+            original: self.gate.clone(),
+        }
+    }
     /// Consume the SAME already-reserved full preparation invoice. This does
     /// not clone a debit or infer new capacity from extending its lifetime.
     pub(in crate::store::critical_namespaces::native_registry) fn from_reserved(
@@ -143,6 +152,17 @@ struct Gate {
     active: AtomicU64,
     serial: AtomicU64,
     _payment: Arc<Payment>,
+}
+
+/// Narrow original gate pin. Gate already owns its payment; retaining Handler
+/// here would unnecessarily retain Handler.cold and its physical-session tail.
+pub(in crate::store::critical_namespaces::native_registry) struct OpenNegative {
+    original: Arc<Gate>,
+}
+impl OpenNegative {
+    pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
+        self.original.active.load(Ordering::SeqCst) != CLOSED
+    }
 }
 
 pub(in crate::store::critical_namespaces::native_registry) struct Claim {

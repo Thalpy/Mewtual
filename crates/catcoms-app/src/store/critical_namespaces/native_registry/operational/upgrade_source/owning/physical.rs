@@ -231,7 +231,28 @@ impl Physical {
         cell::rename_metadata(&self.cell, self.current()?, &self.handler, request, rng)
     }
 }
+/// Cached original negatives only, with no Physical/Current/Store/slot/cold
+/// evidence. Its caller owns an independent finite metadata invoice.
+pub(in crate::store::critical_namespaces::native_registry) struct AuthenticationNegative {
+    gate: lifecycle_admission::OpenNegative,
+    mount: crate::store::chat_admission::CachedPhysicalMountNegative,
+}
+impl AuthenticationNegative {
+    pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
+        self.gate.is_live_cached() && self.mount.is_live_cached()
+    }
+}
 impl MetadataWork {
+    /// Outside every guard, after original-pool validation. Capture the SAME
+    /// mount while this work still retains the physical Store. No file reads.
+    pub(in crate::store::critical_namespaces::native_registry) fn authentication_negative(
+        &self,
+    ) -> Result<AuthenticationNegative, AppError> {
+        Ok(AuthenticationNegative {
+            gate: self.physical.handler.observe_open(),
+            mount: self.physical.current()?.capture_cached_physical_negative(),
+        })
+    }
     pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
         self.physical.open_for_custody()
     }

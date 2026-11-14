@@ -107,6 +107,7 @@ pub(in crate::store) const V2_CURRENT_SCOPE_METADATA_BYTES: usize =
         + std::mem::size_of::<V2CurrentBinding>()
         + std::mem::size_of::<AdmissionOwner>()
         + std::mem::size_of::<revocation::Owner>()
+        + revocation::LIFE_ALLOCATION_BYTES
         + 2 * std::mem::size_of::<AdmissionAuthority>()
         + std::mem::size_of::<OriginalV2GenesisGroupObservation>()
         + 64

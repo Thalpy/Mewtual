@@ -627,6 +627,13 @@ impl V2CurrentLayoutStore {
         }
         Ok(&self.store)
     }
+    /// Capture from THIS original Store while finite physical work owns it.
+    /// No logical lookup, new observer, sender custody or replacement is used.
+    pub(in crate::store::critical_namespaces) fn capture_cached_physical_negative(
+        &self,
+    ) -> chat_admission::CachedPhysicalMountNegative {
+        self.store.chat_mount.capture_cached_physical_negative()
+    }
     /// Fixed negative for capture under a native guard. Borrow the already-owned
     /// revocation atomic directly: no observer, weak upgrade, watch/account lock,
     /// IO, allocation or formatted refusal. Original file/row/command checks

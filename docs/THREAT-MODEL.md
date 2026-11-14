@@ -1,5 +1,12 @@
 # Threat model; client integrity & enforcement boundaries
 
+The disabled native authentication continuation retains original gate/Life/Host
+negatives after destroying its actual physical work. It cannot keep a revoking
+Owner/Sender alive, use a replacement mount, refund refusal credit under Store,
+or turn successful key verification into UI/SDK authorization. The additional
+Life heap allocation is explicitly included in funded-owner metadata.
+[Boundary and pending tests](communication-recovery/CHAT-V2-NATIVE-AUTH-CHECK.md).
+
 The disabled native text UI retirement path preserves original counter ownership
 through lost waiters, dropped tasks and replacement mounts. It never substitutes
 an empty replacement registry for the original CLOSED+zero proof. An outer close

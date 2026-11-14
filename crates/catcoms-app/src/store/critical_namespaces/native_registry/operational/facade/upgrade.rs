@@ -303,4 +303,214 @@ mod tests {
         .unwrap();
         assert_eq!(cold.row_count_data().unwrap(), records().len());
     }
+
+    struct AuthFixture {
+        vault: NativeTextVault,
+        budget: NativeUiInvocationBudget,
+        pool: CriticalCatalogReadPool,
+        generation: Arc<AtomicU64>,
+        authorized: Arc<AtomicU64>,
+        requested: Arc<AtomicBool>,
+    }
+    fn auth_fixture(path: &Path, seed: u64) -> AuthFixture {
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let pool =
+            CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity()).unwrap();
+        let budget = NativeUiInvocationBudget::new(pool.clone()).unwrap();
+        let generation = Arc::new(AtomicU64::new(7));
+        let authorized = Arc::new(AtomicU64::new(7));
+        let requested = Arc::new(AtomicBool::new(false));
+        let mut plan = NativeTextVaultUpgrade::prepare(
+            index2(path, &mut rng),
+            generation.clone(),
+            authorized.clone(),
+            requested.clone(),
+            budget.clone(),
+        )
+        .unwrap();
+        plan.retry(&mut rng).unwrap();
+        AuthFixture {
+            vault: plan.into_vault().unwrap(),
+            budget,
+            pool,
+            generation,
+            authorized,
+            requested,
+        }
+    }
+    fn original_index(
+        vault: &NativeTextVault,
+    ) -> &super::super::super::upgrade_source::owning::Store {
+        match &vault.index {
+            IndexOwner::Version3(index) => index,
+            _ => panic!("real selected3 control"),
+        }
+    }
+    fn wrapper_calls() -> usize {
+        super::super::AUTH_VERIFY_CALLS.with(|count| count.replace(0))
+    }
+
+    #[test]
+    fn native_auth_check_releases_original_slot_and_session_without_retaining_physical_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = auth_fixture(dir.path(), 0xcd01);
+        let baseline = f.pool.charged_for_test();
+        let prepared = f
+            .vault
+            .prepare_native_authentication(f.budget.prepare().unwrap());
+        assert!(original_index(&f.vault).capture_metadata_work().is_none());
+        assert_eq!(
+            f.pool.charged_for_test(),
+            baseline + super::super::super::native_ui::INVOCATION_BYTES
+        );
+        wrapper_calls();
+        let check = prepared.verify(SECRET).unwrap();
+        assert_eq!(wrapper_calls(), 1);
+        assert!(check.is_live_cached());
+        let mut next = original_index(&f.vault)
+            .capture_metadata_work()
+            .expect("original physical slot released before finalization");
+        assert_eq!(next.row_count_data().unwrap(), records().len());
+        drop(next);
+        // UI lock is deliberately narrower than whole mount authentication.
+        f.generation.store(8, Ordering::SeqCst);
+        f.authorized.store(0, Ordering::SeqCst);
+        f.requested.store(true, Ordering::SeqCst);
+        assert!(check.is_live_cached());
+        drop(f.vault);
+        assert!(!check.is_live_cached());
+        // This is the actual strict3 storage opener and real vault session.
+        // A retained Handler.cold/Physical/Current would return VaultBusy here.
+        let mut reopened = mount::NativeIndexStore::open_lifecycle3_for_test(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+        .unwrap();
+        assert_eq!(reopened.row_count_data().unwrap(), records().len());
+        assert!(
+            !check.is_live_cached(),
+            "replacement must not retarget the original negative"
+        );
+        drop(reopened);
+        drop(check);
+        assert_eq!(f.pool.charged_for_test(), 0);
+    }
+
+    #[test]
+    fn native_auth_check_validates_original_credit_before_wrapper_and_keeps_refusal_payment() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = auth_fixture(dir.path(), 0xcd02);
+        let foreign_pool =
+            CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity()).unwrap();
+        let foreign = NativeUiInvocationBudget::new(foreign_pool.clone()).unwrap();
+        wrapper_calls();
+        let prepared = f
+            .vault
+            .prepare_native_authentication(foreign.prepare().unwrap());
+        assert!(
+            prepared.work.is_some(),
+            "the original prepaid capture remains separate from later fee validation"
+        );
+        assert!(prepared.verify(SECRET).is_err());
+        assert_eq!(
+            wrapper_calls(),
+            0,
+            "foreign credit reached actual wrapper verification"
+        );
+        assert_eq!(foreign_pool.charged_for_test(), 0);
+        let busy = original_index(&f.vault).capture_metadata_work().unwrap();
+        let baseline = f.pool.charged_for_test();
+        let prepared = f
+            .vault
+            .prepare_native_authentication(f.budget.prepare().unwrap());
+        assert_eq!(
+            f.pool.charged_for_test(),
+            baseline + super::super::super::native_ui::INVOCATION_BYTES,
+            "Busy capture refunded the caller's owned fee inside its guard"
+        );
+        assert!(prepared.verify(SECRET).is_err());
+        assert_eq!(wrapper_calls(), 0);
+        assert_eq!(f.pool.charged_for_test(), baseline);
+        drop(busy);
+        assert!(f
+            .vault
+            .prepare_native_authentication(f.budget.prepare().unwrap())
+            .verify(SECRET)
+            .is_ok());
+    }
+
+    #[test]
+    fn native_auth_check_independently_tracks_original_host_gate_and_mount() {
+        for n in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let f = auth_fixture(dir.path(), 0xcd10 + n);
+            let check = f
+                .vault
+                .prepare_native_authentication(f.budget.prepare().unwrap())
+                .verify(SECRET)
+                .unwrap();
+            assert!(check.is_live_cached());
+            match n {
+                0 => {
+                    f.vault.ui.close_first();
+                    assert!(original_index(&f.vault).handler_for_test().is_open_cached());
+                    assert!(original_index(&f.vault)
+                        .actual_store_for_test()
+                        .unwrap()
+                        .chat_mount
+                        .is_live_cached());
+                }
+                1 => {
+                    original_index(&f.vault).close_admission();
+                    assert!(check.host.is_open());
+                    assert!(original_index(&f.vault)
+                        .actual_store_for_test()
+                        .unwrap()
+                        .chat_mount
+                        .is_live_cached());
+                }
+                _ => {
+                    original_index(&f.vault)
+                        .actual_store_for_test()
+                        .unwrap()
+                        .revoke_chat_mount();
+                    assert!(check.host.is_open());
+                    assert!(original_index(&f.vault).handler_for_test().is_open_cached());
+                }
+            }
+            assert!(
+                !check.is_live_cached(),
+                "each independent original negative must fence finalization"
+            );
+        }
+    }
+
+    #[test]
+    fn native_auth_check_version2_refuses_outside_capture_without_refunding_owned_credit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xcd20);
+        let pool =
+            CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity()).unwrap();
+        let budget = NativeUiInvocationBudget::new(pool.clone()).unwrap();
+        let vault = NativeTextVault::from_trusted_host(
+            index2(dir.path(), &mut rng),
+            Arc::new(AtomicU64::new(7)),
+            Arc::new(AtomicU64::new(7)),
+            Arc::new(AtomicBool::new(false)),
+            budget.clone(),
+        )
+        .unwrap();
+        let baseline = pool.charged_for_test();
+        let prepared = vault.prepare_native_authentication(budget.prepare().unwrap());
+        assert_eq!(
+            pool.charged_for_test(),
+            baseline + super::super::super::native_ui::INVOCATION_BYTES
+        );
+        wrapper_calls();
+        assert!(prepared.verify(SECRET).is_err());
+        assert_eq!(wrapper_calls(), 0);
+        assert_eq!(pool.charged_for_test(), baseline);
+    }
 }

@@ -16,7 +16,7 @@ use std::sync::{
 };
 
 const GENERATIONS: usize = 32;
-const INVOCATION_BYTES: usize = 4096;
+pub(super) const INVOCATION_BYTES: usize = 4096;
 const HOST_BYTES: usize = 4096;
 const REGISTRY_BYTES: usize = 16 * 1024;
 const MINIMUM_CAPACITY: usize = 2 * GENERATIONS * INVOCATION_BYTES + HOST_BYTES + REGISTRY_BYTES;
@@ -38,6 +38,12 @@ impl NativeUiInvocationBudget {
             return Err(refused());
         }
         Ok(Self { pool })
+    }
+    pub(super) fn require_credit(
+        &self,
+        credit: &NativeUiInvocationMetadata,
+    ) -> Result<(), AppError> {
+        credit.fee.require(&self.pool, INVOCATION_BYTES)
     }
     /// Outside all guards, before original-vault capture. One affine credit can
     /// construct at most one candidate, including a losing/transient candidate.
@@ -131,6 +137,9 @@ impl UiAdmissionOwner {
                 _fee: registry_fee,
             }),
         })
+    }
+    pub(super) fn invocation_budget(&self) -> NativeUiInvocationBudget {
+        self.registry.budget.clone()
     }
     pub(super) fn observe_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
         self.binding.observe_mount()

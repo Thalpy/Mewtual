@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+Native text authentication is releasing its physical slot before finalization
+while retaining independently paid original Host/index/mount cached negatives.
+The actual native consumer is under validation and remains disabled; typed UI
+continuity is still unfinished.
+[Contract](communication-recovery/CHAT-V2-NATIVE-AUTH-CHECK.md).
+
 The disabled native text path is adding original UI-key retirement ownership and
 lock/unlock/close ordering. Key-counter drainage is distinct from whole shutdown;
 UI continuity and operational text send remain unfinished.

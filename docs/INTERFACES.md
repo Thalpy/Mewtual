@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`prepare_native_authentication(credit)` now returns an infallible owning capture,
+including Busy/closed/version2 refusals. Outside guards, verify validates the
+original pool and secret, destroys whole physical work, and returns an opaque
+non-Clone NativeTextVaultAuthenticationCheck. Its cached checks grant no authority.
+[Capture and lifetime contract](communication-recovery/CHAT-V2-NATIVE-AUTH-CHECK.md).
+
 `NativeTextUiRetirementDrain` is a non-cloneable negative-only observation of
 one original fixed retirement batch. It grants no owner, key or reopen access.
 Native installs it before publishing its coalesced task and requires CLOSED+zero

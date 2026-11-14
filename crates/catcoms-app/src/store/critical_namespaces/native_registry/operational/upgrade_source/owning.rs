@@ -9,7 +9,9 @@ use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInve
 use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
 mod physical;
-pub(in crate::store::critical_namespaces::native_registry) use physical::MetadataWork;
+pub(in crate::store::critical_namespaces::native_registry) use physical::{
+    AuthenticationNegative, MetadataWork,
+};
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]

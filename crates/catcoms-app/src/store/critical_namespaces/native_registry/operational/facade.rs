@@ -27,37 +27,86 @@ enum IndexOwner {
     Version2(mount::NativeIndexStore),
     Version3(super::upgrade_source::owning::Store),
 }
-/// One non-cloneable, bounded authentication task for the original selected3
-/// physical mount. Drop outside every native/Root guard: it can own the final
-/// files. Verification grants no session, Source, SDK or row authority.
+/// Infallible original capture, including refusals. Always retain this WHOLE
+/// capsule until outside every guard: even Busy/Version2 holds its unique fee,
+/// and a present work capsule can own the final original physical files.
 pub struct NativeTextVaultAuthentication {
-    work: super::upgrade_source::owning::MetadataWork,
+    work: Option<super::upgrade_source::owning::MetadataWork>,
     host: catcoms_rt::NativeChatUiMountObservation,
+    expected: NativeUiInvocationBudget,
+    // LAST: all original metadata/custody retires before this independent fee.
+    credit: NativeUiInvocationMetadata,
 }
-impl std::fmt::Debug for NativeTextVaultAuthentication {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NativeTextVaultAuthentication")
-            .finish_non_exhaustive()
-    }
+/// Successful verification's original cached negatives only. No physical slot,
+/// Store, close owner, Sender, cold lease, UI/Source/SDK grant or weak upgrade.
+/// Keep the whole non-Clone observation outside native finalization guards.
+pub struct NativeTextVaultAuthenticationCheck {
+    host: catcoms_rt::NativeChatUiMountObservation,
+    physical: super::upgrade_source::owning::AuthenticationNegative,
+    _credit: NativeUiInvocationMetadata,
 }
 impl NativeTextVaultAuthentication {
-    /// Blocking KDF work; execute on the blocking pool, outside native guards.
-    pub fn verify(self, secret: &[u8]) -> Result<Self, AppError> {
-        if !self.is_live_cached() {
+    /// Blocking KDF verification outside EVERY guard. An independently funded
+    /// invocation is checked against this original host's pool BEFORE either
+    /// missing-work refusal or KDF. On success the WHOLE physical work is dropped
+    /// before returning cached negatives, so continuity may capture its slot.
+    pub fn verify(mut self, secret: &[u8]) -> Result<NativeTextVaultAuthenticationCheck, AppError> {
+        self.expected.require_credit(&self.credit)?;
+        if !self.host.is_open() {
             return Err(refused());
         }
-        self.work.verify_native_passphrase(secret)?;
-        if !self.is_live_cached() {
+        let work = self.work.take().ok_or_else(refused)?;
+        if !work.is_live_cached() {
             return Err(refused());
         }
-        Ok(self)
-    }
-    /// Original host/physical negatives only. Retain this task through native
-    /// authorization commit; no IO, allocation, new pin or UI permission here.
-    pub fn is_live_cached(&self) -> bool {
-        self.host.is_open() && self.work.is_live_cached()
+        let physical = work.authentication_negative()?;
+        #[cfg(test)]
+        AUTH_VERIFY_CALLS.with(|count| count.set(count.get() + 1));
+        work.verify_native_passphrase(secret)?;
+        let check = NativeTextVaultAuthenticationCheck {
+            host: self.host,
+            physical,
+            _credit: self.credit,
+        };
+        // No guard surrounds this destructor. SlotAck releases only after any
+        // last physical/Current destruction, using its original payment tail.
+        drop(work);
+        if !check.is_live_cached() {
+            return Err(refused());
+        }
+        Ok(check)
     }
 }
+impl NativeTextVaultAuthenticationCheck {
+    /// Cached original negatives only, not proof of UI authorization. This
+    /// reads atomics and cannot drop a temporarily upgraded revoking owner.
+    pub fn is_live_cached(&self) -> bool {
+        self.host.is_open() && self.physical.is_live_cached()
+    }
+}
+macro_rules! opaque_auth_debug {
+    ($($ty:ty),+) => {$(impl std::fmt::Debug for $ty {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct(stringify!($ty)).finish_non_exhaustive()
+        }
+    })+};
+}
+opaque_auth_debug!(
+    NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck
+);
+
+// Physical work already has its fixed original slot. This separately pins the
+// actual capture/check/temporary metadata overlap to ONE unique invocation fee;
+// it makes no claim about KDF working memory, native IPC or browser buffers.
+const _: () = assert!(
+    std::mem::size_of::<NativeTextVaultAuthentication>()
+        + 2 * std::mem::size_of::<NativeTextVaultAuthenticationCheck>()
+        + std::mem::size_of::<super::upgrade_source::owning::AuthenticationNegative>()
+        + std::mem::size_of::<super::upgrade_source::owning::MetadataWork>()
+        + 32 * std::mem::size_of::<usize>()
+        <= super::native_ui::INVOCATION_BYTES
+);
 
 impl NativeTextVault {
     /// Consume an original, uninstalled native index owner. This may allocate
@@ -133,19 +182,24 @@ impl NativeTextVault {
         self.ui.collect_drained()
     }
 
-    /// Capture one finite physical owner under the native store guard. The
-    /// expensive keystore verification MUST run after that guard has ended.
-    /// This is no UI authorization; native commits its original generation.
-    pub fn prepare_native_authentication(&self) -> Result<NativeTextVaultAuthentication, AppError> {
-        match &self.index {
-            IndexOwner::Version3(index) => index
-                .capture_metadata_work()
-                .map(|work| NativeTextVaultAuthentication {
-                    work,
-                    host: self.ui.observe_mount(),
-                })
-                .ok_or_else(refused),
-            IndexOwner::Version2(_) => Err(refused()),
+    /// Infallible fixed capture under native's Store guard. Pay credit BEFORE
+    /// that guard. Busy/Version2 is encoded as absent work. A closed Host may
+    /// still have captured work while index closure follows; verify refuses it
+    /// outside guards. Every refusal retains the SAME credit until then.
+    /// It grants no permission; verify the caller's secret outside every guard.
+    pub fn prepare_native_authentication(
+        &self,
+        credit: NativeUiInvocationMetadata,
+    ) -> NativeTextVaultAuthentication {
+        let work = match &self.index {
+            IndexOwner::Version3(index) => index.capture_metadata_work(),
+            IndexOwner::Version2(_) => None,
+        };
+        NativeTextVaultAuthentication {
+            work,
+            host: self.ui.observe_mount(),
+            expected: self.ui.invocation_budget(),
+            credit,
         }
     }
 
@@ -178,3 +232,6 @@ impl std::fmt::Debug for NativeTextVault {
         f.debug_struct("NativeTextVault").finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+thread_local! { static AUTH_VERIFY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
