@@ -1,7 +1,7 @@
 //! Finite original physical3 custody, separate from affine admission. No raw
 //! Current/Store, owned index, SDK entry or native command credential escapes.
 use super::*;
-use crate::store::critical_namespaces::native_registry::lifecycle::{cell, rename};
+use crate::store::critical_namespaces::native_registry::lifecycle::{cell, refresh, rename};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
@@ -140,6 +140,13 @@ impl Physical {
         drop(inventory); // actual buffers drain before cell unlock
         Ok(count)
     }
+    pub(super) fn refresh_legacy_invite_data(
+        &self,
+        request: &refresh::Request,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(rename::Metadata, Option<cell::CompletedDebt>), AppError> {
+        cell::refresh_legacy_invite(&self.cell, self.current()?, &self.handler, request, rng)
+    }
     pub(super) fn rename_metadata_data(
         &self,
         request: &rename::Request,
@@ -153,6 +160,13 @@ impl MetadataWork {
         &mut self,
     ) -> Result<usize, AppError> {
         self.physical.row_count_data()
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn refresh_legacy_invite_data(
+        &mut self,
+        request: &refresh::Request,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(rename::Metadata, Option<cell::CompletedDebt>), AppError> {
+        self.physical.refresh_legacy_invite_data(request, rng)
     }
     pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata_data(
         &mut self,

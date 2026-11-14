@@ -24,7 +24,7 @@ enum Evidence {
         io: Box<UpgradeIo>,
         output: Box<preparation::Output>,
     },
-    IndexRenamed {
+    IndexCommitted {
         io: Box<IndexCommitIo>,
         frame: Zeroizing<Vec<u8>>,
     },
@@ -74,12 +74,12 @@ impl Handler {
             // THIS inventory through effect and final exposure, never recapture
             // equal-looking objects after repair or drop its required Stage.
             let proof = super::wal::classify(store, &inventory)?;
-            let evidence = if proof.decision() == super::wal::Decision::Rename {
+            let evidence = if proof.decision().is_commit() {
                 let frame = Zeroizing::new(inventory.index_stage().ok_or_else(refused)?.to_vec());
                 let mut io = IndexCommitIo::recover(store, inventory, proof, &frame)?;
                 io.commit(store, &frame)?;
                 io.require_complete(store, &frame)?;
-                Evidence::IndexRenamed {
+                Evidence::IndexCommitted {
                     io: Box::new(io),
                     frame,
                 }
@@ -136,7 +136,7 @@ impl Handler {
                 inventory.require_after_join(store, catalog)
             }
             Evidence::Repaired { io, output } => io.require_complete(store, &output.bytes()),
-            Evidence::IndexRenamed { io, frame } => io.require_complete(store, frame),
+            Evidence::IndexCommitted { io, frame } => io.require_complete(store, frame),
             Evidence::IndexCleaned { io } => io.require_complete(store),
         };
         drop(observation); // No cell/catalog/Current guard; files then session.

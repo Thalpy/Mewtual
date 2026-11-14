@@ -1,7 +1,7 @@
 //! One normal3 transaction retained inside the affine selected owner. The
 //! mutex is still held across actual IO: exclusive Rust borrowing alone would
 //! not poison the state when a file effect unwinds. Poison requires cold open.
-use super::{admission, preparation, rename, wal, *};
+use super::{admission, metadata, preparation, refresh, rename, wal, *};
 use crate::store::{
     critical_namespaces::native_registry::preparation::NativeRegistryHandler,
     persistence::native_registry::lifecycle::upgrade::{index::IndexCommitIo, UpgradeInventory},
@@ -45,7 +45,7 @@ struct Transaction {
     frame: Zeroizing<Vec<u8>>,
     _selected: Box<data::Index>,
     _candidate: Box<data::Index>,
-    request: rename::Request,
+    request: metadata::Request,
     result: rename::Metadata,
     claim: Option<admission::Claim>,
     // Original physical exclusion outlives every file/buffer, even if the
@@ -81,7 +81,8 @@ pub(in crate::store::critical_namespaces::native_registry) const METADATA_BYTES:
         + std::mem::size_of::<IndexCommitIo>()
     + std::mem::size_of::<crate::store::persistence::native_registry::lifecycle::upgrade::index::IndexStageCleanup>()
         + std::mem::size_of::<wal::VerifiedWal>())
-    + 1024;
+    + 1024
+    + metadata::RETAINED_PAYLOAD;
 
 /// A CAS on local metadata, not an invocation-receipt protocol. Exact retained
 /// retries share the frozen candidate and draw no RNG. After completion/cold
@@ -94,14 +95,46 @@ pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata(
     request: &rename::Request,
     rng: &mut impl CryptoRngCore,
 ) -> Result<(rename::Metadata, Option<CompletedDebt>), AppError> {
-    if request.name.len() > super::super::data::MAX_NAME {
-        return Err(refused());
-    }
+    change_metadata(
+        cell,
+        current,
+        handler,
+        metadata::Input::Rename(request),
+        rng,
+    )
+}
+
+/// The same cell, claim and outgoing debt as Rename; this cannot overlap it.
+pub(in crate::store::critical_namespaces::native_registry) fn refresh_legacy_invite(
+    cell: &Mutex<Cell>,
+    current: &V2CurrentLayoutStore,
+    handler: &admission::Handler,
+    request: &refresh::Request,
+    rng: &mut impl CryptoRngCore,
+) -> Result<(rename::Metadata, Option<CompletedDebt>), AppError> {
+    change_metadata(
+        cell,
+        current,
+        handler,
+        metadata::Input::Refresh(request),
+        rng,
+    )
+}
+
+fn change_metadata(
+    cell: &Mutex<Cell>,
+    current: &V2CurrentLayoutStore,
+    handler: &admission::Handler,
+    request: metadata::Input<'_>,
+    rng: &mut impl CryptoRngCore,
+) -> Result<(rename::Metadata, Option<CompletedDebt>), AppError> {
+    // Bound before touching files, scanning equality or cloning retained input.
+    request.require_bounded()?;
     let mut cell = cell.try_lock().map_err(|_| refused())?;
     handler.require()?;
     let store = current.checked_store()?;
     if let Some(pending) = &cell.pending {
-        if &pending.request != request {
+        if !request.matches(&pending.request) {
             return Err(refused());
         }
     } else {
@@ -116,7 +149,7 @@ pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata(
         }
         let (selected, _) = preparation::decode_selected_data(store, &inventory)?;
         let parent = *blake3::hash(inventory.index()).as_bytes();
-        let plan = rename::prepare(selected, request, parent)?;
+        let plan = request.prepare(selected, parent)?;
         let rename::Plan::Change {
             selected,
             candidate,
@@ -143,7 +176,8 @@ pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata(
         let derived = Zeroizing::new(blake3::derive_key(preparation::INDEX_KEY, key.as_slice()));
         let plain = Zeroizing::new(candidate.encode_data()?);
         let frame = Zeroizing::new(crate::store::frame(&seal(&derived, &plain, rng)?));
-        let proof = wal::verify_warm_rename(store, &inventory, &candidate, &frame)?;
+        let proof =
+            wal::verify_warm_metadata(store, &inventory, &candidate, &frame, request.kind())?;
         let io = IndexCommitIo::prepare(store, inventory, proof, &frame)?;
         // All allocations/preparation precede the writer and final claim.
         let mut transaction = Transaction {
@@ -151,12 +185,7 @@ pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata(
             frame,
             _selected: selected,
             _candidate: candidate,
-            request: rename::Request {
-                id: request.id,
-                identity: request.identity,
-                expected_revision: request.expected_revision,
-                name: request.name.clone(),
-            },
+            request: request.freeze(),
             result,
             claim: None,
             _session: store._session.retain_for_physical_work(),

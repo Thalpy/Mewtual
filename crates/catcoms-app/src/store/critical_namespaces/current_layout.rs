@@ -550,6 +550,8 @@ impl V2CurrentLayoutStore {
         Ok(source)
     }
     pub(in crate::store) fn checked_store(&self) -> Result<&ServerStore, AppError> {
+        #[cfg(test)]
+        CHECKED_STORE_ENTRIES.with(|entries| entries.set(entries.get().saturating_add(1)));
         self.store.validate_mounted_current_layout()?;
         Ok(&self.store)
     }
@@ -574,3 +576,14 @@ impl V2CurrentLayoutStore {
 
 #[cfg(test)]
 mod tests;
+
+// Count the actual entry, before its first marker/file read. Thread-local test
+// observation cannot supply a Store, skip a check or affect another test's IO.
+#[cfg(test)]
+thread_local! {
+    static CHECKED_STORE_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(in crate::store::critical_namespaces) fn take_checked_store_entries_for_test() -> usize {
+    CHECKED_STORE_ENTRIES.with(|entries| entries.replace(0))
+}

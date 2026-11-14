@@ -10,8 +10,10 @@ pub(super) mod cell;
 mod codec;
 mod data;
 mod inspection;
+mod metadata;
 mod migration;
 pub(super) mod preparation;
+pub(super) mod refresh;
 pub(super) mod rename;
 pub(super) mod wal;
 

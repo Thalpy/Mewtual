@@ -79,7 +79,7 @@ impl IndexCommitIo {
     ) -> Result<Self, AppError> {
         original.require(store)?;
         proof.require_inventory(&original)?;
-        if proof.decision() != Decision::Rename
+        if !proof.decision().is_commit()
             || proof.has_stage()
             || original.index_stage().is_some()
             || !(40..=MAX_INDEX_FRAME).contains(&candidate.len())
@@ -106,7 +106,7 @@ impl IndexCommitIo {
     ) -> Result<Self, AppError> {
         original.require(store)?;
         proof.require_inventory(&original)?;
-        if proof.decision() != Decision::Rename
+        if !proof.decision().is_commit()
             || !proof.has_stage()
             || original.index_stage() != Some(candidate)
             || !(40..=MAX_INDEX_FRAME).contains(&candidate.len())

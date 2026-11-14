@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The private normal3 `refresh_legacy_invite_data` method stores already-minted
+active Legacy invite DATA. Its whole tagged request is retained in Rename's
+original cell, using the same revision, physical custody and outgoing debt.
+It provides no native command, minting or SDK authority.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-INDEX3-INVITE.md).
+
 The private index3 Store can capture one affine `MetadataWork` for its original
 physical allocation. Fixed negative capture is atomic/Arc-only; actual count and
 Rename still acquire the same cell and original claims. The capsule exposes no

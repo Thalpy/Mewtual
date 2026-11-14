@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+Normal3 Legacy invite refresh shares Rename's original metadata cell and
+revision. Full tagged-input equality prevents cross-operation retry takeover;
+the first bound check precedes IO/copy and the independent invoice explicitly
+pays one maximum retained invite. Warm proof derives the sealed successor kind;
+cold IO permits exactly Rename or Refresh, never an arbitrary non-cleanup kind.
+This stores DATA, with native command/minting/join authority still unfinished.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-INDEX3-INVITE.md).
+
 Physical custody cannot reopen native index admission. Selected3's finite work
 capsule retains the SAME original physical allocation; its slot acknowledgement
 follows actual cell/Current destruction and retains a narrow payer with no
@@ -34,7 +42,7 @@ opener. Its inventory-bound semantic proof requires the exact held JOIN successo
 when one was authenticated; disappearance cannot become an old-catalog success.
 No fresh capture substitutes for those identities at exposure. This remains
 storage DATA and grants no SDK/native authority. The private normal3 inspector
-now supports only an exact Rename successor, raw duplicate, qualified short
+now supports an exact Rename or Legacy invite-refresh successor, raw duplicate, qualified short
 Stage or actual AEAD failure. Authenticated unsupported work stays untouched.
 Its proof binds the same inventory and actual selected/Stage hashes; original
 IO/cleanup survives common opening with no fresh post-effect adoption. A real

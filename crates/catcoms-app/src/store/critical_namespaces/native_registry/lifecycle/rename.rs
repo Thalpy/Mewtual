@@ -5,7 +5,7 @@ use super::{
     *,
 };
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(in crate::store::critical_namespaces::native_registry) struct Request {
     pub(in crate::store::critical_namespaces::native_registry) id: u64,
     pub(in crate::store::critical_namespaces::native_registry) identity: [u8; 32],
