@@ -159,3 +159,53 @@ and Linux frontend 3,441/check/build pass. The `939ea602` member-storage workflo
 43553131305 passes on both platforms after correcting genuine cohort counts.
 Root full tests are still running; these results are not full sign-off for the
 new retry correction. Native command and Chat V2 activation remain unfinished.
+
+## Separate wire and startup-pressure contracts (14 November)
+
+The next Windows run 43556397080 passed QUIC/RR but exposed the predecessor's
+retry amplification directly: the old endpoint adopted 1,129 topics, had not
+adopted the target, and recorded 53,783 signed attempts with no successful
+publication. The current endpoint adopted 2,000 and published 563 payloads. The
+old implementation cannot be retroactively corrected by this dependency update.
+These observations and the synchronous whole-queue retry call path identify a
+predecessor starvation problem; they do not prove every stalled receive detail.
+
+The fixture now states two different contracts explicitly:
+
+- Old/new wire compatibility waits for actual target-topic adoption before bulk
+  publication. It still requires real bidirectional RR, exact signed near 60 KiB
+  gossip, and live-process Mesh withdrawal. This is a deliberate scope change:
+  it does not claim mixed-version startup resilience.
+- Current/current pressure starts with no server subscriptions. The client must
+  prove exactly 128 originals held for NoPeers, with target absent and exactly
+  7,864,320 held bytes. It sends no replacement originals. A second actual RR
+  must complete BEFORE the controller releases subscriptions. The server then
+  admits 2,000 subscriptions while continuing to service traffic, and must receive
+  a serial from those original 128 messages. Both original 15s exchange limits and
+  one 45s controller deadline per pair remain unchanged.
+
+The pressure client's signing oracle requires 256..=1,280 attempts: initial 128,
+retained target retries, and the conservative allowance for every 2s timer pass
+inside 15s. This both checks the oracle is active and rejects wholesale retry per
+unrelated subscription even on a fast host. Hold observations publish their full
+tuple before a Release count, which the pressure-client task consumes with Acquire; the Python controller reads its completed marker.
+Both pressure processes are proven to use the same current binary/stack; their
+proof is separate from the unchanged-source predecessor proof.
+
+Both real scenarios pass locally, including the final pressure RR and signing
+range. The pressure client records 256 signed attempts, 128 successful local
+publications and 128 first holds. An actual pinned old/old negative control
+reached the same held/RR barriers, then failed the signed-attempt-bound assertion;
+its earlier helper did not print the actual count, and no number is claimed.
+Strict Net all-target/all-feature lint and cleanup/script checks pass. All 177
+Net unit tests remain passing; production code is unchanged since 77d34d08.
+This proves bounded retry work and traffic progress in this fixture, not delivery
+of every original, chat durability, another group's fairness or physical networks.
+
+After receiving an original client message, the pressure server now sends an
+additional exact RR acknowledgement. The client must handle and serve it through
+its original Mesh actor, and the server must receive the reply. Both endpoints
+require this causal barrier before completing the phase or sampling the signing
+range. It is separate from the earlier pre-release pressure RR: receiving early
+server gossip alone cannot prove the client's retry batch has returned. Both
+scenarios pass after this final review correction, with unchanged deadlines.

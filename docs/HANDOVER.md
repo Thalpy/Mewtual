@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Wire compatibility and pressure evidence (14 November; CI pending)
+
+The new old/current Windows failure exposes predecessor retry amplification:
+1,129 topics adopted, target absent and 53,783 signing attempts. Current-only
+source correction does not repair that old binary. The fixture now separates
+phased old/new wire compatibility from a stronger current/current pressure test.
+The latter proves 128 original NoPeers holds, an actual second RR before any
+subscription release, progress through 2,000 subscriptions, receipt from the
+original 128 set and a non-vacuous 256..=1,280 signing-work bound.
+Both scenarios pass locally; the current client records 256 attempts. The same
+pressure contract rejects the actual pinned predecessor at the signing bound.
+The hold-tuple ordering race found in review is fixed with Release/Acquire.
+A separate post-original-receipt RR acknowledgement now prevents premature
+completion while the client's retry batch is still running. Both endpoints
+require it before the signing-range check; both real scenarios pass afterward.
+No time limit or receipt assertion was relaxed. Legacy startup resilience,
+complete-original delivery, broader fairness and full Chat V2 remain unproved.
+[Exact contracts and evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
 ## Network subscription retry continuation (14 November; validation ongoing)
 
 Fresh `939ea602` Windows old-peer CI43553131480 failed after genuine QUIC/RR; both

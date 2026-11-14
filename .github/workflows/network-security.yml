@@ -30,7 +30,7 @@ env:
 
 jobs:
   compatibility:
-    name: Actual old-peer compatibility (${{ matrix.os }})
+    name: Actual wire compatibility and pressure (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     strategy:
@@ -83,6 +83,7 @@ jobs:
           path: |
             logs/network-security/*.log
             logs/network-security/*.json
+            logs/network-security/current-pressure/*.log
           if-no-files-found: error
 
 # Existing strict lint, dependency/license audit and full Root/native/frontend

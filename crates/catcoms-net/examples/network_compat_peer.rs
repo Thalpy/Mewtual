@@ -128,7 +128,6 @@ impl tracing::Subscriber for Diagnostics {
             "Publishing message" => increment(2),
             "published" => increment(3),
             "publish held for retry" => {
-                increment(4);
                 if observed.error.text().contains("NoPeers")
                     || observed.error.text().contains("subscribed")
                 {
@@ -140,6 +139,9 @@ impl tracing::Subscriber for Diagnostics {
                     increment(6);
                 }
                 COUNTERS[7].store(observed.bytes, Ordering::Relaxed);
+                // Publish the completed tuple last: the main task uses this
+                // count as its pressure barrier across two Tokio workers.
+                COUNTERS[4].fetch_add(1, Ordering::Release);
             }
             "gossip received" => increment(8),
             _ => (),
@@ -189,7 +191,12 @@ async fn main() {
         target: hex::encode(format!("migration-topic-{:08}", TOPICS - 1)),
     })
     .unwrap();
-    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<_> = std::env::args().skip(1).collect();
+    // Closed controller-selected scenarios, identical in both source builds.
+    let scenario = arguments.pop().expect("explicit probe scenario");
+    let pressure = scenario == "--pressure";
+    let phased = scenario == "--wait-target";
+    assert!(pressure || phased);
     let server = arguments.as_slice() == ["server"];
     assert!(server || (arguments.len() == 2 && arguments[0] == "client"));
     let role = if server { "server" } else { "client" };
@@ -211,9 +218,10 @@ async fn main() {
             .unwrap()
             .peer_id_data()
     );
-    // Queue all subscriptions before any dial. Their actual hex-encoded initial
-    // announcement exceeds 64KiB; shorter raw-topic fixtures miss that boundary.
-    for index in 0..TOPICS {
+    // Wire compatibility queues all topics before dial; their real hex hello
+    // exceeds64KiB. The pressure server deliberately withholds all topics until
+    // the client has proved128 originals held and completed an independent RR.
+    for index in 0..if server && pressure { 0 } else { TOPICS } {
         mesh.subscribe(Topic::new(format!("migration-topic-{index:08}")))
             .await
             .unwrap();
@@ -262,19 +270,43 @@ async fn main() {
     let publish_topic = topic.clone();
     let publication_start = Arc::new(tokio::sync::Notify::new());
     let publication_wait = publication_start.clone();
+    let release_publication = Arc::new(tokio::sync::Notify::new());
+    let publication_release = release_publication.clone();
     let publisher = tokio::spawn(async move {
         // Isolate protocol negotiation before bulk traffic. This probe proves
         // both functional protocols; sustained-load fairness is separate
         // acceptance and must not be inferred from these exchanges.
         publication_wait.notified().await;
-        for serial in 0u32..1_500 {
+        if pressure && server {
+            publication_release.notified().await;
+        }
+        if phased {
+            // The immutable predecessor's all-topic retry amplification is
+            // tested separately from wire compatibility. Wait for its ACTUAL
+            // target adoption, not a local subscribe ACK or a fixed delay.
+            // The enclosing original 15-second exchange deadline still applies.
+            while COUNTERS[1].load(Ordering::Relaxed) == 0 {
+                SystemClock.sleep(Duration::from_millis(5)).await;
+            }
+        }
+        let attempts = if pressure && !server { 128 } else { 1_500 };
+        for serial in 0u32..attempts {
             let mut payload = vec![own; PAYLOAD];
             payload[PAYLOAD - 4..].copy_from_slice(&serial.to_be_bytes());
             publish_mesh
                 .publish(publish_topic.clone(), payload.into())
                 .await
                 .unwrap();
-            SystemClock.sleep(Duration::from_millis(20)).await;
+            // In the current/current pressure scenario the client first fills
+            // the REAL held queue while the server has no subscriptions at all.
+            if !(pressure && !server && serial < 128) {
+                SystemClock.sleep(Duration::from_millis(20)).await;
+            }
+        }
+        if pressure && !server {
+            // No post-release replacement can satisfy the pressure receipt.
+            // Preserve the actual publisher owner until controller cancellation.
+            std::future::pending::<()>().await;
         }
         panic!("finite gossip probe attempts exhausted");
     });
@@ -284,9 +316,56 @@ async fn main() {
         let mut received_request = false;
         let mut received_gossip = false;
         let mut received_reply = false;
+        let pressure_reply = mesh.request_connected(peer, PROTOCOL, Bytes::from(vec![19, own, 3]));
+        tokio::pin!(pressure_reply);
+        let mut pressure_answered = !pressure || server;
+        let mut pressure_served = !pressure || !server;
+        let original_receipt_ack =
+            mesh.request_connected(peer, PROTOCOL, Bytes::from(vec![19, own, 5]));
+        tokio::pin!(original_receipt_ack);
+        let mut receipt_confirmed = !pressure;
+        let subscription_mesh = mesh.clone();
+        let subscribe_after_hold = async move {
+            command("release-target").await;
+            release_publication.notify_one();
+            for index in 0..TOPICS {
+                subscription_mesh
+                    .subscribe(Topic::new(format!("migration-topic-{index:08}")))
+                    .await
+                    .unwrap();
+            }
+            drop(subscription_mesh);
+        };
+        tokio::pin!(subscribe_after_hold);
+        let held_notification = async {
+            while COUNTERS[4].load(Ordering::Acquire) < 128 {
+                SystemClock.sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(COUNTERS[4].load(Ordering::Acquire), 128);
+            assert_eq!(COUNTERS[5].load(Ordering::Relaxed), 128);
+            assert_eq!(COUNTERS[6].load(Ordering::Relaxed), 0);
+            assert_eq!(COUNTERS[1].load(Ordering::Relaxed), 0);
+            assert_eq!(COUNTERS[7].load(Ordering::Relaxed), 128 * PAYLOAD as u64);
+            marker("HELD client 128");
+        };
+        tokio::pin!(held_notification);
+        let mut subscribed = !pressure || !server;
+        let mut notified = !pressure || server;
         bounded("bidirectional RR and signed near-limit gossip", async {
             loop {
                 tokio::select! {
+                    _ = &mut subscribe_after_hold, if !subscribed => { subscribed = true; }
+                    _ = &mut held_notification, if !notified => { notified = true; }
+                    result = &mut pressure_reply, if pressure && !server && notified && !pressure_answered => {
+                        assert_eq!(result.unwrap().as_ref(), &[19, remote, 4]);
+                        assert_eq!(COUNTERS[1].load(Ordering::Relaxed), 0, "subscriptions are still withheld");
+                        pressure_answered = true;
+                        marker("PRESSURE_RR client");
+                    }
+                    result = &mut original_receipt_ack, if pressure && server && received_gossip && !receipt_confirmed => {
+                        assert_eq!(result.unwrap().as_ref(), &[19, remote, 6]);
+                        receipt_confirmed = true;
+                    }
                     result = &mut reply, if !received_reply => {
                         assert_eq!(result.unwrap().as_ref(), &[19, remote, 2]);
                         received_reply = true;
@@ -296,9 +375,22 @@ async fn main() {
                         TransportEvent::Request { from, proto, data, responder } => {
                             assert_eq!(from, peer);
                             assert_eq!(proto, PROTOCOL);
-                            assert_eq!(data.as_ref(), &[19, remote, 1]);
-                            responder.try_respond(Bytes::from(vec![19, own, 2])).unwrap();
-                            received_request = true;
+                            let is_pressure = pressure && server && data.as_ref() == [19, remote, 3];
+                            let is_receipt_ack = pressure && !server && data.as_ref() == [19, remote, 5];
+                            if is_receipt_ack {
+                                // The original actor can surface this causally
+                                // later request only AFTER its synchronous
+                                // held128 retry batch returned. A mere early
+                                // server gossip or target flag cannot prove it.
+                                receipt_confirmed = true;
+                            } else if is_pressure {
+                                assert!(!subscribed, "pressure RR is served before subscription release");
+                                pressure_served = true;
+                            } else {
+                                assert_eq!(data.as_ref(), &[19, remote, 1]);
+                                received_request = true;
+                            }
+                            responder.try_respond(Bytes::from(vec![19, own, if is_receipt_ack { 6 } else if is_pressure { 4 } else { 2 }])).unwrap();
                         eprintln!("{role}: exact inbound RR request served");
                         }
                         TransportEvent::Gossip { topic: actual, from, data } => {
@@ -306,7 +398,8 @@ async fn main() {
                             assert_eq!(actual, topic);
                             assert_eq!(data.len(), PAYLOAD);
                             assert!(data[..PAYLOAD-4].iter().all(|byte| *byte == remote));
-                        assert!(u32::from_be_bytes(data[PAYLOAD-4..].try_into().unwrap()) < 1_500);
+                        let serial = u32::from_be_bytes(data[PAYLOAD-4..].try_into().unwrap());
+                        assert!(serial < if pressure && server { 128 } else { 1_500 });
                         if !received_gossip {
                             eprintln!("{role}: exact near-limit gossip received");
                         }
@@ -318,12 +411,28 @@ async fn main() {
                 if received_reply && received_request {
                     publication_start.notify_one();
                 }
-                if received_reply && received_request && received_gossip {
+                if received_reply && received_request && received_gossip && subscribed && notified && pressure_answered && pressure_served && receipt_confirmed {
                     break;
                 }
             }
         })
         .await;
+        if pressure && !server {
+            // 128 first attempts +128 exact-topic retries + every full retry
+            // possible within15s at the production2s cadence (including one
+            // already-ready timer). Whole-queue retry per unrelated SUB breaks
+            // this bound even on a fast host; no timeout-only oracle is used.
+            let maximum = 128 * (2 + (15 / 2 + 1));
+            let attempts = COUNTERS[2].load(Ordering::Relaxed);
+            if !(256..=maximum).contains(&attempts) {
+                diagnostic_summary("signing_bound_exceeded");
+            }
+            assert!(
+                (256..=maximum).contains(&attempts),
+                "pressure signing attempts {attempts} outside active oracle range 256..={maximum}"
+            );
+            assert_eq!(COUNTERS[4].load(Ordering::Acquire), 128);
+        }
     }
     marker(&format!("EXCHANGED {role} {TOPICS} {PAYLOAD}"));
     if server {
