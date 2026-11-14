@@ -62,10 +62,26 @@ before returning; metadata/UI zero alone is not universal physical release.
 
 ## Validation and remaining work
 
-Focused/current-source checks are in progress. Review fixed two medium issues:
-the original envelope began after file work, and the controller's payment
-holder preceded its remaining policy field. Static re-review found no remaining
-blocker/high/medium. Execution evidence must be recorded after the actual runs.
+At runtime checkpoint `d4496bdd`, all 51 native-text cases passed (152.99s),
+including the eight new lifecycle regressions. The Root same/foreign/closed
+comparison passed exactly one case (10.39s). All 3,446 frontend cases passed
+(80.64s); Svelte reported zero errors/warnings and the production build passed.
+Root/native formatting, ambient/raw-filesystem/exact-count gates, native check
+(1m20s), strict native Clippy (4m25s), native build (5m06s), real startup and UI
+flows passed. Both dependency audits passed. Initial sandbox attempts could not
+access the advisory/browser profiles; the same gates passed with profile access.
+
+Root strict Clippy still fails on the same 564 existing errors; no new warning
+or suppression was added. Complete Root/native CI is running at
+[43643841874](https://github.com/Thalpy/Mewtual/actions/runs/43643841874), with the
+single user-deferred slow case excluded. Pending CI is not acceptance evidence.
+The validation follow-up changes documentation and one test comment only.
+
+Review fixed two medium ownership issues: the original envelope began after
+file work, and the controller's payment holder preceded its policy field. It
+also strengthened the output regression to observe the actual original wait
+Pending, rather than an artificial scheduling barrier. Final static re-review
+found no remaining blocker/high/medium; its last wording clarification is fixed.
 
 Native authoring commands must retain actual native admission, source/runtime
 and completed-output custody through publication. Joined/Add production sources,

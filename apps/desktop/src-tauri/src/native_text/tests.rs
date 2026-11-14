@@ -2214,7 +2214,7 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
     let acknowledged = snapshot_result(acknowledged.await.unwrap());
     // The former snapshot-only close could finish here. With canonical
     // Sources, acknowledging DATA loss cannot certify a foreign owner pair.
-    // Keep both the original Source owner and the foreign facade untouched.
+    // Retain both original owners and leave both ciphertexts unchanged.
     assert_eq!(acknowledged["deferred"], true);
     assert_eq!(
         acknowledged["history_error"],
