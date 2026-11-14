@@ -9,6 +9,7 @@ mod catalog;
 pub(super) mod cell;
 mod codec;
 mod data;
+pub(super) mod founder;
 mod inspection;
 mod metadata;
 mod migration;

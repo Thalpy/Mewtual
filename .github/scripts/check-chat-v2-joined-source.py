@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import runpy
+import re
 import sys
 
 REPO = Path(__file__).resolve().parents[2]
@@ -24,7 +25,8 @@ COHORTS = (
     # must not vanish behind a selector typo or a platform-only fixture.
     ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 10),
     ("retained-bootstrap-owner", "catcoms-app", "retained_bootstrap", 3),
-    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::", 25),
+    # Includes the genuine whole-Host observation/ordinary-UI-lock distinction.
+    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::", 26),
     ("native-warm-sdk-tail", "catcoms-sync", "native_warm_sdk_tail_", 1),
     ("native-founder-sdk", "catcoms-app", "native_sdk_", 5),
     ("native-network-identity", "catcoms-net", "seeded_transport_identity_data", 3),
@@ -34,7 +36,9 @@ COHORTS = (
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
     ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 11 if sys.platform in ("win32", "linux") else 4),
     # Includes private owning3 storage/cold custody, not a native SDK/backend grant.
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 207),
+    # Exact current inventory includes the actual fresh-factory, owning upgrade
+    # and founder birth/activation regressions; these do not grant a live SDK.
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 221),
     ("current-cached-mount", "catcoms-app", "current_cached_mount_check_never_constructs_a_revocation_observer", 1),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
@@ -44,6 +48,68 @@ COHORTS = (
     ("native-index3-interrupted-join", "catcoms-app", "lifecycle3_seed_claim_preserves_a_real_interrupted_join_stage", 1),
     ("native-index3-cold-join-role", "catcoms-app", "lifecycle3_actual_join_cold_open_retains_the_exact_selected_catalog_role", 1),
 )
+
+
+# These are artifact producers, not skipped acceptance regressions. Their real
+# --ignored --exact executions and eleven-fixture markers remain mandatory in
+# check-chat-v2-native-index3.py. The broad normal cohort must stay zero-ignored.
+FIXTURE_PREFIX = "store::critical_namespaces::native_registry::lifecycle::cell::tests::compatibility::"
+INDEX3_FIXTURES = tuple(FIXTURE_PREFIX + suffix for suffix in (
+    "generate_native3_fixtures", "verify_native3_predecessor_fixtures",
+))
+# The shared runner retains at most two matches PER pattern. Use one pattern
+# per skip string so an extra matching name always becomes a rejected second
+# match, even when a different ordinary test vanished and total count is equal.
+INVENTORY_MATCHES = tuple(re.compile(r"^(.*" + re.escape(name) + r".*): test$")
+                          for name in INDEX3_FIXTURES)
+INVENTORY_COUNT = re.compile(r"^(\d+) tests, (\d+) benchmarks$")
+
+
+def validate_inventory(matches: list, counts: list, expected: int) -> None:
+    if (matches != [[(name,)] for name in INDEX3_FIXTURES]
+            or counts != [(str(expected), "0")]):
+        raise RuntimeError(f"native fixture inventory changed: {matches!r}, {counts!r}")
+
+
+def inventory_self_test() -> None:
+    good = [[(name,)] for name in INDEX3_FIXTURES]
+    validate_inventory(good, [("223", "0")], 223)
+    validate_inventory(good, [("2", "0")], 2)
+    for names, counts in (
+        (good[:1], [("223", "0")]),
+        ([good[0] + good[0], good[1]], [("223", "0")]),
+        ([good[0] + [(INDEX3_FIXTURES[0] + "_extra",)], good[1]], [("223", "0")]),
+        ([good[0], good[1] + [("prefix_" + INDEX3_FIXTURES[1],)]], [("223", "0")]),
+        (good, [("224", "0")]), (good, [("223", "0"), ("223", "0")]),
+        ([], [("223", "0")]),
+    ):
+        try:
+            validate_inventory(names, counts, 223)
+        except RuntimeError:
+            continue
+        raise AssertionError("missing/duplicate/expanded native fixture selection accepted")
+    # Pin actual regex/runner composition as well as the result validator.
+    expanded = "\n".join(name + ": test" for name in (*INDEX3_FIXTURES, INDEX3_FIXTURES[1] + "_extra"))
+    # Per-line runner applies patterns to a line stripped of ANSI/newline.
+    matches = [[m.groups() for line in expanded.splitlines()
+                for m in pattern.finditer(line)][:2] for pattern in INVENTORY_MATCHES]
+    try:
+        validate_inventory(matches, [("223", "0")], 223)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("actual skip-prefix twin was hidden by the bounded matcher")
+
+
+def check_normal_inventory(guard: dict, directory: Path, command: list[str], expected: int) -> None:
+    for label, extra, total in (("all", [], expected + 2), ("ignored", ["--ignored"], 2)):
+        code, _, timed_out, found = guard["run_logged"](
+            "native-registry-inventory-" + label, command + ["--", "--list", *extra],
+            directory, limit=30 * 60, markers=(*INVENTORY_MATCHES, INVENTORY_COUNT),
+        )
+        if code or timed_out:
+            raise RuntimeError("native registry inventory could not be established")
+        validate_inventory(found[:2], found[2], total)
 
 
 def fresh_founder_cohort(cohorts: tuple) -> list:
@@ -79,6 +145,7 @@ def main() -> None:
     guard = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-member-save.py"))
     guard["self_test"]()
     selection_self_test()
+    inventory_self_test()
     assert len({name for name, *_ in COHORTS}) == len(COHORTS)
     assert all(expected > 0 for *_, expected in COHORTS)
     if args.self_test:
@@ -104,6 +171,9 @@ def main() -> None:
         command = [
             "cargo", "test", "--locked", "-p", crate, "--all-features", "--lib", selector,
         ]
+        if name == "native-registry-physical":
+            check_normal_inventory(guard, directory, command, expected)
+            command += ["--", "--skip", INDEX3_FIXTURES[0], "--skip", INDEX3_FIXTURES[1]]
         code, summaries, timed_out, _ = guard["run_logged"](
             name, command, directory, limit=30 * 60,
         )

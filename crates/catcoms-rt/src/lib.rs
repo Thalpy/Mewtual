@@ -26,8 +26,8 @@ pub use native_chat_key::{
     NativeChatKeyDrain, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatKeyRefusal,
     NativeChatPreparedKeyCut, NativeChatSdkRestoreEnds, NativeChatSourceObservation,
     NativeChatSourceOwner, NativeChatUiBinding, NativeChatUiCommand, NativeChatUiCurrentCheck,
-    NativeChatUiSessionOwner, NativeChatUiSessionPreparation, NativeChatWarmSdkReopenCut,
-    NATIVE_CHAT_UI_FIXED_METADATA_BYTES,
+    NativeChatUiMountObservation, NativeChatUiSessionOwner, NativeChatUiSessionPreparation,
+    NativeChatWarmSdkReopenCut, NATIVE_CHAT_UI_FIXED_METADATA_BYTES,
 };
 pub use protocol_rng::SeededProtocolRng;
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};

@@ -1,6 +1,21 @@
 # Mewtual; Handover
 
-## Wire compatibility and pressure evidence (14 November; CI pending)
+## Native text warm factory (14 November; validation in progress, off)
+
+The actual main-window Tauri unlock path now has a trusted off-by-default native
+consumer for the opaque selected3 vault. Fresh storage keeps one original
+session/key/mount through critical activation and namespace upgrades. Native
+checks real ACL, original generation, actual secret and same Host/physical
+liveness; it caches completed metadata locked when a later lock wins. A foreign
+wrapper, empty secret or stale invocation cannot authorize that retained owner.
+
+This is mount/authentication only. UI continuity, SourceRegistry, retained
+native device/transport/whole creator, member command dispatch, cold restore,
+joined Add/source/archive, transport, projection/admin and combined acceptance
+remain unfinished. Do not enable Chat V2 or claim user-ready text messaging.
+[Exact scope, pending checks and limitations](communication-recovery/CHAT-V2-NATIVE-WARM-FACTORY.md).
+
+## Wire compatibility and pressure evidence (14 November; Linux/Windows CI passed)
 
 The new old/current Windows failure exposes predecessor retry amplification:
 1,129 topics adopted, target absent and 53,783 signing attempts. Current-only
@@ -9,7 +24,8 @@ phased old/new wire compatibility from a stronger current/current pressure test.
 The latter proves 128 original NoPeers holds, an actual second RR before any
 subscription release, progress through 2,000 subscriptions, receipt from the
 original 128 set and a non-vacuous 256..=1,280 signing-work bound.
-Both scenarios pass locally; the current client records 256 attempts. The same
+Both scenarios pass locally and on both OSes in CI43561112497 at66b9a2f3;
+the local current client records 256 attempts. The same
 pressure contract rejects the actual pinned predecessor at the signing bound.
 The hold-tuple ordering race found in review is fixed with Release/Acquire.
 A separate post-original-receipt RR acknowledgement now prevents premature
@@ -33,7 +49,8 @@ this proves the CI cause, broader startup fairness or full Chat V2 is made.
 See [scope and evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
 
 Earlier combined `4935e25` full native/checks pass on both platforms; Linux
-frontend 3,441/check/build pass. Full Root runs remain active. Member-storage
+frontend 3,441/check/build pass. Windows Root passed; Linux Root hit its outer120-minute job bound while
+individual tests progressed. It is not a full Root pass. Member-storage
 43553131305 passes both platforms at939ea602. Final checks for the new runtime
 correction and native/joined/transport/UI Chat V2 integration remain open.
 

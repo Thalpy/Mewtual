@@ -15,7 +15,7 @@ pub(super) struct MigrationOrigin {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum BirthKind {
+pub(in crate::store::critical_namespaces::native_registry) enum BirthKind {
     Founder,
     Joined,
     LegacyJoin,
@@ -24,13 +24,13 @@ pub(super) enum BirthKind {
 /// Immutable creation receipt. Local names and refreshed invites are not part
 /// of token lookup: request commits to the original input, not today's display.
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct Birth {
-    pub(super) kind: BirthKind,
-    pub(super) invocation: [u8; 32],
-    pub(super) request: [u8; 32],
-    pub(super) signer: [u8; 32],
-    pub(super) network: [u8; 32],
-    pub(super) join_context: Option<[u8; 32]>,
+pub(in crate::store::critical_namespaces::native_registry) struct Birth {
+    pub(in crate::store::critical_namespaces::native_registry) kind: BirthKind,
+    pub(in crate::store::critical_namespaces::native_registry) invocation: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) request: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) signer: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) network: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) join_context: Option<[u8; 32]>,
 }
 
 #[derive(Clone, PartialEq, Eq)]

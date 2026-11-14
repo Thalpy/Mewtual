@@ -18,7 +18,10 @@ mod opening;
 mod payment;
 mod upgrade;
 pub(in crate::store::critical_namespaces) mod upgrade_source;
-pub use facade::NativeTextVault;
+pub use facade::{
+    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultUpgrade,
+    NativeTextVaultUpgradeRefusal,
+};
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
 pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
 pub use native_ui::{

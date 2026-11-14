@@ -636,8 +636,8 @@ fn synchronous_manual_command_inventory_and_acl_are_explicit() {
             ))));
     }
     let source = include_str!("../lib.rs");
-    assert!(source
-        .contains(".invoke_handler(admin_chat_ledger::with_commands(tauri::generate_handler!["));
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(compact.contains(".invoke_handler(native_text::with_commands(admin_chat_ledger::with_commands(tauri::generate_handler!["));
     // The separate public moderation endpoint remains its original advisory projection.
     assert!(!source[source.find("async fn get_moderation(").unwrap()
         ..source.find("async fn get_moderation(").unwrap() + 1500]

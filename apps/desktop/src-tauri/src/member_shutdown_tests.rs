@@ -148,7 +148,7 @@ async fn native_close_saves_history_and_pending_admission_without_waiting_for_of
         let store = state.store.lock().await.take().unwrap();
         assert!(shutdown::freeze_servers(&state).await.is_err());
         assert!(running.actor.snapshot().await.is_ok());
-        *state.store.lock().await = Some((store).into());
+        *state.store.lock().await = Some(store);
 
         // A real checkpoint replacement failure must also defer close, retaining the previous
         // accepted snapshot. The obstruction is confined to this test's independent vault.

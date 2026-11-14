@@ -1,5 +1,11 @@
 # Network security dependency migration
 
+Latest recorded wire evidence: both explicit contracts pass on Linux and
+Windows in CI43561112497 at66b9a2f3. Earlier full4935 native/checks pass on both
+platforms and Windows Root passes; Linux Root reached its outer120-minute bound
+while tests progressed. Later native factory changes require their own full
+validation. These are scoped results, not complete Chat V2 acceptance.
+
 Status: implementation under validation. Chat V2 remains disabled. This targets
 the remaining dependency obligations; it does not supply the missing native or
 joined source.

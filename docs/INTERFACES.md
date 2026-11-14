@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`NativeRegistryInstallation::prepare_fresh` is the distinct fresh-only owning
+storage constructor. `NativeTextVaultUpgrade` consumes genuine index2 custody
+through selected3; it supplies no raw Store/Current or Source/SDK extractor.
+`prepare_native_authentication` captures one finite original physical/Host task
+for blocking same-mounted-key verification and final negative checks. The actual
+native consumer remains off and does not yet implement text authoring or UI
+continuity. [Boundary](communication-recovery/CHAT-V2-NATIVE-WARM-FACTORY.md).
+
 `catcoms_rt::SeededProtocolRng` bridges only the upstream seeded/forkable rand-core
 0.10 protocol API. Production seeds it through the existing 0.6 OS seam; ordinary
 application RNG interfaces remain unchanged. Debug is redacted and there is no

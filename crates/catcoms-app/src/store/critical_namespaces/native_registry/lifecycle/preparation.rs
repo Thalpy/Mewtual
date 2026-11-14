@@ -179,6 +179,22 @@ pub(in crate::store::critical_namespaces::native_registry) fn authenticate_selec
 
 /// Internal paid decoder for the retained normal3 cell/inspector. The full
 /// index stays inside the lifecycle implementation, never a public snapshot.
+/// Closed native facade projection. Keep decoded indexes inside this paid
+/// lifecycle module; the caller retains the original inventory and must reprove
+/// it under the catalog mutex before exposing these bounded historical labels.
+pub(in crate::store::critical_namespaces::native_registry) fn lookup_selected_creation_data(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+    invocation: [u8; 32],
+    request: [u8; 32],
+) -> Result<Option<crate::store::NativeCreationStatusData>, AppError> {
+    let (index, _) = decode_selected_data(store, inventory)?;
+    index
+        .lookup_data(invocation, request)?
+        .map(super::founder::status)
+        .transpose()
+}
+
 pub(super) fn decode_selected_data(
     store: &crate::store::ServerStore,
     inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,

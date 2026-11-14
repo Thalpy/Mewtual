@@ -113,6 +113,47 @@ impl NativeRegistryInstallation {
             current,
             policy.preparation.clone(),
         )?;
+        Self::from_prepared(prepared, policy, physical_fee)
+    }
+
+    /// Create one new empty vault and retain the SAME session/keys/lineage
+    /// through critical activation and every private namespace declaration.
+    /// Existing vaults/artifacts refuse; this is no general cold selector.
+    /// Initial preparation errors preserve files and require cold recovery.
+    pub fn prepare_fresh(
+        dir: impl AsRef<Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: V2CurrentLayoutPolicy,
+        policy: NativeRegistryPolicy,
+    ) -> Result<Self, AppError> {
+        let physical_fee = policy.physical_payment(&current)?;
+        let fee = Arc::new(policy.preparation.pool.try_reserve(PREPARATION_FEE)?);
+        let opening = PreparedV2CurrentLayoutStore::create_for_native_registry(
+            dir.as_ref(),
+            passphrase,
+            rng,
+            current,
+        )?;
+        let prepared = PreparedNativeRegistryMigration::from_opening(
+            opening,
+            rng,
+            policy.preparation.clone(),
+            fee,
+        )?;
+        #[cfg(test)]
+        super::super::super::current_layout::native_fresh_test_edge(
+            super::super::super::current_layout::NativeFreshEdge::NativePrepared,
+            prepared.current.cached_store()?,
+        );
+        Self::from_prepared(prepared, policy, physical_fee)
+    }
+
+    fn from_prepared(
+        prepared: PreparedNativeRegistryMigration,
+        policy: NativeRegistryPolicy,
+        physical_fee: Arc<CatalogReadReservation>,
+    ) -> Result<Self, AppError> {
         let handler = NativeMigrationHandler {
             policy: policy.preparation,
             fee: prepared.fee.clone(),
