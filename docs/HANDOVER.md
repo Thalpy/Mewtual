@@ -29,8 +29,9 @@ retire, even if the first cleanup fails.
 
 Earlier overlapping-bulk probes failed, including one current/current control;
 the production cause remains unknown. The passing functional gate negotiates RR
-before bulk and establishes no sustained-load fairness. Root strict lint, full
-shipping suites, Linux native build and startup remain open. Native commands,
+before bulk and establishes no sustained-load fairness. Root strict lint fails
+with610 existing App errors; no suppression or public dead-code workaround was
+added. Full shipping suites, Linux native build and startup remain open. Native commands,
 joined sources and final Chat V2 acceptance are unfinished. Chat V2 is off.
 [Design and primary sources](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
 

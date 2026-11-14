@@ -112,3 +112,11 @@ the production build passes (51.69s). Actual Windows native production checking
 passes (7m05s). Linux native build, startup, strict lint and all full shipping
 backend suites remain required. No physical-network, browser/audio or
 final Chat V2 acceptance follows from these intermediate checks.
+
+Root strict Clippy was run and fails with610 existing App errors. There is no
+warning suppression, unused public export or advisory waiver in this checkpoint.
+Strict Clippy for both changed RT/Net crates, including all targets/features,
+passes (54.69s).
+The pinned predecessor is retained independently of PR branch history by
+`compat/network-security-predecessor-944115c2`; the gate still verifies its full
+commit SHA, not a movable tag.
