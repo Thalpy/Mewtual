@@ -38,6 +38,8 @@ pub(in crate::voice_handoff) use media::{
 pub(in crate::voice_handoff) use media_index::Prepared as MediaIndexPrepared;
 mod ready;
 mod sdk;
+#[cfg(test)]
+pub(in crate::voice_handoff) use sdk::Preparation as SdkPreparationForTest;
 mod sdp;
 mod sdp_history;
 mod sdp_input;

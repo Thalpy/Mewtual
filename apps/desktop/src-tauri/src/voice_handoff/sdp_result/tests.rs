@@ -936,7 +936,26 @@ pub(in crate::voice_handoff) async fn exercise_open(
     // Close the actual native PC before HIGH's cleanup. Its same Session/Action ACK
     // and settlement remain available without granting or reviving SDK/RTC currentness.
     let pc = super::super::requests::pc::Request::decode(parent.id().logical(), pc_frame).unwrap();
-    parent.close_pc(route.session().identity(), &pc).unwrap();
+    // Maintenance can briefly hold this same native row. Every Capacity exit
+    // from close_pc precedes request_close, so retry only this exact unstarted
+    // close; never replay an SDP result, mint, or SDK operation. The forced
+    // real-mutex refusal pins that boundary before the positive control.
+    assert!(matches!(
+        parent.pc_test_close_with_parent_locked(route.session().identity(), &pc),
+        Err(VoiceError::Capacity)
+    ));
+    for attempt in 0..32 {
+        match parent.close_pc(route.session().identity(), &pc) {
+            Ok(_) => break,
+            Err(VoiceError::Capacity) if attempt < 31 => {
+                crate::voice_runtime(state)
+                    .clock()
+                    .sleep(std::time::Duration::from_millis(10))
+                    .await;
+            }
+            Err(error) => panic!("original native PC close refused: {error:?}"),
+        }
+    }
     finish_original(
         state,
         public,
