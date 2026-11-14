@@ -69,9 +69,17 @@ passed. Actual-diff read-only review, including the last test, is clear across
 B/H/M/L. The native-registry normal cohort grows230->231 and RT key cohort26->27;
 the two dedicated predecessor artifact generators are unchanged.
 
-Strict/full/native-startup execution remains pending for this increment. The
-parent's Root strict result is582 App errors; no passing sign-off is claimed.
-These checks do not establish complete lock snapshot custody or retry.
+Strict native all-target/all-feature Clippy, separate native check, both shipping
+dependency audits, Windows build (3m29s), actual startup and browser flows passed.
+Root strict Clippy was run and still fails with582 App errors in the unfinished
+pipeline; no suppression or passing sign-off is claimed.
+
+Full Root/native execution is queued at runtime commitcc5e6d21:
+[run43591075301](https://github.com/Thalpy/Mewtual/actions/runs/43591075301).
+It supersedes the older ordinary-IO-only run. The single named slow catch-up
+cost case remains deferred; no other acceptance regression was skipped.
+This remains a draft, not merge-ready, and does not establish complete lock
+snapshot custody or retry.
 
 Still required: pre-schedule lock/close snapshot capture from an authorized UI,
 freshness bound to the first actual SC predecessor, native custody through lost

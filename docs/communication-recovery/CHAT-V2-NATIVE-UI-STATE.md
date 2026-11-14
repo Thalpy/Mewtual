@@ -84,8 +84,10 @@ pipeline; no suppression or passing sign-off is claimed.
 
 Complete Root/native CI was dispatched at runtime commit0ba8cb08:
 [run43588313636](https://github.com/Thalpy/Mewtual/actions/runs/43588313636).
-It remains pending. Only the previously named slow catch-up cost case remains
-deferred until final acceptance. This checkpoint is not ready to merge.
+That run was superseded by the original-target increment atcc5e6d21:
+[latest full run43591075301](https://github.com/Thalpy/Mewtual/actions/runs/43591075301)
+is queued. Only the previously named slow catch-up cost case remains deferred
+until final acceptance. This checkpoint is not ready to merge.
 
 The next implementation must capture each final snapshot's original authenticated
 mount before scheduling, retain its exact bytes and unique credit through lost
