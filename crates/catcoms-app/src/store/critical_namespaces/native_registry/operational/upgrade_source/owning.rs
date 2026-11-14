@@ -388,6 +388,21 @@ impl Store {
     > {
         self.physical.rename_metadata_data(request, rng)
     }
+    /// Store already-minted Legacy invite DATA under the same metadata CAS.
+    /// Native minting/current membership and command authorization are separate.
+    pub(in crate::store::critical_namespaces::native_registry) fn refresh_legacy_invite_data(
+        &mut self,
+        request: &super::super::super::lifecycle::refresh::Request,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::super::lifecycle::rename::Metadata,
+            Option<super::super::super::lifecycle::cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        self.physical.refresh_legacy_invite_data(request, rng)
+    }
     /// One prepaid original physical capsule, not admission or a native/SDK
     /// credential. Cached capture performs no IO/allocation/account lock;
     /// retire the returned WHOLE capsule outside all native/writer guards.

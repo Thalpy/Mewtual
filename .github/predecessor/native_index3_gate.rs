@@ -5,15 +5,17 @@ mod normal3_predecessor {
     use super::*;
     use std::{collections::BTreeMap, path::PathBuf};
 
-    const CASES: [(&str, [bool; 3]); 9] = [
+    const CASES: [(&str, [bool; 3]); 11] = [
         ("control1", [true, false, false]),
         ("control2", [false, true, false]),
         ("selected3", [false, false, true]),
         ("renamed3", [false, false, true]),
-        ("partial3", [false, false, false]),
-        ("rename-stage3", [false, false, false]),
-        ("duplicate3", [false, false, false]),
-        ("bad-mac3", [false, false, false]),
+        ("refreshed3", [false, false, true]),
+        ("refresh-stage3", [false, false, false]),
+        ("partial3", [false, false, true]),
+        ("rename-stage3", [false, false, true]),
+        ("duplicate3", [false, false, true]),
+        ("bad-mac3", [false, false, true]),
         ("authenticated-invalid3", [false, false, false]),
     ];
     fn tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -92,6 +94,6 @@ mod normal3_predecessor {
                 }
             }
         }
-        println!("native3 predecessor gate: 9 fixtures x 3 openers checked");
+        println!("native3 predecessor gate: 11 fixtures x 3 openers checked");
     }
 }

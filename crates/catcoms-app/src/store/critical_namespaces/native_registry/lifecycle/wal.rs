@@ -15,9 +15,25 @@ use zeroize::Zeroizing;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum Decision {
     Rename,
+    RefreshLegacyInvite,
     Duplicate,
     DiscardShort,
     DiscardBadMac,
+}
+
+impl Decision {
+    /// The only implemented content-bearing normal3 WAL operations. Cleanup
+    /// decisions and future Change variants must never enter this IO role.
+    pub(in crate::store) fn is_commit(self) -> bool {
+        matches!(self, Self::Rename | Self::RefreshLegacyInvite)
+    }
+}
+fn metadata_decision(change: Change) -> Result<Decision, AppError> {
+    match change {
+        Change::Rename => Ok(Decision::Rename),
+        Change::RefreshLegacyInvite => Ok(Decision::RefreshLegacyInvite),
+        _ => Err(refused()),
+    }
 }
 
 /// Affine semantic proof for THIS held inventory/selected frame/Stage. Exposing
@@ -105,7 +121,7 @@ fn proof(inventory: &UpgradeInventory, candidate: &[u8], decision: Decision) -> 
 }
 
 /// Cold native Stage and JOIN Stage may not coexist. Initially the concrete
-/// normal producer supports Rename only; other authenticated Change kinds are
+/// normal producer supports Rename and Legacy invite refresh only; other authenticated Change kinds are
 /// preserved/refused until their actual owning producers are implemented.
 pub(super) fn classify(
     store: &ServerStore,
@@ -121,14 +137,9 @@ pub(super) fn classify(
     } else {
         let key = Zeroizing::new(store.keys.db_key()?);
         match open_index(&key, stage, selected.capability) {
-            Ok(next) => {
-                if selected.successor_data(&next, *blake3::hash(inventory.index()).as_bytes())?
-                    != Change::Rename
-                {
-                    return Err(refused());
-                }
-                Decision::Rename
-            }
+            Ok(next) => metadata_decision(
+                selected.successor_data(&next, *blake3::hash(inventory.index()).as_bytes())?,
+            )?,
             Err(ReadError::Unauthenticated(_)) => Decision::DiscardBadMac,
             Err(error) => return Err(error.into_error()),
         }
@@ -140,11 +151,12 @@ pub(super) fn classify(
 /// Issue warm IO proof only for the actual selected3 parent and the SAME
 /// sealed canonical candidate. Caller keeps all preparation inside its paid
 /// cell; neither the candidate nor a remembered hash authorizes physical IO.
-pub(super) fn verify_warm_rename(
+pub(super) fn verify_warm_metadata(
     store: &ServerStore,
     inventory: &UpgradeInventory,
     candidate: &Index,
     bytes: &[u8],
+    expected: Change,
 ) -> Result<VerifiedWal, AppError> {
     require_normal_inventory(store, inventory)?;
     if inventory.index_stage().is_some() {
@@ -153,14 +165,12 @@ pub(super) fn verify_warm_rename(
     let (selected, _) = preparation::decode_selected_data(store, inventory)?;
     let key = Zeroizing::new(store.keys.db_key()?);
     let sealed = open_index(&key, bytes, selected.capability).map_err(ReadError::into_error)?;
-    if sealed != *candidate
-        || selected.successor_data(candidate, *blake3::hash(inventory.index()).as_bytes())?
-            != Change::Rename
-    {
+    let actual = selected.successor_data(&sealed, *blake3::hash(inventory.index()).as_bytes())?;
+    if sealed != *candidate || actual != expected {
         return Err(refused());
     }
     inventory.require(store)?;
-    Ok(proof(inventory, bytes, Decision::Rename))
+    Ok(proof(inventory, bytes, metadata_decision(actual)?))
 }
 
 #[cfg(test)]

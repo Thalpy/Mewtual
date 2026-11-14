@@ -9,13 +9,16 @@ It compares the stable numeric ID, immutable identity and expected metadata
 revision. One successful change increments that row's revision and the index
 generation; other rows, migration origin, creation receipts and ID high-water
 stay unchanged. The closed `Index::successor_data` check requires exactly Rename.
+Legacy invite refresh now uses the same cell and recovery, with a separately tagged
+request and shared revision; see [the refresh contract](CHAT-V2-NATIVE-INDEX3-INVITE.md).
 Other operation producers and their recovery remain separate work.
 
 ## Retained warm operation
 
-The opaque selected3 Store keeps one `Mutex<Cell>` before its original Current.
-The Store's affine closer is its first field. Its only metadata method takes
-`&mut self`; no shared physical loan or owned index snapshot escapes.
+The opaque selected3 physical allocation keeps one `Mutex<Cell>` before its
+original Current. The Store's affine closer is its first field. Concrete metadata
+methods use that same cell through the facade or one bounded private physical
+capsule; no raw Store/Current or owned index snapshot escapes.
 
 Preparation, decoding, canonical encoding, sealing and allocation happen inside
 this paid cell before the catalog claim. The independently reserved version3
@@ -60,7 +63,7 @@ Supported normal Stage cases are deliberately closed:
 
 | Actual Stage | Action |
 |---|---|
-| One authenticated Rename successor of this exact framed parent | Promote and cover the same held Stage |
+| One authenticated Rename or Legacy invite-refresh successor of this exact framed parent | Promote and cover the same held Stage |
 | Byte-identical framed selected index | Cover selected data and remove the duplicate |
 | Attributable 0–39-byte Stage | Cover selected data and remove the incomplete Stage |
 | Bounded frame with an actual AEAD authentication failure | Cover selected data and remove the failed Stage |

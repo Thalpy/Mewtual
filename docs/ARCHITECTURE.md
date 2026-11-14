@@ -1,5 +1,10 @@
 # Mewtual; Architecture
 
+Normal3's private metadata cell now also has a concrete Legacy invite refresh
+producer under validation. It shares Rename's revision, retained request/IO,
+physical owner and retirement fence. No native minting or join authority follows
+from storing invite DATA. [Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-INDEX3-INVITE.md).
+
 Private selected3 storage now separates affine admission from one bounded finite
 physical-work capsule. Count/Rename still serialize through the original cell;
 closing the facade cannot free physical custody before its worker/debt drains.

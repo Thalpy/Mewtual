@@ -444,3 +444,5 @@ fn lifecycle3_cell_cleanup_repeats_barrier_and_never_reports_visible_unlink_as_c
 }
 
 mod compatibility;
+
+mod refresh;

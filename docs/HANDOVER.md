@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Private Legacy invite refresh (14 November; validation pending)
+
+The owning normal3 metadata path now stores a Legacy invite using the same
+physical cell, revision, retained claim/IO and outgoing debt as Rename. A closed
+tagged request retains every field and is bounded before IO; its maximum64KiB
+payload is explicit in the existing2MiB control invoice, without a fee increase.
+Warm proof derives the authenticated successor kind. Both IO constructors and
+cold inspection accept exactly Rename or Refresh; cleanup rules remain closed.
+
+The initial nine focused regressions pass (50.59s). Both LOW review follow-ups
+are fixed and re-reviewed clear; all 98 combined lifecycle cases pass (442.83s).
+The compiled registry contains 207 ordinary cases plus 2 explicit compatibility
+cases. All 3,441 frontend tests, Svelte checking and the production build pass. The real4f45d586 predecessor gate now
+has11 fixtures, including clean refresh success and unchanged Refresh-Stage
+refusal. Its self-check passes; actual predecessor execution, native checking, full suites and strict gates
+remain required. Chat V2 remains disabled; actual native/joined/transport/UI
+consumers and the other lifecycle operations are still unfinished.
+[Scope](communication-recovery/CHAT-V2-NATIVE-INDEX3-INVITE.md).
+
 ## Private finite physical3 work (13 November; validation in progress)
 
 The actual selected3 owner now closes admission separately from one fixed-slot
