@@ -65,6 +65,24 @@ correct receipt must still release and recover the original history. This
 cleanup observer does not renew a Claim or require it to remain unexpired.
 Other exchanges, including intentional guard-held Capacity checks, are unchanged.
 
+## Read-only SDK preflight under server-map contention
+
+At3950ce59 Linux full native passed. Windows run43608286310 passed1052 and
+failed13; its first failure was sdk.rs's direct preflight unwrap returning
+Protocol(Capacity), before any physical hold or SDK preparation/allocation.
+The later twelve failures came from the shared fixture's poisoned isolation.
+
+The three identical read-only SDK preflights now share one narrowly bounded
+observer. It drives the same future with the real server map held, requires
+exact Capacity, releases that map, then requires success. Session counters and
+SDK release state stay unchanged. Only preflight Capacity can repeat, at most32
+observations within one fixed five-second watchdog including pressure and Actor
+IO. Allocation, attachment, Release and actual custody/deadline checks stay
+outside the wrapper. The exact original failing TCP scenario passed using the
+identical fixture copied into the authoring worktree (7.44 seconds, after the
+native rebuild). The updated H-head full CI remains pending; this copied-source
+focused pass is not an independent H full run.
+
 ## Evidence and limits
 
 Read-only actual-diff reviews of the earlier SDP and Current corrections are clear. The actual native
@@ -74,8 +92,10 @@ The exact original native media TCP scenario also passed (70.47 seconds). Those
 focused native executions used the identical changed fixture files copied into
 the later native-UI worktree, not an independent H build. Their full H Windows
 run passed; the Linux failure and new wrong-receipt correction are described
-above. The new correction's focused execution and updated-head full CI remain
-pending; prior focused passes do not validate it. Earlier full Root runs remain
+above. Its copied-source exact maximum-SDP regression passed (6.43 seconds),
+and the full3950ce59 Linux native run passed; Windows failed later at the
+read-only SDK preflight. Only the newest SDK preflight correction's focused
+execution and updated-head full CI remain pending. Earlier full Root runs remain
 subject to the one explicitly deferred slow catch-up cost case. Root strict
 Clippy still has unfinished application-pipeline errors; no passing sign-off
 or suppression is claimed.

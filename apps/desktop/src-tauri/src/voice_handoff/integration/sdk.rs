@@ -10,6 +10,55 @@ pub(super) struct Token {
     pub(super) proof: [u8; 32],
 }
 
+/// Only the read-only Actor preflight is retried. The same original route
+/// and Context remain bound; no physical position, SDK allocation, attach or
+/// Release is included. One fixed observer bound covers pressure and Actor IO.
+async fn preflight_after_capacity(
+    state: &AppState,
+    context: &context::Context,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+) {
+    let clock = crate::voice_runtime(state).clock();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let counts = route.session().fixture_counts();
+        let sdk = parent.sdk_test_released();
+        let pressure = state.servers.lock().await;
+        let seen = tokio::sync::Notify::new();
+        let original = async {
+            for _ in 0..32 {
+                match factory::preflight_binding(context, route).await {
+                    Ok(commit) => {
+                        drop(commit);
+                        return;
+                    }
+                    Err(factory::Refused::Protocol(VoiceError::Capacity)) => {
+                        // The refused preflight has dropped all broad owners
+                        // before telling the pressure driver to release its map.
+                        seen.notify_one();
+                        clock.sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("original SDK preflight refused: {error:?}"),
+                }
+            }
+            panic!("original SDK preflight stayed busy for32 observations");
+        };
+        tokio::pin!(original);
+        tokio::select! {
+            _ = seen.notified() => {},
+            _ = &mut original => panic!("held real server map did not refuse SDK preflight"),
+        }
+        assert_eq!(route.session().fixture_counts(), counts);
+        assert_eq!(parent.sdk_test_released(), sdk);
+        drop(pressure);
+        original.await; // The SAME future, not a new attempt/deadline wrapper.
+        assert_eq!(route.session().fixture_counts(), counts);
+        assert_eq!(parent.sdk_test_released(), sdk);
+    })
+    .await
+    .expect("original SDK preflight exceeded its fixed observation bound");
+}
+
 /// Fixture observation of a nonblocking local constructor, not an SDK retry.
 /// Keep the original physical position and request across maintenance lock
 /// contention. No preflight, allocation, attach or Release is repeated here;
@@ -114,7 +163,7 @@ pub(super) async fn start(
     // Use the actual affine physical position. Even trusted code cannot allocate another
     // candidate under it while the first original preparation is retained.
     let context = context::Context::new(state);
-    factory::preflight_binding(&context, route).await.unwrap();
+    preflight_after_capacity(state, &context, route, parent).await;
     let incoming = opened_frame(
         public,
         route,
@@ -298,7 +347,7 @@ pub(super) async fn close_preparation_then_unwind(
     body.push(0);
     let request = requests::sdk::Request::decode(parent.id().logical(), &body).unwrap();
     let context = context::Context::new(state);
-    factory::preflight_binding(&context, route).await.unwrap();
+    preflight_after_capacity(state, &context, route, parent).await;
     let incoming = opened_frame(
         public,
         route,
@@ -379,7 +428,7 @@ pub(super) async fn fence_preparation_then_unwind(
     body.push(0);
     let request = requests::sdk::Request::decode(parent.id().logical(), &body).unwrap();
     let context = context::Context::new(state);
-    factory::preflight_binding(&context, route).await.unwrap();
+    preflight_after_capacity(state, &context, route, parent).await;
     let incoming = opened_frame(
         public,
         route,
