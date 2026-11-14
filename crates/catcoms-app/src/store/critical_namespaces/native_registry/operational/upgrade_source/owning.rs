@@ -10,7 +10,7 @@ use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
 mod physical;
 pub(in crate::store::critical_namespaces::native_registry) use physical::{
-    AuthenticationNegative, MetadataWork,
+    AuthenticationNegative, MetadataWork, UiWork,
 };
 
 #[cfg(test)]
@@ -451,6 +451,11 @@ impl Store {
         AppError,
     > {
         self.physical.refresh_legacy_invite_data(request, rng)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn capture_ui_work(
+        &self,
+    ) -> Option<UiWork> {
+        self.physical.capture_ui()
     }
     /// One prepaid original physical capsule, not admission or a native/SDK
     /// credential. Cached capture performs no IO/allocation/account lock;

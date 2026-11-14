@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+Native lock snapshots now have bounded synchronous DATA custody, original-mount
+retry, exact close acknowledgements and response-bound warning receipts under
+adversarial validation. Chat V2 stays off; operational text authoring and
+acceptance remain unfinished. This continuation supersedes the older snapshot
+status paragraphs below. [Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-SNAPSHOTS.md).
+
+## Prior disabled checkpoints (before lock-snapshot integration)
+
+Native ordinary UI-state IO is adding original authenticated-mount binding.
+Same-root reauthentication keeps its canonical negative metadata; another live
+mount cannot substitute. Lock snapshots and retry remain unfinished.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-TARGET.md).
+
+Ordinary native UI-state read/save is under validation on a separate original
+physical slot and owned IO lane. It remains disabled; final lock snapshots and
+authentication continuity are still unfinished.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-STATE.md).
+
 Native text authentication is releasing its physical slot before finalization
 while retaining independently paid original Host/index/mount cached negatives.
 The actual native consumer is under validation and remains disabled; typed UI

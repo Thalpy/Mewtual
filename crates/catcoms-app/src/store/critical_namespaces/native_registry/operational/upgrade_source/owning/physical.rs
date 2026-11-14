@@ -17,6 +17,7 @@ pub(super) struct Physical {
     // before an infallible unique move fills Some. No method exposes None.
     current: Option<V2CurrentLayoutStore>,
     slot: Arc<Slot>,
+    ui_slot: Arc<Slot>,
     // LAST: actual original payment after every file/slot control allocation.
     handler: lifecycle_admission::Handler,
 }
@@ -45,8 +46,8 @@ impl Drop for SlotAck {
 pub(super) const METADATA: usize = 8
     * (std::mem::size_of::<Physical>() + std::mem::size_of::<MetadataWork>()
     + std::mem::size_of::<SlotAck>() + std::mem::size_of::<Slot>()
-    // Both Arc allocations' strong/weak counters, plus Option control metadata.
-    + 4 * std::mem::size_of::<usize>())
+    // Physical and both slot Arc controls, plus Option control metadata.
+    + 6 * std::mem::size_of::<usize>())
     + 512;
 
 impl Physical {
@@ -57,6 +58,9 @@ impl Physical {
             cell: Mutex::default(),
             current: None,
             slot: Arc::new(Slot {
+                taken: AtomicBool::new(false),
+            }),
+            ui_slot: Arc::new(Slot {
                 taken: AtomicBool::new(false),
             }),
             handler,
@@ -116,6 +120,31 @@ impl Physical {
             return None;
         }
         Some(value)
+    }
+    /// The UI sidecar is independent of index WAL/claim state. Reusing the
+    /// index slot would let an uncertain metadata transaction starve drafts.
+    pub(super) fn capture_ui(self: &Arc<Self>) -> Option<UiWork> {
+        if !self.open_for_custody()
+            || self
+                .ui_slot
+                .taken
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return None;
+        }
+        let ack = SlotAck {
+            original: self.ui_slot.clone(),
+            _payment: self.handler.payment_tail(),
+        };
+        let work = UiWork {
+            physical: self.clone(),
+            _ack: ack,
+        };
+        if !work.is_live_cached() {
+            return None;
+        }
+        Some(work)
     }
     pub(super) fn verify_native_passphrase(&self, passphrase: &[u8]) -> Result<(), AppError> {
         if !self.open_for_custody() {
@@ -231,6 +260,47 @@ impl Physical {
         cell::rename_metadata(&self.cell, self.current()?, &self.handler, request, rng)
     }
 }
+/// One dedicated original UI-sidecar slot. Neither Clone nor a close owner.
+/// Actual last Physical/Current destruction precedes its acknowledgement.
+pub(in crate::store::critical_namespaces::native_registry) struct UiWork {
+    physical: Arc<Physical>,
+    _ack: SlotAck,
+}
+impl UiWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
+        self.physical.open_for_custody()
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn read(
+        &self,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        if !self.is_live_cached() {
+            return Err(refused());
+        }
+        let result = self
+            .physical
+            .current()?
+            .cached_store()?
+            .load_ui_state_record()?;
+        if !self.is_live_cached() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn save(
+        &self,
+        bytes: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if !self.is_live_cached() {
+            return Err(refused());
+        }
+        self.physical
+            .current()?
+            .cached_store()?
+            .save_ui_state(bytes, rng)
+    }
+}
+
 /// Cached original negatives only, with no Physical/Current/Store/slot/cold
 /// evidence. Its caller owns an independent finite metadata invoice.
 pub(in crate::store::critical_namespaces::native_registry) struct AuthenticationNegative {

@@ -11,21 +11,26 @@ mod boot;
 pub(super) mod retirement;
 #[cfg(test)]
 mod tests;
+pub(super) mod ui_state;
 
 const ENABLED: bool = false;
 const MAX_SECRET: usize = 4096;
 type Task = std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 pub(super) struct Registry {
+    pub(super) selected: bool,
     inflight: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     ui_budget: NativeUiInvocationBudget,
+    pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
     #[cfg(test)]
     directory: Option<PathBuf>,
     #[cfg(test)]
     final_edge: Option<Arc<tests::AdmissionBarrier>>,
+    #[cfg(test)]
+    reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     retirement_queue: StdMutex<Option<Arc<StdMutex<Vec<Task>>>>>,
     #[cfg(test)]
@@ -46,20 +51,27 @@ impl Default for Registry {
         use catcoms_app::store::CriticalCatalogReadPool;
         let retirement = retirement::Coalescer::default();
         let preludes = retirement.prelude();
+        let ui_budget = NativeUiInvocationBudget::new(
+            CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity())
+                .expect("fixed native UI policy"),
+        )
+        .expect("fixed native UI capacity");
+        let ui_state =
+            ui_state::Controller::new(ui_budget.prepare().expect("UI-state control payment"));
         Self {
+            selected: false,
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
-            ui_budget: NativeUiInvocationBudget::new(
-                CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity())
-                    .expect("fixed native UI policy"),
-            )
-            .expect("fixed native UI capacity"),
+            ui_budget,
+            ui_state,
             retirement,
             preludes,
             #[cfg(test)]
             directory: None,
             #[cfg(test)]
             final_edge: None,
+            #[cfg(test)]
+            reply_edge: StdMutex::new(None),
             #[cfg(test)]
             retirement_queue: StdMutex::new(None),
             #[cfg(test)]
@@ -132,7 +144,8 @@ pub(super) fn initial_state() -> AppState {
     initial_state_selected(ENABLED)
 }
 fn initial_state_selected(enabled: bool) -> AppState {
-    let state = AppState::default();
+    let mut state = AppState::default();
+    state.native_text.selected = enabled;
     if enabled {
         state.ui_session_generation.store(1, Ordering::SeqCst);
         state.ui_authorized_generation.store(0, Ordering::SeqCst);
@@ -157,6 +170,17 @@ fn router<R: tauri::Runtime>(
     spawn: impl Fn(Task) + Send + Sync + 'static,
 ) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     move |invoke| {
+        if enabled
+            && matches!(
+                invoke.message.command(),
+                "lock_session" | "close_vault_window"
+            )
+        {
+            return ui_state::snapshots::route(invoke, &spawn);
+        }
+        if enabled && matches!(invoke.message.command(), "get_ui_state" | "save_ui_state") {
+            return ui_state::route(invoke, &spawn);
+        }
         if !enabled || invoke.message.command() != "unlock" {
             return fallback(invoke);
         }
@@ -216,14 +240,43 @@ fn router<R: tauri::Runtime>(
         drop(invoke.message); // retain only one bounded secret, never arbitrary JSON
         spawn(Box::pin(async move {
             let state = app.state::<AppState>();
-            let result = execute(&state, &captured, directory).await;
+            let mut notice = None;
+            let result = execute(&state, &captured, directory, &mut notice).await;
+            #[cfg(test)]
+            {
+                let edge = state.native_text.reply_edge.lock().unwrap().clone();
+                if let Some(edge) = edge {
+                    edge.wait_once().await;
+                }
+            }
+            let mut _retired_notice = None;
             let _commit = state.ui_session_commit.lock().await;
             if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation {
                 resolver.reject("Unlock was superseded. Try again.");
             } else {
+                let current = if let Some(n) = notice.as_ref() {
+                    state.native_text.preludes.is_idle_cached()
+                        && state
+                            .native_text
+                            .ui_state
+                            .snapshots
+                            .notice_is_current(&state, n)
+                            .await
+                } else {
+                    false
+                };
                 match result {
                     Ok(rows) => resolver.resolve(rows),
                     Err(error) => resolver.reject(error),
+                }
+                if current
+                    && state.ui_session_generation.load(Ordering::SeqCst) == captured.generation
+                {
+                    _retired_notice = state
+                        .native_text
+                        .ui_state
+                        .snapshots
+                        .publish_notice(notice.as_ref().unwrap());
                 }
             }
         }));
@@ -264,6 +317,7 @@ async fn execute(
     state: &AppState,
     captured: &Captured,
     directory: PathBuf,
+    notice: &mut Option<ui_state::snapshots::Notice>,
 ) -> Result<Vec<ReloadedServer>, String> {
     let _mount = state.vault_mount.lock().await;
     // An older lock can publish this generation before revoking voice state.
@@ -345,14 +399,20 @@ async fn execute(
         // its own secret against the same completed mounted keystore.
         authentication = authenticate_mounted(state, &captured.secret).await?;
     }
-    let authentication = authentication.ok_or("Vault startup did not complete.")?;
+    let authentication = Arc::new(authentication.ok_or("Vault startup did not complete.")?);
     #[cfg(test)]
     if let Some(edge) = &state.native_text.final_edge {
         edge.wait_once().await;
     }
-    finalize_unlock_session_with_voice_checked(state, captured.generation, false, &ticket, || {
-        authentication.is_live_cached()
-    })
+    finalize_unlock_session_with_voice_checked(
+        state,
+        captured.generation,
+        false,
+        &ticket,
+        || authentication.is_live_cached(),
+        Some(authentication.clone()),
+        Some(notice),
+    )
     .await?;
     // This warm milestone admits only a fresh empty vault; no fake Legacy
     // actors are created from index DATA. Native authoring/restore come next.

@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native lock snapshots now have bounded synchronous DATA custody, original-mount
+retry, exact close acknowledgements and response-bound warning receipts under
+adversarial validation. Chat V2 stays off; operational text authoring and
+acceptance remain unfinished. This continuation supersedes the older snapshot
+status paragraphs below. [Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-SNAPSHOTS.md).
+
+## Prior disabled checkpoints (before lock-snapshot integration)
+
+The disabled native UI-state target path rejects a live foreign original before
+sidecar IO, and checks the actual mounted facade before authorization mutations.
+Shared UI counters and directory labels cannot establish original identity.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-TARGET.md).
+
+The disabled native UI-state path fences old replies after actual lock registration,
+keeps admitted IO custody after observer loss and distinguishes missing from
+malformed records. It is logical-mount custody, not filesystem-path identity or
+completed lock-snapshot continuity.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-STATE.md).
+
 The disabled native authentication continuation retains original gate/Life/Host
 negatives after destroying its actual physical work. It cannot keep a revoking
 Owner/Sender alive, use a replacement mount, refund refusal credit under Store,

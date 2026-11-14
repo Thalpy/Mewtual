@@ -130,6 +130,11 @@ const provider = new Proxy(webcrypto.subtle as unknown as SubtleCrypto, { get(ta
       if (name === "decrypt" && view.length === 3 && view[0] === 1 && view[1] === 3) {
         detail += "/refused-" + view[2];
       }
+      if (name === "decrypt" && view.length === 4 && view[0] === 9 && view[1] === 2
+          && ((view[2] <= 1 && view[3] === 0) || (view[2] === 2 && view[3] <= 11))) {
+        // Fixed authenticated error enums only; never append identities/proofs.
+        detail += `/media-refused-${view[2]}-${view[3]}`;
+      }
       if (name === "decrypt") admissionObservations.observe((args[0] as AesGcmParams)?.additionalData, view);
     }
     stage(detail); return result;
@@ -746,9 +751,9 @@ async function step(value: Step): Promise<unknown> {
       // Current for EACH original full parent after both native histories disappeared.
       for (const record of mediaRecords) {
         await broker.completeNativeMediaHandoff(owner, channel, record.plan);
-        const before = record.currents;
-        await broker.completeNativeMediaHandoff(owner, channel, record.plan);
-        assert.ok(record.currents > before, "fresh authenticated Current on exact retained peer");
+        // A void join may coalesce or observe a local refusal. Require actual
+        // Current on this original under the existing bounded observer.
+        await freshOriginalMediaCurrent(record);
         assert.equal(record.calls.closed, 0);
       }
       return { kind: "all-media-current", peers: mediaRecords.length };

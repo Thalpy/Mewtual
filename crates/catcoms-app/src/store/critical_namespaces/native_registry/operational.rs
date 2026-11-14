@@ -16,6 +16,7 @@ mod mount;
 mod native_ui;
 mod opening;
 mod payment;
+mod ui_state;
 mod upgrade;
 pub(in crate::store::critical_namespaces) mod upgrade_source;
 pub use facade::{
@@ -29,6 +30,11 @@ pub use native_ui::{
     UiCandidate as NativeTextUiCandidate, UiCapture as NativeTextUiObservation,
     UiGarbage as NativeTextUiGarbage, UiPreparation as NativeTextUiPreparation,
     UiRetirement as NativeTextUiRetirement, UiRetirementState as NativeTextUiRetirementState,
+};
+pub use ui_state::{
+    UiStateBudget as NativeUiStateBudget, UiStateCredit as NativeUiStateCredit,
+    UiStatePreparation as NativeUiStatePreparation, UiStateRead as NativeUiStateRead,
+    UiStateSaved as NativeUiStateSaved,
 };
 pub use upgrade::{NativeIndexPolicy, NativeIndexUpgrade};
 

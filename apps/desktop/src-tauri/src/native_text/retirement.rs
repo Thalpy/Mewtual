@@ -48,6 +48,7 @@ impl Default for Coalescer {
 /// destruction, so no unlock may reopen between the final drain and destroy.
 pub(crate) struct Prelude {
     active: std::sync::atomic::AtomicUsize,
+    mutations: std::sync::atomic::AtomicUsize,
     changed: Notify,
     #[cfg(test)]
     waiting: Notify,
@@ -55,14 +56,36 @@ pub(crate) struct Prelude {
 }
 pub(crate) struct PreludeGuard {
     original: Arc<Prelude>,
+    mutation: bool,
 }
 impl Prelude {
     pub(crate) fn begin(self: &Arc<Self>) -> Result<PreludeGuard, &'static str> {
+        self.begin_kind(true)
+    }
+    pub(crate) fn begin_close(self: &Arc<Self>) -> Result<PreludeGuard, &'static str> {
+        self.begin_kind(false)
+    }
+    fn begin_kind(self: &Arc<Self>, mutation: bool) -> Result<PreludeGuard, &'static str> {
         self.active
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
             .map_err(|_| UNAVAILABLE)?;
+        if mutation
+            && self
+                .mutations
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
+                .is_err()
+        {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.changed.notify_waiters();
+            return Err(UNAVAILABLE);
+        }
+        // A finite producer increments mutations BEFORE its SC registration.
+        // If close overtakes the tiny active->mutations window, its later
+        // authentication-incarnation check still rejects a superseded capture;
+        // any capture sampling after close SC is already unauthorized.
         Ok(PreludeGuard {
             original: self.clone(),
+            mutation,
         })
     }
     pub(crate) fn is_idle_cached(&self) -> bool {
@@ -86,8 +109,27 @@ impl Prelude {
         }
     }
 }
+impl PreludeGuard {
+    /// A close holds THIS guard through destroy. Older producers must finish
+    /// snapshot registration before the final save/ack decision; later locked
+    /// echoes cannot create fresh authorized payloads.
+    pub(crate) async fn wait_for_other_mutations(&self) {
+        loop {
+            let changed = self.original.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.original.mutations.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
 impl Drop for PreludeGuard {
     fn drop(&mut self) {
+        if self.mutation {
+            self.original.mutations.fetch_sub(1, Ordering::SeqCst);
+        }
         self.original.active.fetch_sub(1, Ordering::SeqCst);
         self.original.changed.notify_waiters();
     }
@@ -104,6 +146,7 @@ impl Coalescer {
     pub(super) fn prelude(&self) -> Arc<Prelude> {
         Arc::new(Prelude {
             active: std::sync::atomic::AtomicUsize::new(0),
+            mutations: std::sync::atomic::AtomicUsize::new(0),
             changed: Notify::new(),
             #[cfg(test)]
             waiting: Notify::new(),

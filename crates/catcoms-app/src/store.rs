@@ -67,7 +67,8 @@ pub use critical_namespaces::{
     NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
     NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
     NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget,
-    NativeUiInvocationMetadata, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
+    NativeUiStateRead, NativeUiStateSaved, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
     PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
     PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
     ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
@@ -6092,14 +6093,25 @@ impl ServerStore {
     /// state; malformed/tampered ciphertext is an error so the UI can disclose that recovery is
     /// needed instead of silently discarding drafts.
     pub fn load_ui_state(&self) -> Result<Vec<u8>, AppError> {
+        Ok(self.load_ui_state_record()?.unwrap_or_default())
+    }
+
+    /// Preserve absence separately from authenticated empty plaintext. Only a
+    /// genuine NotFound is None; a present record always reaches the UI schema
+    /// validator, including empty/whitespace/future content. No file is rewritten.
+    pub fn load_ui_state_record(&self) -> Result<Option<Vec<u8>>, AppError> {
         let path = self.ui_state_path();
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
+        // Only actual NotFound means first run. Path::exists also hides
+        // access failures and a dangling symlink, which would silently reset
+        // drafts instead of preserving/refusing the unexpected object.
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(AppError::Io(error.to_string())),
+        };
         // Check both metadata and the actual read: a file may grow after metadata was observed.
         // Seal overhead is the 24-byte nonce plus the 16-byte authentication tag.
         let max_sealed = MAX_UI_STATE_BYTES + 40;
-        let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
         if !metadata.file_type().is_file() || metadata.len() > max_sealed as u64 {
             return Err(AppError::Invalid(
                 "UI state is not bounded and regular".into(),
@@ -6113,19 +6125,36 @@ impl ServerStore {
         {
             return Err(AppError::Invalid("opened UI state is not regular".into()));
         }
-        let mut bytes = Vec::new();
-        file.take(max_sealed as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| AppError::Io(e.to_string()))?;
-        if bytes.len() > max_sealed {
-            return Err(AppError::Invalid("UI state exceeds its bound".into()));
-        }
+        let bytes = Self::read_ui_state_bytes(file, max_sealed)?;
         let sealed = unframe(&bytes)?;
         let plain = unseal(&self.keys.db_key()?, &sealed)?;
         if plain.len() > MAX_UI_STATE_BYTES {
             return Err(AppError::Invalid("UI state exceeds its bound".into()));
         }
-        Ok(plain)
+        Ok(Some(plain))
+    }
+
+    /// One controlled allocation, including one overflow sentinel byte. Retry
+    /// Interrupted as read_to_end did before this bounded loop replaced it.
+    fn read_ui_state_bytes(mut reader: impl Read, maximum: usize) -> Result<Vec<u8>, AppError> {
+        let mut bytes = vec![0; maximum + 1];
+        let mut filled = 0;
+        while filled < bytes.len() {
+            let read = match reader.read(&mut bytes[filled..]) {
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(AppError::Io(error.to_string())),
+            };
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        bytes.truncate(filled);
+        if bytes.len() > maximum {
+            return Err(AppError::Invalid("UI state exceeds its bound".into()));
+        }
+        Ok(bytes)
     }
 
     /// Seal + atomically write a server's [`ServerNet`] (its libp2p identity seed, listen port and
@@ -7114,6 +7143,86 @@ mod tests {
         file.set_len((MAX_UI_STATE_BYTES + 41) as u64).unwrap();
         assert!(
             matches!(store.load_ui_state(), Err(AppError::Invalid(message)) if message.contains("bounded and regular"))
+        );
+    }
+
+    #[test]
+    fn ui_state_reader_retries_interrupted_io_and_bounds_an_endless_source() {
+        struct InterruptedOnce {
+            interrupted: bool,
+            data: std::io::Cursor<Vec<u8>>,
+        }
+        impl Read for InterruptedOnce {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                self.data.read(bytes)
+            }
+        }
+        let reader = InterruptedOnce {
+            interrupted: false,
+            data: std::io::Cursor::new(vec![1, 2, 3]),
+        };
+        assert_eq!(
+            ServerStore::read_ui_state_bytes(reader, 3).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert!(ServerStore::read_ui_state_bytes(std::io::repeat(0), 3).is_err());
+    }
+
+    #[test]
+    fn ui_state_record_distinguishes_missing_from_authenticated_empty_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(15);
+        let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
+        assert!(store.load_ui_state_record().unwrap().is_none());
+        store.save_ui_state(b"", &mut rng).unwrap();
+        let bytes = fs::read(store.ui_state_path()).unwrap();
+        assert_eq!(store.load_ui_state_record().unwrap(), Some(Vec::new()));
+        assert_eq!(fs::read(store.ui_state_path()).unwrap(), bytes);
+        fs::write(store.ui_state_path(), []).unwrap();
+        assert!(
+            store.load_ui_state_record().is_err(),
+            "present truncated ciphertext cannot become missing"
+        );
+    }
+
+    #[test]
+    fn ui_state_refuses_and_preserves_a_nonregular_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+        let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
+        fs::create_dir(store.ui_state_path()).unwrap();
+        assert!(matches!(store.load_ui_state(), Err(AppError::Invalid(_))));
+        assert!(fs::symlink_metadata(store.ui_state_path())
+            .unwrap()
+            .is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ui_state_dangling_link_is_not_an_absent_first_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(14);
+        let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("missing-ui-state-target"),
+            store.ui_state_path(),
+        )
+        .unwrap();
+        assert!(
+            !store.ui_state_path().exists(),
+            "reproduces the old false-absence preflight"
+        );
+        assert!(matches!(store.load_ui_state(), Err(AppError::Invalid(_))));
+        assert!(
+            fs::symlink_metadata(store.ui_state_path())
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a refused object must not be replaced or removed"
         );
     }
 

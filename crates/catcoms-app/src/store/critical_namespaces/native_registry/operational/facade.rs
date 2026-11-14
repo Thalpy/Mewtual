@@ -78,6 +78,19 @@ impl NativeTextVaultAuthentication {
     }
 }
 impl NativeTextVaultAuthenticationCheck {
+    /// Original-mount correlation only. A UI lock may preserve this identity;
+    /// it never proves a current UI generation or a newly authenticated secret.
+    pub fn same_original(&self, other: &Self) -> bool {
+        self.host.same_original(&other.host)
+    }
+    pub(super) fn matches_ui_mount(&self, host: &catcoms_rt::NativeChatUiMountObservation) -> bool {
+        self.is_live_cached() && self.host.same_original(host)
+    }
+    /// Cached identity/negative check against the ACTUAL mounted facade. This
+    /// allocates no identity and cannot substitute a replacement by directory.
+    pub fn is_for_original_vault(&self, vault: &NativeTextVault) -> bool {
+        self.matches_ui_mount(&vault.observe_ui_mount())
+    }
     /// Cached original negatives only, not proof of UI authorization. This
     /// reads atomics and cannot drop a temporarily upgraded revoking owner.
     pub fn is_live_cached(&self) -> bool {
@@ -201,6 +214,37 @@ impl NativeTextVault {
             expected: self.ui.invocation_budget(),
             credit,
         }
+    }
+
+    pub(super) fn observe_ui_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
+        self.ui.observe_mount()
+    }
+    /// Capture only the original dedicated UI slot. No index-WAL/Idle proof is
+    /// substituted for local sidecar ownership. Native authenticates the caller.
+    pub fn prepare_ui_state(
+        &self,
+        credit: super::ui_state::UiStateCredit,
+    ) -> super::ui_state::UiStatePreparation {
+        let work = match &self.index {
+            IndexOwner::Version3(index) => index.capture_ui_work(),
+            IndexOwner::Version2(_) => None,
+        };
+        super::ui_state::UiStatePreparation::new(self, work, credit, None)
+    }
+
+    /// Native continuity uses this original authenticated mount binding in
+    /// addition to its own ACL and captured-generation admission. The owning
+    /// capture remains infallible; wrong/closed targets refuse outside guards.
+    pub fn prepare_ui_state_for_original(
+        &self,
+        credit: super::ui_state::UiStateCredit,
+        target: Arc<NativeTextVaultAuthenticationCheck>,
+    ) -> super::ui_state::UiStatePreparation {
+        let work = match &self.index {
+            IndexOwner::Version3(index) => index.capture_ui_work(),
+            IndexOwner::Version2(_) => None,
+        };
+        super::ui_state::UiStatePreparation::new(self, work, credit, Some(target))
     }
 
     /// Historical bounded DATA only, serialized with this original index's
