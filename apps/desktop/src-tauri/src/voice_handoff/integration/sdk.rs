@@ -9,6 +9,56 @@ pub(super) struct Token {
     pub(super) generation: u64,
     pub(super) proof: [u8; 32],
 }
+
+/// Fixture observation of a nonblocking local constructor, not an SDK retry.
+/// Keep the original physical position and request across maintenance lock
+/// contention. No preflight, allocation, attach or Release is repeated here;
+/// each constructor call still performs all actual current-custody checks.
+async fn preparation_after_capacity(
+    context: &context::Context,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    physical: &channel::PhysicalHold,
+    request: &requests::sdk::Request,
+    clock: &dyn catcoms_rt::Clock,
+) -> Result<Option<ledger::SdkPreparationForTest>, factory::Refused> {
+    // Pin the failure with the real parent mutex before retrying. This oracle
+    // must not acquire a candidate, change sdk_preparing or spend group credit.
+    let mut observed_contention = false;
+    for attempt in 0..32 {
+        let before = route.session().fixture_counts();
+        let was_observed = observed_contention;
+        let result = crate::voice_handoff::sdp::current(context, route, |admission| {
+            if !observed_contention {
+                observed_contention = true;
+                parent.sdk_test_begin_with_parent_locked(
+                    admission,
+                    physical,
+                    route.session(),
+                    request,
+                )
+            } else {
+                parent.begin_sdk(admission, physical, route.session(), request)
+            }
+        });
+        if !was_observed && observed_contention {
+            assert!(matches!(
+                result,
+                Err(factory::Refused::Protocol(VoiceError::Capacity))
+            ));
+            assert_eq!(route.session().fixture_counts(), before);
+        }
+        if !matches!(
+            result,
+            Err(factory::Refused::Protocol(VoiceError::Capacity))
+        ) || attempt == 31
+        {
+            return result; // Success/None/Unauthorized/closed never become retries.
+        }
+        clock.sleep(std::time::Duration::from_millis(10)).await;
+    }
+    unreachable!("last bounded constructor attempt returns its original result")
+}
 async fn exchange(
     state: &AppState,
     public: &bootstrap::SetupOutput,
@@ -78,9 +128,15 @@ pub(super) async fn start(
         None,
     );
     let physical = incoming.hold_position().unwrap();
-    let mut preparation = crate::voice_handoff::sdp::current(&context, route, |admission| {
-        parent.begin_sdk(admission, &physical, route.session(), &request)
-    })
+    let mut preparation = preparation_after_capacity(
+        &context,
+        route,
+        parent,
+        &physical,
+        &request,
+        crate::voice_runtime(state).clock().as_ref(),
+    )
+    .await
     .unwrap()
     .unwrap();
     assert!(matches!(
@@ -256,9 +312,15 @@ pub(super) async fn close_preparation_then_unwind(
         None,
     );
     let physical = incoming.hold_position().unwrap();
-    let mut preparation = crate::voice_handoff::sdp::current(&context, route, |admission| {
-        parent.begin_sdk(admission, &physical, route.session(), &request)
-    })
+    let mut preparation = preparation_after_capacity(
+        &context,
+        route,
+        parent,
+        &physical,
+        &request,
+        crate::voice_runtime(state).clock().as_ref(),
+    )
+    .await
     .unwrap()
     .unwrap();
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -331,9 +393,15 @@ pub(super) async fn fence_preparation_then_unwind(
         None,
     );
     let physical = incoming.hold_position().unwrap();
-    let mut preparation = crate::voice_handoff::sdp::current(&context, route, |admission| {
-        parent.begin_sdk(admission, &physical, route.session(), &request)
-    })
+    let mut preparation = preparation_after_capacity(
+        &context,
+        route,
+        parent,
+        &physical,
+        &request,
+        crate::voice_runtime(state).clock().as_ref(),
+    )
+    .await
     .unwrap()
     .unwrap();
     preparation.allocate().unwrap();

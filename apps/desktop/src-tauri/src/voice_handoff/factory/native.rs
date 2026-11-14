@@ -22,6 +22,16 @@ enum Selection {
     Consumed,
 }
 
+/// Fixture observation of the SAME actual request, never a grant or a supplied
+/// expected peer. The real producer still repeats all Route/Root checks.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::voice_handoff) enum FixtureOriginalRequest {
+    Discovery(u8),
+    Exact(PairSelector),
+    Unsupported,
+}
+
 // Unlike the physical factory's4KiB publication-only task, this standalone task also pays
 // its entire preflight/UI preparation, concurrent with an independently occupied browser
 // Control envelope. The complete discovery/confirmation/reconciliation graph is measured
@@ -40,9 +50,15 @@ struct NativeCustody {
 }
 pub(in crate::voice_handoff) struct NativeCompletion {
     result: Result<RowId, Refused>,
+    #[cfg(test)]
+    original: FixtureOriginalRequest,
     _custody: NativeCustody,
 }
 impl NativeCompletion {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_original_request(&self) -> FixtureOriginalRequest {
+        self.original
+    }
     /// Bounded public row metadata only. The original ledger remains the authority for
     /// attached action/input/permit/result and exact retries. A Pending row is not input.
     pub(in crate::voice_handoff) fn result(&self) -> Result<RowId, Refused> {
@@ -52,6 +68,8 @@ impl NativeCompletion {
 struct Worker {
     context: Option<Context>,
     selector: Selection,
+    #[cfg(test)]
+    original: FixtureOriginalRequest,
     custody: NativeCustody,
 }
 
@@ -186,6 +204,12 @@ fn spawn_inner(
     // future and completed-output storage. There is no second charge at final admission.
     let future = run_native(Worker {
         context: Some(context.clone()),
+        #[cfg(test)]
+        original: match &selector {
+            Selection::Discover { cursor, .. } => FixtureOriginalRequest::Discovery(*cursor),
+            Selection::Exact(selector) => FixtureOriginalRequest::Exact(*selector),
+            _ => FixtureOriginalRequest::Unsupported,
+        },
         selector,
         custody: NativeCustody {
             _credit: credit,
@@ -276,6 +300,8 @@ async fn run_native(mut worker: Worker) -> NativeCompletion {
         .fixture_native_finished(result.as_ref().err().copied());
     NativeCompletion {
         result,
+        #[cfg(test)]
+        original: worker.original,
         _custody: worker.custody,
     }
 }
@@ -289,6 +315,13 @@ async fn execute(worker: &mut Worker) -> Result<RowId, Refused> {
         Selection::Ready { cursor } => return ready::execute(worker, cursor).await,
         Selection::Consumed => return Err(Refused::Closed),
     };
+    #[cfg(test)]
+    {
+        // Discovery was query-only until this point. Cache its ACTUAL result
+        // before preflight/Begin/Actor publication; retries can never rediscover
+        // a different peer once any selected work might exist.
+        worker.original = FixtureOriginalRequest::Exact(selector);
+    }
     #[cfg(test)]
     worker
         .custody

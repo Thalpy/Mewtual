@@ -3,6 +3,52 @@
 use super::*;
 
 #[test]
+fn sdp_failure_diagnostics_keep_original_children_and_do_not_wait_for_child_state() {
+    let (coordinator, selected, selector) = selection();
+    let (foreign_coordinator, foreign, foreign_selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let (_join, _action, parent) = returned_parent(&ledger, &coordinator, &selected, selector);
+    let (_foreign_join, _foreign_action, foreign_parent) =
+        returned_parent(&ledger, &foreign_coordinator, &foreign, foreign_selector);
+    let (Begin::Factory(child), _) = ledger
+        .begin_child(selected.clone(), &parent, ConfirmationPurpose::Start(None))
+        .unwrap()
+    else {
+        panic!("real original child reservation")
+    };
+    let (Begin::Factory(foreign_child), _) = ledger
+        .begin_child(
+            foreign.clone(),
+            &foreign_parent,
+            ConfirmationPurpose::Incoming(1),
+        )
+        .unwrap()
+    else {
+        panic!("real other-parent child reservation")
+    };
+    let before = selected.resources().counts();
+    let (original, diagnostic) = ledger.fixture_sdp_diagnostic(&selected, Some(parent.id()));
+    assert!(original == Some(selector));
+    assert!(diagnostic.contains("Some((\"start\", Some("));
+    assert!(
+        !diagnostic.contains("\"incoming\""),
+        "other parent's child must be absent"
+    );
+    let row = ledger.row(child.id()).unwrap();
+    let held = row.state.lock().unwrap();
+    let (original, diagnostic) = ledger.fixture_sdp_diagnostic(&selected, Some(parent.id()));
+    assert!(original == Some(selector));
+    assert!(
+        diagnostic.contains("Some((\"start\", None))"),
+        "child contention is observed without waiting"
+    );
+    assert!(!diagnostic.contains("\"incoming\""));
+    drop(held);
+    assert_eq!(selected.resources().counts(), before);
+    assert_ne!(child.id(), foreign_child.id());
+}
+
+#[test]
 fn continuation_scan_does_not_infer_derived_success_or_incoming_authority_from_return() {
     let (mut coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());
