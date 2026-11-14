@@ -165,20 +165,30 @@ class Peer:
             raise RuntimeError("owned peer pipe failed to retire")
 
 
-def peers(old_binary: Path, current_binary: Path, directory: Path, proof: dict) -> None:
-    if sha(old_binary.read_bytes()) != proof["old_binary_sha256"]:
+def peers(old_binary: Path, current_binary: Path, directory: Path, proof: dict, *, pressure: bool) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    if sha(old_binary.read_bytes()) != proof["server_binary_sha256"]:
         raise RuntimeError("old executable changed before spawn")
-    if sha(current_binary.read_bytes()) != proof["current_binary_sha256"]:
+    if sha(current_binary.read_bytes()) != proof["client_binary_sha256"]:
         raise RuntimeError("current executable changed before spawn")
     deadline = time.monotonic() + 45  # ONE deadline, never renewed by retries/output.
-    old = Peer([str(old_binary), "server"], "old", directory)
+    scenario = "--pressure" if pressure else "--wait-target"
+    proof["publication_phase"] = "held_128_then_2000_subscriptions_without_ready_wait" if pressure else "RR_then_actual_target_adoption"
+    old = Peer([str(old_binary), "server", scenario], "old", directory)
     current = None
     try:
         ready = old.line(deadline)
         match = re.fullmatch(r"READY (12D3KooW[1-9A-HJ-NP-Za-km-z]{44}) (/ip4/127\.0\.0\.1/udp/([0-9]{1,5})/quic-v1)", ready)
         if match is None or not 0 < int(match[3]) <= 65535:
             raise RuntimeError(f"invalid old-peer ready marker: {ready!r}")
-        current = Peer([str(current_binary), "client", f"{match[2]}/p2p/{match[1]}"], "current", directory)
+        current = Peer([str(current_binary), "client", f"{match[2]}/p2p/{match[1]}", scenario], "current", directory)
+        if pressure:
+            if current.line(deadline) != "HELD client 128":
+                raise RuntimeError("pressure scenario did not hold 128 actual publications")
+            if current.line(deadline) != "PRESSURE_RR client":
+                raise RuntimeError("request/reply did not progress while 128 originals were held")
+            proof["request_reply_before_subscription_release"] = True
+            old.send("release-target")
         if old.line(deadline) != "EXCHANGED server 2000 61440":
             raise RuntimeError("old peer did not receive exact current traffic")
         if current.line(deadline) != "EXCHANGED client 2000 61440":
@@ -206,7 +216,11 @@ def peers(old_binary: Path, current_binary: Path, directory: Path, proof: dict) 
                 raise RuntimeError(f"unexpected/repeated peer markers: {child.label}")
         proof["old_markers"] = old.lines
         proof["current_markers"] = current.lines
-        print("Old-peer gate passed: two actual processes, bidirectional RR/gossip, 2000 topics, live-process Mesh withdrawal.")
+        if pressure:
+            proof["post_original_receipt_acknowledged"] = True
+            proof["originals_before_release"] = 128
+            proof["active_signing_oracle_range"] = [256, 1280]
+        print(f"{'Current pressure' if pressure else 'Phased old-peer'} gate passed: two actual processes, bidirectional RR/gossip, 2000 topics, live-process Mesh withdrawal.")
     finally:
         stop_peers(current, old)
 
@@ -307,8 +321,19 @@ def run() -> None:
                 cargo("restore-head", ["build", "--locked", "-p", "catcoms-net", "--example", "network_compat_peer"])
         finally:
             git("worktree", "remove", "--force", str(worktree))
-    peers(old_binary, current_binary, directory, proof)
+    proof["server_binary_sha256"] = proof["old_binary_sha256"]
+    proof["client_binary_sha256"] = proof["current_binary_sha256"]
+    peers(old_binary, current_binary, directory, proof, pressure=False)
     (directory / "interop-proof.json").write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
+    current_proof = {
+        "head": proof["head"], "current_worktree_status": proof["current_worktree_status"],
+        "example_sha256": proof["example_sha256"],
+        "server_stack": proof["current_stack"], "client_stack": proof["current_stack"],
+        "server_binary_sha256": proof["current_binary_sha256"],
+        "client_binary_sha256": proof["current_binary_sha256"],
+    }
+    peers(current_binary, current_binary, directory / "current-pressure", current_proof, pressure=True)
+    (directory / "pressure-proof.json").write_text(json.dumps(current_proof, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
