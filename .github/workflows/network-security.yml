@@ -1,0 +1,90 @@
+name: Network security migration compatibility
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/network-security.yml'
+      - '.github/scripts/check-network-security.py'
+      - 'vendor/libp2p-gossipsub/**'
+      - 'crates/catcoms-net/**'
+      - 'crates/catcoms-rt/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'apps/desktop/src-tauri/Cargo.lock'
+      - 'apps/desktop/src-tauri/Cargo.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_TEST_THREADS: 2
+
+jobs:
+  compatibility:
+    name: Actual wire compatibility and pressure (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check actual vendor archive and both shipping resolutions
+        run: |
+          python .github/scripts/check-network-security.py --self-test
+          python .github/scripts/check-network-security.py --integrity-only
+      - name: Execute exact patched and production cohorts
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import runpy
+          guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
+          output = Path('logs/network-security')
+          output.mkdir(parents=True, exist_ok=True)
+          cohorts = (
+              ('vendor-regressions', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'mewtual_'], 6),
+              ('vendor-protocol', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'protocol::'], 9),
+              ('vendor-library', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib'], 159),
+              ('net', ['-p', 'catcoms-net', '--lib'], 177),
+              ('protocol-rng', ['-p', 'catcoms-rt', '--lib', 'protocol_rng::tests'], 3),
+          )
+          for label, arguments, count in cohorts:
+              code, summaries, timed_out, _ = guard['run_logged'](
+                  label, ['cargo', 'test', '--locked', *arguments], output,
+              )
+              if timed_out:
+                  raise RuntimeError(f'{label}: deadline exceeded')
+              guard['validate'](''.join(summaries), code, count)
+          PY
+      - name: Build previous stack and exchange through actual loopback QUIC
+        run: python .github/scripts/check-network-security.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: network-security-${{ matrix.os }}
+          path: |
+            logs/network-security/*.log
+            logs/network-security/*.json
+            logs/network-security/current-pressure/*.log
+          if-no-files-found: error
+
+# Existing strict lint, dependency/license audit and full Root/native/frontend
+# jobs remain mandatory. This functional lane does not waive or replace them.

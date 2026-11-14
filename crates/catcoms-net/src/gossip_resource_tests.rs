@@ -9,7 +9,218 @@ use std::io;
 #[derive(Clone)]
 struct ControlCodec;
 
-#[async_trait::async_trait]
+/// An observed-refusal probe, unlike ControlCodec's intentionally parked
+/// response. It writes the oversize frame only after the receiver actually
+/// accepts the near-limit positive control on this SAME negotiated stream.
+#[derive(Clone)]
+struct RefusalCodec(Arc<tokio::sync::Notify>);
+impl request_response::Codec for RefusalCodec {
+    type Protocol = StreamProtocol;
+    type Request = (Vec<u8>, Vec<u8>);
+    type Response = ();
+    async fn read_request<T>(&mut self, _: &StreamProtocol, _: &mut T) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        std::future::pending().await
+    }
+    async fn read_response<T>(&mut self, _: &StreamProtocol, stream: &mut T) -> io::Result<()>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        use futures::AsyncReadExt;
+        let mut byte = [0];
+        if stream.read(&mut byte).await? == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response to gossip control",
+            ))
+        }
+    }
+    async fn write_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        stream: &mut T,
+        frames: Self::Request,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let (near, oversize) = frames;
+        assert!(near.len() < GOSSIP_RPC_MAX_BYTES);
+        assert!(oversize.len() > GOSSIP_RPC_MAX_BYTES);
+        let mut prefix = Vec::new();
+        varint(&mut prefix, near.len());
+        stream.write_all(&prefix).await?;
+        stream.write_all(&near).await?;
+        stream.flush().await?;
+        self.0.notified().await;
+        prefix.clear();
+        varint(&mut prefix, oversize.len());
+        stream.write_all(&prefix).await?;
+        stream.write_all(&oversize).await?;
+        stream.flush().await
+    }
+    async fn write_response<T>(&mut self, _: &StreamProtocol, _: &mut T, _: ()) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "probe sends no response",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn valid_oversize_control_is_observably_refused_then_fresh_stream_progresses() {
+    let phase = async {
+        let mut receiver = build_tcp_swarm_with_key(keypair_from_seed([85; 32]).unwrap()).unwrap();
+        let receiver_id = *receiver.local_peer_id();
+        receiver
+            .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .unwrap();
+        let address = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = receiver.select_next_some().await {
+                break address;
+            }
+        };
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let key = keypair_from_seed([86; 32]).unwrap();
+        let bad_peer = key.public().to_peer_id();
+        let mut bad = SwarmBuilder::with_existing_identity(key)
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .unwrap()
+            .with_behaviour(|_| {
+                request_response::Behaviour::with_codec(
+                    RefusalCodec(gate.clone()),
+                    [(
+                        StreamProtocol::new("/meshsub/1.1.0"),
+                        request_response::ProtocolSupport::Full,
+                    )],
+                    request_response::Config::default(),
+                )
+            })
+            .unwrap()
+            .build();
+        bad.dial(
+            libp2p::swarm::dial_opts::DialOpts::peer_id(receiver_id)
+                .addresses(vec![address.clone()])
+                .build(),
+        )
+        .unwrap();
+        let baseline = "near-limit-control-positive";
+        let denied = "oversize-control-must-not-be-adopted";
+        // Unknown nested field15 is legal protobuf and ignored by the Control
+        // schema. Both complete RPCs also contain a valid subscription. Neither
+        // malformed fields nor a forged length can masquerade as byte refusal.
+        let frame = |sentinel: &str, padding: usize| {
+            let mut rpc = subscriptions(&[(true, sentinel.into())]);
+            let mut control = Vec::new();
+            field(&mut control, 15, &vec![0; padding]);
+            field(&mut rpc, 3, &control);
+            rpc
+        };
+        let mut input = Some((
+            frame(baseline, GOSSIP_RPC_MAX_BYTES - 1024),
+            frame(denied, GOSSIP_RPC_MAX_BYTES),
+        ));
+        let mut request = None;
+        let mut accepted_near = false;
+        let mut refused = false;
+        while !(accepted_near && refused) {
+            tokio::select! {
+                event=bad.select_next_some()=>match event {
+                    SwarmEvent::ConnectionEstablished {peer_id,..} if peer_id==receiver_id && input.is_some()=>{
+                        request=Some(bad.behaviour_mut().send_request(&receiver_id,input.take().unwrap()));
+                    }
+                    SwarmEvent::Behaviour(request_response::Event::Message {message:request_response::Message::Response {request_id,response:()},..})=>{
+                        assert_eq!(Some(request_id),request);refused=true; // actual remote stream EOF
+                    }
+                    SwarmEvent::Behaviour(request_response::Event::OutboundFailure {request_id,error,..})=>{
+                        assert_eq!(Some(request_id),request);
+                        let closed = match &error {
+                            request_response::OutboundFailure::ConnectionClosed => true,
+                            request_response::OutboundFailure::Io(io) => matches!(io.kind(),io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe),
+                            _ => false,
+                        };
+                        assert!(closed,"not an observed remote stream end: {error}");
+                        refused=true;
+                    }
+                    _=>{}
+                },
+                event=receiver.select_next_some()=>{
+                    if let SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(gossipsub::Event::Subscribed {peer_id,topic}))=event {
+                        if peer_id==bad_peer {
+                            assert_ne!(topic,gossipsub::IdentTopic::new(denied).hash());
+                            if topic==gossipsub::IdentTopic::new(baseline).hash() {accepted_near=true;gate.notify_one();}
+                        }
+                    }
+                }
+            }
+        }
+        // A fresh valid stream must make actual progress on the SAME receiver,
+        // not on a replacement peer that lost the refused decoder's state.
+        let key = keypair_from_seed([87; 32]).unwrap();
+        let good_peer = key.public().to_peer_id();
+        let mut good = SwarmBuilder::with_existing_identity(key)
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .unwrap()
+            .with_behaviour(|_| {
+                request_response::Behaviour::with_codec(
+                    ControlCodec,
+                    [(
+                        StreamProtocol::new("/meshsub/1.1.0"),
+                        request_response::ProtocolSupport::Full,
+                    )],
+                    request_response::Config::default(),
+                )
+            })
+            .unwrap()
+            .build();
+        good.dial(
+            libp2p::swarm::dial_opts::DialOpts::peer_id(receiver_id)
+                .addresses(vec![address])
+                .build(),
+        )
+        .unwrap();
+        let receipt = "after-observed-oversize-refusal";
+        let mut sent = false;
+        loop {
+            tokio::select! {
+                event=good.select_next_some()=>{
+                    if matches!(event,SwarmEvent::ConnectionEstablished {peer_id,..} if peer_id==receiver_id) && !sent {
+                        good.behaviour_mut().send_request(&receiver_id,vec![subscriptions(&[(true,receipt.into())])]);sent=true;
+                    }
+                },
+                event=receiver.select_next_some()=>{
+                    if let SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(gossipsub::Event::Subscribed {peer_id,topic}))=event {
+                        assert!(!(peer_id==bad_peer && topic==gossipsub::IdentTopic::new(denied).hash()));
+                        if peer_id==good_peer && topic==gossipsub::IdentTopic::new(receipt).hash() {break;}
+                    }
+                }
+            }
+        }
+        assert!(sent);
+    };
+    tokio::select! {
+        _=phase=>{},
+        _=SystemClock.sleep(Duration::from_secs(10))=>panic!("observed byte-refusal/fresh-stream control exceeded watchdog")
+    }
+}
+
 impl request_response::Codec for ControlCodec {
     type Protocol = StreamProtocol;
     type Request = Vec<Vec<u8>>;
@@ -243,6 +454,13 @@ async fn retained_subscription_bound_accepts_duplicates_and_resumes_after_unsubs
 
 #[tokio::test]
 async fn real_tcp_gossip_delivers_at_one_hundred_one_hundred_one_and_two_thousand_topics() {
+    // Opt-in failure diagnostics on the test runtime's thread. No process-wide
+    // subscriber or production payload logging policy is changed.
+    let _trace = std::env::var_os("MEWTUAL_GOSSIP_TEST_TRACE").map(|_| {
+        tracing::subscriber::set_default(tracing_subscriber::fmt()
+            .with_env_filter("libp2p_gossipsub::handler=debug,libp2p_gossipsub::protocol=debug,catcoms_net=debug")
+            .with_ansi(false).with_test_writer().finish())
+    });
     use catcoms_rt::{MeshTransport, Topic, TransportEvent};
     for count in [100, 101, 2000] {
         tokio::time::timeout(std::time::Duration::from_secs(20), async {

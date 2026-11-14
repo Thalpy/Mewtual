@@ -184,7 +184,13 @@ pub(super) async fn exercise(
     );
     let request = decode(parent, &encoded, true);
     let candidate = parent
-        .sdp_action_candidate(route.session().identity(), &request)
+        .sdp_test_candidate_after_capacity(
+            route.session().identity(),
+            &request,
+            intent,
+            clock.as_ref(),
+        )
+        .await
         .unwrap();
     let funding = candidate.funding();
     let before = state.voice_handoff.sdp_test_rows(parent.id());
@@ -280,9 +286,28 @@ pub(super) async fn exercise(
         Some(if mismatch { b"v=0" } else { b"v=1" }),
     );
     let changed = decode(parent, &changed, true);
+    let canonical_before = row.sdp_test_outcome();
+    assert!(matches!(
+        parent.sdp_test_candidate_with_parent_locked(route.session().identity(), &changed),
+        Err(VoiceError::Capacity)
+    ));
+    assert_eq!(state.voice_handoff.sdp_test_rows(parent.id()), before + 1);
+    assert!(Arc::ptr_eq(&canonical_before, &row.sdp_test_outcome()));
+    assert!(row.status().unwrap().action.is_none());
+    drop(canonical_before);
     let changed_candidate = parent
-        .sdp_action_candidate(route.session().identity(), &changed)
+        .sdp_test_candidate_after_capacity(
+            route.session().identity(),
+            &changed,
+            intent,
+            clock.as_ref(),
+        )
+        .await
         .unwrap();
+    assert!(
+        Arc::ptr_eq(funding, changed_candidate.funding()),
+        "same actual Seal funding"
+    );
     // Deterministically reproduce supported admission contention, rather than relying on
     // the periodic collector happening to win this turn. Capacity is BEFORE the callback;
     // it must leave the one original row/outcome and its unstarted publication untouched.
@@ -630,7 +655,13 @@ pub(super) async fn exercise(
     let encoded_open = bytes(parent, pc_frame, None);
     let open = decode(parent, &encoded_open, false);
     let open_candidate = parent
-        .sdp_action_candidate(route.session().identity(), &open)
+        .sdp_test_candidate_after_capacity(
+            route.session().identity(),
+            &open,
+            intent,
+            clock.as_ref(),
+        )
+        .await
         .unwrap();
     if matches!(mismatch_mode, 1 | 2) {
         // Retain a genuinely unstarted Open row through the parent PC/SDK close. Its

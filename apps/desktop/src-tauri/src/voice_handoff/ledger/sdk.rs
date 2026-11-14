@@ -117,6 +117,30 @@ impl Drop for Preparation {
     }
 }
 impl ResolvedRow {
+    /// Exercise the real constructor while this original parent's actual state
+    /// mutex is held. No installed obligation or preparation is fabricated.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_begin_with_parent_locked(
+        &self,
+        admission: &super::super::transition::Admission<'_>,
+        physical: &PhysicalHold,
+        session: &Arc<Session>,
+        request: &Request,
+    ) -> Result<Option<Preparation>, VoiceError> {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let original = storage(self, &state, admission.session(), request).unwrap();
+        let before = (original.sdk_preparing, original.sdk.is_some());
+        let result = self.begin_sdk(admission, physical, session, request);
+        let storage = storage(self, &state, admission.session(), request).unwrap();
+        let after = (storage.sdk_preparing, storage.sdk.is_some());
+        // A regressed constructor might return a Preparation whose Drop locks
+        // this state. Release the guard before any assertion or result drop.
+        drop(state);
+        assert_eq!(before, (false, false));
+        assert_eq!(after, before);
+        result
+    }
+
     /// Test-only observation of the actual installed obligation; this neither constructs
     /// custody nor mutates release state. Used after real HTTP/browser admission.
     #[cfg(test)]

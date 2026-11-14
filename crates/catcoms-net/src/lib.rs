@@ -127,6 +127,11 @@ const MAX_FRAME: usize = catcoms_rt::MAX_REQUEST_RESPONSE_FRAME_BYTES;
 const MAX_DISCOVERED_PER_RESPONSE: usize = 128;
 
 /// The request/response protocol id (anti-entropy / blob fetch).
+// One named finite allowance for both full gossip RPC and aggregate SUB/control
+// bytes. Existing subscription compatibility needs more than the new16KiB
+// default; this preserves the old nominal64KiB ceiling, never unlimited frames.
+const GOSSIP_RPC_MAX_BYTES: usize = 64 * 1024;
+
 const RR_PROTOCOL: &str = "/catcoms/rr/1";
 
 /// Errors building or driving the mesh.
@@ -468,7 +473,6 @@ async fn write_frame<T: AsyncWrite + Unpin + Send>(
     Ok(())
 }
 
-#[async_trait::async_trait]
 impl request_response::Codec for BytesCodec {
     type Protocol = StreamProtocol;
     type Request = Vec<u8>;
@@ -594,7 +598,7 @@ pub struct MeshBehaviour {
     /// address candidate back from a fresh socket. The corresponding **server** behaviour lives
     /// only on those infrastructure swarms; ordinary members must not become public dial-back
     /// services merely by joining a group.
-    pub autonat_client: autonat::v2::client::Behaviour<OsCryptoRng>,
+    pub autonat_client: autonat::v2::client::Behaviour<catcoms_rt::SeededProtocolRng>,
     /// UPnP IGD: best-effort ask a compatible home router to open a port. PCP and NAT-PMP are
     /// separate actor-owned clients because libp2p's behaviour does not implement them.
     pub upnp: Toggle<libp2p::upnp::tokio::Behaviour>,
@@ -616,9 +620,26 @@ impl MeshBehaviour {
         relay_client: relay::client::Behaviour,
         enable_port_mapping: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let gossipsub = gossipsub::Behaviour::new(
+        // SUB fields count toward the upstream aggregate-control ceiling too.
+        // Keep the old finite whole-RPC allowance: the new16KiB default rejects
+        // genuine2000-topic announcements and old-peer initial subscription sets.
+        // The wire prescan/publish-count limit and repaired PRUNE handling remain.
+        let gossip_config = gossipsub::ConfigBuilder::default()
+            .max_transmit_size(GOSSIP_RPC_MAX_BYTES)
+            .max_control_message_size(GOSSIP_RPC_MAX_BYTES)
+            .build()?;
+        let gossipsub = gossipsub::Behaviour::new_with_subscription_filter(
             gossipsub::MessageAuthenticity::Signed(key.clone()),
-            gossipsub::Config::default(),
+            gossip_config,
+            // Preserve our actual 2000-topic contract. The repaired upstream
+            // default is now100; using it silently drops legitimate larger
+            // groups. Both count limits supplement the finite wire-byte bound;
+            // they are checked after decoding and do not bound all preallocation.
+            gossipsub::MaxCountSubscriptionFilter {
+                filter: gossipsub::AllowAllSubscriptionFilter {},
+                max_subscribed_topics: 2000,
+                max_subscriptions_per_request: 2000,
+            },
         )?;
         let request_response = request_response::Behaviour::with_codec(
             BytesCodec::default(),
@@ -635,7 +656,7 @@ impl MeshBehaviour {
         // default. AutoNAT v2 nonces are security-sensitive and must follow the same dependency
         // boundary as every other random value in the application.
         let autonat_client = autonat::v2::client::Behaviour::new(
-            OsCryptoRng,
+            catcoms_rt::SeededProtocolRng::seeded_by(&mut OsCryptoRng),
             autonat::v2::client::Config::default(),
         );
         let upnp = Toggle::from(enable_port_mapping.then(libp2p::upnp::tokio::Behaviour::default));
@@ -769,6 +790,8 @@ pub fn build_tcp_swarm_with_key_and_port_mapping(
 
 #[cfg(test)]
 mod gossip_resource_tests;
+#[cfg(test)]
+mod protocol_provider_tests;
 #[cfg(test)]
 mod quic_compatibility_tests;
 
@@ -1825,11 +1848,46 @@ impl PendingPublish {
         depth > 0
     }
 
+    /// Extract only originals on the exact announced wire topic. A burst of
+    /// unrelated subscription events must not rehash/re-sign the entire held
+    /// queue on every callback. Preserve all unmatched bytes, order and charge;
+    /// the timer still retries transient queue pressure without a new SUB.
+    fn take_for_subscription(&mut self, hash: &gossipsub::TopicHash) -> Vec<(Topic, Bytes)> {
+        let bytes = &mut self.bytes;
+        self.items
+            .extract_if(.., |(topic, data)| {
+                if !subscription_matches_topic(hash, topic) {
+                    return false;
+                }
+                *bytes -= data.len();
+                true
+            })
+            .collect()
+    }
+
     /// Remove everything held, for a retry pass that re-holds whatever still cannot go out.
     fn take(&mut self) -> Vec<(Topic, Bytes)> {
         self.bytes = 0;
         std::mem::take(&mut self.items)
     }
+}
+
+/// `to_ident` uses canonical lowercase hex with identity hashing. Compare
+/// directly without allocating/decoding attacker-supplied strings or treating
+/// invalid hex as the empty application topic. Case is significant on the wire.
+fn subscription_matches_topic(hash: &gossipsub::TopicHash, topic: &Topic) -> bool {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let wire = hash.as_str().as_bytes();
+    if topic.as_bytes().len().checked_mul(2) != Some(wire.len()) {
+        return false;
+    }
+    topic
+        .as_bytes()
+        .iter()
+        .zip(wire.chunks_exact(2))
+        .all(|(byte, pair)| {
+            pair[0] == HEX[(byte >> 4) as usize] && pair[1] == HEX[(byte & 15) as usize]
+        })
 }
 
 /// A peer's last known transport identity, kept so a request can redial it after its connection
@@ -4938,15 +4996,25 @@ impl Actor {
     }
 
     fn flush_pending_publish(&mut self) {
+        let before = self.pending_publish.items.len();
         let held = self.pending_publish.take();
-        let attempted = held.len();
+        self.retry_held_publications(held, before);
+    }
+
+    fn flush_subscribed_topic(&mut self, topic: &gossipsub::TopicHash) {
+        let before = self.pending_publish.items.len();
+        let held = self.pending_publish.take_for_subscription(topic);
+        self.retry_held_publications(held, before);
+    }
+
+    fn retry_held_publications(&mut self, held: Vec<(Topic, Bytes)>, before: usize) {
         for (topic, data) in held {
             self.publish_or_hold(topic, data, PublishAttempt::Retry);
         }
         let still_held = self.pending_publish.items.len();
-        if attempted > still_held {
+        if before > still_held {
             tracing::info!(
-                released = attempted - still_held,
+                released = before - still_held,
                 still_held,
                 "held publications went out"
             );
@@ -5214,9 +5282,9 @@ impl Actor {
                 }
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(
-                gossipsub::Event::Subscribed { .. },
+                gossipsub::Event::Subscribed { topic, .. },
             )) => {
-                self.flush_pending_publish();
+                self.flush_subscribed_topic(&topic);
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
                 request_response::Event::Message { peer, message, .. },
@@ -5440,8 +5508,15 @@ impl Actor {
             // libp2p's behaviour is UPnP IGD only (PCP/NAT-PMP are driven by the workers above).
             // Fold both implementations through one event path so candidates, diagnostics and
             // expiry all have identical semantics.
+            // New upstream events also carry a local address. Preserve this
+            // behaviour's existing global-UPnP mapping key (None) here. Moving
+            // it into bound-interface ownership needs its own normalization
+            // and expiry tests; it is not an incidental dependency adaptation.
             SwarmEvent::Behaviour(MeshBehaviourEvent::Upnp(e)) => match e {
-                libp2p::upnp::Event::NewExternalAddr(addr) => {
+                libp2p::upnp::Event::NewExternalAddr {
+                    external_addr: addr,
+                    ..
+                } => {
                     if let Some((transport, _)) = port_mapping_transport(&addr) {
                         self.on_port_mapping_event(PortMappingEvent::Mapped {
                             mechanism: PortMappingMechanism::Upnp,
@@ -5453,7 +5528,10 @@ impl Actor {
                         tracing::warn!(%addr, "UPnP returned an address with no TCP or QUIC port");
                     }
                 }
-                libp2p::upnp::Event::ExpiredExternalAddr(addr) => {
+                libp2p::upnp::Event::ExpiredExternalAddr {
+                    external_addr: addr,
+                    ..
+                } => {
                     if let Some((transport, _)) = port_mapping_transport(&addr) {
                         self.on_port_mapping_event(PortMappingEvent::Expired {
                             mechanism: PortMappingMechanism::Upnp,
@@ -7006,6 +7084,106 @@ mod tests {
             pending.bytes, 0,
             "a drained queue must not keep charging for what it handed back"
         );
+    }
+
+    #[test]
+    fn subscription_bursts_leave_unrelated_held_originals_unattempted() {
+        let target = Topic::new("held target");
+        let mut pending = PendingPublish::default();
+        let originals: Vec<_> = (0..128).map(|n| Bytes::from(vec![n; 60 * 1024])).collect();
+        for bytes in &originals {
+            pending.hold(target.clone(), bytes.clone());
+        }
+        let charged = pending.bytes;
+        for n in 0..2_000 {
+            let unrelated = to_ident(&Topic::new(format!("other-{n}"))).hash();
+            assert!(
+                pending.take_for_subscription(&unrelated).is_empty(),
+                "no original reaches the signer on an unrelated event"
+            );
+            assert_eq!(pending.items.len(), originals.len());
+            assert_eq!(pending.bytes, charged);
+        }
+        let selected = pending.take_for_subscription(&to_ident(&target).hash());
+        assert_eq!(selected.len(), originals.len());
+        for ((topic, bytes), original) in selected.iter().zip(&originals) {
+            assert_eq!(topic, &target);
+            assert_eq!(
+                bytes.as_ptr(),
+                original.as_ptr(),
+                "no payload copy or replacement"
+            );
+        }
+        assert!(pending.is_empty());
+        assert_eq!(pending.bytes, 0);
+    }
+
+    #[test]
+    fn subscription_selection_preserves_other_topics_and_rejects_noncanonical_aliases() {
+        let a = Topic::new(vec![0xab]);
+        let b = Topic::new("another");
+        let empty = Topic::new(Vec::<u8>::new());
+        let mut pending = PendingPublish::default();
+        for (topic, bytes) in [
+            (a.clone(), b"a1".as_slice()),
+            (b.clone(), b"b1".as_slice()),
+            (a.clone(), b"a2".as_slice()),
+            (empty.clone(), b"empty".as_slice()),
+        ] {
+            pending.hold(topic, Bytes::copy_from_slice(bytes));
+        }
+        for invalid in ["AB", "not-hex", "a", "abab"] {
+            assert!(pending
+                .take_for_subscription(&gossipsub::TopicHash::from_raw(invalid))
+                .is_empty());
+        }
+        let selected = pending.take_for_subscription(&to_ident(&a).hash());
+        assert_eq!(
+            selected
+                .iter()
+                .map(|(_, bytes)| bytes.as_ref())
+                .collect::<Vec<_>>(),
+            [b"a1".as_slice(), b"a2".as_slice()]
+        );
+        assert_eq!(
+            pending
+                .items
+                .iter()
+                .map(|(topic, _)| topic)
+                .collect::<Vec<_>>(),
+            [&b, &empty]
+        );
+        assert_eq!(pending.bytes, 7);
+        assert!(pending.should_report_depth());
+        // The independent timer can still attempt every remaining original.
+        assert_eq!(pending.take().len(), 2);
+        assert_eq!(pending.bytes, 0);
+    }
+
+    #[test]
+    fn failed_subscription_retry_retains_all_originals_and_exact_queue_charge() {
+        let target = Topic::new("retry target");
+        let unrelated = Topic::new("unrelated");
+        let original = Bytes::from(vec![1; 60 * 1024]);
+        let other = Bytes::from(vec![2; 60 * 1024]);
+        let mut pending = PendingPublish::default();
+        pending.hold(target.clone(), original.clone());
+        pending.hold(unrelated.clone(), other.clone());
+        for _ in 0..3 {
+            let selected = pending.take_for_subscription(&to_ident(&target).hash());
+            assert_eq!(selected.len(), 1);
+            assert_eq!(pending.bytes, other.len());
+            // The existing retry path re-holds the SAME bytes after a transient
+            // refusal. No new arrival or bound change can evict the untouched row.
+            for (topic, bytes) in selected {
+                pending.hold(topic, bytes);
+            }
+            assert_eq!(pending.bytes, other.len() + original.len());
+            assert_eq!(pending.items.len(), 2);
+            assert_eq!(pending.items[0].0, unrelated);
+            assert_eq!(pending.items[0].1.as_ptr(), other.as_ptr());
+            assert_eq!(pending.items[1].1.as_ptr(), original.as_ptr());
+        }
     }
 
     /// A queue that has not moved is not re-announced on every retry pass.

@@ -14,6 +14,11 @@ bytes.workspace = true
 # catcoms-rt on its own failed to compile.
 tokio = { workspace = true, features = ["sync", "time"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+# AutoNAT's current protocol API forks a seeded RNG. Keep this compatibility
+# edge separate from the application's existing rand-core 0.6 seam.
+rand_core_0_10 = { package = "rand_core", version = "=0.10.1", default-features = false }
+rand_chacha = { version = "=0.10.0", default-features = false }
+zeroize = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

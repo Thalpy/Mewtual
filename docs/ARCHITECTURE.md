@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+The network dependency security migration is under validation. Actual patched
+gossipsub/Hickory packages replace the old graph in both workspaces, with explicit
+2000-topic limits and a narrow RT seeded RNG adapter for AutoNAT. QUIC's upstream
+TLS backend changes to explicit AWS-LC; WebSocket retains explicit ring. No global
+provider initializer or smart-dial behavior is added.
+[Scope and required evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
 Normal3's private metadata cell now also has a concrete Legacy invite refresh
 producer under validation. It shares Rename's revision, retained request/IO,
 physical owner and retirement fence. No native minting or join authority follows

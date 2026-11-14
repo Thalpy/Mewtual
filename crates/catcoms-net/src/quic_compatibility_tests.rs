@@ -4,6 +4,75 @@
 //! can hide a broken UDP/TLS/multiplexed request path in this fixture.
 use super::*;
 
+#[tokio::test]
+async fn actual_udp_quic_refuses_a_listener_with_the_wrong_expected_peer() {
+    use futures::StreamExt;
+    use libp2p::swarm::{dial_opts::DialOpts, DialError, SwarmEvent};
+    let server_key = keypair_from_seed([0x65; 32]).unwrap();
+    let client_key = keypair_from_seed([0x66; 32]).unwrap();
+    let actual = server_key.public().to_peer_id();
+    let foreign = keypair_from_seed([0x67; 32]).unwrap().public().to_peer_id();
+    assert_ne!(actual, foreign);
+    // Use the ACTUAL product Swarm builder: raw QUIC authenticates and returns
+    // the certificate's peer, while Swarm enforces the expected-peer binding.
+    let mut server = build_tcp_swarm_with_key(server_key).unwrap();
+    let mut client = build_tcp_swarm_with_key(client_key).unwrap();
+    server
+        .listen_on("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap())
+        .unwrap();
+    let address = bounded("wrong-peer UDP listener", async {
+        loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = server.select_next_some().await {
+                break address;
+            }
+        }
+    })
+    .await;
+    client
+        .dial(
+            DialOpts::peer_id(foreign)
+                .addresses(vec![address.clone()])
+                .build(),
+        )
+        .unwrap();
+    bounded("actual Swarm wrong-peer rejection",async {
+        loop {
+            tokio::select! {
+                event=client.select_next_some()=>match event {
+                    SwarmEvent::OutgoingConnectionError {peer_id,error,..}=>{
+                        assert_eq!(peer_id,Some(foreign));
+                        assert!(matches!(&error,DialError::WrongPeerId {obtained,..} if obtained==&actual),"unexpected dial error: {error}");
+                        break;
+                    }
+                    SwarmEvent::ConnectionEstablished {peer_id,..}=>panic!("wrong-peer dial adopted {peer_id}"),
+                    _=>{}
+                },
+                _=server.select_next_some()=>{}
+            }
+        }
+    }).await;
+    assert_eq!(client.connected_peers().count(), 0);
+    // Same listener and original swarms: refusal must not strand future valid
+    // work. The correct expected peer then authenticates over the UDP endpoint.
+    client
+        .dial(DialOpts::peer_id(actual).addresses(vec![address]).build())
+        .unwrap();
+    bounded("same endpoint with the actual expected peer",async {
+        loop {
+            tokio::select! {
+                event=client.select_next_some()=>match event {
+                    SwarmEvent::ConnectionEstablished {peer_id,..}=>{assert_eq!(peer_id,actual);break;},
+                    SwarmEvent::OutgoingConnectionError {error,..}=>panic!("correct peer refused: {error}"),
+                    _=>{}
+                },
+                _=server.select_next_some()=>{}
+            }
+        }
+    }).await;
+    assert!(client.is_connected(&actual));
+    assert!(!client.is_connected(&foreign));
+}
+
 async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
     tokio::select! {
         result = future => result,

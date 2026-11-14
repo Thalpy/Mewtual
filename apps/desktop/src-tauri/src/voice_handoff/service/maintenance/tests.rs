@@ -102,6 +102,134 @@ async fn bounded_native_outcome(waiter: native::NativeWaiter) -> native::NativeC
         .expect("original native worker task panicked")
 }
 
+async fn original_native_outcome_until(
+    waiter: native::NativeWaiter,
+    clock: &dyn Clock,
+    deadline: u64,
+) -> Result<native::NativeCompletion, crate::voice_handoff::factory::Refused> {
+    let remaining = deadline.saturating_sub(clock.monotonic_ms());
+    tokio::time::timeout(Duration::from_millis(remaining), waiter)
+        .await
+        .expect("same native discovery exceeded its original fixture bound")
+}
+
+/// Retry ONLY the original discovery request or its actually selected exact
+/// purpose. Admission advances Cursor even on local refusal, so calling another
+/// ordinary_work turn here would silently select a different peer. Metadata is
+/// taken from the actual completion while it still owns its NativeHold, then
+/// that WHOLE completion/payment/position drops before any re-entry or wait.
+async fn finish_original_discovery(
+    context: &Context,
+    route: &Route,
+    clock: &dyn Clock,
+    initial: native::NativeCompletion,
+    deadline: u64,
+) -> Result<native::NativeCompletion, crate::voice_handoff::factory::Refused> {
+    use crate::voice_handoff::factory::Refused;
+    use catcoms_sync::voice_v2::VoiceError;
+    use native::FixtureOriginalRequest;
+    let mut first = Some(initial);
+    let mut original = FixtureOriginalRequest::Unsupported;
+    for attempt in 0..32 {
+        let completion = if let Some(first) = first.take() {
+            Ok(first)
+        } else {
+            // Sleep may have reached the ONE original bound. Do not admit a
+            // new native producer merely to time out its observer immediately.
+            if clock.monotonic_ms() >= deadline {
+                return Err(Refused::Protocol(VoiceError::Capacity));
+            }
+            let waiter = match original {
+                FixtureOriginalRequest::Discovery(cursor) => {
+                    native::discover_derivation(context, route, cursor)
+                }
+                FixtureOriginalRequest::Exact(selector) => {
+                    native::produce_derivation(context, route, selector)
+                }
+                FixtureOriginalRequest::Unsupported => {
+                    panic!("original discovery metadata missing")
+                }
+            };
+            match waiter {
+                Ok(waiter) => original_native_outcome_until(waiter, clock, deadline).await,
+                Err(error) => Err(error),
+            }
+        };
+        match completion {
+            Ok(completed) => {
+                if !matches!(
+                    completed.result(),
+                    Err(Refused::Protocol(VoiceError::Capacity))
+                ) || attempt == 31
+                    || clock.monotonic_ms() >= deadline
+                {
+                    return Ok(completed);
+                }
+                let next = completed.fixture_original_request();
+                match (original, next) {
+                    (
+                        FixtureOriginalRequest::Unsupported,
+                        FixtureOriginalRequest::Discovery(_) | FixtureOriginalRequest::Exact(_),
+                    ) => original = next,
+                    (
+                        FixtureOriginalRequest::Discovery(a),
+                        FixtureOriginalRequest::Discovery(b),
+                    ) if a == b => {}
+                    (FixtureOriginalRequest::Discovery(_), FixtureOriginalRequest::Exact(_)) => {
+                        original = next
+                    }
+                    (FixtureOriginalRequest::Exact(a), FixtureOriginalRequest::Exact(b))
+                        if a == b => {}
+                    _ => panic!("actual original request changed: {original:?} -> {next:?}"),
+                }
+                drop(completed);
+            }
+            Err(Refused::Protocol(VoiceError::Capacity))
+                if attempt < 31 && clock.monotonic_ms() < deadline => {}
+            Err(error) => return Err(error),
+        }
+        let remaining = deadline.saturating_sub(clock.monotonic_ms());
+        clock.sleep(Duration::from_millis(remaining.min(10))).await;
+    }
+    unreachable!("last bounded original request returns its exact result")
+}
+
+#[tokio::test]
+async fn original_discovery_retry_does_not_dispatch_after_sleep_reaches_its_bound() {
+    use crate::voice_handoff::factory::Refused;
+    use catcoms_sync::voice_v2::VoiceError;
+    use std::future::Future;
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_, selected, _) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    route.acknowledge_setup().unwrap();
+    let servers = f.state.servers.lock().await;
+    let waiter = native::discover_derivation(&context, &route, 1).unwrap();
+    let initial = bounded_native_outcome(waiter).await;
+    assert_eq!(
+        initial.result(),
+        Err(Refused::Protocol(VoiceError::Capacity))
+    );
+    drop(servers);
+    let clock = catcoms_rt::ManualClock::new(0);
+    let retry = finish_original_discovery(&context, &route, &clock, initial, 10);
+    tokio::pin!(retry);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(retry.as_mut().poll(&mut cx).is_pending());
+    // The first whole completion released its actual native position before
+    // sleeping. Close that same issuer: an erroneous re-dispatch would report
+    // Closed, rather than the original terminal Capacity at the expired bound.
+    drop(route.session().native_hold().unwrap());
+    route.session().close_admission();
+    clock.advance_ms(10);
+    assert!(matches!(
+        retry.await,
+        Err(Refused::Protocol(VoiceError::Capacity))
+    ));
+    f.close().await;
+}
+
 /// Exercise the SAME production Cursor across an admitted, proven local refusal and
 /// its ordinary continuation/discovery turns. The native snapshot chooses the peer;
 /// no supplied expected selector, cursor reset or fabricated grant enters any producer.
@@ -146,15 +274,40 @@ pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
     assert_eq!(cursor.stage[index], 2);
     assert_eq!(cursor.peers[index], 1);
     clock.sleep(Duration::from_millis(CADENCE_MS)).await;
+    let live = context.upgrade().expect("same mounted context");
+    let servers = live.servers.lock().await;
+    let deadline = clock
+        .monotonic_ms()
+        .checked_add(10_000)
+        .expect("fixture clock bound");
     let (admitted, _, waiter) = cursor.ordinary_work(context, route, index);
     assert!(admitted);
-    let completed = bounded_native_outcome(waiter.unwrap()).await;
+    let completed = original_native_outcome_until(waiter.unwrap(), clock, deadline)
+        .await
+        .expect("original rotated native task failed");
+    assert_eq!(
+        completed.result(),
+        Err(crate::voice_handoff::factory::Refused::Protocol(
+            catcoms_sync::voice_v2::VoiceError::Capacity
+        ))
+    );
+    assert_eq!(
+        completed.fixture_original_request(),
+        native::FixtureOriginalRequest::Discovery(1)
+    );
+    drop(servers);
+    drop(live);
+    let completed = finish_original_discovery(context, route, clock, completed, deadline)
+        .await
+        .expect("original native discovery admission refused");
     assert!(
         completed.result().is_ok(),
         "real next native snapshot/publication failed: {:?}",
         completed.result()
     );
     drop(completed);
+    assert_eq!(cursor.stage[index], 3);
+    assert_eq!(cursor.peers[index], 2); // no reset or extra ordinary_work rotation
 }
 
 #[tokio::test]

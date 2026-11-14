@@ -1,5 +1,97 @@
 # Mewtual; Handover
 
+## Wire compatibility and pressure evidence (14 November; CI pending)
+
+The new old/current Windows failure exposes predecessor retry amplification:
+1,129 topics adopted, target absent and 53,783 signing attempts. Current-only
+source correction does not repair that old binary. The fixture now separates
+phased old/new wire compatibility from a stronger current/current pressure test.
+The latter proves 128 original NoPeers holds, an actual second RR before any
+subscription release, progress through 2,000 subscriptions, receipt from the
+original 128 set and a non-vacuous 256..=1,280 signing-work bound.
+Both scenarios pass locally; the current client records 256 attempts. The same
+pressure contract rejects the actual pinned predecessor at the signing bound.
+The hold-tuple ordering race found in review is fixed with Release/Acquire.
+A separate post-original-receipt RR acknowledgement now prevents premature
+completion while the client's retry batch is still running. Both endpoints
+require it before the signing-range check; both real scenarios pass afterward.
+No time limit or receipt assertion was relaxed. Legacy startup resilience,
+complete-original delivery, broader fairness and full Chat V2 remain unproved.
+[Exact contracts and evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
+## Network subscription retry continuation (14 November; validation ongoing)
+
+Fresh `939ea602` Windows old-peer CI43553131480 failed after genuine QUIC/RR; both
+endpoints timed out on gossip. The earlier passing pair does not resolve this
+run. Separately confirmed actor amplification is corrected: Subscribed now
+retries only exact-topic held originals; unrelated/invalid/uppercase aliases
+cannot cause wholesale re-signing. Periodic retries, limits and deadlines remain.
+All 177 Net tests and strict affected lint pass. Actual old/current process
+interop passes locally with new bounded scalar diagnostics and unchanged
+assertions. No target-subscription wait was added to the probe. No claim that
+this proves the CI cause, broader startup fairness or full Chat V2 is made.
+See [scope and evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
+Earlier combined `4935e25` full native/checks pass on both platforms; Linux
+frontend 3,441/check/build pass. Full Root runs remain active. Member-storage
+43553131305 passes both platforms at939ea602. Final checks for the new runtime
+correction and native/joined/transport/UI Chat V2 integration remain open.
+
+
+## Combined network/native checkpoint (14 November; full CI running)
+
+PR113 integrates the separately reviewed native fixture correction from PR109.
+The two exact PC-close/media scenarios pass on the new stack(6.45s and8.42s).
+Actual native rebuilding passes(4m13s), followed by the real application startup
+gate. No startup panic or provider-selection failure occurs. Network compatibility
+CI43547079658 passes on Linux and Windows, including exact6/9/159/174/3 cohorts,
+archive verification and the genuine old-peer process gate. Complete shipping
+validation43547127334 is running; the single agreed slow cost case is deferred.
+
+The member-storage lane stopped with22 passing tests where its old guard expected
+19. History identifies the three added genuine JOIN regressions; all original19
+remain, with no ignored test. The unchanged broad Windows member_save selector
+likewise now has the original19 cases plus one native whole-Host case. The strict
+guards now expect22 and20 respectively. Actual local cohorts pass(183.15s and
+144.56s); the guard self-test and read-only review pass. This changes inventory,
+not tests or their contracts. Other strict-lint-blocked lanes remain red. Chat V2
+is still off; actual native, joined, transport and UI integration remain unfinished.
+
+## Network security migration (14 November; validation pending)
+
+All five libp2p manifest edges and both locks move to0.57.1, actual production
+gossipsub0.50.1 and Hickory0.26.3. The old DNS exceptions are removed. Both
+shipping audits pass(advisories, bans, licences, sources); no new waiver. Finite
+2000/2000 counts and explicit65536-byte payload/SUB-control caps preserve topic
+capacity; the latter increases the new16KiB default. A checksum-verified full
+vendor corrects oversized initial hello and declared-frame/coalesced-frame
+handling while retaining upstream PRUNE/count protections. The original priority
+queue is unbounded; no total memory bound is claimed.
+
+Pass: Net174(0.93s), RT67(0.01s), vendor159(8.80s), direct vendor6/protocol9,
+both dependency audits, formatting, ambient/raw-fs and cleanup self-test. The
+complete frontend3441 tests pass(118.37s), check has0 errors/warnings and build
+passes(51.69s). Actual Windows native production checking passes(7m05s).
+Read-only design/diff review and re-review found no remaining blocker/high/medium.
+
+QUIC unavoidably moves to upstream explicit AWS-LC/hybrid TLS. WebSocket remains
+explicit ring, with no new global initializer. Fresh-process provider order,
+real WS TLS trust/name/DNS and wrong-peer QUIC regressions pass. A real pinned
+0.56/0.49.5 binary exchanges both RR directions and near 60 KiB signed gossip after
+both queue2000 subscriptions; the last topic is observed, not every remote slot.
+The controller proves a live path before old Mesh Drop, then actual withdrawal
+and exact Unreachable while the old process stays alive. Binaries, unchanged old
+HEAD/lock and identical helper source are checked; both owned children always
+retire, even if the first cleanup fails.
+
+Earlier overlapping-bulk probes failed, including one current/current control;
+the production cause remains unknown. The passing functional gate negotiates RR
+before bulk and establishes no sustained-load fairness. Root strict lint fails
+with610 existing App errors; no suppression or public dead-code workaround was
+added. Full shipping suites, Linux native build and startup remain open. Native commands,
+joined sources and final Chat V2 acceptance are unfinished. Chat V2 is off.
+[Design and primary sources](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
 ## Private Legacy invite refresh (14 November; validation pending)
 
 The owning normal3 metadata path now stores a Legacy invite using the same
@@ -111,6 +203,120 @@ sign-off remain open. The separate native fixture PR106 focused Linux/Windows ru
 Capacity assumption, still open; no specific lock or production deadlock was
 established. Exact-head full suites, strict Clippy and dependency sign-off remain
 required. Chat V2 stays disabled.
+## Original PC close contention (14 November; validation pending)
+
+Full native CI43531747636 passes on Windows. Linux has1041 passing and4 failing
+cases: the first refusal is the exact SDP-result fixture's direct original
+`close_pc` unwrap; the other3 are the recovery fixture's failed-shutdown exclusion.
+The SDK constructor correction remains in place. No production fault is inferred
+from this newly identified nonblocking close refusal.
+
+Every Capacity return in `close_pc` precedes `request_close`: index/row contention
+or genuine undrained media prevents closure. The fixture now retains the same
+parent, Session and decoded PC request through at most32 attempts with the
+existing Clock's10ms delay. Persistent media/refusal still fails; success and
+non-Capacity outcomes never become another attempt. No result, mint, allocation,
+SDK Release or authority generation is repeated.
+
+A forced actual-parent-mutex observation proves closed/action-closed flags stay
+false before the positive control. It drops the guard before assertions. The
+existing genuine-admitted-media refusal and later drainage checks remain intact.
+The exact formerly failing scenario passes locally(5.78s), as does the real
+queued-actor/media/SDK-close control(6.18s). Native production checking passes
+(1m33s), as do native formatting and diff checks. Read-only design/diff review
+and short re-review are clear; the compile finding was fixed without adding
+Debug to private proof types. Exact-source full native validation remains open.
+Chat V2 is off.
+
+## SDK preparation contention (13 November; full rerun pending)
+
+Full native CI43522590967 passes on Windows. Linux has1027 passing and18 failing
+cases: the first failure is `integration/sdk.rs`'s direct `begin_sdk` constructor
+unwrap on `Protocol(Capacity)`; the other17 are the fixture's explicit failed-
+shutdown exclusion. This is a local preparation refusal before SDK allocation,
+attachment or publication, not an SDK Release result.
+
+The fixture retains the same decoded request, original parent, Context/Route and
+PhysicalHold through at most32 constructor attempts, sleeping at most10ms through
+the injected Clock between attempts. Only exact protocol Capacity retries. Every
+attempt repeats production current-custody checks; successful/absent preparation
+and every other error return immediately. No preflight, physical-position capture,
+allocation, attach, final admission or Release is wrapped in this retry.
+
+A genuine parent-state mutex oracle now precedes recovery in all three fixture
+constructors. It calls the actual constructor under that lock and proves the
+preparing/installed flags remain false and the same Session counts unchanged.
+The guard drops before assertions or unexpected preparation destruction. Global
+pool counts are intentionally not compared while unrelated maintenance is active.
+
+The formerly failing exact scenario passes locally(6.49s), as do both real
+closing-fence scenarios(13.96s), native production checking(1m31s) and formatting.
+Read-only design and actual-diff review are clear. Linux full native rerun remains
+required; the earlier Linux failed-media timeout's root cause remains unresolved.
+No Chat V2 activation or final native acceptance is claimed.
+
+## Native acceptance follow-up (13 November; execution pending)
+
+Focused CI43505629044 reached new later failures after the initial SDP/discovery
+corrections. Windows refused the second exact collected-history lookup with
+Capacity. That nonblocking lookup can contend even after its first success.
+The fixture now retries only the same Target on Capacity under its original
+deadline, retaining all proof/absence/tombstone assertions. A deterministic
+probe holds the actual entry mutex and proves that same refusal before retry.
+No SDK Release or production authorization retry was added.
+
+Linux's failed-media preservation case timed out while the original parent had
+no adopted key. Its earlier diagnostic discarded the actual selector at that
+absence. The test-only snapshot now retains original parent/Claim/key flags
+and the bounded original confirmation-child roles/status, including contention.
+It uses nonblocking locks and formats after unlocking; no receipt, key, payload
+or owned result is exposed. Genuine child-reservation regressions cover foreign
+filtering and a held original child mutex without starting work.
+
+Read-only actual-diff review and re-review are clear. Exact-source focused
+CI43518027838 passes on Linux and Windows:7 real scenarios, the original deadline
+regression,6 command-ACL cases and native checking. Linux also runs the full
+frontend/check/build gates. The2 diagnostic regressions pass locally; the focused
+runner now executes their exact2-case cohort before the7 scenarios. Local runs
+also pass the exact history-retirement case (38.07s), failed-media preservation
+case (66.70s) and native production check (1m07s).
+
+Linux's earlier intermittent timeout was not reproduced in these runs; adding
+diagnostics does not establish its cause or a production fix. Full exact-source
+native validation remains open. Chat V2 is off.
+
+## Native fixture contention follow-up (13 November; execution pending)
+
+Combined parent run43492056361 reports1027 passed/16 failed on Windows native.
+The first failure is candidate preparation in `integration/sdp_rows.rs`: its
+nonblocking parent/index checks legitimately return Capacity before a Candidate
+or publication. The later failures are the recovery fixture's fail-stop cascade.
+An earlier Linux failure at `maintenance/tests.rs` likewise assumed an admitted
+discovery worker must succeed. Neither log identifies the winning lock or proves
+a production deadlock or authorization bypass.
+
+The test-only correction retries the same three SDP candidate preparations under
+their original Ready deadline, only on Capacity. A real parent-row lock oracle
+checks no new row/outcome/action and the same original Seal funding. Begin,
+RetryMismatch, SDK Release and actual actor/drop-order assertions remain intact.
+
+Discovery retries keep original-request DATA from the actual native Worker and
+completion: query cursor until selection, then a sticky exact actual selector
+before any effect. The whole completion drops before re-entry, with one shared
+10-second observer bound and32 attempts. The production Cursor is neither reset
+nor advanced by retries. An additional real map-held refusal and the existing
+alternate-peer/indexed-sibling assertions remain. A real refused completion plus
+ManualClock tests the sleep-to-deadline edge and actual native-position release.
+The cfg(test) metadata is included in the existing actual layout measurements;
+no fee, stack or timeout waiver was added.
+
+Read-only actual-diff review and re-review are clear. Formatting, diff and exact
+runner self-checks pass. Local execution passes the deadline case (1.73s), all
+nine native-worker cases (0.29s), the actual SDP/SDK-order scenario (7.93s) and
+the actual discovery/alternate-peer scenario (51.51s). Native production checking
+passes (2m01s). Focused Linux/Windows run43505629044 remains in progress. Its
+runner requires seven real scenarios, the deadline regression and six ACL cases;
+it does not replace full suites or provide physical audio/network evidence.
 
 ## Private index3 physical roles (13 November; owning handoff still open)
 
