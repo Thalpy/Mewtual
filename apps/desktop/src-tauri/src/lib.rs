@@ -16991,6 +16991,18 @@ async fn close_vault_window_with_capture<R: tauri::Runtime>(
             })
         }
     };
+    if state.native_text.selected {
+        if let Err(error) = native_text::sources::close(state, &SystemClock).await {
+            return Ok(CloseVaultWindowOutcome {
+                continuity_error: lock.continuity_error,
+                continuity_revision: close_revision.clone(),
+                continuity_discardable: Some(close_revision.is_some()),
+                history_error: Some(error),
+                deferred: true,
+                destroy_error: None,
+            });
+        }
+    }
     let destroy_error = match app.get_webview_window("main") {
         Some(window) => window.destroy().err().map(|error| error.to_string()),
         None => Some("the main window no longer exists".to_string()),

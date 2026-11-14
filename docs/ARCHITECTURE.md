@@ -1,5 +1,10 @@
 # Mewtual; Architecture
 
+The disabled native text path now has a removable canonical Source owner,
+paired warm installation and original bootstrap/source/work shutdown under
+validation. Native commands, joined sources, transport/projection/cold restore
+and Chat V2 acceptance remain open. [Contract](communication-recovery/CHAT-V2-NATIVE-SOURCE-CONTROLLER.md).
+
 Original metadata/authentication and UI-state work now have a distinct closed
 drain under validation. Nine focused cases passed, including a post-CAS capture
 wakeup race fixed after review. This is separate from Source/SDK/TCP and actual

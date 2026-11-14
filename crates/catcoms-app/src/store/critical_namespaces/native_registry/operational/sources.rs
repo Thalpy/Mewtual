@@ -502,6 +502,13 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
+    /// Cached original-allocation comparison for native replacement refusal.
+    /// This remains true after closure. It supplies no UI authority, readiness,
+    /// key drainage or permission to substitute a different facade/collection.
+    pub fn is_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
+        Arc::ptr_eq(&self.scope, &vault.sources.observe())
+    }
+
     /// Preparation may read the original native index and allocate; call only
     /// outside EVERY native/Root guard. Lookup precedes device/key generation.
     /// The native checked factory must already have captured the original UI

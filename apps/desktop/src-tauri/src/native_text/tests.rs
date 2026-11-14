@@ -127,6 +127,336 @@ fn index(path: &Path) -> Vec<u8> {
     std::fs::read(path.join("chat-owner-v2/native-registry.bin")).unwrap()
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_sources_real_boot_envelope_unpolled_and_unwind_drop_files_before_wake() {
+    struct WakeAfterFiles {
+        path: PathBuf,
+        observed: Arc<AtomicBool>,
+        released: Arc<AtomicBool>,
+    }
+    impl std::task::Wake for WakeAfterFiles {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.released.store(
+                catcoms_storage::acquire_vault_session(&self.path).is_ok(),
+                Ordering::SeqCst,
+            );
+            self.observed.store(true, Ordering::SeqCst);
+        }
+    }
+    for unwind in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("vault");
+        let state = initial_state_selected(true);
+        let original = state.native_text.sources.boot.clone();
+        let mut output = BootOutput {
+            plan: Some(boot::Bootstrap::Fresh),
+            outcome: Ok(()),
+            _end: original.enter().unwrap(),
+        };
+        output
+            .plan
+            .as_mut()
+            .unwrap()
+            .advance(
+                &path,
+                SECRET.as_bytes(),
+                (
+                    state.ui_session_generation.clone(),
+                    state.ui_authorized_generation.clone(),
+                    state.session_lock_requested.clone(),
+                ),
+                state.native_text.ui_budget.clone(),
+                state.native_text.sources.policy(),
+            )
+            .unwrap();
+        assert!(matches!(
+            catcoms_storage::acquire_vault_session(&path),
+            Err(catcoms_storage::StorageError::VaultBusy)
+        ));
+        original.close();
+        let observed = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let waker = std::task::Waker::from(Arc::new(WakeAfterFiles {
+            path: path.clone(),
+            observed: observed.clone(),
+            released: released.clone(),
+        }));
+        let mut wait = Box::pin(original.wait());
+        assert!(wait
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_pending());
+        if unwind {
+            let task = move || {
+                let _output = output;
+                panic!("real boot envelope unwind");
+            };
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).is_err());
+        } else {
+            let task = move || output;
+            drop(task); // actual owning closure never polled
+        }
+        assert!(observed.load(Ordering::SeqCst));
+        assert!(
+            released.load(Ordering::SeqCst),
+            "End woke before the actual vault destructor"
+        );
+        assert!(original.is_drained_cached());
+        catcoms_storage::acquire_vault_session(&path).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_sources_ui_output_and_unlock_waiting_prelude_do_not_deadlock_close() {
+    use catcoms_app::store::{CriticalCatalogReadPool, NativeUiStateBudget};
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let budget = NativeUiStateBudget::new(
+        CriticalCatalogReadPool::new(NativeUiStateBudget::required_capacity()).unwrap(),
+    )
+    .unwrap();
+    let credit = budget.prepare().unwrap();
+    let preparation = {
+        let store = state.store.lock().await;
+        store
+            .as_ref()
+            .unwrap()
+            .as_text_v2()
+            .unwrap()
+            .prepare_ui_state(credit)
+    };
+    let output = preparation.read().unwrap(); // actual completed output owns UiWork
+    let close_prelude = register_vault_close(&state).await.unwrap();
+    let generation = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let reply = invoke(&main, &generation, SECRET);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let unlocking = tokio::spawn(task);
+    timeout(
+        Duration::from_secs(60),
+        state.native_text.preludes.wait_blocked_for_test(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        state.vault_mount.try_lock().is_err(),
+        "real unlock holds mount while awaiting prelude"
+    );
+    let handle = app.handle().clone();
+    let closing =
+        tokio::spawn(
+            async move { sources::close(&handle.state::<AppState>(), &SystemClock).await },
+        );
+    timeout(
+        Duration::from_secs(60),
+        state.native_text.source_work_waiting.notified(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !closing.is_finished(),
+        "the actual original UiWork keeps close Pending"
+    );
+    assert!(matches!(
+        catcoms_storage::acquire_vault_session(&path),
+        Err(catcoms_storage::StorageError::VaultBusy)
+    ));
+    drop(output);
+    timeout(Duration::from_secs(60), closing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    // Metadata-only auth/UI negatives still exist, but actual files are free.
+    catcoms_storage::acquire_vault_session(&path).unwrap();
+    assert!(
+        !unlocking.is_finished(),
+        "close must finish WITHOUT joining the blocked unlock task"
+    );
+    drop(close_prelude);
+    unlocking.await.unwrap();
+    refused(reply.await.unwrap());
+    assert!(state.store.lock().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_sources_close_before_unpolled_boot_never_creates_a_vault() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    let state = app.state::<AppState>();
+    let reply = invoke(&main, "1", SECRET);
+    let _close = register_vault_close(&state).await.unwrap();
+    let (_, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+    assert!(may_destroy);
+    sources::close(&state, &SystemClock).await.unwrap();
+    assert!(state.store.lock().await.is_none());
+    assert!(state.native_text.bootstrap.lock().unwrap().is_none());
+    run(&queue).await;
+    refused(reply.await.unwrap());
+    assert!(
+        !path.exists(),
+        "old queued startup must not create files after close"
+    );
+    // A later lock generation and the correct secret cannot revive the
+    // irreversibly closed original bootstrap/controller.
+    let later = lock_session_outcome_inner(&state, None).await;
+    let retry = invoke(&main, &later.generation, SECRET);
+    run(&queue).await;
+    refused(retry.await.unwrap());
+    assert!(!path.exists());
+    sources::close(&state, &SystemClock).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_sources_close_waits_returned_boot_pair_then_drops_parked_original() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    let state = app.state::<AppState>();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.boot_return_edge.lock().unwrap() = Some(edge.clone());
+    let reply = invoke(&main, "1", SECRET);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let running = tokio::spawn(task);
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    assert!(path.exists());
+    assert!(state.store.lock().await.is_none());
+    let _close = register_vault_close(&state).await.unwrap();
+    let (_, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+    assert!(may_destroy);
+    let mut closing = Box::pin(sources::close(&state, &SystemClock));
+    pending_once(closing.as_mut()).await;
+    assert!(state.native_text.sources.is_closing_cached());
+    assert!(
+        !state.native_text.sources.boot.is_drained_cached(),
+        "returned pair still owns real files"
+    );
+    edge.release.notify_one();
+    timeout(Duration::from_secs(60), closing)
+        .await
+        .unwrap()
+        .unwrap();
+    running.await.unwrap();
+    refused(reply.await.unwrap());
+    assert!(state.store.lock().await.is_none());
+    assert!(state.native_text.bootstrap.lock().unwrap().is_none());
+    assert!(state.native_text.sources.boot.is_drained_cached());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_sources_close_waits_actual_auth_capsule_and_survives_lost_close_future() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let credit = state.native_text.ui_budget.prepare().unwrap();
+    let auth = {
+        let store = state.store.lock().await;
+        store
+            .as_ref()
+            .unwrap()
+            .as_text_v2()
+            .unwrap()
+            .prepare_native_authentication(credit)
+    };
+    let _close = register_vault_close(&state).await.unwrap();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.source_work_edge.lock().unwrap() = Some(edge.clone());
+    let handle = app.handle().clone();
+    let closing =
+        tokio::spawn(
+            async move { sources::close(&handle.state::<AppState>(), &SystemClock).await },
+        );
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    assert!(
+        state.store.lock().await.is_some(),
+        "actual Auth custody outlives source zero"
+    );
+    closing.abort();
+    assert!(closing.await.unwrap_err().is_cancelled());
+    // No failed-task flag substitutes for the old active original capsule.
+    let mut retry = Box::pin(sources::close(&state, &SystemClock));
+    pending_once(retry.as_mut()).await;
+    drop(auth);
+    timeout(Duration::from_secs(60), retry)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.store.lock().await.is_none());
+    assert!(state.native_text.sources.is_closing_cached());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_sources_replacement_between_close_stages_preserves_both_original_owners() {
+    let root = tempfile::tempdir().unwrap();
+    let (old, old_main, old_queue) = app(root.path().join("old"), None, true);
+    let (new, new_main, new_queue) = app(root.path().join("new"), None, true);
+    unlock_current(&old, &old_main, &old_queue).await;
+    unlock_current(&new, &new_main, &new_queue).await;
+    let state = old.state::<AppState>();
+    let foreign = new.state::<AppState>();
+    let _close = register_vault_close(&state).await.unwrap();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.source_work_edge.lock().unwrap() = Some(edge.clone());
+    let handle = old.handle().clone();
+    let closing =
+        tokio::spawn(
+            async move { sources::close(&handle.state::<AppState>(), &SystemClock).await },
+        );
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    // Trusted test replacement, not a renderer-created owner. The final
+    // comparison must refuse and leave this foreign facade completely alone.
+    {
+        let mut first = state.store.lock().await;
+        let mut second = foreign.store.lock().await;
+        std::mem::swap(&mut *first, &mut *second);
+    }
+    edge.release.notify_one();
+    assert!(closing.await.unwrap().is_err());
+    let credit = foreign.native_text.ui_budget.prepare().unwrap();
+    let original = {
+        let store = state.store.lock().await;
+        assert!(state
+            .native_text
+            .sources
+            .capture_retirement(&store)
+            .is_err());
+        // The foreign facade uses its actual matching budget. The old close
+        // must leave its Host and original physical work admission untouched.
+        store
+            .as_ref()
+            .unwrap()
+            .as_text_v2()
+            .unwrap()
+            .prepare_native_authentication(credit)
+    };
+    assert!(original.verify(SECRET.as_bytes()).is_ok());
+    {
+        let mut first = state.store.lock().await;
+        let mut second = foreign.store.lock().await;
+        std::mem::swap(&mut *first, &mut *second);
+    }
+    sources::close(&state, &SystemClock).await.unwrap();
+    assert!(state.store.lock().await.is_none());
+    unlock_current(&new, &new_main, &new_queue).await;
+    require_unlocked_session(&foreign).await.unwrap();
+}
+
 #[test]
 fn native_text_arguments_are_bounded_canonical_and_cannot_select_a_protocol() {
     let good = serde_json::json!({"passphrase":SECRET,"expectedUiGeneration":"7"});
@@ -1881,10 +2211,31 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
     assert!(old.await.is_err());
     let acknowledged = close_request(&main, None, close["continuity_revision"].as_str());
     run(&queue).await;
+    let acknowledged = snapshot_result(acknowledged.await.unwrap());
+    // The former snapshot-only close could finish here. With canonical
+    // Sources, acknowledging DATA loss cannot certify a foreign owner pair.
+    // Keep both the original Source owner and the foreign facade untouched.
+    assert_eq!(acknowledged["deferred"], true);
     assert_eq!(
-        snapshot_result(acknowledged.await.unwrap())["deferred"],
-        false
+        acknowledged["history_error"],
+        "The original vault changed while closing."
     );
+    assert!(
+        state
+            .native_text
+            .ui_state
+            .snapshots
+            .close_decision(close["continuity_revision"].as_str())
+            .acknowledged
+    );
+    assert!(state.native_text.sources.retains_original(&original));
+    {
+        let store = state.store.lock().await;
+        let foreign = store.as_ref().expect("foreign facade retained");
+        assert!(!state.native_text.sources.retains_original(foreign));
+        assert!(other_state.native_text.sources.retains_original(foreign));
+    }
+    assert!(state.native_text.sources.is_closing_cached());
     assert_eq!(
         std::fs::read(path_a.join("ui-state.bin")).unwrap(),
         before_a
@@ -1896,4 +2247,20 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
     let foreign = state.store.lock().await.replace(original).unwrap();
     *other_state.store.lock().await = Some(foreign);
     drop(state.native_text.ui_state.install_target(original_target));
+    // The same acknowledged close can now retire the actual original pair.
+    let retry = close_request(&main, None, close["continuity_revision"].as_str());
+    run(&queue).await;
+    let retried = snapshot_result(retry.await.unwrap());
+    assert_eq!(retried["deferred"], false);
+    assert!(retried["history_error"].is_null());
+    assert!(state.store.lock().await.is_none());
+    assert!(other_state.store.lock().await.is_some());
+    assert_eq!(
+        std::fs::read(path_a.join("ui-state.bin")).unwrap(),
+        before_a
+    );
+    assert_eq!(
+        std::fs::read(path_b.join("ui-state.bin")).unwrap(),
+        before_b
+    );
 }

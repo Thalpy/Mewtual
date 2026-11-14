@@ -1,5 +1,12 @@
 # Mewtual; Handover
 
+Native canonical Sources, paired warm installation and whole-close composition
+are under validation. Original bootstrap work, retained plans, Source/SDK/TCP,
+metadata/UI work and actual facade disposal are separate obligations. Chat V2
+stays off; native commands, joined/Add sources, archive/transport/projection/cold
+restore and combined acceptance remain open.
+[Current contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-CONTROLLER.md).
+
 Original metadata/authentication and UI-state work now have a distinct closed
 drain under validation. Nine focused cases passed, including a post-CAS capture
 wakeup race fixed after review. This is separate from Source/SDK/TCP and actual
