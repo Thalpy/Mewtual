@@ -106,6 +106,50 @@ impl catcoms_app::VoiceSdpPublication for NeverApplied {
         panic!("abandoned recorded queue invoked its native publisher")
     }
 }
+
+/// A foreign Session must reach the actual identity check, rather than pass
+/// vacuously on an earlier busy index/row. This is a read-only rejection probe:
+/// SAME row and allocation, Capacity only, with no SDP/SDK/publication retry.
+async fn observe_foreign_history(
+    row: &ledger::ResolvedRow,
+    foreign: &Arc<channel::SessionIdentity>,
+    clock: &dyn catcoms_rt::Clock,
+) {
+    // Force the first REAL refusal into the observer's retry branch. The guard
+    // leaves before any Clock wait, indexed getter, snapshot Drop or assertion.
+    let first = {
+        let held = row.fixture_hold_transition_index();
+        let result = row.sdp_history(foreign);
+        drop(held);
+        result
+    };
+    let mut first = Some(first);
+    let work = async {
+        let mut busy_seen = false;
+        for attempt in 0..32 {
+            match first.take().unwrap_or_else(|| row.sdp_history(foreign)) {
+                Err(VoiceError::Capacity) => busy_seen = true,
+                Err(VoiceError::Unauthorized) if busy_seen => return,
+                other => {
+                    drop(other); // actual unexpected snapshot retires outside guards
+                    panic!("foreign history did not reach the exact identity refusal");
+                }
+            }
+            assert!(
+                attempt < 31,
+                "foreign history stayed busy through its probe bound"
+            );
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    // ONE watchdog for the observation loop after the deliberate synchronous
+    // fixture-index acquisition above. It cannot preempt that blocking barrier.
+    // The unchanged intent deadline is sampled below; no Ready/SDP authority is renewed.
+    tokio::select! {
+        _ = work => {},
+        _ = clock.sleep(std::time::Duration::from_secs(5)) => panic!("foreign history probe exceeded its bound"),
+    }
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn exercise(
     state: &AppState,
@@ -177,10 +221,9 @@ pub(super) async fn exercise(
     // A distinct actual identity allocation cannot query the original row. This is a
     // post-authentication boundary test; MAC/HTTP enforcement is exercised separately.
     let foreign = Arc::new(channel::SessionIdentity([77; 32]));
-    assert_eq!(
-        row.sdp_history(&foreign).err(),
-        Some(VoiceError::Unauthorized)
-    );
+    observe_foreign_history(&row, &foreign, clock.as_ref()).await;
+    assert_eq!(row.id(), id);
+    assert!(Arc::ptr_eq(&row.sdp_test_outcome(), &slot));
     let original_remaining = intent
         .remaining_at(clock.now_ms(), clock.monotonic_ms())
         .unwrap();
