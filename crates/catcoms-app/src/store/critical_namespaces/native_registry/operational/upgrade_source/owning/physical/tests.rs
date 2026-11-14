@@ -17,9 +17,219 @@ use std::{
     fs,
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
-    sync::{atomic::AtomicU8, mpsc::sync_channel},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        mpsc::sync_channel,
+    },
     time::Duration,
 };
+
+type WorkSlotHook = Option<(bool, Box<dyn FnOnce()>)>;
+thread_local! {
+    static BEFORE_WORK_SLOT: std::cell::RefCell<WorkSlotHook> = const {std::cell::RefCell::new(None)};
+    static AFTER_WORK_SLOT: std::cell::RefCell<WorkSlotHook> = const {std::cell::RefCell::new(None)};
+    static WORK_SLOT_CLAIMS: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};
+}
+pub(super) fn after_work_slot(ui: bool) {
+    let hook = AFTER_WORK_SLOT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(kind, _)| *kind == ui) {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    if let Some((_, hook)) = hook {
+        hook();
+    }
+}
+pub(super) fn before_work_slot(ui: bool) {
+    let hook = BEFORE_WORK_SLOT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(kind, _)| *kind == ui) {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    if let Some((_, hook)) = hook {
+        hook();
+    }
+}
+pub(super) fn work_slot_claimed() {
+    WORK_SLOT_CLAIMS.with(|calls| calls.set(calls.get() + 1));
+}
+
+struct InlineWorkWake {
+    native: Arc<Mutex<()>>,
+    wakes: std::sync::atomic::AtomicUsize,
+    under_guard: std::sync::atomic::AtomicBool,
+}
+impl std::task::Wake for InlineWorkWake {
+    fn wake(self: Arc<Self>) {
+        if self.native.try_lock().is_err() {
+            self.under_guard.store(true, Ordering::SeqCst);
+        }
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+type WaitingWork = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+#[test]
+fn native_work_retirement_post_cas_close_keeps_both_whole_capsules_until_outside_guard_drop() {
+    use std::task::{Context, Poll, Waker};
+    for ui in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xfa15 + u64::from(ui));
+        let owner = mounted(dir.path(), &mut rng);
+        let native = Arc::new(Mutex::new(()));
+        let wake = Arc::new(InlineWorkWake {
+            native: native.clone(),
+            wakes: std::sync::atomic::AtomicUsize::new(0),
+            under_guard: std::sync::atomic::AtomicBool::new(false),
+        });
+        let waker = Waker::from(wake.clone());
+        let waiting = std::rc::Rc::new(std::cell::RefCell::new(None::<WaitingWork>));
+        let result = waiting.clone();
+        let closing = owner.physical.clone();
+        let registered = waker.clone();
+        AFTER_WORK_SLOT.with(|slot| {
+            *slot.borrow_mut() = Some((
+                ui,
+                Box::new(move || {
+                    closing.close_admission();
+                    let original = closing.observe_closed_work();
+                    assert!(
+                        !original.is_drained(),
+                        "the actual admitted capsule owns ACTIVE"
+                    );
+                    let mut future: WaitingWork = Box::pin(async move { original.wait().await });
+                    assert!(future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(&registered))
+                        .is_pending());
+                    *result.borrow_mut() = Some(future); // keep the real registered waiter alive
+                }),
+            ))
+        });
+        let (mut metadata, ui_work) = {
+            let _held = native.lock().unwrap();
+            let metadata = if ui {
+                None
+            } else {
+                owner.capture_metadata_work()
+            };
+            let ui_work = if ui { owner.capture_ui_work() } else { None };
+            assert_eq!(
+                wake.wakes.load(Ordering::SeqCst),
+                0,
+                "capture must not notify under the simulated native Store writer"
+            );
+            assert!(
+                if ui {
+                    ui_work.is_some()
+                } else {
+                    metadata.is_some()
+                },
+                "successful CAS must return its whole stale capsule"
+            );
+            (metadata, ui_work)
+        };
+        // Passive capture grants no late IO: its ordinary operations reject
+        // the closed original outside the guard, without discarding custody.
+        if let Some(work) = metadata.as_mut() {
+            assert!(work.row_count_data().is_err());
+        }
+        if let Some(work) = ui_work.as_ref() {
+            assert!(work.read().is_err());
+        }
+        drop(metadata);
+        drop(ui_work);
+        assert_eq!(
+            wake.wakes.load(Ordering::SeqCst),
+            1,
+            "both kinds must notify their real registered waiter"
+        );
+        assert!(!wake.under_guard.load(Ordering::SeqCst));
+        let mut future = waiting
+            .borrow_mut()
+            .take()
+            .expect("actual original wait was registered");
+        assert_eq!(
+            future.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(())
+        );
+    }
+}
+
+#[test]
+fn native_work_retirement_close_between_actual_open_check_and_slot_cas_prevents_both_physical_clones(
+) {
+    for ui in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xfa10 + u64::from(ui));
+        let owner = mounted(dir.path(), &mut rng);
+        let closing = owner.physical.clone();
+        let reached = Arc::new(AtomicU8::new(0));
+        let seen = reached.clone();
+        BEFORE_WORK_SLOT.with(|slot| {
+            *slot.borrow_mut() = Some((
+                ui,
+                Box::new(move || {
+                    closing.close_admission();
+                    let original = closing.observe_closed_work();
+                    assert!(
+                        original.is_drained(),
+                        "both original slots closed before delayed CAS"
+                    );
+                    seen.store(1, Ordering::SeqCst);
+                }),
+            ))
+        });
+        let before = WORK_SLOT_CLAIMS.with(|calls| calls.get());
+        if ui {
+            assert!(owner.capture_ui_work().is_none());
+        } else {
+            assert!(owner.capture_metadata_work().is_none());
+        }
+        assert_eq!(reached.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            WORK_SLOT_CLAIMS.with(|calls| calls.get()),
+            before,
+            "no actual slot admission/Physical-clone branch"
+        );
+        assert!(owner.physical.observe_closed_work().is_drained());
+    }
+}
+
+#[test]
+fn native_work_retirement_metadata_ui_zero_does_not_clear_independent_completed_debt_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xfa12);
+    let owner = mounted(dir.path(), &mut rng);
+    let input = request(&owner);
+    let mut work = owner.capture_metadata_work().unwrap();
+    let (_, debt) = work.rename_metadata_data(&input, &mut rng).unwrap();
+    assert!(
+        debt.is_some(),
+        "actual completed index IO has outgoing custody"
+    );
+    owner.close_admission();
+    let original = owner.observe_closed_work();
+    assert!(!original.is_drained());
+    drop(work);
+    assert!(
+        original.is_drained(),
+        "only the metadata/UI capsule scopes drained"
+    );
+    drop(owner);
+    assert!(
+        busy(dir.path()),
+        "completed debt has its own actual physical-session lease"
+    );
+    drop(debt);
+    drop(reopen(dir.path())); // observer alone holds no Physical or cold evidence
+}
 
 fn index(path: &Path) -> PathBuf {
     path.join(crate::store::critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
@@ -127,7 +337,7 @@ fn lifecycle3_physical_work_capture_refuses_each_original_negative_without_takin
         }
         crate::store::chat_admission::take_revocation_observer_constructions();
         assert!(owner.capture_metadata_work().is_none());
-        assert!(!owner.physical.slot.taken.load(Ordering::SeqCst));
+        assert!(!owner.physical.slot.active_for_test());
         assert_eq!(
             crate::store::chat_admission::take_revocation_observer_constructions(),
             0
@@ -253,7 +463,7 @@ fn lifecycle3_physical_work_last_arc_drains_actual_io_before_slot_and_payment() 
             let flags = catch_unwind(AssertUnwindSafe(|| {
                 let occupied = observed_slot
                     .upgrade()
-                    .is_some_and(|slot| slot.taken.load(Ordering::SeqCst));
+                    .is_some_and(|slot| slot.active_for_test());
                 let funded = observed_pool.charged_for_test() == PREPARATION_FEE;
                 let excluded = busy(&path);
                 u8::from(occupied) | (u8::from(funded) << 1) | (u8::from(excluded) << 2)

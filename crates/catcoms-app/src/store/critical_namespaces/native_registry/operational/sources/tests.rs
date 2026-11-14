@@ -64,7 +64,9 @@ pub(super) fn policy() -> NativeTextSourcePolicy {
     )
     .unwrap()
 }
-pub(super) fn selected(path: &std::path::Path) -> (NativeTextVault, NativeUiInvocationBudget) {
+pub(in crate::store::critical_namespaces::native_registry::operational) fn selected(
+    path: &std::path::Path,
+) -> (NativeTextVault, NativeUiInvocationBudget) {
     selected_configured(path, true)
 }
 fn selected_configured(
@@ -121,7 +123,9 @@ pub(super) fn command(
     let mut capture = Some(vault.admit_ui(&mut candidate).unwrap());
     vault.bind_native_source_command(&mut capture).unwrap()
 }
-pub(super) fn sources(vault: &NativeTextVault) -> NativeTextSources<MemNetwork, ChaCha20Rng> {
+pub(in crate::store::critical_namespaces::native_registry::operational) fn sources(
+    vault: &NativeTextVault,
+) -> NativeTextSources<MemNetwork, ChaCha20Rng> {
     match vault
         .capture_native_sources(policy().prepare().unwrap())
         .finish()

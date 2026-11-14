@@ -1,13 +1,13 @@
 //! Finite original physical3 custody, separate from affine admission. No raw
 //! Current/Store, owned index, SDK entry or native command credential escapes.
 use super::*;
+mod work;
 use crate::store::critical_namespaces::native_registry::lifecycle::{
     cell, founder, refresh, rename,
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Mutex,
-};
+use std::sync::Mutex;
+pub(in crate::store::critical_namespaces::native_registry) use work::WorkDrain;
+use work::{Slot, SlotAck};
 
 pub(super) struct Physical {
     // Actual poisoned cell and its pending files/buffers retire before Current.
@@ -20,9 +20,6 @@ pub(super) struct Physical {
     ui_slot: Arc<Slot>,
     // LAST: actual original payment after every file/slot control allocation.
     handler: lifecycle_admission::Handler,
-}
-struct Slot {
-    taken: AtomicBool,
 }
 
 /// Exactly one prepaid fixed capsule. It is not Clone and contains no affine
@@ -61,21 +58,13 @@ impl NetworkSeal {
         )?)))
     }
 }
-struct SlotAck {
-    original: Arc<Slot>,
-    _payment: lifecycle_admission::PaymentTail,
-}
-impl Drop for SlotAck {
-    fn drop(&mut self) {
-        self.original.taken.store(false, Ordering::SeqCst);
-    }
-}
 
 pub(super) const METADATA: usize = 8
     * (std::mem::size_of::<Physical>() + std::mem::size_of::<MetadataWork>()
     + std::mem::size_of::<SlotAck>() + std::mem::size_of::<Slot>()
     // Physical and both slot Arc controls, plus Option control metadata.
     + 6 * std::mem::size_of::<usize>())
+    + work::METADATA
     + 512;
 
 impl Physical {
@@ -85,12 +74,8 @@ impl Physical {
         Arc::new(Self {
             cell: Mutex::default(),
             current: None,
-            slot: Arc::new(Slot {
-                taken: AtomicBool::new(false),
-            }),
-            ui_slot: Arc::new(Slot {
-                taken: AtomicBool::new(false),
-            }),
+            slot: Arc::new(Slot::new()),
+            ui_slot: Arc::new(Slot::new()),
             handler,
         })
     }
@@ -125,15 +110,16 @@ impl Physical {
     /// this capsule before capture; no account/observer/cell lock is needed.
     /// An active claim may be lent for exact retry, never mistaken for Idle.
     pub(super) fn capture(self: &Arc<Self>) -> Option<MetadataWork> {
-        if !self.open_for_custody()
-            || self
-                .slot
-                .taken
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
+        if !self.open_for_custody() {
             return None;
         }
+        #[cfg(test)]
+        tests::before_work_slot(false);
+        if !self.slot.enter() {
+            return None;
+        }
+        #[cfg(test)]
+        tests::work_slot_claimed();
         // Arm the ack immediately after the slot CAS. All construction here is
         // plain moves/Arc clones; there is no fallible gap with an orphan slot.
         let ack = SlotAck {
@@ -144,23 +130,26 @@ impl Physical {
             physical: self.clone(),
             _ack: ack,
         };
-        if !value.physical.open_for_custody() {
-            return None;
-        }
+        #[cfg(test)]
+        tests::after_work_slot(false);
+        // After winning ACTIVE, return WHOLE custody even if closure raced.
+        // The caller rejects stale negatives outside its native guard. A late
+        // None here would drop SlotAck and synchronously wake close under it.
         Some(value)
     }
     /// The UI sidecar is independent of index WAL/claim state. Reusing the
     /// index slot would let an uncertain metadata transaction starve drafts.
     pub(super) fn capture_ui(self: &Arc<Self>) -> Option<UiWork> {
-        if !self.open_for_custody()
-            || self
-                .ui_slot
-                .taken
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
+        if !self.open_for_custody() {
             return None;
         }
+        #[cfg(test)]
+        tests::before_work_slot(true);
+        if !self.ui_slot.enter() {
+            return None;
+        }
+        #[cfg(test)]
+        tests::work_slot_claimed();
         let ack = SlotAck {
             original: self.ui_slot.clone(),
             _payment: self.handler.payment_tail(),
@@ -169,9 +158,10 @@ impl Physical {
             physical: self.clone(),
             _ack: ack,
         };
-        if !work.is_live_cached() {
-            return None;
-        }
+        #[cfg(test)]
+        tests::after_work_slot(true);
+        // Same owning late-refusal rule as MetadataWork above: read/save
+        // recheck this original outside guards before performing any IO.
         Some(work)
     }
 
@@ -198,6 +188,14 @@ impl Physical {
     }
     pub(super) fn close_admission(&self) {
         self.handler.close();
+        self.slot.close();
+        self.ui_slot.close();
+    }
+    /// Original metadata/UI controls only. The affine owning caller has
+    /// already closed its index; no Physical or cold evidence escapes.
+    pub(super) fn observe_closed_work(&self) -> WorkDrain {
+        self.close_admission();
+        WorkDrain::new(self)
     }
     /// Exact bounded immutable receipt lookup under the SAME cell/claim. A
     /// matched unsupported backend refuses; it must never become absence.
