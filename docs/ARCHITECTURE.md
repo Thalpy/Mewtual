@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+Whole native text Source retirement is under validation. Cleanup now separates
+original key work, whole SDK/body destruction and original TCP drainage, retaining
+the same canonical evidence across lost workers. All 46 affected source tests
+passed; adversarial review is clear. The native consumer and wider
+Chat V2 remain unfinished and disabled.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-RETIREMENT.md).
+
 Native text transport now retains actual TCP key-task custody through teardown.
 The affected networking package passed 208 tests and strict Clippy; the Root
 source/admission cohort passed 37 cases. Native commands, canonical

@@ -15,6 +15,10 @@ use std::marker::PhantomData;
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 mod network;
+mod retirement;
+pub use retirement::{
+    NativeTextSourceRetirement, NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus,
+};
 
 const MAX_SOURCES: usize = 64;
 const CONTROL_BYTES: usize = 64 * 1024;
@@ -67,7 +71,7 @@ impl NativeTextSourcePolicy {
                         .checked_mul(std::mem::size_of::<Entry<T, R>>())
                         .ok_or_else(refused)?,
                 )
-                .and_then(|n| n.checked_add(4096))
+                .and_then(|n| n.checked_add(retirement::invoice::<T, R>()))
                 .is_none_or(|n| n > CONTROL_BYTES)
         {
             return Err(refused());
@@ -110,7 +114,7 @@ pub struct NativeTextSources<T: MeshTransport, R: CryptoRngCore> {
     policy: NativeTextSourcePolicy,
     // Original physical custody and control payment remain until entries leave.
     work: SourceWork,
-    _metadata: CatalogReadReservation,
+    retirement: Arc<retirement::Control>,
 }
 
 struct Entry<T: MeshTransport, R: CryptoRngCore> {
@@ -332,6 +336,10 @@ struct RuntimeSlot<T: MeshTransport, R: CryptoRngCore> {
     running: bool,
     interrupted: bool,
     poisoned: bool,
+    // Monotone and serialized with borrowing the whole body. A preparation
+    // captured before close cannot borrow a body restored by cleanup's Busy.
+    retiring: bool,
+    retirement: retirement::BodyState,
 }
 struct RuntimeCell<T: MeshTransport, R: CryptoRngCore> {
     state: Mutex<RuntimeSlot<T, R>>,
@@ -480,7 +488,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
             entries: Mutex::new(entries),
             policy: budget.policy,
             work: work.expect("checked original source work"),
-            _metadata: budget.metadata,
+            retirement: Arc::new(retirement::Control::new(budget.metadata)),
         })
     }
 }
@@ -563,6 +571,8 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
                         running: false,
                         interrupted: false,
                         poisoned: false,
+                        retiring: false,
+                        retirement: retirement::BodyState::new(),
                     }),
                     returned: tokio::sync::Notify::new(),
                 }),
@@ -598,8 +608,13 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
         drop(selected);
         drop(candidate); // a racing unused candidate may own real files/payment
         let keys = prepared.map_err(|_| Error::Unavailable)?;
+        #[cfg(test)]
+        retirement::tests::after_key_preparation();
         let body = {
             let mut state = cell.state.try_lock().map_err(|_| Error::Busy)?;
+            if state.retiring || !self.scope.is_open() {
+                return Err(Error::Unavailable);
+            }
             if state.running || state.poisoned {
                 return Err(Error::Busy);
             }

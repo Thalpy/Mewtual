@@ -423,6 +423,19 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             None => Ok(()),
         }
     }
+
+    /// Test only: retain a genuine member-save source End while the whole
+    /// driver attempts to close. No key/signing/save authorization is tested.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn hold_member_save_source_for_test(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<Box<dyn Send>, AppError> {
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .hold_member_save_source_for_test(layout)
+    }
 }
 
 impl V2CurrentLayoutStore {
