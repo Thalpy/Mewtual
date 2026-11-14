@@ -51,6 +51,11 @@ pub(super) struct Reservation {
     io: Option<crate::store::persistence::native_registry::network::NetworkIo>,
 }
 impl Reservation {
+    /// Negative-only observation of this original preparation. No transport,
+    /// constructor or passive physical custody is exposed to cleanup.
+    pub(super) fn observe_tcp(&self) -> Option<catcoms_net::NativeTcpDrain> {
+        self.tcp.as_ref().map(|tcp| tcp.observe_drain())
+    }
     fn new(context: ([u8; 32], [u8; 32]), signer: [u8; 32]) -> Self {
         Self {
             context,

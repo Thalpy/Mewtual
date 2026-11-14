@@ -1278,6 +1278,25 @@ impl<T, R> PreparedV2TextHost<T, R> {
         let idle = cell.lock().ok()?.owner.is_some();
         Some(idle)
     }
+    /// Hold the REAL lane's source End independently of key counters, to test
+    /// whole-driver teardown. This bypasses request admission in tests only.
+    pub(in crate::store) fn hold_member_save_source_for_test(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<Box<dyn Send>, AppError>
+    where
+        T: MeshTransport,
+        R: CryptoRngCore,
+    {
+        self.ensure_member_lane(layout)?;
+        Ok(Box::new(
+            self.member
+                .as_ref()
+                .ok_or_else(refused)?
+                .save_source_for_test()
+                .issue()?,
+        ))
+    }
     /// Save-source ends dropped so far by this host's lane.
     pub(in crate::store) fn member_save_ends_completed_for_test(&self) -> Option<u64> {
         self.member

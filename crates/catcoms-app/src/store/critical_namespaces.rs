@@ -67,13 +67,14 @@ pub use native_registry::{
     NativeTextCreationJob, NativeTextCreationProgress, NativeTextCreationRefusal,
     NativeTextCreationRequest, NativeTextCreationSettings, NativeTextSourceBudget,
     NativeTextSourceCommand, NativeTextSourcePolicy, NativeTextSourcePreparation,
-    NativeTextSources, NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation,
-    NativeTextUiPreparation, NativeTextUiRetirement, NativeTextUiRetirementBatch,
-    NativeTextUiRetirementDrain, NativeTextUiRetirementState, NativeTextVault,
-    NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade,
-    NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget, NativeUiInvocationMetadata,
-    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
-    NativeUiStateSaved, PreparedNativeRegistryMigration,
+    NativeTextSourceRetirement, NativeTextSourceRetirementRefusal,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiCandidate,
+    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
+    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
+    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
+    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
+    NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;

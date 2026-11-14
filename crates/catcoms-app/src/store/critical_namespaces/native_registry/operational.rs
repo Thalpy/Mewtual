@@ -22,7 +22,8 @@ pub use sources::{
     NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationProgress,
     NativeTextCreationRefusal, NativeTextCreationRequest, NativeTextCreationSettings,
     NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
-    NativeTextSourcePreparation, NativeTextSources,
+    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementRefusal,
+    NativeTextSourceRetirementStatus, NativeTextSources,
 };
 mod ui_state;
 mod upgrade;

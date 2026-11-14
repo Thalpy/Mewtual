@@ -448,6 +448,18 @@ impl SourceWork {
     ) -> Option<Self> {
         self.physical.capture_source()
     }
+    /// Exercise the actual whole Host's independently retained member End.
+    /// This is deliberately absent from production Source/Current surfaces.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn hold_native_member_end_for_test<
+        T: catcoms_rt::MeshTransport,
+        R: CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+    ) -> Result<Box<dyn Send>, AppError> {
+        driver.hold_member_save_source_for_test(self.physical.current()?)
+    }
     pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
         self.physical.open_for_custody()
     }

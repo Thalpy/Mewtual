@@ -270,6 +270,8 @@ fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_af
             running: true,
             interrupted: false,
             poisoned: false,
+            retiring: false,
+            retirement: retirement::BodyState::new(),
         }),
         returned: tokio::sync::Notify::new(),
     });
