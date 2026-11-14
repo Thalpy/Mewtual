@@ -724,7 +724,7 @@ pub(super) async fn exercise(
     drop(parked);
     let completed = waiter.complete().await.unwrap();
     assert!(matches!(completed.result, Err(Refused::Closed)));
-    *state.store.lock().await = Some((stored).into());
+    *state.store.lock().await = Some(stored);
     drop(completed);
     drop(incoming);
     actor
