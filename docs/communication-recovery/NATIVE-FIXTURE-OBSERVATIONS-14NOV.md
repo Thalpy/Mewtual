@@ -48,15 +48,34 @@ It did not establish that the refusal was Capacity or prove a production media
 lifecycle defect. Diagnostics now append only validated authenticated scalar
 media-error category/code, never parent, proof, key, SDP or plaintext.
 
+## Wrong cleanup receipt under contention
+
+The corrected H run43599886163 passed all Windows native tests, but Linux
+passed1060 and failed5. Its first failure was the maximum-SDP scenario's wrong
+Release receipt: it expected Unauthorized[1,3,5] immediately and observed
+Capacity[1,3,7]. Four subsequent scenarios failed on the poisoned shared fixture.
+The actual ledger acquires its index and row before validating the receipt.
+
+The wrong-proof check now first forces the real direct-native index refusal,
+then drops that guard before framed parent resolution. It retries only the
+exact authenticated Capacity shape for the same opcode10 body, with at most32
+observations inside one fixed five-second watchdog, and still requires exact
+Unauthorized. The original claim remains unreleased throughout; the following
+correct receipt must still release and recover the original history. This
+cleanup observer does not renew a Claim or require it to remain unexpired.
+Other exchanges, including intentional guard-held Capacity checks, are unchanged.
+
 ## Evidence and limits
 
-Read-only actual-diff reviews of both corrections are clear. The actual native
+Read-only actual-diff reviews of the earlier SDP and Current corrections are clear. The actual native
 text lifecycle cohort passed43 cases, the exact framed SDP scenario passed1,
 and345 focused TypeScript cases passed with both Current/refusal corrections.
 The exact original native media TCP scenario also passed (70.47 seconds). Those
 focused native executions used the identical changed fixture files copied into
-the later native-UI worktree, not an independent H build. Full corrected-head
-CI is still pending at the time this record was written. Earlier full Root runs remain
+the later native-UI worktree, not an independent H build. Their full H Windows
+run passed; the Linux failure and new wrong-receipt correction are described
+above. The new correction's focused execution and updated-head full CI remain
+pending; prior focused passes do not validate it. Earlier full Root runs remain
 subject to the one explicitly deferred slow catch-up cost case. Root strict
 Clippy still has unfinished application-pipeline errors; no passing sign-off
 or suppression is claimed.
