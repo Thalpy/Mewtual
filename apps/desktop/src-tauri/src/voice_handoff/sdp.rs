@@ -19,11 +19,25 @@ pub(super) async fn apply(
     route
         .session()
         .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 1);
-    let result = prepare(context, route, &incoming).await;
+    // Completion evidence comes from THIS call's local stage, never from the
+    // lossy shared progress table. A missed diagnostic remains missing evidence.
     #[cfg(test)]
-    route
-        .session()
-        .fixture_sdp_finished(result.as_ref().err().copied());
+    let mut stage = 1;
+    let result = prepare(
+        context,
+        route,
+        &incoming,
+        #[cfg(test)]
+        &mut stage,
+    )
+    .await;
+    #[cfg(test)]
+    route.session().fixture_sdp_finished(
+        incoming.logical(),
+        incoming.fixture_sequence(),
+        stage,
+        result.as_ref().err().copied(),
+    );
     let mut reply = incoming.reply(
         BodyKind::Control,
         if result.is_ok() { REPLY_BYTES } else { 3 },
@@ -68,6 +82,7 @@ async fn prepare(
     context: &Context,
     route: &Route,
     incoming: &Incoming,
+    #[cfg(test)] stage: &mut u8,
 ) -> Result<SdpReceipt, Refused> {
     if !incoming.belongs_to(route.session())
         || incoming.operation() != Operation::SdpPhase
@@ -93,29 +108,41 @@ async fn prepare(
             .map_err(Into::into);
     }
     #[cfg(test)]
-    route
-        .session()
-        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 2);
+    {
+        *stage = 2;
+        route
+            .session()
+            .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 2);
+    }
     if let Some(receipt) = row.recover_sdp(route.session().identity(), &request)? {
         return Ok(receipt);
     }
     #[cfg(test)]
-    route
-        .session()
-        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 3);
+    {
+        *stage = 3;
+        route
+            .session()
+            .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 3);
+    }
     factory::preflight_binding(context, route).await?;
     #[cfg(test)]
-    route
-        .session()
-        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 4);
+    {
+        *stage = 4;
+        route
+            .session()
+            .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 4);
+    }
     let Some(mut preparation) = current(context, route, |admission| {
         row.begin_sdp(admission, &request)
     })?
     else {
         #[cfg(test)]
-        route
-            .session()
-            .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 7);
+        {
+            *stage = 7;
+            route
+                .session()
+                .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 7);
+        }
         return row
             .recover_sdp(route.session().identity(), &request)?
             .ok_or(VoiceError::Capacity.into());
@@ -123,14 +150,20 @@ async fn prepare(
     // Fixed native intent already owns this preparation. End cannot report final drainage
     // while its actual reservation is being acquired, refused, attached or destroyed.
     #[cfg(test)]
-    route
-        .session()
-        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 5);
+    {
+        *stage = 5;
+        route
+            .session()
+            .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 5);
+    }
     preparation.prepare()?;
     #[cfg(test)]
-    route
-        .session()
-        .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 6);
+    {
+        *stage = 6;
+        route
+            .session()
+            .fixture_sdp_stage(incoming.logical(), incoming.fixture_sequence(), 6);
+    }
     let result = current(context, route, |admission| {
         row.attach_sdp(admission, &request, &mut preparation)
     });

@@ -126,6 +126,53 @@ async fn retry_capacity(
     }
 }
 
+/// Diagnostics are deliberately lossy. Missing evidence never satisfies the
+/// oracle: observe another exact physical request under the SAME pressure and
+/// original deadline, at most32 times. Only authenticated Capacity can retry.
+#[allow(clippy::too_many_arguments)]
+async fn observe_capacity_stage(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+    deadline: u64,
+    stage: u8,
+) {
+    let clock = crate::voice_runtime(state).clock();
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    for _ in 0..32 {
+        let now = clock.monotonic_ms();
+        assert!(now < deadline, "original SDP observation deadline expired");
+        let (reply, sequence) = tokio::select! {
+            result = exchange_observed(state, public, route, parent, body) => result,
+            _ = clock.sleep(std::time::Duration::from_millis(deadline - now)) =>
+                panic!("SDP refusal observation exceeded original deadline"),
+        };
+        assert!(clock.monotonic_ms() < deadline);
+        assert_eq!(
+            reply, capacity,
+            "unexpected authenticated pressured SDP reply"
+        );
+        if route
+            .session()
+            .fixture_native_snapshot()
+            .sdp_refusal_at(sequence)
+            == Some((stage, parent.id().logical(), Some(VoiceError::Capacity)))
+        {
+            return;
+        }
+        let remaining = deadline.saturating_sub(clock.monotonic_ms());
+        clock
+            .sleep(std::time::Duration::from_millis(remaining.min(10)))
+            .await;
+    }
+    panic!(
+        "no exact physical request proved actual SDP stage{stage} refusal; {}",
+        route.session().fixture_native_snapshot().describe_sdp()
+    );
+}
+
 // Keep original endpoint/parent/proof owners explicit across these independent race modes.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn exercise(
@@ -177,16 +224,23 @@ pub(super) async fn exercise(
         let pool = route.selected().resources();
         let group = route.selected().binding().scope.group;
         let pressure = hold_pressure(&pool, group, || {}).await.unwrap();
-        assert_eq!(
-            exchange(state, public, route, parent, &prepare).await,
-            capacity,
-            "actual storage admission must refuse under ordinary-pool pressure"
+        assert!(parent.sdp_test_preparation().is_none());
+        // Force the earlier real refusal which the previous one-shot assumption
+        // missed. Preflight must not create an intent, worker or Phase.
+        let clock = crate::voice_runtime(state).clock();
+        let remaining = deadline.saturating_sub(clock.monotonic_ms());
+        let servers = tokio::select! {
+            held = state.servers.lock() => held,
+            _ = clock.sleep(std::time::Duration::from_millis(remaining)) =>
+                panic!("SDP pressure acquisition exceeded original deadline"),
+        };
+        observe_capacity_stage(state, public, route, parent, &prepare, deadline, 3).await;
+        assert!(
+            parent.sdp_test_preparation().is_none(),
+            "preflight refusal created an SDP intent"
         );
-        assert_eq!(
-            route.session().fixture_native_snapshot().sdp_refusal(),
-            Some((5, parent.id().logical(), Some(VoiceError::Capacity))),
-            "only the actual reserve refusal exercises this recovery contract"
-        );
+        drop(servers); // Keep SAME ordinary-pool pressure until real reservation refusal.
+        observe_capacity_stage(state, public, route, parent, &prepare, deadline, 5).await;
         let failed = parent
             .sdp_test_preparation()
             .expect("original fixed intent survives refusal");
@@ -272,12 +326,25 @@ pub(super) async fn exercise(
         // Quiet production collection must also resume a recorded closed intent while
         // the KeyClaim/call are still current. The held real buffer still blocks drainage.
         state.voice_handoff.collect_retired();
-        let closing = exchange(
+        let closing_body = body(parent, key, Some(proof));
+        // The original negative cleanup/history observation may contend both
+        // before and after monotone close. Prove a real native index refusal,
+        // then recover through authenticated ingress with this SAME body/proof
+        // and original deadline. Never hold this index over parent resolution:
+        // that earlier ingress step takes it synchronously.
+        let release = requests::sdp::Request::decode(parent.id().logical(), &closing_body).unwrap();
+        let index = parent.fixture_hold_transition_index();
+        let refused = parent.release_sdp(route.session().identity(), &release, proof);
+        drop(index);
+        assert!(matches!(refused, Err(VoiceError::Capacity)));
+        let closing = retry_capacity(
             state,
             public,
             route,
             parent,
-            &body(parent, key, Some(proof)),
+            &closing_body,
+            deadline,
+            |_| {},
         )
         .await;
         assert_eq!(&closing[..2], &[5, if copy.is_some() { 2 } else { 3 }]);
@@ -294,7 +361,7 @@ pub(super) async fn exercise(
         }
         drop(copy);
         assert!(parent.sdp_test_drained());
-        let closed = exchange(state, public, route, parent, &prepare).await;
+        let closed = retry_capacity(state, public, route, parent, &prepare, deadline, |_| {}).await;
         assert_eq!(&closed[..2], &[5, 3]);
         assert_eq!(&closed[138..170], &proof);
         assert!(phase.arm().is_err());

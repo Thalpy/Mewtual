@@ -69,6 +69,62 @@ fn retired(owner: &UiAdmissionOwner, generation: u64) -> RetirementBatch {
 }
 
 #[test]
+fn original_drain_observer_requires_closed_and_zero_even_after_batch_is_dropped() {
+    let f = Fixture::new();
+    let capture = f.capture();
+    let source = NativeChatSourceOwner::for_trusted_source(&capture.command, Arc::new(())).unwrap();
+    let mut cut = source
+        .prepare_cut(&capture.command, NativeChatKeyPurpose::FounderSdk)
+        .unwrap();
+    let mut ends = NativeChatKeyEnds::new();
+    cut.enter(
+        &source.observe(),
+        NativeChatKeyPurpose::FounderSdk,
+        &mut ends,
+    )
+    .unwrap();
+    let original = f.owner.begin_retirement(7).unwrap();
+    let drain = original.observe_drain().unwrap();
+    assert!(!drain.is_drained_cached());
+    drop(original); // Simulate an unpolled native retirement task being lost.
+    assert!(
+        !drain.is_drained_cached(),
+        "closing is not completion of admitted work"
+    );
+    let replacement = Fixture::new();
+    assert_eq!(
+        replacement.owner.begin_retirement(7).unwrap().state(),
+        UiRetirementState::KeyWorkDrained
+    );
+    assert!(
+        !drain.is_drained_cached(),
+        "another owner's empty registry proves nothing"
+    );
+    let mut wait = Box::pin(drain.wait());
+    assert!(poll(wait.as_mut()).is_pending());
+    drop(ends);
+    assert!(poll(wait.as_mut()).is_ready());
+    drop(wait);
+    assert!(drain.is_drained_cached());
+    assert!(f.owner.require_capture(&capture).is_err());
+}
+
+#[test]
+fn original_drain_observer_does_not_treat_open_zero_as_drained() {
+    let f = Fixture::new();
+    let capture = f.capture();
+    let original = f.owner.begin_retirement(7).unwrap();
+    let drain = original.observe_drain().unwrap();
+    assert!(
+        !drain.is_drained_cached(),
+        "batch has not closed its owner yet"
+    );
+    drop(original);
+    assert!(drain.is_drained_cached());
+    assert!(f.owner.require_capture(&capture).is_err());
+}
+
+#[test]
 fn independently_paid_competitors_use_one_canonical_generation_and_keep_the_loser_outside() {
     let f = Fixture::new();
     let baseline = f.pool.charged_for_test();

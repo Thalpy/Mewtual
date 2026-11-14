@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+The disabled native text UI retirement path preserves original counter ownership
+through lost waiters, dropped tasks and replacement mounts. It never substitutes
+an empty replacement registry for the original CLOSED+zero proof. An outer close
+fence prevents reauthentication between final drainage and destruction; snapshot
+loss acknowledgement cannot bypass key work. SDK/physical shutdown and typed
+continuity remain unproved.
+[Contract and pending tests](communication-recovery/CHAT-V2-NATIVE-UI-LIFECYCLE.md).
+
 The new disabled native warm text entry checks actual Tauri ACL/window and the
 pre-schedule generation, verifies the same mounted critical key hierarchy under
 one wrapper transaction and retains original whole-Host/physical negatives

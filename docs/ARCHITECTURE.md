@@ -1,5 +1,10 @@
 # Mewtual; Architecture
 
+The disabled native text path is adding original UI-key retirement ownership and
+lock/unlock/close ordering. Key-counter drainage is distinct from whole shutdown;
+UI continuity and operational text send remain unfinished.
+[Boundary and pending validation](communication-recovery/CHAT-V2-NATIVE-UI-LIFECYCLE.md).
+
 The real native warm text factory is under validation, with production selection
 still off. Its synchronous Tauri router authenticates the actual caller and
 original generation; its fresh storage chain retains the same vault session,

@@ -466,6 +466,37 @@ impl UiRetirement {
     pub fn into_batch(self) -> Option<RetirementBatch> {
         self.batch
     }
+    /// Observe only this original batch's key counters before moving it into a
+    /// native-owned task. The observation grants no key or close authority. It
+    /// lets native recover after an unpolled task is dropped without mistaking
+    /// a replacement mount's empty registry for completion of the old work.
+    pub fn observe_drain(&self) -> Option<RetirementDrain> {
+        self.batch.as_ref().map(|batch| RetirementDrain {
+            records: std::array::from_fn(|i| batch.records[i].clone()),
+        })
+    }
+}
+/// Original key-counter observation only: neither a whole-vault shutdown proof
+/// nor permission to reopen a UI generation. Keep this envelope non-Clone; the
+/// coalesced native job shares one independently paid observation by reference.
+pub struct RetirementDrain {
+    records: [Option<Arc<RetirementRecord>>; GENERATIONS],
+}
+impl RetirementDrain {
+    /// Both closure and zero entered work are required. Zero while an owner is
+    /// still open must never permit GC or recovery after a failed native task.
+    pub fn is_drained_cached(&self) -> bool {
+        self.records
+            .iter()
+            .flatten()
+            .all(|record| record.drain.is_drained())
+    }
+    /// Wait on the original counters outside every native/Root guard.
+    pub async fn wait(&self) {
+        for record in self.records.iter().flatten() {
+            record.drain.wait().await;
+        }
+    }
 }
 /// Affine close/drain custody. Move out before any notification, Drop or wait.
 pub struct RetirementBatch {
@@ -510,6 +541,7 @@ opaque_debug!(
     UiCandidate,
     UiCapture,
     UiRetirement,
+    RetirementDrain,
     RetirementBatch,
     UiGarbage
 );

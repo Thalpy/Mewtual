@@ -32,3 +32,31 @@ Read-only adversarial review is clear after removing a proposed invalid syntheti
 positive fixture. Rustfmt and diff checks passed. Compilation, the focused real
 TCP scenario and complete native validation remain pending for this correction.
 No new acceptance test name or focused count was introduced.
+
+## Exact storage-reservation refusal evidence
+
+Linux native run43576853387 at f443dd92 passed1060 tests and failed4.
+The first actual failure expected a stage5 SDP reservation refusal but observed
+stage3 Capacity; the other three failures followed poisoned fixture isolation.
+Stage3 preflight precedes creating the SDP intent. The shared progress table was
+also lossy, so its old completion tuple could inherit a stale stage. That tuple
+alone cannot conclusively identify the old request's refusal boundary.
+
+The fixture now retains the same ordinary-pool pressure while forcing the real
+servers mutex refusal and proving no intent was created. It then releases only
+that mutex and requires actual stage5 Capacity before continuing. Both observations
+use the exact physical request sequence, allow at most32 authenticated Capacity
+retries, and keep the same parent/action/body/proof and original deadline. Missing
+diagnostics are never evidence of either boundary. Mutex acquisition, exchanges
+and sleeps are bounded by the original remaining Clock deadline. All downstream
+fixed-intent, drainage, proof recovery and lost Seal/Open-result assertions remain.
+
+Test-only completion now publishes stage, parent, physical sequence and refusal
+from one call's local stage rather than reading best-effort shared progress. The
+pure regression deliberately omits a progress update and proves completion cannot
+inherit an older request's boundary. No production protocol or attempt policy is
+changed. Final-source real-TCP lost-result regression passed (one test,5.92s),
+and the local completion-attribution regression passed. Read-only actual-diff
+re-review is clear. These focused runs used the same native correction in the
+UI-state integration worktree. Full native execution at the corrected checkpoint
+is still pending; no completed acceptance or production activation is claimed.

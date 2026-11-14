@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`NativeTextUiRetirementDrain` is a non-cloneable negative-only observation of
+one original fixed retirement batch. It grants no owner, key or reopen access.
+Native installs it before publishing its coalesced task and requires CLOSED+zero
+before failed-task recovery; current-Root probing follows every completion.
+[Lifecycle contract](communication-recovery/CHAT-V2-NATIVE-UI-LIFECYCLE.md).
+
 `NativeRegistryInstallation::prepare_fresh` is the distinct fresh-only owning
 storage constructor. `NativeTextVaultUpgrade` consumes genuine index2 custody
 through selected3; it supplies no raw Store/Current or Source/SDK extractor.

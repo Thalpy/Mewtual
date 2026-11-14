@@ -16302,12 +16302,21 @@ async fn finalize_unlock_session_with_voice_checked(
     voice_ticket: &SessionTicket,
     mount_is_live: impl Fn() -> bool + Send + Sync,
 ) -> Result<Option<Vec<ReloadedServer>>, String> {
+    state.native_text.preludes.wait_idle().await;
     if !mount_is_live() {
         return Err("The mounted vault has closed.".into());
     }
+    // A lock may have published its SC barrier without yet starting the
+    // native-owned Root drain. Probe/start it here too, before authorization.
+    // Root's retirement bound is inclusive: preserve this NEW generation.
+    native_text::retirement::older_than(state, expected_generation).await?;
     reattach_voice_actors(state, expected_generation, voice_ticket).await?;
+    #[cfg(test)]
+    state.native_text.unlock_commit_wait.notify_one();
     let _commit = state.ui_session_commit.lock().await;
-    if !mount_is_live() || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
     {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
@@ -16321,7 +16330,9 @@ async fn finalize_unlock_session_with_voice_checked(
     } else {
         None
     };
-    if !mount_is_live() || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
     {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
@@ -16330,7 +16341,8 @@ async fn finalize_unlock_session_with_voice_checked(
     let reopening = !*resumable || ui_session_closed(state);
     *resumable = true;
     let activation = voice_runtime(state).activate_session(voice_ticket);
-    if mount_is_live()
+    if state.native_text.preludes.is_idle_cached()
+        && mount_is_live()
         && activation.is_ok()
         && state.ui_session_generation.load(Ordering::SeqCst) == expected_generation
     {
@@ -16339,7 +16351,8 @@ async fn finalize_unlock_session_with_voice_checked(
             .store(expected_generation, Ordering::SeqCst);
         state.session_lock_requested.store(false, Ordering::SeqCst);
     }
-    if !mount_is_live()
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
         || activation.is_err()
         || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
         || state.session_lock_requested.load(Ordering::SeqCst)
@@ -16449,10 +16462,20 @@ where
             "unlock was superseded by a newer lock request; try again",
         ));
     }
-    let voice_ticket = voice_runtime(state).session_ticket();
     // This lock covers both the already-mounted authentication path and first reload. Without it,
     // two concurrent webview mounts can both observe `None` and start duplicate actors.
     let _mount = state.vault_mount.lock().await;
+    // An older lock may have published G before replacing its voice session.
+    // Complete that prelude, recheck the ORIGINAL request, and only then take
+    // the original pre-auth ticket. Never refresh the ticket after verification.
+    state.native_text.preludes.wait_idle().await;
+    if state.ui_session_generation.load(Ordering::SeqCst) != unlock_generation {
+        return Err(op.fail(
+            codes::SESSION_LOCKED,
+            "unlock was superseded by a newer lock request; try again",
+        ));
+    }
+    let voice_ticket = voice_runtime(state).session_ticket();
     if authenticate_mounted_store(state, passphrase.as_bytes())
         .await
         .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
@@ -16665,15 +16688,19 @@ struct RegisteredLockSessionOutcome {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct LockSessionOutcome {
     continuity_error: Option<String>,
+    // Not discardable continuity. Native close reports this separately and
+    // must never destroy merely because the user acknowledged snapshot loss.
+    key_work_error: Option<String>,
 }
 
 async fn lock_session_outcome_inner(
     state: &AppState,
     ui_state_json: Option<String>,
 ) -> RegisteredLockSessionOutcome {
-    let (generation, result) = lock_session_with_generation_inner(state, ui_state_json).await;
+    let (generation, snapshot, keys) =
+        lock_session_with_generation_inner(state, ui_state_json).await;
     RegisteredLockSessionOutcome {
-        continuity_error: result.err(),
+        continuity_error: snapshot.err().or_else(|| keys.err()),
         generation: generation.to_string(),
     }
 }
@@ -16707,6 +16734,7 @@ async fn close_vault_window_plan_inner(
                 return (
                     LockSessionOutcome {
                         continuity_error: Some(error),
+                        key_work_error: None,
                     },
                     true,
                 );
@@ -16714,16 +16742,18 @@ async fn close_vault_window_plan_inner(
             return (
                 LockSessionOutcome {
                     continuity_error: Some(error),
+                    key_work_error: None,
                 },
                 false,
             );
         }
     }
     let had_local_snapshot = ui_state_json.is_some();
-    let (requested_generation, result) =
+    let (requested_generation, snapshot, keys) =
         lock_session_with_generation_inner(state, ui_state_json).await;
     let mut outcome = LockSessionOutcome {
-        continuity_error: result.err(),
+        continuity_error: snapshot.err(),
+        key_work_error: keys.err(),
     };
     // The commit mutex is shared by all lock callers, so an older ordinary Ctrl+L may consume and
     // validate the close's newer pending snapshot. In that interleaving this close itself sees no
@@ -16749,7 +16779,8 @@ async fn close_vault_window_plan_inner(
             *state.vault_window_close_debt.lock().await = Some(error.clone());
         }
     }
-    let may_destroy = outcome.continuity_error.is_none() || discard_continuity_error;
+    let may_destroy = outcome.key_work_error.is_none()
+        && (outcome.continuity_error.is_none() || discard_continuity_error);
     (outcome, may_destroy)
 }
 
@@ -16765,18 +16796,36 @@ async fn close_vault_window(
     ui_state_json: Option<String>,
     discard_continuity_error: bool,
 ) -> Result<CloseVaultWindowOutcome, String> {
+    // A continuity-loss acknowledgement is never permission to bypass key
+    // drainage. This outer prelude blocks reauthentication through destroy;
+    // every close also publishes a fresh negative epoch before any await.
+    let _close_prelude = register_vault_close(&state).await?;
     let (lock, may_destroy) =
         close_vault_window_plan_inner(&state, ui_state_json, discard_continuity_error).await;
     if !may_destroy {
         return Ok(CloseVaultWindowOutcome {
             continuity_error: lock.continuity_error,
-            history_error: None,
+            history_error: lock.key_work_error,
             deferred: true,
             destroy_error: None,
         });
     }
 
     let _closing = state.vault_window_close.lock().await;
+    if let Err(error) = native_text::retirement::older_than(
+        &state,
+        state.ui_session_generation.load(Ordering::SeqCst),
+    )
+    .await
+    {
+        return Ok(CloseVaultWindowOutcome {
+            continuity_error: lock.continuity_error,
+            history_error: Some(error),
+            deferred: true,
+            destroy_error: None,
+        });
+    }
+
     let history = match shutdown::freeze_servers(&state).await {
         Ok(barrier) => barrier,
         Err(error) => {
@@ -16803,14 +16852,25 @@ async fn close_vault_window(
     })
 }
 
+/// Register the unconditional close fence before consulting any previously
+/// acknowledged continuity debt. The returned native guard must outlive the
+/// final key drain and actual window destruction (or deferred-close response).
+async fn register_vault_close(
+    state: &AppState,
+) -> Result<native_text::retirement::PreludeGuard, String> {
+    let guard = state.native_text.preludes.begin().map_err(str::to_string)?;
+    register_ui_lock_request(state);
+    *state.session_resumable.lock().await = false;
+    Ok(guard)
+}
+
 /// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
 /// malformed continuity state or a vault write failure is reported, but must never leave the
 /// sensitive webview session open as a side effect of that error.
 #[cfg(test)]
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
-    lock_session_with_generation_inner(state, ui_state_json)
-        .await
-        .1
+    let (_, snapshot, keys) = lock_session_with_generation_inner(state, ui_state_json).await;
+    snapshot.and(keys)
 }
 
 /// Register the lock before calling any hook that may acquire a mutex. The separately committed
@@ -16833,10 +16893,24 @@ fn register_ui_lock_request(state: &AppState) -> u64 {
 async fn lock_session_with_generation_inner(
     state: &AppState,
     ui_state_json: Option<String>,
-) -> (u64, Result<(), String>) {
+) -> (u64, Result<(), String>, Result<(), String>) {
     // Revoke old work before any await, then cross the separate event and command fences. Once
     // this function returns, an old join can neither emit its private reply nor register/persist.
+    // Atomic prelude registration precedes SC epoch publication; no later
+    // authenticated unlock can overtake an older snapshot/resumable mutation.
+    let prelude = state.native_text.preludes.begin();
     let lock_generation = register_ui_lock_request(state);
+    let prelude = match prelude {
+        Ok(prelude) => prelude,
+        Err(error) => return (lock_generation, Ok(()), Err(error.into())),
+    };
+    #[cfg(test)]
+    {
+        let edge = state.native_text.lock_prelude_edge.lock().unwrap().clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
     state
         .voice_authority
         .lock()
@@ -16867,6 +16941,8 @@ async fn lock_session_with_generation_inner(
         }
     }
     *state.session_resumable.lock().await = false;
+    drop(prelude); // mutation quiescence, NOT proof that the snapshot was saved
+
     // Native snapshot custody must precede BOTH publication fences. If this future disappears
     // while waiting for an emission, a later snapshot-less close still owns the exact bytes.
     // Detached owners were revoked before the first await above. Release this short guard
@@ -16874,7 +16950,29 @@ async fn lock_session_with_generation_inner(
     {
         let _events = state.ui_event_commit.lock().await;
     }
+    // Snapshot custody and the early resumable=false assignment precede this
+    // await. The owned drain outlives a lost waiter; no UI/Store writer is held
+    // while actual admitted Root key work finishes.
+    let key_result = native_text::retirement::older_than(state, lock_generation).await;
+    #[cfg(test)]
+    {
+        let edge = state.native_text.lock_commit_edge.lock().unwrap().clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
     let _session_commit = state.ui_session_commit.lock().await;
+    // A correct same/newer-generation authentication may have acquired commit
+    // first after all lock preludes completed. Its finalizer already settled
+    // pending continuity. Do not clear that newly opened session's state.
+    let current = state.ui_session_generation.load(Ordering::SeqCst);
+    if current >= lock_generation
+        && state.ui_authorized_generation.load(Ordering::SeqCst) == current
+        && !state.session_lock_requested.load(Ordering::SeqCst)
+        && *state.session_resumable.lock().await
+    {
+        return (lock_generation, Ok(()), key_result);
+    }
     // Close the registration/early-sweep race as a second line of defence. Registration itself
     // checks `session_lock_requested` while holding the cancellation table, but this post-commit
     // drain also retires any future registration path that was already inside the UI commit seam.
@@ -16940,7 +17038,7 @@ async fn lock_session_with_generation_inner(
     for upload in abandoned {
         discard_pending_upload(upload).await;
     }
-    (lock_generation, save_result)
+    (lock_generation, save_result, key_result)
 }
 
 // ---------------------------------------------------------------------------
@@ -20749,8 +20847,9 @@ mod tests {
             .unwrap_err()
             .contains("locked"));
         drop(admitted_begin);
-        let (_generation, result) = locking.await.unwrap();
-        result.unwrap();
+        let (_generation, snapshot, keys) = locking.await.unwrap();
+        snapshot.unwrap();
+        keys.unwrap();
         assert!(state
             .inline_downloads
             .lock()

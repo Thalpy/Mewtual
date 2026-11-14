@@ -66,6 +66,32 @@ async fn exchange(
     )
 }
 
+/// Cleanup observation only: contention may precede receipt validation. Keep
+/// this exact original body under one bounded watchdog, without renewing the
+/// Claim or requiring it to remain live (Release also works after expiry).
+async fn observe_wrong_release(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+) -> Vec<u8> {
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    let clock = crate::voice_runtime(state).clock();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for _ in 0..32 {
+            let reply = exchange(state, public, route, parent, body).await;
+            if reply != capacity {
+                return reply;
+            }
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("wrong original Release remained busy for32 observations");
+    })
+    .await
+    .expect("wrong original Release exceeded its fixed observation bound")
+}
+
 pub(super) enum Cleanup {
     Live,
     SdkAdmissionRace,
@@ -582,10 +608,23 @@ pub(super) fn custody_cycle<'a>(
         }
         let mut wrong = receipt;
         wrong[0] ^= 1;
+        let wrong_body = body(parent, Some(wrong));
+        // Force the actual local refusal, outside framed parent resolution:
+        // that resolver takes this index synchronously. A wrong receipt must
+        // never release the original claim, before or after the refusal.
+        let mono = clock.monotonic_ms();
+        assert!(!parent.transition_test_state().2);
+        let index = parent.fixture_hold_transition_index();
+        let refused =
+            parent.release_transition(route.session().identity(), action, handshake, wrong, mono);
+        drop(index);
+        assert!(matches!(refused, Err(VoiceError::Capacity)));
+        assert!(!parent.transition_test_state().2);
         assert_eq!(
-            exchange(state, &public, &route, parent, &body(parent, Some(wrong))).await,
+            observe_wrong_release(state, &public, &route, parent, &wrong_body).await,
             replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized))
         );
+        assert!(!parent.transition_test_state().2);
         // Exercise both release orders. Neither individual release can cover the other's
         // separately latched obligation; the old finite Claim never changes identity.
         if end_before_recovery {
