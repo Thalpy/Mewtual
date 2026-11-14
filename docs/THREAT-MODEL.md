@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+The network security migration replaces actual vulnerable DNS/gossipsub packages
+and removes obsolete DNS exceptions, under validation. Finite subscription caps,
+callback guards, Noise/peer identity and boxed transport composition remain.
+AutoNAT uses an explicitly seeded, parent-advancing RT CSPRNG, never identical
+cloned child streams. QUIC now requires explicit AWS-LC with hybrid key exchange;
+WebSocket retains explicit ring and public-PKI name/trust checks. No process-wide
+provider installation, smart-dial opt-in or complete TLS resource bound is added.
+[Provider boundaries and required tests](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
 Normal3 Legacy invite refresh shares Rename's original metadata cell and
 revision. Full tagged-input equality prevents cross-operation retry takeover;
 the first bound check precedes IO/copy and the independent invoice explicitly
@@ -73,7 +82,9 @@ updates actual locked libp2p-quic/quinn-proto/quinn-udp versions, preserves
 unrelated resolution edges and keeps Tokio/rustls-ring. The UDP-only functional
 test requires authenticated QUIC paths and exact-peer refusal after withdrawal;
 it is neither exploit reproduction nor physical-network/joined-drain evidence.
-The thirteen Hickory/PRUNE audit findings remain a separate migration obligation.
+The later network migration replaces the actual affected Hickory/PRUNE runtime
+packages; both shipping audits now pass. Its native/full-suite and load evidence
+remain separate requirements.
 [Patch scope and primary sources](communication-recovery/QUIC-SECURITY-PATCHES.md).
 
 The non-writing index2-to3 preparation requires atomic strong-and-weak physical

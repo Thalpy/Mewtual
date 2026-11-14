@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Network security migration (14 November; validation pending)
+
+All five libp2p manifest edges and both locks move to0.57.1, actual production
+gossipsub0.50.1 and Hickory0.26.3. The old DNS exceptions are removed. Both
+shipping audits pass(advisories, bans, licences, sources); no new waiver. Finite
+2000/2000 counts and explicit65536-byte payload/SUB-control caps preserve topic
+capacity; the latter increases the new16KiB default. A checksum-verified full
+vendor corrects oversized initial hello and declared-frame/coalesced-frame
+handling while retaining upstream PRUNE/count protections. The original priority
+queue is unbounded; no total memory bound is claimed.
+
+Pass: Net174(0.93s), RT67(0.01s), vendor159(8.80s), direct vendor6/protocol9,
+both dependency audits, formatting, ambient/raw-fs and cleanup self-test. The
+complete frontend3441 tests pass(118.37s), check has0 errors/warnings and build
+passes(51.69s). Actual Windows native production checking passes(7m05s).
+Read-only design/diff review and re-review found no remaining blocker/high/medium.
+
+QUIC unavoidably moves to upstream explicit AWS-LC/hybrid TLS. WebSocket remains
+explicit ring, with no new global initializer. Fresh-process provider order,
+real WS TLS trust/name/DNS and wrong-peer QUIC regressions pass. A real pinned
+0.56/0.49.5 binary exchanges both RR directions and near60KiB signed gossip after
+both queue2000 subscriptions; the last topic is observed, not every remote slot.
+The controller proves a live path before old Mesh Drop, then actual withdrawal
+and exact Unreachable while the old process stays alive. Binaries, unchanged old
+HEAD/lock and identical helper source are checked; both owned children always
+retire, even if the first cleanup fails.
+
+Earlier overlapping-bulk probes failed, including one current/current control;
+the production cause remains unknown. The passing functional gate negotiates RR
+before bulk and establishes no sustained-load fairness. Root strict lint, full
+shipping suites, Linux native build and startup remain open. Native commands,
+joined sources and final Chat V2 acceptance are unfinished. Chat V2 is off.
+[Design and primary sources](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
 ## Private Legacy invite refresh (14 November; validation pending)
 
 The owning normal3 metadata path now stores a Legacy invite using the same

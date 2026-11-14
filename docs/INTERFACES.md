@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`catcoms_rt::SeededProtocolRng` bridges only the upstream seeded/forkable rand-core
+0.10 protocol API. Production seeds it through the existing 0.6 OS seam; ordinary
+application RNG interfaces remain unchanged. Debug is redacted and there is no
+ambient Default or Clone. It grants no native, identity or signing authority.
+[Migration and pending evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
 The private normal3 `refresh_legacy_invite_data` method stores already-minted
 active Legacy invite DATA. Its whole tagged request is retained in Rename's
 original cell, using the same revision, physical custody and outgoing debt.

@@ -127,6 +127,11 @@ const MAX_FRAME: usize = catcoms_rt::MAX_REQUEST_RESPONSE_FRAME_BYTES;
 const MAX_DISCOVERED_PER_RESPONSE: usize = 128;
 
 /// The request/response protocol id (anti-entropy / blob fetch).
+// One named finite allowance for both full gossip RPC and aggregate SUB/control
+// bytes. Existing subscription compatibility needs more than the new16KiB
+// default; this preserves the old nominal64KiB ceiling, never unlimited frames.
+const GOSSIP_RPC_MAX_BYTES: usize = 64 * 1024;
+
 const RR_PROTOCOL: &str = "/catcoms/rr/1";
 
 /// Errors building or driving the mesh.
@@ -468,7 +473,6 @@ async fn write_frame<T: AsyncWrite + Unpin + Send>(
     Ok(())
 }
 
-#[async_trait::async_trait]
 impl request_response::Codec for BytesCodec {
     type Protocol = StreamProtocol;
     type Request = Vec<u8>;
@@ -594,7 +598,7 @@ pub struct MeshBehaviour {
     /// address candidate back from a fresh socket. The corresponding **server** behaviour lives
     /// only on those infrastructure swarms; ordinary members must not become public dial-back
     /// services merely by joining a group.
-    pub autonat_client: autonat::v2::client::Behaviour<OsCryptoRng>,
+    pub autonat_client: autonat::v2::client::Behaviour<catcoms_rt::SeededProtocolRng>,
     /// UPnP IGD: best-effort ask a compatible home router to open a port. PCP and NAT-PMP are
     /// separate actor-owned clients because libp2p's behaviour does not implement them.
     pub upnp: Toggle<libp2p::upnp::tokio::Behaviour>,
@@ -616,9 +620,26 @@ impl MeshBehaviour {
         relay_client: relay::client::Behaviour,
         enable_port_mapping: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let gossipsub = gossipsub::Behaviour::new(
+        // SUB fields count toward the upstream aggregate-control ceiling too.
+        // Keep the old finite whole-RPC allowance: the new16KiB default rejects
+        // genuine2000-topic announcements and old-peer initial subscription sets.
+        // The wire prescan/publish-count limit and repaired PRUNE handling remain.
+        let gossip_config = gossipsub::ConfigBuilder::default()
+            .max_transmit_size(GOSSIP_RPC_MAX_BYTES)
+            .max_control_message_size(GOSSIP_RPC_MAX_BYTES)
+            .build()?;
+        let gossipsub = gossipsub::Behaviour::new_with_subscription_filter(
             gossipsub::MessageAuthenticity::Signed(key.clone()),
-            gossipsub::Config::default(),
+            gossip_config,
+            // Preserve our actual 2000-topic contract. The repaired upstream
+            // default is now100; using it silently drops legitimate larger
+            // groups. Both count limits supplement the finite wire-byte bound;
+            // they are checked after decoding and do not bound all preallocation.
+            gossipsub::MaxCountSubscriptionFilter {
+                filter: gossipsub::AllowAllSubscriptionFilter {},
+                max_subscribed_topics: 2000,
+                max_subscriptions_per_request: 2000,
+            },
         )?;
         let request_response = request_response::Behaviour::with_codec(
             BytesCodec::default(),
@@ -635,7 +656,7 @@ impl MeshBehaviour {
         // default. AutoNAT v2 nonces are security-sensitive and must follow the same dependency
         // boundary as every other random value in the application.
         let autonat_client = autonat::v2::client::Behaviour::new(
-            OsCryptoRng,
+            catcoms_rt::SeededProtocolRng::seeded_by(&mut OsCryptoRng),
             autonat::v2::client::Config::default(),
         );
         let upnp = Toggle::from(enable_port_mapping.then(libp2p::upnp::tokio::Behaviour::default));
@@ -769,6 +790,8 @@ pub fn build_tcp_swarm_with_key_and_port_mapping(
 
 #[cfg(test)]
 mod gossip_resource_tests;
+#[cfg(test)]
+mod protocol_provider_tests;
 #[cfg(test)]
 mod quic_compatibility_tests;
 
@@ -5440,8 +5463,15 @@ impl Actor {
             // libp2p's behaviour is UPnP IGD only (PCP/NAT-PMP are driven by the workers above).
             // Fold both implementations through one event path so candidates, diagnostics and
             // expiry all have identical semantics.
+            // New upstream events also carry a local address. Preserve this
+            // behaviour's existing global-UPnP mapping key (None) here. Moving
+            // it into bound-interface ownership needs its own normalization
+            // and expiry tests; it is not an incidental dependency adaptation.
             SwarmEvent::Behaviour(MeshBehaviourEvent::Upnp(e)) => match e {
-                libp2p::upnp::Event::NewExternalAddr(addr) => {
+                libp2p::upnp::Event::NewExternalAddr {
+                    external_addr: addr,
+                    ..
+                } => {
                     if let Some((transport, _)) = port_mapping_transport(&addr) {
                         self.on_port_mapping_event(PortMappingEvent::Mapped {
                             mechanism: PortMappingMechanism::Upnp,
@@ -5453,7 +5483,10 @@ impl Actor {
                         tracing::warn!(%addr, "UPnP returned an address with no TCP or QUIC port");
                     }
                 }
-                libp2p::upnp::Event::ExpiredExternalAddr(addr) => {
+                libp2p::upnp::Event::ExpiredExternalAddr {
+                    external_addr: addr,
+                    ..
+                } => {
                     if let Some((transport, _)) = port_mapping_transport(&addr) {
                         self.on_port_mapping_event(PortMappingEvent::Expired {
                             mechanism: PortMappingMechanism::Upnp,

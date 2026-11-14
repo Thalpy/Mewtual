@@ -16,6 +16,7 @@
 pub mod clock;
 pub mod mem;
 mod native_chat_key;
+pub mod protocol_rng;
 pub mod rng;
 pub mod transport;
 
@@ -28,6 +29,7 @@ pub use native_chat_key::{
     NativeChatUiSessionOwner, NativeChatUiSessionPreparation, NativeChatWarmSdkReopenCut,
     NATIVE_CHAT_UI_FIXED_METADATA_BYTES,
 };
+pub use protocol_rng::SeededProtocolRng;
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
     BoxedDialPermit, ConnectionDirection, ConnectionFamily, ConnectionLease, ConnectionPath,
