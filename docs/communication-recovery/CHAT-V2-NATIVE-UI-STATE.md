@@ -75,11 +75,17 @@ ignored artifact generators and230 normal cases; the dedicated predecessor gate
 still runs those generators explicitly. Read-only design/actual-diff re-review is
 clear after fixing both deterministic race observations and panic-safe cleanup.
 
-Strict Root/native lint, separate native compile, dependency audits, real native
-build/startup/flows and complete backend CI are pending at this draft checkpoint.
-The prior strict Root result had582 errors in the unfinished App pipeline; no
-suppression or passing sign-off is claimed. Only the previously named slow
-catch-up cost case remains deferred until final acceptance.
+Strict native all-target/all-feature Clippy, the separate native compile check,
+both shipping dependency audits, actual Windows build (3m29s), built-binary
+startup and browser flows passed. Startup verified the same SHA256 binary:
+601A380648855F6DCC9F2F1F59DA742BA51F0DF658170DA4506F4409962084E9.
+Root strict Clippy was run and still fails with582 errors in the unfinished App
+pipeline; no suppression or passing sign-off is claimed.
+
+Complete Root/native CI was dispatched at runtime commit0ba8cb08:
+[run43588313636](https://github.com/Thalpy/Mewtual/actions/runs/43588313636).
+It remains pending. Only the previously named slow catch-up cost case remains
+deferred until final acceptance. This checkpoint is not ready to merge.
 
 The next implementation must capture each final snapshot's original authenticated
 mount before scheduling, retain its exact bytes and unique credit through lost
