@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Combined network/native checkpoint (14 November; full CI running)
+
+PR113 integrates the separately reviewed native fixture correction from PR109.
+The two exact PC-close/media scenarios pass on the new stack(6.45s and8.42s).
+Actual native rebuilding passes(4m13s), followed by the real application startup
+gate. No startup panic or provider-selection failure occurs. Network compatibility
+CI43547079658 passes on Linux and Windows, including exact6/9/159/174/3 cohorts,
+archive verification and the genuine old-peer process gate. Complete shipping
+validation43547127334 is running; the single agreed slow cost case is deferred.
+
+The member-storage lane stopped with22 passing tests where its old guard expected
+19. History identifies the three added genuine JOIN regressions; all original19
+remain, with no ignored test. The unchanged broad Windows member_save selector
+likewise now has the original19 cases plus one native whole-Host case. The strict
+guards now expect22 and20 respectively. Actual local cohorts pass(183.15s and
+144.56s); the guard self-test and read-only review pass. This changes inventory,
+not tests or their contracts. Other strict-lint-blocked lanes remain red. Chat V2
+is still off; actual native, joined, transport and UI integration remain unfinished.
+
 ## Network security migration (14 November; validation pending)
 
 All five libp2p manifest edges and both locks move to0.57.1, actual production

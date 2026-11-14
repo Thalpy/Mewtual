@@ -44,7 +44,9 @@ COHORTS = (
     ("sorted-declarations", "critical_namespaces::catalog_declaration", 4),
     ("namespace-codec", "critical_namespaces::member_outbox_namespace_codec", 6),
     ("join-producer", "critical_namespaces::pending_join::producer::member_outbox_tests", 4),
-    ("current-mount", "critical_namespaces::current_layout::tests::member_outbox", 19),
+    # This module also owns the genuine index2 JOIN and both lifecycle3 JOIN
+    # regressions. Keep all22 in this broad cohort; do not trim it to the old19.
+    ("current-mount", "critical_namespaces::current_layout::tests::member_outbox", 22),
     ("governance-mount", "critical_namespaces::governance_layout::tests::member_outbox", 8),
     ("outbox-engine", "v2_member_outbox", 32),
 )
@@ -293,7 +295,9 @@ def run() -> None:
     directory.mkdir(parents=True, exist_ok=True)
     cohorts = list(COHORTS)
     if sys.platform == "win32":
-        cohorts.append(("member-save-host", "member_save", 19))
+        # The original19 save-module cases plus the native whole-warm-Host
+        # integration that now traverses the same real member-save boundary.
+        cohorts.append(("member-save-host", "member_save", 20))
     else:
         print("Windows-only member-save host cases are not claimed on this platform.")
     results: list[dict] = []

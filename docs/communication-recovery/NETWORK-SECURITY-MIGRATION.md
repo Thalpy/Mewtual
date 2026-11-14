@@ -117,6 +117,11 @@ Root strict Clippy was run and fails with610 existing App errors. There is no
 warning suppression, unused public export or advisory waiver in this checkpoint.
 Strict Clippy for both changed RT/Net crates, including all targets/features,
 passes (54.69s).
+The native PC-close and media-refusal regressions also pass on the combined
+stack(6.45s and8.42s). Actual Windows rebuilding(4m13s) and the real application
+startup gate pass. Dedicated compatibility CI43547079658 passes on Linux and
+Windows; full shipping run43547127334 remains in progress. No all-green claim
+follows: strict App debt and unfinished native/joined/transport consumers remain.
 The pinned predecessor is retained independently of PR branch history by
 `compat/network-security-predecessor-944115c2`; the gate still verifies its full
 commit SHA, not a movable tag.
