@@ -2,8 +2,252 @@
 //! No native ACL, transport, SDK or Active backend acceptance is claimed.
 use super::super::tests::{command, inputs, request, selected, sources};
 use super::*;
+use catcoms_rt::Clock;
 
 mod compatibility;
+
+#[cfg(any(windows, target_os = "linux"))]
+#[tokio::test]
+async fn native_sources_index_revocation_after_device_counter_prevents_transport_construction() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected(dir.path());
+    let owner = prepared_mesh_pending(&vault, &budget, 0xe1a1);
+    let job = owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap();
+    let body = job.loan.body.as_ref().unwrap();
+    let network = body.network.as_ref().unwrap();
+    let seed = *network.seed;
+    let frame = network.frame.as_ref().unwrap().clone();
+    let cells = owner.entries.lock().unwrap();
+    let entry = cells.first().unwrap().clone();
+    drop(cells);
+    let rt_only = NativeFounderKeys::prepare(&entry.owner, &job.command.ui.command).unwrap();
+    let cell = entry.runtime.clone();
+    drop(entry);
+    let super::super::super::facade::IndexOwner::Version3(index) = &vault.index else {
+        panic!("genuine index3 fixture");
+    };
+    let actual_index = index.handler_for_test();
+    TRANSPORT_DEVICE_EDGE.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(move || actual_index.close()));
+    });
+    let calls = TRANSPORT_CALLS.with(|calls| calls.get());
+    assert_eq!(
+        job.prepare_transport(),
+        Err(NativeTextCreationRefusal::Unavailable)
+    );
+    assert!(
+        rt_only.require_device().is_ok(),
+        "Host/UI/source counters remain live"
+    );
+    assert!(owner.scope.is_open());
+    assert_eq!(TRANSPORT_CALLS.with(|calls| calls.get()), calls);
+    let state = cell.state.lock().unwrap();
+    let body = state.body.as_ref().unwrap();
+    assert!(!body.work.is_live_cached());
+    let network = body.network.as_ref().unwrap();
+    assert!(network.transport_build == TransportBuild::Fresh);
+    assert_eq!(*network.seed, seed);
+    assert_eq!(network.frame.as_ref().unwrap().as_slice(), frame.as_slice());
+    assert!(body.transport.is_none());
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[tokio::test]
+async fn native_sources_unpolled_original_tcp_task_pins_real_vault_after_all_root_owners_are_destroyed(
+) {
+    use crate::store::critical_namespaces::native_registry::preparation::tests::{
+        current_policy, NeverRng, SECRET,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected(dir.path());
+    let owner = vault
+        .capture_native_sources(
+            super::super::tests::policy()
+                .prepare::<catcoms_net::MeshService, rand_chacha::ChaCha20Rng>()
+                .unwrap(),
+        )
+        .finish()
+        .unwrap();
+    owner
+        .prepare_creation(
+            command(&vault, &budget),
+            request(1, "Original"),
+            mesh_inputs(0xe171),
+        )
+        .unwrap()
+        .prepare_device()
+        .unwrap();
+    owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap()
+        .prepare_network()
+        .unwrap();
+    owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap()
+        .cover_pending_network()
+        .unwrap();
+    owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap()
+        .prepare_transport()
+        .unwrap();
+    let mut job = owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap();
+    let body = job.loan.body.as_mut().unwrap();
+    // Test-only resource move, not a public transport/SDK extractor. No SDK
+    // exists. The original Net task now provides the only physical tail.
+    let mesh = body.transport.take().unwrap();
+    let drain = body
+        .network
+        .as_ref()
+        .unwrap()
+        .tcp
+        .as_ref()
+        .unwrap()
+        .observe_drain();
+    drop(job);
+    assert_eq!(
+        owner
+            .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+            .unwrap()
+            .prepare_transport(),
+        Err(NativeTextCreationRefusal::NetworkOutcomeUnknown),
+        "an actually returned Mesh cannot be replaced because its test-only slot is now empty"
+    );
+    drop(owner);
+    drop(vault);
+    drop(mesh);
+    // Current-thread runtime; no await/yield has occurred since construction.
+    // The real key-bearing Actor is still completely unpolled. No RuntimeLoan,
+    // preparation, SourceWork/UI capsule or Source owner can satisfy this probe.
+    assert!(!drain.is_drained());
+    assert!(matches!(
+        crate::store::NativeIndexStore::open_lifecycle3_for_test(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy()
+        ),
+        Err(AppError::Storage(catcoms_storage::StorageError::VaultBusy))
+    ));
+    tokio::select! {
+        _ = drain.wait() => {},
+        _ = catcoms_rt::SystemClock.sleep(std::time::Duration::from_secs(10)) => panic!("original TCP actor did not retire"),
+    }
+    // A still-retained negative observer must not keep Physical or its vault
+    // lock alive after the actual tasks/custody have retired.
+    let mut reopened = crate::store::NativeIndexStore::open_lifecycle3_for_test(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    assert_eq!(reopened.row_count_data().unwrap(), 2);
+    assert!(drain.is_drained());
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[tokio::test]
+async fn native_sources_observed_transport_error_retries_same_identity_only_after_original_drain_with_new_payment(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected(dir.path());
+    let owner = prepared_mesh_pending(&vault, &budget, 0xe181);
+    let baseline = owner.policy.pool.charged_for_test();
+    REFUSE_CONSTRUCTOR.with(|flag| flag.set(true));
+    assert_eq!(
+        owner
+            .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+            .unwrap()
+            .prepare_transport(),
+        Err(NativeTextCreationRefusal::Storage)
+    );
+    let job = owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap();
+    let network = job.loan.body.as_ref().unwrap().network.as_ref().unwrap();
+    assert!(network.transport_build == TransportBuild::ObservedErr);
+    let original = network.tcp.as_ref().unwrap().observe_drain();
+    let cipher = network.frame.as_ref().unwrap().clone();
+    let seed = *network.seed;
+    let port = network.port;
+    drop(job);
+    tokio::select! {
+        _ = original.wait() => {},
+        _ = catcoms_rt::SystemClock.sleep(std::time::Duration::from_secs(10)) => panic!("refused original TCP work did not drain"),
+    }
+    assert_eq!(
+        owner.policy.pool.charged_for_test(),
+        baseline + catcoms_net::NATIVE_TCP_LIFETIME_BYTES
+    );
+    owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap()
+        .prepare_transport()
+        .unwrap();
+    // The OLD negative observer still owns its real fee. The new attempt must
+    // not recycle that reservation merely because its old count became zero.
+    assert_eq!(
+        owner.policy.pool.charged_for_test(),
+        baseline + 2 * catcoms_net::NATIVE_TCP_LIFETIME_BYTES
+    );
+    let job = owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap();
+    let network = job.loan.body.as_ref().unwrap().network.as_ref().unwrap();
+    assert!(network.transport_build == TransportBuild::Returned);
+    assert_eq!(
+        network.frame.as_ref().unwrap().as_slice(),
+        cipher.as_slice()
+    );
+    assert_eq!(*network.seed, seed);
+    assert_eq!(network.port, port);
+    drop(job);
+    drop(original);
+    assert_eq!(
+        owner.policy.pool.charged_for_test(),
+        baseline + catcoms_net::NATIVE_TCP_LIFETIME_BYTES
+    );
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn native_sources_unknown_transport_unwind_cannot_become_observed_error_from_a_drained_counter() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected(dir.path());
+    let owner = prepared_mesh_pending(&vault, &budget, 0xe191);
+    let calls = TRANSPORT_CALLS.with(|calls| calls.get());
+    // No Tokio runtime exists: the REAL keyed transport constructor unwinds,
+    // rather than returning a fabricated Err from a fixture callback.
+    let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = owner
+            .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+            .unwrap()
+            .prepare_transport();
+    }));
+    assert!(interrupted.is_err());
+    let job = owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap();
+    let network = job.loan.body.as_ref().unwrap().network.as_ref().unwrap();
+    assert!(network.transport_build == TransportBuild::Entered);
+    assert!(network.tcp.as_ref().unwrap().observe_drain().is_drained());
+    drop(job);
+    assert_eq!(
+        owner
+            .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+            .unwrap()
+            .prepare_transport(),
+        Err(NativeTextCreationRefusal::NetworkOutcomeUnknown)
+    );
+    assert_eq!(TRANSPORT_CALLS.with(|calls| calls.get()), calls + 1);
+}
 
 #[cfg(any(windows, target_os = "linux"))]
 #[tokio::test]
@@ -109,6 +353,17 @@ async fn native_sources_native_activation_cannot_use_data_path_or_foreign_origin
 thread_local! {
     static FACTORY_INPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TRANSPORT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static REFUSE_CONSTRUCTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TRANSPORT_DEVICE_EDGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn after_transport_device_entry() {
+    let hook = TRANSPORT_DEVICE_EDGE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+pub(super) fn refuse_constructor_once() -> bool {
+    REFUSE_CONSTRUCTOR.with(|flag| flag.replace(false))
 }
 pub(super) fn after_factory_input_move() {
     if FACTORY_INPUT.with(|slot| slot.replace(false)) {
@@ -129,6 +384,26 @@ fn mesh_inputs(seed: u64) -> NativeTextCreationInputs<rand_chacha::ChaCha20Rng> 
 
 #[cfg(any(windows, target_os = "linux"))]
 fn prepared_mesh_founder(
+    vault: &NativeTextVault,
+    budget: &crate::store::NativeUiInvocationBudget,
+    seed: u64,
+) -> NativeTextSources<catcoms_net::MeshService, rand_chacha::ChaCha20Rng> {
+    let owner = prepared_mesh_pending(vault, budget, seed);
+    owner
+        .prepare_creation(command(vault, budget), request(1, "Original"), inputs())
+        .unwrap()
+        .prepare_transport()
+        .unwrap();
+    owner
+        .prepare_creation(command(vault, budget), request(1, "Original"), inputs())
+        .unwrap()
+        .prepare_founder()
+        .unwrap();
+    owner
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn prepared_mesh_pending(
     vault: &NativeTextVault,
     budget: &crate::store::NativeUiInvocationBudget,
     seed: u64,
@@ -161,20 +436,41 @@ fn prepared_mesh_founder(
         .cover_pending_network()
         .unwrap();
     owner
-        .prepare_creation(command(vault, budget), request(1, "Original"), inputs())
-        .unwrap()
-        .prepare_transport()
-        .unwrap();
-    owner
-        .prepare_creation(command(vault, budget), request(1, "Original"), inputs())
-        .unwrap()
-        .prepare_founder()
-        .unwrap();
-    owner
 }
 fn selected_index(path: &std::path::Path) -> std::path::PathBuf {
     path.join(crate::store::critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
         .join(crate::store::critical_namespaces::native_registry::preparation::INDEX_NAME)
+}
+#[cfg(any(windows, target_os = "linux"))]
+fn original_tcp_drain(
+    owner: &NativeTextSources<catcoms_net::MeshService, rand_chacha::ChaCha20Rng>,
+    vault: &NativeTextVault,
+    budget: &crate::store::NativeUiInvocationBudget,
+) -> catcoms_net::NativeTcpDrain {
+    let job = owner
+        .prepare_creation(command(vault, budget), request(1, "Original"), inputs())
+        .unwrap();
+    let drain = job
+        .loan
+        .body
+        .as_ref()
+        .unwrap()
+        .network
+        .as_ref()
+        .unwrap()
+        .tcp
+        .as_ref()
+        .unwrap()
+        .observe_drain();
+    drop(job);
+    drain
+}
+#[cfg(any(windows, target_os = "linux"))]
+async fn wait_tcp_close(drain: catcoms_net::NativeTcpDrain) {
+    tokio::select! {
+        _ = drain.wait() => {},
+        _ = catcoms_rt::SystemClock.sleep(std::time::Duration::from_secs(10)) => panic!("actual original TCP teardown did not finish"),
+    }
 }
 fn index_stage(path: &std::path::Path) -> std::path::PathBuf {
     path.join(crate::store::critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
@@ -289,8 +585,10 @@ async fn native_sources_cold_native_activation_commits_exact_stage_and_preserves
         assert!(take_fault_seen());
         let selected = std::fs::read(selected_index(dir.path())).unwrap();
         let stage = std::fs::read(index_stage(dir.path())).unwrap();
+        let drain = original_tcp_drain(&owner, &vault, &budget);
         drop(owner);
         drop(vault);
+        wait_tcp_close(drain).await;
         if missing {
             std::fs::remove_file(
                 dir.path()
@@ -306,7 +604,17 @@ async fn native_sources_cold_native_activation_commits_exact_stage_and_preserves
             current_policy(),
         );
         if missing {
-            assert!(cold.is_err());
+            let error = match cold {
+                Err(error) => error,
+                Ok(_) => panic!("missing native network must refuse"),
+            };
+            assert!(
+                !matches!(
+                    error,
+                    AppError::Storage(catcoms_storage::StorageError::VaultBusy)
+                ),
+                "must reach missing-dependency validation, not another live physical owner"
+            );
             assert_eq!(std::fs::read(selected_index(dir.path())).unwrap(), selected);
             assert_eq!(std::fs::read(index_stage(dir.path())).unwrap(), stage);
         } else {
@@ -356,17 +664,22 @@ async fn native_sources_cold_exposure_refuses_equal_network_replacement_after_ac
         .unwrap()
         .id;
     drop(job);
+    let drain = original_tcp_drain(&owner, &vault, &budget);
     drop(owner);
     drop(vault);
+    wait_tcp_close(drain).await;
     let before = std::fs::read(selected_index(dir.path())).unwrap();
     let file = dir
         .path()
         .join("servers")
         .join(format!("{row}.native-net-v1"));
     let bytes = std::fs::read(&file).unwrap();
+    let inspected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let at_inspection = inspected.clone();
     at_edge(
         Edge::AfterInspection,
         Box::new(move || {
+            at_inspection.store(true, std::sync::atomic::Ordering::SeqCst);
             std::fs::rename(&file, file.with_extension("held-original")).unwrap();
             std::fs::write(&file, &bytes).unwrap();
         }),
@@ -378,6 +691,10 @@ async fn native_sources_cold_exposure_refuses_equal_network_replacement_after_ac
         current_policy()
     )
     .is_err());
+    assert!(
+        inspected.load(std::sync::atomic::Ordering::SeqCst),
+        "must exercise actual cold inspection"
+    );
     assert_eq!(std::fs::read(selected_index(dir.path())).unwrap(), before);
 }
 
@@ -509,8 +826,10 @@ async fn native_sources_exact_minimum_native_invoice_reopens_genuine_pending_and
         } else {
             drop(job);
         }
+        let drain = original_tcp_drain(&owner, &vault, &budget);
         drop(owner);
         drop(vault);
+        wait_tcp_close(drain).await;
         if !active {
             std::fs::remove_file(
                 dir.path()

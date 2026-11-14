@@ -48,7 +48,10 @@ impl NativeTextSourcePolicy {
     pub fn required_capacity(maximum: usize) -> Result<usize, AppError> {
         maximum
             .checked_add(2)
-            .and_then(|n| n.checked_mul(ENTRY_BYTES))
+            // Runtime custody and each transport attempt have distinct real
+            // debits. Allow one completed attempt's metadata to overlap a new
+            // attempt; further retained metadata honestly causes Busy.
+            .and_then(|n| n.checked_mul(ENTRY_BYTES + 2 * catcoms_net::NATIVE_TCP_LIFETIME_BYTES))
             .and_then(|n| n.checked_add(CONTROL_BYTES))
             .ok_or_else(refused)
     }
@@ -121,6 +124,7 @@ struct Entry<T: MeshTransport, R: CryptoRngCore> {
 /// Fee-only custody. Never put a runtime/issuer, drain or registry in a source
 /// counter: each of those can own a path back to that very counter.
 pub(in crate::store::critical_namespaces::native_registry) struct RuntimeMetadata {
+    pool: CriticalCatalogReadPool,
     _debit: CatalogReadReservation,
 }
 
@@ -377,6 +381,9 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> Option<usize> {
         // Original frame + Pending copy + retained activation dependency,
         // with bounded ciphertext/plaintext validation and reread overlap.
         6 * 64 * 1024,
+        // Actual TCP wrappers use their OWN per-attempt debit. These inline
+        // preparation/return envelopes remain part of the runtime account.
+        2 * std::mem::size_of::<catcoms_net::NativeTcpPreparation>(),
         48 * 1024, // bounded request/control/return envelopes and Arc headers
     ]
     .into_iter()
@@ -519,6 +526,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
             }
             // Fee-only source counter custody, never a runtime/cell/issuer.
             let metadata = Arc::new(RuntimeMetadata {
+                pool: self.policy.pool.clone(),
                 _debit: self
                     .policy
                     .pool

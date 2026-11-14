@@ -246,6 +246,7 @@ fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_af
     let (vault, _) = selected(dir.path());
     let owner = sources(&vault);
     let payment = Arc::new(RuntimeMetadata {
+        pool: owner.policy.pool.clone(),
         _debit: owner.policy.pool.try_reserve(ENTRY_BYTES).unwrap(),
     });
     let original = owner.work.for_paid_runtime(&payment).unwrap();

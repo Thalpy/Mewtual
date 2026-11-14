@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Native text transport now retains actual TCP key-task custody through teardown.
+The affected networking package passed 208 tests and strict Clippy; the Root
+source/admission cohort passed 37 cases. Native commands, canonical
+retirement, joined sources and Chat V2 acceptance remain unfinished and disabled.
+[Scope and evidence](communication-recovery/CHAT-V2-NATIVE-TCP-LIFETIME.md).
+
 Native text authoring is adding the original device/network/whole founder and
 Native4 activation dependencies. The current source cohort passed 33 local
 regressions; broader gates and the actual native command consumer remain open.
