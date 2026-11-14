@@ -1,5 +1,10 @@
 # Mewtual; Handover
 
+Original authenticated-mount binding for native ordinary UI-state IO is under
+validation. Same-root reauth retains canonical metadata; live foreign targets
+refuse. Native lock snapshots/pending retry are still unimplemented and V2 is off.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-TARGET.md).
+
 Ordinary native UI-state IO is implemented and under validation; Chat V2 is off.
 The same original physical slot/lane remains owned through response or caller
 loss. Native lock snapshots, original-target pending retries and authentication

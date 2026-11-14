@@ -26,7 +26,7 @@ COHORTS = (
     ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 10),
     ("retained-bootstrap-owner", "catcoms-app", "retained_bootstrap", 3),
     # Includes the genuine whole-Host observation/ordinary-UI-lock distinction.
-    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::", 26),
+    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::", 27),
     ("native-authentication-life", "catcoms-app", "chat_admission::revocation::tests", 5),
     ("native-warm-sdk-tail", "catcoms-sync", "native_warm_sdk_tail_", 1),
     ("native-founder-sdk", "catcoms-app", "native_sdk_", 5),
@@ -40,8 +40,8 @@ COHORTS = (
     # Exact current inventory includes the actual fresh-factory, owning upgrade
     # and founder birth/activation regressions, plus the two original-drain
     # observer cases, four physical-slot/authentication checks and three UI-sidecar
-    # IO cases. None grants a live SDK.
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 230),
+    # IO cases and the original-target refusal. None grants a live SDK.
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 231),
     ("current-cached-mount", "catcoms-app", "current_cached_mount_check_never_constructs_a_revocation_observer", 1),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),

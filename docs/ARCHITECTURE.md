@@ -1,5 +1,10 @@
 # Mewtual; Architecture
 
+Native ordinary UI-state IO is adding original authenticated-mount binding.
+Same-root reauthentication keeps its canonical negative metadata; another live
+mount cannot substitute. Lock snapshots and retry remain unfinished.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-TARGET.md).
+
 Ordinary native UI-state read/save is under validation on a separate original
 physical slot and owned IO lane. It remains disabled; final lock snapshots and
 authentication continuity are still unfinished.

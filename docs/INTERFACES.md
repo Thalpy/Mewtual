@@ -1,5 +1,10 @@
 # Mewtual; Interfaces & Hooks Schema
 
+prepare_ui_state_for_original retains an opaque authenticated-mount check
+through IO/publication. same_original compares the original Host allocation;
+it grants no current UI or SDK authority.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-TARGET.md).
+
 NativeUiStatePreparation is an infallible owning capture. Its Read/Saved results
 retain original physical custody and unique credit through native publication;
 no raw Store/Current or command authority escapes. Lock continuity remains open.

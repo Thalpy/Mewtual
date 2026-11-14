@@ -16291,6 +16291,7 @@ async fn finalize_unlock_session_with_voice(
         include_running_servers,
         voice_ticket,
         || true,
+        None,
     )
     .await
 }
@@ -16304,6 +16305,7 @@ async fn finalize_unlock_session_with_voice_checked(
     include_running_servers: bool,
     voice_ticket: &SessionTicket,
     mount_is_live: impl Fn() -> bool + Send + Sync,
+    native_target: Option<Arc<catcoms_app::store::NativeTextVaultAuthenticationCheck>>,
 ) -> Result<Option<Vec<ReloadedServer>>, String> {
     state.native_text.preludes.wait_idle().await;
     if !mount_is_live() {
@@ -16314,6 +16316,12 @@ async fn finalize_unlock_session_with_voice_checked(
     // Root's retirement bound is inclusive: preserve this NEW generation.
     native_text::retirement::older_than(state, expected_generation).await?;
     reattach_voice_actors(state, expected_generation, voice_ticket).await?;
+    // Allocate/choose canonical metadata before guards. Whole replaced payment
+    // is kept in this outer variable even if final publication is superseded.
+    let mut candidate_target = native_target
+        .as_ref()
+        .map(|target| state.native_text.ui_state.canonical_target(target));
+    let mut _retired_target = None;
     let _io = state.native_text.ui_state.lane.clone().lock_owned().await;
     #[cfg(test)]
     state.native_text.unlock_commit_wait.notify_one();
@@ -16342,6 +16350,16 @@ async fn finalize_unlock_session_with_voice_checked(
     }
 
     let mut resumable = state.session_resumable.lock().await;
+    if let Some(target) = native_target.as_ref() {
+        let store = state.store.lock().await; // UI -> resumable -> short Store
+        if !store
+            .as_ref()
+            .and_then(MountedVault::as_text_v2)
+            .is_some_and(|vault| target.is_for_original_vault(vault))
+        {
+            return Err("The mounted vault changed.".into());
+        }
+    }
     let reopening = !*resumable || ui_session_closed(state);
     *resumable = true;
     let activation = voice_runtime(state).activate_session(voice_ticket);
@@ -16350,6 +16368,9 @@ async fn finalize_unlock_session_with_voice_checked(
         && activation.is_ok()
         && state.ui_session_generation.load(Ordering::SeqCst) == expected_generation
     {
+        if let Some(target) = candidate_target.take() {
+            _retired_target = state.native_text.ui_state.install_target(target);
+        }
         state
             .ui_authorized_generation
             .store(expected_generation, Ordering::SeqCst);

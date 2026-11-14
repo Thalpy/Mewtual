@@ -45,6 +45,7 @@ impl UiStateCredit {
 /// is destroyed under the native Store guard.
 pub struct UiStatePreparation {
     work: Option<UiWork>,
+    target: Option<Arc<NativeTextVaultAuthenticationCheck>>,
     host: catcoms_rt::NativeChatUiMountObservation,
     credit: UiStateCredit,
 }
@@ -53,9 +54,11 @@ impl UiStatePreparation {
         vault: &NativeTextVault,
         work: Option<UiWork>,
         credit: UiStateCredit,
+        target: Option<Arc<NativeTextVaultAuthenticationCheck>>,
     ) -> Self {
         Self {
             work,
+            target,
             host: vault.observe_ui_mount(),
             credit,
         }
@@ -64,17 +67,18 @@ impl UiStatePreparation {
     /// present record and MUST reach native's UTF-8/JSON validation.
     pub fn read(mut self) -> Result<UiStateRead, AppError> {
         self.credit.require()?;
-        if !self.host.is_open() {
+        if !original_is_live(&self.host, &self.target) {
             return Err(refused());
         }
         let work = self.work.take().ok_or_else(refused)?;
         let bytes = work.read()?;
-        if !self.host.is_open() || !work.is_live_cached() {
+        if !original_is_live(&self.host, &self.target) || !work.is_live_cached() {
             return Err(refused());
         }
         Ok(UiStateRead {
             bytes,
             work,
+            target: self.target,
             host: self.host,
             _credit: self.credit,
         })
@@ -88,13 +92,16 @@ impl UiStatePreparation {
         rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<UiStateSaved, AppError> {
         self.credit.require()?;
-        if bytes.len() > crate::store::MAX_UI_STATE_BYTES || !self.host.is_open() {
+        if bytes.len() > crate::store::MAX_UI_STATE_BYTES
+            || !original_is_live(&self.host, &self.target)
+        {
             return Err(refused());
         }
         let work = self.work.take().ok_or_else(refused)?;
         work.save(bytes, rng)?;
         Ok(UiStateSaved {
             work,
+            target: self.target,
             host: self.host,
             _credit: self.credit,
         })
@@ -107,6 +114,7 @@ impl UiStatePreparation {
 pub struct UiStateRead {
     bytes: Option<Vec<u8>>,
     work: UiWork,
+    target: Option<Arc<NativeTextVaultAuthenticationCheck>>,
     host: catcoms_rt::NativeChatUiMountObservation,
     _credit: UiStateCredit,
 }
@@ -115,21 +123,35 @@ impl UiStateRead {
         self.bytes.as_deref()
     }
     pub fn is_live_cached(&self) -> bool {
-        self.host.is_open() && self.work.is_live_cached()
+        original_is_live(&self.host, &self.target) && self.work.is_live_cached()
     }
 }
 /// Actual successful IO, still bound to its original slot and metadata through
 /// native's final publication check. A stale reply does not undo the disk effect.
 pub struct UiStateSaved {
     work: UiWork,
+    target: Option<Arc<NativeTextVaultAuthenticationCheck>>,
     host: catcoms_rt::NativeChatUiMountObservation,
     _credit: UiStateCredit,
 }
 impl UiStateSaved {
     pub fn is_live_cached(&self) -> bool {
-        self.host.is_open() && self.work.is_live_cached()
+        original_is_live(&self.host, &self.target) && self.work.is_live_cached()
     }
 }
+/// Native targets are sealed checks, not a caller-supplied boolean. The affine
+/// facade never transplants its Host into another physical index after selected3
+/// authentication, so this unique Host match binds the exact original pairing.
+fn original_is_live(
+    host: &catcoms_rt::NativeChatUiMountObservation,
+    target: &Option<Arc<NativeTextVaultAuthenticationCheck>>,
+) -> bool {
+    host.is_open()
+        && target
+            .as_ref()
+            .is_none_or(|target| target.matches_ui_mount(host))
+}
+
 macro_rules! opaque_ui_debug {
     ($($ty:ty),+) => {$(impl std::fmt::Debug for $ty {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

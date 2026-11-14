@@ -943,3 +943,24 @@ fn native_chat_mount_observation_ignores_ui_lock_but_never_survives_host_close()
     drop(fixture);
     assert!(!observed.is_open());
 }
+
+#[test]
+fn native_chat_mount_identity_distinguishes_hosts_even_with_shared_ui_atomics() {
+    let fixture = Fixture::new();
+    let original = fixture.binding.observe_mount();
+    let replacement = NativeChatUiBinding::from_trusted_host(
+        fixture.generation.clone(),
+        fixture.authorized.clone(),
+        fixture.requested.clone(),
+        Arc::new(()),
+    );
+    assert!(original.same_original(&fixture.binding.observe_mount()));
+    assert!(!original.same_original(&replacement.observe_mount()));
+    fixture.lock();
+    fixture.unlock();
+    assert!(original.same_original(&fixture.binding.observe_mount()));
+    fixture.binding.close();
+    assert!(!original.is_open());
+    assert!(!original.same_original(&replacement.observe_mount()));
+    assert!(replacement.observe_mount().is_open());
+}

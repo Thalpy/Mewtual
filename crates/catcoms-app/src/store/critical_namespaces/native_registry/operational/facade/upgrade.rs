@@ -167,7 +167,7 @@ mod tests {
     };
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, RngCore, SeedableRng};
-    use std::{path::Path, sync::atomic::Ordering};
+    use std::{fs, path::Path, sync::atomic::Ordering};
 
     struct NeverRng;
     impl CryptoRng for NeverRng {}
@@ -634,6 +634,67 @@ mod tests {
         .unwrap();
         assert_eq!(pool.charged_for_test(), 0);
     }
+    #[test]
+    fn native_ui_target_rejects_live_foreign_origin_before_sidecar_write() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let original = auth_fixture(a.path(), 0xcf01);
+        let foreign = auth_fixture(b.path(), 0xcf02);
+        let own = Arc::new(
+            original
+                .vault
+                .prepare_native_authentication(original.budget.prepare().unwrap())
+                .verify(SECRET)
+                .unwrap(),
+        );
+        let same = Arc::new(
+            original
+                .vault
+                .prepare_native_authentication(original.budget.prepare().unwrap())
+                .verify(SECRET)
+                .unwrap(),
+        );
+        let wrong = Arc::new(
+            foreign
+                .vault
+                .prepare_native_authentication(foreign.budget.prepare().unwrap())
+                .verify(SECRET)
+                .unwrap(),
+        );
+        assert!(own.same_original(&same));
+        assert!(!own.same_original(&wrong));
+        assert!(wrong.is_live_cached());
+        assert!(own.is_for_original_vault(&original.vault));
+        assert!(!wrong.is_for_original_vault(&original.vault));
+        let (budget, pool) = ui_io_budget();
+        let saved = original
+            .vault
+            .prepare_ui_state_for_original(budget.prepare().unwrap(), own.clone())
+            .save(b"original", &mut ChaCha20Rng::seed_from_u64(0xcf03))
+            .unwrap();
+        drop(saved);
+        let before = fs::read(a.path().join("ui-state.bin")).unwrap();
+        assert!(original
+            .vault
+            .prepare_ui_state_for_original(budget.prepare().unwrap(), wrong.clone())
+            .save(b"foreign replacement", &mut NeverRng)
+            .is_err());
+        assert_eq!(fs::read(a.path().join("ui-state.bin")).unwrap(), before);
+        assert!(original
+            .vault
+            .prepare_ui_state_for_original(budget.prepare().unwrap(), wrong)
+            .read()
+            .is_err());
+        let read = original
+            .vault
+            .prepare_ui_state_for_original(budget.prepare().unwrap(), same)
+            .read()
+            .unwrap();
+        assert_eq!(read.bytes(), Some(b"original".as_slice()));
+        drop(read);
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+
     #[test]
     fn native_ui_state_io_pays_each_position_before_capture_and_refunds_busy_outside() {
         let dir = tempfile::tempdir().unwrap();

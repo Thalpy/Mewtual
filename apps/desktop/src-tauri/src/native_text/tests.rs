@@ -1132,3 +1132,208 @@ async fn native_ui_state_lost_observer_keeps_blocking_io_lane_until_actual_work_
         tauri::ipc::InvokeResponse::Ok(_)
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_target_reauthentication_keeps_the_same_original_canonical_pin() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let original = state.native_text.ui_state.original_target().unwrap();
+    lock_session_outcome_inner(&state, None).await;
+    unlock_current(&app, &main, &queue).await;
+    let returned = state.native_text.ui_state.original_target().unwrap();
+    assert!(
+        Arc::ptr_eq(&original, &returned),
+        "same-root reauth replaced canonical target"
+    );
+    assert!(original.is_live_cached());
+    let next = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    assert!(matches!(
+        next.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_target_actual_router_refuses_a_live_foreign_pin_without_writing() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("first");
+    let (first, main, queue) = app(path.clone(), None, true);
+    let (second, other, other_queue) = app(root.path().join("second"), None, true);
+    unlock_current(&first, &main, &queue).await;
+    unlock_current(&second, &other, &other_queue).await;
+    let json = r#"{"version":3,"drafts":{"room":"original"},"readMarks":{}}"#;
+    let saved = ui_request(&main, "save_ui_state", Some(json));
+    run(&queue).await;
+    assert!(matches!(
+        saved.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    let before = std::fs::read(path.join("ui-state.bin")).unwrap();
+    let state = first.state::<AppState>();
+    let wrong = second
+        .state::<AppState>()
+        .native_text
+        .ui_state
+        .original_target()
+        .unwrap();
+    assert!(wrong.is_live_cached());
+    let original = state.native_text.ui_state.install_target(wrong).unwrap();
+    let rejected = ui_request(
+        &main,
+        "save_ui_state",
+        Some(r#"{"version":3,"drafts":{},"readMarks":{}}"#),
+    );
+    run(&queue).await;
+    refused(rejected.await.unwrap());
+    let read = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    refused(read.await.unwrap());
+    assert_eq!(std::fs::read(path.join("ui-state.bin")).unwrap(), before);
+    // Genuine own-target positive control: failure was not a closed UI/pool.
+    let retired = state.native_text.ui_state.install_target(original);
+    drop(retired);
+    let read = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    let tauri::ipc::InvokeResponse::Ok(body) = read.await.unwrap() else {
+        panic!("own target refused");
+    };
+    assert_eq!(body.deserialize::<String>().unwrap(), json);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_target_finalizer_refuses_absent_or_foreign_store_before_authorization_mutations()
+{
+    for foreign in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let edge = AdmissionBarrier::new();
+        let (first, main, queue) = app(root.path().join("first"), Some(edge.clone()), true);
+        let (second, other, other_queue) = app(root.path().join("second"), None, true);
+        unlock_current(&second, &other, &other_queue).await;
+        let reply = invoke(&main, "1", SECRET);
+        let task = queue.lock().unwrap().pop().unwrap();
+        let running = tokio::spawn(task);
+        tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+            .await
+            .unwrap();
+        let state = first.state::<AppState>();
+        let original = state.store.lock().await.take().unwrap();
+        // Retain the original affine owner open: cached original negatives must
+        // stay positive so only the ACTUAL mounted-target check can refuse.
+        assert!(original.as_text_v2().unwrap().row_count_data().is_ok());
+        if foreign {
+            let replacement = second
+                .state::<AppState>()
+                .store
+                .lock()
+                .await
+                .take()
+                .unwrap();
+            *state.store.lock().await = Some(replacement);
+        }
+        edge.release.notify_one();
+        running.await.unwrap();
+        refused(reply.await.unwrap());
+        assert_locked(&state).await;
+        assert_eq!(state.ui_authorized_generation.load(Ordering::SeqCst), 0);
+        assert!(state.native_text.ui_state.original_target().is_none());
+        let displaced = state.store.lock().await.replace(original);
+        if let Some(displaced) = displaced {
+            *second.state::<AppState>().store.lock().await = Some(displaced);
+        }
+        // Genuine original-owner retry succeeds; missing/foreign check was not
+        // a synthetic closed owner, failed secret, or an always-refusing fence.
+        unlock_current(&first, &main, &queue).await;
+        require_unlocked_session(&state).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_target_unpolled_command_cannot_adopt_a_replacement_at_the_same_ui_epoch() {
+    let root = tempfile::tempdir().unwrap();
+    let path_a = root.path().join("first");
+    let path_b = root.path().join("second");
+    let (first, main, queue) = app(path_a.clone(), None, true);
+    let (second, other, other_queue) = app(path_b.clone(), None, true);
+    unlock_current(&first, &main, &queue).await;
+    unlock_current(&second, &other, &other_queue).await;
+    let a = r#"{"version":3,"drafts":{"room":"original A"},"readMarks":{}}"#;
+    let b = r#"{"version":3,"drafts":{"room":"original B"},"readMarks":{}}"#;
+    for (view, work, json) in [(&main, &queue, a), (&other, &other_queue, b)] {
+        let saved = ui_request(view, "save_ui_state", Some(json));
+        run(work).await;
+        assert!(matches!(
+            saved.await.unwrap(),
+            tauri::ipc::InvokeResponse::Ok(_)
+        ));
+    }
+    let before_a = std::fs::read(path_a.join("ui-state.bin")).unwrap();
+    let before_b = std::fs::read(path_b.join("ui-state.bin")).unwrap();
+    let state = first.state::<AppState>();
+    let other_state = second.state::<AppState>();
+    let original_target = state.native_text.ui_state.original_target().unwrap();
+    let replacement_target = other_state.native_text.ui_state.original_target().unwrap();
+    let old = ui_request(&main, "save_ui_state", Some(b));
+    assert_eq!(
+        queue.lock().unwrap().len(),
+        1,
+        "original task was not kept unpolled"
+    );
+    let replacement = other_state.store.lock().await.take().unwrap();
+    let original = state.store.lock().await.replace(replacement).unwrap();
+    assert!(original_target.is_for_original_vault(original.as_text_v2().unwrap()));
+    assert!(replacement_target.is_live_cached());
+    let retired = state
+        .native_text
+        .ui_state
+        .install_target(replacement_target);
+    drop(retired);
+    for (left, right) in [
+        (
+            &state.ui_session_generation,
+            &other_state.ui_session_generation,
+        ),
+        (
+            &state.ui_authorized_generation,
+            &other_state.ui_authorized_generation,
+        ),
+    ] {
+        assert_eq!(left.load(Ordering::SeqCst), right.load(Ordering::SeqCst));
+    }
+    assert!(!state.session_lock_requested.load(Ordering::SeqCst));
+    assert!(!other_state.session_lock_requested.load(Ordering::SeqCst));
+    run(&queue).await; // FIRST poll: only pre-schedule original-target custody differs.
+    refused(old.await.unwrap());
+    assert_eq!(
+        std::fs::read(path_a.join("ui-state.bin")).unwrap(),
+        before_a
+    );
+    assert_eq!(
+        std::fs::read(path_b.join("ui-state.bin")).unwrap(),
+        before_b
+    );
+    // A NEW request succeeds on B+its installed target. Refreshing the old
+    // request's target when first polled would therefore have corrupted B.
+    let fresh_b = ui_request(&main, "save_ui_state", Some(a));
+    run(&queue).await;
+    assert!(matches!(
+        fresh_b.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    assert_ne!(
+        std::fs::read(path_b.join("ui-state.bin")).unwrap(),
+        before_b
+    );
+    let displaced = state.store.lock().await.replace(original).unwrap();
+    *other_state.store.lock().await = Some(displaced);
+    let retired = state.native_text.ui_state.install_target(original_target);
+    drop(retired);
+    let fresh_a = ui_request(&main, "get_ui_state", None);
+    run(&queue).await;
+    let tauri::ipc::InvokeResponse::Ok(body) = fresh_a.await.unwrap() else {
+        panic!("original A refused");
+    };
+    assert_eq!(body.deserialize::<String>().unwrap(), a);
+}

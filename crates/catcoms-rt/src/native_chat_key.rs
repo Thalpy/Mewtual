@@ -231,6 +231,12 @@ impl std::fmt::Debug for NativeChatUiMountObservation {
     }
 }
 impl NativeChatUiMountObservation {
+    /// Compare the original runtime allocation, never labels, shared UI atomics
+    /// or replacement state. Equality grants no permission and ignores UI epochs;
+    /// callers must independently require current authorization and live negatives.
+    pub fn same_original(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.original, &other.original)
+    }
     /// SC-only check, including while the UI is locked. Never a permission.
     pub fn is_open(&self) -> bool {
         !self.original.closed.load(Ordering::SeqCst)

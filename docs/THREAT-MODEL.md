@@ -1,5 +1,10 @@
 # Threat model; client integrity & enforcement boundaries
 
+The disabled native UI-state target path rejects a live foreign original before
+sidecar IO, and checks the actual mounted facade before authorization mutations.
+Shared UI counters and directory labels cannot establish original identity.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-TARGET.md).
+
 The disabled native UI-state path fences old replies after actual lock registration,
 keeps admitted IO custody after observer loss and distinguishes missing from
 malformed records. It is logical-mount custody, not filesystem-path identity or

@@ -11,6 +11,7 @@ use tauri::ipc::InvokeResponseBody;
 pub(super) const EMPTY: &str = r#"{"version":1,"drafts":{},"readMarks":{}}"#;
 pub(crate) struct Controller {
     pub(crate) lane: Arc<Mutex<()>>,
+    pub(super) target: StdMutex<Option<Arc<NativeTextVaultAuthenticationCheck>>>,
     waiters: Arc<Semaphore>,
     budget: NativeUiStateBudget,
     #[cfg(test)]
@@ -27,6 +28,7 @@ impl Controller {
     pub(super) fn new(metadata: NativeUiInvocationMetadata) -> Self {
         Self {
             lane: Arc::new(Mutex::new(())),
+            target: StdMutex::new(None),
             waiters: Arc::new(Semaphore::new(4)),
             budget: NativeUiStateBudget::new(
                 CriticalCatalogReadPool::new(NativeUiStateBudget::required_capacity())
@@ -43,6 +45,36 @@ impl Controller {
             lock_waiting: tokio::sync::Notify::new(),
             _metadata: metadata,
         }
+    }
+    /// Metadata only; never keeps the affine vault/physical session alive.
+    pub(crate) fn original_target(&self) -> Option<Arc<NativeTextVaultAuthenticationCheck>> {
+        self.target
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+    /// Prepare outside native commit. Same-root reauthentication keeps the
+    /// original canonical allocation, rather than rebinding pending references.
+    pub(crate) fn canonical_target(
+        &self,
+        fresh: &Arc<NativeTextVaultAuthenticationCheck>,
+    ) -> Arc<NativeTextVaultAuthenticationCheck> {
+        let current = self.original_target();
+        match current {
+            Some(current) if current.is_live_cached() && current.same_original(fresh) => current,
+            _ => fresh.clone(),
+        }
+    }
+    /// Install a prebuilt allocation. The replaced whole check returns to an
+    /// OUTER native variable for destruction after every commit/store guard.
+    pub(crate) fn install_target(
+        &self,
+        target: Arc<NativeTextVaultAuthenticationCheck>,
+    ) -> Option<Arc<NativeTextVaultAuthenticationCheck>> {
+        self.target
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .replace(target)
     }
     /// Same real lane acquisition in production and tests. The test receipt
     /// observes an actual Pending poll; it supplies no ownership or permission.
@@ -170,12 +202,15 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                     .prepare()
                     .map_err(|_| "UI state is busy. Try again.")
                     .and_then(|credit| {
+                        let target = control
+                            .original_target()
+                            .ok_or("The native vault is unavailable.")?;
                         parse(invoke.message.payload(), save)
-                            .map(|op| (generation, permit, credit, op))
+                            .map(|op| (generation, permit, credit, op, target))
                     })
             })
     };
-    let (generation, _permit, credit, operation) = match captured {
+    let (generation, _permit, credit, operation, target) = match captured {
         Ok(value) => value,
         Err(error) => {
             invoke.resolver.reject(error);
@@ -197,7 +232,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 .as_ref()
                 .and_then(MountedVault::as_text_v2)
                 .ok_or("The native vault is unavailable.")?;
-            preparation = Some(vault.prepare_ui_state(credit));
+            preparation = Some(vault.prepare_ui_state_for_original(credit, target));
             Ok::<_, String>(())
         }
         .await;

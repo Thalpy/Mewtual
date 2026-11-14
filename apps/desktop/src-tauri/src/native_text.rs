@@ -354,14 +354,19 @@ async fn execute(
         // its own secret against the same completed mounted keystore.
         authentication = authenticate_mounted(state, &captured.secret).await?;
     }
-    let authentication = authentication.ok_or("Vault startup did not complete.")?;
+    let authentication = Arc::new(authentication.ok_or("Vault startup did not complete.")?);
     #[cfg(test)]
     if let Some(edge) = &state.native_text.final_edge {
         edge.wait_once().await;
     }
-    finalize_unlock_session_with_voice_checked(state, captured.generation, false, &ticket, || {
-        authentication.is_live_cached()
-    })
+    finalize_unlock_session_with_voice_checked(
+        state,
+        captured.generation,
+        false,
+        &ticket,
+        || authentication.is_live_cached(),
+        Some(authentication.clone()),
+    )
     .await?;
     // This warm milestone admits only a fresh empty vault; no fake Legacy
     // actors are created from index DATA. Native authoring/restore come next.
