@@ -180,6 +180,56 @@ async fn timed_out_native_observer_keeps_actual_payment_and_position_until_parke
     assert_eq!(after, before);
 }
 
+/// Only an independently authenticated local Capacity control is retryable.
+/// The original row/selector/purpose/deadline survive; physical Session request
+/// counters still advance. Outer serialization/refusal errors are not ambiguity
+/// refunds and must fail this fixture instead of being silently retried.
+#[allow(clippy::too_many_arguments)]
+async fn original_derivation_input(
+    context: &context::Context,
+    route: &bootstrap::Route,
+    public: &bootstrap::SetupOutput,
+    id: ledger::RowId,
+    purpose: &[u8],
+    clock: &dyn catcoms_rt::Clock,
+    deadline: u64,
+    capacity_observed: &tokio::sync::Notify,
+) -> ((u64, u8, u8, [u8; 16]), channel::CompletedReply) {
+    for _ in 0..32 {
+        assert!(
+            clock.monotonic_ms() < deadline,
+            "original derivation Input deadline exhausted"
+        );
+        let header = (route.session().fixture_counts().1 + 1, 1, 0, id.logical());
+        let reply = input::pull(
+            context,
+            route,
+            opened_frame(public, route, header, purpose, None),
+        )
+        .await
+        .unwrap();
+        let admission = hex::decode(reply.admission()).unwrap();
+        assert!(
+            clock.monotonic_ms() < deadline,
+            "original derivation Input completed after its deadline"
+        );
+        if admission[36] == 1 {
+            return (header, reply);
+        }
+        assert_eq!(
+            opened_reply(public, header, purpose, &reply),
+            replies::refused(factory::Refused::Protocol(
+                catcoms_sync::voice_v2::VoiceError::Capacity
+            )),
+            "only the exact authenticated local Capacity refusal can retry Input"
+        );
+        drop(reply);
+        capacity_observed.notify_one();
+        clock.sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("original derivation Input exceeded 32 local Capacity observations");
+}
+
 async fn derivation_cycle(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
@@ -291,9 +341,45 @@ async fn derivation_cycle(
     // This is an ACTUAL extra Root input borrower, independent of the physical Input reply.
     // Final issuance must stay pending through End/compaction until this owner really drops.
     let late_input = row.work().unwrap().action().input().unwrap();
-    let header = (3, 1, 0, id.logical());
-    let incoming = opened_frame(&public, &route, header, &purpose, None);
-    let reply = input::pull(&context, &route, incoming).await.unwrap();
+    // Input is a real nonblocking native boundary, not a guarantee of Data.
+    // Preserve the already-published Action and its ORIGINAL deadline across
+    // authenticated local Capacity refusals. No crypto result is published here.
+    let clock = crate::voice_runtime(state).clock();
+    let original_deadline = row
+        .work()
+        .unwrap()
+        .action()
+        .protected_binding()
+        .unwrap()
+        .deadline;
+    let before_input = row.status().unwrap();
+    // One original-deadline watchdog covers the forced refusal AND every
+    // Actor/UI wait and retry sleep. A timed-out observer is never drainage.
+    let (header, reply) = tokio::time::timeout(
+        std::time::Duration::from_millis(original_deadline.saturating_sub(clock.monotonic_ms())),
+        async {
+            let pressure = state.servers.lock().await;
+            let observed = tokio::sync::Notify::new();
+            let mut same_input = Box::pin(original_derivation_input(
+                &context, &route, &public, id, &purpose, clock.as_ref(), original_deadline, &observed,
+            ));
+            // Drive the SAME helper until it has authenticated and collected
+            // a real Capacity control. Pending Actor work or KDF cannot fake
+            // this observation. Returning the first Control unconditionally
+            // would complete this future and fail deterministically here.
+            tokio::select! {
+                biased;
+                _ = observed.notified() => {},
+                _ = &mut same_input => panic!("Input escaped actual servers pressure without authenticated Capacity"),
+            }
+            assert!(row.status().unwrap() == before_input,
+                "refused Input changed the original row/action");
+            drop(pressure);
+            same_input.await
+        },
+    )
+    .await
+    .expect("original derivation Input exceeded its original deadline");
     let mut plain = opened_reply_kind(&public, header, &purpose, &reply, 1);
     assert_eq!(&plain[..2], &[1, 5]);
     assert_eq!(&plain[2..18], &id.logical());
