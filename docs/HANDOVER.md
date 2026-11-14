@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Original PC close contention (14 November; validation pending)
+
+Full native CI43531747636 passes on Windows. Linux has1041 passing and4 failing
+cases: the first refusal is the exact SDP-result fixture's direct original
+`close_pc` unwrap; the other3 are the recovery fixture's failed-shutdown exclusion.
+The SDK constructor correction remains in place. No production fault is inferred
+from this newly identified nonblocking close refusal.
+
+Every Capacity return in `close_pc` precedes `request_close`: index/row contention
+or genuine undrained media prevents closure. The fixture now retains the same
+parent, Session and decoded PC request through at most32 attempts with the
+existing Clock's10ms delay. Persistent media/refusal still fails; success and
+non-Capacity outcomes never become another attempt. No result, mint, allocation,
+SDK Release or authority generation is repeated.
+
+A forced actual-parent-mutex observation proves closed/action-closed flags stay
+false before the positive control. It drops the guard before assertions. The
+existing genuine-admitted-media refusal and later drainage checks remain intact.
+The exact formerly failing scenario passes locally(5.78s), as does the real
+queued-actor/media/SDK-close control(6.18s). Native production checking passes
+(1m33s), as do native formatting and diff checks. Read-only design/diff review
+and short re-review are clear; the compile finding was fixed without adding
+Debug to private proof types. Exact-source full native validation remains open.
+Chat V2 is off.
+
 ## SDK preparation contention (13 November; full rerun pending)
 
 Full native CI43522590967 passes on Windows. Linux has1027 passing and18 failing
