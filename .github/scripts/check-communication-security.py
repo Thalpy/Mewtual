@@ -35,7 +35,9 @@ def main() -> None:
     if args.mode == "gossip":
         commands = [("gossip-resource", ["cargo", "test", "--locked", "-p", "catcoms-net",
                      "--all-features", "--lib", "gossip_resource_tests"])]
-        expected = 4
+        # The patched gossip migration adds the real oversize-control refusal
+        # and fresh-stream progress case to the four original resource cases.
+        expected = 5
     elif args.mode == "storage":
         commands = [(selector, ["cargo", "test", "--locked", "-p", "catcoms-storage",
                      "--all-features", "--lib", selector]) for selector in STORAGE]
