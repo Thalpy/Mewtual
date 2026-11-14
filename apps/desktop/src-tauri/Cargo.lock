@@ -643,6 +643,7 @@ dependencies = [
  "catcoms-crypto",
  "catcoms-discovery",
  "catcoms-mls",
+ "catcoms-net",
  "catcoms-replication",
  "catcoms-rt",
  "catcoms-storage",

@@ -63,13 +63,17 @@ pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use native_registry::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
     NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
-    NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextUiCandidate,
-    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
-    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
-    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget,
-    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
-    NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
+    NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextCreationInputs,
+    NativeTextCreationJob, NativeTextCreationProgress, NativeTextCreationRefusal,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextSourceBudget,
+    NativeTextSourceCommand, NativeTextSourcePolicy, NativeTextSourcePreparation,
+    NativeTextSources, NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation,
+    NativeTextUiPreparation, NativeTextUiRetirement, NativeTextUiRetirementBatch,
+    NativeTextUiRetirementDrain, NativeTextUiRetirementState, NativeTextVault,
+    NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade,
+    NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
+    NativeUiStateSaved, PreparedNativeRegistryMigration,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;

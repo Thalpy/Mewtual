@@ -11,6 +11,7 @@ pub(super) enum Request {
     Refresh(refresh::Request),
     FounderBirth(founder::Pending),
     FounderActivate(founder::Activate),
+    NativeFounderActivate(founder::Activate),
 }
 #[derive(Clone, Copy)]
 pub(super) enum Input<'a> {
@@ -18,6 +19,10 @@ pub(super) enum Input<'a> {
     Refresh(&'a refresh::Request),
     FounderBirth(&'a founder::Pending),
     FounderActivate(&'a founder::Activate),
+    NativeFounderActivate(
+        &'a founder::Activate,
+        &'a std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
+    ),
 }
 // Exactly one frozen request payload in the same existing control invoice,
 // separate from selected/candidate strings and ciphertext/AEAD terms.
@@ -58,17 +63,30 @@ impl From<rename::Plan> for Plan {
     }
 }
 const _: () = assert!(super::super::data::MAX_NAME <= RETAINED_PAYLOAD);
-impl Input<'_> {
+impl<'a> Input<'a> {
     pub(super) fn require_bounded(self) -> Result<(), AppError> {
         match self {
             Self::FounderBirth(r) => return r.require_bounded(),
-            Self::FounderActivate(r) => return r.require_bounded(),
+            Self::FounderActivate(r) => {
+                if r.birth.kind != super::data::BirthKind::Founder {
+                    return Err(refused());
+                }
+                return r.require_bounded();
+            }
+            Self::NativeFounderActivate(r, _) => {
+                if r.birth.kind != super::data::BirthKind::NativeFounder {
+                    return Err(refused());
+                }
+                return r.require_bounded();
+            }
             _ => (),
         }
         let fits = match self {
             Self::Rename(r) => r.name.len() <= super::super::data::MAX_NAME,
             Self::Refresh(r) => r.invite.len() <= super::super::data::MAX_INVITE,
-            Self::FounderBirth(_) | Self::FounderActivate(_) => unreachable!(),
+            Self::FounderBirth(_) | Self::FounderActivate(_) | Self::NativeFounderActivate(..) => {
+                unreachable!()
+            }
         };
         if fits {
             Ok(())
@@ -82,6 +100,7 @@ impl Input<'_> {
             (Self::Refresh(a), Request::Refresh(b)) => a == b,
             (Self::FounderBirth(a), Request::FounderBirth(b)) => a == b,
             (Self::FounderActivate(a), Request::FounderActivate(b)) => a == b,
+            (Self::NativeFounderActivate(a, _), Request::NativeFounderActivate(b)) => a == b,
             _ => false,
         }
     }
@@ -91,6 +110,7 @@ impl Input<'_> {
             Self::Refresh(r) => Request::Refresh(r.clone()),
             Self::FounderBirth(r) => Request::FounderBirth(r.clone()),
             Self::FounderActivate(r) => Request::FounderActivate(r.clone()),
+            Self::NativeFounderActivate(r, _) => Request::NativeFounderActivate(r.clone()),
         }
     }
     pub(super) fn kind(self) -> Change {
@@ -98,7 +118,7 @@ impl Input<'_> {
             Self::Rename(_) => Change::Rename,
             Self::Refresh(_) => Change::RefreshLegacyInvite,
             Self::FounderBirth(_) => Change::Birth,
-            Self::FounderActivate(_) => Change::Activate,
+            Self::FounderActivate(_) | Self::NativeFounderActivate(..) => Change::Activate,
         }
     }
     pub(super) fn prepare(self, selected: Index, parent: [u8; 32]) -> Result<Plan, AppError> {
@@ -107,6 +127,17 @@ impl Input<'_> {
             Self::Refresh(r) => refresh::prepare(selected, r, parent).map(Into::into),
             Self::FounderBirth(r) => r.prepare(selected, parent),
             Self::FounderActivate(r) => r.prepare(selected, parent),
+            Self::NativeFounderActivate(r, _) => r.prepare(selected, parent),
+        }
+    }
+    pub(super) fn network(
+        self,
+    ) -> Option<
+        &'a std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
+    > {
+        match self {
+            Self::NativeFounderActivate(_, proof) => Some(proof),
+            _ => None,
         }
     }
 }

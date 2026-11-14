@@ -48,15 +48,84 @@ It did not establish that the refusal was Capacity or prove a production media
 lifecycle defect. Diagnostics now append only validated authenticated scalar
 media-error category/code, never parent, proof, key, SDP or plaintext.
 
+## Wrong cleanup receipt under contention
+
+The corrected H run43599886163 passed all Windows native tests, but Linux
+passed1060 and failed5. Its first failure was the maximum-SDP scenario's wrong
+Release receipt: it expected Unauthorized[1,3,5] immediately and observed
+Capacity[1,3,7]. Four subsequent scenarios failed on the poisoned shared fixture.
+The actual ledger acquires its index and row before validating the receipt.
+
+The wrong-proof check now first forces the real direct-native index refusal,
+then drops that guard before framed parent resolution. It retries only the
+exact authenticated Capacity shape for the same opcode10 body, with at most32
+observations inside one fixed five-second watchdog, and still requires exact
+Unauthorized. The original claim remains unreleased throughout; the following
+correct receipt must still release and recover the original history. This
+cleanup observer does not renew a Claim or require it to remain unexpired.
+Other exchanges, including intentional guard-held Capacity checks, are unchanged.
+
+## Read-only SDK preflight under server-map contention
+
+At3950ce59 Linux full native passed. Windows run43608286310 passed1052 and
+failed13; its first failure was sdk.rs's direct preflight unwrap returning
+Protocol(Capacity), before any physical hold or SDK preparation/allocation.
+The later twelve failures came from the shared fixture's poisoned isolation.
+
+The three identical read-only SDK preflights now share one narrowly bounded
+observer. It drives the same future with the real server map held, requires
+exact Capacity, releases that map, then requires success. Session counters and
+SDK release state stay unchanged. Only preflight Capacity can repeat, at most32
+observations within one fixed five-second watchdog including pressure and Actor
+IO. Allocation, attachment, Release and actual custody/deadline checks stay
+outside the wrapper. The exact original failing TCP scenario passed using the
+identical fixture copied into the authoring worktree (7.44 seconds, after the
+native rebuild). The updated H-head full CI remains pending; this copied-source
+focused pass is not an independent H full run.
+
 ## Evidence and limits
 
-Read-only actual-diff reviews of both corrections are clear. The actual native
+Read-only actual-diff reviews of the earlier SDP and Current corrections are clear. The actual native
 text lifecycle cohort passed43 cases, the exact framed SDP scenario passed1,
 and345 focused TypeScript cases passed with both Current/refusal corrections.
 The exact original native media TCP scenario also passed (70.47 seconds). Those
 focused native executions used the identical changed fixture files copied into
-the later native-UI worktree, not an independent H build. Full corrected-head
-CI is still pending at the time this record was written. Earlier full Root runs remain
+the later native-UI worktree, not an independent H build. Their full H Windows
+run passed; the Linux failure and new wrong-receipt correction are described
+above. Its copied-source exact maximum-SDP regression passed (6.43 seconds),
+and the full3950ce59 Linux native run passed; Windows failed later at the
+read-only SDK preflight. Only the newest SDK preflight correction's focused
+execution and updated-head full CI remain pending. Earlier full Root runs remain
 subject to the one explicitly deferred slow catch-up cost case. Root strict
 Clippy still has unfinished application-pipeline errors; no passing sign-off
 or suppression is claimed.
+
+## Foreign native SDP history under index contention
+
+The later complete run at d0f2de20 passed native Linux, but Windows passed 1076
+and failed 13. The first substantive failure was sdp_submission.rs:180: a direct
+foreign-Session history query returned Capacity before its expected Unauthorized.
+The other twelve failures were the shared fixture's deliberate poison cascade.
+This is separate from the earlier SDK-preflight correction; its H13d complete
+Windows and Linux runs both passed.
+
+The direct sdp_history call takes the real transition-index and row locks before
+checking exact Session allocation. The fixture now forces one actual index
+refusal, then observes only that SAME row/foreign Arc under a bounded Capacity
+retry. It still requires exact Unauthorized, and drops every unexpected actual
+snapshot outside guards. No HTTP request, SDP/SDK/Release work or publication is
+retried. The original intent's remaining lifetime is still sampled afterward;
+this fixed five-second observation loop supplies no renewed authority or
+deadline. Its watchdog follows the deliberate synchronous index acquisition and
+cannot preempt that barrier. Row ID and actual original outcome allocation are
+checked afterward; the original funding remains owned for the later existing
+publication/custody assertions, not proved by a candidate-self comparison.
+
+Design/actual-diff review and the exact failed TCP regression are pending for
+this latest correction. The failed current full run is not credited as green.
+
+The exact previously failing TCP scenario passed locally with this correction
+(1 case, 5.24 seconds), including the forced actual-index Capacity observation.
+It was built against the transport continuation containing the identical fixture
+change. The current complete d0f2de20 Windows failure remains recorded above;
+complete validation of the corrected head is still required.

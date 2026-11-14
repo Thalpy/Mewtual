@@ -13,6 +13,7 @@ pub(super) mod founder;
 mod inspection;
 mod metadata;
 mod migration;
+mod network;
 pub(super) mod preparation;
 pub(super) mod refresh;
 pub(super) mod rename;

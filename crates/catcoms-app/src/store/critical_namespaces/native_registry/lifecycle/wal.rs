@@ -45,7 +45,7 @@ fn supported_decision(
     match selected.successor_data(candidate, parent)? {
         Change::Birth
             if matches!(candidate.rows.last().map(|r| &r.backend),
-            Some(Backend::Pending { birth, .. }) if birth.kind == BirthKind::Founder && birth.join_context.is_none()) =>
+            Some(Backend::Pending { birth, .. }) if birth.kind.is_founder() && birth.join_context.is_none()) =>
         {
             Ok(Decision::FounderBirth)
         }
@@ -54,7 +54,7 @@ fn supported_decision(
                 old != new
                     && matches!((&old.backend, &new.backend),
                 (Backend::Pending { birth, .. }, Backend::Founder { .. })
-                    if birth.kind == BirthKind::Founder && birth.join_context.is_none())
+                    if birth.kind.is_founder() && birth.join_context.is_none())
             }) =>
         {
             Ok(Decision::FounderActivate)
@@ -73,8 +73,18 @@ pub(in crate::store) struct VerifiedWal {
     observed_stage: Option<[u8; 32]>,
     candidate: [u8; 32],
     decision: Decision,
+    network: Option<
+        std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
+    >,
 }
 impl VerifiedWal {
+    pub(in crate::store) fn take_network(
+        &mut self,
+    ) -> Option<
+        std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
+    > {
+        self.network.take()
+    }
     pub(in crate::store) fn decision(&self) -> Decision {
         self.decision
     }
@@ -146,6 +156,7 @@ fn proof(inventory: &UpgradeInventory, candidate: &[u8], decision: Decision) -> 
             .map(|raw| *blake3::hash(raw).as_bytes()),
         candidate: *blake3::hash(candidate).as_bytes(),
         decision,
+        network: None,
     }
 }
 
@@ -159,6 +170,7 @@ pub(super) fn classify(
     require_normal_inventory(store, inventory)?;
     let (selected, _) = preparation::decode_selected_data(store, inventory)?;
     let stage = inventory.index_stage().ok_or_else(refused)?;
+    let mut network = None;
     let decision = if stage == inventory.index() {
         Decision::Duplicate
     } else if stage.len() < 40 {
@@ -166,17 +178,44 @@ pub(super) fn classify(
     } else {
         let key = Zeroizing::new(store.keys.db_key()?);
         match open_index(&key, stage, selected.capability) {
-            Ok(next) => supported_decision(
-                &selected,
-                &next,
-                *blake3::hash(inventory.index()).as_bytes(),
-            )?,
+            Ok(next) => {
+                let decision = supported_decision(
+                    &selected,
+                    &next,
+                    *blake3::hash(inventory.index()).as_bytes(),
+                )?;
+                if selected.rows.iter().chain(&next.rows).any(|row| {
+                    row.backend
+                        .birth()
+                        .is_some_and(|birth| birth.kind == BirthKind::NativeFounder)
+                }) {
+                    let handler = native_handler(store)?;
+                    // Pending Birth may lack a file; validate its authenticated
+                    // reservation DATA without granting cold execution.
+                    network = super::network::capture_activation(store, &selected, &next, handler)?;
+                    super::network::require_birth_candidate(store, &selected, &next)?;
+                }
+                decision
+            }
             Err(ReadError::Unauthenticated(_)) => Decision::DiscardBadMac,
             Err(error) => return Err(error.into_error()),
         }
     };
     inventory.require(store)?;
-    Ok(proof(inventory, stage, decision))
+    let mut proof = proof(inventory, stage, decision);
+    proof.network = network;
+    Ok(proof)
+}
+
+fn native_handler(store: &ServerStore) -> Result<&super::admission::Handler, AppError> {
+    match store
+        .current_layout_policy
+        .as_ref()
+        .and_then(|policy| policy.native_registry.as_ref())
+    {
+        Some(super::super::preparation::NativeRegistryHandler::Lifecycle(handler)) => Ok(handler),
+        _ => Err(refused()),
+    }
 }
 
 /// Issue warm IO proof only for the actual selected3 parent and the SAME

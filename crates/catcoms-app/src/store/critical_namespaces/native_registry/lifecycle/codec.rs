@@ -44,6 +44,7 @@ fn read_birth(input: &mut Decoder<'_>) -> Result<Birth, AppError> {
         1 => BirthKind::Founder,
         2 => BirthKind::Joined,
         3 => BirthKind::LegacyJoin,
+        4 => BirthKind::NativeFounder,
         _ => return Err(refused()),
     };
     Ok(Birth {
@@ -52,7 +53,7 @@ fn read_birth(input: &mut Decoder<'_>) -> Result<Birth, AppError> {
         request: field32(input)?,
         signer: field32(input)?,
         network: field32(input)?,
-        join_context: if kind == BirthKind::Founder {
+        join_context: if kind.is_founder() {
             None
         } else {
             Some(field32(input)?)
@@ -64,6 +65,7 @@ fn put_birth(output: &mut Encoder, value: &Birth) -> Result<(), AppError> {
         BirthKind::Founder => 1,
         BirthKind::Joined => 2,
         BirthKind::LegacyJoin => 3,
+        BirthKind::NativeFounder => 4,
     });
     for field in [value.invocation, value.request, value.signer, value.network] {
         output.put_bytes(&field).map_err(|_| refused())?;
@@ -75,6 +77,41 @@ fn put_birth(output: &mut Encoder, value: &Birth) -> Result<(), AppError> {
 }
 fn birth_length(value: &Birth) -> usize {
     1 + 4 * 36 + if value.join_context.is_some() { 36 } else { 0 }
+}
+
+#[cfg(test)]
+mod native_birth_tests {
+    use super::*;
+    #[test]
+    fn native_birth_discriminant_preserves_all_existing_encodings_and_uses_four() {
+        for (kind, tag) in [
+            (BirthKind::Founder, 1),
+            (BirthKind::Joined, 2),
+            (BirthKind::LegacyJoin, 3),
+            (BirthKind::NativeFounder, 4),
+        ] {
+            let birth = Birth {
+                kind,
+                invocation: [1; 32],
+                request: [2; 32],
+                signer: [3; 32],
+                network: [4; 32],
+                join_context: if kind.is_founder() {
+                    None
+                } else {
+                    Some([5; 32])
+                },
+            };
+            let mut output = Encoder::with_capacity(256);
+            put_birth(&mut output, &birth).unwrap();
+            let raw = output.finish();
+            assert_eq!(raw[0], tag);
+            assert_eq!(raw.len(), if kind.is_founder() { 145 } else { 181 });
+            let mut input = Decoder::new(&raw);
+            assert!(read_birth(&mut input).unwrap() == birth);
+            input.finish().unwrap();
+        }
+    }
 }
 fn read_legacy_origin(input: &mut Decoder<'_>) -> Result<LegacyOrigin, AppError> {
     match input.get_u8().map_err(|_| refused())? {
@@ -218,7 +255,9 @@ impl Index {
             let final_payload = match &row.backend {
                 Backend::Pending { birth, .. } => {
                     let final_state = match birth.kind {
-                        BirthKind::Founder => birth_length(birth) + MAX_FOUNDER_BINDING + 36,
+                        BirthKind::Founder | BirthKind::NativeFounder => {
+                            birth_length(birth) + MAX_FOUNDER_BINDING + 36
+                        }
                         BirthKind::Joined => birth_length(birth) + MAX_JOINED_BINDING + 36,
                         BirthKind::LegacyJoin => {
                             1 + birth_length(birth) + 4 + original::MAX_INVITE + 36

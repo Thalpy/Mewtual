@@ -19,6 +19,14 @@ pub(in crate::store::critical_namespaces::native_registry) enum BirthKind {
     Founder,
     Joined,
     LegacyJoin,
+    /// Actual native founder: activation/cold operational DATA require the
+    /// original immutable native network dependency. Old1/2/3 retain meaning.
+    NativeFounder,
+}
+impl BirthKind {
+    pub(super) fn is_founder(self) -> bool {
+        matches!(self, Self::Founder | Self::NativeFounder)
+    }
 }
 
 /// Immutable creation receipt. Local names and refreshed invites are not part
@@ -217,7 +225,7 @@ impl Index {
             previous = Some(row.id);
             identities.push(row.identity);
             if let Some(birth) = row.backend.birth() {
-                if (birth.kind == BirthKind::Founder) != birth.join_context.is_none() {
+                if birth.kind.is_founder() != birth.join_context.is_none() {
                     return Err(refused());
                 }
                 invocations.push(birth.invocation);
@@ -238,7 +246,7 @@ impl Index {
                 }
                 Backend::Founder { birth, binding }
                 | Backend::RetiredFounder { birth, binding, .. } => {
-                    if birth.kind != BirthKind::Founder
+                    if !birth.kind.is_founder()
                         || birth.signer != binding.signer
                         || binding.vault != self.capability.original.vault
                         || binding.layout != self.capability.original.root
@@ -262,7 +270,7 @@ impl Index {
                     }
                 }
                 Backend::AbandonedFounder { birth, .. } => {
-                    if birth.kind != BirthKind::Founder {
+                    if !birth.kind.is_founder() {
                         return Err(refused());
                     }
                 }
@@ -355,7 +363,7 @@ impl Index {
                             return Err(refused())
                         }
                         (Backend::Pending { birth, .. }, Backend::Founder { .. })
-                            if birth.kind == BirthKind::Founder =>
+                            if birth.kind.is_founder() =>
                         {
                             Change::Activate
                         }
@@ -372,7 +380,7 @@ impl Index {
                             },
                         ) if birth.kind == BirthKind::LegacyJoin => Change::Activate,
                         (Backend::Pending { birth, .. }, Backend::AbandonedFounder { .. })
-                            if birth.kind == BirthKind::Founder =>
+                            if birth.kind.is_founder() =>
                         {
                             Change::Abandon
                         }

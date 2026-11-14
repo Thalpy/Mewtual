@@ -452,6 +452,17 @@ pub struct UiCapture {
     original: Weak<Registry>,
     _invocation: Arc<Fee>,
 }
+impl UiCapture {
+    /// Cached negatives only. The owning concrete factory still has to check
+    /// this capture against its original facade and source collection.
+    pub(super) fn is_current_cached(&self) -> bool {
+        !self
+            .record
+            .retiring
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && self.current.is_current()
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Key-work-only retirement status, never whole native lock completion.
 pub enum UiRetirementState {

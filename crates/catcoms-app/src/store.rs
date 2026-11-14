@@ -62,13 +62,17 @@ pub use critical_namespaces::{
     FreshV2TextFounderBinding, FreshV2TextFounderPolicy, JournalledCheckpointJoinPreparation,
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
     NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
-    NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextUiCandidate,
-    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
-    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
-    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget,
-    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
-    NativeUiStateRead, NativeUiStateSaved, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextCreationInputs,
+    NativeTextCreationJob, NativeTextCreationProgress, NativeTextCreationRefusal,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextSourceBudget,
+    NativeTextSourceCommand, NativeTextSourcePolicy, NativeTextSourcePreparation,
+    NativeTextSources, NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation,
+    NativeTextUiPreparation, NativeTextUiRetirement, NativeTextUiRetirementBatch,
+    NativeTextUiRetirementDrain, NativeTextUiRetirementState, NativeTextVault,
+    NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade,
+    NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
+    NativeUiStateSaved, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
     PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
     PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
     ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
@@ -323,9 +327,14 @@ impl ServerNet {
     /// and needs nothing persisted beyond the seed that is already there. The seed is secret and
     /// BLAKE3 is preimage-resistant, so publishing the port reveals nothing about the identity.
     pub fn derived_port(&self) -> u16 {
+        Self::derived_port_for_seed(&self.key_seed)
+    }
+    /// Same existing derivation for the private native reservation, before
+    /// any transport is constructed. This exposes no seed or fallback chooser.
+    pub(in crate::store) fn derived_port_for_seed(seed: &[u8; 32]) -> u16 {
         let mut input = Vec::with_capacity(PORT_DOMAIN.len() + 32);
         input.extend_from_slice(PORT_DOMAIN);
-        input.extend_from_slice(&self.key_seed);
+        input.extend_from_slice(seed);
         let h = blake3::hash(&input);
         let n = u32::from_be_bytes(h.as_bytes()[..4].try_into().expect("4 bytes"));
         (PORT_LOW + n % PORT_SPAN) as u16
@@ -3533,6 +3542,10 @@ mod persistence {
 
     #[derive(Clone, Copy)]
     enum ArchiveOutputMode {
+        /// New immutable native network output: only create_new or the SAME
+        /// already-held warm object. Even an equal complete foreign file is
+        /// refused. This is not cold repair or an adoption/reseal path.
+        NewOriginal,
         /// Only a newly created or SAME warm held object can be completed. A pre-existing
         /// complete exact output may be re-synced; an unowned partial first seed refuses.
         Original,
@@ -3683,6 +3696,9 @@ mod persistence {
                     if metadata.file_type().is_file()
                         && metadata.len() <= expected.len() as u64 =>
                 {
+                    if matches!(mode, ArchiveOutputMode::NewOriginal) {
+                        return Err(refused());
+                    }
                     if matches!(mode, ArchiveOutputMode::Original) {
                         // Do NOT retain an unowned prefix and turn it into "already held" on
                         // the next retry. Only a complete exact original output may be adopted

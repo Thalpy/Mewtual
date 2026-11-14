@@ -60,6 +60,13 @@ declare -A allowed=(
   # destination is re-proved after large reads before rename; selection/unlink
   # phases are cached before covering barriers. These are not epoch-file permits.
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
+  # Immutable initial native network output: held original file/parents only.
+  ['crates/catcoms-app/src/store/persistence/native_registry/network.rs|cover|self.servers.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network.rs|cover|self.vault.file.sync_all().map_err(io)?;']=1
+  # Retained native activation dependency: original file and both parents.
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.output.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.servers.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.vault.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|self.base.vault.file.sync_all().map_err(io)?;']=2
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::remove_file(&seed).map_err(io)?;']=1

@@ -21,13 +21,16 @@ pub(in crate::store) mod preparation;
 
 pub use operational::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
-    NativeIndexUpgrade, NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation,
-    NativeTextUiPreparation, NativeTextUiRetirement, NativeTextUiRetirementBatch,
-    NativeTextUiRetirementDrain, NativeTextUiRetirementState, NativeTextVault,
-    NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade,
-    NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget, NativeUiInvocationMetadata,
-    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
-    NativeUiStateSaved,
+    NativeIndexUpgrade, NativeTextCreationInputs, NativeTextCreationJob,
+    NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
+    NativeTextCreationSettings, NativeTextSourceBudget, NativeTextSourceCommand,
+    NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSources, NativeTextUiCandidate,
+    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
+    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
+    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
+    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
+    NativeUiStateRead, NativeUiStateSaved,
 };
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,

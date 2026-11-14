@@ -6,6 +6,7 @@ use crate::store::critical_namespaces::{self as critical, native_registry::prepa
 use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
 use critical::read_pool::CatalogReadReservation;
 pub(in crate::store) mod lifecycle;
+pub(in crate::store) mod network;
 pub(in crate::store) mod operational;
 
 fn denied() -> AppError {

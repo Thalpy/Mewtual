@@ -13,6 +13,8 @@ use zeroize::Zeroizing;
 /// drops its Store before the evidence's last handler clone retires.
 pub(super) struct Observation {
     evidence: Evidence,
+    networks:
+        Vec<std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>>,
     _session: catcoms_storage::VaultPhysicalWorkLease,
 }
 enum Evidence {
@@ -54,6 +56,7 @@ impl Handler {
                             io: Box::new(io),
                             output: Box::new(output),
                         },
+                        networks: Vec::new(),
                         _session: store._session.retain_for_physical_work(),
                     });
                 }
@@ -69,6 +72,9 @@ impl Handler {
             // this strict3 open; a later explicit2 opener can recover its JOIN.
             return Err(refused());
         }
+        let (selected, _) = preparation::decode_selected_data(store, &inventory)?;
+        let networks = super::network::capture_selected(store, &selected, self)?;
+        drop(selected);
         if inventory.index_stage().is_some() {
             // Normal3 WAL is mutually exclusive with JOIN/upgrade debt. Keep
             // THIS inventory through effect and final exposure, never recapture
@@ -91,6 +97,7 @@ impl Handler {
             };
             return self.retain_observation(Observation {
                 evidence,
+                networks,
                 _session: store._session.retain_for_physical_work(),
             });
         }
@@ -100,6 +107,7 @@ impl Handler {
                 inventory: Box::new(inventory),
                 catalog,
             },
+            networks,
             _session: store._session.retain_for_physical_work(),
         })
     }
@@ -131,14 +139,19 @@ impl Handler {
                 .take()
                 .ok_or_else(refused)?
         };
-        let result = match &observation.evidence {
-            Evidence::Selected { inventory, catalog } => {
-                inventory.require_after_join(store, catalog)
+        let result = (|| {
+            for network in &observation.networks {
+                network.require(store)?;
             }
-            Evidence::Repaired { io, output } => io.require_complete(store, &output.bytes()),
-            Evidence::IndexCommitted { io, frame } => io.require_complete(store, frame),
-            Evidence::IndexCleaned { io } => io.require_complete(store),
-        };
+            match &observation.evidence {
+                Evidence::Selected { inventory, catalog } => {
+                    inventory.require_after_join(store, catalog)
+                }
+                Evidence::Repaired { io, output } => io.require_complete(store, &output.bytes()),
+                Evidence::IndexCommitted { io, frame } => io.require_complete(store, frame),
+                Evidence::IndexCleaned { io } => io.require_complete(store),
+            }
+        })();
         drop(observation); // No cell/catalog/Current guard; files then session.
         result
     }

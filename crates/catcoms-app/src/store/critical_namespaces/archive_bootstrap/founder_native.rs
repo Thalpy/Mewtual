@@ -127,6 +127,15 @@ impl NativeFounderKeys {
             .map_err(|_| refused())
     }
 
+    /// Cached Device progress is still bound to its original source. A row
+    /// can retire independently of its Host/UI/physical mount; cached success
+    /// must not silently outlive that revocation or admit another primitive.
+    pub(in crate::store) fn require_device(&self) -> Result<(), AppError> {
+        self.device
+            .preflight(&self.original, Purpose::Device)
+            .map_err(|_| refused())
+    }
+
     pub(in crate::store) fn member_entry(
         &mut self,
     ) -> (

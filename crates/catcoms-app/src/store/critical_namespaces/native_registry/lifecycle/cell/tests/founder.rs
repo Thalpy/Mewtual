@@ -345,7 +345,9 @@ fn lifecycle3_founder_wal_preserves_valid_unsupported_joined_and_legacy_stages()
                         origin: LegacyOrigin::Admitted(birth),
                         invite: "future invite".into(),
                     },
-                    BirthKind::Founder => unreachable!(),
+                    BirthKind::Founder | BirthKind::NativeFounder => {
+                        unreachable!("this control exercises joined and legacy-join kinds only")
+                    }
                 };
             }
             // Full syntax, AEAD and general successor math are valid. Only the
