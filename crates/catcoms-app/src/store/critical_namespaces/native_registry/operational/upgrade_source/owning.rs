@@ -10,7 +10,7 @@ use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
 mod physical;
 pub(in crate::store::critical_namespaces::native_registry) use physical::{
-    AuthenticationNegative, MetadataWork, SourceWork, UiWork,
+    AuthenticationNegative, MetadataWork, SourceWork, UiWork, WorkDrain,
 };
 
 #[cfg(test)]
@@ -385,6 +385,13 @@ impl Store {
 
     pub(in crate::store::critical_namespaces::native_registry) fn close_admission(&self) {
         self.physical.close_admission();
+    }
+    /// Call after closing this SAME owning facade; returned metadata has no
+    /// physical/Current/handler backreference and cannot reopen work slots.
+    pub(in crate::store::critical_namespaces::native_registry) fn observe_closed_work(
+        &self,
+    ) -> WorkDrain {
+        self.physical.observe_closed_work()
     }
     pub(in crate::store::critical_namespaces::native_registry) fn lookup_creation_data(
         &self,

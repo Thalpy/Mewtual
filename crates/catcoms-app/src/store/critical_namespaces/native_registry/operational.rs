@@ -27,6 +27,8 @@ pub use sources::{
     NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
 };
 mod ui_state;
+mod work_retirement;
+pub use work_retirement::{NativeTextWorkRetirement, NativeTextWorkRetirementPreparation};
 mod upgrade;
 pub(in crate::store::critical_namespaces) mod upgrade_source;
 pub use facade::{

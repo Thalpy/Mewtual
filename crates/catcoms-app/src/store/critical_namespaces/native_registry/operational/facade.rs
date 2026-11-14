@@ -225,6 +225,11 @@ impl NativeTextVault {
     pub(super) fn observe_ui_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
         self.ui.observe_mount()
     }
+    /// Original caller-credit policy only; this private clone grants no work,
+    /// UI or owner authority and performs no account lock/allocation.
+    pub(super) fn ui_invocation_budget(&self) -> NativeUiInvocationBudget {
+        self.ui.invocation_budget()
+    }
     /// Capture only the original dedicated UI slot. No index-WAL/Idle proof is
     /// substituted for local sidecar ownership. Native authenticates the caller.
     pub fn prepare_ui_state(

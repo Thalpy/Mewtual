@@ -547,4 +547,4 @@ impl<T: MeshTransport, R: CryptoRngCore> Drop for NativeTextSources<T, R> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

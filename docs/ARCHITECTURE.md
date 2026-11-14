@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+Original metadata/authentication and UI-state work now have a distinct closed
+drain under validation. Nine focused cases passed, including a post-CAS capture
+wakeup race fixed after review. This is separate from Source/SDK/TCP and actual
+facade disposal; native close integration and Chat V2 remain unfinished.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-WORK-DRAIN.md).
+
 Native text creation and retirement now have owning two-phase work captures
 under validation. Admitted preparations participate in original closure even
 when no row exists. Ten new regressions and all 56 affected source tests passed;
