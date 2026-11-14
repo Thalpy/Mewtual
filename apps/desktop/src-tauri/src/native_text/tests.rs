@@ -8,7 +8,7 @@ const SECRET: &str = "native text fixture secret";
 type Queue = Arc<StdMutex<Vec<Task>>>;
 type Reply = oneshot::Receiver<tauri::ipc::InvokeResponse>;
 
-pub(super) struct AdmissionBarrier {
+pub(crate) struct AdmissionBarrier {
     armed: AtomicBool,
     arrived: Notify,
     release: Notify,
@@ -21,7 +21,7 @@ impl AdmissionBarrier {
             release: Notify::new(),
         })
     }
-    pub(super) async fn wait_once(&self) {
+    pub(crate) async fn wait_once(&self) {
         if self.armed.swap(false, Ordering::SeqCst) {
             self.arrived.notify_one();
             self.release.notified().await;
@@ -413,4 +413,457 @@ async fn native_text_first_unlock_without_prior_lock_has_a_real_usable_generatio
         let vault = store.as_ref().unwrap().as_text_v2().unwrap();
         assert!(!vault.ui_is_current_cached(&observation));
     }
+}
+
+// These lifecycle tests use the real native router and a real mounted selected3
+// owner. Hooks pause scheduling only; no fixture boolean grants key authority.
+async fn capture_current_ui(state: &AppState) -> catcoms_app::store::NativeTextUiObservation {
+    let credit = state.native_text.ui_budget.prepare().unwrap();
+    let preparation = {
+        let store = state.store.lock().await;
+        store
+            .as_ref()
+            .unwrap()
+            .as_text_v2()
+            .unwrap()
+            .capture_ui(state.ui_session_generation.load(Ordering::SeqCst), credit)
+    };
+    let mut candidate = preparation.finish().unwrap();
+    let capture = {
+        let store = state.store.lock().await;
+        let vault = store.as_ref().unwrap().as_text_v2().unwrap();
+        let capture = vault.admit_ui(&mut candidate).unwrap();
+        vault.require_ui(&capture).unwrap();
+        capture
+    };
+    drop(candidate);
+    capture
+}
+async fn current_ui_is_live(
+    state: &AppState,
+    capture: &catcoms_app::store::NativeTextUiObservation,
+) -> bool {
+    let store = state.store.lock().await;
+    store
+        .as_ref()
+        .unwrap()
+        .as_text_v2()
+        .unwrap()
+        .require_ui(capture)
+        .is_ok()
+}
+async fn unlock_current(
+    app: &tauri::App<MockRuntime>,
+    main: &tauri::WebviewWindow<MockRuntime>,
+    queue: &Queue,
+) {
+    let generation = app
+        .state::<AppState>()
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let reply = invoke(main, &generation, SECRET);
+    run(queue).await;
+    success(reply.await.unwrap());
+}
+async fn pending_once<F: Future + ?Sized>(mut future: std::pin::Pin<&mut F>) {
+    std::future::poll_fn(|cx| {
+        assert!(
+            future.as_mut().poll(cx).is_pending(),
+            "expected an actual pending barrier"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_retirement_collects_more_than_the_generation_cap_without_reviving_old_pins() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let mut old = Vec::new();
+    for _ in 0..40 {
+        let capture = capture_current_ui(&state).await;
+        assert!(current_ui_is_live(&state, &capture).await);
+        let outcome = lock_session_outcome_inner(&state, None).await;
+        assert!(outcome.continuity_error.is_none());
+        assert!(!current_ui_is_live(&state, &capture).await);
+        old.push(capture);
+        unlock_current(&app, &main, &queue).await;
+    }
+    let fresh = capture_current_ui(&state).await;
+    assert!(current_ui_is_live(&state, &fresh).await);
+    for capture in &old {
+        assert!(!current_ui_is_live(&state, capture).await);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_retirement_coalesces_and_survives_a_lost_lock_waiter() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let original = capture_current_ui(&state).await;
+    let retirement: Queue = Arc::new(StdMutex::new(Vec::new()));
+    *state.native_text.retirement_queue.lock().unwrap() = Some(retirement.clone());
+    let handle = app.handle().clone();
+    let first =
+        tokio::spawn(
+            async move { lock_session_outcome_inner(&handle.state::<AppState>(), None).await },
+        );
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.native_text.retirement_enqueued.notified(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retirement.lock().unwrap().len(), 1);
+    let mut second = Box::pin(lock_session_outcome_inner(&state, None));
+    pending_once(second.as_mut()).await;
+    assert_eq!(
+        retirement.lock().unwrap().len(),
+        1,
+        "both locks must use the same original batch"
+    );
+    assert!(!current_ui_is_live(&state, &original).await);
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    run(&retirement).await;
+    assert!(second.await.continuity_error.is_none());
+    assert!(retirement.lock().unwrap().is_empty());
+    unlock_current(&app, &main, &queue).await;
+    assert!(current_ui_is_live(&state, &capture_current_ui(&state).await).await);
+    assert!(!current_ui_is_live(&state, &original).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_retirement_unpolled_task_drop_recovers_from_its_original_closed_counters() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let original = capture_current_ui(&state).await;
+    let retirement: Queue = Arc::new(StdMutex::new(Vec::new()));
+    *state.native_text.retirement_queue.lock().unwrap() = Some(retirement.clone());
+    let handle = app.handle().clone();
+    let locking =
+        tokio::spawn(
+            async move { lock_session_outcome_inner(&handle.state::<AppState>(), None).await },
+        );
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.native_text.retirement_enqueued.notified(),
+    )
+    .await
+    .unwrap();
+    let unpolled = retirement.lock().unwrap().pop().unwrap();
+    drop(unpolled); // Outside the queue lock: actual batch destruction closes its owners.
+    assert!(locking.await.unwrap().continuity_error.is_none());
+    unlock_current(&app, &main, &queue).await;
+    assert!(current_ui_is_live(&state, &capture_current_ui(&state).await).await);
+    assert!(!current_ui_is_live(&state, &original).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_retirement_publication_gap_panic_does_not_strand_the_next_real_unlock() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let original = capture_current_ui(&state).await;
+    state
+        .native_text
+        .panic_retirement_publication
+        .store(true, Ordering::SeqCst);
+    let handle = app.handle().clone();
+    let locking =
+        tokio::spawn(
+            async move { lock_session_outcome_inner(&handle.state::<AppState>(), None).await },
+        );
+    assert!(locking.await.unwrap_err().is_panic());
+    assert_locked(&state).await;
+    unlock_current(&app, &main, &queue).await;
+    assert!(current_ui_is_live(&state, &capture_current_ui(&state).await).await);
+    assert!(!current_ui_is_live(&state, &original).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_unlock_cannot_overtake_an_older_locks_unfinished_prelude() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let original = capture_current_ui(&state).await;
+    let edge = AdmissionBarrier::new();
+    *state.native_text.lock_prelude_edge.lock().unwrap() = Some(edge.clone());
+    let handle = app.handle().clone();
+    let locking =
+        tokio::spawn(
+            async move { lock_session_outcome_inner(&handle.state::<AppState>(), None).await },
+        );
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let generation = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let mut reply = invoke(&main, &generation, SECRET);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let running = tokio::spawn(task);
+    // This signal requires the actual native unlock to observe this exact
+    // active prelude. Pending KDF or unrelated IO cannot satisfy the test.
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.native_text.preludes.wait_blocked_for_test(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        reply.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(require_unlocked_session(&state).await.is_err());
+    edge.release.notify_one();
+    assert!(locking.await.unwrap().continuity_error.is_none());
+    running.await.unwrap();
+    success(reply.await.unwrap());
+    require_unlocked_session(&state).await.unwrap();
+    assert!(*state.session_resumable.lock().await);
+    assert!(!current_ui_is_live(&state, &original).await);
+    assert!(current_ui_is_live(&state, &capture_current_ui(&state).await).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_late_lock_cleanup_cannot_close_a_correct_same_generation_unlock() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let original = capture_current_ui(&state).await;
+    let edge = AdmissionBarrier::new();
+    *state.native_text.lock_commit_edge.lock().unwrap() = Some(edge.clone());
+    let handle = app.handle().clone();
+    let locking =
+        tokio::spawn(
+            async move { lock_session_outcome_inner(&handle.state::<AppState>(), None).await },
+        );
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    unlock_current(&app, &main, &queue).await;
+    let replacement = capture_current_ui(&state).await;
+    // Actual post-auth plaintext cache: deleting the late-cleanup exception
+    // must fail even though G-1 separately preserves the Root UI owner.
+    state.media_cache.lock().await.push(MediaChunk {
+        server: 17,
+        cid: "new-session".into(),
+        manifest_version: [9; 32],
+        index: 0,
+        bytes: Arc::new(vec![1, 2, 3]),
+    });
+    edge.release.notify_one();
+    assert!(locking.await.unwrap().continuity_error.is_none());
+    require_unlocked_session(&state).await.unwrap();
+    assert!(*state.session_resumable.lock().await);
+    assert!(current_ui_is_live(&state, &replacement).await);
+    assert!(!current_ui_is_live(&state, &original).await);
+    assert_eq!(
+        state.media_cache.lock().await.len(),
+        1,
+        "old lock cleared newly authenticated media"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_close_debt_acknowledgement_still_fences_the_current_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let original = capture_current_ui(&state).await;
+    *state.vault_window_close_debt.lock().await = Some("prior snapshot failed".into());
+    let fence = register_vault_close(&state).await.unwrap();
+    let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, true).await;
+    assert!(may_destroy);
+    assert!(outcome.continuity_error.is_some());
+    retirement::older_than(&state, state.ui_session_generation.load(Ordering::SeqCst))
+        .await
+        .unwrap();
+    assert!(!current_ui_is_live(&state, &original).await);
+    let generation = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let mut reply = invoke(&main, &generation, SECRET);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let running = tokio::spawn(task);
+    // This signal requires the actual native unlock to observe this exact
+    // active prelude. Pending KDF or unrelated IO cannot satisfy the test.
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.native_text.preludes.wait_blocked_for_test(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        reply.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(require_unlocked_session(&state).await.is_err());
+    drop(fence); // Simulate a deferred close; production retains this through destruction.
+    running.await.unwrap();
+    success(reply.await.unwrap());
+    require_unlocked_session(&state).await.unwrap();
+    assert!(!current_ui_is_live(&state, &original).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_close_cannot_discard_real_key_retirement_failure_as_snapshot_loss() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let original = capture_current_ui(&state).await;
+    state.native_text.retirement.poison_for_test();
+    let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, true).await;
+    assert!(outcome.key_work_error.is_some());
+    assert!(outcome.continuity_error.is_none());
+    assert!(
+        !may_destroy,
+        "snapshot-loss acknowledgement bypassed failed key work"
+    );
+    assert!(
+        state.vault_window_close_debt.lock().await.is_none(),
+        "key failure became discardable continuity debt"
+    );
+    assert!(!current_ui_is_live(&state, &original).await);
+    assert_locked(&state).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_unlock_rechecks_prelude_after_wait_idle_before_committing() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    lock_session_outcome_inner(&state, None).await;
+    // Consume the initial successful finalizer's observation, then force THIS
+    // actual authenticated finalizer to wait on the real UI commit mutex.
+    state.native_text.unlock_commit_wait.notified().await;
+    let held = state.ui_session_commit.lock().await;
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let reply = invoke(&main, &generation.to_string(), SECRET);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let running = tokio::spawn(task);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.native_text.unlock_commit_wait.notified(),
+    )
+    .await
+    .unwrap();
+    // Models a lock thread descheduled after prelude registration but before
+    // its SC increment. A generation-only recheck cannot detect this boundary.
+    let prelude = state.native_text.preludes.begin().unwrap();
+    drop(held);
+    running.await.unwrap();
+    refused(reply.await.unwrap());
+    assert_eq!(
+        state.ui_session_generation.load(Ordering::SeqCst),
+        generation
+    );
+    assert_locked(&state).await;
+    drop(prelude);
+    unlock_current(&app, &main, &queue).await;
+    require_unlocked_session(&state).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_pre_auth_ticket_cannot_adopt_an_intervening_voice_session() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    lock_session_outcome_inner(&state, None).await;
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let before = index(&path);
+    let edge = AdmissionBarrier::new();
+    *state.native_text.ticket_edge.lock().unwrap() = Some(edge.clone());
+    let reply = invoke(&main, &generation.to_string(), SECRET);
+    let task = queue.lock().unwrap().pop().unwrap();
+    let running = tokio::spawn(task);
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    // This is the real Coordinator/Runtime replacement, with NO UI generation
+    // change. A ticket sampled after KDF would incorrectly adopt this session.
+    state.voice_authority.lock().unwrap().revoke_all();
+    assert_eq!(
+        state.ui_session_generation.load(Ordering::SeqCst),
+        generation
+    );
+    edge.release.notify_one();
+    running.await.unwrap();
+    refused(reply.await.unwrap());
+    assert_locked(&state).await;
+    assert_eq!(index(&path), before);
+    unlock_current(&app, &main, &queue).await;
+    require_unlocked_session(&state).await.unwrap();
+}
+
+async fn unexpected_legacy_cold(
+    _: u64,
+    _: SessionTicket,
+    _: Operation,
+    _: String,
+) -> Result<Vec<ReloadedServer>, AppError> {
+    panic!("real mounted Legacy authentication must never reopen the vault")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_shared_legacy_authentication_waits_before_its_pre_auth_voice_ticket() {
+    let root = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState::default());
+    let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+    *state.store.lock().await = Some(store.into());
+    let edge = AdmissionBarrier::new();
+    *state.native_text.lock_prelude_edge.lock().unwrap() = Some(edge.clone());
+    let locking_state = state.clone();
+    let locking =
+        tokio::spawn(async move { lock_session_outcome_inner(&locking_state, None).await });
+    tokio::time::timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let unlock_state = state.clone();
+    let unlocking = tokio::spawn(async move {
+        unlock_authentication(
+            &unlock_state,
+            "correct horse".into(),
+            generation.to_string(),
+            None,
+            unexpected_legacy_cold,
+        )
+        .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.native_text.preludes.wait_blocked_for_test(),
+    )
+    .await
+    .unwrap();
+    assert!(require_unlocked_session(&state).await.is_err());
+    edge.release.notify_one();
+    assert!(locking.await.unwrap().continuity_error.is_none());
+    assert!(unlocking.await.unwrap().unwrap().is_empty());
+    require_unlocked_session(&state).await.unwrap();
+    assert!(*state.session_resumable.lock().await);
+    assert!(matches!(
+        state.store.lock().await.as_ref(),
+        Some(MountedVault::Legacy(_))
+    ));
 }

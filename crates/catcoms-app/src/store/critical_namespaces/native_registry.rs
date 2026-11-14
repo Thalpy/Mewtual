@@ -23,9 +23,9 @@ pub use operational::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
     NativeIndexUpgrade, NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation,
     NativeTextUiPreparation, NativeTextUiRetirement, NativeTextUiRetirementBatch,
-    NativeTextUiRetirementState, NativeTextVault, NativeTextVaultAuthentication,
-    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeUiInvocationBudget,
-    NativeUiInvocationMetadata,
+    NativeTextUiRetirementDrain, NativeTextUiRetirementState, NativeTextVault,
+    NativeTextVaultAuthentication, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+    NativeUiInvocationBudget, NativeUiInvocationMetadata,
 };
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,

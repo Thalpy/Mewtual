@@ -1,5 +1,14 @@
 # Mewtual; Handover
 
+## Native text UI lifecycle continuation (14 November, validation pending)
+
+Original-batch coalescing, failed-task original-counter recovery, prelude ordering
+and unconditional close fencing are implemented on the disabled native path.
+Root focused12, native focused19 and frontend3441/check/build passed. Read-only
+adversarial review is clear; actual TCP regression, full Rust/static gates and
+build/startup remain pending. Chat V2 is OFF and not complete.
+[Detailed contract, tests and remaining work](communication-recovery/CHAT-V2-NATIVE-UI-LIFECYCLE.md).
+
 ## Native text warm factory (14 November; validation in progress, off)
 
 The actual main-window Tauri unlock path now has a trusted off-by-default native

@@ -8,6 +8,7 @@ use tauri::ipc::{Invoke, InvokeBody};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
+pub(super) mod retirement;
 #[cfg(test)]
 mod tests;
 
@@ -19,14 +20,32 @@ pub(super) struct Registry {
     inflight: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     ui_budget: NativeUiInvocationBudget,
+    retirement: retirement::Coalescer,
+    pub(super) preludes: Arc<retirement::Prelude>,
     #[cfg(test)]
     directory: Option<PathBuf>,
     #[cfg(test)]
     final_edge: Option<Arc<tests::AdmissionBarrier>>,
+    #[cfg(test)]
+    retirement_queue: StdMutex<Option<Arc<StdMutex<Vec<Task>>>>>,
+    #[cfg(test)]
+    retirement_enqueued: tokio::sync::Notify,
+    #[cfg(test)]
+    pub(super) lock_prelude_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    pub(super) lock_commit_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    panic_retirement_publication: AtomicBool,
+    #[cfg(test)]
+    pub(super) unlock_commit_wait: tokio::sync::Notify,
+    #[cfg(test)]
+    ticket_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
 }
 impl Default for Registry {
     fn default() -> Self {
         use catcoms_app::store::CriticalCatalogReadPool;
+        let retirement = retirement::Coalescer::default();
+        let preludes = retirement.prelude();
         Self {
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
@@ -35,10 +54,26 @@ impl Default for Registry {
                     .expect("fixed native UI policy"),
             )
             .expect("fixed native UI capacity"),
+            retirement,
+            preludes,
             #[cfg(test)]
             directory: None,
             #[cfg(test)]
             final_edge: None,
+            #[cfg(test)]
+            retirement_queue: StdMutex::new(None),
+            #[cfg(test)]
+            retirement_enqueued: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            lock_prelude_edge: StdMutex::new(None),
+            #[cfg(test)]
+            lock_commit_edge: StdMutex::new(None),
+            #[cfg(test)]
+            panic_retirement_publication: AtomicBool::new(false),
+            #[cfg(test)]
+            unlock_commit_wait: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            ticket_edge: StdMutex::new(None),
         }
     }
 }
@@ -226,10 +261,21 @@ async fn execute(
     directory: PathBuf,
 ) -> Result<Vec<ReloadedServer>, String> {
     let _mount = state.vault_mount.lock().await;
+    // An older lock can publish this generation before revoking voice state.
+    // Snapshot its original ticket only AFTER that mutation prelude ends, but
+    // BEFORE KDF/verification, so authentication cannot adopt a later Host.
+    state.native_text.preludes.wait_idle().await;
     if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation {
         return Err("Unlock was superseded. Try again.".into());
     }
     let ticket = voice_runtime(state).session_ticket();
+    #[cfg(test)]
+    {
+        let edge = state.native_text.ticket_edge.lock().unwrap().clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
     let mut authentication = authenticate_mounted(state, &captured.secret).await?;
     if authentication.is_none() {
         let mut plan = {

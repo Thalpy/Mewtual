@@ -25,10 +25,10 @@ pub use facade::{
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
 pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
 pub use native_ui::{
-    RetirementBatch as NativeTextUiRetirementBatch, UiCandidate as NativeTextUiCandidate,
-    UiCapture as NativeTextUiObservation, UiGarbage as NativeTextUiGarbage,
-    UiPreparation as NativeTextUiPreparation, UiRetirement as NativeTextUiRetirement,
-    UiRetirementState as NativeTextUiRetirementState,
+    RetirementBatch as NativeTextUiRetirementBatch, RetirementDrain as NativeTextUiRetirementDrain,
+    UiCandidate as NativeTextUiCandidate, UiCapture as NativeTextUiObservation,
+    UiGarbage as NativeTextUiGarbage, UiPreparation as NativeTextUiPreparation,
+    UiRetirement as NativeTextUiRetirement, UiRetirementState as NativeTextUiRetirementState,
 };
 pub use upgrade::{NativeIndexPolicy, NativeIndexUpgrade};
 
