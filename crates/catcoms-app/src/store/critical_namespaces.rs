@@ -66,6 +66,7 @@ pub use native_registry::{
     NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextUiCandidate,
     NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
     NativeTextUiRetirementBatch, NativeTextUiRetirementState, NativeTextVault,
+    NativeTextVaultAuthentication, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
     NativeUiInvocationBudget, NativeUiInvocationMetadata, PreparedNativeRegistryMigration,
 };
 pub(super) mod read_pool;

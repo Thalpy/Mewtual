@@ -235,7 +235,7 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|file.sync_all().map_err(io)?;']=1
   # Both public open APIs use this one private constructor before any token/cursor exists.
-  ['crates/catcoms-app/src/store.rs|open_with_catalog_policies|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
+  ['crates/catcoms-app/src/store.rs|open_catalog_in_session|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
   # remove_server unlinks only the non-family {id}.bin, .net and .cache files (I-4 audit:
   # correctly not rotating).
   ['crates/catcoms-app/src/store.rs|remove_server|fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;']=1

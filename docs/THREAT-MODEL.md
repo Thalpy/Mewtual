@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+The new disabled native warm text entry checks actual Tauri ACL/window and the
+pre-schedule generation, verifies the same mounted critical key hierarchy under
+one wrapper transaction and retains original whole-Host/physical negatives
+through unlock commit. Fresh creation refuses all prior directory data under
+its real vault session; a missing wrapper cannot mint a replacement identity.
+It grants no operational founder, joined source, SDK or message capability.
+UI continuity and cold operational restart remain unfinished and Chat V2 stays
+off. [Limits and evidence](communication-recovery/CHAT-V2-NATIVE-WARM-FACTORY.md).
+
 The network security migration replaces actual vulnerable DNS/gossipsub packages
 and removes obsolete DNS exceptions, under validation. Finite subscription caps,
 callback guards, Noise/peer identity and boxed transport composition remain.

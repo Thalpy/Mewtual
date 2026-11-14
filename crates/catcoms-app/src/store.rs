@@ -65,6 +65,7 @@ pub use critical_namespaces::{
     NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextUiCandidate,
     NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
     NativeTextUiRetirementBatch, NativeTextUiRetirementState, NativeTextVault,
+    NativeTextVaultAuthentication, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
     NativeUiInvocationBudget, NativeUiInvocationMetadata, PendingJoinCatalogPolicy,
     PreparedArchiveBootstrapStore, PreparedFreshV2TextFounder, PreparedNativeRegistryMigration,
     PreparedV2CurrentLayoutStore, PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation,
@@ -5869,6 +5870,45 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         policies: governance_open::CatalogPolicies,
     ) -> Result<Self, AppError> {
+        let dir = dir.as_ref().to_path_buf();
+        // Keep every existing opener's exclusion-before-KDF ordering unchanged.
+        let session = acquire_vault_session(&dir)?;
+        Self::open_catalog_in_session(dir, passphrase, rng, policies, session)
+    }
+
+    /// Closed initial native factory edge. Strict absence is proved AFTER the
+    /// actual lifetime session is acquired, including all old/orphan artifacts.
+    /// The normal default grammar still opens all lower inventories exactly
+    /// once. No configured gate, raw-key return or skip-gate flag is exposed.
+    fn create_private_for_native_registry(
+        dir: &Path,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Self, AppError> {
+        let session = acquire_vault_session(dir)?;
+        session.require_fresh_directory(dir)?;
+        Self::open_catalog_in_session(
+            dir.to_path_buf(),
+            passphrase,
+            rng,
+            governance_open::CatalogPolicies {
+                catalog_read_pool: None,
+                pending_join_policy: None,
+                archive_bootstrap_policy: None,
+                current_layout_policy: None,
+                governance_layout_policy: None,
+            },
+            session,
+        )
+    }
+
+    fn open_catalog_in_session(
+        dir: PathBuf,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        policies: governance_open::CatalogPolicies,
+        session: VaultSessionGuard,
+    ) -> Result<Self, AppError> {
         let governance_open::CatalogPolicies {
             catalog_read_pool,
             pending_join_policy,
@@ -5876,10 +5916,6 @@ impl ServerStore {
             current_layout_policy,
             governance_layout_policy,
         } = policies;
-        let dir = dir.as_ref().to_path_buf();
-        // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
-        // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
-        let session = acquire_vault_session(&dir)?;
         critical_namespaces::refuse_orphan_before_vault_creation(
             &dir,
             current_layout_policy
@@ -5961,6 +5997,14 @@ impl ServerStore {
     /// only safe way to reopen that webview boundary while still rejecting a wrong passphrase.
     pub fn verify_passphrase(&self, passphrase: &[u8]) -> Result<(), AppError> {
         verify_vault_passphrase(&self.dir, passphrase)?;
+        Ok(())
+    }
+
+    /// Same mounted critical-key identity, without acquiring a second physical
+    /// session or returning keys. Selected3 reauthentication uses this instead
+    /// of legacy's path-only helper; the storage layer holds one wrapper lock.
+    fn verify_native_critical_passphrase(&self, secret: &[u8]) -> Result<(), AppError> {
+        catcoms_storage::verify_critical_vault_passphrase_for_keys(&self.dir, secret, &self.keys)?;
         Ok(())
     }
 

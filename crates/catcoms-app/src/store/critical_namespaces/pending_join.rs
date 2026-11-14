@@ -224,6 +224,66 @@ impl ServerStore {
             return Err(refused());
         }
         self.open_owner_operations_gate(actual_format, passphrase, rng)?;
+        self.install_opened_pending_catalog(opened, metadata_fee)
+    }
+
+    /// Only the owned initial native factory reaches this edge after the SAME
+    /// Store activated its Empty critical catalog. Existing lower inventories
+    /// are already mounted; replaying their constructor would discard/refuse
+    /// original negatives. Revalidate, never clear or reopen them.
+    pub(in crate::store::critical_namespaces) fn attach_created_empty_catalog(
+        &self,
+    ) -> Result<(), AppError> {
+        if self.chat_mount.observer().is_cancelled()
+            || self.chat_vault_format()? != VaultFormat::CriticalNamespaces
+            || !self.has_owner_operations_intent()?
+            || self
+                .pending_join_catalog
+                .lock()
+                .map_err(|_| refused())?
+                .is_some()
+            || self.current_layout.lock().map_err(|_| refused())?.is_some()
+            || self
+                .archive_bootstrap_root
+                .lock()
+                .map_err(|_| refused())?
+                .is_some()
+            || self
+                .member_outbox_layout
+                .lock()
+                .map_err(|_| refused())?
+                .is_some()
+        {
+            return Err(refused());
+        }
+        super::refuse_unimplemented_archive_storage(&self.dir)?;
+        super::governance_layout::refuse_unsupported_storage(&self.dir)?;
+        super::member_outbox_layout::refuse_unsupported_storage(&self.dir)?;
+        crate::store::persistence::native_registry::refuse_unsupported_storage(&self.dir)?;
+        let empty = self.inspect_empty_critical_catalog()?.ok_or_else(refused)?;
+        empty.validate_original(self)?;
+        let policy = self.pending_join_policy.as_ref().ok_or_else(refused)?;
+        if policy.persistent_capacity < 2 * codec::MAX_CATALOG_FRAMED {
+            return Err(refused());
+        }
+        let metadata_fee = policy.pool.try_reserve(METADATA_FEE)?;
+        let opened = self.inspect_pending_join_catalog()?;
+        if opened.selected.generation != 1
+            || opened.selected.count != 0
+            || opened.selected.archive.is_some()
+            || opened.selected.current_layout.is_some()
+            || opened.selected.member_outbox.is_some()
+        {
+            return Err(refused());
+        }
+        self.install_opened_pending_catalog(opened, metadata_fee)
+    }
+
+    fn install_opened_pending_catalog(
+        &self,
+        opened: Opened,
+        metadata_fee: CatalogReadReservation,
+    ) -> Result<(), AppError> {
         self.settle_pending_join_catalog(&opened)?;
         opened.validate_original(self)?;
         let mut next = Some(Mounted {

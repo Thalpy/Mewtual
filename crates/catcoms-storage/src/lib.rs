@@ -53,8 +53,9 @@ pub use retention::{
 };
 pub use vault::{
     acquire_vault_session, change_vault_passphrase, open_or_create_vault,
-    open_or_create_vault_classified, vault_exists, verify_vault_passphrase, OpenedVault,
-    VaultFormat, VaultPhysicalWorkLease, VaultSessionGuard, MAX_VAULT_SECRET_BYTES,
+    open_or_create_vault_classified, vault_exists, verify_critical_vault_passphrase_for_keys,
+    verify_vault_passphrase, OpenedVault, VaultFormat, VaultPhysicalWorkLease, VaultSessionGuard,
+    MAX_VAULT_SECRET_BYTES,
 };
 
 /// Errors from the storage layer.

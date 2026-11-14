@@ -373,6 +373,53 @@ impl Store {
         self.physical.row_count_data()
     }
 
+    /// Native facade's shared DATA read still serializes through the original
+    /// physical cell. The older exclusive owner API remains unchanged.
+    pub(in crate::store::critical_namespaces::native_registry) fn native_row_count_data(
+        &self,
+    ) -> Result<usize, AppError> {
+        self.physical.row_count_data()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn close_admission(&self) {
+        self.physical.close_admission();
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn lookup_creation_data(
+        &self,
+        invocation: [u8; 32],
+        request: [u8; 32],
+    ) -> Result<Option<crate::store::NativeCreationStatusData>, AppError> {
+        self.physical.lookup_creation_data(invocation, request)
+    }
+
+    /// Storage-only founder transitions on the SAME poisoned cell. Outgoing
+    /// debt must retire outside guards before another physical phase can begin.
+    pub(in crate::store::critical_namespaces::native_registry) fn birth_founder_data(
+        &mut self,
+        request: &super::super::super::lifecycle::founder::Pending,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::mount::NativeCreationStatusData,
+            Option<super::super::super::lifecycle::cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        self.physical.birth_founder_data(request, rng)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn activate_founder_data(
+        &mut self,
+        request: &super::super::super::lifecycle::founder::Activate,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::mount::NativeCreationStatusData,
+            Option<super::super::super::lifecycle::cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        self.physical.activate_founder_data(request, rng)
+    }
     /// Private local metadata CAS. No native caller/SDK authority is implied.
     /// The returned finite debt must retire outside every enclosing guard.
     pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata_data(

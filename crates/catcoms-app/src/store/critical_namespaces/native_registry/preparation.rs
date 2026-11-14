@@ -193,7 +193,16 @@ impl PreparedNativeRegistryMigration {
         // Failure here must precede even prerequisite opening, KDF and RNG.
         let fee = Arc::new(policy.pool.try_reserve(PREPARATION_FEE)?);
         crate::store::persistence::native_registry::refuse_unsupported_storage(dir.as_ref())?;
-        let mut opening = PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current_policy)?;
+        let opening = PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current_policy)?;
+        Self::from_opening(opening, rng, policy, fee)
+    }
+
+    fn from_opening(
+        mut opening: PreparedV2CurrentLayoutStore,
+        rng: &mut impl CryptoRngCore,
+        policy: NativeRegistryPreparationPolicy,
+        fee: Arc<CatalogReadReservation>,
+    ) -> Result<Self, AppError> {
         opening.retry(rng)?;
         let current = opening.into_current_layout_store().map_err(|_| refused())?;
         let store = current.checked_store()?;

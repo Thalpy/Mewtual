@@ -1,7 +1,9 @@
 //! Finite original physical3 custody, separate from affine admission. No raw
 //! Current/Store, owned index, SDK entry or native command credential escapes.
 use super::*;
-use crate::store::critical_namespaces::native_registry::lifecycle::{cell, refresh, rename};
+use crate::store::critical_namespaces::native_registry::lifecycle::{
+    cell, founder, refresh, rename,
+};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
@@ -115,6 +117,54 @@ impl Physical {
         }
         Some(value)
     }
+    pub(super) fn verify_native_passphrase(&self, passphrase: &[u8]) -> Result<(), AppError> {
+        if !self.open_for_custody() {
+            return Err(refused());
+        }
+        self.current()?
+            .cached_store()?
+            .verify_native_critical_passphrase(passphrase)?;
+        if !self.open_for_custody() {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    pub(super) fn close_admission(&self) {
+        self.handler.close();
+    }
+    /// Exact bounded immutable receipt lookup under the SAME cell/claim. A
+    /// matched unsupported backend refuses; it must never become absence.
+    pub(super) fn lookup_creation_data(
+        &self,
+        invocation: [u8; 32],
+        request: [u8; 32],
+    ) -> Result<Option<crate::store::NativeCreationStatusData>, AppError> {
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let current = self.current()?;
+        let store = current.checked_store()?;
+        let inventory =
+            UpgradeInventory::capture(store, self.handler.debit(), self.handler.pool())?;
+        let result =
+            super::super::super::super::lifecycle::preparation::lookup_selected_creation_data(
+                store, &inventory, invocation, request,
+            )?;
+        let guard = store
+            .pending_join_catalog
+            .try_lock()
+            .map_err(|_| refused())?;
+        self.handler.require_idle_cached()?;
+        if guard.as_ref().ok_or_else(refused)?.pending.is_some() {
+            return Err(refused());
+        }
+        inventory.require(store)?;
+        drop(guard);
+        drop(inventory);
+        drop(cell);
+        Ok(result)
+    }
     pub(super) fn row_count_data(&self) -> Result<usize, AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
@@ -140,6 +190,32 @@ impl Physical {
         drop(inventory); // actual buffers drain before cell unlock
         Ok(count)
     }
+    pub(in crate::store::critical_namespaces::native_registry) fn birth_founder_data(
+        &self,
+        request: &founder::Pending,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::super::mount::NativeCreationStatusData,
+            Option<cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        cell::birth_founder(&self.cell, self.current()?, &self.handler, request, rng)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn activate_founder_data(
+        &self,
+        request: &founder::Activate,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::super::mount::NativeCreationStatusData,
+            Option<cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        cell::activate_founder(&self.cell, self.current()?, &self.handler, request, rng)
+    }
     pub(super) fn refresh_legacy_invite_data(
         &self,
         request: &refresh::Request,
@@ -156,6 +232,15 @@ impl Physical {
     }
 }
 impl MetadataWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
+        self.physical.open_for_custody()
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn verify_native_passphrase(
+        &self,
+        secret: &[u8],
+    ) -> Result<(), AppError> {
+        self.physical.verify_native_passphrase(secret)
+    }
     pub(in crate::store::critical_namespaces::native_registry) fn row_count_data(
         &mut self,
     ) -> Result<usize, AppError> {

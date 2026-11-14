@@ -308,6 +308,32 @@ impl std::fmt::Debug for V2CurrentLayoutStore {
             .finish_non_exhaustive()
     }
 }
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::store::critical_namespaces) enum NativeFreshEdge {
+    LowerOpened,
+    CriticalActivated,
+    NativePrepared,
+}
+#[cfg(test)]
+type NativeFreshHook = Box<dyn FnMut(NativeFreshEdge, &ServerStore)>;
+#[cfg(test)]
+thread_local! {
+    pub(in crate::store::critical_namespaces) static NATIVE_FRESH_HOOK:
+        std::cell::RefCell<Option<NativeFreshHook>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(in crate::store::critical_namespaces) fn native_fresh_test_edge(
+    edge: NativeFreshEdge,
+    store: &ServerStore,
+) {
+    let hook = NATIVE_FRESH_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(mut hook) = hook {
+        hook(edge, store);
+        NATIVE_FRESH_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
 impl PreparedV2CurrentLayoutStore {
     pub fn open(
         dir: impl AsRef<Path>,
@@ -330,6 +356,42 @@ impl PreparedV2CurrentLayoutStore {
             Some(policy.archive.clone()),
             Some(policy),
         )?);
+        Self::from_private_open(store, fee)
+    }
+
+    /// Initial native chain only. Public open remains already-critical strict.
+    /// Both wrapper payment and the caller's native invoices precede KDF/IO.
+    pub(in crate::store::critical_namespaces) fn create_for_native_registry(
+        dir: &Path,
+        secret: &[u8],
+        rng: &mut impl CryptoRngCore,
+        policy: V2CurrentLayoutPolicy,
+    ) -> Result<Self, AppError> {
+        policy.require_persistent_capacity()?;
+        if dir.as_os_str().len() > MAX_OPEN_BASE_PATH {
+            return Err(refused());
+        }
+        let fee = policy.archive.pending.pool.try_reserve(WRAPPER_FEE)?;
+        let store = ServerStore::create_private_for_native_registry(dir, secret, rng)?;
+        #[cfg(test)]
+        native_fresh_test_edge(NativeFreshEdge::LowerOpened, &store);
+        let mut store = store.into_critical_namespace_store(secret, rng)?;
+        #[cfg(test)]
+        native_fresh_test_edge(NativeFreshEdge::CriticalActivated, &store);
+        // This owner has NEVER been exposed. Its existing admission/pin tables
+        // remain unchanged; initialize only the absent configured catalog mount.
+        store.catalog_read_pool = Some(policy.archive.pending.pool.clone());
+        store.pending_join_policy = Some(policy.archive.pending.clone());
+        store.archive_bootstrap_policy = Some(policy.archive.clone());
+        store.current_layout_policy = Some(policy);
+        store.attach_created_empty_catalog()?;
+        Self::from_private_open(Box::new(store), fee)
+    }
+
+    fn from_private_open(
+        store: Box<ServerStore>,
+        fee: CatalogReadReservation,
+    ) -> Result<Self, AppError> {
         let archive_ready = store
             .archive_bootstrap_root
             .lock()

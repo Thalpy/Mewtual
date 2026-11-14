@@ -132,6 +132,9 @@ impl UiAdmissionOwner {
             }),
         })
     }
+    pub(super) fn observe_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
+        self.binding.observe_mount()
+    }
     pub(super) fn close_first(&self) {
         self.binding.close();
     }

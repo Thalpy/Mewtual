@@ -412,6 +412,35 @@ impl std::fmt::Debug for VaultSessionGuard {
     }
 }
 impl VaultSessionGuard {
+    /// Fresh-only negative restriction under this already-held lifetime lock.
+    /// Inspect at most two entries and allow only this exact lock object. A
+    /// missing wrapper must never cause new keys beside old encrypted data.
+    /// This performs no KDF, creates no vault and grants no mounted authority.
+    pub fn require_fresh_directory(&self, dir: impl AsRef<Path>) -> Result<(), StorageError> {
+        let mut entries =
+            std::fs::read_dir(dir.as_ref()).map_err(|e| StorageError::Io(e.to_string()))?;
+        let entry = entries
+            .next()
+            .ok_or(StorageError::Malformed)?
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        if entry.file_name() != OsStr::new(VAULT_SESSION_LOCK_FILE)
+            || !entry
+                .file_type()
+                .map_err(|e| StorageError::Io(e.to_string()))?
+                .is_file()
+            || entries.next().is_some()
+        {
+            return Err(StorageError::Malformed);
+        }
+        let actual = File::open(entry.path()).map_err(|e| StorageError::Io(e.to_string()))?;
+        if crate::kept::session_id(&actual).map_err(|e| StorageError::Io(e.to_string()))?
+            != crate::kept::session_id(&self.lock).map_err(|e| StorageError::Io(e.to_string()))?
+        {
+            return Err(StorageError::Malformed);
+        }
+        Ok(())
+    }
+
     /// Retain ONLY the original OS lock for one running physical job. This neither keeps the
     /// Store/keys/creator alive nor grants admission, Current or permission to begin new work.
     /// The concrete host must separately prepay/admit the job and hold this loan until every
@@ -474,6 +503,33 @@ pub fn verify_vault_passphrase(
     let _lock = lock_vault(dir)?;
     let bytes = read_vault_wrapper(&dir.join(VAULT_FILE))?;
     let _ = decode_and_unseal(&bytes, passphrase)?;
+    Ok(())
+}
+
+/// Authenticate the SAME mounted critical vault under one wrapper transaction.
+/// Unlike path-only verification, a valid wrapper copied from another vault
+/// cannot authorize access to retained keys. Same-DEK passphrase rewrap remains
+/// valid. This checks format/key identity only, never catalog or UI authority.
+pub fn verify_critical_vault_passphrase_for_keys(
+    dir: impl AsRef<Path>,
+    passphrase: &[u8],
+    mounted: &KeyHierarchy,
+) -> Result<(), StorageError> {
+    validate_existing_vault_secret_shape(passphrase)?;
+    let dir = dir.as_ref();
+    let _lock = lock_vault(dir)?;
+    let bytes = read_vault_wrapper(&dir.join(VAULT_FILE))?;
+    if vault_version(&bytes)? != VAULT_VERSION_CRITICAL_NAMESPACES {
+        return Err(StorageError::Malformed);
+    }
+    let candidate = KeyHierarchy::new(decode_and_unseal(&bytes, passphrase)?);
+    let expected = Zeroizing::new(mounted.db_key()?);
+    let actual = Zeroizing::new(candidate.db_key()?);
+    // Hash's equality is constant-time in the pinned BLAKE3 implementation.
+    // Compare fixed-size key commitments; temporary raw subkeys zeroize.
+    if blake3::hash(expected.as_ref()) != blake3::hash(actual.as_ref()) {
+        return Err(StorageError::Malformed);
+    }
     Ok(())
 }
 
@@ -1117,6 +1173,56 @@ mod tests {
             _ => panic!("unknown vault child role {role}"),
         };
         record_result(&marker(&dir, &format!("{role}-result")), result);
+    }
+
+    #[test]
+    fn fresh_directory_is_bound_to_the_actual_held_session_lock() {
+        let first = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let first_guard = acquire_vault_session(first.path()).unwrap();
+        let other_guard = acquire_vault_session(other.path()).unwrap();
+        first_guard.require_fresh_directory(first.path()).unwrap();
+        other_guard.require_fresh_directory(other.path()).unwrap();
+        assert!(first_guard.require_fresh_directory(other.path()).is_err());
+        assert!(other_guard.require_fresh_directory(first.path()).is_err());
+        std::fs::write(first.path().join("unknown"), b"kept").unwrap();
+        assert!(first_guard.require_fresh_directory(first.path()).is_err());
+        assert_eq!(
+            std::fs::read(first.path().join("unknown")).unwrap(),
+            b"kept"
+        );
+    }
+
+    #[test]
+    fn critical_mounted_verification_binds_keys_and_format_but_allows_same_dek_rewrap() {
+        let first = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xca31);
+        let keys = open_or_create_vault(first.path(), b"original", &mut rng).unwrap();
+        let legacy = std::fs::read(first.path().join(VAULT_FILE)).unwrap();
+        activate_critical_namespace_vault(first.path(), b"original", &mut rng).unwrap();
+        verify_critical_vault_passphrase_for_keys(first.path(), b"original", &keys).unwrap();
+        assert!(verify_critical_vault_passphrase_for_keys(first.path(), b"wrong", &keys).is_err());
+        let original = std::fs::read(first.path().join(VAULT_FILE)).unwrap();
+        let other_keys = open_or_create_vault(other.path(), b"foreign", &mut rng).unwrap();
+        activate_critical_namespace_vault(other.path(), b"foreign", &mut rng).unwrap();
+        std::fs::copy(other.path().join(VAULT_FILE), first.path().join(VAULT_FILE)).unwrap();
+        // The old path-only check succeeds: the new boundary must prove more.
+        verify_vault_passphrase(first.path(), b"foreign").unwrap();
+        assert!(
+            verify_critical_vault_passphrase_for_keys(first.path(), b"foreign", &keys).is_err()
+        );
+        verify_critical_vault_passphrase_for_keys(first.path(), b"foreign", &other_keys).unwrap();
+        std::fs::write(first.path().join(VAULT_FILE), legacy).unwrap();
+        assert!(
+            verify_critical_vault_passphrase_for_keys(first.path(), b"original", &keys).is_err()
+        );
+        std::fs::write(first.path().join(VAULT_FILE), original).unwrap();
+        change_vault_passphrase(first.path(), b"original", b"replacement", &mut rng).unwrap();
+        verify_critical_vault_passphrase_for_keys(first.path(), b"replacement", &keys).unwrap();
+        assert!(
+            verify_critical_vault_passphrase_for_keys(first.path(), b"original", &keys).is_err()
+        );
     }
 
     #[test]

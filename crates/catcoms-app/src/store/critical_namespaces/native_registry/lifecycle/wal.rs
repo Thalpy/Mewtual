@@ -2,7 +2,7 @@
 //! from syntax support; a future/unsupported authenticated operation is kept.
 use super::{
     capability::Capability,
-    data::{Change, Index},
+    data::{Backend, BirthKind, Change, Index},
     preparation, *,
 };
 use crate::store::persistence::native_registry::lifecycle::upgrade::{
@@ -14,6 +14,8 @@ use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum Decision {
+    FounderBirth,
+    FounderActivate,
     Rename,
     RefreshLegacyInvite,
     Duplicate,
@@ -25,11 +27,38 @@ impl Decision {
     /// The only implemented content-bearing normal3 WAL operations. Cleanup
     /// decisions and future Change variants must never enter this IO role.
     pub(in crate::store) fn is_commit(self) -> bool {
-        matches!(self, Self::Rename | Self::RefreshLegacyInvite)
+        matches!(
+            self,
+            Self::FounderBirth | Self::FounderActivate | Self::Rename | Self::RefreshLegacyInvite
+        )
     }
 }
-fn metadata_decision(change: Change) -> Result<Decision, AppError> {
-    match change {
+// `successor_data` describes the whole future grammar. It is deliberately
+// wider than the actual writing/recovery producers. Inspect BOTH authenticated
+// rows so supporting a founder cannot accidentally activate a joined/legacy
+// source whose namespace/journal/own-Add authority is not implemented here.
+fn supported_decision(
+    selected: &Index,
+    candidate: &Index,
+    parent: [u8; 32],
+) -> Result<Decision, AppError> {
+    match selected.successor_data(candidate, parent)? {
+        Change::Birth
+            if matches!(candidate.rows.last().map(|r| &r.backend),
+            Some(Backend::Pending { birth, .. }) if birth.kind == BirthKind::Founder && birth.join_context.is_none()) =>
+        {
+            Ok(Decision::FounderBirth)
+        }
+        Change::Activate
+            if selected.rows.iter().zip(&candidate.rows).any(|(old, new)| {
+                old != new
+                    && matches!((&old.backend, &new.backend),
+                (Backend::Pending { birth, .. }, Backend::Founder { .. })
+                    if birth.kind == BirthKind::Founder && birth.join_context.is_none())
+            }) =>
+        {
+            Ok(Decision::FounderActivate)
+        }
         Change::Rename => Ok(Decision::Rename),
         Change::RefreshLegacyInvite => Ok(Decision::RefreshLegacyInvite),
         _ => Err(refused()),
@@ -121,7 +150,7 @@ fn proof(inventory: &UpgradeInventory, candidate: &[u8], decision: Decision) -> 
 }
 
 /// Cold native Stage and JOIN Stage may not coexist. Initially the concrete
-/// normal producer supports Rename and Legacy invite refresh only; other authenticated Change kinds are
+/// normal producer supports founder Birth/Activate, Rename and Legacy invite refresh; other authenticated Change kinds are
 /// preserved/refused until their actual owning producers are implemented.
 pub(super) fn classify(
     store: &ServerStore,
@@ -137,8 +166,10 @@ pub(super) fn classify(
     } else {
         let key = Zeroizing::new(store.keys.db_key()?);
         match open_index(&key, stage, selected.capability) {
-            Ok(next) => metadata_decision(
-                selected.successor_data(&next, *blake3::hash(inventory.index()).as_bytes())?,
+            Ok(next) => supported_decision(
+                &selected,
+                &next,
+                *blake3::hash(inventory.index()).as_bytes(),
             )?,
             Err(ReadError::Unauthenticated(_)) => Decision::DiscardBadMac,
             Err(error) => return Err(error.into_error()),
@@ -170,7 +201,15 @@ pub(super) fn verify_warm_metadata(
         return Err(refused());
     }
     inventory.require(store)?;
-    Ok(proof(inventory, bytes, metadata_decision(actual)?))
+    Ok(proof(
+        inventory,
+        bytes,
+        supported_decision(
+            &selected,
+            &sealed,
+            *blake3::hash(inventory.index()).as_bytes(),
+        )?,
+    ))
 }
 
 #[cfg(test)]

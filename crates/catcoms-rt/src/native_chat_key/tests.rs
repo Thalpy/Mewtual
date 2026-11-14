@@ -925,3 +925,21 @@ fn native_chat_key_session_preparation_never_owns_close_or_retargets_after_captu
     drop(fixture); // A metadata pin must not keep the affine binding open.
     assert!(preparation.finish().is_err());
 }
+
+#[test]
+fn native_chat_mount_observation_ignores_ui_lock_but_never_survives_host_close() {
+    let fixture = Fixture::new();
+    let observed = fixture.binding.observe_mount();
+    assert!(observed.is_open());
+    fixture.lock();
+    assert!(observed.is_open());
+    assert!(!fixture.binding.is_current(7));
+    fixture.unlock();
+    assert!(observed.is_open());
+    fixture.binding.close();
+    assert!(!observed.is_open());
+    fixture.unlock();
+    assert!(!observed.is_open());
+    drop(fixture);
+    assert!(!observed.is_open());
+}

@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Native text warm factory (14 November; validation in progress, off)
+
+The actual main-window Tauri unlock path now has a trusted off-by-default native
+consumer for the opaque selected3 vault. Fresh storage keeps one original
+session/key/mount through critical activation and namespace upgrades. Native
+checks real ACL, original generation, actual secret and same Host/physical
+liveness; it caches completed metadata locked when a later lock wins. A foreign
+wrapper, empty secret or stale invocation cannot authorize that retained owner.
+
+This is mount/authentication only. UI continuity, SourceRegistry, retained
+native device/transport/whole creator, member command dispatch, cold restore,
+joined Add/source/archive, transport, projection/admin and combined acceptance
+remain unfinished. Do not enable Chat V2 or claim user-ready text messaging.
+[Exact scope, pending checks and limitations](communication-recovery/CHAT-V2-NATIVE-WARM-FACTORY.md).
+
 ## Network subscription retry continuation (14 November; validation ongoing)
 
 Fresh `939ea602` Windows old-peer CI43553131480 failed after genuine QUIC/RR; both

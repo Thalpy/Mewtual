@@ -202,11 +202,38 @@ impl NativeChatUiBinding {
         self.original.current(expected)
     }
 
+    /// Negative whole-mount observation for locked reauthentication. It
+    /// deliberately ignores UI generation/authorization and cannot issue a
+    /// session or key work. Its paid Host metadata survives the affine owner.
+    pub fn observe_mount(&self) -> NativeChatUiMountObservation {
+        NativeChatUiMountObservation {
+            original: self.original.clone(),
+        }
+    }
+
     /// Irreversibly close this original mounted host BEFORE taking any native,
     /// registry, operation or Root guard. SC-only: no walk, wait or notification.
     /// UI lock retires its generations instead; it must retain the mounted host.
     pub fn close(&self) {
         self.original.closed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Paid metadata pin observing only irreversible whole-host closure. An open
+/// result grants no native caller, authenticated secret, UI session or key use.
+pub struct NativeChatUiMountObservation {
+    original: Arc<Host>,
+}
+impl std::fmt::Debug for NativeChatUiMountObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeChatUiMountObservation")
+            .finish_non_exhaustive()
+    }
+}
+impl NativeChatUiMountObservation {
+    /// SC-only check, including while the UI is locked. Never a permission.
+    pub fn is_open(&self) -> bool {
+        !self.original.closed.load(Ordering::SeqCst)
     }
 }
 

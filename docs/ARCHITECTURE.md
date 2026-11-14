@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+The real native warm text factory is under validation, with production selection
+still off. Its synchronous Tauri router authenticates the actual caller and
+original generation; its fresh storage chain retains the same vault session,
+keys and lineage into the opaque selected3 owner. This is mount/authentication
+only. Operational founder/member dispatch, cold restore and Svelte continuity
+remain unfinished. [Contract](communication-recovery/CHAT-V2-NATIVE-WARM-FACTORY.md).
+
 The network dependency security migration is under validation. Actual patched
 gossipsub/Hickory packages replace the old graph in both workspaces, with explicit
 2000-topic limits and a narrow RT seeded RNG adapter for AutoNAT. QUIC's upstream
