@@ -3,7 +3,7 @@
 use super::*;
 use voice_authority::{JoinKeyAdmission, JoinKeyPublication, PublicationPlan};
 
-fn executor(value: &str) -> Result<[u8; 32], String> {
+pub(super) fn executor(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64
         || !value
             .bytes()
@@ -164,15 +164,10 @@ pub(super) async fn settle_inner(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .settle_join_key(owner, executor)?;
-    if let Some(mut drained) = pending {
+    if let Some(drained) = pending {
         // One retained state notification, independent of an IPC waiter's lifetime. No timer,
         // repeated actor request or speculative engine-credit refund is needed to await it.
-        while !*drained.borrow_and_update() {
-            drained
-                .changed()
-                .await
-                .map_err(|_| "voice key settlement owner stopped")?;
-        }
+        drained.wait().await?;
     }
     Ok(())
 }

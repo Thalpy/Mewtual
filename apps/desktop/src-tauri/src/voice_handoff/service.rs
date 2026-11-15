@@ -1,7 +1,7 @@
 //! Authenticated local handoff IO, owned by the application host. With its original native
 //! Context it dispatches typed crypto actions; a context-free service handles Status only.
 //! A confirmed channel is not a call grant, room proof, action admission or browser-drain proof.
-use super::bootstrap::{Registry, Route};
+use super::bootstrap::{AdmittedRoute, Registry, Route};
 use super::channel::{BodyKind, CompletedReply, Incoming, Operation};
 use super::context::Context;
 use super::http;
@@ -317,10 +317,23 @@ struct Connection<S = TcpStream> {
     stream: S,
     reply: Option<CompletedReply>,
     incoming: Option<Incoming>,
-    route: Option<Route>,
+    route: Option<PhysicalRoute>,
     scratch: [u8; http::HEADER_BYTES],
     filled: usize,
     output: Output,
+}
+/// Native Row provenance selects a profile; this exposes no generic selected owner.
+enum PhysicalRoute {
+    Existing(Route),
+    Admitted(AdmittedRoute),
+}
+impl PhysicalRoute {
+    fn session(&self) -> &super::channel::SessionRef {
+        match self {
+            Self::Existing(route) => route.session(),
+            Self::Admitted(route) => route.session(),
+        }
+    }
 }
 impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
     fn new(stream: S) -> Self {
@@ -370,7 +383,14 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             // native rows supply the actual Session and transcript; lookup creates no row.
             let admission = head.admission.ok_or(Refused::Header)?;
             let slot = u8::from_str_radix(&admission[14..16], 16).map_err(|_| Refused::Header)?;
-            self.route = Some(registry.route(slot).map_err(|_| Refused::Binding)?);
+            self.route = Some(match registry.route(slot) {
+                Ok(route) => PhysicalRoute::Existing(route),
+                Err(_) => PhysicalRoute::Admitted(
+                    registry
+                        .admitted_route(slot)
+                        .map_err(|_| Refused::Binding)?,
+                ),
+            });
             let route = self.route.as_ref().ok_or(Refused::Binding)?;
             let mut worker = route.session().header().map_err(|_| Refused::Capacity)?;
             worker.scratch_mut()[..self.filled].copy_from_slice(&self.scratch[..self.filled]);
@@ -378,12 +398,18 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
                 .set_filled(self.filled)
                 .map_err(|_| Refused::Header)?;
             current(clock, deadline)?;
-            let incoming = if let Some(context) = context {
-                dispatch::admit(worker, port, origin.value(), route, context)?
-            } else {
-                worker
+            let incoming = match (route, context) {
+                (PhysicalRoute::Admitted(route), Some(_)) => {
+                    super::admitted_admission::admit(worker, port, origin.value(), route)
+                        .map_err(|_| Refused::Header)?
+                }
+                (PhysicalRoute::Admitted(_), None) => return Err(Refused::Binding),
+                (PhysicalRoute::Existing(route), Some(context)) => {
+                    dispatch::admit(worker, port, origin.value(), route, context)?
+                }
+                (PhysicalRoute::Existing(route), None) => worker
                     .admit_service_control(port, origin.value(), route.session_id(), false)
-                    .map_err(|_| Refused::Header)?
+                    .map_err(|_| Refused::Header)?,
             };
             self.incoming = Some(incoming);
             let incoming = self.incoming.as_mut().ok_or(Refused::Body)?;
@@ -405,10 +431,16 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             current(clock, deadline)?;
             incoming.open().map_err(|_| Refused::Body)?;
             let incoming = self.incoming.take().ok_or(Refused::Body)?;
-            let reply = if let Some(context) = context {
-                dispatch::respond(context, route, incoming).await?
-            } else {
-                status(route, incoming)?
+            let reply = match (route, context) {
+                (PhysicalRoute::Admitted(route), Some(context)) => {
+                    super::admitted_admission::respond(context, route, incoming)
+                        .map_err(|_| Refused::Body)?
+                }
+                (PhysicalRoute::Admitted(_), None) => return Err(Refused::Binding),
+                (PhysicalRoute::Existing(route), Some(context)) => {
+                    dispatch::respond(context, route, incoming).await?
+                }
+                (PhysicalRoute::Existing(route), None) => status(route, incoming)?,
             };
             self.reply = Some(reply);
             let reply = self.reply.as_ref().ok_or(Refused::Body)?;

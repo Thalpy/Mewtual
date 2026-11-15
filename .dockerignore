@@ -91,6 +91,7 @@
 !apps/desktop/src-tauri/src/voice_handoff/requests/sdk-vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/requests/pc-vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/requests/sdp-action-vectors.json
+!apps/desktop/src-tauri/src/voice_handoff/requests/negotiation-capacity-vectors.json
 !apps/desktop/src-tauri/tauri.conf.json
 !apps/desktop/src-tauri/tauri.official.conf.json
 !apps/desktop/src-tauri/icons/**/*.icns

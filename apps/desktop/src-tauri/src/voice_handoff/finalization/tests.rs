@@ -2,7 +2,7 @@
 //! synthetic desktop grant fixture. No production opcode or normal Actor success is enabled.
 use super::*;
 use crate::voice_activation_tests::Fixture;
-use crate::voice_handoff::bootstrap::{fixture_installed as installed, SetupOutput};
+use crate::voice_handoff::bootstrap::{fixture_installed as installed, SetupOutputRef};
 use crate::voice_handoff::ledger::{
     tests::{actual_action, selection},
     Begin,
@@ -10,13 +10,12 @@ use crate::voice_handoff::ledger::{
 use catcoms_sync::voice_v2::crypto_actions::CryptoInputLease;
 use catcoms_sync::voice_v2::presence::{LocalJoin, PairSelector};
 use catcoms_sync::voice_v2::resources::ResourceKind;
-use std::sync::Arc;
 
 struct Case {
     native: Fixture,
     coordinator: crate::voice_authority::Coordinator,
     route: Route,
-    public: Arc<SetupOutput>,
+    public: SetupOutputRef,
     selector: PairSelector,
     id: RowId,
     input: Option<CryptoInputLease>,
@@ -122,13 +121,18 @@ async fn delayed_root_owner_and_lost_issuance_and_ack_replies_recover_on_origina
     assert!(!ledger.channel_may_close(selected));
     // Fill the ordinary group pool AFTER compaction, while the real late Root input remains.
     let pool = selected.resources();
+    let group = selected.binding().scope.group;
     let pressure = pool
         .charge(
-            selected.binding().scope.group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let full = pool.counts();
     let response = case.respond(2, None);
     assert!(response.result.as_ref().unwrap().proof.is_none());

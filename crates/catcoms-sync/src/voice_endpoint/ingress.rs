@@ -7,6 +7,7 @@ use voice_v2::helper::RoomAuthority;
 use voice_v2::packets::Authority;
 use voice_v2::presence::{FreshPeer, WatchAuthority};
 use voice_v2::runtime::{EffectAuthority, IngressTicket};
+use voice_v2::source::AdmittedDiscoveryActivity;
 use voice_v2::source::SourceActivity;
 use voice_v2::{Body, Context, Envelope, MessageId, SignedObject};
 
@@ -18,6 +19,10 @@ enum Targets {
     Watch(Vec<(u64, WatchLease)>),
     Join(u64, CallLease),
 }
+enum PublicSource {
+    Existing(SourceActivity),
+    Admitted(AdmittedDiscoveryActivity),
+}
 
 mod encrypted;
 #[cfg(test)]
@@ -28,7 +33,13 @@ impl Targets {
     fn live(&self) -> bool {
         match self {
             Self::Watch(targets) => targets.iter().any(|(_, lease)| lease.is_live()),
-            Self::Join(_, lease) => lease.is_live(),
+            Self::Join(_, lease) => {
+                if lease.is_admitted() {
+                    lease.admitted_active()
+                } else {
+                    lease.is_live()
+                }
+            }
         }
     }
     async fn revoked(&self) {
@@ -207,53 +218,67 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if voice.endpoints.public.full() {
             return Err(VoiceError::Capacity);
         }
+        // The implicit admitted watcher belongs to the unique exact residence,
+        // not the legacy observer map. Snapshot its original lease into the ACK.
+        let admitted = voice.endpoints.activation.as_ref().and_then(|held| {
+            super::admitted_presence::current(voice, &self.blob_fetch_instance, held.original())
+                .ok()?;
+            held.presence
+                .as_ref()
+                .map(|presence| presence.get())
+                .filter(|presence| presence.scope() == context.scope)
+        });
         let targets = match envelope.object().body() {
-            Body::Announcement { .. } => Targets::Watch(
-                voice
-                    .endpoints
-                    .observers
-                    .iter()
-                    .filter(|(_, observer)| {
-                        observer.scope == context.scope && observer.lease.is_live()
-                    })
-                    .map(|(id, observer)| (*id, observer.lease.clone()))
-                    .collect(),
-            ),
-            Body::JoinProof { .. } => Targets::Watch(
-                voice
+            Body::Announcement { .. } | Body::JoinProof { .. } => {
+                let proof = matches!(envelope.object().body(), Body::JoinProof { .. });
+                let mut targets: Vec<_> = voice
                     .endpoints
                     .observers
                     .iter()
                     .filter(|(_, observer)| {
                         observer.scope == context.scope
                             && observer.lease.is_live()
-                            && observer.watcher.targets_proof(envelope.object())
+                            && (!proof || observer.watcher.targets_proof(envelope.object()))
                     })
                     .map(|(id, observer)| (*id, observer.lease.clone()))
-                    .collect(),
-            ),
+                    .collect();
+                if let Some(presence) = admitted.filter(|presence| {
+                    presence.is_live() && (!proof || presence.targets_proof(envelope.object()))
+                }) {
+                    targets.push((presence.id(), presence.watch().clone()));
+                }
+                Targets::Watch(targets)
+            }
             Body::WatchChallenge {
                 target,
                 join,
                 key_ref,
                 ..
             } => {
-                let participant = voice
-                    .endpoints
-                    .participant
-                    .as_ref()
-                    .ok_or(VoiceError::Unauthorized)?;
-                if *target != context.local
-                    || participant
-                        .grant
-                        .upgrade()
-                        .is_none_or(|grant| grant.scope() != context.scope)
-                    || participant.join.key().join != *join
-                    || participant.join.key().key_ref != *key_ref
-                {
-                    return Err(VoiceError::Unauthorized);
+                if let Some(presence) = admitted.filter(|presence| {
+                    *target == context.local
+                        && presence.key().join == *join
+                        && presence.key().key_ref == *key_ref
+                }) {
+                    Targets::Join(presence.id(), presence.lease().clone())
+                } else {
+                    let participant = voice
+                        .endpoints
+                        .participant
+                        .as_ref()
+                        .ok_or(VoiceError::Unauthorized)?;
+                    if *target != context.local
+                        || participant
+                            .grant
+                            .upgrade()
+                            .is_none_or(|grant| grant.scope() != context.scope)
+                        || participant.join.key().join != *join
+                        || participant.join.key().key_ref != *key_ref
+                    {
+                        return Err(VoiceError::Unauthorized);
+                    }
+                    Targets::Join(participant.watch.id, participant.lease.clone())
                 }
-                Targets::Join(participant.watch.id, participant.lease.clone())
             }
             Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. } => {
                 unreachable!()
@@ -350,14 +375,56 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         clock.as_ref(),
                         &mut self.rng,
                     )?,
-                    participant.join.source_activity(&authority)?,
+                    PublicSource::Existing(participant.join.source_activity(&authority)?),
                 ))
             } else {
                 None
             }
         };
         if let Some((object, activity)) = announcement {
-            if let Err(error) = self.queue_voice_source(object, activity) {
+            if let Err(error) = self.queue_voice_public_source(object, activity) {
+                if error != VoiceError::Capacity && error != VoiceError::RateLimited {
+                    return Err(error);
+                }
+            }
+        }
+        // Shared discovery is the only admitted producer in this slice. It is
+        // independently typed and never passes through the Existing source API.
+        let admitted_announcement = {
+            let voice = self
+                .voice_runtime
+                .as_mut()
+                .ok_or(VoiceError::Unauthorized)?;
+            let original = voice
+                .endpoints
+                .activation
+                .as_ref()
+                .filter(|held| held.original().is_active() && held.presence.is_some())
+                .map(|held| held.original().clone());
+            if let Some(original) = original {
+                let context =
+                    super::admitted_presence::current(voice, &self.blob_fetch_instance, &original)?;
+                let presence = voice
+                    .endpoints
+                    .activation
+                    .as_mut()
+                    .and_then(|held| held.presence.as_mut())
+                    .expect("same original presence")
+                    .get_mut();
+                let object = presence.announce(
+                    &self.device,
+                    &context,
+                    &|id| members.contains(&id),
+                    clock.as_ref(),
+                    &mut self.rng,
+                )?;
+                Some((object, PublicSource::Admitted(presence.activity()?)))
+            } else {
+                None
+            }
+        };
+        if let Some((object, activity)) = admitted_announcement {
+            if let Err(error) = self.queue_voice_public_source(object, activity) {
                 if error != VoiceError::Capacity && error != VoiceError::RateLimited {
                     return Err(error);
                 }
@@ -395,14 +462,38 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // starts a NEW native challenge, never adopts old proof/ACK authority or spends
                 // original quota again. Old target progress may be discarded after native death.
                 let mut current: Vec<_> = match work.packet.object.body() {
-                    Body::Announcement { .. } => endpoints
-                        .observers
-                        .iter()
-                        .filter(|(_, observer)| {
-                            observer.scope == work.packet.object.scope() && observer.lease.is_live()
-                        })
-                        .map(|(id, _)| *id)
-                        .collect(),
+                    Body::Announcement { .. } => {
+                        let mut current: Vec<_> = endpoints
+                            .observers
+                            .iter()
+                            .filter(|(_, observer)| {
+                                observer.scope == work.packet.object.scope()
+                                    && observer.lease.is_live()
+                            })
+                            .map(|(id, _)| *id)
+                            .collect();
+                        // Existing observers may challenge a retained candidate after
+                        // replacement. Admitted work never adopts a new residence:
+                        // only its original captured watcher can process this packet.
+                        if let Some(presence) = endpoints
+                            .activation
+                            .as_ref()
+                            .filter(|held| held.original().is_active())
+                            .and_then(|held| held.presence.as_ref())
+                            .map(|presence| presence.get())
+                        {
+                            if let Targets::Watch(targets) = &work.packet.targets {
+                                if targets.iter().any(|(id, lease)| {
+                                    *id == presence.id()
+                                        && lease.is_same(presence.watch())
+                                        && lease.is_live()
+                                }) {
+                                    current.push(presence.id());
+                                }
+                            }
+                        }
+                        current
+                    }
                     _ => match &work.packet.targets {
                         Targets::Watch(targets) => targets
                             .iter()
@@ -410,7 +501,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                             .map(|(id, _)| *id)
                             .collect(),
                         Targets::Join(id, lease) => {
-                            if lease.is_live() {
+                            if if lease.is_admitted() {
+                                lease.admitted_active()
+                            } else {
+                                lease.is_live()
+                            } {
                                 vec![*id]
                             } else {
                                 Vec::new()
@@ -426,7 +521,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let result = self.process_voice_public(key, id);
                 let success = match result {
                     Ok(Some((object, activity))) => {
-                        self.queue_voice_source(object, activity).map(|_| ())
+                        self.queue_voice_public_source(object, activity).map(|_| ())
                     }
                     Ok(None) => Ok(()),
                     Err(error) => Err(error),
@@ -462,13 +557,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         key: Key,
         id: u64,
-    ) -> Result<Option<(SignedObject, SourceActivity)>, VoiceError> {
+    ) -> Result<Option<(SignedObject, PublicSource)>, VoiceError> {
         let clock = self.voice_v2_clock();
         let members: HashSet<_> = self.group.member_device_ids().into_iter().collect();
         let voice = self
             .voice_runtime
             .as_mut()
             .ok_or(VoiceError::Unauthorized)?;
+        let admitted_original = voice
+            .endpoints
+            .activation
+            .as_ref()
+            .filter(|held| {
+                held.presence
+                    .as_ref()
+                    .is_some_and(|presence| presence.get().id() == id)
+            })
+            .map(|held| held.original().clone());
+        if let Some(original) = &admitted_original {
+            super::admitted_presence::current(voice, &self.blob_fetch_instance, original)?;
+        }
         let endpoints = &mut voice.endpoints;
         let packet = endpoints
             .public
@@ -482,6 +590,48 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
         let context = actor.source_context(packet.object.scope())?;
+        if admitted_original.is_some() {
+            let presence = endpoints
+                .activation
+                .as_mut()
+                .and_then(|held| held.presence.as_mut())
+                .ok_or(VoiceError::Unauthorized)?
+                .get_mut();
+            let member = |id| members.contains(&id);
+            return match packet.object.body() {
+                Body::Announcement { .. } => {
+                    let (object, activity) = actor.with_limits(|limits| {
+                        presence.challenge(
+                            &packet.object,
+                            &self.device,
+                            &context,
+                            &member,
+                            limits,
+                            clock.as_ref(),
+                            &mut self.rng,
+                        )
+                    })?;
+                    Ok(Some((object, PublicSource::Existing(activity))))
+                }
+                Body::JoinProof { .. } => {
+                    presence.prove(&packet.object, &context, &member, clock.as_ref())?;
+                    endpoints.changed();
+                    Ok(None)
+                }
+                Body::WatchChallenge { .. } => {
+                    let object = presence.answer(
+                        &packet.object,
+                        &self.device,
+                        &context,
+                        &member,
+                        clock.as_ref(),
+                        &mut self.rng,
+                    )?;
+                    Ok(Some((object, PublicSource::Admitted(presence.activity()?))))
+                }
+                _ => Err(VoiceError::Unauthorized),
+            };
+        }
         match packet.object.body() {
             Body::Announcement { .. } | Body::JoinProof { .. } => {
                 let observer = endpoints
@@ -506,7 +656,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     })?;
                     Ok(Some((
                         object,
-                        observer.watcher.source_activity(&authority)?,
+                        PublicSource::Existing(observer.watcher.source_activity(&authority)?),
                     )))
                 } else {
                     observer
@@ -536,11 +686,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 )?;
                 Ok(Some((
                     object,
-                    participant.join.source_activity(&authority)?,
+                    PublicSource::Existing(participant.join.source_activity(&authority)?),
                 )))
             }
             Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. } => {
                 Err(VoiceError::Unauthorized)
+            }
+        }
+    }
+    fn queue_voice_public_source(
+        &mut self,
+        object: SignedObject,
+        activity: PublicSource,
+    ) -> Result<bool, VoiceError> {
+        match activity {
+            PublicSource::Existing(activity) => self.queue_voice_source(object, activity),
+            PublicSource::Admitted(activity) => {
+                self.queue_admitted_voice_discovery(object, activity)
             }
         }
     }

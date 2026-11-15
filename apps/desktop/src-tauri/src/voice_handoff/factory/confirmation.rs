@@ -98,7 +98,7 @@ async fn ensure(
     {
         let authority = context.authority.lock().unwrap_or_else(|e| e.into_inner());
         require_current_selection(context.gate(), &authority, &selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     let grant = selected.grant()?;
     let handshake = parent.confirmation_handshake()?;

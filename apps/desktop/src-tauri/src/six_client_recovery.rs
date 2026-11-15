@@ -8,6 +8,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod admitted_control;
 mod chat_bubbles;
 mod chat_matrix;
 mod files;
@@ -265,7 +266,7 @@ impl Scenario {
             self.admission.is_some(),
             "real clients require isolated fixture admission"
         );
-        assert!(matches!(count, 3 | 6));
+        assert!(matches!(count, 3 | 4 | 6));
         for index in 0..count {
             let state = if let Some(clock) = &self.voice_clock {
                 runtime::mount_with_voice_clock(

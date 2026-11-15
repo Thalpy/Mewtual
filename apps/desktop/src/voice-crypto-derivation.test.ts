@@ -1,3 +1,4 @@
+import { DEFAULT_VOICE_BROWSER_BUDGET } from "./voice-browser-budget.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TestContext } from "node:test";
@@ -232,9 +233,10 @@ test("retained HMR broker shares the continuing protected action and refuses old
 
 test("reserved derivation succeeds with the ordinary group byte pool full", async t => {
   const f = await fixture(t), plan = f.makePlan(), action = f.register(plan), held = gate(); t.after(held.release);
-  const free = 256 * 1024 - f.broker.counts().bytes;
-  const ordinary = f.broker.run(f.owner, "derive", free, () => held.promise);
-  assert.equal(f.broker.counts().bytes, 256 * 1024);
+  const free = DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - f.broker.counts().bytes;
+  const ordinary = Promise.all(Array.from({ length: Math.ceil(free / (256 * 1024)) }, (_, index) =>
+    f.broker.run(f.owner, "derive", Math.min(256 * 1024, free - index * 256 * 1024), () => held.promise)));
+  assert.equal(f.broker.counts().bytes, DEFAULT_VOICE_BROWSER_BUDGET.groupBytes);
   assert.equal((await action.attempt()).kind, "accepted"); assert.equal(f.counts().derives, 1);
   held.release(); await ordinary;
 });
@@ -242,8 +244,12 @@ test("reserved derivation succeeds with the ordinary group byte pool full", asyn
 test("failed plan admission leaves no phantom claims, bytes or permanent stamp", async t => {
   const f = await fixture(t), held = gate(); t.after(held.release);
   const before = f.broker.counts().bytes;
-  const ordinary = f.broker.run(f.owner, "derive", 200 * 1024, () => held.promise);
-  assert.throws(f.makePlan, /capacity/); assert.equal(f.broker.counts().bytes, before + 200 * 1024);
+  // Keep the original capacity-refusal contract at the selected local limit.
+  // A historical200KiB filler no longer fills the larger default group budget.
+  const pressure = DEFAULT_VOICE_BROWSER_BUDGET.groupBytes - before - 1;
+  const ordinary = Promise.all(Array.from({ length: Math.ceil(pressure / (256 * 1024)) }, (_, index) =>
+    f.broker.run(f.owner, "derive", Math.min(256 * 1024, pressure - index * 256 * 1024), () => held.promise)));
+  assert.throws(f.makePlan, /capacity/); assert.equal(f.broker.counts().bytes, before + pressure);
   held.release(); await ordinary; await until(() => f.broker.counts().active === 0);
   assert.doesNotThrow(f.makePlan);
 });

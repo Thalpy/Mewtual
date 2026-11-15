@@ -8,6 +8,8 @@ import {
 import type {
   VoiceConfirmationIdentity, VoiceConfirmationInput, VoiceConfirmationNative, VoiceConfirmationReceipt,
 } from "./voice-crypto.ts";
+import { voiceBrowserBudget } from "./voice-browser-budget.ts";
+import type { VoiceBrowserBudget } from "./voice-browser-budget.ts";
 
 // Native replies below are an explicit IPC fault seam, not evidence of a native action queue.
 // Actual P-256/HKDF/AES-GCM computations use Node's real WebCrypto implementation.
@@ -19,7 +21,7 @@ function signal<T>() {
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
 }
-async function fixture() {
+async function fixture(budget?: VoiceBrowserBudget) {
   let decrypts = 0, digests = 0, engineFailure = "", sequence = 0n;
   let engineGate: ReturnType<typeof signal<void>> | null = null;
   let engineEntered = signal<void>();
@@ -44,7 +46,7 @@ async function fixture() {
   };
   const owner = createVoiceCryptoOwner("native-owner", "a".repeat(64), () => true);
   const window = {};
-  const broker = windowVoiceCryptoBroker(ordinary, window, engine);
+  const broker = windowVoiceCryptoBroker(ordinary, window, engine, undefined, budget);
   const a = await createVoiceJoinKey(broker, owner), b = await createVoiceJoinKey(broker, owner);
   const transcript = text("native confirmation transcript");
   const left = await deriveVoicePair(broker, owner, a.privateKey, b.publicKey, transcript, true);
@@ -245,7 +247,9 @@ test("full combined terminal capacity refuses before another engine or native tr
 });
 
 test("large native inputs share the ordinary broker group byte ceiling before admission", async () => {
-  const f = await fixture(), input = await f.input("1", new Uint8Array(4096));
+  // Pin this existing pressure scenario to its original lower policy. The default
+  // is now configurable; raising the assertion would stop testing the 256 KiB cap.
+  const f = await fixture(voiceBrowserBudget(256)), input = await f.input("1", new Uint8Array(4096));
   const held = signal<void>();
   const ordinary = f.broker.run(f.owner, "derive", 100_000, () => held.promise);
   await Promise.resolve(); await Promise.resolve();
