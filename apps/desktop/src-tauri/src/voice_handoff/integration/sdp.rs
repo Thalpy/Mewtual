@@ -326,12 +326,25 @@ pub(super) async fn exercise(
         // Quiet production collection must also resume a recorded closed intent while
         // the KeyClaim/call are still current. The held real buffer still blocks drainage.
         state.voice_handoff.collect_retired();
-        let closing = exchange(
+        let closing_body = body(parent, key, Some(proof));
+        // The original negative cleanup/history observation may contend both
+        // before and after monotone close. Prove a real native index refusal,
+        // then recover through authenticated ingress with this SAME body/proof
+        // and original deadline. Never hold this index over parent resolution:
+        // that earlier ingress step takes it synchronously.
+        let release = requests::sdp::Request::decode(parent.id().logical(), &closing_body).unwrap();
+        let index = parent.fixture_hold_transition_index();
+        let refused = parent.release_sdp(route.session().identity(), &release, proof);
+        drop(index);
+        assert!(matches!(refused, Err(VoiceError::Capacity)));
+        let closing = retry_capacity(
             state,
             public,
             route,
             parent,
-            &body(parent, key, Some(proof)),
+            &closing_body,
+            deadline,
+            |_| {},
         )
         .await;
         assert_eq!(&closing[..2], &[5, if copy.is_some() { 2 } else { 3 }]);
@@ -348,7 +361,7 @@ pub(super) async fn exercise(
         }
         drop(copy);
         assert!(parent.sdp_test_drained());
-        let closed = exchange(state, public, route, parent, &prepare).await;
+        let closed = retry_capacity(state, public, route, parent, &prepare, deadline, |_| {}).await;
         assert_eq!(&closed[..2], &[5, 3]);
         assert_eq!(&closed[138..170], &proof);
         assert!(phase.arm().is_err());

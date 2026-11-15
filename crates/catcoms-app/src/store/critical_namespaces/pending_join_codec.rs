@@ -294,6 +294,45 @@ pub(super) fn parse_lifecycle_native_registry_layout<'a>(
     )
 }
 
+/// Steady-state grammar selected only by the concrete governed native owner.
+/// None of its three critical handlers is optional. The declaration's original
+/// no4 parent is parsed separately, never as a steady-state fallback.
+pub(super) fn parse_governed_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_native_governance_family(plain, domain, executing)?;
+    if parsed.governance.is_none()
+        || parsed.member_outbox.is_none()
+        || parsed.native_registry_payload.is_none()
+    {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+/// Declaration-only native3 family. The actual unexposed continuation or cold
+/// declaration verifier must classify its exact parent/seed pair before use.
+pub(super) fn parse_native_governance_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_known(
+        plain,
+        domain,
+        SupportedLayout::GOVERNANCE_LAYOUT
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(Some(3)),
+    )?;
+    if parsed.member_outbox.is_none() || parsed.native_registry_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
 /// Only the concrete Current-layout physical inspector may select this grammar. The default,
 /// Pending and ID2-only inspectors still reject namespace3 in EITHER fixed source before old
 /// cleanup. No parsed label or external flag can install this actual constructor policy.

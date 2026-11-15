@@ -3,29 +3,68 @@
 //! The warm fixture uses this SAME synchronous router and authentication flow;
 //! its trusted Rust policy selects implementation, never grants authority.
 use super::*;
-use catcoms_app::store::{NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget};
+use catcoms_app::store::{
+    NativeTextHistoryResponseBudget, NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget,
+};
 use tauri::ipc::{Invoke, InvokeBody};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
+mod boot_lifetime;
+pub(super) mod continuity;
+mod founding;
+mod history;
+mod listing;
 pub(super) mod retirement;
+mod sending;
+pub(super) mod sources;
 #[cfg(test)]
 mod tests;
+pub(super) mod ui_state;
 
 const ENABLED: bool = false;
 const MAX_SECRET: usize = 4096;
 type Task = std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 pub(super) struct Registry {
+    pub(super) selected: bool,
     inflight: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     ui_budget: NativeUiInvocationBudget,
+    history_budget: NativeTextHistoryResponseBudget,
+    listing: listing::Policy,
+    #[cfg(test)]
+    listing_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    listing_drop_watch: StdMutex<Option<Arc<listing::DropWatch>>>,
+    #[cfg(test)]
+    history_drop_watch: StdMutex<Option<Arc<history::DropWatch>>>,
+    pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
+    sources: sources::Controller,
     #[cfg(test)]
     directory: Option<PathBuf>,
     #[cfg(test)]
     final_edge: Option<Arc<tests::AdmissionBarrier>>,
+    #[cfg(test)]
+    boot_return_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    source_work_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    source_work_waiting: tokio::sync::Notify,
+    #[cfg(test)]
+    found_publication_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    text_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    send_final_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    send_io_edge: StdMutex<Option<Arc<tests::BlockingIoBarrier>>>,
+    #[cfg(test)]
+    source_retirement_waiting: tokio::sync::Notify,
+    #[cfg(test)]
+    reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     retirement_queue: StdMutex<Option<Arc<StdMutex<Vec<Task>>>>>,
     #[cfg(test)]
@@ -46,20 +85,62 @@ impl Default for Registry {
         use catcoms_app::store::CriticalCatalogReadPool;
         let retirement = retirement::Coalescer::default();
         let preludes = retirement.prelude();
+        let ui_budget = NativeUiInvocationBudget::new(
+            CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity())
+                .expect("fixed native UI policy"),
+        )
+        .expect("fixed native UI capacity");
+        let ui_state =
+            ui_state::Controller::new(ui_budget.prepare().expect("UI-state control payment"));
+        let sources = sources::Controller::new(
+            ui_budget
+                .prepare()
+                .expect("source lifecycle control payment"),
+        );
+        let history_budget = NativeTextHistoryResponseBudget::new(
+            CriticalCatalogReadPool::new(NativeTextHistoryResponseBudget::required_capacity())
+                .expect("fixed history response policy"),
+        )
+        .expect("fixed history response capacity");
         Self {
+            selected: false,
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
-            ui_budget: NativeUiInvocationBudget::new(
-                CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity())
-                    .expect("fixed native UI policy"),
-            )
-            .expect("fixed native UI capacity"),
+            ui_budget,
+            history_budget,
+            listing: listing::Policy::default(),
+            #[cfg(test)]
+            listing_reply_edge: StdMutex::new(None),
+            #[cfg(test)]
+            listing_drop_watch: StdMutex::new(None),
+            #[cfg(test)]
+            history_drop_watch: StdMutex::new(None),
+            ui_state,
             retirement,
             preludes,
+            sources,
             #[cfg(test)]
             directory: None,
             #[cfg(test)]
             final_edge: None,
+            #[cfg(test)]
+            boot_return_edge: StdMutex::new(None),
+            #[cfg(test)]
+            source_work_edge: StdMutex::new(None),
+            #[cfg(test)]
+            source_work_waiting: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            found_publication_edge: StdMutex::new(None),
+            #[cfg(test)]
+            text_reply_edge: StdMutex::new(None),
+            #[cfg(test)]
+            send_final_edge: StdMutex::new(None),
+            #[cfg(test)]
+            send_io_edge: StdMutex::new(None),
+            #[cfg(test)]
+            source_retirement_waiting: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            reply_edge: StdMutex::new(None),
             #[cfg(test)]
             retirement_queue: StdMutex::new(None),
             #[cfg(test)]
@@ -80,6 +161,7 @@ impl Default for Registry {
 
 struct Captured {
     generation: u64,
+    lifetime: Arc<boot_lifetime::Control>,
     secret: Zeroizing<Vec<u8>>,
     _permit: OwnedSemaphorePermit,
 }
@@ -132,7 +214,8 @@ pub(super) fn initial_state() -> AppState {
     initial_state_selected(ENABLED)
 }
 fn initial_state_selected(enabled: bool) -> AppState {
-    let state = AppState::default();
+    let mut state = AppState::default();
+    state.native_text.selected = enabled;
     if enabled {
         state.ui_session_generation.store(1, Ordering::SeqCst);
         state.ui_authorized_generation.store(0, Ordering::SeqCst);
@@ -157,6 +240,29 @@ fn router<R: tauri::Runtime>(
     spawn: impl Fn(Task) + Send + Sync + 'static,
 ) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     move |invoke| {
+        if enabled
+            && matches!(
+                invoke.message.command(),
+                "lock_session" | "close_vault_window"
+            )
+        {
+            return ui_state::snapshots::route(invoke, &spawn);
+        }
+        if enabled && matches!(invoke.message.command(), "get_ui_state" | "save_ui_state") {
+            return ui_state::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "found_server" {
+            return founding::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "send_message" {
+            return sending::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "get_message_page" {
+            return history::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "resume_session" {
+            return listing::route(invoke, &spawn);
+        }
         if !enabled || invoke.message.command() != "unlock" {
             return fallback(invoke);
         }
@@ -175,6 +281,7 @@ fn router<R: tauri::Runtime>(
             // BEFORE parsing or scheduling: a completely unpolled old invoke
             // cannot adopt the authorization of a subsequent lock/unlock cycle.
             let generation = state.ui_session_generation.load(Ordering::SeqCst);
+            let lifetime = state.native_text.sources.boot.clone();
             let captured = state
                 .native_text
                 .inflight
@@ -184,6 +291,7 @@ fn router<R: tauri::Runtime>(
                 .and_then(|permit| {
                     arguments(invoke.message.payload(), generation).map(|secret| Captured {
                         generation,
+                        lifetime,
                         secret,
                         _permit: permit,
                     })
@@ -216,14 +324,67 @@ fn router<R: tauri::Runtime>(
         drop(invoke.message); // retain only one bounded secret, never arbitrary JSON
         spawn(Box::pin(async move {
             let state = app.state::<AppState>();
-            let result = execute(&state, &captured, directory).await;
+            let mut notice = None;
+            let mut original_error = false;
+            let mut result = match execute(&state, &captured, directory, &mut notice).await {
+                Ok(authentication) => match state
+                    .native_text
+                    .listing
+                    .prepare(&state.native_text.ui_budget)
+                {
+                    Ok(payment) => {
+                        listing::snapshot(&state, captured.generation, authentication, payment)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => {
+                    original_error = true;
+                    Err(error)
+                }
+            };
+            #[cfg(test)]
+            {
+                let edge = state.native_text.reply_edge.lock().unwrap().clone();
+                if let Some(edge) = edge {
+                    edge.wait_once().await;
+                }
+            }
+            let mut _retired_notice = None;
             let _commit = state.ui_session_commit.lock().await;
             if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation {
                 resolver.reject("Unlock was superseded. Try again.");
             } else {
-                match result {
-                    Ok(rows) => resolver.resolve(rows),
-                    Err(error) => resolver.reject(error),
+                // Keep the whole owning output outside these final guards,
+                // including through a real callback panic.
+                let store = state.store.lock().await;
+                let table = state.servers.lock().await;
+                let success = result
+                    .as_ref()
+                    .is_ok_and(|output| output.current(&state, &store, &table));
+                match &mut result {
+                    Ok(output) if success => resolver.resolve(
+                        tauri::ipc::InvokeResponseBody::Json(output.body.take().unwrap()),
+                    ),
+                    Ok(_) => resolver.reject(listing::STALE),
+                    Err(error) => resolver.reject(&*error),
+                }
+                if notice.as_ref().is_some_and(|n| {
+                    n.delivered_by_unlock(original_error, success)
+                        && state.native_text.preludes.is_idle_cached()
+                        && !state.native_text.sources.is_closing_cached()
+                        && state
+                            .native_text
+                            .ui_state
+                            .snapshots
+                            .notice_is_current_in_store(&state, n, &store)
+                }) && state.ui_session_generation.load(Ordering::SeqCst) == captured.generation
+                {
+                    _retired_notice = state
+                        .native_text
+                        .ui_state
+                        .snapshots
+                        .publish_notice(notice.as_ref().unwrap());
                 }
             }
         }));
@@ -264,13 +425,25 @@ async fn execute(
     state: &AppState,
     captured: &Captured,
     directory: PathBuf,
-) -> Result<Vec<ReloadedServer>, String> {
+    notice: &mut Option<ui_state::snapshots::Notice>,
+) -> Result<Arc<NativeTextVaultAuthenticationCheck>, String> {
+    if !state
+        .native_text
+        .sources
+        .boot
+        .same_original(&captured.lifetime)
+        || state.native_text.sources.is_closing_cached()
+    {
+        return Err("This vault is closing. Try closing the window again.".into());
+    }
     let _mount = state.vault_mount.lock().await;
     // An older lock can publish this generation before revoking voice state.
     // Snapshot its original ticket only AFTER that mutation prelude ends, but
     // BEFORE KDF/verification, so authentication cannot adopt a later Host.
     state.native_text.preludes.wait_idle().await;
-    if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation {
+    if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation
+        || state.native_text.sources.is_closing_cached()
+    {
         return Err("Unlock was superseded. Try again.".into());
     }
     let ticket = voice_runtime(state).session_ticket();
@@ -283,7 +456,10 @@ async fn execute(
     }
     let mut authentication = authenticate_mounted(state, &captured.secret).await?;
     if authentication.is_none() {
-        let mut plan = {
+        // Count only actual bootstrap/file custody, never the complete unlock
+        // task that may later wait for close's prelude while owning vault_mount.
+        let boot_end = captured.lifetime.enter().map_err(str::to_string)?;
+        let plan = {
             let mut slot = state
                 .native_text
                 .bootstrap
@@ -298,14 +474,28 @@ async fn execute(
             state.session_lock_requested.clone(),
         );
         let budget = state.native_text.ui_budget.clone();
+        let source_policy = state.native_text.sources.policy();
         // Whole original storage work, outside store/UI/operation guards. A
         // waiter disappearing does not cancel this owned native router task.
+        // Construct BEFORE scheduling: an unpolled closure or panic in file
+        // work must drop the actual plan before retiring its End too.
+        let mut output = BootOutput {
+            plan: Some(plan),
+            outcome: Ok(()),
+            _end: boot_end,
+        };
         let result = tauri::async_runtime::spawn_blocking(move || {
-            let result = plan.advance(&directory, &secret, atoms, budget);
-            (plan, result)
+            output.outcome = output.plan.as_mut().expect("original boot plan").advance(
+                &directory,
+                &secret,
+                atoms,
+                budget,
+                source_policy,
+            );
+            output
         })
         .await;
-        let (mut plan, outcome) = match result {
+        let mut output = match result {
             Ok(result) => result,
             Err(_) => {
                 *state
@@ -316,28 +506,58 @@ async fn execute(
                 return Err("Vault startup failed. Its files have been kept.".into());
             }
         };
-        let ready = plan.take_ready();
+        #[cfg(test)]
+        {
+            let edge = state.native_text.boot_return_edge.lock().unwrap().clone();
+            if let Some(edge) = edge {
+                edge.wait_once().await;
+            }
+        }
+        let mut install_error = None;
+        // Own a losing whole pair OUTSIDE Store/controller even on unwind.
+        let mut ready = output.plan.as_mut().unwrap().take_ready();
+        {
+            let mut store = state.store.lock().await;
+            // Pair-install admission linearizes at these final checks while
+            // the SAME boot End remains live. Irreversible close fences the
+            // controller and waits that End before collecting an admitted pair.
+            if state.ui_session_generation.load(Ordering::SeqCst) == captured.generation
+                && !state.native_text.sources.is_closing_cached()
+                && state.native_text.preludes.is_idle_cached()
+            {
+                if ready.is_some() {
+                    if let Err(error) = state.native_text.sources.install(
+                        &mut store,
+                        &mut ready,
+                        &captured.lifetime,
+                    ) {
+                        install_error = Some(error.to_string());
+                    }
+                }
+            } else {
+                install_error = Some("Unlock was superseded. Try again.".into());
+            }
+        }
+        // Retain an uninstalled pair in the original canonical plan. This move
+        // and any destructor are outside Store/controller, including failure.
+        if let Some(ready) = ready {
+            *output.plan.as_mut().unwrap() = boot::Bootstrap::Ready(ready);
+        }
         {
             let mut slot = state
                 .native_text
                 .bootstrap
                 .lock()
                 .map_err(|_| "Vault startup is unavailable.")?;
-            *slot = Some(plan); // previous value is None; no owner destroyed here
+            if slot.is_some() {
+                return Err("The original vault startup changed.".into());
+            }
+            *slot = output.plan.take(); // None before move, no losing owner Drop here
         }
-        if let Some(vault) = ready {
-            let mut owner = Some(vault);
-            {
-                let mut guard = state.store.lock().await;
-                if guard.is_none() {
-                    *guard = owner.take().map(MountedVault::TextV2);
-                }
-            }
-            // Destruction of a losing actual owner is outside the store guard.
-            if owner.is_some() {
-                drop(owner);
-                return Err("The mounted vault changed.".into());
-            }
+        let outcome = std::mem::replace(&mut output.outcome, Ok(()));
+        drop(output); // returned owning plan transferred; End BEFORE finalizer wait
+        if let Some(error) = install_error {
+            return Err(error);
         }
         outcome?;
         // Retrying retained metadata work is NOT authentication. Even if a
@@ -345,16 +565,31 @@ async fn execute(
         // its own secret against the same completed mounted keystore.
         authentication = authenticate_mounted(state, &captured.secret).await?;
     }
-    let authentication = authentication.ok_or("Vault startup did not complete.")?;
+    let authentication = Arc::new(authentication.ok_or("Vault startup did not complete.")?);
     #[cfg(test)]
     if let Some(edge) = &state.native_text.final_edge {
         edge.wait_once().await;
     }
-    finalize_unlock_session_with_voice_checked(state, captured.generation, false, &ticket, || {
-        authentication.is_live_cached()
-    })
+    finalize_unlock_session_with_voice_checked(
+        state,
+        captured.generation,
+        false,
+        &ticket,
+        || !state.native_text.sources.is_closing_cached() && authentication.is_live_cached(),
+        Some(authentication.clone()),
+        Some(notice),
+    )
     .await?;
-    // This warm milestone admits only a fresh empty vault; no fake Legacy
-    // actors are created from index DATA. Native authoring/restore come next.
-    Ok(Vec::new())
+    // Preserve THIS actual authenticated association through listing/reply.
+    // Looking up a later canonical target could adopt a replacement mount.
+    Ok(authentication)
+}
+
+/// Actual returned bootstrap ownership precedes its file-work End, including
+/// an unpolled/lost JoinHandle result. A timer or finished blocking closure
+/// alone cannot release a still-returned original facade/partial plan.
+struct BootOutput {
+    plan: Option<boot::Bootstrap>,
+    outcome: Result<(), String>,
+    _end: boot_lifetime::End,
 }

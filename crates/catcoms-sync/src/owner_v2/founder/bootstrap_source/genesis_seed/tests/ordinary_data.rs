@@ -14,7 +14,7 @@ use catcoms_replication::chat::{Body, SignedAction};
 use catcoms_storage::pad::{unpad, OP_PAD_CEILING, OP_PAD_FLOOR};
 use catcoms_wire::{Decoder, DocType};
 
-fn prepared_node(
+pub(in super::super) fn prepared_node(
     id: u64,
 ) -> (
     UnboundV2GenesisNode<MemNetwork, ChaCha20Rng>,
@@ -22,7 +22,19 @@ fn prepared_node(
     OpenedBootstrapSourceData,
     Arc<AtomicUsize>,
 ) {
-    let f = fixture(id);
+    prepared_node_with_clock(id, Box::new(ManualClock::new(1000)))
+}
+
+pub(in super::super) fn prepared_node_with_clock(
+    id: u64,
+    clock: Box<dyn Clock + Send>,
+) -> (
+    UnboundV2GenesisNode<MemNetwork, ChaCha20Rng>,
+    Reservation,
+    OpenedBootstrapSourceData,
+    Arc<AtomicUsize>,
+) {
+    let f = fixture_with_clock(id, clock);
     let count = Arc::new(AtomicUsize::new(0));
     let mut restored = seed(&f.opened, &count);
     restored.prepare_scope(&f.reservation).unwrap();

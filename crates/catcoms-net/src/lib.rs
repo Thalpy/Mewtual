@@ -42,10 +42,12 @@ pub mod join_reply;
 #[cfg(test)]
 mod media_mapping_tests;
 pub mod metering;
+mod native_tcp;
 mod pcp_ipv6;
 pub mod relay_node;
 pub mod rendezvous_node;
 mod seeded_identity;
+pub use native_tcp::{NativeTcpDrain, NativeTcpPreparation, NATIVE_TCP_LIFETIME_BYTES};
 
 pub use addr::{
     addr_has_dns, addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
@@ -3615,6 +3617,7 @@ struct PendingRequest {
 }
 
 struct Actor {
+    native_stop: Option<NativeTcpDrain>,
     swarm: Swarm<MeshBehaviour>,
     /// Whether this product instance explicitly opted into changing the local gateway.
     enable_port_mapping: bool,
@@ -3831,11 +3834,21 @@ impl Actor {
         // timer is re-armed after each pass rather than free-running.
         let publish_retry = SystemClock.sleep(PENDING_PUBLISH_RETRY);
         futures::pin_mut!(publish_retry);
-        loop {
+        'running: loop {
+            if self
+                .native_stop
+                .as_ref()
+                .is_some_and(NativeTcpDrain::is_closed)
+            {
+                break;
+            }
             tokio::select! {
                 maybe_cmd = self.cmd_rx.recv() => {
                     match maybe_cmd {
                         Some(cmd) => {
+                            if self.native_stop.as_ref().is_some_and(NativeTcpDrain::is_closed) {
+                                break;
+                            }
                             self.handle_command(cmd);
                             // Drain whatever the caller has already queued before touching the
                             // swarm again. A dial plan arrives as one `Command::Dial` per address
@@ -3846,8 +3859,14 @@ impl Actor {
                             // A producer cannot keep one turn alive indefinitely and starve
                             // response/timeout/disconnect polling, even under a busy app actor.
                             for _ in 0..31 {
+                                if self.native_stop.as_ref().is_some_and(NativeTcpDrain::is_closed) {
+                                    break 'running;
+                                }
                                 let Ok(next) = self.cmd_rx.try_recv() else { break; };
                                 self.handle_command(next);
+                            }
+                            if self.native_stop.as_ref().is_some_and(NativeTcpDrain::is_closed) {
+                                break;
                             }
                             self.flush_dials();
                         }
@@ -5677,6 +5696,10 @@ fn current_authenticated_routes(
 /// A handle to a running libp2p mesh node, implementing [`MeshTransport`].
 #[derive(Debug)]
 pub struct MeshService {
+    // Native-only affine negative. Legacy constructors leave this None.
+    // Close before dropping service channels; task acknowledgements separately
+    // follow actual Actor/Swarm/connection future and passive custody destruction.
+    _native_tcp_owner: Option<native_tcp::Owner>,
     local: PeerId,
     cmd_tx: mpsc::Sender<Command>,
     /// Independent of the shared command count; bounded one-shot payload ownership survives
@@ -5729,6 +5752,15 @@ impl MeshService {
         constructor_dials: Vec<(libp2p::PeerId, ConnectionId)>,
         enable_port_mapping: bool,
     ) -> Self {
+        Self::spawn_protecting_original(swarm, constructor_dials, enable_port_mapping, None)
+    }
+
+    fn spawn_protecting_original(
+        swarm: Swarm<MeshBehaviour>,
+        constructor_dials: Vec<(libp2p::PeerId, ConnectionId)>,
+        enable_port_mapping: bool,
+        native: Option<native_tcp::Spawn>,
+    ) -> Self {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -5764,6 +5796,7 @@ impl MeshService {
             .map(|(peer, _)| peer)
             .collect();
         let actor = Actor {
+            native_stop: native.as_ref().map(native_tcp::Spawn::observe_drain),
             swarm,
             enable_port_mapping,
             cmd_rx,
@@ -5827,8 +5860,15 @@ impl MeshService {
             authenticated_route_evidence: VecDeque::new(),
             protected,
         };
-        tokio::spawn(actor.run());
+        let native_owner = match native {
+            Some(original) => Some(original.run(actor.run())),
+            None => {
+                drop(tokio::spawn(actor.run()));
+                None
+            }
+        };
         Self {
+            _native_tcp_owner: native_owner,
             local,
             cmd_tx,
             publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
