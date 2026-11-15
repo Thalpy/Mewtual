@@ -36,6 +36,12 @@ cohort; it does not sign or expose unsaved originals. Chat V2 is
 still off and incomplete.
 [Current scope](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
 
+Native caller requirement found during dispatch design: final preparation owns
+counted physical Source work. It must not await the UI commit guard that Legacy
+whole-close holds while draining Sources; use fail-fast owned acquisition and
+drop the whole preparation outside guards before waiting/retrying. The native
+factory remains absent; no deadlocking caller is enabled by this checkpoint.
+
 Native canonical Sources, paired warm installation and whole-close composition
 are under validation. Original bootstrap work, retained plans, Source/SDK/TCP,
 metadata/UI work and actual facade disposal are separate obligations. Chat V2

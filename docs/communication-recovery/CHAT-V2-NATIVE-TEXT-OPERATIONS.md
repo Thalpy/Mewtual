@@ -134,10 +134,10 @@ never silently replaces a token or redraws/re-signs a retained original.
 
 Member phase one restores its runtime loan and releases entered key Ends before
 awaiting native UI commit. Final preparation is prepaid and retains no affine
-Entry/issuer, but still owns a counted Source End. Native must try final commit
-acquisition and drop the whole preparation outside guards on contention before
-waiting: whole-close owns UI commit while it drains those Ends. Under the actual
-owned commit guard, final runtime/source checks
+Entry/issuer, but still owns counted physical Source work. Native must try final
+commit acquisition and drop the whole preparation outside guards on contention
+before waiting: whole-close owns UI commit while it drains those Ends. Under
+the actual owned commit guard, final runtime/source checks
 and admission are fail-fast and use the exact EntryOwner cancellation composed
 with the complete original account authority.
 
