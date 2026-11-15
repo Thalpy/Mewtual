@@ -42,15 +42,15 @@ fn authorize(
     let resumable = state.session_resumable.try_lock().map_err(|_| busy())?;
     if !*resumable
         || store.is_none()
-        || state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire) != generation
+        || state.session_lock_requested.load(Ordering::SeqCst)
+        || state.ui_session_generation.load(Ordering::SeqCst) != generation
     {
         return Err("Message request belongs to a locked or changed vault.".into());
     }
     drop(resumable);
     let registry = state.servers.clone().try_lock_owned().map_err(|_| busy())?;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The conversation changed before this message could be saved.".into());
@@ -58,6 +58,7 @@ fn authorize(
     if let Some(identity) = positive {
         let store = store
             .as_ref()
+            .and_then(MountedVault::as_legacy)
             .ok_or_else(|| "vault is not mounted".to_string())?;
         if store
             .has_chat_stop_fence(server, identity)
@@ -66,11 +67,8 @@ fn authorize(
             return Err("CHAT_SEND_STOPPED: this retired token is permanently fenced; repeat Stop to resolve its saved terminal".into());
         }
     }
-    Ok(DurableSendLease::new(
-        store,
-        server,
-        (persist, session, registry),
-    ))
+    DurableSendLease::new_mounted(store, server, (persist, session, registry))
+        .map_err(|refused| refused.message().to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -190,7 +188,7 @@ pub(super) async fn durable_send_context(
     let _session = require_ui_session_generation(&state, generation).await?;
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The conversation changed while preparing the message.".into());
@@ -315,7 +313,7 @@ pub(super) async fn durable_mutation_context(
     let _session = require_ui_session_generation(&state, generation).await?;
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The conversation changed while preparing the mutation.".into());
@@ -446,6 +444,7 @@ async fn stop_request_at(
             let mounted = state.store.lock().await;
             mounted
                 .as_ref()
+                .and_then(MountedVault::as_legacy)
                 .ok_or_else(|| "vault is not mounted".to_string())?
                 .has_chat_stop_fence(server, &identity)
                 .map_err(|e| e.to_string())?
@@ -461,6 +460,7 @@ async fn stop_request_at(
         let mounted = state.store.lock().await;
         mounted
             .as_ref()
+            .and_then(MountedVault::as_legacy)
             .ok_or_else(|| "vault is not mounted".to_string())?
             .has_chat_stop_fence(server, &identity)
             .map_err(|e| e.to_string())?
@@ -472,7 +472,7 @@ async fn stop_request_at(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| (entry.actor.clone(), entry.instance));
     if let Some((actor, instance)) = current.filter(|_| !existing_fence) {
         drop(orphan);
@@ -486,6 +486,7 @@ async fn stop_request_at(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "vault is not mounted".to_string())?;
     let registry = state.servers.lock().await;
     if registry.contains_key(&server) && !existing_fence {
@@ -611,7 +612,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let mut server = Server::found(
             Hub::new().join(PeerId::from_u64(911)),
@@ -626,7 +627,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             12,
             ServerEntry {
                 files: keep_session::EntryOwner::new(),
@@ -709,7 +710,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let generation = state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        let generation = state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         assert!(authorize(&state, 12, 40, generation, None).is_err());
         drop(ready);
         assert_eq!(actor.messages(1).await.len(), 1);
@@ -717,7 +718,7 @@ mod tests {
         task.abort();
         let _ = task.await;
         drain.await.unwrap();
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         drop(state.store.lock().await.take());
         let store = ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap();
         let snapshot = store.load_server(12).unwrap();
@@ -799,11 +800,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (entry, task, drain) = leaving::tests::running(1001);
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(12, entry);
+        state.servers.lock().await.install_legacy_fixture(12, entry);
         actor.open_channel(5).await;
         let context = actor.durable_send_context().await.unwrap();
         let request = DurableChatRequest::Send(DurableSendRequest {
@@ -843,6 +844,8 @@ mod tests {
             .await
             .as_ref()
             .unwrap()
+            .as_legacy()
+            .unwrap()
             .has_chat_stop_fence(12, &request.retired_identity())
             .unwrap());
         assert!(
@@ -875,6 +878,8 @@ mod tests {
             .await
             .as_ref()
             .unwrap()
+            .as_legacy()
+            .unwrap()
             .load_server(12)
             .unwrap()
             .to_vec();
@@ -889,6 +894,8 @@ mod tests {
                 .await
                 .as_ref()
                 .unwrap()
+                .as_legacy()
+                .unwrap()
                 .load_server(12)
                 .unwrap()
                 .as_slice(),
@@ -899,7 +906,7 @@ mod tests {
         drop(state.store.lock().await.take());
         let reopened = AppState::default();
         *reopened.store.lock().await =
-            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *reopened.session_resumable.lock().await = true;
         let probe = PublicationProbe::default();
         let published = probe.chat.clone();
@@ -942,7 +949,11 @@ mod tests {
         drop(restored.chat_fence_commit);
         let (replacement, task, drain) = leaving::tests::running(1005);
         let replacement_actor = replacement.actor.clone();
-        reopened.servers.lock().await.insert(12, replacement);
+        reopened
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(12, replacement);
         replacement_actor.open_channel(5).await;
         let late = send(
             &reopened,
@@ -974,7 +985,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let guard = state.chat_orphan_commit.clone().lock_owned().await;
         let custody = Arc::new(std::sync::Mutex::new(Some(guard)));
@@ -1022,11 +1033,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (entry, task, drain) = leaving::tests::running(1011);
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(12, entry);
+        state.servers.lock().await.install_legacy_fixture(12, entry);
         actor.open_channel(5).await;
         let context = actor.durable_send_context().await.unwrap();
         let op = Operation::start(
@@ -1072,6 +1083,8 @@ mod tests {
             .await
             .as_ref()
             .unwrap()
+            .as_legacy()
+            .unwrap()
             .load_server(12)
             .unwrap();
         let saved = Server::restore(
@@ -1096,11 +1109,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(dir.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (entry, task, drain) = leaving::tests::running(1013);
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(12, entry);
+        state.servers.lock().await.install_legacy_fixture(12, entry);
         actor.open_channel(5).await;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let request = DurableSendRequest {
@@ -1126,6 +1139,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .save_chat_stop_fence(12, &identity, &mut OsCryptoRng)
             .unwrap();

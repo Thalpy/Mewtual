@@ -70,6 +70,30 @@ impl RngCore for NeverRng {
 impl CryptoRng for NeverRng {}
 
 #[test]
+fn current_cached_mount_check_never_constructs_a_revocation_observer() {
+    let directory = tempfile::tempdir().unwrap();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x33a1);
+    initialize(directory.path(), &mut rng);
+    let mut prepared = open(directory.path(), &shared, &mut rng);
+    prepared.retry(&mut rng).unwrap();
+    let ready = prepared.into_current_layout_store().unwrap();
+    crate::store::chat_admission::take_revocation_observer_constructions();
+    assert!(ready.cached_store().is_ok());
+    assert_eq!(
+        crate::store::chat_admission::take_revocation_observer_constructions(),
+        0,
+        "a final cached edge must not allocate Authority or subscribe to watch"
+    );
+    ready.store.chat_mount.revoke();
+    assert!(ready.cached_store().is_err());
+    assert_eq!(
+        crate::store::chat_admission::take_revocation_observer_constructions(),
+        0
+    );
+}
+
+#[test]
 fn complete_private_id2_then_id3_handoff_keeps_same_root_and_is_not_public_store() {
     let directory = tempfile::tempdir().unwrap();
     let shared = pool();

@@ -5,7 +5,11 @@
 //! instead would compile two unrelated copies of `InspectionFixture`, so it is declared once and
 //! reached by path.
 use super::app;
-use app::{store::ServerStore, studio::*, Server, ServerActor};
+use app::{
+    store::{MountedVault, ServerStore},
+    studio::*,
+    Server, ServerActor,
+};
 use catcoms_mls::MlsDevice;
 use catcoms_replication::{studio::*, Admission, DomainOp, SealedOp, SignedOp};
 use catcoms_rt::{Hub, ManualClock, PeerId};
@@ -23,7 +27,7 @@ fn rng() -> ChaCha20Rng {
 }
 
 pub(crate) struct InspectionFixture {
-    pub(crate) store: Arc<Mutex<Option<ServerStore>>>,
+    pub(crate) store: Arc<Mutex<Option<MountedVault>>>,
     pub(crate) actor: ServerActor,
     pub(crate) clock: ManualClock,
     pub(crate) target: StudioTarget,
@@ -218,7 +222,7 @@ impl InspectionFixture {
         };
         let expected = draft.projection().clone();
         assert_eq!(draft.accepted(), 1);
-        let store = Arc::new(Mutex::new(Some(store)));
+        let store = Arc::new(Mutex::new(Some(store.into())));
         let (actor, mut events, task) = app::spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         Self {
@@ -257,11 +261,14 @@ impl InspectionFixture {
                     action,
                 })
                 .await?
-                .execute(StudioVaultLease::new(
-                    self.store.clone().try_lock_owned().unwrap(),
-                    SERVER,
-                    (),
-                ))
+                .execute(
+                    StudioVaultLease::new_mounted(
+                        self.store.clone().try_lock_owned().unwrap(),
+                        SERVER,
+                        (),
+                    )
+                    .unwrap(),
+                )
                 .await
         })
         .await

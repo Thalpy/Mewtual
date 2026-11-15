@@ -17,6 +17,7 @@ pub mod cold_index;
 pub mod cold_manifest;
 pub mod cold_nodes;
 pub mod cold_records;
+pub mod join_bindings;
 mod ledger;
 pub mod owner_bodies;
 pub mod owner_facts;
