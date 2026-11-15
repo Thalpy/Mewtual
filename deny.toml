@@ -30,23 +30,6 @@ reason = "proc-macro-error2: unmaintained, no vulnerability, transitive, no upgr
 id = "RUSTSEC-2024-0370"
 reason = "GTK build-only proc-macro-error 1.0.4 via reviewed glib-macros 0.18.5/gtk3-macros 0.18.2; maintenance advisory only, no announced vulnerability or safe upgrade; exact version/wrapper bans force re-review"
 
-# hickory-proto arrives through libp2p-dns 0.44 (libp2p 0.56), which pins the 0.25 line. Both
-# advisories below sit behind that pin: drop them the moment libp2p moves to a hickory 0.26 line.
-#
-# The NSEC3 loop lives in DNSSEC proof validation. No crate in either lockfile enables any
-# dnssec feature (grep the locks: zero hits), so the vulnerable code is not compiled into the
-# binary. There is also no patched release to move to yet (patched = [] as of 2026-08-22).
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0118"
-reason = "hickory-proto NSEC3 validation loop: DNSSEC features are not compiled in; no patched release exists"
-
-# The O(n^2) name compression is in message *encoding*. As a stub resolver we encode only our
-# own single-name queries; an attacker cannot make this client encode a many-name message, so
-# the quadratic path is not attacker-drivable here. Fixed only in 0.26.1, behind the libp2p pin.
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0119"
-reason = "hickory-proto O(n^2) encoding: client encodes only its own small queries; fix requires hickory 0.26 via a libp2p bump"
-
 # 0.26.11 is only a compatibility re-export: src/lib.rs contains
 # `pub use parent::TLS_SERVER_ROOTS`, with parent = webpki-roots ^1. Both locks now resolve
 # that parent to 1.0.10, which removes the affected root. The advisory nevertheless matches

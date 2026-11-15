@@ -742,3 +742,199 @@ fn native_install_authenticated_native_seed_beside_governance_is_never_disposabl
     assert!(reopen(dir.path()).is_err());
     assert_eq!(fs::read(file(dir.path(), SEED_NAME)).unwrap(), empty);
 }
+
+#[test]
+fn native_fresh_factory_keeps_original_keys_mount_and_session_at_every_boundary() {
+    use crate::store::critical_namespaces::current_layout::{NativeFreshEdge, NATIVE_FRESH_HOOK};
+    use std::sync::{Arc, Mutex};
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("fresh");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let observations = seen.clone();
+    let target = path.clone();
+    NATIVE_FRESH_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |edge, store| {
+            // This is a genuine competing opener, not a stand-in boolean lock.
+            assert!(matches!(
+                ServerStore::open(&target, SECRET, &mut NeverRng),
+                Err(AppError::Storage(catcoms_storage::StorageError::VaultBusy))
+            ));
+            observations.lock().unwrap().push((
+                edge,
+                store.registry_mount(),
+                *blake3::hash(&store.keys.db_key().unwrap()).as_bytes(),
+                store.chat_mount.observer(),
+            ));
+        }))
+    });
+    let mut rng = ChaCha20Rng::seed_from_u64(0x77f0);
+    let mut original = NativeRegistryInstallation::prepare_fresh(
+        &path,
+        SECRET,
+        &mut rng,
+        current_policy(),
+        policy(),
+    )
+    .unwrap();
+    NATIVE_FRESH_HOOK.with(|slot| drop(slot.borrow_mut().take()));
+    {
+        let observations = seen.lock().unwrap();
+        assert_eq!(observations.len(), 3);
+        assert_eq!(
+            observations.iter().map(|x| x.0).collect::<Vec<_>>(),
+            [
+                NativeFreshEdge::LowerOpened,
+                NativeFreshEdge::CriticalActivated,
+                NativeFreshEdge::NativePrepared
+            ]
+        );
+        let actual = original.prepared.current.cached_store().unwrap();
+        for (_, mount, key, negative) in observations.iter() {
+            assert!(Arc::ptr_eq(mount, &actual.registry_mount()));
+            assert_eq!(
+                *key,
+                *blake3::hash(&actual.keys.db_key().unwrap()).as_bytes()
+            );
+            assert!(!negative.is_cancelled());
+        }
+        assert_eq!(
+            actual.chat_vault_format().unwrap(),
+            catcoms_storage::VaultFormat::CriticalNamespaces
+        );
+    }
+    let frame = original.prepared.output.index.clone();
+    arm_native_install_fault(4);
+    assert!(original.retry().is_err());
+    assert!(take_native_install_fault());
+    original.retry().unwrap(); // the retry API cannot consume RNG at all
+    assert_eq!(original.prepared.output.index, frame);
+    let owner = original.into_native_registry().unwrap();
+    assert_eq!(owner.row_count_data().unwrap(), 0);
+    assert!(matches!(
+        ServerStore::open(&path, SECRET, &mut NeverRng),
+        Err(AppError::Storage(catcoms_storage::StorageError::VaultBusy))
+    ));
+    drop(owner);
+    assert!(seen.lock().unwrap().iter().all(|x| x.3.is_cancelled()));
+    assert_eq!(reopen(&path).unwrap().row_count_data().unwrap(), 0);
+}
+
+#[test]
+fn native_fresh_factory_refuses_all_preexisting_wrapper_versions_without_rng_or_rewrite() {
+    for kind in 0..4 {
+        let root = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x77f1 + kind);
+        let owner = ServerStore::open(root.path(), SECRET, &mut rng).unwrap();
+        owner.save_registry(&records(), &mut rng).unwrap();
+        if kind == 1 {
+            drop(
+                owner
+                    .into_critical_namespace_store(SECRET, &mut rng)
+                    .unwrap(),
+            );
+        } else {
+            drop(owner);
+        }
+        if kind >= 2 {
+            let wrapper = if kind == 2 { vec![255; 89] } else { Vec::new() };
+            fs::write(root.path().join("vault.bin"), wrapper).unwrap();
+        }
+        let wrapper = fs::read(root.path().join("vault.bin")).unwrap();
+        let registry = fs::read(root.path().join("registry.bin")).unwrap();
+        assert!(NativeRegistryInstallation::prepare_fresh(
+            root.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+            policy(),
+        )
+        .is_err());
+        assert_eq!(fs::read(root.path().join("vault.bin")).unwrap(), wrapper);
+        assert_eq!(
+            fs::read(root.path().join("registry.bin")).unwrap(),
+            registry
+        );
+        assert!(!root.path().join(SEED_NAME).exists());
+    }
+    // A nonregular wrapper is presence too, never permission to create keys.
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("vault.bin")).unwrap();
+    assert!(NativeRegistryInstallation::prepare_fresh(
+        root.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        policy()
+    )
+    .is_err());
+    assert!(root.path().join("vault.bin").is_dir());
+    // Unknown native artifacts without a vault survive the first orphan fence.
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join(SEED_NAME), b"unknown original").unwrap();
+    assert!(NativeRegistryInstallation::prepare_fresh(
+        root.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        policy()
+    )
+    .is_err());
+    assert_eq!(
+        fs::read(root.path().join(SEED_NAME)).unwrap(),
+        b"unknown original"
+    );
+    assert!(!root.path().join("vault.bin").exists());
+}
+
+#[test]
+fn native_fresh_factory_payment_refusal_precedes_even_session_directory_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("not-created");
+    let policy = policy();
+    let held = policy.preparation.pool.try_reserve(1).unwrap();
+    assert!(NativeRegistryInstallation::prepare_fresh(
+        &path,
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        policy
+    )
+    .is_err());
+    assert!(!path.exists());
+    drop(held);
+}
+
+#[test]
+fn native_fresh_factory_missing_wrapper_never_creates_new_keys_beside_old_ciphertext() {
+    for with_registry in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x77ff);
+        let store = ServerStore::open(root.path(), SECRET, &mut rng).unwrap();
+        if with_registry {
+            store.save_registry(&records(), &mut rng).unwrap();
+        }
+        // Actual sealed server data, not just a fabricated orphan basename.
+        store
+            .save_server(9, b"original encrypted server", &mut rng)
+            .unwrap();
+        drop(store);
+        let original = fs::read(root.path().join("servers/9.bin")).unwrap();
+        fs::remove_file(root.path().join("vault.bin")).unwrap();
+        assert!(NativeRegistryInstallation::prepare_fresh(
+            root.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+            policy()
+        )
+        .is_err());
+        assert!(!root.path().join("vault.bin").exists());
+        assert_eq!(
+            fs::read(root.path().join("servers/9.bin")).unwrap(),
+            original
+        );
+        if with_registry {
+            assert!(root.path().join("registry.bin").is_file());
+        }
+    }
+}

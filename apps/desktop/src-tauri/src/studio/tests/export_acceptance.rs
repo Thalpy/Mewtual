@@ -332,7 +332,7 @@ async fn gate7_reopened_native_composition_exports_and_other_peer_reads_actual_p
     actor.shutdown().await;
     task.await.unwrap();
     drain.await.unwrap();
-    state.servers.lock().await.clear();
+    state.servers.lock().await.clear_legacy_fixture();
     drop(state.store.lock().await.take());
     *state.store.lock().await =
         Some((ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap()).into());

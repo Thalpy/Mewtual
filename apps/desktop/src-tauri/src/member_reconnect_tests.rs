@@ -194,7 +194,7 @@ mod member_reconnect_regressions {
     ) -> Running {
         let mut entry = snapshot_test_entry(1, actor.clone(), group, device);
         entry.mesh = Some(mesh.clone());
-        state.servers.lock().await.insert(1, entry);
+        state.servers.lock().await.install_legacy_fixture(1, entry);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         Running {
             actor,
@@ -224,7 +224,7 @@ mod member_reconnect_regressions {
     }
 
     async fn stop(state: &AppState, running: Running) {
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         running.actor.shutdown().await;
         running.task.await.unwrap();
         running.drain.await.unwrap();
@@ -593,7 +593,7 @@ mod member_reconnect_regressions {
             ReconnectPolicy::Disabled
         );
         *state.store.lock().await = Some(mounted);
-        state.servers.lock().await.get_mut(&1).unwrap().instance = 2;
+        state.servers.lock().await.legacy_mut(&1).unwrap().instance = 2;
         assert!(
             member_reconnect::persist(&state, 1, 1, &running.actor, Vec::new())
                 .await

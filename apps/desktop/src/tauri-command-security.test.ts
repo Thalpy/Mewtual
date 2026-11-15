@@ -85,7 +85,7 @@ function manualCommands(sources: Map<string, string>): string[] {
   assert.match(body.replace(/"[a-z][a-z0-9_]*"/g, ""), /^[\s,]*$/, "unsupported manual command inventory syntax");
   assert.deepEqual(names, ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"], "review any new manual surface explicitly");
   const bridge = sources.get("lib.rs") ?? "";
-  assert.match(bridge, /\.invoke_handler\(admin_chat_ledger::with_commands\(tauri::generate_handler!\[/,
+  assert.match(bridge.replace(/\s+/g, ""), /\.invoke_handler\(native_text::with_commands\(admin_chat_ledger::with_commands\(tauri::generate_handler!\[/,
     "the reviewed manual router must wrap the actual normal handler");
   return names;
 }

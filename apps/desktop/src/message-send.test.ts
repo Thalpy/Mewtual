@@ -56,6 +56,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
     source.indexOf("  // Inline edit of one of your own messages.")), { target: ts.ScriptTarget.ES2022 });
   return new Function("submit", "refresh", "context", "onSeal", "sendAndRefresh", "persistenceWarning", "sendOutcome", "addPendingSend", "durableStopOriginal", "durableStopTerminal", "retiredStopWarning", "matchingPendingSend", "samePendingIntent", "pendingSendRetryBlock", "resolvePendingSend", "recoverQuarantinedIntent", "quarantinedPendingIntent", "validateSendPayload", "pendingContinuityVersion", "sendRefusedUnaccepted", `
     let draft = "one message", cur = { active: "1" }, activeServerId = 1, sending = false;
+    const chatBackend="legacy";
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
     let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;

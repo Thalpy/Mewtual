@@ -45,18 +45,25 @@ pub use installation::{NativeRegistryInstallation, NativeRegistryPolicy, NativeR
 pub(in crate::store) enum NativeRegistryHandler {
     Migration(NativeMigrationHandler),
     Operational(super::operational::Handler),
+    Lifecycle(super::lifecycle::admission::Handler),
+    GovernedLifecycle(super::lifecycle::admission::Handler),
+    GovernanceOpening(super::lifecycle::admission::Handler),
 }
 impl NativeRegistryHandler {
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         match self {
             Self::Migration(handler) => handler.require(),
             Self::Operational(handler) => handler.require(),
+            Self::Lifecycle(handler)
+            | Self::GovernedLifecycle(handler)
+            | Self::GovernanceOpening(handler) => handler.require(),
         }
     }
     pub(in crate::store) fn namespace_version(&self) -> u32 {
         match self {
             Self::Migration(_) => 1,
             Self::Operational(_) => 2,
+            Self::Lifecycle(_) | Self::GovernedLifecycle(_) | Self::GovernanceOpening(_) => 3,
         }
     }
     pub(in crate::store::critical_namespaces) fn parse_layout<'a>(
@@ -74,7 +81,32 @@ impl NativeRegistryHandler {
                     plain, domain, executing,
                 )
             }
+            Self::Lifecycle(_) => {
+                super::super::pending_join_codec::parse_lifecycle_native_registry_layout(
+                    plain, domain, executing,
+                )
+            }
+            Self::GovernedLifecycle(_) => {
+                super::super::pending_join_codec::parse_governed_native_registry_layout(
+                    plain, domain, executing,
+                )
+            }
+            Self::GovernanceOpening(_) => {
+                super::super::pending_join_codec::parse_native_governance_family(
+                    plain, domain, executing,
+                )
+            }
         }
+    }
+    /// Exact concrete native3 handler loan, never a version-number conversion.
+    pub(in crate::store) fn lifecycle(&self) -> Option<&super::lifecycle::admission::Handler> {
+        match self {
+            Self::Lifecycle(h) | Self::GovernedLifecycle(h) | Self::GovernanceOpening(h) => Some(h),
+            _ => None,
+        }
+    }
+    pub(in crate::store) fn is_governed(&self) -> bool {
+        matches!(self, Self::GovernedLifecycle(_))
     }
 }
 #[derive(Clone)]
@@ -185,7 +217,16 @@ impl PreparedNativeRegistryMigration {
         // Failure here must precede even prerequisite opening, KDF and RNG.
         let fee = Arc::new(policy.pool.try_reserve(PREPARATION_FEE)?);
         crate::store::persistence::native_registry::refuse_unsupported_storage(dir.as_ref())?;
-        let mut opening = PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current_policy)?;
+        let opening = PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current_policy)?;
+        Self::from_opening(opening, rng, policy, fee)
+    }
+
+    fn from_opening(
+        mut opening: PreparedV2CurrentLayoutStore,
+        rng: &mut impl CryptoRngCore,
+        policy: NativeRegistryPreparationPolicy,
+        fee: Arc<CatalogReadReservation>,
+    ) -> Result<Self, AppError> {
         opening.retry(rng)?;
         let current = opening.into_current_layout_store().map_err(|_| refused())?;
         let store = current.checked_store()?;

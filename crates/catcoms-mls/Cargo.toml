@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+catcoms-rt = { path = "../catcoms-rt" }
 catcoms-wire = { path = "../catcoms-wire" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 thiserror.workspace = true
@@ -36,6 +37,7 @@ zeroize = "1"
 test-support = []
 
 [dev-dependencies]
+rand_chacha = "0.3"
 # Negative-only actual candidate provider fault/counter seams. Resolver2 keeps
 # this feature off the ordinary production dependency.
 openmls_memory_storage = { version = "=0.6.0", features = ["test-utils"] }

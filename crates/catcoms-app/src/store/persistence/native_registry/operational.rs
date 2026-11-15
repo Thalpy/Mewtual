@@ -55,6 +55,9 @@ pub(in crate::store) enum Fault {
     IndexStage,
     IndexRename,
     IndexStageUnlink,
+    Index3PartialStage,
+    Index3Covered,
+    Index3CleanupCovered,
 }
 #[cfg(test)]
 thread_local! {

@@ -11,26 +11,18 @@ pub(super) struct StoppedServer {
 }
 
 impl StoppedServer {
-    pub(super) fn remove(
-        self,
-        servers: &mut HashMap<u64, ServerEntry>,
-    ) -> Result<ServerEntry, String> {
-        if servers
-            .get(&self.server)
-            .is_none_or(|entry| entry.instance != self.instance)
-        {
-            return Err("The conversation changed while stopping; retry leaving it.".into());
-        }
-        // The returned row can survive later disk/UI awaits. End its exact native file scope
-        // NOW under the same incarnation guard, rather than waiting for its destructor.
+    pub(super) fn server_id(&self) -> u64 {
+        self.server
+    }
+    pub(super) fn matches_entry(&self, entry: &ServerEntry) -> bool {
+        entry.instance == self.instance
+    }
+    pub(super) fn remove(self, servers: &mut ServerTable) -> Result<Box<ServerEntry>, String> {
+        let mut removed = None;
         servers
-            .get(&self.server)
-            .expect("exact incarnation checked above")
-            .files
-            .retire();
-        Ok(servers
-            .remove(&self.server)
-            .expect("exact incarnation checked above"))
+            .extract_stopped_legacy(self, &mut removed)
+            .map_err(str::to_owned)?;
+        Ok(removed.expect("checked stopped legacy row returned whole"))
     }
 }
 
@@ -43,7 +35,7 @@ pub(super) async fn stop_server(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| (entry.actor.clone(), entry.instance))
     else {
         return Ok(None);
@@ -162,16 +154,29 @@ pub(crate) mod tests {
         let state = AppState::default();
         let (old, old_task, old_drain) = running(911);
         let old_actor = old.actor.clone();
-        state.servers.lock().await.insert(1, old);
+        state.servers.lock().await.install_legacy_fixture(1, old);
         let stopped = stop_server(&state, 1, &ManualClock::new(1_000))
             .await
             .unwrap()
             .unwrap();
         let (replacement, new_task, new_drain) = running(912);
         let new_actor = replacement.actor.clone();
-        state.servers.lock().await.insert(1, replacement);
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(1, replacement);
         assert!(stopped.remove(&mut *state.servers.lock().await).is_err());
-        assert_eq!(state.servers.lock().await[&1].instance, 912);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .instance,
+            912
+        );
         assert!(old_actor
             .send_reply(channel_id("general"), "after retirement", "")
             .await
@@ -199,7 +204,7 @@ pub(crate) mod tests {
         let account = keep_session::current(&state, 0).unwrap();
         let captured = entry.files.scope(account.clone());
         entry.actor.set_keep_session(Some(captured.clone()));
-        state.servers.lock().await.insert(1, entry);
+        state.servers.lock().await.install_legacy_fixture(1, entry);
         let stopped = stop_server(&state, 1, &ManualClock::new(1000))
             .await
             .unwrap()
@@ -227,7 +232,7 @@ pub(crate) mod tests {
         let state = AppState::default();
         let (entry, task, drain) = running(913);
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(1, entry);
+        state.servers.lock().await.install_legacy_fixture(1, entry);
         let ready = actor
             .prepare_durable_send(catcoms_app::durable_chat::DurableSendRequest {
                 token: [1; 16],
@@ -247,7 +252,16 @@ pub(crate) mod tests {
         .await;
         clock.advance_ms(STOP_DEADLINE.as_millis() as u64);
         assert!(stopping.await.is_err());
-        assert_eq!(state.servers.lock().await[&1].instance, 913);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .instance,
+            913
+        );
         drop(ready);
         actor
             .send_reply(channel_id("general"), "still here", "")

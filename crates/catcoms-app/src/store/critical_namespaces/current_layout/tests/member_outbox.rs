@@ -1365,6 +1365,137 @@ fn native_index2_actual_join_lifecycle_preserves_version_and_cold_reopens() {
     assert_eq!(parsed.member_outbox_payload.unwrap(), five);
 }
 
+/// The exact shared JOIN writer supplies real version3 successor bytes. Native
+/// cold inspection must remember WHICH catalog it required, through the common
+/// opener: a vanished successor cannot silently become an old-catalog success.
+#[test]
+fn lifecycle3_actual_join_cold_open_retains_the_exact_selected_catalog_role() {
+    use crate::store::critical_namespaces::native_registry::operational::upgrade_source::owning::{
+        at_edge, Edge,
+    };
+    use crate::store::{
+        NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade, NativeRegistryInstallation,
+        NativeRegistryPolicy,
+    };
+    use catcoms_mls::MlsDevice;
+    for mode in 0..3 {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let shared = pool();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x77d0 + mode);
+        let source = join_source(0x77d0 + mode, &mut rng);
+        let invite = source
+            .owner
+            .mint_owner_checkpoint_invite(&source.store, [79; 16], 100_000, vec![])
+            .unwrap();
+        drop(five_with_join_execution(path, &shared, &source, &mut rng));
+        let policy1 = NativeRegistryPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+            NativeRegistryPolicy::required_persistent_capacity(),
+        )
+        .unwrap();
+        let mut declaration = NativeRegistryInstallation::prepare(
+            path,
+            SECRET,
+            &mut rng,
+            member_execution_policy(&shared),
+            policy1,
+        )
+        .unwrap();
+        declaration.retry().unwrap();
+        let policy2 = NativeIndexPolicy::new(
+            CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+            NativeIndexPolicy::required_persistent_capacity(),
+        )
+        .unwrap();
+        let mut upgrade = NativeIndexUpgrade::prepare(
+            declaration.into_native_registry().unwrap(),
+            policy2,
+            &mut rng,
+        )
+        .unwrap();
+        upgrade.retry().unwrap();
+        let native = upgrade
+            .into_index_store()
+            .unwrap()
+            .into_lifecycle3_for_test(&mut rng)
+            .unwrap();
+        let store = native.actual_store_for_test().unwrap();
+        store
+            .configure_owner_evidence_budget(source.budget)
+            .unwrap();
+        let key = store.keys.db_key().unwrap();
+        let catalog = path.join(Slot::Current.name());
+        let stage = path.join(Slot::Stage.name());
+        let original = fs::read(&catalog).unwrap();
+        if mode < 2 {
+            let mut joined = store
+                .prepare_journalled_owner_checkpoint_join(
+                    &source.store,
+                    &source.owner,
+                    MlsDevice::generate().unwrap(),
+                    invite,
+                    &mut rng,
+                )
+                .unwrap();
+            store.critical_namespace_fault.store(1, Ordering::SeqCst);
+            assert!(matches!(
+                joined.save_pending(store, &mut rng),
+                Err(crate::AppError::Io(_))
+            ));
+            store.critical_namespace_fault.store(0, Ordering::SeqCst);
+            drop(joined);
+        } else {
+            // Genuine duplicate recovery control, with no invented JOIN row.
+            fs::write(&stage, &original).unwrap();
+        }
+        let selected = fs::read(&stage).unwrap();
+        if mode < 2 {
+            assert_ne!(selected, original);
+        }
+        drop(native);
+        if mode == 1 {
+            at_edge(
+                Edge::AfterInspection,
+                Box::new({
+                    let stage = stage.clone();
+                    move || fs::remove_file(stage).unwrap()
+                }),
+            );
+        }
+        let opened = NativeIndexStore::open_lifecycle3_for_test(
+            path,
+            SECRET,
+            &mut NeverRng,
+            member_execution_policy(&shared),
+        );
+        if mode == 1 {
+            assert!(
+                opened.is_err(),
+                "a retained valid successor disappeared after inspection"
+            );
+            assert_eq!(fs::read(&catalog).unwrap(), original);
+        } else {
+            let mut opened = opened.unwrap();
+            assert_eq!(opened.row_count_data().unwrap(), 0);
+            assert_eq!(
+                fs::read(&catalog).unwrap(),
+                if mode == 0 { selected } else { original }
+            );
+            assert!(!stage.exists());
+            let raw = fs::read(&catalog).unwrap();
+            let plain = Zeroizing::new(unseal(&key, &unframe(&raw).unwrap()).unwrap());
+            let parsed = opened
+                .actual_store_for_test()
+                .unwrap()
+                .parse_configured_join_catalog(&plain)
+                .unwrap();
+            assert_eq!(parsed.native_registry_version, Some(3));
+            assert_eq!(parsed.count, usize::from(mode == 0));
+        }
+    }
+}
+
 /// Disk-equivalent seed-claim/predecessor-JOIN interruption, using the genuine
 /// JOIN writer. A real pinned predecessor process is still a separate gate.
 /// A known complete stage is retained byte-for-byte; partial data stays refused.

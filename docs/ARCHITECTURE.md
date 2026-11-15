@@ -1,11 +1,162 @@
 # Mewtual; Architecture
 
-Index3 has non-writing preparation from an exclusively owned opaque index2
-mount and separate private fixed-name physical I/O. Preparation independently
-funds held inputs and encrypted outputs, preserves JOIN history and rechecks
-identities after sealing. The I/O retains actual marker/file proofs across
-retries and proof-bound first-torn cleanup. No opener or owning admission/handoff
-selects3 yet; native command/backend consumers remain open.
+Unsigned native V2 invitation preparation now follows the SAME retained
+Runtime/Host/member verifier and actual governed4 Current. Its output is only
+preimage-hash/expiry DATA. A separate Sync original caches Clock/nonce/spec/raw
+and supplies a distinct native key tail; the covering journal, SavedInvite and
+publication consumer remain unfinished. Chat V2 is OFF.
+[Actual path](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+The library-only governed founder continuation retains the SAME warm node,
+private Add candidate and native custody. Actual SDK evidence is separate from
+original genesis provenance; the ordinary-member branch preserves its original
+Admission and runtime. Production installation, Root covering save and lock
+cleanup remain unfinished and unreachable. [Contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+Completed private MLS Add work has an exclusive exact-receiver whole-pair
+handoff. It retains the replaced graph for disposal outside final writers;
+both installed halves remain independently paid and mutation-closed. The Root
+governing-save/native/Source consumer is still unfinished.
+[Ownership boundary](communication-recovery/CHAT-V2-ADD-OWNERSHIP.md).
+
+Independent V2 join binding DATA codecs now separate accepted-anchor/request/
+package/Welcome commitments and exact governing Add issuer linkage. They have
+no transport/native consumer or source constructor. The actual owning join,
+live founder/joined sources and namespace6 remain unfinished and disabled.
+[Scope and evidence](communication-recovery/CHAT-V2-JOIN-BINDINGS.md).
+
+The disabled Native Text App now consumes a distinct authenticated warm-session
+envelope, retains exact critical4 requests before authoring, and displays its
+own locally saved originals. It excludes unsupported Legacy surfaces/readers.
+Shared group projection, joined sources, transport and cold authoring restore
+remain unfinished. [Current implementation and evidence](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
+The disabled native route now reads bounded pages of the current member's
+actual saved originals, with independent response payment and final checks
+against installed vault/row objects. It is not a shared group projection;
+frontend integration and Chat V2 activation remain unfinished.
+[Contract and pending validation](communication-recovery/CHAT-V2-NATIVE-HISTORY.md).
+
+Native warm text now has real tagged server rows and plain local-message
+dispatch behind the disabled switch. Native final admission holds actual UI
+custody through the file job; whole-close drains without Legacy's held guards.
+Two native rows actually saved in focused tests. Own-history/frontend, joined
+sources, transport/projection/cold restore and full acceptance remain unfinished.
+[Current scope and pending checks](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
+Native row integration now has an original negative Source-counter fence. The
+paid runtime selection can close that counter through SC atomics without
+borrowing its book, runtime or issuer. This neither completes Leave/Retired nor
+drains actual SDK/physical work. Native backend rows, checked commands and the
+frontend remain unfinished and disabled.
+[Implementation and pending checks](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
+The disabled native text runtime now exposes a paid weak original-row selector
+and two-phase ordinary-member saving through the retained NativeRequired driver.
+Native custody precedes runtime restoration on save, refusal, drop and unwind.
+The native command factory, usable server row and complete stored-message reader
+remain open; these Root interfaces do not enable Chat V2.
+[Implementation and evidence](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
+The disabled native text path now has a removable canonical Source owner,
+paired warm installation and original bootstrap/source/work shutdown under
+validation. Native commands, joined sources, transport/projection/cold restore
+and Chat V2 acceptance remain open. [Contract](communication-recovery/CHAT-V2-NATIVE-SOURCE-CONTROLLER.md).
+
+Original metadata/authentication and UI-state work now have a distinct closed
+drain under validation. Nine focused cases passed, including a post-CAS capture
+wakeup race fixed after review. This is separate from Source/SDK/TCP and actual
+facade disposal; native close integration and Chat V2 remain unfinished.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-WORK-DRAIN.md).
+
+Native text creation and retirement now have owning two-phase work captures
+under validation. Admitted preparations participate in original closure even
+when no row exists. Ten new regressions and all 56 affected source tests passed;
+the native controller/commands
+and wider Chat V2 remain unfinished and disabled.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-CAPTURE.md).
+
+Whole native text Source retirement is under validation. Cleanup now separates
+original key work, whole SDK/body destruction and original TCP drainage, retaining
+the same canonical evidence across lost workers. All 46 affected source tests
+passed; adversarial review is clear. The native consumer and wider
+Chat V2 remain unfinished and disabled.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-RETIREMENT.md).
+
+Native text transport now retains actual TCP key-task custody through teardown.
+The affected networking package passed 208 tests and strict Clippy; the Root
+source/admission cohort passed 37 cases. Native commands, canonical
+retirement, joined sources and Chat V2 acceptance remain unfinished and disabled.
+[Scope and evidence](communication-recovery/CHAT-V2-NATIVE-TCP-LIFETIME.md).
+
+Native text authoring is adding the original device/network/whole founder and
+Native4 activation dependencies. The current source cohort passed 33 local
+regressions; broader gates and the actual native command consumer remain open.
+Chat V2 stays disabled and incomplete. [Scope and pending acceptance](communication-recovery/CHAT-V2-NATIVE-AUTHORING.md).
+
+Native lock snapshots now have bounded synchronous DATA custody, original-mount
+retry, exact close acknowledgements and response-bound warning receipts under
+adversarial validation. Chat V2 stays off; operational text authoring and
+acceptance remain unfinished. This continuation supersedes the older snapshot
+status paragraphs below. [Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-SNAPSHOTS.md).
+
+## Prior disabled checkpoints (before lock-snapshot integration)
+
+Native ordinary UI-state IO is adding original authenticated-mount binding.
+Same-root reauthentication keeps its canonical negative metadata; another live
+mount cannot substitute. Lock snapshots and retry remain unfinished.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-TARGET.md).
+
+Ordinary native UI-state read/save is under validation on a separate original
+physical slot and owned IO lane. It remains disabled; final lock snapshots and
+authentication continuity are still unfinished.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-STATE.md).
+
+Native text authentication is releasing its physical slot before finalization
+while retaining independently paid original Host/index/mount cached negatives.
+The actual native consumer is under validation and remains disabled; typed UI
+continuity is still unfinished.
+[Contract](communication-recovery/CHAT-V2-NATIVE-AUTH-CHECK.md).
+
+The disabled native text path is adding original UI-key retirement ownership and
+lock/unlock/close ordering. Key-counter drainage is distinct from whole shutdown;
+UI continuity and operational text send remain unfinished.
+[Boundary and pending validation](communication-recovery/CHAT-V2-NATIVE-UI-LIFECYCLE.md).
+
+The real native warm text factory is under validation, with production selection
+still off. Its synchronous Tauri router authenticates the actual caller and
+original generation; its fresh storage chain retains the same vault session,
+keys and lineage into the opaque selected3 owner. This is mount/authentication
+only. Operational founder/member dispatch, cold restore and Svelte continuity
+remain unfinished. [Contract](communication-recovery/CHAT-V2-NATIVE-WARM-FACTORY.md).
+
+The network dependency security migration is under validation. Actual patched
+gossipsub/Hickory packages replace the old graph in both workspaces, with explicit
+2000-topic limits and a narrow RT seeded RNG adapter for AutoNAT. QUIC's upstream
+TLS backend changes to explicit AWS-LC; WebSocket retains explicit ring. No global
+provider initializer or smart-dial behavior is added.
+[Scope and required evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
+Normal3's private metadata cell now also has a concrete Legacy invite refresh
+producer under validation. It shares Rename's revision, retained request/IO,
+physical owner and retirement fence. No native minting or join authority follows
+from storing invite DATA. [Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-INDEX3-INVITE.md).
+
+Private selected3 storage now separates affine admission from one bounded finite
+physical-work capsule. Count/Rename still serialize through the original cell;
+closing the facade cannot free physical custody before its worker/debt drains.
+Capture borrows the actual mount's revocation atomic without constructing an
+observer. This is under validation, with no native/SDK activation.
+[Custody and limits](communication-recovery/CHAT-V2-NATIVE-INDEX3-PHYSICAL-WORK.md).
+
+Index3's private owning storage upgrade and strict cold opener are under
+validation. They consume the original opaque index2 mount, independently fund
+the overlap, hold both catalog claims through physical selection and handler
+installation, and retain original cold file proofs through Current/JOIN opening.
+The opaque result exposes storage DATA only. A private normal3 Rename WAL and
+continuous cold recovery are under validation; native command and backend
+consumers remain unfinished. Chat V2 stays disabled.
+[Normal WAL boundary](communication-recovery/CHAT-V2-NATIVE-INDEX3-WAL.md).
 [Boundary and invoices](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
 
 The physical native index now retains its Pending-only write in one mount-wide
