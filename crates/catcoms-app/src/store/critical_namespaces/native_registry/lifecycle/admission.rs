@@ -21,6 +21,12 @@ struct Payment {
     debit: CatalogReadReservation,
 }
 
+/// Narrow lifetime tail for finite files/buffers. In particular this does not
+/// retain Handler.cold, which could otherwise cycle back to cold evidence.
+pub(in crate::store::critical_namespaces::native_registry) struct PaymentTail {
+    _payment: Arc<Payment>,
+}
+
 #[derive(Clone)]
 pub(in crate::store) struct Handler {
     // Cold evidence has no Store back-reference. All original handles and its
@@ -30,6 +36,22 @@ pub(in crate::store) struct Handler {
     payment: Arc<Payment>,
 }
 impl Handler {
+    pub(in crate::store::critical_namespaces::native_registry) fn payment_tail(
+        &self,
+    ) -> PaymentTail {
+        PaymentTail {
+            _payment: self.payment.clone(),
+        }
+    }
+    /// Original cached gate only; never retain cold evidence or finite files
+    /// merely to check this negative after authentication releases its slot.
+    pub(in crate::store::critical_namespaces::native_registry) fn observe_open(
+        &self,
+    ) -> OpenNegative {
+        OpenNegative {
+            original: self.gate.clone(),
+        }
+    }
     /// Consume the SAME already-reserved full preparation invoice. This does
     /// not clone a debit or infer new capacity from extending its lifetime.
     pub(in crate::store::critical_namespaces::native_registry) fn from_reserved(
@@ -75,6 +97,11 @@ impl Handler {
         } else {
             Err(refused())
         }
+    }
+    /// Custody-only negative. An ACTIVE retained transaction must still be
+    /// lendable for exact retry; this bit supplies no fresh index admission.
+    pub(in crate::store::critical_namespaces::native_registry) fn is_open_cached(&self) -> bool {
+        self.gate.active.load(Ordering::SeqCst) != CLOSED
     }
     pub(in crate::store) fn close(&self) {
         self.gate.active.store(CLOSED, Ordering::SeqCst);
@@ -127,6 +154,17 @@ struct Gate {
     _payment: Arc<Payment>,
 }
 
+/// Narrow original gate pin. Gate already owns its payment; retaining Handler
+/// here would unnecessarily retain Handler.cold and its physical-session tail.
+pub(in crate::store::critical_namespaces::native_registry) struct OpenNegative {
+    original: Arc<Gate>,
+}
+impl OpenNegative {
+    pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
+        self.original.active.load(Ordering::SeqCst) != CLOSED
+    }
+}
+
 pub(in crate::store::critical_namespaces::native_registry) struct Claim {
     original: Arc<Gate>,
     serial: u64,
@@ -147,6 +185,24 @@ pub(in crate::store::critical_namespaces::native_registry) struct FinishedClaim 
     _original: Arc<Gate>,
 }
 impl Claim {
+    pub(in crate::store::critical_namespaces::native_registry) fn require_active(
+        &self,
+    ) -> Result<(), AppError> {
+        if self.original.active.load(Ordering::SeqCst) != self.serial {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    /// Called only by the LAST completed-debt field after actual IO/buffer
+    /// retirement, outside all writers. Foreign completion must fail closed;
+    /// it cannot leave an unexpected successor admitted.
+    pub(in crate::store::critical_namespaces::native_registry) fn finish_after_retirement(self) {
+        let finished = self.finish();
+        if finished.state == Release::Foreign {
+            finished._original.active.store(CLOSED, Ordering::SeqCst);
+        }
+        drop(finished);
+    }
     pub(in crate::store::critical_namespaces::native_registry) fn finish(self) -> FinishedClaim {
         let state = match self.original.active.compare_exchange(
             self.serial,

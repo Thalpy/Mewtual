@@ -35,6 +35,19 @@ impl std::fmt::Debug for CriticalCatalogReadPool {
     }
 }
 impl CriticalCatalogReadPool {
+    /// Cached allocation identity only; never reserves credit or proves that
+    /// a debit remains valid. Guard-safe captures use this before pinning real
+    /// work, then validate the actual debit outside the native guard.
+    pub(in crate::store) fn same_pool_cached(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+    /// Test only: hold the genuine account writer while another thread
+    /// exercises a purported atomic-only capture. The test owns release/join.
+    #[cfg(test)]
+    pub(in crate::store) fn with_counter_locked_for_test(&self, run: impl FnOnce()) {
+        let _held = self.inner.state.lock().expect("test account writer");
+        run();
+    }
     /// Negative contention observation for actual blocked-I/O tests; no credit or guard.
     #[cfg(test)]
     pub(in crate::store) fn counter_available_for_test(&self) -> bool {

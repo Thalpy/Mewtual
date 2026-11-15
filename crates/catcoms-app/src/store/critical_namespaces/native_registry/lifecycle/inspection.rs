@@ -2,6 +2,7 @@
 //! owner merely because an attributable first claim could be removed.
 use super::{admission::Handler, preparation, *};
 use crate::store::persistence::native_registry::lifecycle::upgrade::{
+    index::{IndexCommitIo, IndexStageCleanup},
     FirstTornIo, UpgradeInventory, UpgradeIo,
 };
 use crate::store::ServerStore;
@@ -12,6 +13,8 @@ use zeroize::Zeroizing;
 /// drops its Store before the evidence's last handler clone retires.
 pub(super) struct Observation {
     evidence: Evidence,
+    networks:
+        Vec<std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>>,
     _session: catcoms_storage::VaultPhysicalWorkLease,
 }
 enum Evidence {
@@ -22,6 +25,13 @@ enum Evidence {
     Repaired {
         io: Box<UpgradeIo>,
         output: Box<preparation::Output>,
+    },
+    IndexCommitted {
+        io: Box<IndexCommitIo>,
+        frame: Zeroizing<Vec<u8>>,
+    },
+    IndexCleaned {
+        io: Box<IndexStageCleanup>,
     },
 }
 
@@ -46,6 +56,7 @@ impl Handler {
                             io: Box::new(io),
                             output: Box::new(output),
                         },
+                        networks: Vec::new(),
                         _session: store._session.retain_for_physical_work(),
                     });
                 }
@@ -61,12 +72,42 @@ impl Handler {
             // this strict3 open; a later explicit2 opener can recover its JOIN.
             return Err(refused());
         }
+        let (selected, _) = preparation::decode_selected_data(store, &inventory)?;
+        let networks = super::network::capture_selected(store, &selected, self)?;
+        drop(selected);
+        if inventory.index_stage().is_some() {
+            // Normal3 WAL is mutually exclusive with JOIN/upgrade debt. Keep
+            // THIS inventory through effect and final exposure, never recapture
+            // equal-looking objects after repair or drop its required Stage.
+            let proof = super::wal::classify(store, &inventory)?;
+            let evidence = if proof.decision().is_commit() {
+                let frame = Zeroizing::new(inventory.index_stage().ok_or_else(refused)?.to_vec());
+                let mut io = IndexCommitIo::recover(store, inventory, proof, &frame)?;
+                io.commit(store, &frame)?;
+                io.require_complete(store, &frame)?;
+                Evidence::IndexCommitted {
+                    io: Box::new(io),
+                    frame,
+                }
+            } else {
+                let mut io = IndexStageCleanup::prepare(store, inventory, proof)?;
+                io.run(store)?;
+                io.require_complete(store)?;
+                Evidence::IndexCleaned { io: Box::new(io) }
+            };
+            return self.retain_observation(Observation {
+                evidence,
+                networks,
+                _session: store._session.retain_for_physical_work(),
+            });
+        }
         let catalog = require_selected(store, &inventory)?;
         self.retain_observation(Observation {
             evidence: Evidence::Selected {
                 inventory: Box::new(inventory),
                 catalog,
             },
+            networks,
             _session: store._session.retain_for_physical_work(),
         })
     }
@@ -98,12 +139,19 @@ impl Handler {
                 .take()
                 .ok_or_else(refused)?
         };
-        let result = match &observation.evidence {
-            Evidence::Selected { inventory, catalog } => {
-                inventory.require_after_join(store, catalog)
+        let result = (|| {
+            for network in &observation.networks {
+                network.require(store)?;
             }
-            Evidence::Repaired { io, output } => io.require_complete(store, &output.bytes()),
-        };
+            match &observation.evidence {
+                Evidence::Selected { inventory, catalog } => {
+                    inventory.require_after_join(store, catalog)
+                }
+                Evidence::Repaired { io, output } => io.require_complete(store, &output.bytes()),
+                Evidence::IndexCommitted { io, frame } => io.require_complete(store, frame),
+                Evidence::IndexCleaned { io } => io.require_complete(store),
+            }
+        })();
         drop(observation); // No cell/catalog/Current guard; files then session.
         result
     }
@@ -117,8 +165,8 @@ fn require_selected(
         || inventory.has_upgrade_outputs()
         || inventory.index_stage().is_some()
     {
-        // Normal version3 index WAL recovery belongs to its own producer.
-        // Do not reuse the smaller version2 decoder/cleanup classifications.
+        // Normal3 Stage is handled only by the dedicated branch above. Never
+        // reuse the smaller version2 decoder/cleanup classifications here.
         return Err(refused());
     }
     let (_, catalog) = preparation::authenticate_selected(store, inventory)?;

@@ -8,6 +8,10 @@ use crate::store::critical_namespaces::{
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
 use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
+mod physical;
+pub(in crate::store::critical_namespaces::native_registry) use physical::{
+    AuthenticationNegative, MetadataWork, SourceWork, UiWork, WorkDrain,
+};
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -17,6 +21,9 @@ pub(in crate::store::critical_namespaces) enum Edge {
     AfterDestination,
     AfterInspection,
     BeforeColdExposure,
+    BeforeMetadataAdmission,
+    AfterMetadataCommit,
+    BeforePhysicalInstall,
 }
 #[cfg(test)]
 thread_local! {
@@ -299,8 +306,8 @@ impl Upgrade {
 /// command, Source or SDK authority is exposed by successful storage upgrade.
 pub(in crate::store::critical_namespaces) struct Store {
     _close: lifecycle_admission::AdmissionOwner,
-    current: V2CurrentLayoutStore,
-    handler: lifecycle_admission::Handler,
+    // Only finite custody is shared. No work capsule can clone this closer.
+    physical: Arc<physical::Physical>,
 }
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -308,11 +315,87 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Store {
+    pub(in crate::store::critical_namespaces::native_registry) fn require_governance_completion(
+        &self,
+        receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,
+    ) -> Result<(), AppError> {
+        self.physical.require_governance_completion(receiver)
+    }
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn constructor_store_for_test(
+        &self,
+    ) -> Result<&ServerStore, AppError> {
+        self.physical.constructor_store_for_test()
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn open_governed(
+        dir: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        mut current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        if policy.pool.same_account(&current.archive.pending.pool)
+            || current
+                .member_outbox
+                .as_ref()
+                .is_none_or(|m| policy.pool.same_account(&m.pool))
+        {
+            return Err(refused());
+        }
+        let handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
+        let physical = physical::Physical::allocate(handler.clone());
+        current.native_registry = Some(NativeRegistryHandler::GovernanceOpening(handler.clone()));
+        let governance = crate::store::V2GovernanceLayoutPolicy::for_native(current)?;
+        let mut prepared = crate::store::PreparedV2GovernanceLayoutStore::open_native(
+            dir, passphrase, rng, governance,
+        )?;
+        prepared.retry(rng)?;
+        let (current, tail) = prepared
+            .into_governance_layout_store()
+            .map_err(|_| refused())?
+            .into_native_current()?;
+        let mut value = Self {
+            _close: lifecycle_admission::AdmissionOwner::new(&handler),
+            physical,
+        };
+        Arc::get_mut(&mut value.physical)
+            .expect("unexposed original governed physical")
+            .install(current);
+        value.row_count_data()?;
+        #[cfg(test)]
+        observe_edge(Edge::BeforeColdExposure);
+        // No file read follows this same-held proof. Existing4 consumes its
+        // original observation; fresh4 retains its overlapping declaration.
+        // On failure the destination must close before the tail is destroyed.
+        if let Err(error) = value.physical.finish_governed_cold(&tail) {
+            drop(value);
+            drop(tail);
+            return Err(error);
+        }
+        drop(tail);
+        Ok(value)
+    }
+    /// Only the private pre-exposure Selected3 continuation reaches this
+    /// unique receiver. Existing work/Source loans make Arc uniqueness fail.
+    pub(in crate::store::critical_namespaces::native_registry) fn advance_governance(
+        &mut self,
+        receiver: &mut crate::store::critical_namespaces::governance_layout::native::Startup,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.advance_governance(receiver, rng)
+    }
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn handler_for_test(
+        &self,
+    ) -> lifecycle_admission::Handler {
+        self.physical.handler_for_test()
+    }
     #[cfg(test)]
     pub(in crate::store::critical_namespaces) fn actual_store_for_test(
         &self,
     ) -> Result<&ServerStore, AppError> {
-        self.current.checked_store()
+        self.physical.actual_store_for_test()
     }
     /// Explicit strict3 cold open. Handler payment and original fixed-marker
     /// inspection precede Current/JOIN cleaners. First-torn cleanup that leaves
@@ -333,6 +416,9 @@ impl Store {
             return Err(refused());
         }
         let handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
+        // Allocate all physical control metadata before common opening moves
+        // a real Current. The unexposed empty physical rejects every operation.
+        let physical = physical::Physical::allocate(handler.clone());
         current.native_registry = Some(NativeRegistryHandler::Lifecycle(handler.clone()));
         let mut prepared =
             crate::store::PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current)?;
@@ -342,40 +428,125 @@ impl Store {
             .map_err(|_| refused())?;
         let mut value = Self {
             _close: lifecycle_admission::AdmissionOwner::new(&handler),
-            current,
-            handler,
+            physical,
         };
+        Arc::get_mut(&mut value.physical)
+            .expect("unexposed original physical3")
+            .install(current);
         value.row_count_data()?;
         #[cfg(test)]
         observe_edge(Edge::BeforeColdExposure);
-        value.handler.finish_cold(value.current.checked_store()?)?;
+        value.physical.finish_cold()?;
         Ok(value)
     }
     pub(in crate::store::critical_namespaces) fn row_count_data(
         &mut self,
     ) -> Result<usize, AppError> {
-        self.handler.require()?;
-        self.handler.require_idle_cached()?;
-        let store = self.current.checked_store()?;
-        // The opaque owner is exclusively borrowed for the whole paid read.
-        // No external Current/worker loan exists; a future shared reader must
-        // add its own cell/fence rather than changing this to an unguarded &self.
-        let inventory =
-            UpgradeInventory::capture(store, self.handler.debit(), self.handler.pool())?;
-        let (count, _) =
-            super::super::super::lifecycle::preparation::authenticate_selected(store, &inventory)?;
-        let guard = store
-            .pending_join_catalog
-            .try_lock()
-            .map_err(|_| refused())?;
-        self.handler.require_idle_cached()?;
-        if guard.as_ref().ok_or_else(refused)?.pending.is_some() {
-            return Err(refused());
-        }
-        inventory.require(store)?;
-        drop(guard);
-        drop(inventory);
-        Ok(count)
+        self.physical.row_count_data()
+    }
+
+    /// Native facade's shared DATA read still serializes through the original
+    /// physical cell. The older exclusive owner API remains unchanged.
+    pub(in crate::store::critical_namespaces::native_registry) fn native_row_count_data(
+        &self,
+    ) -> Result<usize, AppError> {
+        self.physical.row_count_data()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn close_admission(&self) {
+        self.physical.close_admission();
+    }
+    /// Call after closing this SAME owning facade; returned metadata has no
+    /// physical/Current/handler backreference and cannot reopen work slots.
+    pub(in crate::store::critical_namespaces::native_registry) fn observe_closed_work(
+        &self,
+    ) -> WorkDrain {
+        self.physical.observe_closed_work()
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn lookup_creation_data(
+        &self,
+        invocation: [u8; 32],
+        request: [u8; 32],
+    ) -> Result<Option<crate::store::NativeCreationStatusData>, AppError> {
+        self.physical.lookup_creation_data(invocation, request)
+    }
+
+    /// Storage-only founder transitions on the SAME poisoned cell. Outgoing
+    /// debt must retire outside guards before another physical phase can begin.
+    pub(in crate::store::critical_namespaces::native_registry) fn birth_founder_data(
+        &mut self,
+        request: &super::super::super::lifecycle::founder::Pending,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::mount::NativeCreationStatusData,
+            Option<super::super::super::lifecycle::cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        self.physical.birth_founder_data(request, rng)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn activate_founder_data(
+        &mut self,
+        request: &super::super::super::lifecycle::founder::Activate,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::mount::NativeCreationStatusData,
+            Option<super::super::super::lifecycle::cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        self.physical.activate_founder_data(request, rng)
+    }
+    /// Private local metadata CAS. No native caller/SDK authority is implied.
+    /// The returned finite debt must retire outside every enclosing guard.
+    pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata_data(
+        &mut self,
+        request: &super::super::super::lifecycle::rename::Request,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::super::lifecycle::rename::Metadata,
+            Option<super::super::super::lifecycle::cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        self.physical.rename_metadata_data(request, rng)
+    }
+    /// Store already-minted Legacy invite DATA under the same metadata CAS.
+    /// Native minting/current membership and command authorization are separate.
+    pub(in crate::store::critical_namespaces::native_registry) fn refresh_legacy_invite_data(
+        &mut self,
+        request: &super::super::super::lifecycle::refresh::Request,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            super::super::super::lifecycle::rename::Metadata,
+            Option<super::super::super::lifecycle::cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        self.physical.refresh_legacy_invite_data(request, rng)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn capture_ui_work(
+        &self,
+    ) -> Option<UiWork> {
+        self.physical.capture_ui()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn capture_source_work(
+        &self,
+    ) -> Option<SourceWork> {
+        self.physical.capture_source()
+    }
+    /// One prepaid original physical capsule, not admission or a native/SDK
+    /// credential. Cached capture performs no IO/allocation/account lock;
+    /// retire the returned WHOLE capsule outside all native/writer guards.
+    pub(in crate::store::critical_namespaces::native_registry) fn capture_metadata_work(
+        &self,
+    ) -> Option<MetadataWork> {
+        self.physical.capture()
     }
 }
 
@@ -402,6 +573,7 @@ pub(in crate::store::critical_namespaces::native_registry) const OWNERSHIP_METAD
         + std::mem::size_of::<Retirement>()
         + std::mem::size_of::<Claims>()
         + std::mem::size_of::<CatalogHandoff<'static>>())
+    + physical::METADATA
     + 512;
 impl Upgrade {
     pub(in crate::store::critical_namespaces::native_registry) fn into_store(
@@ -410,6 +582,10 @@ impl Upgrade {
         if self.retry().is_err() || !self.complete {
             return Err(Box::new(self));
         }
+        // Allocation precedes the last uniqueness proof and every original
+        // Current extraction. Both original affine closers remain armed here.
+        let destination_handler = self.prepared.handler.clone();
+        let destination_physical = physical::Physical::allocate(destination_handler.clone());
         let Some(source) = self.prepared.original.as_mut() else {
             return Err(Box::new(self));
         };
@@ -437,7 +613,6 @@ impl Upgrade {
             handler,
         } = physical;
         let CloseOwners { old, new } = self.close.take().unwrap();
-        let destination_handler = self.prepared.handler.clone();
         let retirement = Retirement {
             _old_close: old,
             _io: self.io.take().unwrap(),
@@ -451,11 +626,17 @@ impl Upgrade {
         // Destination is declared AFTER the complete retirement bundle. An
         // unwind therefore closes3 before any old input/buffer is destroyed.
         // Its existing affine closer travels here without creating a new gate.
-        let destination = Store {
+        let mut destination = Store {
             _close: new,
-            current,
-            handler: destination_handler,
+            physical: destination_physical,
         };
+        // Destination's FIRST closer is already armed if this invariant ever
+        // regresses. No observer or weak loan exists before the plain move.
+        #[cfg(test)]
+        observe_edge(Edge::BeforePhysicalInstall);
+        Arc::get_mut(&mut destination.physical)
+            .expect("unexposed original physical3")
+            .install(current);
         #[cfg(test)]
         observe_edge(Edge::AfterDestination);
         drop(retirement);
