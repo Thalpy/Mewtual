@@ -22,7 +22,7 @@ pub use source_close::NativeChatSourceClose;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;
-const PURPOSES: usize = 5;
+const PURPOSES: usize = 7;
 
 /// Closed purposes selected by concrete producers, never a WebView permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,12 @@ pub enum NativeChatKeyPurpose {
     BootstrapProfile,
     BootstrapHeader,
     MemberAction,
+    /// One governed Add's secret snapshot/restore, SDK operation and finite
+    /// candidate cleanup. Actual Root request/source admission is independent.
+    AddSdk,
+    /// The exact retained governing Header preimage. Bootstrap and ordinary
+    /// member cuts cannot authorize this later membership signature.
+    GoverningHeader,
 }
 impl NativeChatKeyPurpose {
     fn slot(self) -> usize {
@@ -41,6 +47,10 @@ impl NativeChatKeyPurpose {
             Self::BootstrapProfile => 2,
             Self::BootstrapHeader => 3,
             Self::MemberAction => 4,
+            // Append local counter slots; never alias a bootstrap/member End.
+            // These Rust-only purpose tags are not a wire or disk codec.
+            Self::AddSdk => 5,
+            Self::GoverningHeader => 6,
         }
     }
 }

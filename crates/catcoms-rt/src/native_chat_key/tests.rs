@@ -125,6 +125,82 @@ fn native_chat_key_distinct_purposes_are_bound_to_the_original_source() {
 }
 
 #[test]
+fn native_chat_key_governing_purposes_refuse_bootstrap_member_and_each_other() {
+    use NativeChatKeyPurpose::*;
+    for purpose in [AddSdk, GoverningHeader] {
+        let fixture = Fixture::new();
+        let ui = fixture.session();
+        let source = fixture.source(&ui);
+        let mut cut = source.prepare_cut(&ui.observe(), purpose).unwrap();
+        let mut ends = NativeChatKeyEnds::new();
+        for wrong in [
+            Device,
+            FounderSdk,
+            BootstrapProfile,
+            BootstrapHeader,
+            MemberAction,
+            AddSdk,
+            GoverningHeader,
+        ] {
+            if wrong == purpose {
+                continue;
+            }
+            assert_eq!(
+                cut.preflight(&source.observe(), wrong),
+                Err(NativeChatKeyRefusal::WrongPurpose)
+            );
+            assert_eq!(
+                cut.enter(&source.observe(), wrong, &mut ends),
+                Err(NativeChatKeyRefusal::WrongPurpose)
+            );
+            assert!(ends.slots.iter().all(Option::is_none));
+        }
+        cut.enter(&source.observe(), purpose, &mut ends).unwrap();
+        assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 1);
+        drop(ends);
+        assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn native_chat_key_governing_ends_do_not_alias_existing_slots_and_hold_source_drain() {
+    use NativeChatKeyPurpose::*;
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let source = fixture.source(&ui);
+    let mut ends = NativeChatKeyEnds::new();
+    for purpose in [
+        Device,
+        FounderSdk,
+        BootstrapProfile,
+        BootstrapHeader,
+        MemberAction,
+        AddSdk,
+        GoverningHeader,
+    ] {
+        let mut cut = source.prepare_cut(&ui.observe(), purpose).unwrap();
+        cut.enter(&source.observe(), purpose, &mut ends).unwrap();
+    }
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 7);
+    assert_eq!(source.original.counter.state.load(Ordering::SeqCst), 7);
+    let drain = source.observe_retirement();
+    source.close_handle().close();
+    let mut wait = Box::pin(drain.wait());
+    assert!(
+        pending(wait.as_mut()),
+        "closure cannot retire actual admitted work"
+    );
+    drop(ends);
+    assert!(drain.is_drained());
+    assert!(matches!(
+        wait.as_mut()
+            .poll(&mut Context::from_waker(&Waker::from(Arc::new(NoWake)))),
+        Poll::Ready(())
+    ));
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn native_chat_key_generation_publication_fences_before_registry_retirement() {
     let fixture = Fixture::new();
     let ui = fixture.session();
