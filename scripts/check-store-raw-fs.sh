@@ -120,6 +120,15 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|original.file.sync_all().map_err(io)?;']=1
+  # Native-family constructor only: claim attribution precedes the shared
+  # fence. Abort-only cleanup reauthenticates the pristine native3 baseline,
+  # compares bytes AND held identity again, and covers/reproves Stage absence
+  # before retiring the claim. No native/G/Source authority is produced.
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|original.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|cleanup_native_governance_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|cleanup_native_governance_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
   # Private offline Current4 metadata declaration only. Complete authenticated TWO-frame
   # seed and exact original native objects precede promotion; no arbitrary path, Source,
   # SDK/key entry or epoch-family effect. Preserve partial/foreign evidence on refusal.

@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+Combined governed-native startup authenticates exact index/marker frames and
+retains their original file identities across catalog declaration and final
+handoff. A matching namespace descriptor cannot authorize another mutable
+index. Native seed2 has its own AEAD domain and no seed1 fallback. First-torn
+cleanup only aborts on a separately verified pristine native3 baseline;
+authenticated invalid/future data and changed/nonempty evidence are preserved.
+The cold constructor keeps its actual observation or completed declaration
+through final reads. Cached4 revocation follows the original mounted owner
+without IO or locks. These storage checks establish no live membership,
+Source4, native credential, signer or operational restart authority.
+[Scope and acceptance](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
+
 The completed MLS Add ownership seam refuses foreign/stale receiver pairs and
 keeps exclusive loans through its no-fail swaps. The returned retired owner
 cannot execute or extract SDK state; the installed provider stays closed.

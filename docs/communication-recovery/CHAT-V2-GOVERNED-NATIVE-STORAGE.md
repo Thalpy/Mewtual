@@ -1,11 +1,23 @@
 # Governed native storage: implementation design
 
-This is the next implementation design, not an implemented constructor or
-permission to enable Chat V2. The current production native opener still
-refuses governance4. The completed MLS handoff in PR #131 has no Root consumer.
-Read-only design re-review found no remaining intrinsic blocker/high after
-the tuple bindings and repeated Stage-absence barrier below were clarified.
-No runtime code changed; tests were not rerun for this design-only increment.
+The constructor and cold metadata opener described below are implemented on
+`chat-v2-governed-native-storage`, based on PR #131. They grant no permission
+to enable Chat V2. The completed MLS handoff still has no production Root
+consumer. Read-only design and implementation review corrected the cold
+dispatch order, in-place torn-evidence changes, final retained-file proofs and
+payment/drop ordering. Final revision validation is in progress.
+
+All51 focused governance tests passed (371.56s), including13 new real-file
+constructor cases, all11 warm/cold declaration cuts, cleanup cuts241–244,
+in-place evidence changes, late equal-file replacement, final handoff,
+cached revocation, drop order and both steady parser routes. Complete
+frontend3,485, type checking, production build, browser flows and ambient/raw-fs
+gates passed. All83 native text cases passed (217.12s), including actual
+create/save/history and close/lock paths through the combined startup.
+Strict native all-target/all-feature Clippy passed (3m06s). Root strict Clippy
+still fails on556 inherited App diagnostics (prior checkpoint564); no warning
+suppression was added. Final routing rechecks, native build/startup, complete
+Root/native sign-off and real predecessor-binary evidence are pending.
 
 ## Owning sequence
 
@@ -32,9 +44,9 @@ semantics stay identical; future row changes require their own decision.
 
 ## Parser and inspector integration
 
-`archive_bootstrap::parse_configured_join_catalog` currently prioritizes the
-generic governance policy. That parser only permits4; it must not bypass the
-new steady handler's mandatory4 requirement. The exact configured parser must
+`archive_bootstrap::parse_configured_join_catalog` prioritizes the actual
+steady combined handler over the generic governance policy. The latter only
+permits4; it cannot bypass the steady handler's mandatory4 requirement. The exact configured parser must
 cover both Current and Stage/JOIN reads. Staging accepts its authenticated
 original native3 parent only under the unexposed declaration continuation,
 never through a steady-state missing4 fallback.

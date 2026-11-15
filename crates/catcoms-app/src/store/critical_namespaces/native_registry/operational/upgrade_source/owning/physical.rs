@@ -68,6 +68,29 @@ pub(super) const METADATA: usize = 8
     + 512;
 
 impl Physical {
+    pub(super) fn require_governance_completion(
+        &self,
+        receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,
+    ) -> Result<(), AppError> {
+        receiver.require_complete(self.current()?.checked_store()?)
+    }
+    #[cfg(test)]
+    pub(super) fn constructor_store_for_test(&self) -> Result<&ServerStore, AppError> {
+        Ok(self.current()?.constructor_store_for_test())
+    }
+    pub(super) fn advance_governance(
+        &mut self,
+        receiver: &mut crate::store::critical_namespaces::governance_layout::native::Startup,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        self.current
+            .as_mut()
+            .ok_or_else(refused)?
+            .advance_native_governance(receiver, rng)
+    }
     /// Allocate BEFORE original Current extraction, with the original upgrade
     /// still wholly armed. No physical allocation is exposed until install().
     pub(super) fn allocate(handler: lifecycle_admission::Handler) -> Arc<Self> {
@@ -90,6 +113,12 @@ impl Physical {
     }
     pub(super) fn finish_cold(&self) -> Result<(), AppError> {
         self.handler.finish_cold(self.current()?.checked_store()?)
+    }
+    pub(super) fn finish_governed_cold(
+        &self,
+        tail: &crate::store::critical_namespaces::governance_layout::NativeColdTail,
+    ) -> Result<(), AppError> {
+        tail.finish(self.current()?.checked_store()?)
     }
     #[cfg(test)]
     pub(super) fn handler_for_test(&self) -> lifecycle_admission::Handler {

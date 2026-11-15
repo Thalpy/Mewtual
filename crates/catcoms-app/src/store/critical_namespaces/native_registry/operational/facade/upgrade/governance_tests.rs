@@ -1,0 +1,559 @@
+//! Real-file constructor tests. These create no signer, Source, SDK or native
+//! command credential: all assertions concern the original physical owner.
+use super::*;
+use crate::store::critical_namespaces::{
+    governance_layout as governance,
+    native_registry::preparation::tests::{current_policy, SECRET},
+    pending_join_codec as catalog, Slot, ARCHIVE_BOOTSTRAP_ROOT,
+};
+use crate::store::{
+    NativeIndexPolicy, NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    NativeTextGovernedStorage,
+};
+use rand_chacha::ChaCha20Rng;
+use rand_core::{CryptoRng, RngCore, SeedableRng};
+use std::{fs, path::Path, sync::atomic::Ordering};
+
+struct NeverRng;
+impl CryptoRng for NeverRng {}
+impl RngCore for NeverRng {
+    fn next_u32(&mut self) -> u32 {
+        panic!("retained governance drew randomness")
+    }
+    fn next_u64(&mut self) -> u64 {
+        panic!("retained governance drew randomness")
+    }
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("retained governance drew randomness")
+    }
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+        panic!("retained governance drew randomness")
+    }
+}
+
+fn original(path: &Path, rng: &mut ChaCha20Rng) -> NativeTextVaultUpgrade {
+    let first_policy = NativeRegistryPolicy::new(
+        CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+        NativeRegistryPolicy::required_persistent_capacity(),
+    )
+    .unwrap();
+    let mut first = NativeRegistryInstallation::prepare_fresh(
+        path,
+        SECRET,
+        rng,
+        current_policy(),
+        first_policy,
+    )
+    .unwrap();
+    first.retry().unwrap();
+    let second_policy = NativeIndexPolicy::new(
+        CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+        NativeIndexPolicy::required_persistent_capacity(),
+    )
+    .unwrap();
+    let mut second =
+        NativeIndexUpgrade::prepare(first.into_native_registry().unwrap(), second_policy, rng)
+            .unwrap();
+    second.retry().unwrap();
+    let ui = NativeUiInvocationBudget::new(
+        CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity()).unwrap(),
+    )
+    .unwrap();
+    let mut original = NativeTextVaultUpgrade::prepare(
+        second.into_index_store().unwrap(),
+        Arc::new(AtomicU64::new(7)),
+        Arc::new(AtomicU64::new(7)),
+        Arc::new(AtomicBool::new(false)),
+        ui,
+    )
+    .unwrap();
+    original.retry(rng).unwrap();
+    original
+}
+
+fn actual(plan: &NativeTextGovernanceUpgrade) -> &crate::store::ServerStore {
+    let Some(Phase::Selected3(index)) = plan.original.as_ref().unwrap().phase.as_ref() else {
+        panic!("whole selected3 receiver");
+    };
+    index.constructor_store_for_test().unwrap()
+}
+fn fault(plan: &NativeTextGovernanceUpgrade, point: u8) {
+    actual(plan)
+        .critical_namespace_fault
+        .store(point, Ordering::SeqCst);
+}
+fn leaves(path: &Path) -> [Vec<u8>; 3] {
+    [
+        "native-registry.bin",
+        "native-registry-layout.bin",
+        "member-outbox-layout.bin",
+    ]
+    .map(|name| fs::read(path.join(ARCHIVE_BOOTSTRAP_ROOT).join(name)).unwrap())
+}
+
+#[test]
+fn native_governance_same_owner_warm_constructor_and_cold_metadata_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc401);
+    let original = original(dir.path(), &mut rng);
+    let before = leaves(dir.path());
+    let plan = original.prepare_governance().unwrap();
+    assert!(!plan.receiver.is_complete());
+    let mut plan = NativeTextGovernanceUpgrade::into_vault(plan).unwrap_err();
+    plan.retry(&mut rng).unwrap();
+    let store = actual(&plan);
+    let raw = fs::read(dir.path().join(Slot::Current.name())).unwrap();
+    let plain = crate::store::unseal(
+        &store.keys.db_key().unwrap(),
+        &crate::store::unframe(&raw).unwrap(),
+    )
+    .unwrap();
+    let parsed = catalog::parse_governed_native_registry_layout(
+        &plain,
+        &store.chat_vault_domain().unwrap(),
+        true,
+    )
+    .unwrap();
+    assert!(parsed.governance_payload.is_some());
+    assert!(parsed.member_outbox_payload.is_some());
+    assert!(parsed.native_registry_payload.is_some());
+    assert_eq!(before, leaves(dir.path()));
+    let vault = plan.into_vault().unwrap();
+    assert_eq!(vault.row_count_data().unwrap(), 0);
+    assert!(vault
+        .lookup_creation_data([1; 32], [2; 32])
+        .unwrap()
+        .is_none());
+    drop(vault);
+    let cold = NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+        .unwrap();
+    assert_eq!(cold.row_count_data().unwrap(), 0);
+    assert_eq!(before, leaves(dir.path()));
+}
+
+#[test]
+fn native_governance_warm_faults_retry_exact_outputs_without_randomness() {
+    for point in [240, 229, 231, 232, 233, 234, 235, 236, 237, 238, 239] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc410 + u64::from(point));
+        let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+        let before = leaves(dir.path());
+        fault(&plan, point);
+        assert!(plan.retry(&mut rng).is_err(), "cut {point}");
+        fault(&plan, 0);
+        plan.retry(&mut NeverRng)
+            .unwrap_or_else(|e| panic!("retry cut {point}: {e}"));
+        assert_eq!(
+            before,
+            leaves(dir.path()),
+            "native leaves changed at {point}"
+        );
+        let vault = plan.into_vault().unwrap();
+        assert_eq!(vault.row_count_data().unwrap(), 0);
+        drop(vault);
+        let cold =
+            NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .unwrap_or_else(|e| panic!("cold after {point}: {e}"));
+        assert_eq!(cold.row_count_data().unwrap(), 0);
+    }
+}
+
+#[test]
+fn native_governance_cold_recovery_distinguishes_first_claim_from_complete_seed() {
+    for point in [240, 229, 231, 232, 233, 234, 235, 236, 237, 238, 239] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc510 + u64::from(point));
+        let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+        let before = leaves(dir.path());
+        fault(&plan, point);
+        assert!(plan.retry(&mut rng).is_err(), "cold cut {point}");
+        drop(plan);
+        // A first claim has no authenticated candidate; abort it and declare
+        // fresh. A complete seed must replay its exact saved bytes and nonces.
+        let cold = if point == 240 || point == 229 || point == 231 {
+            NativeTextGovernedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
+        } else {
+            NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+        }
+        .unwrap_or_else(|e| panic!("cold cut {point}: {e}"));
+        assert_eq!(cold.row_count_data().unwrap(), 0);
+        assert_eq!(before, leaves(dir.path()));
+        assert!(!dir.path().join(governance::GOVERNANCE_SEED).exists());
+        assert!(!dir.path().join(Slot::Stage.name()).exists());
+    }
+}
+
+#[test]
+fn native_governance_warm_rejects_equal_native_file_replacement() {
+    for name in ["native-registry.bin", "native-registry-layout.bin"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc601);
+        let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+        fault(&plan, 232); // Exact complete seed, before marker/output selection.
+        assert!(plan.retry(&mut rng).is_err());
+        let file = dir.path().join(ARCHIVE_BOOTSTRAP_ROOT).join(name);
+        let bytes = fs::read(&file).unwrap();
+        let displaced = tempfile::tempdir_in(dir.path().parent().unwrap()).unwrap();
+        fs::rename(&file, displaced.path().join("retained-old")).unwrap();
+        fs::write(&file, &bytes).unwrap();
+        fault(&plan, 0);
+        assert!(
+            plan.retry(&mut NeverRng).is_err(),
+            "equal replacement: {name}"
+        );
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert!(dir.path().join(governance::GOVERNANCE_SEED).exists());
+    }
+}
+
+#[test]
+fn native_governance_final_edges_reject_late_equal_replacement() {
+    for marker_edge in [false, true] {
+        for name in [
+            "native-registry.bin",
+            "native-registry-layout.bin",
+            "current",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let displaced = tempfile::tempdir_in(dir.path().parent().unwrap()).unwrap();
+            let mut rng = ChaCha20Rng::seed_from_u64(0xc801);
+            let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+            let file = if name == "current" {
+                dir.path().join(Slot::Current.name())
+            } else {
+                dir.path().join(ARCHIVE_BOOTSTRAP_ROOT).join(name)
+            };
+            let observed = Arc::new(AtomicBool::new(false));
+            let called = observed.clone();
+            let moved = displaced.path().join("retained");
+            let hook = Box::new(move || {
+                let bytes = fs::read(&file).unwrap();
+                fs::rename(&file, moved).unwrap();
+                fs::write(&file, bytes).unwrap();
+                called.store(true, Ordering::SeqCst);
+            });
+            if marker_edge {
+                governance::set_marker_verification_hook_for_test(hook);
+            } else {
+                governance::set_stage_selection_hook_for_test(hook);
+            }
+            assert!(
+                plan.retry(&mut rng).is_err(),
+                "late edge {marker_edge}: {name}"
+            );
+            assert!(observed.load(Ordering::SeqCst));
+            assert!(!plan.receiver.is_complete());
+            assert!(plan.into_vault().is_err());
+        }
+    }
+}
+
+#[test]
+fn native_governance_torn_cleanup_rejects_in_place_evidence_changes() {
+    for rewrite_seed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc901);
+        let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+        fault(&plan, 229); // Known first claim and empty fence; no seed AEAD yet.
+        assert!(plan.retry(&mut rng).is_err());
+        let key = zeroize::Zeroizing::new(blake3::derive_key(
+            "catcoms/private-chat-v2-native-governance-declaration-key/v2",
+            &actual(&plan).keys.db_key().unwrap(),
+        ));
+        let future = crate::store::frame(&catcoms_crypto::seal(&key, b"future", &mut rng).unwrap());
+        drop(plan);
+        let changed = dir.path().join(if rewrite_seed {
+            governance::GOVERNANCE_SEED
+        } else {
+            Slot::Stage.name()
+        });
+        let bytes = if rewrite_seed { future } else { vec![1, 2, 3] };
+        let replacement = bytes.clone();
+        let changed_hook = changed.clone();
+        let observed = Arc::new(AtomicBool::new(false));
+        let called = observed.clone();
+        governance::set_native_torn_hook_for_test(Box::new(move |_| {
+            // Same file identity, changed contents. No rename or new child can
+            // accidentally satisfy this regression's refusal.
+            fs::write(changed_hook, replacement).unwrap();
+            called.store(true, Ordering::SeqCst);
+        }));
+        assert!(NativeTextGovernedStorage::open(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+        .is_err());
+        assert!(observed.load(Ordering::SeqCst));
+        assert_eq!(fs::read(changed).unwrap(), bytes);
+        assert!(dir.path().join(governance::GOVERNANCE_SEED).exists());
+        assert!(dir.path().join(Slot::Stage.name()).exists());
+    }
+}
+
+#[test]
+fn native_governance_drop_closes_original_before_receiver_and_keeps_outer_fee() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xca01);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    let ui = plan
+        .original
+        .as_ref()
+        .unwrap()
+        .ui
+        .as_ref()
+        .unwrap()
+        .observe_mount();
+    let Some(Phase::Selected3(index)) = plan.original.as_ref().unwrap().phase.as_ref() else {
+        panic!("original selected3");
+    };
+    let handler = index.handler_for_test();
+    let refunded = Arc::new(AtomicBool::new(false));
+    plan._metadata.observe_drop_for_test(refunded.clone());
+    fault(&plan, 232);
+    assert!(plan.retry(&mut rng).is_err());
+    let observed = Arc::new(AtomicBool::new(false));
+    let called = observed.clone();
+    let paid = refunded.clone();
+    governance::set_declaration_tail_hook_for_test(Box::new(move || {
+        assert!(
+            !ui.is_open(),
+            "original UI must close before declaration disposal"
+        );
+        assert!(
+            !handler.is_open_cached(),
+            "original native admission must close first"
+        );
+        assert!(
+            !paid.load(Ordering::SeqCst),
+            "receiver box still has its own payment"
+        );
+        called.store(true, Ordering::SeqCst);
+    }));
+    drop(plan);
+    assert!(observed.load(Ordering::SeqCst));
+    assert!(refunded.load(Ordering::SeqCst));
+}
+
+#[test]
+fn native_governance_cached_negative_follows_actual_mounted_owner_without_locks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xcb01);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    let store = actual(&plan);
+    let negative = store.capture_governance_cached_negative().unwrap();
+    let pool = store
+        .governance_layout_policy
+        .as_ref()
+        .unwrap()
+        .current
+        .archive
+        .pending
+        .pool
+        .clone();
+    pool.with_counter_locked_for_test(|| assert!(negative.is_live_cached()));
+    let mounted = store.governance_layout.lock().unwrap().take().unwrap();
+    let charged = pool.charged_for_test();
+    drop(mounted);
+    pool.with_counter_locked_for_test(|| assert!(!negative.is_live_cached()));
+    // The closed metadata's exact reservation remains charged until every
+    // cached tail drops. Revocation itself requires no IO/account lock.
+    assert_eq!(charged, pool.charged_for_test());
+    assert!(plan.into_vault().is_err());
+}
+
+#[test]
+fn native_governance_steady_parser_rejects_original_catalog_without_namespace4() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xcc01);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    let old = fs::read(dir.path().join(Slot::Current.name())).unwrap();
+    plan.retry(&mut rng).unwrap();
+    let store = actual(&plan);
+    let old_plain = crate::store::unseal(
+        &store.keys.db_key().unwrap(),
+        &crate::store::unframe(&old).unwrap(),
+    )
+    .unwrap();
+    assert!(store.parse_configured_join_catalog(&old_plain).is_err());
+    let current_handler = store
+        .current_layout_policy
+        .as_ref()
+        .unwrap()
+        .native_registry
+        .as_ref()
+        .unwrap();
+    let governance_handler = store
+        .governance_layout_policy
+        .as_ref()
+        .unwrap()
+        .current
+        .native_registry
+        .as_ref()
+        .unwrap();
+    assert!(current_handler.is_governed());
+    assert!(governance_handler.is_governed());
+    assert!(current_handler
+        .parse_layout(&old_plain, &store.chat_vault_domain().unwrap(), true)
+        .is_err());
+    assert!(governance_handler
+        .parse_layout(&old_plain, &store.chat_vault_domain().unwrap(), true)
+        .is_err());
+}
+
+#[test]
+fn native_governance_consuming_warm_handoff_retains_evidence_through_last_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let displaced = tempfile::tempdir_in(dir.path().parent().unwrap()).unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xcd01);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    let file = dir
+        .path()
+        .join(ARCHIVE_BOOTSTRAP_ROOT)
+        .join("native-registry.bin");
+    let observed = Arc::new(AtomicBool::new(false));
+    let called = observed.clone();
+    governance::set_marker_verification_hook_for_test(Box::new(move || {
+        let bytes = fs::read(&file).unwrap();
+        fs::rename(&file, displaced.path().join("original")).unwrap();
+        fs::write(file, bytes).unwrap();
+        called.store(true, Ordering::SeqCst);
+    }));
+    assert!(plan.into_vault().is_err());
+    assert!(observed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn native_governance_cold_handoff_retains_observed_or_declared_original_leaves() {
+    for already_governed in [false, true] {
+        for name in ["native-registry.bin", "native-registry-layout.bin"] {
+            let dir = tempfile::tempdir().unwrap();
+            let displaced = tempfile::tempdir_in(dir.path().parent().unwrap()).unwrap();
+            let mut rng = ChaCha20Rng::seed_from_u64(0xce01);
+            let original = original(dir.path(), &mut rng);
+            if already_governed {
+                let mut plan = original.prepare_governance().unwrap();
+                plan.retry(&mut rng).unwrap();
+                drop(plan.into_vault().unwrap());
+            } else {
+                drop(original);
+            }
+            let file = dir.path().join(ARCHIVE_BOOTSTRAP_ROOT).join(name);
+            let observed = Arc::new(AtomicBool::new(false));
+            let called = observed.clone();
+            owning::at_edge(
+                owning::Edge::BeforeColdExposure,
+                Box::new(move || {
+                    let bytes = fs::read(&file).unwrap();
+                    fs::rename(&file, displaced.path().join("original")).unwrap();
+                    fs::write(file, bytes).unwrap();
+                    called.store(true, Ordering::SeqCst);
+                }),
+            );
+            let result = if already_governed {
+                NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+            } else {
+                NativeTextGovernedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
+            };
+            assert!(
+                result.is_err(),
+                "last cold handoff {already_governed}: {name}"
+            );
+            assert!(observed.load(Ordering::SeqCst));
+        }
+    }
+}
+
+#[test]
+fn native_governance_cold_cleanup_cuts_repeat_fence_barrier_before_claim_retirement() {
+    for point in [241, 242, 243, 244] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xcf01);
+        let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+        fault(&plan, 229);
+        assert!(plan.retry(&mut rng).is_err());
+        let current = fs::read(dir.path().join(Slot::Current.name())).unwrap();
+        let before = leaves(dir.path());
+        drop(plan);
+        let observed = Arc::new(AtomicBool::new(false));
+        let called = observed.clone();
+        governance::set_native_torn_hook_for_test(Box::new(move |store| {
+            store
+                .critical_namespace_fault
+                .store(point, Ordering::SeqCst);
+            called.store(true, Ordering::SeqCst);
+        }));
+        assert!(NativeTextGovernedStorage::open(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+        .is_err());
+        assert!(observed.load(Ordering::SeqCst), "cleanup cut {point}");
+        assert!(!dir.path().join(Slot::Stage.name()).exists());
+        assert_eq!(
+            dir.path().join(governance::GOVERNANCE_SEED).exists(),
+            point < 243
+        );
+        assert_eq!(
+            fs::read(dir.path().join(Slot::Current.name())).unwrap(),
+            current
+        );
+        assert_eq!(before, leaves(dir.path()));
+        if point == 241 {
+            // Stage is already absent, but the next attempt must still reach
+            // the covering barrier before it can retire the original claim.
+            governance::set_native_torn_hook_for_test(Box::new(|store| {
+                store.critical_namespace_fault.store(242, Ordering::SeqCst);
+            }));
+            assert!(NativeTextGovernedStorage::open(
+                dir.path(),
+                SECRET,
+                &mut NeverRng,
+                current_policy(),
+            )
+            .is_err());
+            assert!(dir.path().join(governance::GOVERNANCE_SEED).exists());
+        }
+        let cold = NativeTextGovernedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
+            .unwrap_or_else(|e| panic!("cleanup retry {point}: {e}"));
+        assert_eq!(cold.row_count_data().unwrap(), 0);
+        assert_eq!(before, leaves(dir.path()));
+    }
+}
+
+#[test]
+fn native_governance_authenticated_invalid_seed_is_preserved() {
+    for invalid in [b"".as_slice(), b"future native governance v99".as_slice()] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc701);
+        let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+        fault(&plan, 232);
+        assert!(plan.retry(&mut rng).is_err());
+        let key = zeroize::Zeroizing::new(blake3::derive_key(
+            "catcoms/private-chat-v2-native-governance-declaration-key/v2",
+            &actual(&plan).keys.db_key().unwrap(),
+        ));
+        let invalid = crate::store::frame(&catcoms_crypto::seal(&key, invalid, &mut rng).unwrap());
+        drop(plan);
+        let seed = dir.path().join(governance::GOVERNANCE_SEED);
+        fs::write(&seed, &invalid).unwrap();
+        let current = fs::read(dir.path().join(Slot::Current.name())).unwrap();
+        assert!(NativeTextGovernedStorage::open(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+        .is_err());
+        assert_eq!(fs::read(seed).unwrap(), invalid);
+        assert_eq!(
+            fs::read(dir.path().join(Slot::Current.name())).unwrap(),
+            current
+        );
+    }
+}

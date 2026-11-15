@@ -1,10 +1,19 @@
 # Mewtual; Handover
 
-The next `chat-v2-governed-native-storage` continuation is DESIGN ONLY, based
-on the pushed PR #131 checkpoint `7eb556d5`. Read-only design review is clear
-after making exact native tuple binding and Stage-before-claim recovery
-ordering explicit. No combined constructor, recovery or Source is implemented.
-[Reviewed implementation design](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
+The `chat-v2-governed-native-storage` continuation now implements the private
+same-owner native3-to-governance4 startup and an explicit cold metadata-only
+opener. Native seed2 binds the original index/marker tuple; first-torn cleanup
+is abort-only on the independently pristine baseline. Warm and cold owners
+retain original evidence through their last reads before exposure. Read-only
+review fixes cover opening order, in-place evidence changes, late equal-file
+replacement and payment/drop ordering. All51 focused governance cases, frontend
+3,485, type/build/browser-flow/static gates and all83 native text cases passed.
+Strict native lint passed; Root strict lint retains556 inherited diagnostics
+(prior564), with no suppression. Final routing/native build/startup and full
+validation are still running; earlier results are not this revision's gates.
+This creates no Source4, production Add/Header, joined source, archive or
+transport. Chat V2 remains OFF and incomplete.
+[Implementation and acceptance](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
 
 Continuation `chat-v2-founder-governed-add` combines the pushed join bindings
 and renderer-retirement correction. The completed MLS Add now has a two-phase

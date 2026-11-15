@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`NativeTextVaultUpgrade::prepare_governance` consumes only its private,
+unexposed Selected3 owner. The resulting `NativeTextGovernanceUpgrade` retains
+the original UI/source/native close owners through declaration4 and its final
+consuming proof; an arbitrary empty facade cannot enter this path.
+`NativeTextGovernedStorage::open` explicitly selects combined4/5/native3 cold
+metadata handling and exposes only a row count. It supplies no signer, Source,
+SDK, native-command admission or cold operational facade. Ordinary native3
+and standard governance openers retain their stricter, separate grammars.
+[Recovery and ownership contract](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
+
 `PreparedTextCurrentAdd::prepare_install_into` keeps exclusive original receiver
 and candidate-slot loans after full SDK preflight. `install` only swaps whole
 halves and returns opaque retired custody; caller must dispose outside writers.
