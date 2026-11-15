@@ -1,7 +1,8 @@
 //! Fixed-name index2 IO. The Root owner authenticates selected/candidate DATA,
-//! must retain one mount-wide transaction cell and its full prepaid overlap,
-//! and supply the actual original ServerStore. That warm producer is unfinished;
-//! current production uses the private cold roles. No renderer path reaches IO.
+//! retains one mount-wide transaction cell and its full prepaid overlap, and
+//! supplies the actual original ServerStore. The checked native founder producer
+//! remains unfinished; this private DATA cell grants no native/SDK authority.
+//! Cold recovery uses its distinct exact roles. No renderer path reaches IO.
 use super::*;
 
 pub(in crate::store) const UPGRADE_SEED_NAME: &str = "chat-critical-namespaces.native-index2.seed";
@@ -49,9 +50,14 @@ pub(in crate::store) enum Fault {
     UpgradeCatalogRename,
     UpgradeCovered,
     UpgradeSeedUnlink,
+    UpgradeFenceUnlink,
+    UpgradeFenceUnlinkCovered,
     IndexStage,
     IndexRename,
     IndexStageUnlink,
+    Index3PartialStage,
+    Index3Covered,
+    Index3CleanupCovered,
 }
 #[cfg(test)]
 thread_local! {
@@ -91,14 +97,14 @@ fn fault_requested(point: Fault) -> bool {
 fn interrupted(point: Fault) -> AppError {
     AppError::Io(format!("index storage interrupted at {point:?}"))
 }
-fn trip(point: Fault) -> Result<(), AppError> {
+pub(super) fn trip(point: Fault) -> Result<(), AppError> {
     if fault_requested(point) {
         Err(interrupted(point))
     } else {
         Ok(())
     }
 }
-fn complete_with_cut(
+pub(super) fn complete_with_cut(
     name: &Path,
     slot: &mut Option<critical::pending_join::CreatedStage>,
     expected: &[u8],
@@ -126,6 +132,17 @@ type RenameHook = (RenameTarget, Box<dyn FnOnce()>);
 thread_local! {
     static BEFORE_TARGET_PROOF: std::cell::RefCell<Option<RenameHook>> = const { std::cell::RefCell::new(None) };
     static RENAME_HOOK_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Observe the actual output-root covering path, never an inferred phase
+    // flag or a merely successful file rename. Reset between fault and retry.
+    static OUTPUT_ROOT_COVERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(in crate::store) fn reset_output_root_covers() {
+    OUTPUT_ROOT_COVERS.with(|count| count.set(0));
+}
+#[cfg(test)]
+pub(in crate::store) fn output_root_covers() -> u64 {
+    OUTPUT_ROOT_COVERS.with(std::cell::Cell::get)
 }
 #[cfg(test)]
 pub(in crate::store) fn before_target_proof(target: RenameTarget, hook: Box<dyn FnOnce()>) {
@@ -143,7 +160,7 @@ pub(in crate::store) fn take_rename_hook_seen() -> bool {
     });
     RENAME_HOOK_SEEN.with(|seen| seen.replace(false))
 }
-fn observe_before_target_proof(target: RenameTarget) {
+pub(super) fn observe_before_target_proof(target: RenameTarget) {
     #[cfg(test)]
     {
         let hook = BEFORE_TARGET_PROOF.with(|slot| {
@@ -168,12 +185,14 @@ fn observe_before_target_proof(target: RenameTarget) {
 }
 
 pub(in crate::store) fn refuse_upgrade_debt(store: &ServerStore) -> Result<(), AppError> {
+    super::lifecycle::refuse_upgrade_debt(store)?;
     absent(&path(store, false, UPGRADE_SEED_NAME)?)?;
     absent(&path(store, true, UPGRADE_INDEX_NAME)?)?;
     absent(&path(store, true, UPGRADE_MARKER_NAME)?)
 }
 
 fn no_upgrade_debt(store: &ServerStore) -> Result<(), AppError> {
+    super::lifecycle::refuse_upgrade_debt(store)?;
     for (root, name) in [
         (false, native::SEED_NAME),
         (false, UPGRADE_SEED_NAME),
@@ -188,12 +207,12 @@ fn no_upgrade_debt(store: &ServerStore) -> Result<(), AppError> {
 /// Continuous physical custody, including the entire selected catalog. Even
 /// an equal-byte replacement cannot become this operation's selected parent.
 pub(in crate::store) struct IndexSnapshot {
-    stage: Option<HeldNativeInput>,
-    index: HeldNativeInput,
-    marker: HeldNativeInput,
-    catalog: HeldNativeInput,
-    root: HeldDirectory,
-    vault: HeldDirectory,
+    pub(super) stage: Option<HeldNativeInput>,
+    pub(super) index: HeldNativeInput,
+    pub(super) marker: HeldNativeInput,
+    pub(super) catalog: HeldNativeInput,
+    pub(super) root: HeldDirectory,
+    pub(super) vault: HeldDirectory,
 }
 impl IndexSnapshot {
     pub(in crate::store) fn capture(store: &ServerStore) -> Result<Self, AppError> {
@@ -223,6 +242,37 @@ impl IndexSnapshot {
             stage: HeldNativeInput::capture(
                 &path(store, true, native::INDEX_STAGE_NAME)?,
                 native::MAX_INDEX_FRAME,
+            )?,
+        };
+        value.require_directories(store)?;
+        Ok(value)
+    }
+    /// A separate closed physical inventory for the version3 upgrader only.
+    /// This is not reachable from Root's version2 reader or its ordinary WAL.
+    /// It supplies only held file/directory identity; the dedicated3 inspector
+    /// must authenticate/classify every original and scratch role itself.
+    pub(super) fn capture_lifecycle_inventory(store: &ServerStore) -> Result<Self, AppError> {
+        let value = Self {
+            vault: HeldDirectory::capture(&path(store, false, "")?)?,
+            root: HeldDirectory::capture(&path(store, true, "")?)?,
+            catalog: HeldNativeInput::capture(
+                &path(store, false, critical::Slot::Current.name())?,
+                native::MAX_CATALOG_FRAME,
+            )?
+            .ok_or_else(denied)?,
+            marker: HeldNativeInput::capture(
+                &path(store, true, native::MARKER_NAME)?,
+                native::MAX_MARKER_FRAME,
+            )?
+            .ok_or_else(denied)?,
+            index: HeldNativeInput::capture(
+                &path(store, true, native::INDEX_NAME)?,
+                super::lifecycle::MAX_INDEX_FRAME,
+            )?
+            .ok_or_else(denied)?,
+            stage: HeldNativeInput::capture(
+                &path(store, true, native::INDEX_STAGE_NAME)?,
+                super::lifecycle::MAX_INDEX_FRAME,
             )?,
         };
         value.require_directories(store)?;
@@ -261,7 +311,7 @@ impl IndexSnapshot {
             .require(&path(store, true, native::MARKER_NAME)?)?;
         self.require_directories(store)
     }
-    fn require_directories(&self, store: &ServerStore) -> Result<(), AppError> {
+    pub(super) fn require_directories(&self, store: &ServerStore) -> Result<(), AppError> {
         self.vault.require(&path(store, false, "")?)?;
         self.root.require(&path(store, true, "")?)?;
         if store.chat_mount.observer().is_cancelled() {
@@ -281,8 +331,8 @@ impl IndexSnapshot {
     }
 }
 
-/// Construct before any Stage effect. The future warm caller MUST retain this
-/// same object in its uncertain mount cell across caller loss and refusal. Drop
+/// Construct before any Stage effect. The owning warm IndexCell retains this
+/// same object across caller loss and refusal. Dropping the whole physical mount
 /// loses warm retry custody; a persisted WAL still requires exact cold recovery.
 pub(in crate::store) struct IndexCommitIo {
     stage: Option<critical::pending_join::CreatedStage>,
@@ -291,6 +341,17 @@ pub(in crate::store) struct IndexCommitIo {
     candidate: [u8; 32],
 }
 impl IndexCommitIo {
+    /// Last no-effect parent proof before the owning cell issues its claim.
+    /// A started writer cannot be repurposed as an unstarted preparation.
+    pub(in crate::store) fn require_unstarted_parent(
+        &self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        if self.promoted || self.stage.is_some() {
+            return Err(denied());
+        }
+        self.original.require_selected(store)
+    }
     pub(in crate::store) fn prepare(
         original: IndexSnapshot,
         expected: &[u8],
@@ -538,6 +599,7 @@ impl UpgradeInventory {
         Ok(self.base)
     }
     pub(in crate::store) fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        super::lifecycle::refuse_upgrade_debt(store)?;
         self.base.require_directories(store)?;
         for name in [
             critical::ARCHIVE_DECLARATION_SEED,
@@ -870,6 +932,36 @@ impl UpgradeIo {
         self.original.require_directories(store)
     }
 
+    /// A recorded rename does not prove its directory barrier completed. Warm
+    /// retry and cold mixed-tuple recovery may both enter with promoted=true
+    /// after the original marker-root sync failed or was never reached.
+    /// Re-cover the SAME exact output handles before writing/selecting catalog2.
+    fn cover_selected_outputs_before_catalog(
+        &self,
+        store: &ServerStore,
+        bytes: &UpgradeBytes<'_>,
+    ) -> Result<(), AppError> {
+        self.require_selected_parts(store, bytes)?;
+        for (name, slot, expected) in [
+            (native::INDEX_NAME, &self.index, bytes.index),
+            (native::MARKER_NAME, &self.marker, bytes.marker),
+        ] {
+            let output = slot.as_ref().ok_or_else(denied)?;
+            exact(&path(store, true, name)?, output, expected)?;
+            output.file.sync_all().map_err(io)?;
+        }
+        self.original.root.file.sync_all().map_err(io)?;
+        exact(
+            &path(store, false, UPGRADE_SEED_NAME)?,
+            self.seed.as_ref().ok_or_else(denied)?,
+            bytes.seed,
+        )?;
+        self.require_selected_parts(store, bytes)?;
+        #[cfg(test)]
+        OUTPUT_ROOT_COVERS.with(|count| count.set(count.get() + 1));
+        Ok(())
+    }
+
     pub(in crate::store) fn advance_upgrade(
         &mut self,
         store: &ServerStore,
@@ -949,6 +1041,7 @@ impl UpgradeIo {
                 trip(Fault::UpgradeMarkerRename)?;
                 self.original.root.file.sync_all().map_err(io)?;
             }
+            self.cover_selected_outputs_before_catalog(store, bytes)?;
             complete_with_cut(
                 &stage,
                 &mut self.catalog,

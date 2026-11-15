@@ -3,8 +3,9 @@ use super::handoff::{bridge_layout_bytes, CompletedWarmFounderOrigin};
 use super::*;
 use crate::store::{
     GenesisSeedBudget, MemberSaveJob, MemberSaveNativeAdmission, PreparedV2GenesisCurrent,
-    PreparedV2TextHost, PreparedV2TextRead, RetainedBootstrapSourceData, V2CurrentLayoutStore,
-    V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest, V2TextHostPolicy,
+    PreparedV2TextHost, PreparedV2TextRead, RetainedBootstrapGenesisSeed,
+    RetainedBootstrapSourceData, V2CurrentLayoutStore, V2MemberSaveOutcome, V2MemberSaveRefusal,
+    V2MemberSignRequest, V2TextHostPolicy,
 };
 use catcoms_rt::RequestCancellation;
 use catcoms_sync::owner_v2::V2GenesisRuntimeParts;
@@ -108,6 +109,7 @@ pub struct PreparedFreshV2TextFounder<T: MeshTransport, R: CryptoRngCore> {
     // Resource consumers drain before the creator and this driver's extra fee.
     host: Option<Box<PreparedV2TextHost<T, R>>>,
     current: Option<Box<PreparedV2GenesisCurrent<T, R>>>,
+    seed: Option<RetainedBootstrapGenesisSeed>,
     read: Option<RetainedBootstrapSourceData>,
     parts: Option<V2GenesisRuntimeParts<T, R>>,
     warm_origin: Option<CompletedWarmFounderOrigin>,
@@ -148,6 +150,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Drop for PreparedFreshV2TextFounder<T, 
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
+    /// Preserve the actual NativeRequired whole Host while preparing only an
+    /// unsigned original. No library fallback, key or Saved receipt is issued.
+    pub(in crate::store) fn prepare_native_invite_intent_data(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &mut super::founder::NativeFounderKeys,
+    ) -> Result<([u8; 32], u64), AppError> {
+        keys.preflight(&self.origin)?;
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .prepare_native_invite_intent_data(layout, request, routing_plan, keys)
+    }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.
     fn invoice() -> Result<usize, AppError> {
@@ -248,14 +268,44 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             // The original SDK has drained in take_completed_runtime before
             // this independent paid restore. A refused restore returns the exact
             // original read, never another physical read or source-write grant.
-            let read = self.read.take().ok_or_else(refused)?;
-            let seed = match store.prepare_genesis_seed(read, self.policy.seed) {
-                Ok(seed) => seed,
-                Err(returned) => {
-                    self.read = Some(returned.into_parts().0);
-                    return Err(refused());
+            if self.seed.is_none() {
+                let result = match &mut access {
+                    FounderAccess::Library => {
+                        let read = self.read.take().ok_or_else(refused)?;
+                        store.prepare_genesis_seed(read, self.policy.seed)
+                    }
+                    FounderAccess::Native(keys) => {
+                        let completed = self.warm_origin.as_ref().ok_or_else(refused)?;
+                        let evidence = completed.warm_sdk_evidence(
+                            &self.origin,
+                            self.read.as_ref().ok_or_else(refused)?,
+                        )?;
+                        let read = self.read.take().ok_or_else(refused)?;
+                        store.prepare_warm_native_genesis_seed(
+                            read,
+                            self.policy.seed,
+                            &evidence,
+                            keys,
+                        )
+                    }
+                };
+                match result {
+                    // Cache actual graph+source+all fees BEFORE any late
+                    // original/UI check. A refusal retains this same seed.
+                    Ok(seed) => self.seed = Some(seed),
+                    Err(returned) => {
+                        self.read = Some(returned.into_parts().0);
+                        return Err(refused());
+                    }
                 }
-            };
+            }
+            self.seed
+                .as_ref()
+                .ok_or_else(refused)?
+                .validate_original(store)?;
+            source.original.creator.original.validate_original(store)?;
+            access.require(&self.origin)?;
+            let seed = self.seed.take().ok_or_else(refused)?;
             let parts = self.parts.take().ok_or_else(refused)?;
             let origin = self.warm_origin.take().ok_or_else(refused)?;
             self.current = Some(Box::new(PreparedV2GenesisCurrent::from_original_runtime(
@@ -344,6 +394,29 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .prepare_member_save_with_access(layout, request, negative, rng, access)
     }
 
+    /// Read setup/recovery on the genuine retained Host, never a recreated
+    /// library-origin owner. This produces saved-original DATA only.
+    pub(in crate::store) fn prepare_member_history_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        read: crate::store::persistence::v2_member_outbox::MemberHistoryRead,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<crate::store::persistence::v2_member_outbox::MemberHistoryPage, V2MemberSaveRefusal>
+    {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        if !self.is_ready_data() {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        self.host
+            .as_mut()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .prepare_member_history_with_access(layout, read, negative, rng, access)
+    }
+
     /// No IO/wait is added at the existing finite final edge. The actual
     /// native factory must still authenticate and retain its supplied custody.
     pub fn admit_member_save(
@@ -390,6 +463,19 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             Some(host) => host.cancel_and_drain_admitted_promotion(),
             None => Ok(()),
         }
+    }
+
+    /// Test only: retain a genuine member-save source End while the whole
+    /// driver attempts to close. No key/signing/save authorization is tested.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn hold_member_save_source_for_test(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<Box<dyn Send>, AppError> {
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .hold_member_save_source_for_test(layout)
     }
 }
 
@@ -462,6 +548,7 @@ impl V2CurrentLayoutStore {
                     host: None,
                     current: None,
                     read: None,
+                    seed: None,
                     parts: None,
                     warm_origin: None,
                     binding: None,

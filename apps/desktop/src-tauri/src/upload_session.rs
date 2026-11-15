@@ -22,7 +22,7 @@ impl AdmittedUpload {
 }
 
 fn current(state: &AppState, generation: u64) -> bool {
-    !ui_session_closed(state) && state.ui_session_generation.load(Ordering::Acquire) == generation
+    !ui_session_closed(state) && state.ui_session_generation.load(Ordering::SeqCst) == generation
 }
 
 /// Install only into the session/registry incarnation captured before begin's actor awaits.
@@ -35,7 +35,7 @@ pub(super) async fn register(
 ) -> Result<usize, String> {
     let _commit = require_ui_session_generation(state, upload.generation).await?;
     let servers = state.servers.lock().await;
-    if servers.get(&upload.server).is_none_or(|entry| {
+    if servers.legacy(&upload.server).is_none_or(|entry| {
         entry.instance != upload.instance || !entry.actor.same_instance(&upload.actor)
     }) {
         return Err("the server changed while the upload was starting".into());
@@ -100,7 +100,7 @@ pub(super) async fn take(state: &AppState, key: &UploadKey) -> Result<AdmittedUp
         .servers
         .lock()
         .await
-        .get(&key.0)
+        .legacy(&key.0)
         .is_some_and(|entry| entry.instance == instance && entry.actor.same_instance(&actor));
     let upload = state
         .uploads

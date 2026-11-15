@@ -82,7 +82,7 @@ pub(super) fn authenticate(
     // it distinct from failure before deciding whether scratch is disposable.
     Ok(Zeroizing::new(unseal(&derived, &unframe(raw)?)?))
 }
-fn sealed(
+pub(super) fn sealed(
     key: &[u8; 32],
     domain: &str,
     plain: &[u8],
@@ -435,7 +435,7 @@ impl NativeIndexUpgrade {
             physical: Arc::new(super::mount::NativeIndexPhysical {
                 current: *current,
                 handler,
-                read: std::sync::Mutex::new(()),
+                cell: std::sync::Mutex::new(super::cell::IndexCell::default()),
             }),
         })
     }

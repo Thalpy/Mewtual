@@ -7,7 +7,8 @@
 use super::*;
 use catcoms_rt::{
     NativeChatKeyEnds, NativeChatKeyPurpose as Purpose, NativeChatPreparedKeyCut,
-    NativeChatSourceObservation, NativeChatSourceOwner, NativeChatUiCommand,
+    NativeChatSdkRestoreEnds, NativeChatSourceObservation, NativeChatSourceOwner,
+    NativeChatUiCommand, NativeChatWarmSdkReopenCut,
 };
 
 /// Closed Store-private routing; it is never a decoded permission or callback.
@@ -51,6 +52,8 @@ pub(in crate::store) struct NativeFounderKeys {
     profile: NativeChatPreparedKeyCut,
     header: NativeChatPreparedKeyCut,
     member: NativeChatPreparedKeyCut,
+    warm_sdk: NativeChatWarmSdkReopenCut,
+    warm_ends: NativeChatSdkRestoreEnds,
     // LAST: primitive End accounting outlives each prepared metadata pin. The
     // concrete native worker must drop this entire object outside its guards.
     ends: NativeChatKeyEnds,
@@ -77,6 +80,10 @@ impl NativeFounderKeys {
             member: source
                 .prepare_cut(command, Purpose::MemberAction)
                 .map_err(|_| refused())?,
+            warm_sdk: source
+                .prepare_warm_sdk_reopen(command)
+                .map_err(|_| refused())?,
+            warm_ends: NativeChatSdkRestoreEnds::new(),
             ends: NativeChatKeyEnds::new(),
         })
     }
@@ -120,6 +127,15 @@ impl NativeFounderKeys {
             .map_err(|_| refused())
     }
 
+    /// Cached Device progress is still bound to its original source. A row
+    /// can retire independently of its Host/UI/physical mount; cached success
+    /// must not silently outlive that revocation or admit another primitive.
+    pub(in crate::store) fn require_device(&self) -> Result<(), AppError> {
+        self.device
+            .preflight(&self.original, Purpose::Device)
+            .map_err(|_| refused())
+    }
+
     pub(in crate::store) fn member_entry(
         &mut self,
     ) -> (
@@ -128,5 +144,17 @@ impl NativeFounderKeys {
         &mut NativeChatKeyEnds,
     ) {
         (&self.original, &mut self.member, &mut self.ends)
+    }
+
+    /// Separate from fresh SDK creation. The concrete warm caller additionally
+    /// supplies its real completed handoff/read evidence to the Store decoder.
+    pub(in crate::store) fn warm_sdk_entry(
+        &mut self,
+    ) -> (
+        &NativeChatSourceObservation,
+        &mut NativeChatWarmSdkReopenCut,
+        &mut NativeChatSdkRestoreEnds,
+    ) {
+        (&self.original, &mut self.warm_sdk, &mut self.warm_ends)
     }
 }

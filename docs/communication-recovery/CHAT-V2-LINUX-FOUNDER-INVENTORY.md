@@ -1,4 +1,4 @@
-# Linux fixed-folder inventory (13 November; execution pending)
+# Linux fixed-folder inventory (13 November; focused execution passed)
 
 Genesis seed settlement, Initializing repair, pre-Initializing recovery and text
 promotion previously refused Linux. Linux test successes in those areas could
@@ -51,8 +51,11 @@ was relabelled as portable.
 Windows compatibility cohorts pass: one actual mount, all ten warm driver
 cases,41 genesis controls, eight seed-settlement and three covering-scope cases.
 The first Linux compile caught a mismatched test-only export; its platform gate
-is corrected. Linux compilation and execution remain pending. Focused hosted count
-guards require nonempty exact cohorts; complete exact-source Root/native/frontend,
+is corrected. Run43407038976 atc948192d passes42 Linux cases and11 Windows
+cases, plus3438 frontend tests/check/build and affected protocol strict checks.
+The final annotation-only053ac72a fixes the unchanged raw-fs gate; its complete
+run43416522284 remains in progress. Focused hosted count guards require nonempty
+exact cohorts; complete exact-source Root/native/frontend,
 strict lint and dependency gates remain required. Read-only design/diff review
 found no production blocker/high/medium; the Stat invoice LOW was corrected.
 

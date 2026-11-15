@@ -12,7 +12,7 @@ use crate::{Server, ServerStore};
 /// Trusted native custody. Obtain all ordering guards with try-locks AFTER the actor is Ready.
 /// The ordering value must fence the numeric server, registry incarnation and UI session.
 pub struct ShutdownLease {
-    store: OwnedMutexGuard<Option<ServerStore>>,
+    store: crate::store::LegacyStoreCustody,
     server: u64,
     _ordering: Box<dyn Send>,
 }
@@ -32,10 +32,26 @@ impl ShutdownLease {
         ordering: impl Send + 'static,
     ) -> Self {
         Self {
-            store,
+            store: crate::store::LegacyStoreCustody::Standalone(store),
             server,
             _ordering: Box::new(ordering),
         }
+    }
+
+    /// Preserve original native mutex custody while selecting Legacy only.
+    /// Native V2 freeze/backup requires its own actual writer-drain protocol.
+    pub fn new_mounted(
+        store: OwnedMutexGuard<Option<crate::store::MountedVault>>,
+        server: u64,
+        ordering: impl Send + 'static,
+    ) -> Result<Self, crate::store::MountedLeaseRefusal> {
+        let (store, ordering) =
+            crate::store::LegacyStoreCustody::from_mounted(store, Box::new(ordering))?;
+        Ok(Self {
+            store,
+            server,
+            _ordering: ordering,
+        })
     }
 }
 

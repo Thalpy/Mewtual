@@ -32,7 +32,7 @@ getifs = { version = "=0.6.1", default-features = false }
 # rustls (QUIC + libp2p-tls), so this adds no new crate, only a direct edge to it.
 rustls-pki-types = { version = "1.14", features = ["std"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
-libp2p = { version = "0.56", features = [
+libp2p = { version = "0.57.1", features = [
     "tokio",
     "gossipsub",
     "request-response",
@@ -62,13 +62,15 @@ libp2p = { version = "0.56", features = [
     "tls",
     "dns",
 ] }
-# libp2p0.56 permits older0.49 releases that retain unsolicited GRAFT topics.
-# Use this same production crate below, enforcing the repaired compatible floor.
-# This repairs GRAFT only: PRUNE/Hickory still need the reviewed0.57 migration,
-# which must move this edge to>=0.50.1 rather than retain an unused older island.
-libp2p-gossipsub = { version = "0.49.5", default-features = false }
+# Use this SAME production crate below. The explicit repaired floor must
+# constrain libp2p's actual behaviour, never form an unused older dependency island.
+libp2p-gossipsub = { version = "=0.50.1", default-features = false }
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Observe process-global provider state only in isolated transport regressions.
+# Provider features come from the actual production QUIC/WS dependency edges.
+rustls = { version = "0.23", default-features = false }
 catcoms-discovery = { path = "../catcoms-discovery" }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 

@@ -13,6 +13,104 @@ use std::sync::{
 use std::task::{Context, Poll, Waker};
 
 #[test]
+fn native_warm_sdk_reopen_fences_late_generation_and_caches_a_returned_graph() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for after_sdk in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let shared = pool();
+        let seed = 0x35e0 + u64::from(after_sdk);
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let layout = mount(directory.path(), &shared, &mut rng, true, true);
+        let generation = Arc::new(AtomicU64::new(7));
+        let authorized = Arc::new(AtomicU64::new(7));
+        let binding = NativeChatUiBinding::from_trusted_host(
+            generation.clone(),
+            authorized.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(()),
+        );
+        let ui = binding.open_session(7, Arc::new(())).unwrap();
+        let source =
+            NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap();
+        let mut keys = NativeFounderKeys::prepare(&source, &ui.observe()).unwrap();
+        keys.enter_device().unwrap();
+        let FreshV2TextFounderBegin::Original(mut driver) = layout
+            .prepare_fresh_v2_text_founder_with_origin(
+                [0xe0 + u8::from(after_sdk); 32],
+                "warm saved SDK",
+                policy(),
+                inputs(seed),
+                FounderOrigin::NativeRequired(source.observe()),
+            )
+            .unwrap()
+        else {
+            panic!("genuine original")
+        };
+        let hook = Box::new(move || generation.store(8, SeqCst));
+        if after_sdk {
+            *layout
+                .checked_store()
+                .unwrap()
+                .genesis_after_sdk
+                .lock()
+                .unwrap() = Some(hook);
+        } else {
+            *layout
+                .checked_store()
+                .unwrap()
+                .genesis_before_sdk
+                .lock()
+                .unwrap() = Some(hook);
+        }
+        let calls = ServerStore::genesis_decode_calls_for_test();
+        assert!(driver
+            .retry_with_access(&layout, &mut rng, FounderAccess::Native(&mut keys))
+            .is_err());
+        assert!(!driver.is_ready_data());
+        assert_eq!(
+            driver.seed.is_some(),
+            after_sdk,
+            "cache graph before late UI refusal"
+        );
+        assert_eq!(
+            driver.read.is_some(),
+            !after_sdk,
+            "keep exact original read before entry"
+        );
+        assert_eq!(
+            ServerStore::genesis_decode_calls_for_test(),
+            calls + usize::from(after_sdk)
+        );
+        // The old generation cannot rescue its original. A newly authenticated
+        // command keeps the same source/creator/read/graph and does no second load.
+        assert!(driver
+            .retry_with_access(&layout, &mut NeverRng, FounderAccess::Native(&mut keys))
+            .is_err());
+        let drain = ui.retire();
+        drop(keys);
+        assert!(drain.is_drained());
+        authorized.store(8, SeqCst);
+        let fresh_ui = binding.open_session(8, Arc::new(())).unwrap();
+        let mut fresh_keys = NativeFounderKeys::prepare(&source, &fresh_ui.observe()).unwrap();
+        driver
+            .retry_with_access(&layout, &mut rng, FounderAccess::Native(&mut fresh_keys))
+            .unwrap();
+        assert!(driver.is_ready_data());
+        assert_eq!(
+            ServerStore::genesis_decode_calls_for_test(),
+            calls + 1,
+            "same successful SDK graph reused"
+        );
+        assert!(fresh_keys
+            .warm_sdk_entry()
+            .1
+            .preflight(&source.observe())
+            .is_ok());
+        driver.close_and_drain().unwrap();
+    }
+}
+
+#[test]
 fn native_whole_warm_source_keeps_its_origin_through_current_host_and_member_save() {
     let directory = tempfile::tempdir().unwrap();
     let shared = pool();
@@ -22,8 +120,9 @@ fn native_whole_warm_source_keeps_its_origin_through_current_host_and_member_sav
         Arc::new(AtomicU64::new(7)),
         Arc::new(AtomicU64::new(7)),
         Arc::new(AtomicBool::new(false)),
+        Arc::new(()),
     );
-    let ui = binding.open_session(7).unwrap();
+    let ui = binding.open_session(7, Arc::new(())).unwrap();
     let source = NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap();
     let mut keys = NativeFounderKeys::prepare(&source, &ui.observe()).unwrap();
     keys.enter_device().unwrap();
@@ -174,8 +273,9 @@ fn native_whole_warm_final_save_refuses_late_source_close_or_generation_publicat
             generation.clone(),
             authorized.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(()),
         );
-        let ui = binding.open_session(7).unwrap();
+        let ui = binding.open_session(7, Arc::new(())).unwrap();
         let mut source =
             Some(NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(())).unwrap());
         let mut keys = NativeFounderKeys::prepare(source.as_ref().unwrap(), &ui.observe()).unwrap();
@@ -279,7 +379,9 @@ fn native_whole_warm_final_save_refuses_late_source_close_or_generation_publicat
         drop(ui);
         if !close_source {
             authorized.store(generation.load(SeqCst), SeqCst);
-            let fresh_ui = binding.open_session(generation.load(SeqCst)).unwrap();
+            let fresh_ui = binding
+                .open_session(generation.load(SeqCst), Arc::new(()))
+                .unwrap();
             let mut fresh =
                 NativeFounderKeys::prepare(source.as_ref().unwrap(), &fresh_ui.observe()).unwrap();
             assert_eq!(

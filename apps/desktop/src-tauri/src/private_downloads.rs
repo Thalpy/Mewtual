@@ -860,7 +860,7 @@ async fn reveal_download_in_session(
         return Err(RevealError::Stale);
     }
     let servers = state.servers.lock().await;
-    if !servers.get(&request.server).is_some_and(|entry| {
+    if !servers.legacy(&request.server).is_some_and(|entry| {
         entry.instance == request.instance && entry.actor.same_instance(request.actor)
     }) {
         return Err(RevealError::Stale);
@@ -1839,7 +1839,7 @@ impl ExportPorts for ActorExport<'_> {
             .servers
             .lock()
             .await
-            .get(&self.ctx.server)
+            .legacy(&self.ctx.server)
             .is_some_and(|entry| entry.instance == self.ctx.instance);
         if !self.live() || !current_entry {
             return Err("The download is no longer active.".into());

@@ -12,6 +12,9 @@ pub(super) enum TestCut {
     Serialized,
     MergeEntered,
     Merged,
+    RoutingEntered,
+    RoutingBlobCached,
+    RoutingFrameCached,
     ProviderClosed,
     ObservationCached,
     SnapshotCached,
@@ -22,6 +25,7 @@ pub(super) struct Faults {
     pub(super) fail_at: Option<TestCut>,
     pub(super) sdk_dispatches: usize,
     pub(super) merge_dispatches: usize,
+    pub(super) routing_exports: usize,
 }
 impl PreparedTextCurrentAdd {
     pub(super) fn after_cut_for_test(&mut self, cut: TestCut) -> Result<(), MlsError> {

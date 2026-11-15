@@ -8,7 +8,7 @@ const CLOSE_SAVE_DEADLINE: Duration = Duration::from_secs(10);
 pub(super) struct ShutdownBarrier {
     frozen: Vec<FrozenServer>,
     _session: OwnedMutexGuard<()>,
-    _registry: OwnedMutexGuard<HashMap<u64, ServerEntry>>,
+    _registry: OwnedMutexGuard<ServerTable>,
 }
 
 impl ShutdownBarrier {
@@ -37,19 +37,20 @@ fn lease(
         .map_err(|_| busy())?;
     let store = state.store.clone().try_lock_owned().map_err(|_| busy())?;
     let registry = state.servers.clone().try_lock_owned().map_err(|_| busy())?;
-    if !state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire) != generation
+    if !state.session_lock_requested.load(Ordering::SeqCst)
+        || state.ui_session_generation.load(Ordering::SeqCst) != generation
         || registry
-            .get(&id)
+            .legacy(&id)
             .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The vault or group changed while closing; retry closing.".into());
     }
-    Ok(ShutdownLease::new(store, id, (persist, session, registry)))
+    ShutdownLease::new_mounted(store, id, (persist, session, registry))
+        .map_err(|refused| refused.message().to_string())
 }
 
 pub(super) async fn freeze_servers(state: &AppState) -> Result<ShutdownBarrier, String> {
-    let generation = state.ui_session_generation.load(Ordering::Acquire);
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
     let save = async {
         // Admission may have completed just before close, ahead of the periodic route worker.
         // Save policy, retry correlations and already-proven outbound listener evidence locally.
@@ -60,7 +61,7 @@ pub(super) async fn freeze_servers(state: &AppState) -> Result<ShutdownBarrier, 
             .servers
             .lock()
             .await
-            .iter()
+            .legacy_iter()
             .map(|(id, entry)| (*id, entry.instance, entry.actor.clone()))
             .collect();
         actors.sort_unstable_by_key(|(id, _, _)| *id);
@@ -82,12 +83,12 @@ pub(super) async fn freeze_servers(state: &AppState) -> Result<ShutdownBarrier, 
             .clone()
             .try_lock_owned()
             .map_err(|_| "The group list is busy; retry closing.".to_string())?;
-        if !state.session_lock_requested.load(Ordering::Acquire)
-            || state.ui_session_generation.load(Ordering::Acquire) != generation
+        if !state.session_lock_requested.load(Ordering::SeqCst)
+            || state.ui_session_generation.load(Ordering::SeqCst) != generation
             || registry.len() != actors.len()
             || actors.iter().any(|(id, instance, _)| {
                 registry
-                    .get(id)
+                    .legacy(id)
                     .is_none_or(|entry| entry.instance != *instance)
             })
         {
