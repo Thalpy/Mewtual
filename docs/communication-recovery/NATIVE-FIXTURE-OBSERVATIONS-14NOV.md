@@ -99,3 +99,33 @@ execution and updated-head full CI remain pending. Earlier full Root runs remain
 subject to the one explicitly deferred slow catch-up cost case. Root strict
 Clippy still has unfinished application-pipeline errors; no passing sign-off
 or suppression is claimed.
+
+## Foreign native SDP history under index contention
+
+The later complete run at d0f2de20 passed native Linux, but Windows passed 1076
+and failed 13. The first substantive failure was sdp_submission.rs:180: a direct
+foreign-Session history query returned Capacity before its expected Unauthorized.
+The other twelve failures were the shared fixture's deliberate poison cascade.
+This is separate from the earlier SDK-preflight correction; its H13d complete
+Windows and Linux runs both passed.
+
+The direct sdp_history call takes the real transition-index and row locks before
+checking exact Session allocation. The fixture now forces one actual index
+refusal, then observes only that SAME row/foreign Arc under a bounded Capacity
+retry. It still requires exact Unauthorized, and drops every unexpected actual
+snapshot outside guards. No HTTP request, SDP/SDK/Release work or publication is
+retried. The original intent's remaining lifetime is still sampled afterward;
+this fixed five-second observation loop supplies no renewed authority or
+deadline. Its watchdog follows the deliberate synchronous index acquisition and
+cannot preempt that barrier. Row ID and actual original outcome allocation are
+checked afterward; the original funding remains owned for the later existing
+publication/custody assertions, not proved by a candidate-self comparison.
+
+Design/actual-diff review and the exact failed TCP regression are pending for
+this latest correction. The failed current full run is not credited as green.
+
+The exact previously failing TCP scenario passed locally with this correction
+(1 case, 5.24 seconds), including the forced actual-index Capacity observation.
+It was built against the transport continuation containing the identical fixture
+change. The current complete d0f2de20 Windows failure remains recorded above;
+complete validation of the corrected head is still required.

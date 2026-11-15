@@ -67,6 +67,9 @@ pub(in crate::store) struct IndexCommitIo {
     promoted: bool,
     complete: bool,
     candidate: [u8; 32],
+    network: Option<
+        std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
+    >,
     #[cfg(test)]
     retirement: Option<RetirementObservation>,
 }
@@ -74,7 +77,7 @@ impl IndexCommitIo {
     pub(in crate::store) fn prepare(
         store: &ServerStore,
         original: UpgradeInventory,
-        proof: VerifiedNativeIndex3Wal,
+        mut proof: VerifiedNativeIndex3Wal,
         candidate: &[u8],
     ) -> Result<Self, AppError> {
         original.require(store)?;
@@ -94,6 +97,7 @@ impl IndexCommitIo {
             promoted: false,
             complete: false,
             candidate: proof.candidate(),
+            network: proof.take_network(),
             #[cfg(test)]
             retirement: None,
         })
@@ -101,7 +105,7 @@ impl IndexCommitIo {
     pub(in crate::store) fn recover(
         store: &ServerStore,
         original: UpgradeInventory,
-        proof: VerifiedNativeIndex3Wal,
+        mut proof: VerifiedNativeIndex3Wal,
         candidate: &[u8],
     ) -> Result<Self, AppError> {
         original.require(store)?;
@@ -132,9 +136,44 @@ impl IndexCommitIo {
             promoted: false,
             complete: false,
             candidate: proof.candidate(),
+            network: proof.take_network(),
             #[cfg(test)]
             retirement: None,
         })
+    }
+    pub(in crate::store) fn attach_native_network(
+        &mut self,
+        store: &ServerStore,
+        proof: std::sync::Arc<
+            crate::store::persistence::native_registry::network::NetworkDependency,
+        >,
+    ) -> Result<(), AppError> {
+        if self.stage.is_some() || self.promoted || self.complete || self.network.is_some() {
+            return Err(denied());
+        }
+        proof.require(store)?;
+        self.network = Some(proof);
+        Ok(())
+    }
+    pub(in crate::store) fn require_network_identity(
+        &self,
+        expected: Option<
+            &std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
+        >,
+    ) -> Result<(), AppError> {
+        match (&self.network, expected) {
+            (None, None) => Ok(()),
+            (Some(original), Some(expected)) if std::sync::Arc::ptr_eq(original, expected) => {
+                Ok(())
+            }
+            _ => Err(denied()),
+        }
+    }
+    fn require_network(&self, store: &ServerStore) -> Result<(), AppError> {
+        if let Some(network) = &self.network {
+            network.require(store)?;
+        }
+        Ok(())
     }
     pub(in crate::store) fn require_unstarted_parent(
         &self,
@@ -144,6 +183,7 @@ impl IndexCommitIo {
             return Err(denied());
         }
         self.original.require(store)?;
+        self.require_network(store)?;
         require_static(&self.original, store)
     }
     pub(in crate::store) fn commit(
@@ -158,6 +198,7 @@ impl IndexCommitIo {
             return Err(denied());
         }
         require_static(&self.original, store)?;
+        self.require_network(store)?;
         let stage = path(store, true, native::INDEX_STAGE_NAME)?;
         let selected = path(store, true, native::INDEX_NAME)?;
         if !self.promoted {
@@ -184,6 +225,7 @@ impl IndexCommitIo {
             held(&stage, self.stage.as_ref().ok_or_else(denied)?)?;
             self.original.base.require_directories(store)?;
             self.original.expected_current.require(store)?;
+            self.require_network(store)?;
             fs::rename(&stage, &selected).map_err(io)?;
             self.promoted = true; // Visible progress precedes fallible barriers.
             trip(Fault::IndexRename)?;
@@ -196,6 +238,7 @@ impl IndexCommitIo {
         exact(&selected, output, candidate)?;
         absent(&stage)?;
         trip(Fault::Index3Covered)?;
+        self.require_network(store)?;
         self.complete = true;
         Ok(())
     }
@@ -215,6 +258,7 @@ impl IndexCommitIo {
             candidate,
         )?;
         absent(&path(store, true, native::INDEX_STAGE_NAME)?)?;
+        self.require_network(store)?;
         self.original.expected_current.require(store)
     }
     #[cfg(test)]

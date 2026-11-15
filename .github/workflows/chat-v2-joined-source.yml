@@ -9,6 +9,8 @@ on:
       - '.github/predecessor/native_index2_gate.rs'
       - '.github/scripts/check-chat-v2-native-index3.py'
       - '.github/predecessor/native_index3_gate.rs'
+      - '.github/scripts/check-chat-v2-native-founder.py'
+      - '.github/predecessor/native_founder_gate.rs'
       - 'crates/catcoms-app/src/store/persistence/exact_inventory_linux/**'
       - 'crates/catcoms-app/src/store/persistence/exact_inventory_linux.rs'
       - 'crates/catcoms-net/src/seeded_identity.rs'
@@ -86,6 +88,12 @@ jobs:
       - name: Execute the actual pre-normal-WAL index3 predecessor gate
         if: ${{ !inputs.fresh_founder_only }}
         run: python .github/scripts/check-chat-v2-native-index3.py
+      - name: Check native-founder predecessor count guards
+        if: ${{ !inputs.fresh_founder_only }}
+        run: python .github/scripts/check-chat-v2-native-founder.py --self-test
+      - name: Execute the actual pre-Native4 founder predecessor gate
+        if: ${{ !inputs.fresh_founder_only }}
+        run: python .github/scripts/check-chat-v2-native-founder.py
       - uses: actions/setup-node@v4
         if: runner.os == 'Linux'
         with:
@@ -119,3 +127,4 @@ jobs:
             logs/chat-v2-native-registry/
             logs/chat-v2-native-index2/
             logs/chat-v2-native-index3/
+            logs/chat-v2-native-founder/

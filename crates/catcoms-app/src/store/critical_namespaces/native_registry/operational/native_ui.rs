@@ -16,7 +16,7 @@ use std::sync::{
 };
 
 const GENERATIONS: usize = 32;
-const INVOCATION_BYTES: usize = 4096;
+pub(super) const INVOCATION_BYTES: usize = 4096;
 const HOST_BYTES: usize = 4096;
 const REGISTRY_BYTES: usize = 16 * 1024;
 const MINIMUM_CAPACITY: usize = 2 * GENERATIONS * INVOCATION_BYTES + HOST_BYTES + REGISTRY_BYTES;
@@ -28,6 +28,12 @@ pub struct NativeUiInvocationBudget {
     pool: CriticalCatalogReadPool,
 }
 impl NativeUiInvocationBudget {
+    /// Actual affine metadata debit, as policy DATA only. Native buffer
+    /// envelopes use this quote so a future price change cannot silently make
+    /// their combined credit insufficient. This grants no UI/Source authority.
+    pub const fn metadata_bytes() -> usize {
+        INVOCATION_BYTES
+    }
     /// Process policy DATA; this minimum funds one mounted host and the bounded
     /// independent candidate overlap. It grants no capture or native access.
     pub const fn required_capacity() -> usize {
@@ -38,6 +44,12 @@ impl NativeUiInvocationBudget {
             return Err(refused());
         }
         Ok(Self { pool })
+    }
+    pub(super) fn require_credit(
+        &self,
+        credit: &NativeUiInvocationMetadata,
+    ) -> Result<(), AppError> {
+        credit.fee.require(&self.pool, INVOCATION_BYTES)
     }
     /// Outside all guards, before original-vault capture. One affine credit can
     /// construct at most one candidate, including a losing/transient candidate.
@@ -131,6 +143,9 @@ impl UiAdmissionOwner {
                 _fee: registry_fee,
             }),
         })
+    }
+    pub(super) fn invocation_budget(&self) -> NativeUiInvocationBudget {
+        self.registry.budget.clone()
     }
     pub(super) fn observe_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
         self.binding.observe_mount()
@@ -442,6 +457,17 @@ pub struct UiCapture {
     record: Arc<RetirementRecord>,
     original: Weak<Registry>,
     _invocation: Arc<Fee>,
+}
+impl UiCapture {
+    /// Cached negatives only. The owning concrete factory still has to check
+    /// this capture against its original facade and source collection.
+    pub(super) fn is_current_cached(&self) -> bool {
+        !self
+            .record
+            .retiring
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && self.current.is_current()
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Key-work-only retirement status, never whole native lock completion.

@@ -74,7 +74,7 @@ fn capture(state: &AppState, server: u64, generation: u64) -> Result<Captured, &
     // Contention is a bounded unavailable read, never permission to choose whichever row exists
     // after waiting. Capture instance AND actual Actor while the original registry guard is held.
     let servers = state.servers.try_lock().map_err(|_| "busy")?;
-    let entry = servers.get(&server).ok_or("server-unavailable")?;
+    let entry = servers.legacy(&server).ok_or("server-unavailable")?;
     let row_origin = entry.files.scope(account);
     let mut active = state
         .admin_chat_ledger
@@ -336,7 +336,7 @@ async fn publish(
         return;
     };
     let servers = state.servers.lock().await;
-    let current = servers.get(&captured.server).is_some_and(|entry| {
+    let current = servers.legacy(&captured.server).is_some_and(|entry| {
         entry.instance == captured.instance && entry.actor.same_instance(&captured.actor)
     });
     if !current {

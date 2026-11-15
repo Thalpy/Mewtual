@@ -24,9 +24,10 @@ nor worker normalizes an already captured generation. The real frontend also
 obtains its authentication generation through the existing native lock barrier.
 
 Blocking authentication captures one finite physical metadata capsule under the
-store guard, then verifies outside that guard and the UI commit mutex. The same
-capsule retains the original Host and physical negatives through native unlock
-finalization. Whole-vault closure is distinct from an ordinary UI lock; a correct
+store guard, then verifies outside that guard and the UI commit mutex. The
+[authentication continuation](CHAT-V2-NATIVE-AUTH-CHECK.md) now releases that
+whole work before returning a separately paid original Host/index/mount negative
+Check for native unlock finalization. Whole-vault closure is distinct from an ordinary UI lock; a correct
 secret cannot authorize a permanently closed owner.
 
 Selected3 verification authenticates one actual critical wrapper transaction and

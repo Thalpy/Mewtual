@@ -27,6 +27,7 @@ automerge = "0.10"
 zeroize = "1"
 
 [dev-dependencies]
+openmls_memory_storage = "=0.6.0"
 # `test-support` builds the proposal and external-commit fixtures the commit-log tests wrap in
 # signed commit records. Test-only: resolver 2 keeps it out of every non-test build.
 catcoms-mls = { path = "../catcoms-mls", features = ["test-support"] }
