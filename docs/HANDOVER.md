@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+The separate native acceptance-fixture correction addresses hosted failures
+in PRs #130/#131: a temporary Capacity refusal was used as an Open-history
+baseline, and positive pre-body intake assumed no lock contention. The test
+helpers now retry only those proven pre-body/read-only refusals within the
+same original deadline and authenticated position. History must match the
+known row/parent/Open/no-action shape before byte comparison. Real held-lock
+controls remain; actual full group pressure is refilled after every wait and
+reproved through body admission. Armed expiry and all negative assertions
+remain single-attempt. All9 PC-intent cases and strict native lint passed;
+full exact-head CI remains pending. This changes no production authorization,
+transport behavior, resource allowance, native deadline or activation switch.
+
 The `chat-v2-governed-native-storage` continuation now implements the private
 same-owner native3-to-governance4 startup and an explicit cold metadata-only
 opener. Native seed2 binds the original index/marker tuple; first-torn cleanup
