@@ -1,6 +1,5 @@
 //! Actual factory/physical-debit regressions. These exercise the real Server::found entry,
 //! original held files and namespace, rather than a caller-supplied paid/authorized boolean.
-//! Authored while compilation is paused: none of these tests is execution evidence yet.
 use super::*;
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
@@ -246,8 +245,12 @@ fn lost_saved_return_replays_only_original_unconsumed_admission_and_is_shared_on
     drop(lost);
     let first = store.write_original_creation_debit(prepared).unwrap();
     let duplicate = store.write_original_creation_debit(prepared).unwrap();
-    first.consume_for_sdk(&store, &owner.original).unwrap();
-    assert!(duplicate.consume_for_sdk(&store, &owner.original).is_err());
+    first
+        .consume_for_sdk(&store, &owner.original, None)
+        .unwrap();
+    assert!(duplicate
+        .consume_for_sdk(&store, &owner.original, None)
+        .is_err());
     assert!(store
         .write_original_creation_debit(owner.prepared_debit.as_mut().unwrap())
         .is_err());
@@ -255,6 +258,9 @@ fn lost_saved_return_replays_only_original_unconsumed_admission_and_is_shared_on
     assert_eq!(entries(), 0, "test admission consumption did not call SDK");
     assert!(owner.inputs.is_some());
 }
+
+#[path = "founder_native_tests.rs"]
+mod native;
 
 #[test]
 fn foreign_identical_complete_or_prefix_debit_is_preserved_without_sdk_admission() {

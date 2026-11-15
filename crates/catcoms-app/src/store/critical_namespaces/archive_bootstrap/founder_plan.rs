@@ -14,7 +14,9 @@ pub use source::{
     FreshV2TextFounderBinding, FreshV2TextFounderPolicy, PreparedFreshV2TextFounder,
     ReturnedArchiveFounderPlanning,
 };
-pub(in crate::store) use source::{CompletedWarmFounderOrigin, WarmFounderCurrentReservation};
+pub(in crate::store) use source::{
+    CompletedWarmFounderOrigin, WarmFounderCurrentReservation, WarmSavedSourceSdkReopenEvidence,
+};
 
 /// A source borrow is constructible only here, from the direct `Server::found` result retained
 /// by the actual one-shot creator. Keeping it borrowed through Root I/O prevents this creator's
@@ -232,9 +234,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderCreation<T, R> {
         self,
         store: &ServerStore,
     ) -> Result<ArchiveFounderPlanning<T, R>, ReturnedArchiveFounderCreation<T, R>> {
+        self.into_ram_plan_with_access(store, FounderAccess::Library)
+    }
+    #[allow(clippy::result_large_err)] // return the same prepaid owner without allocating
+    pub(in crate::store) fn into_ram_plan_with_access(
+        self,
+        store: &ServerStore,
+        access: FounderAccess<'_>,
+    ) -> Result<ArchiveFounderPlanning<T, R>, ReturnedArchiveFounderCreation<T, R>> {
         let source = ActualFounderSource::founding(&self);
-        let result = source
-            .validate_original(store)
+        let result = access
+            .require(&self.origin)
+            .and_then(|()| source.validate_original(store))
             .and_then(|()| source.untouched_scope());
         match result {
             Ok(()) => Ok(ArchiveFounderPlanning {
@@ -267,10 +278,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderPlanning<T, R> {
         store: &ServerStore,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ArchiveFounderPlanningProgress, AppError> {
+        self.prepare_ram_plan_with_access(store, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn prepare_ram_plan_with_access(
+        &mut self,
+        store: &ServerStore,
+        rng: &mut dyn CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<ArchiveFounderPlanningProgress, AppError> {
+        access.require(&self.creator.origin)?;
         // An exact completed intent can be reobserved, never reinserted as another transient
         // task or sampled again. The actual saved-source check remains mandatory on retry.
         if self.saved_founding.is_some() {
-            return self.save_founding_intent(store, rng);
+            return self.save_founding_intent_with_access(store, rng, access);
         }
         let source = ActualFounderSource::founding(&self.creator);
         source.validate_original(store)?;

@@ -80,3 +80,19 @@ test("a rejected lock is retained for an exact-snapshot retry before unlock", as
   assert.deepEqual(await coordinator.settle(), { continuity_error: null });
   assert.deepEqual(submitted, ["same immutable snapshot", "same immutable snapshot"]);
 });
+
+
+test("native close acknowledgement echoes only the displayed attempted failure", async () => {
+  const { closeContinuityAcknowledgement } = await import("./window-close.ts");
+  const base = { continuity_error: "disk full", deferred: true, history_error: null, destroy_error: null };
+  assert.deepEqual(closeContinuityAcknowledgement({ ...base, continuity_discardable: true,
+    continuity_revision: "27" }), { discard: true, revision: "27" });
+  for (const result of [
+    { ...base, continuity_discardable: false, continuity_revision: "27" },
+    { ...base, continuity_discardable: true },
+    { ...base, continuity_discardable: true, continuity_revision: "027" },
+    { ...base, continuity_discardable: true, continuity_revision: "18446744073709551616" },
+    { ...base, continuity_discardable: true, continuity_revision: "27", history_error: "key work busy" },
+  ]) assert.deepEqual(closeContinuityAcknowledgement(result), { discard: false, revision: null });
+  assert.deepEqual(closeContinuityAcknowledgement(base), { discard: true, revision: null });
+});

@@ -890,7 +890,7 @@ pub(crate) async fn ensure(
         let servers = state.servers.lock().await;
         let binding = selected.binding();
         *servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .ok_or(Refused::Binding)?
             .device_id

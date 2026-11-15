@@ -726,6 +726,51 @@ fn an_extended_acl_is_never_ruled_out_without_proof() {
     assert!(acl_present_from(Err(rustix::io::Errno::ACCESS)));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn the_explicit_acl_query_observes_real_absence_and_an_extended_acl() {
+    use rustix::fs::{fgetxattr_query, fremovexattr, fsetxattr, XattrFlags};
+    let folder = tempfile::tempdir().unwrap();
+    let directory = File::open(folder.path()).unwrap();
+    let attribute = "system.posix_acl_access";
+    // Do not inherit a machine's default ACL into the negative control.
+    match fremovexattr(&directory, attribute) {
+        Ok(()) | Err(rustix::io::Errno::NODATA) => {}
+        Err(error) => panic!("ACL regression requires Linux POSIX ACL support: {error}"),
+    }
+    assert!(matches!(
+        fgetxattr_query(&directory, attribute),
+        Err(rustix::io::Errno::NODATA)
+    ));
+    assert!(!extended_acl_present(&directory));
+    // Linux's version2 ACL with one named user and a mask: a three-entry mode-
+    // equivalent ACL would be folded back into mode bits by the kernel, so it
+    // would not exercise the positive xattr query at all.
+    let mut acl = 2u32.to_le_bytes().to_vec();
+    // Use a mapped identity even when this test runs inside a user namespace.
+    // The named entry may be redundant with the owner; it is still a real
+    // extended ACL, and the conservative detector must report its presence.
+    let named_user = rustix::process::geteuid().as_raw();
+    for (tag, permissions, id) in [
+        (1u16, 7u16, u32::MAX),
+        (2, 4, named_user),
+        (4, 0, u32::MAX),
+        (16, 4, u32::MAX),
+        (32, 0, u32::MAX),
+    ] {
+        acl.extend_from_slice(&tag.to_le_bytes());
+        acl.extend_from_slice(&permissions.to_le_bytes());
+        acl.extend_from_slice(&id.to_le_bytes());
+    }
+    fsetxattr(&directory, attribute, &acl, XattrFlags::empty()).unwrap();
+    assert_eq!(fgetxattr_query(&directory, attribute).unwrap(), acl.len());
+    assert!(extended_acl_present(&directory));
+    fremovexattr(&directory, attribute).unwrap();
+    assert!(!extended_acl_present(&directory));
+    // The neighboring result-fold test still pins ACCESS and ambiguous errors
+    // to "ACL might exist"; updating the API never weakens that failure rule.
+}
+
 #[cfg(unix)]
 #[test]
 fn the_account_files_are_read_bounded_from_the_root() {

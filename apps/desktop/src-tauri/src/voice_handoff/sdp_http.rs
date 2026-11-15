@@ -90,7 +90,7 @@ fn queue_preflight(
         let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
         let binding = route.selected().binding();
         servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .map(|entry| entry.actor.clone())
             .ok_or(Refused::Closed)?

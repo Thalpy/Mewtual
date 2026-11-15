@@ -344,6 +344,36 @@ fn simultaneous_whole_retirement_and_real_preparation_never_outpace_actual_custo
 }
 
 #[test]
+fn whole_retirement_before_metadata_payment_is_terminal_and_keeps_original_custody() {
+    let (resources, chain, workflow, slots) = fixture();
+    let left = workflow.confirmation_control();
+    let right = workflow.confirmation_control();
+    let mut workflow = Some(workflow);
+    let mut whole = None;
+    let result = left.prepare_sdp_capacity_at(
+        || {
+            whole = Some(right.retire_all());
+            drop(workflow.take()); // no external old-Workflow owner masks the guard
+            assert!(chain.binding.workflow_drained.load(Ordering::Acquire));
+            assert!(
+                !whole.as_ref().unwrap().is_drained(),
+                "actual partial preparation still owns successor custody"
+            );
+        },
+        || {},
+    );
+    // Metadata's real original reservation has closed: its local Capacity
+    // error must not become a retryable result for an irreversibly closed plan.
+    // This deterministic edge reproduced the unchanged concurrent test's CI
+    // failure; do not weaken that race assertion to accept Capacity.
+    assert_eq!(result.err(), Some(VoiceError::Unauthorized));
+    assert!(whole.as_ref().unwrap().is_drained());
+    drop((whole, left, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
 fn whole_close_between_open_observation_and_guard_cas_cannot_overtake_original_control() {
     let (pool, chain, workflow, slots) = fixture();
     let right = workflow.confirmation_control();
