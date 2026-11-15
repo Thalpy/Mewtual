@@ -3,9 +3,13 @@
 use super::*;
 use crate::store::{MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission};
 
-/// Prepaid original key metadata and weak runtime association only. Construct
-/// outside native guards, then acquire actual native commit custody. No Entry,
-/// issuer or strong runtime/body survives that wait in this preparation.
+/// Prepaid unentered key metadata and weak runtime association, retaining the
+/// original counted finite Source work (including its physical custody). Construct
+/// outside native guards. Native must TRY its actual commit acquisition: this
+/// preparation still owns a counted Source End, so awaiting a commit guard
+/// held by whole-close (which drains that End) would deadlock. On contention,
+/// drop the whole preparation outside guards before any wait/retry. No Entry,
+/// issuer or strong runtime/body is retained here.
 pub struct NativeTextMemberFinalPreparation<T: MeshTransport, R: CryptoRngCore> {
     // Allocated outside guards; empty until try_admit arms the whole failure.
     // FIRST so an unrun preparation frees it before its actual payments.
