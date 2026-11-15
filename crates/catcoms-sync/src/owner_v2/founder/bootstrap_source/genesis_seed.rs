@@ -22,12 +22,19 @@ mod ordinary_create;
 // The founder acting as an ORDINARY member; shares nothing with the Append lane above.
 #[cfg(not(target_arch = "wasm32"))]
 mod governance;
+#[cfg(not(target_arch = "wasm32"))]
+mod invite;
 mod ordinary_member;
 #[cfg(not(target_arch = "wasm32"))]
 pub use governance::{
     PreparedV2FounderGovernanceNode, RetiredV2FounderAddNativeCustody, V2FounderAddNativeStage,
     V2FounderAddPreparationRefusal, V2FounderAddRequestData, V2FounderGovernanceNegative,
     V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use invite::{
+    PreparedV2FounderInviteData, V2FounderInviteRequestData, FOUNDER_INVITE_DATA_BYTES,
+    MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 pub use ordinary_append::{
     DetachedV2AppendData, PreparedV2AppendData, V2AppendDataView, V2AppendPlanObservation,
