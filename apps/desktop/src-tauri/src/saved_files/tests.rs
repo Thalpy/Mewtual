@@ -69,7 +69,7 @@ impl SessionWriteCase {
         }
         *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
-        state.servers.lock().await.insert(1, server);
+        state.servers.lock().await.install_legacy_fixture(1, server);
         Self {
             root,
             state,
@@ -85,7 +85,7 @@ impl SessionWriteCase {
     }
 
     async fn finish(self) {
-        self.state.servers.lock().await.clear();
+        self.state.servers.lock().await.clear_legacy_fixture();
         self.actor.shutdown().await;
         self.task.await.unwrap();
         self.drain.await.unwrap();
@@ -179,7 +179,7 @@ async fn saved_file_mutations_apply_while_the_original_session_is_open() {
         }
         if matches!(action, SessionMutation::Limit) {
             let servers = case.state.servers.lock().await;
-            let server = servers.get(&1).unwrap();
+            let server = servers.legacy(&1).unwrap();
             let owner = [server.group_id.as_slice(), server.device_id.as_bytes()].concat();
             drop(servers);
             let store = case.state.store.lock().await;
@@ -354,7 +354,7 @@ fn entry(id: u8, cid: &[u8], folder: &Path, leaf: &str, at: u64) -> SavedFile {
 /// The list as stored for server 1 of `state` (its current owner binding).
 async fn stored(state: &AppState) -> SavedFilesLoad {
     let servers = state.servers.lock().await;
-    let entry = servers.get(&1).expect("server 1");
+    let entry = servers.legacy(&1).expect("server 1");
     let owner = [entry.group_id.as_slice(), entry.device_id.as_bytes()].concat();
     drop(servers);
     state
@@ -411,7 +411,7 @@ async fn a_save_is_recorded_only_for_the_incarnation_that_saved() {
     *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(561);
     let actor = entry.actor.clone();
-    state.servers.lock().await.insert(1, entry);
+    state.servers.lock().await.install_legacy_fixture(1, entry);
 
     let first = record_save(&state, 1, 561, plain(b"file", "report.pdf", &folder), None).await;
     assert!(
@@ -453,7 +453,7 @@ async fn a_save_is_recorded_only_for_the_incarnation_that_saved() {
         2,
         "nothing was added for a stale incarnation"
     );
-    state.servers.lock().await.remove(&1);
+    state.servers.lock().await.remove_legacy_fixture(&1);
     let gone = record_save(&state, 1, 561, plain(b"other", "x.txt", &folder), None).await;
     assert!(matches!(gone, Recorded::No { tell: false }));
     actor.shutdown().await;
@@ -472,7 +472,7 @@ async fn a_list_this_build_cannot_read_is_never_written_over() {
     *state.store.lock().await = Some((store).into());
     let (entry, task, drain) = crate::leaving::tests::running(562);
     let actor = entry.actor.clone();
-    state.servers.lock().await.insert(1, entry);
+    state.servers.lock().await.install_legacy_fixture(1, entry);
 
     let recorded = record_save(&state, 1, 562, plain(b"file", "report.pdf", &folder), None).await;
     assert!(
@@ -501,7 +501,7 @@ async fn clearing_a_saved_private_row_forgets_only_its_own_entry() {
     *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(563);
     let actor = entry.actor.clone();
-    state.servers.lock().await.insert(1, entry);
+    state.servers.lock().await.install_legacy_fixture(1, entry);
     let (_, journal) = published_journal(&downloads, "a.txt");
     let (_, other) = published_journal(&downloads, "b.txt");
     for (cid, journal) in [(&b"a"[..], &journal), (&b"b"[..], &other)] {
@@ -546,7 +546,7 @@ async fn a_rename_after_a_failed_forget_keeps_the_list_readable() {
     *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(564);
     let actor = entry.actor.clone();
-    state.servers.lock().await.insert(1, entry);
+    state.servers.lock().await.install_legacy_fixture(1, entry);
     for leaf in ["report.pdf", "report (1).pdf"] {
         let save = plain(b"file", leaf, &folder);
         assert!(matches!(
@@ -575,7 +575,7 @@ async fn a_rename_after_a_failed_forget_keeps_the_list_readable() {
 /// Server 1's owner binding in `state` (the group, then this device's member id).
 async fn owner_of(state: &AppState) -> Vec<u8> {
     let servers = state.servers.lock().await;
-    let entry = servers.get(&1).expect("server 1");
+    let entry = servers.legacy(&1).expect("server 1");
     [entry.group_id.as_slice(), entry.device_id.as_bytes()].concat()
 }
 
@@ -589,7 +589,7 @@ async fn a_save_is_recorded_within_the_stored_setting() {
     *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(565);
     let actor = entry.actor.clone();
-    state.servers.lock().await.insert(1, entry);
+    state.servers.lock().await.install_legacy_fixture(1, entry);
     let owner = owner_of(&state).await;
     state
         .store
@@ -815,7 +815,7 @@ async fn a_replace_plan_comes_from_the_same_locked_read_that_records_the_save() 
     *state.store.lock().await = Some((store_in(dir.path())).into());
     let (entry, task, drain) = crate::leaving::tests::running(564);
     let actor = entry.actor.clone();
-    state.servers.lock().await.insert(1, entry);
+    state.servers.lock().await.install_legacy_fixture(1, entry);
     let cid = catcoms_storage::Cid::of(b"report.pdf");
     let save = |journal: &ExportJournal| PublishedSave {
         cid,

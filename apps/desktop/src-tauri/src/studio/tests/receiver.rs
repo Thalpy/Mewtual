@@ -237,7 +237,15 @@ async fn native_studio_automatic_two_member_receive_events_pacing_and_restart() 
         .unwrap()
         .as_legacy()
         .unwrap()
-        .blob_store(&hex::encode(&b.state.servers.lock().await[&7].group_id))
+        .blob_store(&hex::encode(
+            &b.state
+                .servers
+                .lock()
+                .await
+                .legacy(&7)
+                .expect("Legacy fixture row")
+                .group_id
+        ))
         .unwrap()
         .get_bounded(&Cid::from_hex(&cid).unwrap(), pix.len())
         .unwrap()
@@ -313,7 +321,7 @@ async fn native_studio_automatic_two_member_receive_events_pacing_and_restart() 
 #[tokio::test]
 async fn native_studio_receiver_and_delayed_events_refuse_old_incarnation_and_lock() {
     let (_root, state, actor, task, drain) = fixture().await;
-    state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+    state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
     assert!(receive_once(&state, 7, 1, &actor).await.is_err());
     assert!(!forward_if_current(&state, 7, 1, || panic!("old actor event escaped")).await);
     assert!(forward_if_current(&state, 7, 2, || {}).await);

@@ -552,7 +552,7 @@ async fn a_real_resume_commits_its_intent_change_only_without_a_cleanup_claim() 
     let (row, task, drain, cid) =
         crate::leaving::tests::running_with_file(944, &state, b"a resumable private copy").await;
     let actor = row.actor.clone();
-    state.servers.lock().await.insert(1, row);
+    state.servers.lock().await.install_legacy_fixture(1, row);
     let (_cancel, watch) = tokio::sync::watch::channel(false);
     let origin = RequestCancellation::new(watch, None);
     let ready = actor

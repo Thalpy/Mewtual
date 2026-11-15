@@ -693,9 +693,558 @@ fn lifecycle3_policy(
     use super::super::super::lifecycle::preparation::Policy;
     Policy::new(pool, Policy::required_persistent_capacity()).unwrap()
 }
+
+#[test]
+fn lifecycle3_expected_current_is_prepaid_and_independent_of_mounted_current_cache() {
+    use crate::store::persistence::native_registry::lifecycle::{
+        ExpectedCurrentInputs, EXPECTED_CURRENT_FEE,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc340);
+    let mounted = mount(dir.path(), &mut rng);
+    let store = mounted.physical.current.cached_store().unwrap();
+    let pool = CriticalCatalogReadPool::new(EXPECTED_CURRENT_FEE).unwrap();
+    let short = pool.try_reserve(EXPECTED_CURRENT_FEE - 1).unwrap();
+    assert!(ExpectedCurrentInputs::capture(store, &short, &pool).is_err());
+    drop(short);
+    let paid = pool.try_reserve(EXPECTED_CURRENT_FEE).unwrap();
+    let inputs = ExpectedCurrentInputs::capture(store, &paid, &pool).unwrap();
+    let layout = store.current_layout.lock().unwrap().take().unwrap();
+    // Real cold inspection occurs before this cache exists. Read-only marker
+    // authentication must not silently install or depend on that mutable owner.
+    let actual = inputs.authenticate(store).unwrap();
+    assert_eq!(actual, layout.layout);
+    assert!(store.current_layout.lock().unwrap().is_none());
+    *store.current_layout.lock().unwrap() = Some(layout);
+    inputs.require(store).unwrap();
+    assert_eq!(pool.charged_for_test(), EXPECTED_CURRENT_FEE);
+    drop(inputs);
+    assert_eq!(pool.charged_for_test(), EXPECTED_CURRENT_FEE);
+    drop(paid);
+    assert_eq!(pool.charged_for_test(), 0);
+}
+
+#[test]
+fn lifecycle3_expected_current_rejects_equal_byte_marker_and_directory_replacement() {
+    use crate::store::persistence::native_registry::lifecycle::{
+        ExpectedCurrentInputs, EXPECTED_CURRENT_FEE,
+    };
+    for (number, name) in [
+        crate::store::critical_namespaces::archive_bootstrap::ROOT_MARKER,
+        crate::store::critical_namespaces::current_layout::CURRENT_MARKER,
+        "",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let replaced = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc341 + number as u64);
+        let mounted = mount(dir.path(), &mut rng);
+        let store = mounted.physical.current.cached_store().unwrap();
+        let pool = CriticalCatalogReadPool::new(EXPECTED_CURRENT_FEE).unwrap();
+        let paid = pool.try_reserve(EXPECTED_CURRENT_FEE).unwrap();
+        let inputs = ExpectedCurrentInputs::capture(store, &paid, &pool).unwrap();
+        let original = if name.is_empty() {
+            // Windows rename rejects a source directory with a trailing separator.
+            dir.path()
+                .join(crate::store::critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
+        } else {
+            file(dir.path(), name)
+        };
+        if name.is_empty() {
+            if let Err(error) = fs::rename(&original, replaced.path().join("original-root")) {
+                // The real Windows Store can hold directory handles which
+                // prohibit this rename outright. Pin that OS protection and
+                // unchanged proof; where replacement is possible the identity
+                // checks below must detect it. Do not weaken handle sharing.
+                #[cfg(windows)]
+                {
+                    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                    inputs.require(store).unwrap();
+                    assert!(original.is_dir());
+                    continue;
+                }
+                #[cfg(not(windows))]
+                panic!("unexpected directory replacement refusal: {error}");
+            }
+            fs::create_dir(&original).unwrap();
+        } else {
+            let bytes = fs::read(&original).unwrap();
+            fs::write(replaced.path().join("equal-marker"), &bytes).unwrap();
+            fs::rename(replaced.path().join("equal-marker"), &original).unwrap();
+            assert_eq!(fs::read(&original).unwrap(), bytes);
+        }
+        assert!(inputs.require(store).is_err());
+        assert!(inputs.authenticate(store).is_err());
+        // A stale proof cannot mutate/repair the substituted object.
+        assert!(original.exists());
+        assert!(mounted.physical.handler.gate.idle());
+    }
+}
+
+#[test]
+fn lifecycle3_expected_current_rejects_foreign_authenticated_marker_and_new_mount() {
+    use crate::store::critical_namespaces::archive_current_namespace_codec as current_codec;
+    use crate::store::persistence::native_registry::lifecycle::{
+        ExpectedCurrentInputs, EXPECTED_CURRENT_FEE,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc345);
+    let mounted = mount(dir.path(), &mut rng);
+    let store = mounted.physical.current.cached_store().unwrap();
+    let pool = CriticalCatalogReadPool::new(EXPECTED_CURRENT_FEE).unwrap();
+    let paid = pool.try_reserve(EXPECTED_CURRENT_FEE).unwrap();
+    let inputs = ExpectedCurrentInputs::capture(store, &paid, &pool).unwrap();
+    let mut layout = inputs.authenticate(store).unwrap();
+    let key = Zeroizing::new(store.keys.db_key().unwrap());
+    layout.root[0] ^= 1;
+    let foreign = current_codec::seal_marker_data(&key, layout, &mut rng).unwrap();
+    let marker = file(
+        dir.path(),
+        crate::store::critical_namespaces::current_layout::CURRENT_MARKER,
+    );
+    let original = fs::read(&marker).unwrap();
+    fs::write(&marker, &foreign).unwrap();
+    assert!(inputs.require(store).is_err());
+    let foreign_inputs = ExpectedCurrentInputs::capture(store, &paid, &pool).unwrap();
+    assert!(foreign_inputs.authenticate(store).is_err());
+    assert_eq!(fs::read(&marker).unwrap(), foreign.as_slice());
+    drop(foreign_inputs);
+    fs::write(&marker, &original).unwrap();
+    inputs.require(store).unwrap();
+    // The vault lock prohibits simultaneous positive mounts. Retain only the
+    // captured old inputs/payment, retire the whole original owner, then use
+    // the genuine opener. Identical paths/bytes/key cannot revive the old proof.
+    drop(mounted);
+    let reopened = mount::NativeIndexStore::open(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        policy(),
+    )
+    .unwrap();
+    let next = reopened.physical.current.cached_store().unwrap();
+    assert!(inputs.require(next).is_err());
+    assert!(inputs.authenticate(next).is_err());
+    assert_eq!(fs::read(marker).unwrap(), original);
+}
 fn lifecycle3_pool() -> CriticalCatalogReadPool {
     CriticalCatalogReadPool::new(super::super::super::lifecycle::preparation::PREPARATION_FEE)
         .unwrap()
+}
+
+#[test]
+fn lifecycle3_first_torn_proof_cannot_move_to_an_equal_second_inventory() {
+    use super::super::super::lifecycle::preparation::first_torn;
+    use crate::store::persistence::native_registry::lifecycle::{
+        self as physical, upgrade as writer,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc393);
+    let mounted = mount(dir.path(), &mut rng);
+    let store = mounted.physical.current.cached_store().unwrap();
+    let pool = lifecycle3_pool();
+    let paid = lifecycle3_policy(pool.clone()).reserve().unwrap();
+    let seed = dir.path().join(physical::UPGRADE_SEED_NAME);
+    fs::write(&seed, [0; 39]).unwrap();
+    let original = writer::UpgradeInventory::capture(store, &paid, &pool).unwrap();
+    let second = writer::UpgradeInventory::capture(store, &paid, &pool).unwrap();
+    let proof = first_torn::verify(store, &original).unwrap();
+    assert!(writer::FirstTornIo::prepare(store, second, proof).is_err());
+    assert_eq!(fs::read(&seed).unwrap(), [0; 39]);
+    let proof = first_torn::verify(store, &original).unwrap();
+    let mut cleanup = writer::FirstTornIo::prepare(store, original, proof).unwrap();
+    cleanup.run(store).unwrap();
+    assert!(!seed.exists());
+}
+
+#[test]
+fn lifecycle3_first_torn_short_and_bad_mac_claims_retire_only_empty_fences() {
+    use super::super::super::lifecycle::preparation::first_torn;
+    use crate::store::persistence::native_registry::lifecycle::{
+        self as physical, upgrade as writer,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc390);
+    let mounted = mount(dir.path(), &mut rng);
+    // An established index's later generation is valid input too. Requiring
+    // G1 here would permanently strand claim-window crashes after a birth.
+    let pending = input();
+    mounted
+        .physical
+        .prepare_pending_birth(&pending, &mut rng)
+        .unwrap();
+    finish(&mounted.physical, &pending);
+    assert_eq!(mounted.row_count_data().unwrap(), 2);
+    let pool = lifecycle3_pool();
+    let prepared = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+        .unwrap();
+    let store = prepared.original_store_for_test();
+    let catalog = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Current.name());
+    let original = fs::read(&catalog).unwrap();
+    let seed = dir.path().join(physical::UPGRADE_SEED_NAME);
+    let stage = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Stage.name());
+    for length in [0, 1, 23, 24, 39, 40] {
+        for with_fence in [false, true] {
+            fs::write(&seed, vec![0; length]).unwrap();
+            if with_fence {
+                fs::write(&stage, []).unwrap();
+            }
+            let inventory = prepared.inventory_for_test(&pool);
+            let proof = first_torn::verify(store, &inventory).unwrap();
+            let mut cleanup = writer::FirstTornIo::prepare(store, inventory, proof).unwrap();
+            cleanup.run(store).unwrap();
+            assert!(!seed.exists());
+            assert!(!stage.exists());
+            assert_eq!(fs::read(&catalog).unwrap(), original);
+        }
+    }
+}
+
+#[test]
+fn lifecycle3_first_torn_unlink_retries_cover_fence_before_seed() {
+    use super::super::super::lifecycle::preparation::first_torn;
+    use crate::store::persistence::native_registry::lifecycle::{
+        self as physical, upgrade as writer,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc391);
+    let mounted = mount(dir.path(), &mut rng);
+    let pool = lifecycle3_pool();
+    let prepared = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+        .unwrap();
+    let store = prepared.original_store_for_test();
+    let seed = dir.path().join(physical::UPGRADE_SEED_NAME);
+    let stage = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Stage.name());
+    for cut in [
+        io::Fault::UpgradeFenceUnlink,
+        io::Fault::UpgradeFenceUnlinkCovered,
+        io::Fault::UpgradeSeedUnlink,
+    ] {
+        fs::write(&seed, [0; 39]).unwrap();
+        fs::write(&stage, []).unwrap();
+        let inventory = prepared.inventory_for_test(&pool);
+        let proof = first_torn::verify(store, &inventory).unwrap();
+        let mut cleanup = writer::FirstTornIo::prepare(store, inventory, proof).unwrap();
+        io::arm_fault(cut);
+        assert!(cleanup.run(store).is_err());
+        assert!(io::take_fault_seen());
+        assert!(!stage.exists());
+        assert_eq!(seed.exists(), cut != io::Fault::UpgradeSeedUnlink);
+        writer::reset_fence_covers();
+        if cut != io::Fault::UpgradeSeedUnlink {
+            writer::before_seed_unlink(Box::new({
+                let seed = seed.clone();
+                move || {
+                    assert!(writer::fence_covers() > 0);
+                    assert_eq!(fs::read(seed).unwrap(), [0; 39]);
+                }
+            }));
+        }
+        cleanup.run(store).unwrap();
+        assert_eq!(
+            writer::take_seed_hook_seen(),
+            cut != io::Fault::UpgradeSeedUnlink
+        );
+        assert!(!seed.exists());
+    }
+}
+
+#[test]
+fn lifecycle3_first_torn_preserves_unknown_and_authenticated_invalid_roles() {
+    use super::super::super::lifecycle::preparation::first_torn;
+    use crate::store::persistence::native_registry::lifecycle as physical;
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc392);
+    let mounted = mount(dir.path(), &mut rng);
+    let pool = lifecycle3_pool();
+    let prepared = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+        .unwrap();
+    let store = prepared.original_store_for_test();
+    let key = Zeroizing::new(store.keys.db_key().unwrap());
+    let derived = Zeroizing::new(blake3::derive_key(
+        "catcoms/private-native-backend-upgrade-key/v3",
+        &key[..],
+    ));
+    let seed = dir.path().join(physical::UPGRADE_SEED_NAME);
+    let stage = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Stage.name());
+    for body in [&[][..], &b"future authenticated intent"[..]] {
+        let sealed = crate::store::frame(&catcoms_crypto::seal(&derived, body, &mut rng).unwrap());
+        fs::write(&seed, &sealed).unwrap();
+        fs::write(&stage, []).unwrap();
+        let inventory = prepared.inventory_for_test(&pool);
+        assert!(first_torn::verify(store, &inventory).is_err());
+        assert_eq!(fs::read(&seed).unwrap(), sealed);
+        assert!(fs::read(&stage).unwrap().is_empty());
+    }
+    fs::write(&seed, [0; 39]).unwrap();
+    fs::write(&stage, b"unknown nonempty stage").unwrap();
+    let inventory = prepared.inventory_for_test(&pool);
+    assert!(first_torn::verify(store, &inventory).is_err());
+    assert_eq!(fs::read(&stage).unwrap(), b"unknown nonempty stage");
+    fs::write(&seed, vec![0; physical::MAX_UPGRADE_SEED_FRAME + 1]).unwrap();
+    assert!(prepared.try_inventory_for_test(&pool).is_err());
+    assert_eq!(
+        fs::metadata(&seed).unwrap().len(),
+        (physical::MAX_UPGRADE_SEED_FRAME + 1) as u64
+    );
+}
+
+#[test]
+fn lifecycle3_physical_exact_outputs_survive_every_owned_retry_cut() {
+    use crate::store::persistence::native_registry::lifecycle::{
+        self as physical, upgrade as writer,
+    };
+    for (number, cut) in [
+        io::Fault::UpgradeClaim,
+        io::Fault::UpgradeFence,
+        io::Fault::UpgradePartialSeed,
+        io::Fault::UpgradeSeed,
+        io::Fault::UpgradePartialIndex,
+        io::Fault::UpgradeIndexTemp,
+        io::Fault::UpgradeIndexRename,
+        io::Fault::UpgradePartialMarker,
+        io::Fault::UpgradeMarkerTemp,
+        io::Fault::UpgradeMarkerRename,
+        io::Fault::UpgradePartialCatalog,
+        io::Fault::UpgradeCatalogRename,
+        io::Fault::UpgradeCovered,
+        io::Fault::UpgradeSeedUnlink,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc350 + number as u64);
+        let mounted = mount(dir.path(), &mut rng);
+        let gate = Arc::downgrade(&mounted.physical.handler.gate);
+        let pool = lifecycle3_pool();
+        let prepared = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap();
+        let store = prepared.original_store_for_test();
+        let inventory = prepared.inventory_for_test(&pool);
+        assert_eq!(
+            inventory.authenticate_expected(store).unwrap(),
+            prepared
+                .expected_current_for_test()
+                .authenticate(store)
+                .unwrap()
+        );
+        let bytes = prepared.output.bytes();
+        let mut work = writer::UpgradeIo::prepare(store, inventory, &bytes).unwrap();
+        // A raw storage fixture retains the real old2 exclusion. No handler3
+        // or warm3 owner is published by this test or by the IO module.
+        let claim = {
+            let catalog = store.pending_join_catalog.lock().unwrap();
+            assert!(catalog.as_ref().unwrap().pending.is_none());
+            prepared.snapshot.require(store).unwrap();
+            gate.upgrade().unwrap().claim().unwrap()
+        };
+        io::arm_fault(cut);
+        assert!(work.advance_upgrade(store, &bytes).is_err(), "{cut:?}");
+        assert!(io::take_fault_seen(), "{cut:?}");
+        // In particular SeedUnlink has visible selected files and no seed,
+        // but its final directory barrier has not succeeded yet.
+        assert!(work.require_complete(store, &bytes).is_err(), "{cut:?}");
+        assert!(store.require_native_index_idle_cached().is_err());
+        work.advance_upgrade(store, &bytes).unwrap();
+        work.require_complete(store, &bytes).unwrap();
+        assert_eq!(
+            fs::read(
+                dir.path()
+                    .join(crate::store::critical_namespaces::Slot::Current.name())
+            )
+            .unwrap(),
+            bytes.catalog
+        );
+        assert_eq!(
+            fs::read(file(
+                dir.path(),
+                super::super::super::preparation::INDEX_NAME
+            ))
+            .unwrap(),
+            bytes.index
+        );
+        assert_eq!(
+            fs::read(file(
+                dir.path(),
+                super::super::super::preparation::MARKER_NAME
+            ))
+            .unwrap(),
+            bytes.marker
+        );
+        assert!(!dir.path().join(physical::UPGRADE_SEED_NAME).exists());
+        assert!(!file(dir.path(), physical::UPGRADE_INDEX_NAME).exists());
+        assert!(!file(dir.path(), physical::UPGRADE_MARKER_NAME).exists());
+        // No data-only success can reopen JOIN on an uninstalled3 handler.
+        gate.upgrade().unwrap().close();
+        assert_eq!(claim.finish().unwrap(), interlock::ClaimRelease::Closed);
+        drop(work);
+        drop(prepared);
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+}
+
+#[test]
+fn lifecycle3_physical_reconstructed_marker_cut_recovers_output_barrier_before_catalog() {
+    use super::super::super::{capability::NativeCapabilityData, lifecycle::preparation::Output};
+    use crate::store::persistence::native_registry::lifecycle::upgrade as writer;
+    for reconstruct in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc370 + u64::from(reconstruct));
+        let mounted = mount(dir.path(), &mut rng);
+        let pool = lifecycle3_pool();
+        let prepared = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap();
+        let store = prepared.original_store_for_test();
+        let original = fs::read(
+            dir.path()
+                .join(crate::store::critical_namespaces::Slot::Current.name()),
+        )
+        .unwrap();
+        let mut work = writer::UpgradeIo::prepare(
+            store,
+            prepared.inventory_for_test(&pool),
+            &prepared.output.bytes(),
+        )
+        .unwrap();
+        io::arm_fault(io::Fault::UpgradeMarkerRename);
+        assert!(work
+            .advance_upgrade(store, &prepared.output.bytes())
+            .is_err());
+        assert!(io::take_fault_seen());
+        // This is real raw-role reconstruction under the same retained mount,
+        // not an actual cold opener/handler3 acceptance claim.
+        let decoded;
+        let output = if reconstruct {
+            drop(work);
+            let inventory = prepared.inventory_for_test(&pool);
+            let layout = inventory.authenticate_expected(store).unwrap();
+            let expected =
+                NativeCapabilityData::for_current_data(layout, &layout.encode_data().unwrap())
+                    .unwrap();
+            let key = Zeroizing::new(store.keys.db_key().unwrap());
+            decoded = Output::decode_seed(&key, expected, inventory.seed().unwrap()).unwrap();
+            work = writer::UpgradeIo::recover(store, inventory, &decoded.bytes()).unwrap();
+            &decoded
+        } else {
+            &prepared.output
+        };
+        writer::reset_output_root_covers();
+        io::before_target_proof(
+            io::RenameTarget::UpgradeCatalog,
+            Box::new({
+                let catalog = dir
+                    .path()
+                    .join(crate::store::critical_namespaces::Slot::Current.name());
+                move || {
+                    assert!(writer::output_root_covers() > 0);
+                    assert_eq!(fs::read(catalog).unwrap(), original);
+                }
+            }),
+        );
+        work.advance_upgrade(store, &output.bytes()).unwrap();
+        assert!(io::take_rename_hook_seen());
+        assert_eq!(
+            fs::read(file(
+                dir.path(),
+                super::super::super::preparation::INDEX_NAME
+            ))
+            .unwrap(),
+            output.bytes().index
+        );
+    }
+}
+
+#[test]
+fn lifecycle3_physical_last_target_proofs_reject_replaced_current_marker() {
+    use crate::store::persistence::native_registry::lifecycle::upgrade as writer;
+    for (number, target) in [
+        io::RenameTarget::UpgradeIndex,
+        io::RenameTarget::UpgradeMarker,
+        io::RenameTarget::UpgradeCatalog,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let replacement = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc380 + number as u64);
+        let mounted = mount(dir.path(), &mut rng);
+        let pool = lifecycle3_pool();
+        let prepared = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap();
+        let store = prepared.original_store_for_test();
+        let original_catalog = fs::read(
+            dir.path()
+                .join(crate::store::critical_namespaces::Slot::Current.name()),
+        )
+        .unwrap();
+        let marker = file(
+            dir.path(),
+            crate::store::critical_namespaces::current_layout::CURRENT_MARKER,
+        );
+        let original = fs::read(&marker).unwrap();
+        let alternate = replacement.path().join("equal-marker");
+        fs::write(&alternate, &original).unwrap();
+        let mut work = writer::UpgradeIo::prepare(
+            store,
+            prepared.inventory_for_test(&pool),
+            &prepared.output.bytes(),
+        )
+        .unwrap();
+        io::before_target_proof(
+            target,
+            Box::new({
+                let marker = marker.clone();
+                move || fs::rename(alternate, marker).unwrap()
+            }),
+        );
+        assert!(work
+            .advance_upgrade(store, &prepared.output.bytes())
+            .is_err());
+        assert!(io::take_rename_hook_seen());
+        assert_eq!(fs::read(marker).unwrap(), original);
+        assert_eq!(
+            fs::read(
+                dir.path()
+                    .join(crate::store::critical_namespaces::Slot::Current.name())
+            )
+            .unwrap(),
+            original_catalog
+        );
+        assert!(work
+            .advance_upgrade(store, &prepared.output.bytes())
+            .is_err());
+    }
 }
 
 #[test]
@@ -793,6 +1342,619 @@ fn lifecycle3_preparation_authenticates_the_held_original_without_changing_any_f
     assert!(gate.upgrade().is_none());
     assert_eq!(pool.charged_for_test(), 0);
     assert!(old_refund.load(Ordering::Acquire));
+}
+
+#[test]
+fn lifecycle3_owning_upgrade_retries_same_intent_and_reopens_without_rng() {
+    use super::super::upgrade_source::owning;
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc401);
+    let mounted = mount(dir.path(), &mut rng);
+    let pending = input();
+    mounted
+        .physical
+        .prepare_pending_birth(&pending, &mut rng)
+        .unwrap();
+    finish(&mounted.physical, &pending);
+    let gate = Arc::downgrade(&mounted.physical.handler.gate);
+    let old_refund = mounted.physical.handler.fee.refund_notice();
+    let pool = lifecycle3_pool();
+    let prepared = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+        .unwrap();
+    let selected = prepared.output.bytes().index.to_vec();
+    let mut upgrade = prepared.admit().unwrap();
+    assert!(!gate.upgrade().unwrap().idle());
+    io::arm_fault(io::Fault::UpgradeSeedUnlink);
+    assert!(upgrade.retry().is_err());
+    assert!(io::take_fault_seen());
+    assert!(!gate.upgrade().unwrap().idle());
+    assert!(!old_refund.load(Ordering::Acquire));
+    assert_eq!(
+        fs::read(file(
+            dir.path(),
+            super::super::super::preparation::INDEX_NAME
+        ))
+        .unwrap(),
+        selected
+    );
+    upgrade.retry().unwrap();
+    let mut mounted = upgrade.into_store().unwrap();
+    assert!(old_refund.load(Ordering::Acquire));
+    assert!(gate.upgrade().is_none());
+    assert_eq!(mounted.row_count_data().unwrap(), 2);
+    assert!(pool.charged_for_test() > 0);
+    drop(mounted);
+    assert_eq!(pool.charged_for_test(), 0);
+    // This is the real strict3 opener, before Current/JOIN cleanup. None of
+    // these storage facts authorize an SDK or represent a joined-member pin.
+    let mut cold = owning::Store::open(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        lifecycle3_policy(pool.clone()),
+    )
+    .unwrap();
+    assert_eq!(cold.row_count_data().unwrap(), 2);
+    assert_eq!(
+        fs::read(file(
+            dir.path(),
+            super::super::super::preparation::INDEX_NAME
+        ))
+        .unwrap(),
+        selected
+    );
+    drop(cold);
+    assert_eq!(pool.charged_for_test(), 0);
+}
+
+#[test]
+fn lifecycle3_owning_close_before_admission_has_no_file_effect() {
+    use super::super::upgrade_source::owning::{at_edge, Edge};
+    for close_new in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc402 + u64::from(close_new));
+        let mounted = mount(dir.path(), &mut rng);
+        let old = mounted.physical.handler.gate.clone();
+        let pool = lifecycle3_pool();
+        let prepared = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap();
+        let new = prepared.lifecycle_handler_for_test();
+        let catalog = dir
+            .path()
+            .join(crate::store::critical_namespaces::Slot::Current.name());
+        let before = fs::read(&catalog).unwrap();
+        at_edge(
+            Edge::BeforeAdmission,
+            Box::new({
+                let old = old.clone();
+                let new = new.clone();
+                move || {
+                    if close_new {
+                        new.close();
+                    } else {
+                        old.close();
+                    }
+                }
+            }),
+        );
+        let prepared = prepared.admit().unwrap_err();
+        assert_eq!(fs::read(&catalog).unwrap(), before);
+        assert!(!dir
+            .path()
+            .join(crate::store::persistence::native_registry::lifecycle::UPGRADE_SEED_NAME)
+            .exists());
+        assert!(!dir
+            .path()
+            .join(crate::store::critical_namespaces::Slot::Stage.name())
+            .exists());
+        drop(prepared);
+        assert!(!old.idle());
+        assert!(new.require_idle_cached().is_err());
+        drop(new);
+        drop(old);
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+}
+
+#[test]
+fn lifecycle3_owning_close_after_install_never_returns_a_warm_owner() {
+    use super::super::upgrade_source::owning::{at_edge, Edge};
+    for close_new in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc404 + u64::from(close_new));
+        let mounted = mount(dir.path(), &mut rng);
+        let old = mounted.physical.handler.gate.clone();
+        let pool = lifecycle3_pool();
+        let prepared = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap();
+        let new = prepared.lifecycle_handler_for_test();
+        let mut upgrade = prepared.admit().unwrap();
+        at_edge(
+            Edge::AfterInstall,
+            Box::new({
+                let old = old.clone();
+                let new = new.clone();
+                move || {
+                    if close_new {
+                        new.close();
+                    } else {
+                        old.close();
+                    }
+                }
+            }),
+        );
+        assert!(upgrade.retry().is_err());
+        assert!(!old.idle());
+        assert!(new.require_idle_cached().is_err());
+        let upgrade = upgrade.into_store().unwrap_err();
+        drop(upgrade);
+        drop(new);
+        drop(old);
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+}
+
+#[test]
+fn lifecycle3_owning_unwind_closes_both_before_retiring_inputs_in_either_wrapper() {
+    use super::super::upgrade_source::owning::{at_edge, Edge};
+    for edge in [Edge::AfterInstall, Edge::AfterDestination] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng =
+            ChaCha20Rng::seed_from_u64(0xc406 + u64::from(edge == Edge::AfterDestination));
+        let mounted = mount(dir.path(), &mut rng);
+        let old = mounted.physical.handler.gate.clone();
+        let old_refund = mounted.physical.handler.fee.refund_notice();
+        let pool = lifecycle3_pool();
+        let mut prepared = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap();
+        let new = prepared.lifecycle_handler_for_test();
+        let observed = Arc::new(AtomicBool::new(false));
+        prepared.retirement = Some(io::RetirementObservation::new(Box::new({
+            let old = old.clone();
+            let new = new.clone();
+            let pool = pool.clone();
+            let old_refund = old_refund.clone();
+            let observed = observed.clone();
+            move || {
+                // Record only while already unwinding; a second panic here
+                // would abort the process instead of reporting a regression.
+                observed.store(
+                    !old.idle()
+                        && new.require_idle_cached().is_err()
+                        && !old_refund.load(Ordering::Acquire)
+                        && pool.charged_for_test() > 0,
+                    Ordering::Release,
+                );
+            }
+        })));
+        let mut upgrade = prepared.admit().unwrap();
+        at_edge(edge, Box::new(|| panic!("real owning transfer cut")));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            if edge == Edge::AfterDestination {
+                let _ = upgrade.into_store();
+            } else {
+                let _ = upgrade.retry();
+            }
+        }));
+        assert!(result.is_err());
+        assert!(observed.load(Ordering::Acquire));
+        assert!(!old.idle());
+        assert!(new.require_idle_cached().is_err());
+        drop(old);
+        drop(new);
+        assert!(old_refund.load(Ordering::Acquire));
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+}
+
+#[test]
+fn lifecycle3_owning_admission_unwind_closes_before_actual_io_retirement() {
+    use super::super::upgrade_source::owning::{at_edge, Edge};
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc409);
+    let mounted = mount(dir.path(), &mut rng);
+    let old = mounted.physical.handler.gate.clone();
+    let pool = lifecycle3_pool();
+    let mut prepared = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+        .unwrap();
+    let new = prepared.lifecycle_handler_for_test();
+    let observed = Arc::new(AtomicBool::new(false));
+    prepared.io_retirement = Some(Box::new({
+        let old = old.clone();
+        let new = new.clone();
+        let pool = pool.clone();
+        let observed = observed.clone();
+        move || {
+            observed.store(
+                !old.idle() && new.require_idle_cached().is_err() && pool.charged_for_test() > 0,
+                Ordering::Release,
+            );
+        }
+    }));
+    at_edge(
+        Edge::BeforeAdmission,
+        Box::new(|| panic!("actual final admission cut")),
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || prepared.admit())).is_err()
+    );
+    assert!(observed.load(Ordering::Acquire));
+    drop(new);
+    drop(old);
+    assert_eq!(pool.charged_for_test(), 0);
+}
+
+#[test]
+fn lifecycle3_owning_destination_unwind_keeps_actual_vault_busy_until_io_drains() {
+    use super::super::upgrade_source::owning::Edge;
+    for edge in [Edge::BeforePhysicalInstall, Edge::AfterDestination] {
+        lifecycle3_destination_unwind_at(edge);
+    }
+}
+
+fn lifecycle3_destination_unwind_at(edge: super::super::upgrade_source::owning::Edge) {
+    use super::super::upgrade_source::owning::{self, at_edge};
+    use std::sync::mpsc::sync_channel;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc410);
+    let mounted = mount(dir.path(), &mut rng);
+    let pool = lifecycle3_pool();
+    let mut prepared = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+        .unwrap();
+    let (entered, seen) = sync_channel(1);
+    let (release, wait) = sync_channel(1);
+    let retirement = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let retired = retirement.clone();
+    let admission = prepared.lifecycle_handler_for_test();
+    let retiring_pool = pool.clone();
+    prepared.io_retirement = Some(Box::new(move || {
+        // This destructor is already unwinding. Never assert/panic or make an
+        // unbounded channel send; report the watchdog outcome to the test.
+        let ready = entered.try_send(()).is_ok();
+        let released = wait.recv_timeout(Duration::from_secs(10)).is_ok();
+        let fenced = !admission.is_open_cached();
+        let funded = retiring_pool.charged_for_test() > 0;
+        retired.store(
+            if ready && released && fenced && funded {
+                1
+            } else {
+                2
+            },
+            Ordering::Release,
+        );
+    }));
+    let upgrade = prepared.admit().unwrap();
+    let worker = std::thread::spawn(move || {
+        at_edge(
+            edge,
+            Box::new(|| panic!("destination closer already armed")),
+        );
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _ = upgrade.into_store();
+        }))
+        .is_err()
+    });
+    let ready = seen.recv_timeout(Duration::from_secs(10));
+    // AfterDestination has destroyed the real Current; only the finite lease
+    // excludes a successor then. BeforePhysicalInstall also exercises closure
+    // while Current is still an uninstalled local, before its later destructor.
+    let busy = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ready.is_ok()
+            && matches!(
+                crate::store::ServerStore::open(
+                    dir.path(),
+                    b"must fail before checking secret",
+                    &mut NeverRng
+                ),
+                Err(AppError::Storage(catcoms_storage::StorageError::VaultBusy))
+            )
+    }));
+    // Always release and join before any assertion, even on failed readiness,
+    // probe refusal, or a panic in the competing constructor.
+    let _ = release.try_send(());
+    let joined = worker.join();
+    assert!(ready.is_ok());
+    assert!(joined.unwrap());
+    assert_eq!(retirement.load(Ordering::Acquire), 1);
+    let busy = busy.unwrap();
+    assert!(busy, "retiring IO must still own the physical session");
+    assert_eq!(pool.charged_for_test(), 0);
+    let mut next = owning::Store::open(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        lifecycle3_policy(pool.clone()),
+    )
+    .unwrap();
+    assert_eq!(next.row_count_data().unwrap(), 1);
+}
+
+#[test]
+fn lifecycle3_owning_retry_after_installed_handler_keeps_both_original_claims() {
+    use super::super::upgrade_source::owning::{at_edge, Edge};
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc412);
+    let mounted = mount(dir.path(), &mut rng);
+    let old = mounted.physical.handler.gate.clone();
+    let pool = lifecycle3_pool();
+    let prepared = mounted
+        .into_upgrade_source()
+        .unwrap()
+        .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+        .unwrap();
+    let new = prepared.lifecycle_handler_for_test();
+    let index = prepared.output.bytes().index.to_vec();
+    let stage = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Stage.name());
+    let mut upgrade = prepared.admit().unwrap();
+    // A real unexpected file at the last proof, AFTER actual policy replacement.
+    // The fault file is test-owned; production never removes ambiguous Stage.
+    at_edge(
+        Edge::AfterInstall,
+        Box::new({
+            let stage = stage.clone();
+            move || fs::write(stage, [0]).unwrap()
+        }),
+    );
+    assert!(upgrade.retry().is_err());
+    assert!(!old.idle());
+    assert!(new.require_idle_cached().is_err());
+    assert_eq!(
+        fs::read(file(
+            dir.path(),
+            super::super::super::preparation::INDEX_NAME
+        ))
+        .unwrap(),
+        index
+    );
+    fs::remove_file(stage).unwrap();
+    // Must recognize SAME installed3 handler/summary, not reparse selected3 as2.
+    upgrade.retry().unwrap();
+    drop(old);
+    drop(new);
+    let mut selected = upgrade.into_store().unwrap();
+    assert_eq!(selected.row_count_data().unwrap(), 1);
+    drop(selected);
+    assert_eq!(pool.charged_for_test(), 0);
+}
+
+#[test]
+fn lifecycle3_strict_cold_open_never_adopts_equal_replacement_after_inspection() {
+    use super::super::upgrade_source::owning::{self, at_edge, Edge};
+    for edge in [Edge::AfterInspection, Edge::BeforeColdExposure] {
+        for name in [
+            super::super::super::preparation::INDEX_NAME,
+            super::super::super::preparation::MARKER_NAME,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut rng = ChaCha20Rng::seed_from_u64(0xc411);
+            let mounted = mount(dir.path(), &mut rng);
+            let pool = lifecycle3_pool();
+            let prepared = mounted
+                .into_upgrade_source()
+                .unwrap()
+                .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+                .unwrap();
+            drop(prepared.admit().unwrap().into_store().unwrap());
+            let target = file(dir.path(), name);
+            let backup = target.with_extension("original");
+            let before = fs::read(&target).unwrap();
+            let replaced = Arc::new(AtomicBool::new(false));
+            at_edge(
+                edge,
+                Box::new({
+                    let replaced = replaced.clone();
+                    let target = target.clone();
+                    let before = before.clone();
+                    move || match fs::rename(&target, &backup) {
+                        Ok(()) => {
+                            fs::write(&target, &before).unwrap();
+                            replaced.store(true, Ordering::Release);
+                        }
+                        Err(error) => {
+                            assert!(
+                                cfg!(windows)
+                                    && error.kind() == std::io::ErrorKind::PermissionDenied,
+                                "{error}"
+                            );
+                            assert_eq!(fs::read(&target).unwrap(), before);
+                        }
+                    }
+                }),
+            );
+            let opened = owning::Store::open(
+                dir.path(),
+                SECRET,
+                &mut NeverRng,
+                current_policy(),
+                lifecycle3_policy(pool.clone()),
+            );
+            if replaced.load(Ordering::Acquire) {
+                assert!(opened.is_err());
+            } else {
+                assert!(cfg!(windows));
+                assert!(opened.is_ok());
+            }
+            drop(opened);
+            assert_eq!(pool.charged_for_test(), 0);
+        }
+    }
+}
+
+#[test]
+fn lifecycle3_strict_cold_open_cleans_only_first_claim_then_refuses_old2() {
+    use super::super::upgrade_source::owning;
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc408);
+    let mounted = mount(dir.path(), &mut rng);
+    drop(mounted);
+    let catalog = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Current.name());
+    let before = fs::read(&catalog).unwrap();
+    let seed = dir
+        .path()
+        .join(crate::store::persistence::native_registry::lifecycle::UPGRADE_SEED_NAME);
+    fs::write(&seed, []).unwrap();
+    let pool = lifecycle3_pool();
+    assert!(owning::Store::open(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        lifecycle3_policy(pool.clone())
+    )
+    .is_err());
+    assert!(!seed.exists());
+    assert_eq!(fs::read(&catalog).unwrap(), before);
+    assert_eq!(pool.charged_for_test(), 0);
+    let cold = mount::NativeIndexStore::open(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        policy(),
+    )
+    .unwrap();
+    assert_eq!(cold.row_count_data().unwrap(), 1);
+}
+
+#[test]
+fn lifecycle3_strict_cold_open_recovers_every_real_upgrade_cut_without_rng() {
+    use super::super::upgrade_source::owning;
+    for (number, cut) in [
+        io::Fault::UpgradeClaim,
+        io::Fault::UpgradeFence,
+        io::Fault::UpgradePartialSeed,
+        io::Fault::UpgradeSeed,
+        io::Fault::UpgradePartialIndex,
+        io::Fault::UpgradeIndexTemp,
+        io::Fault::UpgradeIndexRename,
+        io::Fault::UpgradePartialMarker,
+        io::Fault::UpgradeMarkerTemp,
+        io::Fault::UpgradeMarkerRename,
+        io::Fault::UpgradePartialCatalog,
+        io::Fault::UpgradeCatalogRename,
+        io::Fault::UpgradeCovered,
+        io::Fault::UpgradeSeedUnlink,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc420 + number as u64);
+        let mounted = mount(dir.path(), &mut rng);
+        let pool = lifecycle3_pool();
+        let prepared = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap();
+        let next_index = prepared.output.bytes().index.to_vec();
+        let mut upgrade = prepared.admit().unwrap();
+        io::arm_fault(cut);
+        assert!(upgrade.retry().is_err(), "{cut:?}");
+        assert!(io::take_fault_seen(), "{cut:?}");
+        drop(upgrade);
+        assert_eq!(pool.charged_for_test(), 0);
+        let cold = owning::Store::open(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+            lifecycle3_policy(pool.clone()),
+        );
+        if number < 3 {
+            // These cuts have no complete authenticated intent. Cleanup leaves
+            // old2, so strict3 must refuse rather than upgrade implicitly.
+            assert!(cold.is_err(), "{cut:?}");
+            let cold2 = mount::NativeIndexStore::open(
+                dir.path(),
+                SECRET,
+                &mut NeverRng,
+                current_policy(),
+                policy(),
+            )
+            .unwrap();
+            assert_eq!(cold2.row_count_data().unwrap(), 1);
+        } else {
+            let mut cold = cold.unwrap();
+            assert_eq!(cold.row_count_data().unwrap(), 1, "{cut:?}");
+            assert_eq!(
+                fs::read(file(
+                    dir.path(),
+                    super::super::super::preparation::INDEX_NAME
+                ))
+                .unwrap(),
+                next_index,
+                "{cut:?}"
+            );
+        }
+        assert_eq!(pool.charged_for_test(), 0);
+    }
+}
+
+#[test]
+fn lifecycle3_strict_cold_open_never_recreates_missing_selected_output() {
+    use super::super::upgrade_source::owning;
+    for missing in [
+        super::super::super::preparation::INDEX_NAME,
+        super::super::super::preparation::MARKER_NAME,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc440);
+        let mounted = mount(dir.path(), &mut rng);
+        let pool = lifecycle3_pool();
+        let prepared = mounted
+            .into_upgrade_source()
+            .unwrap()
+            .prepare(lifecycle3_policy(pool.clone()), &mut rng)
+            .unwrap();
+        let mut upgrade = prepared.admit().unwrap();
+        io::arm_fault(io::Fault::UpgradeCatalogRename);
+        assert!(upgrade.retry().is_err());
+        assert!(io::take_fault_seen());
+        drop(upgrade);
+        let target = file(dir.path(), missing);
+        fs::remove_file(&target).unwrap();
+        let seed = dir
+            .path()
+            .join(crate::store::persistence::native_registry::lifecycle::UPGRADE_SEED_NAME);
+        let before_seed = fs::read(&seed).unwrap();
+        assert!(owning::Store::open(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+            lifecycle3_policy(pool.clone())
+        )
+        .is_err());
+        assert!(!target.exists());
+        assert_eq!(fs::read(&seed).unwrap(), before_seed);
+        assert_eq!(pool.charged_for_test(), 0);
+    }
 }
 
 #[test]

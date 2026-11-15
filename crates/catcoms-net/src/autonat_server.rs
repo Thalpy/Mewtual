@@ -29,7 +29,7 @@ use std::task::{Context, Poll};
 
 use crate::addr_is_globally_routable;
 use crate::admission::{addr_prefix, AddrPrefix};
-use catcoms_rt::{Clock, OsCryptoRng, RngCore, SystemClock};
+use catcoms_rt::{Clock, OsCryptoRng, SeededProtocolRng, SystemClock};
 use either::Either;
 use libp2p::core::transport::PortUse;
 use libp2p::core::Endpoint;
@@ -319,9 +319,9 @@ fn direct_target_ip(address: &Multiaddr, requester: PeerId) -> Option<IpAddr> {
 }
 
 /// First half of the policy pair: delegates the protocol and tags its callback dials.
-pub struct GuardedAutoNatServer<R = OsCryptoRng>
+pub struct GuardedAutoNatServer<R = SeededProtocolRng>
 where
-    R: Clone + Send + RngCore + 'static,
+    R: Send + catcoms_rt::protocol_rng::Rng + catcoms_rt::protocol_rng::SeedableRng + 'static,
 {
     inner: autonat::v2::server::Behaviour<R>,
     state: Arc<Mutex<PolicyState>>,
@@ -329,7 +329,7 @@ where
 
 impl<R> fmt::Debug for GuardedAutoNatServer<R>
 where
-    R: Clone + Send + RngCore + 'static,
+    R: Send + catcoms_rt::protocol_rng::Rng + catcoms_rt::protocol_rng::SeedableRng + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GuardedAutoNatServer")
@@ -351,21 +351,35 @@ impl fmt::Debug for AutoNatDialGuard {
 
 pub(crate) fn guarded_autonat_server(
     allow_memory_for_tests: bool,
-) -> (AutoNatDialGuard, GuardedAutoNatServer<OsCryptoRng>) {
+) -> (AutoNatDialGuard, GuardedAutoNatServer<SeededProtocolRng>) {
     guarded_autonat_server_with_clock(Arc::new(SystemClock), allow_memory_for_tests)
 }
 
 fn guarded_autonat_server_with_clock(
     clock: Arc<dyn Clock>,
     allow_memory_for_tests: bool,
-) -> (AutoNatDialGuard, GuardedAutoNatServer<OsCryptoRng>) {
+) -> (AutoNatDialGuard, GuardedAutoNatServer<SeededProtocolRng>) {
+    guarded_autonat_server_with_rng(
+        clock,
+        allow_memory_for_tests,
+        SeededProtocolRng::seeded_by(&mut OsCryptoRng),
+    )
+}
+
+/// Keep the actual upstream RNG injectable. The protocol forks this original
+/// stream; it must not clone an identical stream or silently choose ambient RNG.
+fn guarded_autonat_server_with_rng(
+    clock: Arc<dyn Clock>,
+    allow_memory_for_tests: bool,
+    rng: SeededProtocolRng,
+) -> (AutoNatDialGuard, GuardedAutoNatServer<SeededProtocolRng>) {
     let state = Arc::new(Mutex::new(PolicyState::new(clock, allow_memory_for_tests)));
     (
         AutoNatDialGuard {
             state: state.clone(),
         },
         GuardedAutoNatServer {
-            inner: autonat::v2::server::Behaviour::new(OsCryptoRng),
+            inner: autonat::v2::server::Behaviour::new(rng),
             state,
         },
     )
@@ -441,7 +455,7 @@ impl NetworkBehaviour for AutoNatDialGuard {
 
 impl<R> NetworkBehaviour for GuardedAutoNatServer<R>
 where
-    R: Clone + Send + RngCore + 'static,
+    R: Send + catcoms_rt::protocol_rng::Rng + catcoms_rt::protocol_rng::SeedableRng + 'static,
 {
     type ConnectionHandler =
         <autonat::v2::server::Behaviour<R> as NetworkBehaviour>::ConnectionHandler;
@@ -561,6 +575,19 @@ where
 mod tests {
     use super::*;
     use catcoms_rt::ManualClock;
+
+    #[test]
+    fn injected_seeded_rng_constructs_both_autonat_roles_without_clone_or_default() {
+        use catcoms_rt::protocol_rng::SeedableRng;
+        let clock = Arc::new(ManualClock::new(1000));
+        let (guard, server) =
+            guarded_autonat_server_with_rng(clock, false, SeededProtocolRng::from_seed([91; 32]));
+        assert!(Arc::ptr_eq(&guard.state, &server.state));
+        let _client = autonat::v2::client::Behaviour::new(
+            SeededProtocolRng::from_seed([92; 32]),
+            autonat::v2::client::Config::default(),
+        );
+    }
 
     fn address(text: &str) -> Multiaddr {
         text.parse().expect("test address")
