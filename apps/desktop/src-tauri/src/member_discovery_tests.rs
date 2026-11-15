@@ -33,7 +33,7 @@ async fn detached_member_maintenance_quiet_legacy_pex_is_saved_before_another_ti
     let group_id = receiver_server.group_id();
     let receiver_device = receiver_server.device_id();
     let (receiver, mut events, receiver_task) = spawn(receiver_server);
-    state.servers.lock().await.insert(SERVER, snapshot_test_entry(INSTANCE, receiver.clone(), group_id, receiver_device));
+    state.servers.lock().await.install_legacy_fixture(SERVER, snapshot_test_entry(INSTANCE, receiver.clone(), group_id, receiver_device));
     let wake = install_persistence_signal(&state, SERVER, INSTANCE).await.unwrap();
     let worker_state = state.clone();
     let worker = tokio::spawn(async move { run_persistence_worker(&worker_state, SERVER, INSTANCE, wake).await; });
@@ -44,13 +44,13 @@ async fn detached_member_maintenance_quiet_legacy_pex_is_saved_before_another_ti
         }
     });
     wait_for_clean_snapshot(&state, SERVER).await;
-    let baseline = state.servers.lock().await[&SERVER].persist.completed;
+    let baseline = state.servers.lock().await.legacy(&SERVER).expect("Legacy fixture row").persist.completed;
     sender.publish_self_record(vec![format!("/ip4/203.0.113.1/tcp/22487/p2p/{sender_lib_peer}")], 1).await;
     receiver.drive_discovery().await.unwrap();
     timeout(Duration::from_secs(5), async {
         loop {
             if receiver.member_transport_peer(sender_device).await == Some(sender_peer)
-                && state.servers.lock().await[&SERVER].persist.completed > baseline { break; }
+                && state.servers.lock().await.legacy(&SERVER).expect("Legacy fixture row").persist.completed > baseline { break; }
             SystemClock.sleep(Duration::from_millis(10)).await;
         }
     }).await.expect("late PEX record must wake sealed core persistence without another discovery tick");

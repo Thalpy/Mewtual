@@ -194,6 +194,19 @@ const fn per_context_requirement() -> usize {
         + MEMBER_OUTBOX_CHECKPOINT_FEE
 }
 
+// History setup may recover while the cell still retains an old presealed
+// append. The existing minimum covers this actual three-way overlap; do not
+// silently add a larger reader invoice without revisiting the policy. Extra
+// simultaneously retained pages are independently paid and may cause Busy.
+const _: () = assert!(
+    MEMBER_OUTBOX_OWNER_FEE
+        + MEMBER_OUTBOX_SLOT_FEE
+        + MEMBER_OUTBOX_RECOVERY_FEE
+        + MEMBER_OUTBOX_APPEND_FEE
+        + crate::store::persistence::v2_member_outbox::MEMBER_OUTBOX_HISTORY_FEE
+        <= per_context_requirement()
+);
+
 impl V2MemberOutboxPolicy {
     /// Configure the member-outbox handler. `pool` must be an account dedicated to member
     /// outboxes with capacity for `max_contexts` simultaneous contexts (see

@@ -130,6 +130,76 @@ async fn exchange(
     .unwrap();
     opened_reply(public, header, body, &reply)
 }
+
+/// Observe only an intentionally invalid immutable binding, before any SDK
+/// preparation. Recovery takes fail-fast index/row locks before validating
+/// these fields, so maintenance may correctly return Capacity first. Retain
+/// the exact bad body/parent and require eventual Unauthorized; acceptance,
+/// any SDK state change, or any other result is an immediate failure. This
+/// helper never wraps an original Admit/Release, allocation or attach.
+async fn require_invalid_binding_after_capacity(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+) {
+    let before = parent.sdk_test_preparation_state();
+    assert_eq!(before, Some((false, false)));
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    let unauthorized = replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized));
+    let clock = crate::voice_runtime(state).clock();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for attempt in 0..32 {
+            let reply = exchange(state, public, route, parent, body).await;
+            assert_eq!(parent.sdk_test_preparation_state(), before);
+            if reply == capacity && attempt != 31 {
+                clock.sleep(std::time::Duration::from_millis(10)).await;
+            } else {
+                assert_eq!(
+                    reply, unauthorized,
+                    "changed native SDK binding must refuse"
+                );
+                return;
+            }
+        }
+    })
+    .await
+    .expect("invalid native SDK binding observation stayed busy");
+}
+
+/// Observe an exact original Release through transient fail-fast ledger pressure.
+/// Capacity is proven local and pre-effect in release_sdk; an outer/ambiguous
+/// error or any other authenticated response remains terminal. This deliberately
+/// does not wrap fresh SDK Admit, allocate, attach or actor work.
+async fn release_after_capacity(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+) -> Vec<u8> {
+    let request = requests::sdk::Request::decode(parent.id().logical(), body).unwrap();
+    assert!(matches!(request.kind, requests::sdk::Kind::Release { .. }));
+    let clock = crate::voice_runtime(state).clock();
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    let observe = async {
+        for attempt in 0..32 {
+            let reply = exchange(state, public, route, parent, body).await;
+            if reply != capacity || attempt == 31 {
+                return reply;
+            }
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+        unreachable!("the final bounded observation returns its exact response")
+    };
+    tokio::select! {
+        reply = observe => reply,
+        _ = clock.sleep(std::time::Duration::from_secs(5)) => {
+            panic!("original SDK Release exceeded its fixed observation bound")
+        }
+    }
+}
 pub(super) async fn start(
     state: &AppState,
     public: &bootstrap::SetupOutput,
@@ -144,7 +214,6 @@ pub(super) async fn start(
     body.push(0);
     let request = requests::sdk::Request::decode(parent.id().logical(), &body).unwrap();
     let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
-    let unauthorized = replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized));
     let commit = state.ui_session_commit.clone().lock_owned().await;
     assert_eq!(
         exchange(state, public, route, parent, &body).await,
@@ -154,11 +223,15 @@ pub(super) async fn start(
     for offset in [1, 9, 17, 49, 81, 113, 121, 152] {
         let mut wrong = body.clone();
         wrong[offset] ^= 1;
-        assert_eq!(
-            exchange(state, public, route, parent, &wrong).await,
-            unauthorized,
-            "changed native SDK binding {offset}"
-        );
+        if offset == 113 {
+            let invalid = requests::sdk::Request::decode(parent.id().logical(), &wrong).unwrap();
+            parent.sdk_test_bad_recovery_with_parent_locked(
+                route.session().identity(),
+                &request,
+                &invalid,
+            );
+        }
+        require_invalid_binding_after_capacity(state, public, route, parent, &wrong).await;
     }
     // Use the actual affine physical position. Even trusted code cannot allocate another
     // candidate under it while the first original preparation is retained.
@@ -254,17 +327,29 @@ pub(super) async fn release_after_key_release(
     release[153] = 1;
     release.extend_from_slice(&token.generation.to_be_bytes());
     release.extend_from_slice(&token.proof);
+    let request = requests::sdk::Request::decode(parent.id().logical(), &release).unwrap();
+    parent.sdk_test_release_with_parent_locked(
+        route.session().identity(),
+        &request,
+        token.generation,
+        token.proof,
+    );
     for offset in [154, 162, 193] {
         let mut wrong = release.clone();
         wrong[offset] ^= 1;
         assert_eq!(
-            exchange(state, public, route, parent, &wrong).await,
+            release_after_capacity(state, public, route, parent, &wrong).await,
             replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized))
         );
     }
     for _ in 0..2 {
-        let reply = exchange(state, public, route, parent, &release).await;
-        assert_eq!(&reply[..2], &[6, 3]);
+        let reply = release_after_capacity(state, public, route, parent, &release).await;
+        assert!(
+            reply.len() == super::super::sdk::REPLY_BYTES && reply[..2] == [6, 3],
+            "original SDK Release returned length {} / prefix {:?}",
+            reply.len(),
+            &reply[..reply.len().min(3)]
+        );
         assert_eq!(&reply[178..210], &token.proof);
     }
     assert!(parent.sdp_test_whole_drained());

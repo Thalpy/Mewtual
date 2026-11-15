@@ -17,9 +17,30 @@ impl PreparedTextCurrentAdd {
     /// Add/merge failures remain sticky, including a consumed Pending state;
     /// neither an Operational no-op nor another invocation proves success.
     pub fn execute_private(&mut self) -> Result<(), MlsError> {
+        // The old mode cannot skip the configured transfer, even on retry.
+        if self.routing.is_some() {
+            return Err(bad());
+        }
+        self.execute(None)
+    }
+
+    /// Routing-enabled mode only. The host retains the SAME finite AddSdk
+    /// admission through merge, export, nonce/seal, snapshot and cleanup.
+    /// Root supplies its original RNG seam; cached outputs never draw again.
+    pub fn execute_private_with_routing(
+        &mut self,
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<(), MlsError> {
+        if self.routing.is_none() {
+            return Err(bad());
+        }
+        self.execute(Some(rng))
+    }
+
+    fn execute(&mut self, rng: Option<&mut dyn catcoms_rt::CryptoRngCore>) -> Result<(), MlsError> {
         if matches!(
             self.phase,
-            Phase::Failed | Phase::AddEntered | Phase::MergeEntered
+            Phase::Failed | Phase::AddEntered | Phase::MergeEntered | Phase::Installed
         ) {
             return Err(bad());
         }
@@ -36,6 +57,9 @@ impl PreparedTextCurrentAdd {
             self.enter_and_merge()?;
         }
         if self.phase == Phase::Merged {
+            if self.routing.is_some() {
+                self.finish_routing(rng.ok_or_else(bad)?)?;
+            }
             self.finish_merged()?;
         }
         if self.phase == Phase::Complete {
@@ -200,6 +224,9 @@ impl PreparedTextCurrentAdd {
     }
 
     fn finish_merged(&mut self) -> Result<(), MlsError> {
+        if let Some(route) = &self.routing {
+            route.frame_data()?;
+        }
         if !self.provider_closed {
             if self
                 .graph

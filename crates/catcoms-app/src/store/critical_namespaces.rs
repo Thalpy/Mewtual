@@ -66,7 +66,12 @@ pub use native_registry::{
     NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextCreationBudget,
     NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationPreparation,
     NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
-    NativeTextCreationSettings, NativeTextSourceBudget, NativeTextSourceCommand,
+    NativeTextCreationSettings, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
+    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
+    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
+    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
+    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
+    NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
     NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
     NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
     NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiCandidate,
@@ -256,7 +261,29 @@ impl ServerStore {
             if actual_format != VaultFormat::CriticalNamespaces {
                 return Err(refused());
             }
-            self.inspect_and_repair_native_registry_declaration()?;
+            let handler = self
+                .current_layout_policy
+                .as_ref()
+                .and_then(|policy| policy.native_registry.as_ref())
+                .ok_or_else(refused)?;
+            if matches!(
+                handler,
+                native_registry::preparation::NativeRegistryHandler::GovernanceOpening(_)
+            ) {
+                // This closed constructor owns the combined grammar. Seed4
+                // must settle before native3 captures the selected catalog:
+                // otherwise an empty declaration fence looks like JOIN work,
+                // or the ordinary native inspector refuses its foreign seed.
+                handler.require()?;
+                if self.governance_layout_policy.as_ref().is_none_or(|policy| {
+                    policy.family
+                        != governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+                }) {
+                    return Err(refused());
+                }
+            } else {
+                self.inspect_and_repair_native_registry_declaration()?;
+            }
         } else {
             super::persistence::native_registry::refuse_unsupported_storage(&self.dir)?;
         }

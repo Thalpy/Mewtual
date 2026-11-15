@@ -79,6 +79,8 @@ mod member_reconnect;
 mod native_text;
 mod private_downloads;
 mod saved_files;
+mod server_table;
+use server_table::ServerTable;
 mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
@@ -439,7 +441,7 @@ struct AppState {
     admin_chat_ledger: admin_chat_ledger::Registry,
     /// Off-by-default owning Chat V2 warm factory; never decoded from IPC.
     native_text: native_text::Registry,
-    servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
+    servers: Arc<Mutex<ServerTable>>,
     /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
     /// actor installations than the process can perform in its lifetime; zero has no special
     /// meaning and is permitted after that theoretical wrap.
@@ -1261,7 +1263,7 @@ async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|e| e.actor.clone())
         .ok_or(ActorLookup::NotOpen)
 }
@@ -1287,7 +1289,7 @@ async fn actor_instance_of(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| (entry.actor.clone(), entry.instance))
         .ok_or(ActorLookup::NotOpen)
 }
@@ -1299,7 +1301,7 @@ async fn server_actor_of(state: &AppState, server: u64) -> Result<ServerActor, S
     require_unlocked_session(state).await?;
     let servers = state.servers.lock().await;
     let entry = servers
-        .get(&server)
+        .legacy(&server)
         .ok_or_else(|| "unknown server".to_string())?;
     if entry.is_dm {
         return Err("moderation is only available in server spaces".into());
@@ -2115,7 +2117,7 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
     let state = state.inner();
     let prepared = {
         let mut servers = state.servers.lock().await;
-        let Some(entry) = servers.get_mut(&server) else {
+        let Some(entry) = servers.legacy_mut(&server) else {
             return false;
         };
         let (Some(identity), Some(mesh)) = (entry.interface_routes.clone(), entry.mesh.clone())
@@ -2303,7 +2305,7 @@ fn event_needs_snapshot(event: &AppEvent) -> bool {
 async fn mark_server_dirty(state: &AppState, server: u64, instance: u64) -> bool {
     let mut servers = state.servers.lock().await;
     let Some(entry) = servers
-        .get_mut(&server)
+        .legacy_mut(&server)
         .filter(|entry| entry.instance == instance)
     else {
         return false;
@@ -2354,7 +2356,7 @@ async fn install_persistence_signal(
     instance: u64,
 ) -> Option<watch::Receiver<u64>> {
     let servers = state.servers.lock().await;
-    if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
+    if servers.legacy(&server).map(|entry| entry.instance) != Some(instance) {
         return None;
     }
     let (signal, wake) = watch::channel(0u64);
@@ -3556,9 +3558,33 @@ async fn register_server(
     };
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     let timer_actor = actor.clone();
+    let cache_group = group_id.clone();
+    // Allocate the complete unpublished owner before borrowing the registry.
+    // Voice stays empty until its exact registration CAS below succeeds.
+    let mut candidate = Box::new(ServerEntry {
+        files: keep_session::EntryOwner::new(),
+        actor,
+        instance,
+        group_id,
+        device_id,
+        invite,
+        name,
+        bootstrap,
+        bootstrap_owners,
+        interface_routes,
+        rendezvous,
+        mesh,
+        is_dm,
+        switchboard,
+        record_seq,
+        voice: None,
+        persist: PersistCounters::default(),
+    });
+    let mut replaced = None;
     let mut servers = state.servers.lock().await;
     let install = if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
         || ui_session_closed(state)
+        || servers.contains_key(&id)
     {
         Err("server registration was superseded by a lock request".into())
     } else {
@@ -3576,6 +3602,9 @@ async fn register_server(
         task.abort();
         return Err(error);
     }
+    let publication = servers
+        .prepare_legacy_publication(id, None, &mut replaced)
+        .expect("checked fresh vacancy under the same registry guard");
     let voice = registration.and_then(|registration| match registration.register() {
         Ok(()) => Some(RegisteredVoiceActor(registration)),
         Err(error) => {
@@ -3584,36 +3613,16 @@ async fn register_server(
             None
         }
     });
-    let files = keep_session::EntryOwner::new();
-    actor.set_keep_session(
-        keep_session::current(state, expected_generation).map(|account| files.scope(account)),
+    candidate.voice = voice;
+    candidate.actor.set_keep_session(
+        keep_session::current(state, expected_generation)
+            .map(|account| candidate.files.scope(account)),
     );
-    let cache_group = group_id.clone();
     // Exact row guard is already held. No await or fallible operation may separate the voice
     // registration CAS from publishing the native row that owns it.
-    servers.insert(
-        id,
-        ServerEntry {
-            files,
-            actor,
-            instance,
-            group_id,
-            device_id,
-            invite,
-            name,
-            bootstrap,
-            bootstrap_owners,
-            interface_routes,
-            rendezvous,
-            mesh,
-            is_dm,
-            switchboard,
-            record_seq,
-            voice,
-            persist: PersistCounters::default(),
-        },
-    );
+    publication.publish(candidate);
     drop(servers);
+    drop(replaced);
     supervise("server_actor", id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, id, instance).await;
@@ -3634,7 +3643,7 @@ async fn register_server(
 /// anything the next launch's block starts at.
 async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
     let mut servers = state.servers.lock().await;
-    let e = servers.get_mut(&server)?;
+    let e = servers.legacy_mut(&server)?;
     e.record_seq = e.record_seq.saturating_add(1);
     Some(e.record_seq)
 }
@@ -3652,7 +3661,7 @@ async fn persist_server(state: &AppState, server: u64) -> PersistOutcome {
     let Some((ticket, instance, actor)) = ({
         let mut servers = state.servers.lock().await;
         servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .map(|entry| (entry.persist.request(), entry.instance, entry.actor.clone()))
     }) else {
         return PersistOutcome::Superseded;
@@ -3673,7 +3682,7 @@ async fn persist_server_instance(
     let ticket = {
         let mut servers = state.servers.lock().await;
         let Some(entry) = servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .filter(|entry| entry.instance == instance)
         else {
             return PersistOutcome::Superseded;
@@ -3695,7 +3704,7 @@ async fn retry_pending_persistence(
     let (instance, ticket, actor) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .filter(|entry| entry.instance == instance)?;
         if !entry.persist.needs_write(entry.persist.requested) {
             return admission_storage::combine_retries(net, registry);
@@ -3725,7 +3734,7 @@ async fn persist_captured(
     // request belongs to; and did a write that started after this ticket already carry it?
     let covering = {
         let servers = state.servers.lock().await;
-        let Some(entry) = servers.get(&server) else {
+        let Some(entry) = servers.legacy(&server) else {
             return PersistOutcome::Superseded;
         };
         if entry.instance != instance {
@@ -3760,7 +3769,7 @@ async fn persist_captured(
                 }
             };
             if registry
-                .get(&server)
+                .legacy(&server)
                 .is_none_or(|entry| entry.instance != instance)
             {
                 return PersistOutcome::Superseded;
@@ -3783,7 +3792,7 @@ async fn persist_captured(
                     reason: PersistFailure::WriteFailed,
                 };
             }
-            if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+            if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
                 if entry.instance == instance {
                     entry.persist.completed_through(covering);
                 }
@@ -3819,7 +3828,7 @@ async fn persist_captured(
     // registry lock, and removal cannot complete between this check and the write while the
     // registry guard below is held.
     let servers = state.servers.lock().await;
-    if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
+    if servers.legacy(&server).map(|entry| entry.instance) != Some(instance) {
         return PersistOutcome::Superseded;
     }
     let mut rng = OsCryptoRng;
@@ -3833,7 +3842,7 @@ async fn persist_captured(
     drop(guard);
     // Only a write that actually reached the disk may retire the requests it covered, and only
     // for the incarnation that made them.
-    if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+    if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
         if entry.instance == instance {
             entry.persist.completed_through(covering);
         }
@@ -3924,7 +3933,7 @@ async fn persist_live_local_reconnect_routes_in_state(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
         .and_then(|entry| entry.mesh.clone());
     let Some(mesh) = mesh else {
@@ -4050,7 +4059,7 @@ async fn persist_live_local_reconnect_routes_in_state(
     let final_now_ms = SystemClock.now_ms();
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return;
@@ -4645,7 +4654,7 @@ async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) -> P
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
     else {
         return PersistOutcome::Superseded;
@@ -4831,7 +4840,7 @@ async fn fold_bootstrap_entry(
     let state = app.state::<AppState>();
     let changed_and_actor = {
         let mut servers = state.inner().servers.lock().await;
-        let Some(server_entry) = servers.get_mut(&server) else {
+        let Some(server_entry) = servers.legacy_mut(&server) else {
             return false;
         };
         let changed = if add {
@@ -6319,7 +6328,7 @@ async fn found_server_inner(
         .servers
         .lock()
         .await
-        .get(&server_id)
+        .legacy(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
         match member_reconnect::persist(
@@ -7131,7 +7140,7 @@ async fn join_server_inner(
         .servers
         .lock()
         .await
-        .get(&server_id)
+        .legacy(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
         match member_reconnect::persist(
@@ -7282,7 +7291,7 @@ async fn apply_join_reply(
     let (mesh, actor, group_id, device_id) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "server not found".to_string())?;
         (
             entry
@@ -7483,7 +7492,7 @@ async fn leave_server(
         // the namespace, so it is left alone entirely and the claim goes. Its own leave claims
         // next (it may be waiting on this claim right now) and cleans up.
         let alias = servers
-            .values()
+            .legacy_values()
             .any(|entry| entry.group_id == removed.group_id);
         (removed, claim.filter(|_| !alias))
     };
@@ -7611,7 +7620,7 @@ async fn get_available_invite(state: &AppState, server: u64) -> Result<Option<St
     require_unlocked_session(state).await?;
     let (actor, device_id) = {
         let servers = state.servers.lock().await;
-        match servers.get(&server) {
+        match servers.legacy(&server) {
             Some(e) if e.invite.is_some() => (e.actor.clone(), e.device_id),
             _ => return Ok(None),
         }
@@ -7716,7 +7725,7 @@ async fn refresh_or_mint_invite(
     let (bootstrap, rendezvous, handle, stored_invite) = {
         let servers = state.servers.lock().await;
         let e = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (
             e.bootstrap.clone(),
@@ -7770,7 +7779,7 @@ async fn refresh_or_mint_invite(
     {
         let mut servers = state.servers.lock().await;
         let e = servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .ok_or_else(|| "server closed while minting its invite".to_string())?;
         if !invite_routes_still_current(&bootstrap, &rendezvous, &e.bootstrap, &e.rendezvous) {
             return Err(
@@ -7832,7 +7841,7 @@ async fn check_invite_routes(
     let (bootstrap, rendezvous) = {
         let servers = state.servers.lock().await;
         let e = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (e.bootstrap.clone(), !e.rendezvous.is_empty())
     };
@@ -7900,7 +7909,7 @@ async fn rename_server(
     if name.is_empty() {
         return Err("name cannot be empty".into());
     }
-    match state.servers.lock().await.get_mut(&server) {
+    match state.servers.lock().await.legacy_mut(&server) {
         Some(e) => e.name = name,
         None => return Err("unknown server".into()),
     }
@@ -8752,7 +8761,7 @@ async fn storage_health_cache_get(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .is_some_and(|entry| entry.instance == server_instance);
     if !current {
         return Err("the server changed while storage inspection was in progress".into());
@@ -8774,7 +8783,7 @@ async fn storage_health_cache_publish(
     // clearing the cache, which makes its ordering with this publication atomic.
     let servers = state.servers.lock().await;
     if servers
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != server_instance)
     {
         return Err("the server changed while storage inspection was in progress".into());
@@ -9011,7 +9020,7 @@ async fn mint_member_recovery(
     let candidates = {
         let servers = state.servers.lock().await;
         servers
-            .get(&server)
+            .legacy(&server)
             .map(|entry| entry.bootstrap.clone())
             .ok_or_else(|| "server is not open".to_string())?
     };
@@ -9137,7 +9146,7 @@ async fn dm_stats(state: State<'_, AppState>) -> Result<Vec<DmStat>, String> {
     let dms: Vec<(u64, ServerActor)> = {
         let servers = state.servers.lock().await;
         servers
-            .iter()
+            .legacy_iter()
             .filter(|(_, e)| e.is_dm)
             .map(|(id, e)| (*id, e.actor.clone()))
             .collect()
@@ -9363,7 +9372,7 @@ async fn get_kept_files(state: State<'_, AppState>, server: u64) -> Result<UiKep
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
@@ -9403,7 +9412,7 @@ async fn keep_file(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
@@ -9501,7 +9510,7 @@ async fn commit_kept_command<T>(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
@@ -9516,7 +9525,7 @@ async fn commit_kept_command<T>(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
@@ -10414,7 +10423,7 @@ async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, St
             .servers
             .lock()
             .await
-            .get(&diag.server)
+            .legacy(&diag.server)
             .map(|entry| entry.bootstrap.clone());
         reconcile_advertised(&mut diag.advertised, live);
     }
@@ -10474,7 +10483,7 @@ async fn get_switchboard_status(
     let (actor, offered, eligible) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (
             entry.actor.clone(),
@@ -10518,7 +10527,7 @@ async fn set_switchboard_offered(
     let actor = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         let eligible = entry
             .bootstrap
@@ -10533,7 +10542,7 @@ async fn set_switchboard_offered(
         // Revocation is fail-safe: close the protocol gate first. Even if disk sealing fails, the
         // current process and UI state remain off rather than silently continuing to serve.
         actor.set_switchboard_offered(false).await?;
-        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+        if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
             entry.switchboard = false;
         }
     }
@@ -10576,7 +10585,7 @@ async fn set_switchboard_offered(
             }
             return Err(error);
         }
-        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+        if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
             entry.switchboard = true;
         }
     }
@@ -10682,7 +10691,7 @@ async fn get_call_transport(
     let (actor, advertised, router_maps) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         let router_maps = entry
             .bootstrap_owners
@@ -10829,7 +10838,7 @@ async fn prepare_call_mapping_owner(
     let _commit = require_ui_session_generation(&state, generation).await?;
     let servers = state.servers.lock().await;
     let entry = servers
-        .get(&server)
+        .legacy(&server)
         .ok_or("call server is no longer open")?;
     let binding = call_mappings::Binding {
         generation,
@@ -10855,7 +10864,7 @@ async fn call_mapping_binding_current(state: &AppState, binding: &call_mappings:
     let servers = state.servers.lock().await;
     !ui_session_closed(state)
         && state.ui_session_generation.load(Ordering::SeqCst) == binding.generation
-        && servers.get(&binding.server).is_some_and(|entry| {
+        && servers.legacy(&binding.server).is_some_and(|entry| {
             entry.instance == binding.instance && entry.group_id == binding.group
         })
 }
@@ -11024,7 +11033,7 @@ async fn voice_binding_current(state: &AppState, binding: &voice_authority::Bind
     let servers = state.servers.lock().await;
     !ui_session_closed(state)
         && state.ui_session_generation.load(Ordering::SeqCst) == binding.generation
-        && servers.get(&binding.server).is_some_and(|entry| {
+        && servers.legacy(&binding.server).is_some_and(|entry| {
             entry.instance == binding.instance && entry.group_id == binding.group
         })
 }
@@ -11041,13 +11050,13 @@ async fn check_voice_binding(
 /// The same exact registry/actor query for ordinary IPC and an upgraded handoff context.
 /// Its result is only a snapshot; both callers still need final commit/selection fencing.
 async fn check_voice_binding_in(
-    servers: &Mutex<HashMap<u64, ServerEntry>>,
+    servers: &Mutex<ServerTable>,
     binding: &voice_authority::Binding,
 ) -> Result<(), String> {
     let actor = {
         let servers = servers.lock().await;
         let entry = servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .ok_or("voice server changed")?;
         entry.actor.clone()
@@ -11097,7 +11106,7 @@ async fn prepare_voice_owner_inner(
     let (actor, instance, group) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or("voice server is no longer open")?;
         (entry.actor.clone(), entry.instance, entry.group_id.clone())
     };
@@ -11187,7 +11196,7 @@ async fn activate_voice_owner_inner(
             let actor = {
                 let servers = state.servers.lock().await;
                 servers
-                    .get(&binding.server)
+                    .legacy(&binding.server)
                     .filter(|entry| {
                         entry.instance == binding.instance && entry.group_id == binding.group
                     })
@@ -11289,7 +11298,7 @@ async fn end_voice_owner_inner(state: &AppState, owner: &str) {
         let actor = {
             let servers = state.servers.lock().await;
             servers
-                .get(&original.binding.server)
+                .legacy(&original.binding.server)
                 .filter(|entry| {
                     entry.instance == original.binding.instance
                         && entry.group_id == original.binding.group
@@ -12205,9 +12214,10 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
     if !matches!(
         object.get("version").and_then(serde_json::Value::as_u64),
-        // v3 protects exact retained Send copies that old v2 frontends silently omitted.
+        // v3 protects exact retained Send copies that old v2 frontends silently omitted;
+        // v4 protects native 32-byte requests from all preceding UI readers.
         // This gates only the sealed UI envelope; native authoring/Stop limits stay intact.
-        Some(1..=3)
+        Some(1..=4)
     ) || !object
         .get("drafts")
         .is_some_and(serde_json::Value::is_object)
@@ -12217,6 +12227,14 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
     {
         return Err("unsupported UI continuity state shape".into());
     }
+    native_text::continuity::validate(
+        object,
+        object
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .expect("checked version"),
+    )
+    .map_err(str::to_owned)?;
     // Studio's owned PIX drafts need a larger envelope, not a larger allowance for unrelated
     // chat/read/trust state. Validate each independent budget before the atomic sealed write.
     if let Some(studio) = object.remove("studioDraft") {
@@ -13369,7 +13387,7 @@ async fn get_inbox(state: State<'_, AppState>) -> Result<Vec<UiInboxItem>, Strin
     let servers: Vec<(u64, String, bool, ServerActor)> = {
         let guard = state.servers.lock().await;
         guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| (*id, e.name.clone(), e.is_dm, e.actor.clone()))
             .collect()
     };
@@ -13581,7 +13599,7 @@ async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, e)| {
             (
                 *id,
@@ -13624,7 +13642,7 @@ async fn reload_one(
         .servers
         .lock()
         .await
-        .get(&record.id)
+        .legacy(&record.id)
         .map(|entry| entry.instance);
     // 9g used to dial every address in the snapshot's peer records here, straight at the
     // transport: up to `MAX_PEX_ADDRESSES` per record for every record ever stored, unconditional,
@@ -13749,11 +13767,35 @@ async fn reload_one(
     // Register under the SAME id as on disk (don't allocate a new one).
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     let timer_actor = actor.clone();
+    let mut candidate = Box::new(ServerEntry {
+        files: keep_session::EntryOwner::new(),
+        actor,
+        instance,
+        group_id,
+        device_id,
+        invite: presented_invite,
+        name: record.display_name.clone(),
+        bootstrap,
+        bootstrap_owners,
+        interface_routes: Some(InterfaceRouteIdentity {
+            port,
+            peer_id: id.clone(),
+        }),
+        rendezvous: rz_vec,
+        mesh: Some(mesh_handle),
+        is_dm: record.is_dm,
+        switchboard: net.switchboard,
+        record_seq: net.record_seq,
+        voice: None,
+        persist: PersistCounters::default(),
+    });
+    let mut replaced = None;
     let commit = state.ui_session_commit.lock().await;
     let mut servers = state.servers.lock().await;
     let install = if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
         || !voice_runtime(state).is_current_ticket(voice_ticket)
-        || servers.get(&record.id).map(|entry| entry.instance) != previous_instance
+        || servers.legacy(&record.id).map(|entry| entry.instance) != previous_instance
+        || (previous_instance.is_none() && servers.contains_key(&record.id))
     {
         Err("server reload was superseded by a lock request".into())
     } else {
@@ -13764,57 +13806,35 @@ async fn reload_one(
         drop(commit);
         drop(registration);
         drop(events);
-        actor.shutdown().await;
+        candidate.actor.shutdown().await;
         let _ = task.await;
         return Err(error);
     }
+    let publication = servers
+        .prepare_legacy_publication(record.id, previous_instance, &mut replaced)
+        .expect("checked exact legacy incarnation under the same registry guard");
     let voice = match install_reloaded_voice(registration) {
         Ok(voice) => voice,
         Err(error) => {
             drop(servers);
             drop(commit);
             drop(events);
-            actor.shutdown().await;
+            candidate.actor.shutdown().await;
             let _ = task.await;
             return Err(error);
         }
     };
-    let files = keep_session::EntryOwner::new();
-    if let Some(old) = servers.get(&record.id) {
-        old.files.retire();
-    }
+    candidate.voice = voice;
     // Restores remain inactive until the authenticated account unlock commits below. If this
     // reload is within a live unlock, current() still checks that exact account generation.
-    actor.set_keep_session(
-        keep_session::current(state, expected_generation).map(|account| files.scope(account)),
+    candidate.actor.set_keep_session(
+        keep_session::current(state, expected_generation)
+            .map(|account| candidate.files.scope(account)),
     );
-    servers.insert(
-        record.id,
-        ServerEntry {
-            files,
-            actor,
-            instance,
-            group_id,
-            device_id,
-            invite: presented_invite,
-            name: record.display_name.clone(),
-            bootstrap,
-            bootstrap_owners,
-            interface_routes: Some(InterfaceRouteIdentity {
-                port,
-                peer_id: id.clone(),
-            }),
-            rendezvous: rz_vec,
-            mesh: Some(mesh_handle),
-            is_dm: record.is_dm,
-            switchboard: net.switchboard,
-            record_seq: net.record_seq,
-            voice,
-            persist: PersistCounters::default(),
-        },
-    );
+    publication.publish(candidate);
     drop(servers);
     drop(commit);
+    drop(replaced);
     // Registration is now visible to orphan Stop. Only here can the global absence fence
     // be released; earlier release would let a new fence race autonomous restored publication.
     chat_fence_commit.installed();
@@ -14657,7 +14677,7 @@ async fn create_backup(
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| (*id, entry.instance, op.bind_actor(entry.actor.clone())))
         .collect();
     // Share ordinary snapshot ordering. A backup must never capture an old snapshot and later
@@ -14688,7 +14708,7 @@ async fn create_backup(
         if registry.len() != servers.len()
             || servers.iter().any(|(id, instance, _)| {
                 registry
-                    .get(id)
+                    .legacy(id)
                     .is_none_or(|entry| entry.instance != *instance)
             })
         {
@@ -14698,7 +14718,7 @@ async fn create_backup(
             ));
         }
         let records: Vec<_> = registry
-            .iter()
+            .legacy_iter()
             .map(|(id, entry)| ServerRecord {
                 id: *id,
                 display_name: entry.name.clone(),
@@ -16210,7 +16230,7 @@ async fn reattach_voice_actors(
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .filter(|(_, entry)| {
             entry
                 .voice
@@ -16231,7 +16251,7 @@ async fn reattach_voice_actors(
             return Err("unlock was superseded by a newer lock request; try again".into());
         }
         let Some(entry) = servers
-            .get_mut(&id)
+            .legacy_mut(&id)
             .filter(|entry| entry.instance == instance)
         else {
             // Leave/reload won while the actor reply was pending. Its abandoned candidate is
@@ -16411,7 +16431,7 @@ async fn finalize_unlock_session_with_voice_checked(
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
     if let Some(session) = keep_session::current(state, expected_generation) {
-        for entry in state.servers.lock().await.values() {
+        for entry in state.servers.lock().await.legacy_values() {
             entry
                 .actor
                 .set_keep_session(Some(entry.files.scope(session.clone())));
@@ -16975,7 +16995,18 @@ async fn close_vault_window_with_capture<R: tauri::Runtime>(
         });
     }
 
-    let history = match shutdown::freeze_servers(state).await {
+    // Native Sources count final preparations as physical work. Never hold the
+    // Legacy barrier's UI/table guards while waiting for that work to drain.
+    // The close prelude above has already made closure irreversible; native
+    // rows stay canonically installed (but fenced) if any stage needs a retry.
+    let history_result = if state.native_text.selected {
+        native_text::sources::close_server_rows(state, &SystemClock)
+            .await
+            .map(|()| None)
+    } else {
+        shutdown::freeze_servers(state).await.map(Some)
+    };
+    let history = match history_result {
         Ok(barrier) => barrier,
         Err(error) => {
             return Ok(CloseVaultWindowOutcome {
@@ -16991,24 +17022,14 @@ async fn close_vault_window_with_capture<R: tauri::Runtime>(
             })
         }
     };
-    if state.native_text.selected {
-        if let Err(error) = native_text::sources::close(state, &SystemClock).await {
-            return Ok(CloseVaultWindowOutcome {
-                continuity_error: lock.continuity_error,
-                continuity_revision: close_revision.clone(),
-                continuity_discardable: Some(close_revision.is_some()),
-                history_error: Some(error),
-                deferred: true,
-                destroy_error: None,
-            });
-        }
-    }
     let destroy_error = match app.get_webview_window("main") {
         Some(window) => window.destroy().err().map(|error| error.to_string()),
         None => Some("the main window no longer exists".to_string()),
     };
     if destroy_error.is_none() {
-        history.stop();
+        if let Some(history) = history {
+            history.stop();
+        }
     }
     Ok(CloseVaultWindowOutcome {
         continuity_error: lock.continuity_error,
@@ -17226,7 +17247,7 @@ async fn lock_session_with_capture(
     // checks `session_lock_requested` while holding the cancellation table, but this post-commit
     // drain also retires any future registration path that was already inside the UI commit seam.
     cancel_all_inline_downloads(state);
-    for entry in state.servers.lock().await.values() {
+    for entry in state.servers.lock().await.legacy_values() {
         entry.actor.clear_studio_previews();
     }
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
@@ -17383,7 +17404,7 @@ async fn ceremony_origin(state: &AppState) -> Result<DeviceId, String> {
     let actor = {
         let servers = state.servers.lock().await;
         let (_, entry) = servers
-            .iter()
+            .legacy_iter()
             .min_by_key(|(id, _)| **id)
             .ok_or_else(|| "join or found a server before pairing a device".to_string())?;
         entry.actor.clone()
@@ -17432,7 +17453,7 @@ async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<Pairin
     let (servers, dm_count) = {
         let guard = state.servers.lock().await;
         let mut names: Vec<(u64, String, bool)> = guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| (*id, e.name.clone(), e.is_dm))
             .collect();
         names.sort_by_key(|(id, _, _)| *id);
@@ -17525,7 +17546,7 @@ async fn pairing_mint(
     let mut servers: Vec<GrantSource> = {
         let guard = state.servers.lock().await;
         guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| GrantSource {
                 id: *id,
                 name: e.name.clone(),
@@ -19812,7 +19833,7 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(7, snapshot_test_entry(2, actor.clone(), group, device));
+            .install_legacy_fixture(7, snapshot_test_entry(2, actor.clone(), group, device));
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let called = AtomicBool::new(false);
         let error = commit_kept_command(&state, 7, 1, generation, async {
@@ -23702,7 +23723,7 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
+            .install_legacy_fixture(7, snapshot_test_entry(1, actor.clone(), group, device));
         let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
@@ -23771,14 +23792,14 @@ mod tests {
         let candidate = prepare_voice_owner_inner(&state, controller, 7, room)
             .await
             .unwrap();
-        state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+        state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
         assert!(activate_voice_owner_inner(&state, candidate).await.is_err());
         assert!(
             admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128)
                 .await
                 .is_err()
         );
-        state.servers.lock().await.get_mut(&7).unwrap().instance = 1;
+        state.servers.lock().await.legacy_mut(&7).unwrap().instance = 1;
         let (_download, download_cancelled) = claim_internal_inline_download(&state).unwrap();
         let mapping_owner = {
             let mut mappings = state.media_mappings.lock().unwrap();
@@ -23874,7 +23895,7 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
             actors.push(actor);
             workers.push((task, drain));
         }
@@ -23907,13 +23928,13 @@ mod tests {
         }
         assert!(current.iter().all(|grant| grant.lease().is_live()));
         assert!(old.iter().all(|grant| !grant.lease().is_live()));
-        state.servers.lock().await.remove(&1);
+        state.servers.lock().await.remove_legacy_fixture(&1);
         assert!(
             !current[0].lease().is_live(),
             "native row removal revokes before actor shutdown"
         );
         assert!(current[1].lease().is_live());
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         for actor in &actors {
             actor.shutdown().await;
         }
@@ -23944,7 +23965,7 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
+            .install_legacy_fixture(7, snapshot_test_entry(1, actor.clone(), group, device));
         let runtime = voice_runtime(&state);
         let old_ticket = runtime.session_ticket();
         let generation = state.ui_session_generation.load(Ordering::SeqCst);
@@ -23960,10 +23981,17 @@ mod tests {
             }
         );
         assert!(result.is_err());
-        assert!(state.servers.lock().await.get(&7).unwrap().voice.is_none());
+        assert!(state
+            .servers
+            .lock()
+            .await
+            .legacy(&7)
+            .unwrap()
+            .voice
+            .is_none());
         assert!(actor.voice_call_grant(channel_id("general")).await.is_err());
         assert!(runtime.activate_session(&old_ticket).is_err());
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         actor.shutdown().await;
         task.await.unwrap();
         drain.await.unwrap();
@@ -23993,7 +24021,7 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
             actors.push(actor);
             workers.push((task, drain));
         }
@@ -24003,7 +24031,14 @@ mod tests {
             .await
             .unwrap();
         assert!(*state.session_resumable.lock().await);
-        assert!(state.servers.lock().await.get(&1).unwrap().voice.is_none());
+        assert!(state
+            .servers
+            .lock()
+            .await
+            .legacy(&1)
+            .unwrap()
+            .voice
+            .is_none());
         let grant = actors[1]
             .voice_call_grant(channel_id("general"))
             .await
@@ -24051,7 +24086,7 @@ mod tests {
             .lease()
             .is_live());
         assert!(!grant.lease().is_live());
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         actors[1].shutdown().await;
         for (task, drain) in workers {
             task.await.unwrap();
@@ -24174,7 +24209,7 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
             running.push((actor, task, drain));
         }
         // First actor has frozen by the time the second actor cannot acquire its save lease.
@@ -24248,7 +24283,7 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(1, snapshot_test_entry(71, actor.clone(), group, device));
+            .install_legacy_fixture(1, snapshot_test_entry(71, actor.clone(), group, device));
         let store = state.store.lock().await;
         let backup_state = state.clone();
         let backup_actor = actor.clone();
@@ -24304,7 +24339,13 @@ mod tests {
     async fn wait_for_clean_snapshot(state: &AppState, server: u64) {
         timeout(Duration::from_secs(5), async {
             loop {
-                let counters = state.servers.lock().await[&server].persist;
+                let counters = state
+                    .servers
+                    .lock()
+                    .await
+                    .legacy(&server)
+                    .expect("Legacy fixture row")
+                    .persist;
                 if counters.requested > 0 && counters.requested == counters.completed {
                     return;
                 }
@@ -24371,7 +24412,7 @@ mod tests {
         let group_id = receiver_server.group_id();
         let device_id = receiver_server.device_id();
         let (receiver, mut events, receiver_task) = spawn(receiver_server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             SERVER,
             snapshot_test_entry(INSTANCE, receiver.clone(), group_id, device_id),
         );
@@ -24390,7 +24431,14 @@ mod tests {
             }
         });
         wait_for_clean_snapshot(&state, SERVER).await;
-        let baseline = state.servers.lock().await[&SERVER].persist.completed;
+        let baseline = state
+            .servers
+            .lock()
+            .await
+            .legacy(&SERVER)
+            .expect("Legacy fixture row")
+            .persist
+            .completed;
         sender
             .send_reply(channel, "retained without a local send", "")
             .await
@@ -24430,7 +24478,17 @@ mod tests {
         .await
         .expect("the received message did not reach the encrypted background snapshot");
         wait_for_clean_snapshot(&state, SERVER).await;
-        assert!(state.servers.lock().await[&SERVER].persist.completed > baseline);
+        assert!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist
+                .completed
+                > baseline
+        );
         assert!(require_unlocked_session(&state).await.is_err());
 
         sender.shutdown().await;
@@ -24477,7 +24535,7 @@ mod tests {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(10, actor.clone(), group_id.clone(), device_id),
         );
@@ -24491,7 +24549,17 @@ mod tests {
             !old.has_changed().unwrap(),
             "a burst retains a single latest notification"
         );
-        assert_eq!(state.servers.lock().await[&1].persist.requested, 1_000);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist
+                .requested,
+            1_000
+        );
         note_event_for_persistence(
             &state,
             1,
@@ -24504,7 +24572,7 @@ mod tests {
             !old.has_changed().unwrap(),
             "presence and route churn must not snapshot history"
         );
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(11, actor.clone(), group_id, device_id),
         );
@@ -24514,7 +24582,13 @@ mod tests {
         note_event_for_persistence(&state, 1, 10, &AppEvent::Closed).await;
         assert!(!replacement.has_changed().unwrap());
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters::default()
         );
         assert!(install_persistence_signal(&state, 1, 10).await.is_none());
@@ -24550,7 +24624,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(10, actor.clone(), group_id, device_id),
         );
@@ -24560,7 +24634,16 @@ mod tests {
             run_persistence_worker(&worker_state, 1, 10, wake).await;
         });
         timeout(Duration::from_secs(5), async {
-            while state.servers.lock().await[&1].persist.requested == 0 {
+            while state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist
+                .requested
+                == 0
+            {
                 tokio::task::yield_now().await;
             }
         })
@@ -24571,7 +24654,13 @@ mod tests {
         let writing = persist_lock_for(&state, 1);
         let idle = writing.lock().await;
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 0
@@ -24584,7 +24673,13 @@ mod tests {
         note_event_for_persistence(&state, 1, 10, &AppEvent::SnapshotNeeded).await;
         wait_for_clean_snapshot(&state, 1).await;
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 2,
                 completed: 2
@@ -24642,7 +24737,7 @@ mod tests {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             SERVER,
             ServerEntry {
                 files: keep_session::EntryOwner::new(),
@@ -24692,7 +24787,13 @@ mod tests {
             Some(pending)
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 0
@@ -24710,7 +24811,13 @@ mod tests {
             None
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 1
@@ -24754,7 +24861,13 @@ mod tests {
             }
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 2,
                 completed: 1
@@ -24776,7 +24889,13 @@ mod tests {
             }
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 3,
                 completed: 2
@@ -24857,24 +24976,24 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(SERVER, entry(OLD, old_actor.clone()));
+            .install_legacy_fixture(SERVER, entry(OLD, old_actor.clone()));
         // Several requests, so the stale ticket is a number the replacement's own counters will
         // not have reached. A departing writer holding ticket 1 is accidentally stopped by the
         // coalescing check; the hazard is the one whose ticket is still ahead.
         let stale_ticket = {
             let mut servers = state.servers.lock().await;
-            let entry = servers.get_mut(&SERVER).unwrap();
+            let entry = servers.legacy_mut(&SERVER).unwrap();
             entry.persist.request();
             entry.persist.request();
             entry.persist.request()
         };
         assert_eq!(stale_ticket, 3);
-        state.servers.lock().await.remove(&SERVER);
+        state.servers.lock().await.remove_legacy_fixture(&SERVER);
         state
             .servers
             .lock()
             .await
-            .insert(SERVER, entry(NEW, new_actor.clone()));
+            .install_legacy_fixture(SERVER, entry(NEW, new_actor.clone()));
 
         // The replacement persists a change of its own, and that is what belongs on disk.
         persist_server(&state, SERVER).await;
@@ -24933,7 +25052,7 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .get(&SERVER)
+                .legacy(&SERVER)
                 .unwrap()
                 .persist
                 .completed,
@@ -24995,15 +25114,23 @@ mod tests {
         const SERVER: u64 = 12;
         const OLD: u64 = 40;
         const NEW: u64 = 41;
-        state.servers.lock().await.insert(SERVER, entry(OLD));
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(SERVER, entry(OLD));
         let stale_report =
             build_storage_report(StorageHealth::default(), Vec::new(), &HashSet::new(), 123);
 
         // Model a scan paused after producing its report: leave removes its registry incarnation,
         // then a reload installs a new actor row under the same persisted id before it resumes.
-        state.servers.lock().await.remove(&SERVER);
+        state.servers.lock().await.remove_legacy_fixture(&SERVER);
         state.storage_health.lock().await.remove(&SERVER);
-        state.servers.lock().await.insert(SERVER, entry(NEW));
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(SERVER, entry(NEW));
         assert!(storage_health_cache_publish(
             &state,
             SERVER,
@@ -25471,7 +25598,7 @@ mod tests {
             .await
             .unwrap();
             let actor = restored.actor.clone();
-            state.servers.lock().await.insert(
+            state.servers.lock().await.install_legacy_fixture(
                 SERVER_ID,
                 ServerEntry {
                     files: keep_session::EntryOwner::new(),
@@ -25672,19 +25799,28 @@ mod tests {
         let (actor, events, task) = spawn(member);
         let mut entry = snapshot_test_entry(1, actor.clone(), group, device);
         entry.invite = Some(stored.clone());
-        state.servers.lock().await.insert(1, entry);
+        state.servers.lock().await.install_legacy_fixture(1, entry);
 
         // Even a reusable token must disappear for a current ordinary member. Previously this
         // either exposed a retained code or tried to refresh it and raised a global error.
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
-        assert_eq!(state.servers.lock().await[&1].invite, Some(stored));
-        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .invite,
+            Some(stored)
+        );
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = Some("stale code".into());
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
         assert!(mint_and_store_invite(&state, 1)
             .await
             .unwrap_err()
             .contains("only the owner or an admin"));
-        state.servers.lock().await.get_mut(&1).unwrap().invite = None;
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = None;
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
         assert_eq!(get_available_invite(&state, 99).await.unwrap(), None);
         state.session_lock_requested.store(true, Ordering::SeqCst);
@@ -25721,7 +25857,11 @@ mod tests {
         let (member, member_events, member_task) = spawn(member);
         let mut owner_entry = snapshot_test_entry(1, owner.clone(), group.clone(), owner_device);
         owner_entry.invite = Some(owner_invite);
-        state.servers.lock().await.insert(1, owner_entry);
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(1, owner_entry);
         assert!(get_available_invite(&state, 1).await.unwrap().is_some());
 
         owner.set_admin(member_device, true).await.unwrap();
@@ -25747,7 +25887,11 @@ mod tests {
         );
         let mut member_entry = snapshot_test_entry(2, member.clone(), group, member_device);
         member_entry.invite = Some(admin_invite.clone());
-        state.servers.lock().await.insert(2, member_entry);
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(2, member_entry);
         assert!(get_available_invite(&state, 2).await.unwrap().is_some());
 
         for cached in [admin_invite, "stale code".into()] {
@@ -25763,7 +25907,7 @@ mod tests {
             })
             .await
             .unwrap();
-            state.servers.lock().await.get_mut(&2).unwrap().invite = Some(cached);
+            state.servers.lock().await.legacy_mut(&2).unwrap().invite = Some(cached);
 
             // Pause refresh at the mint mutex AFTER its permitted-role preflight. One poll
             // sends the role query; the actor query barrier ensures its reply is ready for the
@@ -25803,7 +25947,7 @@ mod tests {
 
         // Do not hide a genuine failure behind 'no invite': an unavailable actor has no current
         // role projection, while a permitted owner's malformed cache still self-heals by minting.
-        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = Some("stale code".into());
         assert!(get_available_invite(&state, 1).await.unwrap().is_some());
         owner.shutdown().await;
         owner_task.await.unwrap();
@@ -27237,8 +27381,9 @@ mod tests {
         // these known envelopes are readable; the next unknown successor still refuses.
         assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_ok());
         assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_ok());
         assert!(validate_ui_state_json(r#"{"version":0,"drafts":{},"readMarks":{}}"#).is_err());
-        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json(r#"{"version":5,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());

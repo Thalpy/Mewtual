@@ -80,7 +80,7 @@ pub(super) async fn publish_inner(
     let actor = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .ok_or("voice server changed")?;
         entry.actor.clone()

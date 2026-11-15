@@ -5,8 +5,8 @@ use super::*;
 use catcoms_app::store::{
     ArchiveBootstrapCatalogPolicy, CanonicalFilenameInventoryPolicy, CriticalCatalogReadPool,
     NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade, NativeRegistryInstallation,
-    NativeRegistryPolicy, NativeRegistryStore, NativeTextVaultUpgrade, V2CurrentLayoutPolicy,
-    V2MemberOutboxPolicy,
+    NativeRegistryPolicy, NativeRegistryStore, NativeTextGovernanceUpgrade, NativeTextVaultUpgrade,
+    V2CurrentLayoutPolicy, V2MemberOutboxPolicy,
 };
 
 pub(super) enum Bootstrap {
@@ -16,6 +16,7 @@ pub(super) enum Bootstrap {
     Upgrading2(Box<NativeIndexUpgrade>),
     Index2(NativeIndexStore),
     Upgrading3(Box<NativeTextVaultUpgrade>),
+    Governing(Box<NativeTextGovernanceUpgrade>),
     Ready(super::sources::ReadyBundle),
     Mounted,
     /// Initial preparation/unwind cannot safely reconstruct warm custody. Keep
@@ -45,7 +46,7 @@ fn current_policy() -> Result<V2CurrentLayoutPolicy, catcoms_app::AppError> {
         256,
         256 * 1024 * 1024,
         1 << 20,
-        1,
+        super::super::server_table::NATIVE_ROWS,
         1024 * 1024 * 1024,
     )?)
 }
@@ -154,6 +155,19 @@ impl Bootstrap {
                         *self = Self::Upgrading3(original);
                         return Err(FAILED.into());
                     }
+                    match (*original).prepare_governance() {
+                        Ok(original) => *self = Self::Governing(Box::new(original)),
+                        Err(original) => {
+                            *self = Self::Upgrading3(Box::new(original));
+                            return Err(FAILED.into());
+                        }
+                    }
+                }
+                Self::Governing(mut original) => {
+                    if original.retry(&mut rng).is_err() {
+                        *self = Self::Governing(original);
+                        return Err(FAILED.into());
+                    }
                     match (*original).into_vault() {
                         Ok(owner) => {
                             *self = Self::Ready(super::sources::ReadyBundle::new(
@@ -162,7 +176,7 @@ impl Bootstrap {
                             )?)
                         }
                         Err(original) => {
-                            *self = Self::Upgrading3(Box::new(original));
+                            *self = Self::Governing(Box::new(original));
                             return Err(FAILED.into());
                         }
                     }

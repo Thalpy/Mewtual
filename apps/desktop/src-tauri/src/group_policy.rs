@@ -34,7 +34,7 @@ pub(super) async fn group_communication_mode(
     let _session = require_ui_session_generation(&state, generation).await?;
     let servers = state.servers.lock().await;
     if servers
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The group changed while reading its communication policy.".into());
