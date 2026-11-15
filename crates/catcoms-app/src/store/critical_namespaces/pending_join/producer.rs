@@ -731,6 +731,7 @@ impl ServerStore {
         let mut mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
         let mounted = mounted.as_mut().ok_or_else(refused)?;
         let pending = candidate.as_mut().ok_or_else(refused)?;
+        self.require_native_index_idle_cached()?; // Before consuming the original task observation.
         if pending.continuation_outcome.is_some() {
             return Err(refused());
         }
@@ -869,10 +870,19 @@ fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError>
         (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
         _ => return Err(refused()),
     };
+    let native_registry = match (
+        current.native_registry_version,
+        current.native_registry_payload,
+    ) {
+        (None, None) => 0,
+        (Some(1..=3), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
+        _ => return Err(refused()),
+    };
     archive
         .checked_add(current_layout)
         .and_then(|n| n.checked_add(governance))
         .and_then(|n| n.checked_add(member_outbox))
+        .and_then(|n| n.checked_add(native_registry))
         .ok_or_else(refused)
 }
 
@@ -883,6 +893,7 @@ pub(super) fn preserved_entry_count(current: &codec::Parsed<'_>) -> u32 {
         + u32::from(current.current_layout.is_some())
         + u32::from(current.governance.is_some())
         + u32::from(current.member_outbox.is_some())
+        + u32::from(current.native_registry_payload.is_some())
 }
 
 /// Outer header only; payload version/tag/rows remain the actual JOIN consumer's contract.
@@ -926,6 +937,15 @@ fn append_original_archive(
     if let Some(payload) = current.member_outbox_payload {
         output.put_u32(super::super::member_outbox_namespace_codec::NAMESPACE_ID);
         output.put_u32(super::super::member_outbox_namespace_codec::NAMESPACE_VERSION);
+        output.put_bytes(payload).map_err(|_| refused())?;
+    }
+    if let Some(payload) = current.native_registry_payload {
+        // archive_suffix_length above rejects missing/unknown/mismatched pair
+        // states. Re-emit the actual admitted entry, never a caller's mode or
+        // a version inferred from ciphertext/descriptor contents.
+        output
+            .put_u32(7)
+            .put_u32(current.native_registry_version.ok_or_else(refused)?);
         output.put_bytes(payload).map_err(|_| refused())?;
     }
     Ok(())

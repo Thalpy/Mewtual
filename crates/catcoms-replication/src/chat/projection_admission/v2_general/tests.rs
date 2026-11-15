@@ -6,6 +6,7 @@ use super::*;
 mod admission_prepare;
 mod read_accessors;
 mod review_regressions;
+mod selected_history;
 mod signing;
 use crate::chat::owner_bodies::{AcceptanceSpec, AppendBody, AppendSpec, RemovalBody, RemovalSpec};
 use crate::chat::owner_header::{HeaderKind, HeaderSpec, OwnerBodyId};
@@ -61,8 +62,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_owner_seed(7)
+    }
+    fn with_owner_seed(seed: u8) -> Self {
         let owner = Owner {
-            key: DeviceKeypair::from_seed(&[7; 32]),
+            key: DeviceKeypair::from_seed(&[seed; 32]),
             calls: Cell::new(0),
         };
         let profile = SignedOwnerProfile::sign_using(

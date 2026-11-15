@@ -117,13 +117,17 @@ function appFixture(clock: FakeClock, failure: string | null = null, initial: Pe
   }
   const app = new Function("PendingSendRetry", "samePendingIntent", "pendingSendRetryBlock", "quarantinedPendingIntent", "persistenceWarning", "sanitizePendingSends", "intent", "initialFailure", `
     let locked = false, uiStateReady = true, uiStateLoadGeneration = 1, sending = false;
+    const chatBackend="legacy";let nativeRetryGeneration=null;
     let pendingSends = { [intent.token]: structuredClone(intent) }, pendingSendErrors = {}, retryingPendingSends = false;
     let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
     let windowCloseInFlight = false;
     let draft = intent.text, drafts = { room: intent.text }, draftRevisions = {}, replyingTo = intent.replyTo;
     let cur = { active: intent.channel }, activeServerId = intent.server, error = "";
     let savesFail = false, failure = initialFailure, lostAcknowledgement = false, writes = [], submissions = [], authored = new Set();
+    // This scheduler-only fixture excludes Svelte teardown. ui-remount.test.ts
+    // separately runs the actual retirement helper and real destroy ordering.
     const effects = [], $effect = effect => effects.push(effect), onMount = () => {};
+    const onDestroy = () => {}, retireUiSessionOnUnmount = () => {};
     const chatScopeKey = () => "room", errorText = String, refresh = async () => {};
     const saveUiStateImmediately = async () => {
       if (savesFail || locked || !uiStateReady) return false;

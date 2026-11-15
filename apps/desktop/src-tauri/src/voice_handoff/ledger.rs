@@ -38,6 +38,8 @@ pub(in crate::voice_handoff) use media::{
 pub(in crate::voice_handoff) use media_index::Prepared as MediaIndexPrepared;
 mod ready;
 mod sdk;
+#[cfg(test)]
+pub(in crate::voice_handoff) use sdk::Preparation as SdkPreparationForTest;
 mod sdp;
 mod sdp_history;
 mod sdp_input;
@@ -656,6 +658,15 @@ impl ResolvedRow {
     pub(in crate::voice_handoff) fn fixture_hold_work_retirement(&self) -> impl Drop + '_ {
         self.row
             .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+    /// The real transition-index exclusion, for proving local pre-effect Capacity. This
+    /// cannot edit an index, issue a row/claim or stand in for native authorization.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_hold_transition_index(&self) -> impl Drop + '_ {
+        self.ledger
+            .index
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }

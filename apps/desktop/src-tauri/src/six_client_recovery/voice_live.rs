@@ -781,10 +781,27 @@ async fn complete_browser_media_pair(
     b: &mut Endpoint,
     selectors: [PairSelector; 2],
 ) -> ([u8; 16], [u8; 16]) {
-    let (ap, bp) = tokio::join!(
-        Box::pin(a.automatic_pair(selectors[0])),
-        Box::pin(b.automatic_pair(selectors[1]))
-    );
+    let pair = catch_fixture(async {
+        tokio::join!(
+            Box::pin(a.automatic_pair(selectors[0])),
+            Box::pin(b.automatic_pair(selectors[1]))
+        )
+    })
+    .await;
+    let (ap, bp) = match pair {
+        Ok(pair) => pair,
+        Err(error) => {
+            // A missing Finish cannot be diagnosed from just the recipient's
+            // Hello/Proof rows. Preserve BOTH original endpoints' observations
+            // before the outer fixture tears down their real actors/drivers.
+            eprintln!(
+                "two-peer confirmation failure: A {}; other {}",
+                a.automatic_diagnostic(),
+                b.automatic_diagnostic()
+            );
+            std::panic::resume_unwind(error)
+        }
+    };
     assert_eq!(
         ap.confirmation_handshake().unwrap(),
         bp.confirmation_handshake().unwrap()
@@ -820,7 +837,7 @@ async fn complete_browser_media_pair(
 
 async fn enable(scenario: &Scenario, index: usize) {
     let running = scenario.online(index);
-    let generation = running.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = running.state.ui_session_generation.load(Ordering::SeqCst);
     bounded(
         "actual native unlock/voice actor attachment",
         finalize_unlock_session(&running.state, generation, false),

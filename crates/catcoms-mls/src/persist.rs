@@ -53,6 +53,13 @@ std::thread_local! {
 fn note_snapshot_encoding() {
     SNAPSHOT_ENCODING_ENTRIES.with(|entries| entries.set(entries.get() + 1));
 }
+/// Negative-only observer for the actual bounded constructor's secret-copy
+/// boundary. It can prove that a refused public expectation reached no encoder;
+/// it cannot manufacture an SDK result or change the production branch.
+#[cfg(test)]
+pub(crate) fn snapshot_encoding_entries_for_test() -> usize {
+    SNAPSHOT_ENCODING_ENTRIES.with(std::cell::Cell::get)
+}
 
 /// Serialize a server's full MLS state; provider storage + signer public key + group id;
 /// into a single blob. **Secret**: it contains private keys, so seal it before persisting.

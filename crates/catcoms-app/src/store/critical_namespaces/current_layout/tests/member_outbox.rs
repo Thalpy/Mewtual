@@ -1107,6 +1107,549 @@ fn actual_join_lifecycle_on_current3_preserves_five_exactly_without_four() {
     assert_eq!(files(path), snapshot);
 }
 
+/// Real saved JOIN and execution transitions after native7 installation. A codec-only test
+/// cannot establish that the native pre-cleaner and the actual writer agree on preservation.
+#[test]
+fn native_registry_actual_join_lifecycle_preserves_seven_and_cold_reopens() {
+    use crate::store::{
+        CheckpointJoinSubmissionStatus, NativeRegistryInstallation, NativeRegistryPolicy,
+        NativeRegistryStore,
+    };
+    use catcoms_mls::MlsDevice;
+    use catcoms_rt::{ManualClock, PeerId};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x77b0);
+    let source = join_source(0x77b0, &mut rng);
+    let invite = source
+        .owner
+        .mint_owner_checkpoint_invite(&source.store, [77; 16], 100_000, vec![])
+        .unwrap();
+    drop(five_with_join_execution(path, &shared, &source, &mut rng));
+    let native_policy = || {
+        NativeRegistryPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+            NativeRegistryPolicy::required_persistent_capacity(),
+        )
+        .unwrap()
+    };
+    let mut installation = NativeRegistryInstallation::prepare(
+        path,
+        SECRET,
+        &mut rng,
+        member_execution_policy(&shared),
+        native_policy(),
+    )
+    .unwrap();
+    installation.retry().unwrap();
+    let native = installation.into_native_registry().unwrap();
+    let store = native.actual_store_for_test().unwrap();
+    // This is a newly opened physical mount; the old fixture's trusted runtime budget
+    // was deliberately not persisted or inherited through decoded registry DATA.
+    store
+        .configure_owner_evidence_budget(source.budget)
+        .unwrap();
+    let key = store.keys.db_key().unwrap();
+    let domain = store.chat_vault_domain().unwrap();
+    let namespaces = || {
+        let raw = fs::read(path.join(Slot::Current.name())).unwrap();
+        let plain = Zeroizing::new(unseal(&key, &unframe(&raw).unwrap()).unwrap());
+        let parsed = store.parse_configured_join_catalog(&plain).unwrap();
+        (
+            parsed.member_outbox_payload.unwrap().to_vec(),
+            parsed.native_registry_payload.unwrap().to_vec(),
+            parsed.count,
+        )
+    };
+    let (five, seven, count) = namespaces();
+    assert_eq!(count, 0);
+    let check = || {
+        let (next_five, next_seven, count) = namespaces();
+        assert_eq!(next_five, five);
+        assert_eq!(next_seven, seven);
+        assert_eq!(count, 1);
+        assert!(!ids(&key, &domain, path).contains(&4));
+        store.validate_mounted_member_outbox_layout().unwrap();
+    };
+    let mut joined = store
+        .prepare_journalled_owner_checkpoint_join(
+            &source.store,
+            &source.owner,
+            MlsDevice::generate().unwrap(),
+            invite,
+            &mut rng,
+        )
+        .unwrap();
+    joined.save_pending(store, &mut rng).unwrap();
+    check();
+    joined.pause_pending(store, &mut rng).unwrap();
+    check();
+    joined.resume_pending(store, &mut rng).unwrap();
+    check();
+    let activated = joined
+        .activate_original_transport(
+            store,
+            source.hub.join(PeerId::from_u64(0x77b1)),
+            PeerId::from_u64(0x77b0),
+        )
+        .unwrap();
+    let mut network = activated.into_network_execution(store).unwrap();
+    network.ensure_initial_grant(store, &mut rng).unwrap();
+    check();
+    assert_eq!(
+        network
+            .ensure_submission_armed(store, &mut rng, Arc::new(ManualClock::new(1_000)))
+            .unwrap(),
+        CheckpointJoinSubmissionStatus::Armed
+    );
+    check();
+    drop(network);
+    drop(native);
+    let before = files(path);
+    let cold = NativeRegistryStore::open(
+        path,
+        SECRET,
+        &mut NeverRng,
+        member_execution_policy(&shared),
+        native_policy(),
+    )
+    .unwrap();
+    assert_eq!(cold.row_count_data().unwrap(), 0);
+    assert_eq!(files(path), before);
+    let raw = fs::read(path.join(Slot::Current.name())).unwrap();
+    let plain = Zeroizing::new(unseal(&key, &unframe(&raw).unwrap()).unwrap());
+    let parsed = cold
+        .actual_store_for_test()
+        .unwrap()
+        .parse_configured_join_catalog(&plain)
+        .unwrap();
+    assert_eq!(parsed.native_registry_payload.unwrap(), seven);
+    assert_eq!(parsed.member_outbox_payload.unwrap(), five);
+}
+
+/// A genuine index2 mount must preserve its explicit namespace version through
+/// saved JOIN, pause/resume, execution migration/arming and a real cold opener.
+#[test]
+fn native_index2_actual_join_lifecycle_preserves_version_and_cold_reopens() {
+    use crate::store::{
+        CheckpointJoinSubmissionStatus, NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade,
+        NativeRegistryInstallation, NativeRegistryPolicy,
+    };
+    use catcoms_mls::MlsDevice;
+    use catcoms_rt::{ManualClock, PeerId};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let shared = pool();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x77b0);
+    let source = join_source(0x77b0, &mut rng);
+    let invite = source
+        .owner
+        .mint_owner_checkpoint_invite(&source.store, [77; 16], 100_000, vec![])
+        .unwrap();
+    drop(five_with_join_execution(path, &shared, &source, &mut rng));
+    let native_policy = || {
+        NativeRegistryPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+            NativeRegistryPolicy::required_persistent_capacity(),
+        )
+        .unwrap()
+    };
+    let index_policy = || {
+        NativeIndexPolicy::new(
+            CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+            NativeIndexPolicy::required_persistent_capacity(),
+        )
+        .unwrap()
+    };
+    let mut installation = NativeRegistryInstallation::prepare(
+        path,
+        SECRET,
+        &mut rng,
+        member_execution_policy(&shared),
+        native_policy(),
+    )
+    .unwrap();
+    installation.retry().unwrap();
+    let mut upgrade = NativeIndexUpgrade::prepare(
+        installation.into_native_registry().unwrap(),
+        index_policy(),
+        &mut rng,
+    )
+    .unwrap();
+    upgrade.retry().unwrap();
+    let native = upgrade.into_index_store().unwrap();
+    let store = native.actual_store_for_test().unwrap();
+    // This is a newly opened physical mount; the old fixture's trusted runtime budget
+    // was deliberately not persisted or inherited through decoded registry DATA.
+    store
+        .configure_owner_evidence_budget(source.budget)
+        .unwrap();
+    let key = store.keys.db_key().unwrap();
+    let domain = store.chat_vault_domain().unwrap();
+    let namespaces = || {
+        let raw = fs::read(path.join(Slot::Current.name())).unwrap();
+        let plain = Zeroizing::new(unseal(&key, &unframe(&raw).unwrap()).unwrap());
+        let parsed = store.parse_configured_join_catalog(&plain).unwrap();
+        assert_eq!(parsed.native_registry_version, Some(2));
+        (
+            parsed.member_outbox_payload.unwrap().to_vec(),
+            parsed.native_registry_payload.unwrap().to_vec(),
+            parsed.count,
+        )
+    };
+    let (five, seven, count) = namespaces();
+    assert_eq!(count, 0);
+    let check = || {
+        let (next_five, next_seven, count) = namespaces();
+        assert_eq!(next_five, five);
+        assert_eq!(next_seven, seven);
+        assert_eq!(count, 1);
+        assert!(!ids(&key, &domain, path).contains(&4));
+        store.validate_mounted_member_outbox_layout().unwrap();
+    };
+    let mut joined = store
+        .prepare_journalled_owner_checkpoint_join(
+            &source.store,
+            &source.owner,
+            MlsDevice::generate().unwrap(),
+            invite,
+            &mut rng,
+        )
+        .unwrap();
+    joined.save_pending(store, &mut rng).unwrap();
+    check();
+    joined.pause_pending(store, &mut rng).unwrap();
+    check();
+    joined.resume_pending(store, &mut rng).unwrap();
+    check();
+    let activated = joined
+        .activate_original_transport(
+            store,
+            source.hub.join(PeerId::from_u64(0x77b1)),
+            PeerId::from_u64(0x77b0),
+        )
+        .unwrap();
+    let mut network = activated.into_network_execution(store).unwrap();
+    network.ensure_initial_grant(store, &mut rng).unwrap();
+    check();
+    assert_eq!(
+        network
+            .ensure_submission_armed(store, &mut rng, Arc::new(ManualClock::new(1_000)))
+            .unwrap(),
+        CheckpointJoinSubmissionStatus::Armed
+    );
+    check();
+    drop(network);
+    drop(native);
+    let before = files(path);
+    let cold = NativeIndexStore::open(
+        path,
+        SECRET,
+        &mut NeverRng,
+        member_execution_policy(&shared),
+        index_policy(),
+    )
+    .unwrap();
+    assert_eq!(cold.row_count_data().unwrap(), 0);
+    assert_eq!(files(path), before);
+    let raw = fs::read(path.join(Slot::Current.name())).unwrap();
+    let plain = Zeroizing::new(unseal(&key, &unframe(&raw).unwrap()).unwrap());
+    let parsed = cold
+        .actual_store_for_test()
+        .unwrap()
+        .parse_configured_join_catalog(&plain)
+        .unwrap();
+    assert_eq!(parsed.native_registry_version, Some(2));
+    assert_eq!(parsed.native_registry_payload.unwrap(), seven);
+    assert_eq!(parsed.member_outbox_payload.unwrap(), five);
+}
+
+/// The exact shared JOIN writer supplies real version3 successor bytes. Native
+/// cold inspection must remember WHICH catalog it required, through the common
+/// opener: a vanished successor cannot silently become an old-catalog success.
+#[test]
+fn lifecycle3_actual_join_cold_open_retains_the_exact_selected_catalog_role() {
+    use crate::store::critical_namespaces::native_registry::operational::upgrade_source::owning::{
+        at_edge, Edge,
+    };
+    use crate::store::{
+        NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade, NativeRegistryInstallation,
+        NativeRegistryPolicy,
+    };
+    use catcoms_mls::MlsDevice;
+    for mode in 0..3 {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let shared = pool();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x77d0 + mode);
+        let source = join_source(0x77d0 + mode, &mut rng);
+        let invite = source
+            .owner
+            .mint_owner_checkpoint_invite(&source.store, [79; 16], 100_000, vec![])
+            .unwrap();
+        drop(five_with_join_execution(path, &shared, &source, &mut rng));
+        let policy1 = NativeRegistryPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+            NativeRegistryPolicy::required_persistent_capacity(),
+        )
+        .unwrap();
+        let mut declaration = NativeRegistryInstallation::prepare(
+            path,
+            SECRET,
+            &mut rng,
+            member_execution_policy(&shared),
+            policy1,
+        )
+        .unwrap();
+        declaration.retry().unwrap();
+        let policy2 = NativeIndexPolicy::new(
+            CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+            NativeIndexPolicy::required_persistent_capacity(),
+        )
+        .unwrap();
+        let mut upgrade = NativeIndexUpgrade::prepare(
+            declaration.into_native_registry().unwrap(),
+            policy2,
+            &mut rng,
+        )
+        .unwrap();
+        upgrade.retry().unwrap();
+        let native = upgrade
+            .into_index_store()
+            .unwrap()
+            .into_lifecycle3_for_test(&mut rng)
+            .unwrap();
+        let store = native.actual_store_for_test().unwrap();
+        store
+            .configure_owner_evidence_budget(source.budget)
+            .unwrap();
+        let key = store.keys.db_key().unwrap();
+        let catalog = path.join(Slot::Current.name());
+        let stage = path.join(Slot::Stage.name());
+        let original = fs::read(&catalog).unwrap();
+        if mode < 2 {
+            let mut joined = store
+                .prepare_journalled_owner_checkpoint_join(
+                    &source.store,
+                    &source.owner,
+                    MlsDevice::generate().unwrap(),
+                    invite,
+                    &mut rng,
+                )
+                .unwrap();
+            store.critical_namespace_fault.store(1, Ordering::SeqCst);
+            assert!(matches!(
+                joined.save_pending(store, &mut rng),
+                Err(crate::AppError::Io(_))
+            ));
+            store.critical_namespace_fault.store(0, Ordering::SeqCst);
+            drop(joined);
+        } else {
+            // Genuine duplicate recovery control, with no invented JOIN row.
+            fs::write(&stage, &original).unwrap();
+        }
+        let selected = fs::read(&stage).unwrap();
+        if mode < 2 {
+            assert_ne!(selected, original);
+        }
+        drop(native);
+        if mode == 1 {
+            at_edge(
+                Edge::AfterInspection,
+                Box::new({
+                    let stage = stage.clone();
+                    move || fs::remove_file(stage).unwrap()
+                }),
+            );
+        }
+        let opened = NativeIndexStore::open_lifecycle3_for_test(
+            path,
+            SECRET,
+            &mut NeverRng,
+            member_execution_policy(&shared),
+        );
+        if mode == 1 {
+            assert!(
+                opened.is_err(),
+                "a retained valid successor disappeared after inspection"
+            );
+            assert_eq!(fs::read(&catalog).unwrap(), original);
+        } else {
+            let mut opened = opened.unwrap();
+            assert_eq!(opened.row_count_data().unwrap(), 0);
+            assert_eq!(
+                fs::read(&catalog).unwrap(),
+                if mode == 0 { selected } else { original }
+            );
+            assert!(!stage.exists());
+            let raw = fs::read(&catalog).unwrap();
+            let plain = Zeroizing::new(unseal(&key, &unframe(&raw).unwrap()).unwrap());
+            let parsed = opened
+                .actual_store_for_test()
+                .unwrap()
+                .parse_configured_join_catalog(&plain)
+                .unwrap();
+            assert_eq!(parsed.native_registry_version, Some(3));
+            assert_eq!(parsed.count, usize::from(mode == 0));
+        }
+    }
+}
+
+/// Disk-equivalent seed-claim/predecessor-JOIN interruption, using the genuine
+/// JOIN writer. A real pinned predecessor process is still a separate gate.
+/// A known complete stage is retained byte-for-byte; partial data stays refused.
+#[test]
+fn lifecycle3_seed_claim_preserves_a_real_interrupted_join_stage() {
+    use crate::store::{
+        NativeIndexPolicy, NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    };
+    use catcoms_mls::MlsDevice;
+    for cut in [1u8, 4, 5] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let shared = pool();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x77c0 + u64::from(cut));
+        let source = join_source(0x77c0 + u64::from(cut), &mut rng);
+        let invite = source
+            .owner
+            .mint_owner_checkpoint_invite(&source.store, [78; 16], 100_000, vec![])
+            .unwrap();
+        drop(five_with_join_execution(path, &shared, &source, &mut rng));
+        let policy1 = NativeRegistryPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+            NativeRegistryPolicy::required_persistent_capacity(),
+        )
+        .unwrap();
+        let mut declaration = NativeRegistryInstallation::prepare(
+            path,
+            SECRET,
+            &mut rng,
+            member_execution_policy(&shared),
+            policy1,
+        )
+        .unwrap();
+        declaration.retry().unwrap();
+        let policy2 = NativeIndexPolicy::new(
+            CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+            NativeIndexPolicy::required_persistent_capacity(),
+        )
+        .unwrap();
+        let mut upgrade = NativeIndexUpgrade::prepare(
+            declaration.into_native_registry().unwrap(),
+            policy2,
+            &mut rng,
+        )
+        .unwrap();
+        upgrade.retry().unwrap();
+        let mounted = upgrade.into_index_store().unwrap();
+        let store = mounted.actual_store_for_test().unwrap();
+        store
+            .configure_owner_evidence_budget(source.budget)
+            .unwrap();
+        let mut joined = store
+            .prepare_journalled_owner_checkpoint_join(
+                &source.store,
+                &source.owner,
+                MlsDevice::generate().unwrap(),
+                invite,
+                &mut rng,
+            )
+            .unwrap();
+        let original = fs::read(path.join(Slot::Current.name())).unwrap();
+        store.critical_namespace_fault.store(cut, Ordering::SeqCst);
+        let refused = joined.save_pending(store, &mut rng);
+        assert!(refused.is_err());
+        // This fault seam stays armed until explicitly reset; unlike the
+        // native-index cut it is not consumed. The actual retained Stage below
+        // pins that this was the physical IO cut, rather than an early refusal.
+        assert!(
+            matches!(refused, Err(crate::AppError::Io(_))),
+            "{refused:?}"
+        );
+        store.critical_namespace_fault.store(0, Ordering::SeqCst);
+        drop(joined);
+        let stage = fs::read(path.join(Slot::Stage.name())).unwrap();
+        let seed =
+            path.join(crate::store::persistence::native_registry::lifecycle::UPGRADE_SEED_NAME);
+        fs::write(&seed, []).unwrap();
+        // In the real predecessor ordering this claim was written first; its
+        // reader knew no3 name and could perform exactly the above JOIN write.
+        let result = store.settle_native_index3_claim_for_test();
+        assert_eq!(fs::read(path.join(Slot::Current.name())).unwrap(), original);
+        if cut == 4 {
+            assert!(result.is_err());
+            assert_eq!(fs::read(&seed).unwrap(), b"");
+            assert_eq!(fs::read(path.join(Slot::Stage.name())).unwrap(), stage);
+        } else {
+            result.unwrap();
+            assert!(!seed.exists());
+            if cut == 1 {
+                assert!(!stage.is_empty());
+                assert_eq!(fs::read(path.join(Slot::Stage.name())).unwrap(), stage);
+            } else {
+                assert!(stage.is_empty());
+                assert!(!path.join(Slot::Stage.name()).exists());
+            }
+        }
+    }
+}
+
+/// A paused row is retained JOIN work, not a vacant startup catalog. The native
+/// preparation must preserve both active and paused genuine sources unchanged.
+#[test]
+fn native_registry_preparation_refuses_real_active_and_paused_join_rows() {
+    use crate::store::{NativeRegistryPreparationPolicy, PreparedNativeRegistryMigration};
+    use catcoms_mls::MlsDevice;
+    for paused in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let shared = pool();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x7790 + u64::from(paused));
+        let source = join_source(0x7790, &mut rng);
+        let invite = source
+            .owner
+            .mint_owner_checkpoint_invite(&source.store, [74; 16], 100_000, vec![])
+            .unwrap();
+        let ready = five_with_join_execution(path, &shared, &source, &mut rng);
+        let store = ready.checked_store().unwrap();
+        let mut joined = store
+            .prepare_journalled_owner_checkpoint_join(
+                &source.store,
+                &source.owner,
+                MlsDevice::generate().unwrap(),
+                invite,
+                &mut rng,
+            )
+            .unwrap();
+        joined.save_pending(store, &mut rng).unwrap();
+        if paused {
+            joined.pause_pending(store, &mut rng).unwrap();
+        }
+        let current = fs::read(path.join(Slot::Current.name())).unwrap();
+        assert_eq!(catalog_facts(store, &current).2, 1);
+        drop(joined);
+        drop(ready);
+        let native = NativeRegistryPreparationPolicy::new(
+            CriticalCatalogReadPool::new(NativeRegistryPreparationPolicy::required_capacity())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(PreparedNativeRegistryMigration::open(
+            path,
+            SECRET,
+            &mut NeverRng,
+            member_execution_policy(&shared),
+            native
+        )
+        .is_err());
+        assert_eq!(fs::read(path.join(Slot::Current.name())).unwrap(), current);
+        assert!(!path
+            .join("chat-critical-namespaces.native-registry.seed")
+            .exists());
+    }
+}
+
 /// An ordinary JOIN write interrupted on a namespace5 vault (no governance4), then a cold open.
 /// The JOIN writer's own cuts: 1 leaves a complete synced stage before the rename (the cold
 /// JOIN settlement promotes it), 2 fails the directory barrier AFTER the rename (no stage; the
