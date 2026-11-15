@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+The stage-lifetime continuation permits a completed closed SDK snapshot to
+remain resident after its finite native key work drains. That is not Source,
+SDK-body, physical-work or key-erasure completion. A partial resumable Cell
+must retain its actual original AddSdk End; a spent cut alone is insufficient.
+Retirement also releases old cut metadata to avoid pinning UI-generation fees.
+Fresh native-stage authorization cannot reset request/SDK/key attempt state:
+Attempting is set before RT entry, only returned Busy/Unavailable may prove a
+known local pre-primitive refusal, and unknown/native/key entry cannot be
+laundered by retry. Root must prove the same saved operation and current
+parent/source for every new command. Its real cleanup/covering consumers are
+still absent. [Exact boundary](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The disabled governed Add library now freezes both authenticated signed join
 inputs and bounded exact package bytes before native SDK entry. The actual
 retained Clock supplies first-admission time; cached retries cannot substitute

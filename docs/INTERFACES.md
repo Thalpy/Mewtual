@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The stage-lifetime continuation distinguishes actual admitted SDK work from
+closed cached DATA. `finish_admitted_add_data_native` needs the original real
+AddSdk End; closed retirement proves Cell completion, permanently blocks SDK
+continuation and returns cut metadata/Ends for outside-writer disposal.
+Fresh-stage cuts require exact source/purpose, never-entered/current admission
+and retained eligibility. Only an actual returned local refusal before a
+primitive may permit reauthorization; unknown native/key entry stays terminal.
+Root still must supply new saved-intent/current authorization and its original
+Runtime cleanup before counter waiting. No production caller is added here.
+[Contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The library governed Add request now freezes authenticated Invite/JoinRequest
 and bounded exact package bytes before native SDK entry. First execution uses
 the original retained Clock; exact retries reuse that admitted time and the

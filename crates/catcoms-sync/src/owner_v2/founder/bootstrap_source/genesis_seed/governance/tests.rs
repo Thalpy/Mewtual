@@ -24,6 +24,7 @@ const NOW: u64 = 1_800_000_000_000;
 const RAW: usize = 2 * 1024 * 1024;
 const WORK: usize = 2 * 1024 * 1024 * 1024 - 1;
 
+mod native_stage;
 mod signed_request;
 mod welcome;
 
@@ -417,7 +418,14 @@ fn raw_header_survives_late_lock_and_exact_retry_never_reenters_key() {
     node.materialize_admission_data().unwrap();
     assert!(node.signed_admission_data().unwrap().verify());
     assert!(node.require_sdk_current_data().is_ok()); // Native lock is a distinct negative.
-    assert!(node.pending.as_ref().unwrap().header_cut.is_cancelled());
+    assert!(node
+        .pending
+        .as_ref()
+        .unwrap()
+        .header_cut
+        .as_ref()
+        .unwrap()
+        .is_cancelled());
     drop(node);
     assert_eq!(count.load(SeqCst), 0);
 }

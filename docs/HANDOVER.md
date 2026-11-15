@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+`chat-v2-governed-add-stage-lifetime` follows PR #135. It separates
+closed snapshot DATA from finite native cuts/Ends, retains the actual End for
+partial SDK continuation, and supports fresh authorization only for an exact
+eligible unentered stage. A private Attempting marker prevents a native-entry
+panic becoming a returned-refusal witness; only actual Busy/Unavailable may
+recover before the primitive, and attempts remain spent. RT36, Add35, the145-case
+Sync owner cohort, two doctests and all3,485 frontend tests pass. Strict RT/Sync
+and native lint, native compilation, formatting, ambient/raw-fs gates and both
+dependency audits pass. Root strict lint retains556 inherited errors; complete
+paired Root/native CI is pending. Static review has no findings. Root Runtime
+cleanup before native waiting, terminal
+partial disposal, actual SavedInvite/Outcome/Intent issuers, Source4 and all
+production Add/transport/joined/projection/acceptance work remain unfinished.
+
+PR #135 is pushed at47814a58 with its three separate commits. Complete paired
+Root/native Linux+Windows CI is running at
+[run43723764290](https://github.com/Thalpy/Mewtual/actions/runs/43723764290), with
+only the named10k catch-up cost case deferred. Chat V2 remains OFF.
+
 The `chat-v2-founder-add-transaction` continuation wires authenticated signed
 Invite/JoinRequest and exact bounded package bytes into the same retained
 governed node. It freezes original L0/file key/policy and tagged V2 routing

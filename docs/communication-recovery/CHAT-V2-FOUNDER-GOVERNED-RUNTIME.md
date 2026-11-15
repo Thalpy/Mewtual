@@ -6,6 +6,18 @@ lock cleanup and real production installation remain to be implemented.
 
 ## Implemented boundary
 
+The stage-lifetime continuation is under validation. Native key drainage is
+being separated from retained CLOSED snapshot DATA: an actual completed Cell
+proof precedes monotone SDK-continuation retirement and an outside-writer move
+of cuts/Ends. Partial Cells retain their original admitted SDK End. The new
+no-argument finite finisher uses only that actual End, existing Cell, retained
+RNG and already frozen admission; it neither constructs nor re-admits work.
+The old stronger graph-before-key-drain rule below describes the conservative
+default until that explicit move. Whole Source close still needs actual driver,
+physical work and body destruction after key drainage. Fresh-stage
+reauthorization is being tested against explicit private refusal witnesses;
+the real Runtime cleanup consumer remains unfinished.
+
 `PreparedV2FounderGovernanceNode` consumes the same whole warm founder node.
 It retains the original genesis source, pin context, runtime Clock/RNG, scope
 and Fresh lifetime. Cold decoded genesis DATA cannot enter. The existing
@@ -14,8 +26,10 @@ and original `admission_state` have not been weakened.
 
 At most one private `PendingAdd` owns its MLS candidate, independent admission,
 three prepared native cuts and actual admitted End batch. All cuts must match
-the ONE original native source consumed at preparation. New inputs or native
-cuts cannot replace that pending operation, including after lock/unlock.
+the ONE original native source consumed at preparation. New request inputs
+cannot replace the pending operation. A fresh cut can authorize only an
+eligible unentered stage under the explicit contract below; an old command
+or an unknown entered primitive cannot revive after lock/unlock.
 The SDK cut is entered before secret snapshot/restore, not merely before Add.
 Constructor entry is sticky, and a failed constructor cannot reset its debit.
 An already admitted finite SDK operation can finish its cached phases after
@@ -121,6 +135,45 @@ Source/current/native checks and response release remain Root integration work.
 Focused tests cover canonical Core bytes, actual signed links and payloads,
 separate wrong-source/wrong-purpose refusals, interrupted entry, materializer
 failure, lost raw reply and lock/unlock. Downstream layout checks are pending.
+
+### Finite stages and fresh authorization
+
+`retire_closed_add_native_data` proves actual completed Cell closure before
+permanently disabling SDK continuation and moving cuts plus Ends into a
+`must_use` outside-writer disposal envelope. Partial resumable Cells cannot
+take this path. `finish_admitted_add_data_native` requires the original actual
+same-source AddSdk End, not merely a spent cut; it continues only the existing
+Cell with frozen inputs and RNG. Closed SDK/snapshot DATA can remain resident
+across UI lock after the finite key work drains. Whole Source close remains a
+separate actual driver/body/physical-work/TCP barrier.
+
+Native cuts also retain UI-generation payments. Their metadata retires with
+the End envelope, rather than accumulating old generations on a closed
+candidate. Prepared requests and pre-effect native refusals have a separate
+`retire_unstarted_add_native_data` path; it requires no Cell, the original
+unused SDK admission and exact never-entered/local-refusal evidence.
+
+Before each actual RT admission the private stage state becomes Attempting.
+Only that call's returned Busy/Unavailable creates KnownLocalRefusal. A panic
+stays Attempting; Foreign/WrongPurpose/AlreadyEntered never become a witness.
+Successful admission precedes the irreversible SDK/key marker. Unknown SDK
+construction or key entry without raw remains sticky. Retiring metadata does
+not reset the stage attempt counter or any SDK/Root debit.
+
+`prepare_add_native_stage_data` accepts a genuinely never-entered, live cut
+for the same original source only after displaced metadata moved out. Stage
+eligibility comes from the exact unused old cut or private local-refusal
+witness. SDK reauthorization requires Prepared/no Cell; Header requires the
+closed SDK and frozen unsigned preimage; Welcome requires the materialized
+Add and an unentered frozen Welcome. Cached signatures never re-enter a key.
+This is **not** fresh Root authorization: its caller still must authenticate
+the same operation, covered Outcome/Intent, actual current parent/verifier and
+source before primitive admission. No production native dispatcher calls it.
+
+Root still needs an original-runtime cleanup pass BEFORE key-counter waiting,
+including lost/unpolled work, prepared requests with zero Ends, and terminal
+partial SDK disposal. This library change does not supply that consumer,
+covering journal/Invite receipts or whole-Source acknowledgment.
 
 ## Required production integration
 

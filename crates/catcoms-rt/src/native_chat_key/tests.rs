@@ -1043,3 +1043,93 @@ fn native_chat_mount_identity_distinguishes_hosts_even_with_shared_ui_atomics() 
     assert!(!original.same_original(&replacement.observe_mount()));
     assert!(replacement.observe_mount().is_open());
 }
+
+#[test]
+fn retained_admission_and_never_entered_are_exact_negative_data_not_fresh_permission() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let source = fixture.source(&ui);
+    let foreign = fixture.source(&ui);
+    let original = source.observe();
+    let mut cut = source
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::AddSdk)
+        .unwrap();
+    let mut ends = NativeChatKeyEnds::new();
+    assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert_eq!(
+        cut.require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk),
+        Ok(())
+    );
+    assert_eq!(
+        cut.require_never_entered_data(&foreign.observe(), NativeChatKeyPurpose::AddSdk),
+        Err(NativeChatKeyRefusal::Foreign)
+    );
+    assert_eq!(
+        cut.require_never_entered_data(&original, NativeChatKeyPurpose::JoinWelcome),
+        Err(NativeChatKeyRefusal::WrongPurpose)
+    );
+    cut.enter(&original, NativeChatKeyPurpose::AddSdk, &mut ends)
+        .unwrap();
+    assert!(ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert!(!ends.holds_admitted_purpose_data(&foreign.observe(), NativeChatKeyPurpose::AddSdk));
+    assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::JoinWelcome));
+    assert_eq!(
+        cut.require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk),
+        Err(NativeChatKeyRefusal::AlreadyEntered)
+    );
+    fixture.lock();
+    source.close();
+    assert!(ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert!(cut
+        .preflight(&original, NativeChatKeyPurpose::AddSdk)
+        .is_err());
+    let outer = std::mem::take(&mut ends);
+    assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert!(outer.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert!(!source.observe_retirement().is_drained());
+    drop(outer);
+    assert!(source.observe_retirement().is_drained());
+}
+
+#[test]
+fn partial_native_admission_is_neither_never_entered_nor_an_admitted_source_unit() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let source = fixture.source(&ui);
+    let original = source.observe();
+    let mut cut = source
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::AddSdk)
+        .unwrap();
+    let close = source.close_handle();
+    CUT_BOUNDARY.with(|slot| {
+        *slot.borrow_mut() = Some((CutBoundary::AfterUiCounter, Box::new(move || close.close())))
+    });
+    let mut ends = NativeChatKeyEnds::new();
+    assert_eq!(
+        cut.enter(&original, NativeChatKeyPurpose::AddSdk, &mut ends),
+        Err(NativeChatKeyRefusal::Unavailable)
+    );
+    assert!(CUT_BOUNDARY.with(|slot| slot.borrow().is_none()));
+    assert_eq!(
+        cut.require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk),
+        Err(NativeChatKeyRefusal::AlreadyEntered)
+    );
+    assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 1);
+    drop(ends);
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 0);
+    // A closed never-entered cut can still be classified as such; that DATA
+    // must never be mistaken for permission to enter it on a closed source.
+    let other = fixture.source(&ui);
+    let unused = other
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::JoinWelcome)
+        .unwrap();
+    other.close();
+    assert_eq!(
+        unused.require_never_entered_data(&other.observe(), NativeChatKeyPurpose::JoinWelcome),
+        Ok(())
+    );
+    assert!(unused
+        .preflight(&other.observe(), NativeChatKeyPurpose::JoinWelcome)
+        .is_err());
+}

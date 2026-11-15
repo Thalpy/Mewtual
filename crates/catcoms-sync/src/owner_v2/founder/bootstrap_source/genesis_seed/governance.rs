@@ -24,6 +24,9 @@ use request::FrozenAddRequest;
 mod welcome;
 pub use request::{V2FounderAddRequestData, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES};
 use welcome::PreparedWelcome;
+mod native_stage;
+use native_stage::NativeStageAdmission;
+pub use native_stage::{RetiredV2FounderAddNativeCustody, V2FounderAddNativeStage};
 
 /// Unchanged original preparation inputs on refusal. The independently paid
 /// owning Box is built outside writers; it confers no renewed admission and
@@ -72,11 +75,21 @@ struct PendingAdd {
     welcome: Option<PreparedWelcome>,
     phase: Phase,
     original: NativeChatSourceObservation,
-    sdk_cut: NativeChatPreparedKeyCut,
-    header_cut: NativeChatPreparedKeyCut,
-    welcome_cut: NativeChatPreparedKeyCut,
-    // LAST. Native retirement must continue to see the real operation until
-    // its private graph, provider snapshots and failed preparation have gone.
+    sdk_cut: Option<NativeChatPreparedKeyCut>,
+    header_cut: Option<NativeChatPreparedKeyCut>,
+    welcome_cut: Option<NativeChatPreparedKeyCut>,
+    // Monotone after actual closed-Cell proof. A spent cut alone never proves
+    // its admitted unit still has an End, so later SDK continuation refuses.
+    sdk_continuation_retired: bool,
+    sdk_native: NativeStageAdmission,
+    header_native: NativeStageAdmission,
+    welcome_native: NativeStageAdmission,
+    sdk_may_reauthorize: bool,
+    header_may_reauthorize: bool,
+    welcome_may_reauthorize: bool,
+    // LAST during admitted/partial work and terminal disposal. An explicitly
+    // proved CLOSED Cell may retain historical DATA after native_stage moves
+    // finite custody out; that move monotonically forbids SDK continuation.
     ends: NativeChatKeyEnds,
 }
 
@@ -103,6 +116,7 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 2 * catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES
     + 4 * std::mem::size_of::<PendingAdd>()
     + 4 * std::mem::size_of::<V2InstalledFounderAddData>()
+    + 4 * std::mem::size_of::<RetiredV2FounderAddNativeCustody>()
     + 4 * std::mem::size_of::<PreparedV2FounderGovernanceNode<(), ()>>()
     + 4 * std::mem::size_of::<(
         NativeChatSourceObservation,
@@ -197,6 +211,15 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         if self.pending.is_some()
             || !admission.supports_routing_data()
             || sdk_cut
+                .require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk)
+                .is_err()
+            || header_cut
+                .require_never_entered_data(&original, NativeChatKeyPurpose::GoverningHeader)
+                .is_err()
+            || welcome_cut
+                .require_never_entered_data(&original, NativeChatKeyPurpose::JoinWelcome)
+                .is_err()
+            || sdk_cut
                 .preflight(&original, NativeChatKeyPurpose::AddSdk)
                 .is_err()
             || header_cut
@@ -239,9 +262,16 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             welcome: None,
             phase: Phase::Prepared,
             original,
-            sdk_cut,
-            header_cut,
-            welcome_cut,
+            sdk_cut: Some(sdk_cut),
+            header_cut: Some(header_cut),
+            welcome_cut: Some(welcome_cut),
+            sdk_continuation_retired: false,
+            sdk_native: NativeStageAdmission::new(),
+            header_native: NativeStageAdmission::new(),
+            welcome_native: NativeStageAdmission::new(),
+            sdk_may_reauthorize: false,
+            header_may_reauthorize: false,
+            welcome_may_reauthorize: false,
             ends: NativeChatKeyEnds::new(),
         }));
         Ok(())
@@ -268,15 +298,24 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         }
         let p = self.pending.as_mut().ok_or_else(unavailable)?;
         p.request.require_same(request)?;
+        if p.sdk_continuation_retired {
+            return Err(unavailable()); // use the explicit cached DATA loan
+        }
         if p.phase == Phase::Prepared {
+            if !p.sdk_native.may_enter() {
+                return Err(unavailable());
+            }
             // Sample the ORIGINAL retained node clock, immediately before the
             // first native SDK entry. Prepared time and caller time cannot
             // extend the signed invitation or the actual package lifetime.
             let now_ms = self.node._parts.body._clock.now_ms();
             p.request.require_unexpired(now_ms)?;
-            p.sdk_cut
-                .enter(&p.original, NativeChatKeyPurpose::AddSdk, &mut p.ends)
-                .map_err(|_| unavailable())?;
+            p.sdk_native.enter(
+                p.sdk_cut.as_mut().ok_or_else(unavailable)?,
+                &p.original,
+                NativeChatKeyPurpose::AddSdk,
+                &mut p.ends,
+            )?;
             p.admitted_at_ms = Some(now_ms);
             p.phase = Phase::SdkEntered;
             #[cfg(test)]
@@ -309,18 +348,16 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             .map_err(|_| unavailable())?;
         }
         if p.phase == Phase::SdkEntered {
-            p.cell
-                .as_mut()
-                .ok_or_else(unavailable)?
-                .execute_private_with_routing(&mut self.node._parts.body._rng)
-                .map_err(|_| unavailable())?;
-            p.phase = Phase::Complete;
             #[cfg(test)]
-            test_cut(TestCut::SdkComplete);
+            test_cut(TestCut::BeforeSdkExecution);
+            self.finish_admitted_add_data_native()?;
         }
         // No late negative intervenes between real SDK outputs and their
         // owning Cell/phase above. Exact borrowed DATA remains recoverable.
+        let p = self.pending.as_ref().ok_or_else(unavailable)?;
         p.sdk_cut
+            .as_ref()
+            .ok_or_else(unavailable)?
             .preflight(&p.original, NativeChatKeyPurpose::AddSdk)
             .map_err(|_| unavailable())?;
         self.require_sdk_current_data()
@@ -438,13 +475,12 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         {
             return Err(unavailable());
         }
-        p.header_cut
-            .enter(
-                &p.original,
-                NativeChatKeyPurpose::GoverningHeader,
-                &mut p.ends,
-            )
-            .map_err(|_| unavailable())?;
+        p.header_native.enter(
+            p.header_cut.as_mut().ok_or_else(unavailable)?,
+            &p.original,
+            NativeChatKeyPurpose::GoverningHeader,
+            &mut p.ends,
+        )?;
         p.phase = Phase::HeaderEntered;
         #[cfg(test)]
         test_cut(TestCut::HeaderEntered);
@@ -616,7 +652,9 @@ mod tests;
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestCut {
+    NativeAdmissionAttempting,
     SdkEntered,
+    BeforeSdkExecution,
     SdkComplete,
     HeaderEntered,
     RawCached,
