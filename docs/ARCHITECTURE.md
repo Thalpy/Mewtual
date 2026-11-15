@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+Native row integration now has an original negative Source-counter fence. The
+paid runtime selection can close that counter through SC atomics without
+borrowing its book, runtime or issuer. This neither completes Leave/Retired nor
+drains actual SDK/physical work. Native backend rows, checked commands and the
+frontend remain unfinished and disabled.
+[Implementation and pending checks](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
 The disabled native text runtime now exposes a paid weak original-row selector
 and two-phase ordinary-member saving through the retained NativeRequired driver.
 Native custody precedes runtime restoration on save, refusal, drop and unwind.

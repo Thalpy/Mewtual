@@ -262,13 +262,18 @@ fn native_sources_invoice_counts_actual_generic_runtime_not_only_arc_pointer() {
 #[test]
 fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_after_owner_drop() {
     let dir = tempfile::tempdir().unwrap();
-    let (vault, _) = selected(dir.path());
+    let (vault, budget) = selected(dir.path());
     let owner = sources(&vault);
     let payment = Arc::new(RuntimeMetadata {
         pool: owner.policy.pool.clone(),
         _debit: owner.policy.pool.try_reserve(ENTRY_BYTES).unwrap(),
     });
     let original = owner.work.for_paid_runtime(&payment).unwrap();
+    let source_owner = NativeChatSourceOwner::for_trusted_source(
+        &command(&vault, &budget).ui.command,
+        payment.clone(),
+    )
+    .unwrap();
     let body: Runtime<MemNetwork, ChaCha20Rng> = Runtime {
         founder_policy: owner.policy.founder,
         request: Some(request(1, "Original retained request")),
@@ -281,6 +286,7 @@ fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_af
         clock: None,
         network: None,
         selection: None,
+        source_close: source_owner.close_handle(),
         work: original,
         _metadata: payment,
     };

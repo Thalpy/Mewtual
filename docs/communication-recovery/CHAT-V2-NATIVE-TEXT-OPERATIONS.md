@@ -12,8 +12,11 @@ the actual covered Active row through a fresh original index lookup, and the
 original command/source before returning `NativeTextRuntimeSelection`. It does
 not reconstruct an owner from a numeric server ID or recovered index DATA.
 
-The selection owns only Scope metadata, a weak original RuntimeCell association,
-the exact stored row and request bindings, and the original payment last. It
+The selection owns Scope metadata, a weak original RuntimeCell association,
+the exact stored row and request bindings, an original negative Source-counter
+fence and the original payment last. That fence stops new primitive entry via
+SC atomics; it neither owns the issuer nor certifies Leave/Retired, SDK or
+physical drainage. It
 has no Entry/issuer, physical lease, SDK body or positive key permission.
 `id_data` and `same_original` cannot prove current authority or readiness.
 The actual runtime caches one canonical selection allocation. Every fresh
@@ -131,7 +134,10 @@ never silently replaces a token or redraws/re-signs a retained original.
 
 Member phase one restores its runtime loan and releases entered key Ends before
 awaiting native UI commit. Final preparation is prepaid and retains no affine
-Entry/issuer. Under the actual owned commit guard, final runtime/source checks
+Entry/issuer, but still owns a counted Source End. Native must try final commit
+acquisition and drop the whole preparation outside guards on contention before
+waiting: whole-close owns UI commit while it drains those Ends. Under the actual
+owned commit guard, final runtime/source checks
 and admission are fail-fast and use the exact EntryOwner cancellation composed
 with the complete original account authority.
 

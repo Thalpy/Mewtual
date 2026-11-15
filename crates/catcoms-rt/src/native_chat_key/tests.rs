@@ -3,6 +3,7 @@
 use super::*;
 use std::future::Future;
 use std::task::{Context, Poll, Wake, Waker};
+mod source_close;
 
 struct Fixture {
     binding: NativeChatUiBinding,

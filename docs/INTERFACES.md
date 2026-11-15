@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`NativeChatSourceOwner::close_handle` issues only the original negative counter
+fence. Root's paid runtime selection exposes `close_original_cached`; it performs
+no IO, allocation, wait or notification and confers no positive authority.
+Actual owner retirement and key/SDK/TCP drainage remain separate.
+[Native dispatch work](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
 Native text operations provide a paid weak original-runtime association from
 the actual retained stored founder, plus original member prepare/final-admit
 wrappers. An admitted save owns native custody before its runtime restoration

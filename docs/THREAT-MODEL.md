@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native row closure must fence the original primitive counter, independently of
+watch cancellation. Its opaque negative close handle retains that counter and
+the original trusted payer, without an issuer/Host backlink; the actual Root
+producer supplies fee-only custody. SC close runs no Waker and is not a
+Leave/Retired, SDK-release or physical-erasure certificate. The backend/native
+factory consumer remains unfinished and Chat V2 stays off.
+[Scope and tests](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
 Native text member preparation selects the original runtime through fresh index
 evidence and the original Entry's member cut. Numeric IDs, recovered row DATA
 and erased custody boxes confer no signing or native UI authority. The owning

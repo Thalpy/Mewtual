@@ -4,6 +4,7 @@ use super::super::network::tests::prepared_mesh_founder;
 use super::super::tests::{command, inputs, request, selected};
 use super::*;
 use catcoms_rt::Clock;
+use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 #[tokio::test]
@@ -74,6 +75,7 @@ async fn native_runtime_selection_reuses_one_paid_allocation_through_actual_reti
     let stale = owner
         .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
         .unwrap();
+    first.close_original_cached();
     let mut retirement = owner.prepare_retirement().unwrap();
     assert!(matches!(
         stale.select_stored_runtime(),
@@ -114,6 +116,112 @@ async fn native_runtime_selection_reuses_one_paid_allocation_through_actual_reti
     assert_eq!(pool.charged_for_test(), ENTRY_BYTES);
     drop(first);
     assert_eq!(pool.charged_for_test(), 0);
+}
+
+#[tokio::test]
+async fn native_runtime_selection_close_fences_only_the_original_row_with_its_whole_runtime_borrowed(
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected(directory.path());
+    let owner = prepared_mesh_founder(&vault, &budget, 0xeb01);
+    owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap()
+        .cover_founder_activation()
+        .unwrap();
+    let first = owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap()
+        .select_stored_runtime()
+        .unwrap();
+    let next = || {
+        owner
+            .prepare_creation(
+                command(&vault, &budget),
+                request(2, "Other"),
+                NativeTextCreationInputs::new(
+                    ChaCha20Rng::seed_from_u64(0xeb11),
+                    ChaCha20Rng::seed_from_u64(0xeb12),
+                    Box::new(catcoms_rt::ManualClock::new(100)),
+                ),
+            )
+            .unwrap()
+    };
+    next().prepare_device().unwrap();
+    next().prepare_network().unwrap();
+    next().cover_pending_network().unwrap();
+    next().prepare_transport().unwrap();
+    next().prepare_founder().unwrap();
+    next().cover_founder_activation().unwrap();
+    let other = next().select_stored_runtime().unwrap();
+    assert_ne!(first.id_data(), other.id_data());
+    let old = owner
+        .capture_member(
+            &first,
+            command(&vault, &budget),
+            owner.policy.prepare_member().unwrap(),
+        )
+        .finish()
+        .unwrap();
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let session = catcoms_rt::RequestCancellation::new(receiver, None);
+    #[cfg(windows)]
+    let before=crate::store::PreparedV2TextHost::<catcoms_net::MeshService,ChaCha20Rng>::native_member_sign_dispatches_for_test();
+    {
+        // This is the actual original book writer, while the whole first
+        // runtime is already on loan. The cached fence must need neither.
+        let _writer = owner.entries.lock().unwrap();
+        first.close_original_cached();
+        first.close_original_cached();
+    }
+    let body = catcoms_replication::chat::Body::Create {
+        text: "other row still works".into(),
+        reply_to: None,
+    };
+    let request = crate::store::V2MemberSignRequest {
+        token: [0xeb; 32],
+        channel: 7,
+        body: &body,
+        parents: &[],
+        dependencies: &[],
+    };
+    assert_eq!(
+        old.prepare_member_save(request, &session),
+        Err(crate::store::V2MemberSaveRefusal::Unavailable)
+    );
+    let current = owner
+        .capture_member(
+            &other,
+            command(&vault, &budget),
+            owner.policy.prepare_member().unwrap(),
+        )
+        .finish()
+        .unwrap();
+    assert_eq!(
+        current.prepare_member_save(
+            crate::store::V2MemberSignRequest {
+                token: [0xeb; 32],
+                channel: 7,
+                body: &body,
+                parents: &[],
+                dependencies: &[]
+            },
+            &session
+        ),
+        Ok(crate::store::V2MemberSaveOutcome::Ready)
+    );
+    #[cfg(windows)]
+    assert_eq!(crate::store::PreparedV2TextHost::<catcoms_net::MeshService,ChaCha20Rng>::native_member_sign_dispatches_for_test(),before+1);
+    assert!(matches!(
+        owner
+            .capture_member(
+                &first,
+                command(&vault, &budget),
+                owner.policy.prepare_member().unwrap()
+            )
+            .finish(),
+        Err(crate::store::V2MemberSaveRefusal::Unavailable)
+    ));
 }
 
 #[tokio::test]

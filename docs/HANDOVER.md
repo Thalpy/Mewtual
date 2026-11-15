@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+Active continuation: `chat-v2-native-text-dispatch` in its isolated worktree,
+based on PR #124. The per-row original counter fence is written and statically
+reviewed clear; RT74, selector5, actual loan1 and all 79 affected Source cases
+passed, as did strict RT Clippy. Full continuation gates remain pending. An
+unwired native table draft exists but has no validation or caller acceptance.
+No native backend/factory/frontend integration or
+usable Leave/Retired transition exists yet. Native boot's one member-context
+policy also needs a decision before two-row saves can be accepted. Chat V2 is
+off and incomplete.
+The shutdown survey found a required ordering constraint: Legacy close retains
+both UI commit and the full server-map guard while draining Sources. Native
+final preparation retains counted physical work and must never await that
+commit; use fail-fast owned acquisition. Native table shutdown must not
+reacquire its already-held table guard or drop removed owners under guards.
+[Current scope](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
 `chat-v2-native-text-operations` continues in the controller worktree on a new
 branch. The complete affected source cohort passed all 78 cases (zero failures
 or ignored), including four original-runtime selector regressions, 12 genuine

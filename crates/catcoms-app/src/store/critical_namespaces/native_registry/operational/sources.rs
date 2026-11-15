@@ -175,6 +175,9 @@ struct Runtime<T: MeshTransport, R: CryptoRngCore> {
     // One paid canonical metadata allocation. Exact retries issue handles to
     // this same selection rather than allocating again on the entry's debit.
     selection: Option<NativeTextRuntimeSelection<T, R>>,
+    // Negative-only original key counter, captured before moving its issuer
+    // into Entry. Native row closure must not borrow this runtime or issuer.
+    source_close: catcoms_rt::NativeChatSourceClose,
     work: SourceWork,
     _metadata: Arc<RuntimeMetadata>,
 }

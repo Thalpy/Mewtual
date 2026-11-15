@@ -17,6 +17,8 @@ use tokio::sync::Notify;
 
 mod sdk_restore;
 pub use sdk_restore::{NativeChatSdkRestoreEnds, NativeChatWarmSdkReopenCut};
+mod source_close;
+pub use source_close::NativeChatSourceClose;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;

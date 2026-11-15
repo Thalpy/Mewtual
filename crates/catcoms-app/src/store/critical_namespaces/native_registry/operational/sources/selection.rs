@@ -17,6 +17,7 @@ pub(super) struct Selection<T: MeshTransport, R: CryptoRngCore> {
     pub(super) status: crate::store::NativeCreationStatusData,
     pub(super) invocation: [u8; 32],
     pub(super) request: [u8; 32],
+    source_close: catcoms_rt::NativeChatSourceClose,
     // LAST: actual weak RuntimeCell allocation and all copied metadata must
     // remain paid even after the whole canonical Sources/SDK has been dropped.
     _metadata: Arc<RuntimeMetadata>,
@@ -50,6 +51,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
                 status,
                 invocation: request.invocation,
                 request: request.digest,
+                source_close: body.source_close.clone(),
                 _metadata: body._metadata.clone(),
             }),
         }
@@ -58,6 +60,15 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
     /// Local index DATA only, not an authenticated native server credential.
     pub fn id_data(&self) -> u64 {
         self.original.status.id
+    }
+
+    /// Fence this exact original Source at native row retirement. SC-only and
+    /// independent of runtime/book writers; already captured cuts cannot enter
+    /// after this edge. No Leave, file, SDK or transport completion is claimed.
+    /// Keep this whole selection alive through the caller's guard scope and
+    /// dispose of it outside guards, just like its original paid metadata.
+    pub fn close_original_cached(&self) {
+        self.original.source_close.close();
     }
 
     /// Exact original runtime allocation, scope and covered row comparison.
