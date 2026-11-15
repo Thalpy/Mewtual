@@ -315,6 +315,76 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Store {
+    pub(in crate::store::critical_namespaces::native_registry) fn require_governance_completion(
+        &self,
+        receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,
+    ) -> Result<(), AppError> {
+        self.physical.require_governance_completion(receiver)
+    }
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn constructor_store_for_test(
+        &self,
+    ) -> Result<&ServerStore, AppError> {
+        self.physical.constructor_store_for_test()
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn open_governed(
+        dir: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        mut current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        if policy.pool.same_account(&current.archive.pending.pool)
+            || current
+                .member_outbox
+                .as_ref()
+                .is_none_or(|m| policy.pool.same_account(&m.pool))
+        {
+            return Err(refused());
+        }
+        let handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
+        let physical = physical::Physical::allocate(handler.clone());
+        current.native_registry = Some(NativeRegistryHandler::GovernanceOpening(handler.clone()));
+        let governance = crate::store::V2GovernanceLayoutPolicy::for_native(current)?;
+        let mut prepared = crate::store::PreparedV2GovernanceLayoutStore::open_native(
+            dir, passphrase, rng, governance,
+        )?;
+        prepared.retry(rng)?;
+        let (current, tail) = prepared
+            .into_governance_layout_store()
+            .map_err(|_| refused())?
+            .into_native_current()?;
+        let mut value = Self {
+            _close: lifecycle_admission::AdmissionOwner::new(&handler),
+            physical,
+        };
+        Arc::get_mut(&mut value.physical)
+            .expect("unexposed original governed physical")
+            .install(current);
+        value.row_count_data()?;
+        #[cfg(test)]
+        observe_edge(Edge::BeforeColdExposure);
+        // No file read follows this same-held proof. Existing4 consumes its
+        // original observation; fresh4 retains its overlapping declaration.
+        // On failure the destination must close before the tail is destroyed.
+        if let Err(error) = value.physical.finish_governed_cold(&tail) {
+            drop(value);
+            drop(tail);
+            return Err(error);
+        }
+        drop(tail);
+        Ok(value)
+    }
+    /// Only the private pre-exposure Selected3 continuation reaches this
+    /// unique receiver. Existing work/Source loans make Arc uniqueness fail.
+    pub(in crate::store::critical_namespaces::native_registry) fn advance_governance(
+        &mut self,
+        receiver: &mut crate::store::critical_namespaces::governance_layout::native::Startup,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.advance_governance(receiver, rng)
+    }
     #[cfg(test)]
     pub(in crate::store::critical_namespaces::native_registry) fn handler_for_test(
         &self,

@@ -1,7 +1,7 @@
 //! Real creation -> sealed source -> actual closed SDK loader. Authored UNRUN under the
 //! user compilation/test/build pause; resource fixtures are not Saved/Current authorities.
 use super::*;
-mod ordinary_data;
+pub(super) mod ordinary_data;
 use crate::local_chat_scope::ManagedChatScopeRevocation;
 use catcoms_mls::persist::{OwnerSdkGraphReservation, OwnerSdkRestoreLimits};
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId, RequestCancellation};
@@ -20,7 +20,7 @@ type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
 const KEY: [u8; 32] = [193; 32];
 const DOMAIN: [u8; 32] = [194; 32];
 const NONCE: [u8; 32] = [195; 32];
-struct Reservation {
+pub(super) struct Reservation {
     group: Vec<u8>,
     signer: [u8; 32],
     identity: Arc<()>,
@@ -86,11 +86,15 @@ struct Fixture {
     opened: OpenedBootstrapSourceData,
 }
 fn fixture(id: u64) -> Fixture {
+    fixture_with_clock(id, Box::new(ManualClock::new(1000)))
+}
+
+fn fixture_with_clock(id: u64, clock: Box<dyn Clock + Send>) -> Fixture {
     let mut node = ChannelSync::found(
         Hub::new().join(PeerId::from_u64(id)),
         MlsDevice::generate().unwrap(),
         ChaCha20Rng::seed_from_u64(id),
-        Box::new(ManualClock::new(1000)),
+        clock,
     )
     .unwrap();
     node.rendezvous_nodes = vec![
@@ -162,7 +166,10 @@ fn admission(count: &Arc<AtomicUsize>) -> OwnerSdkRestoreAdmission {
 fn limits() -> V2GenesisSeedLimits {
     V2GenesisSeedLimits::new(1024 * 1024, 512 * 1024, 512 * 1024).unwrap()
 }
-fn seed(opened: &OpenedBootstrapSourceData, count: &Arc<AtomicUsize>) -> UnboundV2GenesisSeed {
+pub(super) fn seed(
+    opened: &OpenedBootstrapSourceData,
+    count: &Arc<AtomicUsize>,
+) -> UnboundV2GenesisSeed {
     prepare_v2_genesis_seed(opened, limits(), admission(count)).unwrap()
 }
 

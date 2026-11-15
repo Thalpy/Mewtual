@@ -1,5 +1,64 @@
 # Threat model; client integrity & enforcement boundaries
 
+The stage-lifetime continuation permits a completed closed SDK snapshot to
+remain resident after its finite native key work drains. That is not Source,
+SDK-body, physical-work or key-erasure completion. A partial resumable Cell
+must retain its actual original AddSdk End; a spent cut alone is insufficient.
+Retirement also releases old cut metadata to avoid pinning UI-generation fees.
+Fresh native-stage authorization cannot reset request/SDK/key attempt state:
+Attempting is set before RT entry, only returned Busy/Unavailable may prove a
+known local pre-primitive refusal, and unknown/native/key entry cannot be
+laundered by retry. Root must prove the same saved operation and current
+parent/source for every new command. Its real cleanup/covering consumers are
+still absent. [Exact boundary](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The disabled governed Add library now freezes both authenticated signed join
+inputs and bounded exact package bytes before native SDK entry. The actual
+retained Clock supplies first-admission time; cached retries cannot substitute
+renderer time, different credential expectations or new routing randomness.
+The original L0/file key and supported pinned policy are sealed only by the
+same merged candidate. This is cryptographic/source consistency, not Root
+invitation authorization, consumed-nonce evidence, saved membership, Welcome
+release or joined Source provenance. A future joiner must strictly verify the
+tagged V2 plaintext and every binding with no Legacy fallback.
+[Contract and remaining boundaries](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+Governed-native Current admission now revalidates its actual mounted4 owner,
+retained marker and final same-file bytes under the already-held Root. A
+missing marker, equal-byte replacement or post-authentication in-place mutation
+cannot pass that additional check. Only the constructor-selected steady native
+family enters it; parsed4 or temporary opening state cannot create authority.
+This remains a namespace negative, not Source4 or a governing save receipt.
+[Boundary and evidence](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The library-only governed founder owner preserves immutable genesis provenance
+separately from actual installed SDK evidence. One pending Add owns three native
+cuts bound to the same original source and keeps real Ends after all private
+payloads. Constructor ambiguity cannot reset its debit; governing raw64 is
+cached before late checks. No Root/native path constructs this owner yet.
+
+The response uses a separate `JoinWelcome` purpose (appended slot7), never the
+governing Header's spent cut. Its unsigned canonical preimage is frozen from
+the same request/Cell/materialized Add; raw64 is cached before verification or
+late cancellation. An uncertain entered key call cannot sign again. Root must
+durably cover WelcomeIntent before entry and the actual installed response
+before release; these library DATA interfaces implement neither authority.
+Its future consumer requires durable outcome binding and cancelled-operation
+cleanup before UI/key drainage; End counting alone would deadlock lock/close.
+[Scope and remaining enforcement](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+Combined governed-native startup authenticates exact index/marker frames and
+retains their original file identities across catalog declaration and final
+handoff. A matching namespace descriptor cannot authorize another mutable
+index. Native seed2 has its own AEAD domain and no seed1 fallback. First-torn
+cleanup only aborts on a separately verified pristine native3 baseline;
+authenticated invalid/future data and changed/nonempty evidence are preserved.
+The cold constructor keeps its actual observation or completed declaration
+through final reads. Cached4 revocation follows the original mounted owner
+without IO or locks. These storage checks establish no live membership,
+Source4, native credential, signer or operational restart authority.
+[Scope and acceptance](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
+
 The completed MLS Add ownership seam refuses foreign/stale receiver pairs and
 keeps exclusive loans through its no-fail swaps. The returned retired owner
 cannot execute or extract SDK state; the installed provider stays closed.
@@ -6675,3 +6734,17 @@ archive: malicious omission can still deny progress, and Root must implement
 bounded authenticated export, selected-write coupling and contradiction replay
 before evicting hot evidence or claiming restart-safe fork detection. See
 [the detailed boundary](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).
+
+## Native V2 invitation boundary (15 November)
+
+Unsigned invite preparation now derives anchor/policy/draws from the same warm
+node and route DATA from its actual retained transport reservation. A random
+row identity is distinct from the transport-key commitment authenticated by
+Birth. Current4 and the original founder Admission/selected G1 are rechecked
+before and after draw. Zero certified contacts are encoded; a wildcard listener
+or configured relay string is never treated as reachable-route evidence.
+The separate native JoinInvite tail caches raw64 before late checks and cannot
+renew unknown Clock/RNG/key entry. This supplies no SavedInvite/current Add or
+publication authority. Durable KeyAttempt/cold no-resign, persistent quotas and
+covering journal/IO admission remain unfinished. Chat V2 stays OFF.
+[Detailed limits](communication-recovery/CHAT-V2-INVITE-ISSUER.md).

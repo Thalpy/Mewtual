@@ -8,6 +8,79 @@ mod compatibility;
 
 #[cfg(any(windows, target_os = "linux"))]
 #[tokio::test]
+async fn native_runtime_invite_route_requires_actual_context_and_distinct_birth_domains() {
+    use super::super::tests::selected_governed;
+    let directory = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_governed(directory.path());
+    let owner = prepared_mesh_founder(&vault, &budget, 0xe705);
+    owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap()
+        .cover_founder_activation()
+        .unwrap();
+    let mut job = owner
+        .prepare_creation(command(&vault, &budget), request(1, "Original"), inputs())
+        .unwrap();
+    {
+        let body = job.loan.body.as_mut().unwrap();
+        let binding = body.driver.as_ref().unwrap().binding_data().unwrap();
+        let network = body.network.as_mut().unwrap();
+        let original = network.context;
+        // Row identity is independent randomness. Birth alone binds the full
+        // transport-key commitment; equating those domains bricks every mint.
+        assert_ne!(
+            network.identity,
+            network.public.as_ref().unwrap().commitment_data()
+        );
+        let expected = network.invite_routing_plan_data(binding).unwrap();
+        assert!(expected.len() <= 1024 && expected.capacity() <= 1024);
+        // Pin the complete public grammar, including the explicit absence of
+        // certified contacts. Private vault/root IDs, native invocation data
+        // and configured route strings have no trailing field to hide in.
+        let mut plan = catcoms_wire::Decoder::new(&expected);
+        assert_eq!(
+            plan.get_bytes().unwrap(),
+            b"mewtual/chat/native-invite-routing-plan/v2\0"
+        );
+        assert_eq!(plan.get_u16().unwrap(), 2);
+        assert_eq!(plan.get_bytes().unwrap(), binding.group_data());
+        let public = network.public.as_ref().unwrap();
+        assert_eq!(plan.get_bytes().unwrap(), public.public_key_data());
+        assert_eq!(plan.get_bytes().unwrap(), public.peer_id_data().as_bytes());
+        assert_eq!(plan.get_bytes().unwrap(), public.commitment_data());
+        assert_eq!(plan.get_u16().unwrap(), 1); // TCP reservation
+        assert_eq!(plan.get_u16().unwrap(), network.port);
+        assert_eq!(plan.get_u32().unwrap(), 0); // no certified addresses
+        plan.finish().unwrap();
+        for field in [0, 1] {
+            if field == 0 {
+                network.context.0[0] ^= 1;
+            } else {
+                network.context.1[0] ^= 1;
+            }
+            assert!(network.invite_routing_plan_data(binding).is_err());
+            network.context = original;
+            assert_eq!(network.invite_routing_plan_data(binding).unwrap(), expected);
+        }
+        network.pending.as_mut().unwrap().birth.network[0] ^= 1;
+        assert!(network.invite_routing_plan_data(binding).is_err());
+        network.pending.as_mut().unwrap().birth.network[0] ^= 1;
+        let actual_peer = network.actual_peer.replace("foreign transport".into());
+        assert!(network.invite_routing_plan_data(binding).is_err());
+        network.actual_peer = actual_peer;
+        assert_eq!(network.invite_routing_plan_data(binding).unwrap(), expected);
+    }
+    // Restore the SAME original loan; the actual producer can now draw its one
+    // unsigned original normally. No new Source/driver/transport is constructed.
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let negative = catcoms_rt::RequestCancellation::new(receiver, None);
+    assert!(super::super::member::NativeTextMemberJob { inner: job }
+        .prepare_invite_intent([46; 32], 60_000, &negative)
+        .is_ok());
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[tokio::test]
 async fn native_sources_index_revocation_after_device_counter_prevents_transport_construction() {
     let dir = tempfile::tempdir().unwrap();
     let (vault, budget) = selected(dir.path());

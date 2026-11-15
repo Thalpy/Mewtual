@@ -303,7 +303,7 @@ fn change_metadata(
         if catalog.pending.is_some()
             || !matches!(store.current_layout_policy.as_ref()
             .and_then(|policy| policy.native_registry.as_ref()),
-            Some(NativeRegistryHandler::Lifecycle(actual)) if actual.same(handler))
+            Some(NativeRegistryHandler::Lifecycle(actual) | NativeRegistryHandler::GovernedLifecycle(actual) | NativeRegistryHandler::GovernanceOpening(actual)) if actual.same(handler))
         {
             return Err(refused());
         }
