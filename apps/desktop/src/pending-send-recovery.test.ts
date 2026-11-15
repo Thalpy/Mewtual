@@ -74,7 +74,7 @@ test("failed continuity hydration cannot replace the sealed pending identities w
   const studioDraft = JSON.stringify({ version: 1, scope: { server: 1, channel: "1" }, group: "a".repeat(64), records: [] });
   const initial = sanitizeUiContinuity({ pendingSends: { [intent.token]: intent }, drafts: { room: intent.text }, studioDraft });
   const app = new Function("initial", "sanitizeUiContinuity", "planLegacyReadMarkMigration", "console", `
-    let locked = false, uiStateLoadGeneration = 7, uiStateHydrationAttempt = 0, uiStateReady = false, uiStateSaveTimer;
+    let locked = false, uiStateLoadGeneration = 7, uiStateHydrationAttempt = 0, uiStateReady = false, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = structuredClone(initial.pendingSends), drafts = structuredClone(initial.drafts), uiContinuityVersion = 1;
     let recoveredSendDrafts = {};

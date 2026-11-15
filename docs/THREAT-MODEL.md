@@ -6,6 +6,12 @@ Add/current source. Every representation is verified before link/duplicate use;
 Welcome's governing issuer is checked independently of inviter/forwarder.
 No consumer or protocol activation exists. [Scope and tests](communication-recovery/CHAT-V2-JOIN-BINDINGS.md).
 
+A destroyed renderer component permanently refuses further continuity and
+Native Text driver work. Retirement precedes potentially throwing cleanup.
+This prevents old callbacks submitting stale journals after a warm remount;
+it grants no native authority and does not cancel already-admitted work.
+[Boundary and tests](communication-recovery/CHAT-V2-UI-RETIREMENT.md).
+
 Native session listings retain the actual authentication/installed-object
 association and independent copy payment through final delivery. Busy/stale
 post-auth listing errors do not consume warning acknowledgement. The App keeps
