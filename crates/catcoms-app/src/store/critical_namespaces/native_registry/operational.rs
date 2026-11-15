@@ -11,24 +11,49 @@ mod catalog;
 mod cell;
 pub(super) mod data;
 mod facade;
+mod governed;
+pub use governed::NativeTextGovernedStorage;
+mod history_response;
+pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};
 mod interlock;
 mod mount;
 mod native_ui;
 mod opening;
 mod payment;
+mod source_admission;
+mod sources;
+pub use sources::{
+    NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
+    NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextMemberAdmissionFailure,
+    NativeTextMemberBudget, NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem,
+    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberJob,
+    NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeTextRuntimeSelection,
+    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
+    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
+};
+mod ui_state;
+mod work_retirement;
+pub use work_retirement::{NativeTextWorkRetirement, NativeTextWorkRetirementPreparation};
 mod upgrade;
 pub(in crate::store::critical_namespaces) mod upgrade_source;
 pub use facade::{
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultUpgrade,
-    NativeTextVaultUpgradeRefusal,
+    NativeTextGovernanceUpgrade, NativeTextVault, NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
 };
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
 pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
 pub use native_ui::{
-    RetirementBatch as NativeTextUiRetirementBatch, UiCandidate as NativeTextUiCandidate,
-    UiCapture as NativeTextUiObservation, UiGarbage as NativeTextUiGarbage,
-    UiPreparation as NativeTextUiPreparation, UiRetirement as NativeTextUiRetirement,
-    UiRetirementState as NativeTextUiRetirementState,
+    RetirementBatch as NativeTextUiRetirementBatch, RetirementDrain as NativeTextUiRetirementDrain,
+    UiCandidate as NativeTextUiCandidate, UiCapture as NativeTextUiObservation,
+    UiGarbage as NativeTextUiGarbage, UiPreparation as NativeTextUiPreparation,
+    UiRetirement as NativeTextUiRetirement, UiRetirementState as NativeTextUiRetirementState,
+};
+pub use ui_state::{
+    UiStateBudget as NativeUiStateBudget, UiStateCredit as NativeUiStateCredit,
+    UiStatePreparation as NativeUiStatePreparation, UiStateRead as NativeUiStateRead,
+    UiStateSaved as NativeUiStateSaved,
 };
 pub use upgrade::{NativeIndexPolicy, NativeIndexUpgrade};
 
@@ -142,7 +167,9 @@ impl crate::store::ServerStore {
                 super::preparation::NativeRegistryHandler::Operational(handler) => {
                     handler.require_index_idle_cached()?
                 }
-                super::preparation::NativeRegistryHandler::Lifecycle(handler) => {
+                super::preparation::NativeRegistryHandler::Lifecycle(handler)
+                | super::preparation::NativeRegistryHandler::GovernedLifecycle(handler)
+                | super::preparation::NativeRegistryHandler::GovernanceOpening(handler) => {
                     handler.require_idle_cached()?
                 }
                 super::preparation::NativeRegistryHandler::Migration(_) => {}

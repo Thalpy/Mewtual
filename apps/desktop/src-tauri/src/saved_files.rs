@@ -337,7 +337,7 @@ async fn with_owner<T>(
     let store = guard.as_ref().and_then(MountedVault::as_legacy)?;
     let servers = state.servers.lock().await;
     let entry = servers
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)?;
     // The group, then this device's member id in it: a later membership (leave and join again)
     // has another member id, so a record that survived a leave never applies to it.
@@ -1193,7 +1193,7 @@ async fn reset_saved_files_in_session(state: &AppState, server: u64) -> Result<(
         .ok_or_else(|| "The vault is locked.".to_string())?;
     let servers = state.servers.lock().await;
     let entry = servers
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
         .ok_or_else(|| "server changed".to_string())?;
     let owner = [entry.group_id.as_slice(), entry.device_id.as_bytes()].concat();

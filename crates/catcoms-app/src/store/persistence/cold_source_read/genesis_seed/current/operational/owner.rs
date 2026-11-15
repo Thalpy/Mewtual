@@ -123,6 +123,22 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    /// Only the real warm whole owner can prepare an invite. Cold/Repaired
+    /// metadata never supplies a new signer or starts another original draw.
+    pub(super) fn prepare_invite_data(
+        &mut self,
+        store: &ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        native: &catcoms_rt::NativeChatSourceObservation,
+        slot: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderInviteData>,
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                current.prepare_text_invite_data(store, request, native, slot)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
     /// Root already admitted the exact selected request and separately paid producer
     /// buffers. Family helpers end their SourceRef borrow before the mutable RNG call.
     pub(super) fn prepare_create_data(

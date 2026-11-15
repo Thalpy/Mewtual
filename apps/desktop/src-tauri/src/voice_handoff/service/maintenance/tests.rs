@@ -626,7 +626,11 @@ async fn parked_old_discovery_cannot_block_end_replacement_or_another_server() {
     registration.register().unwrap();
     let mut entry = crate::tests::snapshot_test_entry(1, other.clone(), group, device);
     entry.voice = Some(crate::RegisteredVoiceActor(registration));
-    f.state.servers.lock().await.insert(8, entry);
+    f.state
+        .servers
+        .lock()
+        .await
+        .install_legacy_fixture(8, entry);
     let parked = park(&f.actor).await;
     let owners = Arc::strong_count(&grant);
     let mut cursor = Cursor::new();

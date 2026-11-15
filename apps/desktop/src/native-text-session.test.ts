@@ -1,0 +1,28 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { decodeRestoredChatSession } from "./native-text-session.ts";
+const row = { backend: "text-v2", server: 1, context: "01".repeat(32), channel: "340282366920938463463374607431768211455", name: "Group", display_name: "Catte", is_dm: false };
+test("session backend survives zero rows and stays distinct from locked resume", () => {
+  assert.deepEqual(decodeRestoredChatSession([]), { backend: "legacy", servers: [] });
+  assert.deepEqual(decodeRestoredChatSession({ backend: "text-v2", servers: [] }), { backend: "text-v2", servers: [] });
+  assert.equal(decodeRestoredChatSession(null), null);
+  const legacy = [{ server: 7, name: "Existing group", invite: "" }];
+  assert.equal(decodeRestoredChatSession(legacy)?.servers, legacy, "existing Legacy array contract is preserved");
+});
+test("native session retains two exact contexts without coercing channel integers", () => {
+  const native = { backend: "text-v2", servers: [row, { ...row, server: 2, context: "02".repeat(32) }] };
+  const parsed = decodeRestoredChatSession(native)!;
+  assert.deepEqual(parsed, native);
+  assert.ok(Object.isFrozen(parsed.servers[0]));
+  assert.notEqual(parsed.servers, native.servers);
+});
+test("session decoder rejects mixed modes, future fields and guessed defaults", () => {
+  for (const value of [[row], { servers: [] }, { backend: "legacy", servers: [] }, { backend: "future", servers: [] },
+    { backend: "text-v2", servers: [], ignored: true }, { backend: "text-v2", servers: [row, row] },
+    { backend: "text-v2", servers: [row, { ...row, server: 2 }, { ...row, server: 3 }] }]) assert.throws(() => decodeRestoredChatSession(value));
+  for (const patch of [{ backend: "legacy" }, { server: Number.MAX_SAFE_INTEGER + 1 }, { server: -1 }, { context: "00".repeat(32) },
+    { context: "01".repeat(16) }, { channel: "01" }, { channel: "340282366920938463463374607431768211456" },
+    { name: "" }, { name: "💜".repeat(65) }, { display_name: "\ud800" }, { is_dm: "false" }, { extra: true }]) {
+    assert.throws(() => decodeRestoredChatSession({ backend: "text-v2", servers: [{ ...row, ...patch }] }));
+  }
+});
