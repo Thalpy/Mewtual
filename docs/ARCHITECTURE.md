@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+The disabled Native Text App now consumes a distinct authenticated warm-session
+envelope, retains exact critical4 requests before authoring, and displays its
+own locally saved originals. It excludes unsupported Legacy surfaces/readers.
+Shared group projection, joined sources, transport and cold authoring restore
+remain unfinished. [Current implementation and evidence](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
 The disabled native route now reads bounded pages of the current member's
 actual saved originals, with independent response payment and final checks
 against installed vault/row objects. It is not a shared group projection;

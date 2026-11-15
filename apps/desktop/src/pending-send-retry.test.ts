@@ -117,6 +117,7 @@ function appFixture(clock: FakeClock, failure: string | null = null, initial: Pe
   }
   const app = new Function("PendingSendRetry", "samePendingIntent", "pendingSendRetryBlock", "quarantinedPendingIntent", "persistenceWarning", "sanitizePendingSends", "intent", "initialFailure", `
     let locked = false, uiStateReady = true, uiStateLoadGeneration = 1, sending = false;
+    const chatBackend="legacy";let nativeRetryGeneration=null;
     let pendingSends = { [intent.token]: structuredClone(intent) }, pendingSendErrors = {}, retryingPendingSends = false;
     let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
     let windowCloseInFlight = false;

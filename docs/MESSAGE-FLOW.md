@@ -23,6 +23,12 @@ separate work.
 
 ## Chat history adversarial continuation (20 October)
 
+The disabled Native Text frontend now seals an exact critical4 intent before
+local save, retries the same token automatically and reads bounded pages of its
+own saved originals. Backend mode is explicit even for an empty vault. There is
+still no V2 second-member delivery or shared projection, so the live network
+trace below remains Legacy. [Current native flow](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
 15 November disabled native V2 continuation: original-runtime member preparation
 signs once into namespace5; final admission holds actual native custody through
 the local save and restores the runtime afterward. Its own-history reader also

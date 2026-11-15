@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import { NativeVaultLockCoordinator } from "./window-close.ts";
+import {decodeRestoredChatSession} from "./native-text-session.ts";
 
 const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 function production(start: string, end: string) {
@@ -24,9 +25,11 @@ function entry(initialNativeGeneration = 6n) {
   const closeEnd = source.indexOf("      // Capture is a native setting,", closeStart);
   assert.ok(closeStart >= 0 && closeEnd > closeStart);
   const close = ts.transpile("[" + source.slice(closeStart, closeEnd) + "];", { target: ts.ScriptTarget.ES2022 });
-  return new Function("NativeVaultLockCoordinator", "rows", "initialNativeGeneration", `
+  return new Function("NativeVaultLockCoordinator", "rows", "initialNativeGeneration", "decodeRestoredChatSession", `
     let locked = true, unlocking = false, unlockAttempt = 0, windowCloseInFlight = false;
     let uiStateLoadGeneration = 0, uiStateReady = false, vaultExists = true, error = "";
+    let chatBackend=null,startTab="join",nativeOriginals=[],nativeCursor=null,nativeHistoryLoading=false,nativeHistoryLoaded=false,nativeHistoryError=null,nativeHistoryRevision=0,nativeRetryGeneration=null;
+    const studioExit={begin:()=>({current:()=>true})};
     let passphrase = "first secret", revealPassphrase = true, unlockMethod = "sigil";
     let sigilStrokes = [1], sigilDrawing = [2], sigilColors = [], sigilEmojis = [3], sigilWord = "private", melodySeq = [4];
     let inSetup = false, setupStep = "secret", setupFirst = "setup secret", setupPath = "sync", syncIntent = false;
@@ -126,7 +129,7 @@ function entry(initialNativeGeneration = 6n) {
         nativeGeneration: nativeGeneration.toString(),
         windowCloseInFlight, explicit: explicit.get("catcoms.explicit-lock") }; }
     };
-  `)(NativeVaultLockCoordinator, rows, initialNativeGeneration);
+  `)(NativeVaultLockCoordinator, rows, initialNativeGeneration,decodeRestoredChatSession);
 }
 
 test("actual double Enter sends one unlock and restores once; another Enter cannot unmount live Studio", async () => {

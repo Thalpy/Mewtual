@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+Current continuation is `chat-v2-native-text-session`, in the same isolated
+`target/cv2-native-text-history` worktree, based on PR #127 `47b44308`.
+Warm native listing, real App local creation/send/history and exact critical4
+retry scheduling are implemented. Native83 and final frontend3480 passed.
+Native lint/check/build/
+startup, frontend check/build, Native and existing browser flows, audits and
+static gates passed. Exact-head complete Root/native CI remains pending.
+Root strict Clippy retains564 inherited failures. Chat V2 stays OFF and
+incomplete. This paragraph supersedes older “frontend not wired” checkpoints.
+[Current contract, evidence and remaining scope](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
 Active continuation is `chat-v2-native-text-continuity`, in the SAME isolated
 `target/cv2-native-text-history` worktree, based on pushed draft PR #126
 `bea882ac`. Critical4 frontend persistence/strict retry DATA and paired native

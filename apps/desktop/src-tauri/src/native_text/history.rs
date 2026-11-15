@@ -480,7 +480,7 @@ impl Write for Capped {
         Ok(())
     }
 }
-fn encode(value: &impl Serialize, cap: usize) -> Result<String, String> {
+pub(super) fn encode(value: &impl Serialize, cap: usize) -> Result<String, String> {
     // No serde_json::Value/whole-page clone and no Vec growth past fixed cap.
     if cap > SERIALIZED_LIMIT {
         return Err("Invalid history response limit.".into());

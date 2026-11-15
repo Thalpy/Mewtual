@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Native unlock/resume has a closed `text-v2` envelope even for zero rows; Legacy
+keeps its existing array. Native save receipts now encode u64 ordinals as
+decimal strings. The App seals critical4 native intents before dispatch and
+uses separate bounded own-original history. No DTO grants native authority.
+[Session/UI contract and limitations](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
 Critical UI continuity4 retains native32-byte retry requests separately from
 Legacy pending sends. Unknown native entries refuse the whole envelope;
 the format never grants signing authority. Paired validation is in progress.

@@ -1,5 +1,12 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native session listings retain the actual authentication/installed-object
+association and independent copy payment through final delivery. Busy/stale
+post-auth listing errors do not consume warning acknowledgement. The App keeps
+backend mode independently of empty rows and seals exact native intents before
+dispatch. Its local original list establishes neither shared history nor peer
+delivery. [Current boundary, tests and remaining gaps](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
 Native retry continuity is caller DATA under sticky critical4, with whole-queue
 refusal instead of lossy sanitization. It cannot reconstruct a cold signer or
 replace native object/generation checks. [Scope and pending evidence](communication-recovery/CHAT-V2-NATIVE-CONTINUITY.md).

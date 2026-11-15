@@ -18,6 +18,7 @@ test("retry refuses IPC until the caller identity survives an actual successful 
   const body = transpile("  async function submitPendingSend(", "  // Inline edit of one of your own messages.");
   const app = new Function("addPendingSend", "matchingPendingSend", "samePendingIntent", "sendAndRefresh", "persistenceWarning", "sendOutcome", "pendingSendRetryBlock", "quarantinedPendingIntent", "validateSendPayload", "pendingContinuityVersion", "sendRefusedUnaccepted", `
     let draft = "retain this identity", cur = { active: "1" }, activeServerId = 1, sending = false;
+    const chatBackend="legacy";
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
     let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;

@@ -212,6 +212,10 @@
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import type { NativeTextIntents } from "./native-text-intents";
+  import { createNativeTextDriver } from "./native-text-driver";
+  import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
+  import { readNativeOriginals, type NativeOriginal } from "./native-text-history";
+  import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
@@ -358,11 +362,14 @@
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
   type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean; storage_warning?: string | null };
-  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean; reconnect_warning?: string | null };
+  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean; reconnect_warning?: string | null; backend?: "text-v2"; context?: string; display_name?: string };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
   // messages/roster/profiles/files are loaded for the active server on switch + events.
   type ServerState = {
+    backend?: "text-v2";
+    context?: string;
+    displayName?: string;
     id: number;
     name: string;
     channels: Channel[];
@@ -376,6 +383,14 @@
   };
 
   let servers = $state<ServerState[]>([]);
+  let chatBackend = $state<"legacy" | "text-v2" | null>(null);
+  let nativeOriginals = $state.raw<NativeOriginal[]>([]);
+  let nativeCursor = $state<{next:string;end:string}|null>(null);
+  let nativeHistoryLoading = $state(false);
+  let nativeHistoryLoaded = $state(false);
+  let nativeHistoryError = $state<string|null>(null);
+  let nativeHistoryRevision = 0;
+  let nativeRetryGeneration = $state<number|null>(null);
   let activeServerId = $state<number | null>(null);
   // Bumped by every move that changes WHICH group the panes show. An async refresh captures it
   // on entry and re-checks after its awaits: a slow answer from the group you just left must
@@ -489,6 +504,7 @@
   let fileTrustPolicies = $state<FileTrustPolicies>({});
   // Roving-tabindex arrows for the start tabs: with two tabs, either arrow means "the other one".
   function startTabArrows(e: KeyboardEvent) {
+    if(chatBackend==="text-v2")return;
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
     startTab = startTab === "join" ? "found" : "join";
@@ -740,6 +756,7 @@
   }
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
+    if(chatBackend==="text-v2" || (id===null?cur:servers.find(server=>server.id===id))?.backend==="text-v2")return;
     // Every settings request owns navigation, including one for the server already on screen. A
     // newer request thereby retires an older one still waiting on a Studio Save to switch servers:
     // that switch then never commits, so it can neither close this dialog (clearServerView) nor
@@ -3580,8 +3597,8 @@
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
-      sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
+      chatBackend==="text-v2" ? Object.keys(nativeTextIntents).length>0 : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
+      sending || (chatBackend==="text-v2" ? nativeHistoryLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
     );
   });
   onMount(() => () => pendingSendRetry.cancel());
@@ -4692,6 +4709,7 @@
   // the first time a pane that can render cards is live. The ref-card effect tracks wikiMap, so
   // the cards re-resolve themselves when it lands.
   async function ensureWikiMap() {
+    if(chatBackend==="text-v2")return;
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null || wikiMapFor === server) return;
@@ -6574,11 +6592,18 @@
       if (current()) vaultExists = exists;
     } catch { if (current()) vaultExists = true; }
   }
-  function restoreReloaded(reloaded: Reloaded[]) {
+  function restoreReloaded(value: unknown) {
     // Restoration is an entry edge, never an in-session refresh. In particular it
     // must not reset readiness underneath a live Studio and its retained work.
     if (!locked || windowCloseInFlight) return false;
+    const restored = decodeRestoredChatSession<Reloaded>(value);
+    if (restored === null) return false;
+    const reloaded: Reloaded[] = restored.backend === "text-v2"
+      ? restored.servers.map(row=>({...row,invite:"",channels:[{id:row.channel,name:"general"}]})) : restored.servers;
+    chatBackend = restored.backend;
+    startTab = restored.backend === "text-v2" ? "found" : "join";
     servers = reloaded.map((r) => ({
+      backend:r.backend,context:r.context,displayName:r.display_name,
       id: r.server,
       name: r.name,
       channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }],
@@ -6588,7 +6613,7 @@
       isDm: r.is_dm,
     }));
     locked = false;
-    void callMappingSession.claimController();
+    if(chatBackend === "legacy") void callMappingSession.claimController();
     const reconnectWarnings = reloaded.filter((r) => r.reconnect_warning);
     if (reconnectWarnings.length) {
       toast(reconnectWarnings.map((r) => `${r.name}: ${r.reconnect_warning}`).join("\n"), "warn", 0);
@@ -6598,9 +6623,18 @@
     // Drafts/read boundaries must land before switchServer restores the active composer and
     // snapshots its divider. The native actors are already running, so this is only local UI state.
     const continuityGeneration = ++uiStateLoadGeneration;
-    void loadUiContinuity(continuityGeneration).finally(() => {
+    // Claim AFTER establishing this UI generation, still before the first
+    // hydration await. A claim from the preceding generation is already stale
+    // when switchServer checks it and would leave every restored row unopened.
+    const route=studioExit.begin();
+    void loadUiContinuity(continuityGeneration).finally(async () => {
       if (continuityGeneration !== uiStateLoadGeneration || locked) return;
-      if (firstServer) void switchServer(firstServer.id);
+      if(chatBackend === "text-v2") {
+        if(firstServer) await switchServer(firstServer.id,()=>{},route);
+        if(continuityGeneration===uiStateLoadGeneration && !locked) void retryNativeTextRequests();
+        return;
+      }
+      if (firstServer) void switchServer(firstServer.id,()=>{},route);
       // Unread badges start empty here because nothing durable holds them. Anything that arrived
       // while the vault was locked (the native bridge drops those events on purpose) or while the
       // app was closed has no event left to raise a badge, so rebuild them from each channel's
@@ -6615,9 +6649,7 @@
       // feeds into a count instead of an announcement of everything that ever happened.
       void loadNews();
     });
-    refreshAllDmRequests();
-    loadInbox();
-    refreshAllServerIcons();
+    if(chatBackend === "legacy") {refreshAllDmRequests();loadInbox();refreshAllServerIcons();}
     return true;
   }
 
@@ -6837,6 +6869,10 @@
     pendingSends = {};
     recoveredSendDrafts = {};
     nativeTextIntents = {};
+    chatBackend = null;
+    nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
+    nativeHistoryLoaded=false;nativeHistoryError=null;
+    nativeRetryGeneration=null;
     pendingSendResolution = null;
     pendingSendErrors = {};
     retryingPendingSends = false;
@@ -6861,15 +6897,131 @@
     locked = true; // studio-exit: forced edge (lock, as above)
   }
 
+  function nativeTextDriver(session:number, sealed:()=>void=()=>{}) {
+    const current=()=>chatBackend==="text-v2" && !locked && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration;
+    return createNativeTextDriver({
+      read:()=>nativeTextIntents,
+      replace:next=>{if(!current())throw new Error("The chat session changed.");nativeTextIntents=next;uiContinuityVersion=4;},
+      seal:()=>queueUiStateSave(()=>{if(!current())throw new Error("The chat session changed.");return continuityJson();}),
+      current,
+      token:()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,"0")).join(""),
+      invoke:async(command,args)=>{
+        if(command==="found_server")return(await invokeDebugged<unknown>("found_server",args)).value;
+        if(command==="send_message")return(await invokeDebugged<unknown>("send_message",args)).value;
+        throw new Error("Unsupported native chat request.");
+      },
+      sealed:()=>sealed?.(),
+    });
+  }
+  function installNativeServer(row:NativeTextServer) {
+    const previous=servers.find(server=>server.id===row.server);
+    if(previous && (previous.backend!=="text-v2" || previous.context!==row.context)) throw new Error("The group changed. Unlock again.");
+    const entry:ServerState={id:row.server,name:row.name,backend:"text-v2",context:row.context,displayName:row.display_name,
+      channels:[{id:row.channel,name:"general"}],active:row.channel,unread:[],invite:"",isDm:row.is_dm};
+    servers=previous?servers.map(server=>server.id===row.server?entry:server):[...servers,entry];
+  }
+  function nativeDraftRetirement(server:number,channel:string,context:string,text:string) {
+    const key=chatScopeKey(server,channel),revision=draftRevisions[key]??0;
+    const original=activeServerId===server && cur?.active===channel ? draft : drafts[key]??"";
+    return ()=>{
+      if(original.trim()!==text || (draftRevisions[key]??0)!==revision || servers.find(row=>row.id===server)?.context!==context)return;
+      const active=activeServerId===server && cur?.active===channel && cur?.context===context;
+      if(active && draft!==original)return;
+      if(!active && drafts[key]!==original)return;
+      drafts={...drafts,[key]:""};draftRevisions[key]=revision+1;
+      if(active)draft="";
+    };
+  }
+  async function retryNativeTextRequests() {
+    if(nativeRetryGeneration===uiStateLoadGeneration || nativeHistoryLoading || busy || sending || locked || !uiStateReady || windowCloseInFlight || chatBackend!=="text-v2" || !Object.keys(nativeTextIntents).length)return;
+    const session=uiStateLoadGeneration;nativeRetryGeneration=session;
+    try {
+      for(const intent of Object.values(nativeTextIntents)) {
+        if(locked || session!==uiStateLoadGeneration || windowCloseInFlight || chatBackend!=="text-v2")return;
+        if(!nativeTextIntents[intent.token])continue;
+        try {
+          if(intent.kind==="found") {
+            // Only open a recovered first group while this original empty-view
+            // navigation still owns the screen. A retry must not hijack a newer
+            // selection made while its persistence/native reply was pending.
+            const route=activeServerId===null&&!showAdd?studioExit.begin():null;
+            const result=await nativeTextDriver(session).found(intent);
+            if(result){installNativeServer(result.server);if(route?.current()&&activeServerId===null&&!showAdd){await switchServer(result.server.server,()=>{},route);}}
+          }
+          else {const row=servers.find(row=>row.id===intent.server);if(row?.backend!=="text-v2" || row.context!==intent.expectedContext)continue;
+            await nativeTextDriver(session,nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text)).send(intent.server,intent.channel,intent.expectedContext,intent.text);}
+        }catch { /* Keep exact custody; a later scheduled retry reuses it. */ }
+      }
+    }finally{
+      if(nativeRetryGeneration===session){
+        nativeRetryGeneration=null;
+        // Navigation during a write selects immediately but defers its read.
+        // Once this owner retires, read the CURRENT view, including on refusal.
+        if(!locked && session===uiStateLoadGeneration && cur?.backend==="text-v2")await refreshNativeHistory();
+      }
+    }
+  }
+  async function refreshNativeHistory(append=false) {
+    const selected=cur,server=activeServerId;
+    if(selected?.backend!=="text-v2" || !selected.context || server===null || locked || !uiStateReady)return;
+    // Reads and writes share native admission. The write owner always refreshes
+    // the latest selected view after retiring, so a switch need not compete for
+    // that permit or lose its history when the write's original view changed.
+    if(sending || busy || nativeRetryGeneration!==null)return;
+    if(nativeHistoryLoading)return;
+    const session=uiStateLoadGeneration,viewToken=viewGeneration,revision=++nativeHistoryRevision,channel=selected.active,context=selected.context;
+    const current=()=>!locked && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context;
+    nativeHistoryLoading=true;nativeHistoryError=null;
+    try {
+      const result=await readNativeOriginals((_command,args)=>invoke<unknown>("get_message_page",args),{server,channel,context},current,append?nativeCursor:null);
+      if(!result || !current())return;
+      // This is a local original list. Do not populate Legacy pageTotal,
+      // unread/version anchors or derive full-group absence from this subset.
+      nativeOriginals=append?[...nativeOriginals,...result.items].slice(-256):result.items;
+      nativeCursor={next:result.next,end:result.end};
+      nativeHistoryLoaded=true;
+    }catch(failure){if(current()){nativeHistoryError="Saved messages could not be loaded. Try again.";error=errorText(failure);}}
+    finally{if(revision===nativeHistoryRevision)nativeHistoryLoading=false;}
+  }
+  async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
+    const selected=cur;if(selected?.backend!=="text-v2" || !selected.context)return "refused";
+    const session=uiStateLoadGeneration,context=selected.context,operation=++pendingSendNonce;
+    const retireDraft=nativeDraftRetirement(server,channel,context,text);
+    sending=true;
+    try {
+      const result=await nativeTextDriver(session,retireDraft).send(server,channel,context,text);
+      if(!result)return "uncertain";
+      if(result.disposition==="uncertain")return "uncertain";
+      return "sent"; // press outcome only; UI status remains Saved here
+    }catch(failure){if(!locked && session===uiStateLoadGeneration)error=errorText(failure);return "uncertain";}
+    finally{
+      if(pendingSendNonce===operation){sending=false;if(!locked && session===uiStateLoadGeneration)await refreshNativeHistory();}
+    }
+  }
+
   async function found() {
+    if(chatBackend === "text-v2" && (!uiStateReady || locked || windowCloseInFlight || nativeHistoryLoading || nativeRetryGeneration===uiStateLoadGeneration || busy)) return;
     busy = true;
     error = "";
     const operationGeneration = viewGeneration;
+    const nativeSession=chatBackend==="text-v2"?uiStateLoadGeneration:null;
+    const route=chatBackend==="text-v2"?studioExit.begin():null;
     try {
       // The group's name and your name in it are two different things. Naming the group is
       // optional; left blank it is labelled after the person who founded it, which is at least
       // a description of what it is rather than a second copy of your own name.
       const serverName = newServerName.trim() || `${displayName}'s server`;
+      if(chatBackend === "text-v2") {
+        const session=uiStateLoadGeneration;
+        const result=await nativeTextDriver(session).found({displayName,serverName,advertise,relay,rendezvous,isDm:false});
+        if(!result || locked || session!==uiStateLoadGeneration) return;
+        installNativeServer(result.server);
+        if(sessionContinuationCurrent(operationGeneration,viewGeneration,locked)) {
+          showAdd=false;newServerName="";if(route)await switchServer(result.server.server,()=>{},route);
+        }
+        if(result.cleanupPending) toast("The group was created. Its saved retry will be checked again.","warn",5000);
+        return;
+      }
       const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false, serverName });
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       addServer(r, serverName, displayName);
@@ -6892,10 +7044,12 @@
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
     } finally {
       busy = false;
+      if(nativeSession!==null && nativeSession===uiStateLoadGeneration && !locked)await refreshNativeHistory();
     }
   }
 
   async function join() {
+    if(chatBackend==="text-v2")return;
     busy = true;
     error = "";
     joinReplyReady = null;
@@ -6962,6 +7116,7 @@
   }
 
   async function applyJoinReply(replace = false) {
+    if(chatBackend==="text-v2")return;
     const server = activeServerId;
     if (server === null || !joinReplyInput.trim()) return;
     const operationGeneration = viewGeneration;
@@ -7036,6 +7191,7 @@
   // Start a new DM: found a 1:1 group named after the friend; the invite that comes back is the
   // "friend code" to share. Your own profile name is unchanged (a DM's label is the friend's name).
   async function newDm() {
+    if(chatBackend==="text-v2")return;
     const name = dmName.trim();
     if (!name) return;
     busy = true;
@@ -7058,6 +7214,7 @@
 
   // Accept a friend code: join the friend's 1:1 group, flagged as a DM.
   async function addFriend() {
+    if(chatBackend==="text-v2")return;
     const name = dmName.trim();
     if (!name) return;
     busy = true;
@@ -7240,6 +7397,7 @@
   // Open the DMs area (the friends/DM list); land on the first DM if there is one, else an empty
   // DM-home (no active group) ready for a New DM / Add friend.
   function enterDmHome() {
+    if(chatBackend==="text-v2")return;
     // DM home with no DM clears the active group, which takes the Studio off screen.
     leaveStudioThen((route) => {
       dmHome = true;
@@ -7394,11 +7552,13 @@
     mentionChannels = new Set(); // mention badges are scoped to the active server
   }
   function openNewDm() {
+    if(chatBackend==="text-v2")return;
     showNewDm = true;
     showAddFriend = false;
     dmName = "";
   }
   function openAddFriend() {
+    if(chatBackend==="text-v2")return;
     showAddFriend = true;
     showNewDm = false;
     dmName = "";
@@ -7435,6 +7595,14 @@
     groupLoading = true;
     messagesLoading = true;
     const s = servers.find((x) => x.id === id);
+    if(s?.backend==="text-v2") {
+      dmHome=s.isDm;showNewDm=false;showAddFriend=false;notice="";
+      nativeOriginals=[];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryLoaded=false;nativeHistoryError=null;nativeHistoryRevision++;
+      loadDraftFor(chanKey());committed();
+      await refreshNativeHistory();
+      if(viewCurrent(gen,id)){groupLoading=false;messagesLoading=false;}
+      return true;
+    }
     // Nothing is cleared here. Arriving at a server is not reading its channels, and the rail's
     // badge is derived from the unread channel list rather than kept beside it, so opening one
     // channel can no longer blank the evidence that the other eleven have something in them.
@@ -7669,7 +7837,7 @@
   /** This server's cache status (cheap natively). A stale reply for another server is dropped. */
   async function refreshCacheStatus(server: number | null = activeServerId) {
     const seq = ++cacheStatusSeq;
-    if (server === null || locked) {
+    if (server === null || locked || chatBackend==="text-v2") {
       cacheStatus = null;
       return;
     }
@@ -7814,6 +7982,7 @@
   }
 
   async function addChannel() {
+    if(chatBackend==="text-v2")return;
     const name = newChannel.trim().replace(/^#/, "");
     if (!name || activeServerId === null || windowCloseInFlight) return;
     newChannel = "";
@@ -7832,6 +8001,7 @@
   }
 
   async function refreshChannels(server: number) {
+    if(chatBackend==="text-v2")return;
     try {
       const channels = await invoke<Channel[]>("get_channels", { server });
       const s = servers.find((x) => x.id === server);
@@ -7930,6 +8100,7 @@
   let refreshRevision = 0;
   async function refresh(animateArrivals = false) {
     if (!cur || !cur.active || activeServerId === null) return;
+    if(cur.backend==="text-v2"){await refreshNativeHistory();return;}
     const server = activeServerId;
     const channel = cur.active;
     const revision = ++refreshRevision;
@@ -8133,6 +8304,7 @@
    * while the scan is in flight must not be thrown away by its answer.
    */
   async function rebuildUnread(server: number) {
+    if(chatBackend==="text-v2")return;
     try {
       const heads = await invoke<ChannelHead[]>("get_channel_heads", { server });
       if (locked) return;
@@ -8188,6 +8360,7 @@
   let deliverySnapshot = $state({ revision: 0, reports: {} as Record<string, DeliveryState> });
   let delivery = $derived(deliverySnapshot.reports);
   async function refreshDelivery() {
+    if(chatBackend==="text-v2")return;
     const gen = viewGeneration;
     const server = activeServerId;
     const channel = cur?.active;
@@ -8331,6 +8504,7 @@
     }
   }
   async function refreshFiles() {
+    if(cur?.backend==="text-v2")return;
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null) return;
@@ -8630,6 +8804,7 @@
     }
   }
   async function refreshConnectivity() {
+    if(chatBackend==="text-v2")return;
     const generation = ++connectivityRefreshGeneration;
     try {
       const refreshed = await invoke<Connectivity>("get_connectivity");
@@ -9147,6 +9322,7 @@
   /// `route` is the action this tab change belongs to; a standalone call is its own action. A route
   /// a newer action has retired changes nothing.
   function switchView(v: Tab, route: StudioRoute = studioExit.begin()) {
+    if(chatBackend==="text-v2" && v!=="chat")return;
     if (windowCloseInFlight || !route.current()) return;
     if (view === "studio" && v !== "studio" && studioHasWork?.()) {
       void route.leave().then((released) => { if (released) switchView(v, route); }); return;
@@ -10089,6 +10265,7 @@
   }
 
   function serverMenu(s: ServerState): MenuItem[] {
+    if(s.backend==="text-v2")return [{head:true,kind:"server",title:s.name},{label:"Open saved messages",onSelect:()=>{void switchServer(s.id);}}];
     const items: MenuItem[] = [{ head: true, kind: s.isDm ? "dm" : "server", title: s.name }];
     if (s.invite) items.push({ label: "Copy invite", icon: "link", onSelect: () => void copyFreshInvite(s.id) });
     items.push({
@@ -10114,6 +10291,7 @@
   // A sidebar channel row. Channels are a frontend list keyed by name, so there is no backend
   // read cursor to set here: "mark as read" clears the badge, which is what the row shows.
   function channelMenu(c: Channel): MenuItem[] {
+    if(chatBackend==="text-v2")return [];
     const sv = activeServerId;
     if (sv === null || !cur) return [];
     const unread = cur.unread.includes(c.id) || mentionChannels.has(c.id);
@@ -14090,6 +14268,7 @@
   /// The inbox replaces the main pane, so opening it takes the Studio off screen. `then` runs only
   /// once the inbox actually opened (never after a refused Studio Save).
   function openInbox(then: () => void = () => {}) {
+    if(chatBackend==="text-v2")return;
     leaveStudioThen(() => {
       inboxView = true;
       dmHome = false;
@@ -17125,6 +17304,7 @@
     tweenSpaceCamera(spaceClusterAnchor(id), fxMotionOff ? 1 : duration);
   }
   function toggleSpace() {
+    if(chatBackend==="text-v2")return;
     clearTimeout(spaceEnterTimer);
     stopSpaceCameraTween();
     spaceEntering = null;
@@ -21069,6 +21249,7 @@
   }
 
   async function retryPendingSends(automatic = false) {
+    if(chatBackend==="text-v2"){await retryNativeTextRequests();return;}
     if (locked || !uiStateReady || windowCloseInFlight || retryingPendingSends || sending || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
     const session = uiStateLoadGeneration;
     retryingPendingSends = true;
@@ -21101,10 +21282,12 @@
   // Resolves to what the press came to (`SendOutcome`), for "post now" to report; every other
   // caller ignores it.
   async function send(): Promise<SendOutcome> {
+    if(cur?.backend==="text-v2" && (nativeHistoryLoading || busy || nativeRetryGeneration===uiStateLoadGeneration))return "refused";
     const text = draft.trim();
     if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return "refused";
     const server = activeServerId;
     const channel = cur.active;
+    if(cur.backend==="text-v2")return sendNativeText(text,server,channel);
     const session = uiStateLoadGeneration;
     const sessionCurrent = () => !locked && !windowCloseInFlight && session === uiStateLoadGeneration;
     const reply_to = replyingTo;
@@ -22404,7 +22587,7 @@
       if (activeServerId !== null && cur?.active) await channelEventRefresh.request(true);
       // A lost member-route or membership event otherwise leaves Connectivity stale forever.
       // Refresh only while that projection is visible; the backend read is local and bounded.
-      if (memberRoutesVisible(activeServerId, view)) await refreshMemberRoutes();
+      if (cur?.backend!=="text-v2" && memberRoutesVisible(activeServerId, view)) await refreshMemberRoutes();
       diagRecord({
         section: "ipc",
         code: "UI.RESYNC.APPLIED",
@@ -23311,7 +23494,7 @@
     const tick = setInterval(() => {
       nowTick = Date.now();
       pruneTicker(); // stale news stops being news
-      if (memberRoutesVisible(activeServerId, view)) void refreshMemberRoutes();
+      if (cur?.backend!=="text-v2" && memberRoutesVisible(activeServerId, view)) void refreshMemberRoutes();
     }, 60_000);
     // A moving transfer must stop looking active when no new chunk has arrived. This small UI-only
     // clock drives that freshness check; it does not poll the network or alter transfer state.
@@ -26438,9 +26621,9 @@
         </li>
       {/each}
     </ul>
-    <form class="join-channel" onsubmit={(e) => { e.preventDefault(); addChannel(); }}>
+    {#if chatBackend !== "text-v2"}<form class="join-channel" onsubmit={(e) => { e.preventDefault(); addChannel(); }}>
       <input bind:value={newChannel} placeholder="+ join or create #channel" />
-    </form>
+    </form>{/if}
   {/if}
 {/snippet}
 
@@ -27031,6 +27214,17 @@
       {@render brandMark("opening your vault")}
       <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
     </div>
+  {:else if chatBackend === "text-v2" && (servers.length === 0 || showAdd) && !showSettings}
+    <section class="start gate" aria-label="Create a local group">
+      {@render brandMark("your vault is ready")}
+      <h2>Create a local group</h2>
+      <p class="muted small">Messages are saved on this device. Joining and shared history are not available yet.</p>
+      <label class="field"><span>Your name</span><input bind:value={displayName} /></label>
+      <label class="field"><span>Group name</span><input bind:value={newServerName} placeholder="Optional" /></label>
+      <button onclick={found} disabled={busy || nativeRetryGeneration !== null || !displayName.trim()}>{busy ? "Creating…" : "Create group"}</button>
+      {#if servers.length}<button class="ghost" onclick={() => showAdd=false}>Back to saved messages</button>{/if}
+      {#if error}<p role="status">{error}</p>{/if}
+    </section>
   {:else if (servers.length === 0 || showAdd) && !showSettings}
     <!-- The start surface uses the window. It was a single 480px column stacking identity,
          the trust choice, the tabs, the pane, pairing and diagnostics, which squeezed the one
@@ -27552,6 +27746,7 @@
            the middle (however many servers you join), and feedback/settings pinned at the
            bottom. Only the middle band scrolls, so the fixed destinations never slide away. -->
       <nav class="rail">
+        {#if chatBackend !== "text-v2"}
         <div class="rail-fixed">
           <button
             class="server-icon dm-circle"
@@ -27579,6 +27774,7 @@
           </button>
           <div class="rail-sep"></div>
         </div>
+        {/if}
         <div class="rail-scroll">
           {#each railServers as s}
             <button
@@ -27602,7 +27798,7 @@
         </div>
         <div class="rail-fixed rail-foot">
           <div class="rail-sep"></div>
-          <button class="server-icon orbit-btn" class:active={spaceOpen} title="Server space (Ctrl+O)" aria-label="Open the 360 server space" onclick={toggleSpace}>{@render icoOrbit()}</button>
+          {#if chatBackend !== "text-v2"}<button class="server-icon orbit-btn" class:active={spaceOpen} title="Server space (Ctrl+O)" aria-label="Open the 360 server space" onclick={toggleSpace}>{@render icoOrbit()}</button>{/if}
           <button class="server-icon feedback-btn" title="Send feedback (bug / feature request)" aria-label="Send feedback" onclick={() => (showFeedback = true)}>{@render icoFeedback()}</button>
           <button class="server-icon gear" title="Settings" aria-label="Settings" onclick={() => openSettings()}>{@render icoGear()}</button>
         </div>
@@ -27831,7 +28027,7 @@
         {/if}
         <div class="server-head">
           <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
-          <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>{@render icoWrench()}</button>
+          {#if chatBackend !== "text-v2"}<button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>{@render icoWrench()}</button>{/if}
         </div>
         {@render contextNav(false)}
 
@@ -27845,10 +28041,10 @@
               {#if moderationCases.length}<b>{moderationCases.length}</b>{/if}
             </button>
           {/if}
-          <div class="sidebar-ops">
+          {#if chatBackend !== "text-v2"}<div class="sidebar-ops">
             <button type="button" class:active={view === "storage"} title="Storage health & repair" aria-label="Storage health and repair" onclick={() => switchView("storage")}>{@render icoStorage()}<span>Storage</span></button>
             <button type="button" class:active={view === "connectivity"} title="Connectivity assistant" aria-label="Connectivity assistant" onclick={() => switchView("connectivity")}>{@render icoConnectivity()}<span>Connect</span></button>
-          </div>
+          </div>{/if}
         </div>
         {@render youPanel()}
         {/if}
@@ -27861,7 +28057,7 @@
             <p class="muted">Pick a conversation on the left, or start a <strong>New DM</strong> / <strong>Add a friend</strong> with their code. A DM is a private, end-to-end-encrypted 1:1: your identity here stays unlinkable to your servers.</p>
           </div>
         {:else}
-        {#if cur}
+        {#if cur && cur.backend !== "text-v2"}
           <!-- Surface strip: the content column's own nav. The sidebar is contextual to whatever
                is selected here (channels for chat, pages for the wiki, folders for files, …). -->
           <nav class="surface-bar" aria-label="Surfaces">
@@ -27916,7 +28112,11 @@
             {/if}
           </nav>
         {/if}
-        {#if view === "chat"}
+        {#if cur?.backend === "text-v2"}
+          <NativeSavedChat rows={nativeOriginals} loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
+            text={draft} busy={sending || nativeHistoryLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
+            change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
+        {:else if view === "chat"}
           <!-- Header: identity on the left, the channel's description filling the middle, every
                action on the right. The member count lives in the members column, not here. -->
           <h2 class="chan-head" use:headBottom>
@@ -29762,7 +29962,7 @@
 
       <!-- Studio reserves this width for the drawing and its controls. The member-list
            preference is preserved for chat; call frame claims remain in Studio's Art tab. -->
-      {#if !dmHome && cur && !cur.isDm && membersOpen && view !== "studio"}
+      {#if !dmHome && cur && cur.backend !== "text-v2" && !cur.isDm && membersOpen && view !== "studio"}
         <aside class="members-col" aria-label="Members">
           <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}
