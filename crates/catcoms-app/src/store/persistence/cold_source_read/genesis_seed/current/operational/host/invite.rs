@@ -10,6 +10,9 @@ use catcoms_sync::owner_v2::{
 
 pub(super) struct PendingInvite {
     request: V2FounderInviteRequestData,
+    // Retain exact public bytes so journal/publication never reconstructs the
+    // plan later from a digest and potentially changed transport state.
+    routing_plan: Vec<u8>,
     original: Option<PreparedV2FounderInviteData>,
     // Last: the retained spec/preimage and all refusal overlap remain paid.
     fee: CatalogReadReservation,
@@ -25,14 +28,25 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         &mut self,
         layout: &V2CurrentLayoutStore,
         request: V2FounderInviteRequestData,
+        routing_plan: &[u8],
         keys: &mut NativeFounderKeys,
     ) -> Result<([u8; 32], u64), AppError> {
         keys.preflight(&self.origin)?;
-        if request.token == [0; 32]
+        if routing_plan.is_empty() || routing_plan.len() > 1024 {
+            return Err(refused()); // before hash/copy/draw
+        }
+        let route = catcoms_replication::chat::join_bindings::JoinPayloadKindData::RoutingPlan
+            .commitment_data(routing_plan)
+            .map_err(|_| refused())?;
+        if route != request.public_routing_plan
+            || request.token == [0; 32]
             || request.public_routing_plan == [0; 32]
             || request.lifetime_ms == 0
             || request.lifetime_ms > MAX_FOUNDER_INVITE_LIFETIME_MS
-            || self.invite.as_ref().is_some_and(|p| p.request != request)
+            || self
+                .invite
+                .as_ref()
+                .is_some_and(|p| p.request != request || p.routing_plan != routing_plan)
         {
             return Err(refused());
         }
@@ -67,6 +81,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             fee.validate(pool, INVITE_BYTES)?;
             self.invite = Some(Box::new(PendingInvite {
                 request,
+                routing_plan: routing_plan.to_vec(),
                 original: None,
                 fee,
             }));

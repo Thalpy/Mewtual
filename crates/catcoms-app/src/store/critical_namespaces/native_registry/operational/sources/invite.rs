@@ -43,8 +43,12 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
                 catcoms_sync::owner_v2::V2FounderInviteRequestData {
                     token,
                     lifetime_ms,
-                    public_routing_plan: route,
+                    public_routing_plan:
+                        catcoms_replication::chat::join_bindings::JoinPayloadKindData::RoutingPlan
+                            .commitment_data(&route)
+                            .map_err(|_| Error::Failed)?,
                 },
+                &route,
                 &mut inner.keys,
             )
             .map_err(|_| Error::Failed);

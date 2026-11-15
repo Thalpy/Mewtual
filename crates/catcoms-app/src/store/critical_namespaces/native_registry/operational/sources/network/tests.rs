@@ -33,6 +33,25 @@ async fn native_runtime_invite_route_requires_actual_context_and_distinct_birth_
             network.public.as_ref().unwrap().commitment_data()
         );
         let expected = network.invite_routing_plan_data(binding).unwrap();
+        assert!(expected.len() <= 1024 && expected.capacity() <= 1024);
+        // Pin the complete public grammar, including the explicit absence of
+        // certified contacts. Private vault/root IDs, native invocation data
+        // and configured route strings have no trailing field to hide in.
+        let mut plan = catcoms_wire::Decoder::new(&expected);
+        assert_eq!(
+            plan.get_bytes().unwrap(),
+            b"mewtual/chat/native-invite-routing-plan/v2\0"
+        );
+        assert_eq!(plan.get_u16().unwrap(), 2);
+        assert_eq!(plan.get_bytes().unwrap(), binding.group_data());
+        let public = network.public.as_ref().unwrap();
+        assert_eq!(plan.get_bytes().unwrap(), public.public_key_data());
+        assert_eq!(plan.get_bytes().unwrap(), public.peer_id_data().as_bytes());
+        assert_eq!(plan.get_bytes().unwrap(), public.commitment_data());
+        assert_eq!(plan.get_u16().unwrap(), 1); // TCP reservation
+        assert_eq!(plan.get_u16().unwrap(), network.port);
+        assert_eq!(plan.get_u32().unwrap(), 0); // no certified addresses
+        plan.finish().unwrap();
         for field in [0, 1] {
             if field == 0 {
                 network.context.0[0] ^= 1;
