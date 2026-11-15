@@ -17,11 +17,15 @@ mod work;
 pub(crate) use installation::metadata_layout_bytes as installation_metadata_layout_bytes;
 pub use installation::{PreparedTextCurrentAddInstallation, RetiredTextCurrentAdd};
 mod result;
+mod routing;
 #[cfg(test)]
 use faults::TestCut;
 pub(crate) use result::metadata_layout_bytes as completed_result_metadata_layout_bytes;
 pub use result::{
     CompletedTextCurrentAddData, TextCurrentAddParentView, TextCurrentAddRequestView,
+};
+pub use routing::{
+    MAX_TEXT_ADD_ROUTING_PLAIN_BYTES, TEXT_ADD_ROUTING_TYPED_BYTES, TEXT_ADD_ROUTING_WORK,
 };
 
 fn bad() -> MlsError {
@@ -37,6 +41,7 @@ pub struct TextCurrentAddRequestData<'a> {
     subject: [u8; 32],
     nonce: [u8; 16],
     reference: [u8; 32],
+    expected_credential: Option<[u8; 32]>,
     now_ms: u64,
 }
 impl<'a> TextCurrentAddRequestData<'a> {
@@ -52,8 +57,17 @@ impl<'a> TextCurrentAddRequestData<'a> {
             subject,
             nonce,
             reference,
+            expected_credential: None,
             now_ms,
         }
+    }
+
+    /// Untrusted signed-request expectation, not authentication or authority.
+    /// A native producer derives this from its original verified request. The
+    /// actual validated KP must match BEFORE any secret snapshot/restore.
+    pub fn with_expected_credential_data(mut self, digest: [u8; 32]) -> Self {
+        self.expected_credential = Some(digest);
+        self
     }
 }
 impl fmt::Debug for TextCurrentAddRequestData<'_> {
@@ -155,6 +169,9 @@ pub struct PreparedTextCurrentAdd {
     #[cfg(test)]
     faults: faults::Faults,
     outputs: Option<SdkOutputs>,
+    // Same candidate's optional finite routing operation, never a key getter.
+    // It precedes the graph/admission tails, including all failure cleanup.
+    routing: Option<routing::RoutingOutput>,
     commit: Option<Vec<u8>>,
     welcome: Option<Vec<u8>>,
     group_info: Option<Vec<u8>>,
@@ -166,6 +183,7 @@ pub struct PreparedTextCurrentAdd {
     nonce: [u8; 16],
     reference: [u8; 32],
     credential_digest: [u8; 32],
+    expected_credential: Option<[u8; 32]>,
     now_ms: u64,
     original_snapshot_id: [u8; 32],
     phase: Phase,
@@ -198,15 +216,54 @@ impl PreparedTextCurrentAdd {
         admission: &mut Option<TextCurrentAddAdmission>,
         output: &mut Option<Self>,
     ) -> Result<(), MlsError> {
+        Self::prepare_optional_routing_into(device, group, request, None, admission, output)
+    }
+
+    /// Prepare a routing-enabled private candidate. The caller owns/validates
+    /// the tagged plaintext's provenance and independently funds its buffers.
+    /// This never derives a current routing tuple from historical labels.
+    /// Old/new constructors cannot adopt each other's existing Cell.
+    pub fn prepare_with_routing_into(
+        device: &MlsDevice,
+        group: &ServerGroup,
+        request: TextCurrentAddRequestData<'_>,
+        routing_plain: &[u8],
+        admission: &mut Option<TextCurrentAddAdmission>,
+        output: &mut Option<Self>,
+    ) -> Result<(), MlsError> {
+        Self::prepare_optional_routing_into(
+            device,
+            group,
+            request,
+            Some(routing_plain),
+            admission,
+            output,
+        )
+    }
+
+    fn prepare_optional_routing_into(
+        device: &MlsDevice,
+        group: &ServerGroup,
+        request: TextCurrentAddRequestData<'_>,
+        routing_plain: Option<&[u8]>,
+        admission: &mut Option<TextCurrentAddAdmission>,
+        output: &mut Option<Self>,
+    ) -> Result<(), MlsError> {
         if let Some(cell) = output.as_ref() {
             if admission.is_some() {
                 return Err(bad());
+            }
+            match (&cell.routing, routing_plain) {
+                (None, None) => {}
+                (Some(original), Some(plain)) if original.matches_plain(plain) => {}
+                _ => return Err(bad()),
             }
             cell.original.require_same(device, group)?;
             if cell.package_frame != request.frame
                 || cell.subject != request.subject
                 || cell.nonce != request.nonce
                 || cell.reference != request.reference
+                || cell.expected_credential != request.expected_credential
                 || cell.now_ms != request.now_ms
             {
                 return Err(bad());
@@ -219,6 +276,11 @@ impl PreparedTextCurrentAdd {
         // independent reservation must cover this entire conservative inventory
         // before even the package/public-crypto or clone preparation starts.
         invoice::require(limits, 0)?;
+        match routing_plain {
+            Some(plain) => routing::require(limits, plain)?,
+            None if limits.routing_typed_bytes == 0 && limits.routing_work == 0 => {}
+            None => return Err(bad()),
+        }
         let original = OriginalParent::observe(device, group)?;
         // Bound real table probing/copies and fixed key/identity work BEFORE the
         // snapshot/first KP allocation. This pays constructor work, not SDK Add.
@@ -235,6 +297,9 @@ impl PreparedTextCurrentAdd {
         // decode, snapshot copy or typed SDK restore. Preserve Some on error
         // without treating it as a reusable cumulative allocation account.
         paid.enter_preparation()?;
+        // The same SDK preparation entry already owns both resource classes.
+        // A failure below never refunds/reconstructs that cumulative allowance.
+        let routing = routing_plain.map(routing::RoutingOutput::new);
         let mut package_budget =
             PackageBudget::new(limits.package_typed_bytes, limits.package_work);
         let package = text_add_package::validate(
@@ -248,6 +313,12 @@ impl PreparedTextCurrentAdd {
             &mut package_budget,
         )?;
         let credential_digest = *package.identity().credential_digest();
+        if request
+            .expected_credential
+            .is_some_and(|expected| expected != credential_digest)
+        {
+            return Err(bad());
+        }
         let output_remaining = limits
             .output_bytes
             .checked_sub(request.frame.len())
@@ -277,6 +348,7 @@ impl PreparedTextCurrentAdd {
             #[cfg(test)]
             faults: Default::default(),
             outputs: None,
+            routing,
             commit: None,
             welcome: None,
             group_info: None,
@@ -288,6 +360,7 @@ impl PreparedTextCurrentAdd {
             nonce: request.nonce,
             reference: request.reference,
             credential_digest,
+            expected_credential: request.expected_credential,
             now_ms: request.now_ms,
             original_snapshot_id,
             phase: Phase::Prepared,

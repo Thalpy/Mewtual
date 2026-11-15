@@ -947,6 +947,18 @@ impl ServerStore {
     pub(in crate::store) fn validate_mounted_governance_layout(&self) -> Result<(), AppError> {
         let root_guard = self.archive_bootstrap_root.lock().map_err(|_| denied())?;
         let root = root_guard.as_ref().ok_or_else(denied)?;
+        self.validate_mounted_governance_layout_under_archive_root(root)
+    }
+
+    /// Borrow the SAME already-held Root in a concrete Current group guard.
+    /// Reacquiring `archive_bootstrap_root` here would deadlock that guard.
+    /// Lock order remains Root -> governance metadata -> Current metadata.
+    /// The retained mounted payment covers the serialized marker/read/AEAD
+    /// scratch; a parsed namespace descriptor is never an installed owner.
+    pub(in crate::store) fn validate_mounted_governance_layout_under_archive_root(
+        &self,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+    ) -> Result<(), AppError> {
         let mounted = self.governance_layout.lock().map_err(|_| denied())?;
         validate_mounted(self, root, mounted.as_ref().ok_or_else(denied)?)
     }

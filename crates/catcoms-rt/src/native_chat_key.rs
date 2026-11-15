@@ -22,7 +22,7 @@ pub use source_close::NativeChatSourceClose;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;
-const PURPOSES: usize = 5;
+const PURPOSES: usize = 9;
 
 /// Closed purposes selected by concrete producers, never a WebView permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,18 @@ pub enum NativeChatKeyPurpose {
     BootstrapProfile,
     BootstrapHeader,
     MemberAction,
+    /// One governed Add's secret snapshot/restore, SDK operation and finite
+    /// candidate cleanup. Actual Root request/source admission is independent.
+    AddSdk,
+    /// The exact retained governing Header preimage. Bootstrap and ordinary
+    /// member cuts cannot authorize this later membership signature.
+    GoverningHeader,
+    /// The exact retained join response signature. It is distinct from the
+    /// governing Header and never grants response publication or delivery.
+    JoinWelcome,
+    /// A retained invitation preimage. This does not authorize Add, consume
+    /// an invite nonce, or prove that the invitation has been saved.
+    JoinInvite,
 }
 impl NativeChatKeyPurpose {
     fn slot(self) -> usize {
@@ -41,6 +53,12 @@ impl NativeChatKeyPurpose {
             Self::BootstrapProfile => 2,
             Self::BootstrapHeader => 3,
             Self::MemberAction => 4,
+            // Append local counter slots; never alias a bootstrap/member End.
+            // These Rust-only purpose tags are not a wire or disk codec.
+            Self::AddSdk => 5,
+            Self::GoverningHeader => 6,
+            Self::JoinWelcome => 7,
+            Self::JoinInvite => 8,
         }
     }
 }
@@ -483,6 +501,26 @@ pub struct NativeChatPreparedKeyCut {
     entered: bool,
 }
 impl NativeChatPreparedKeyCut {
+    /// Exact negative metadata only, including after cancellation. Unlike
+    /// preflight this deliberately checks no current UI/source permission: a
+    /// cleanup owner needs to distinguish a never-entered cut from partial
+    /// native admission. Passing this check authorizes no key or SDK work.
+    pub fn require_never_entered_data(
+        &self,
+        original: &NativeChatSourceObservation,
+        purpose: NativeChatKeyPurpose,
+    ) -> Result<(), NativeChatKeyRefusal> {
+        if self.purpose != purpose {
+            return Err(NativeChatKeyRefusal::WrongPurpose);
+        }
+        if !std::ptr::eq(Arc::as_ptr(&self.source), original.original.as_ptr()) {
+            return Err(NativeChatKeyRefusal::Foreign);
+        }
+        if self.entered {
+            return Err(NativeChatKeyRefusal::AlreadyEntered);
+        }
+        Ok(())
+    }
     /// Cached negative check with no temporary metadata upgrade/destructor.
     /// It is not primitive, SDK, file or source admission.
     pub fn is_cancelled(&self) -> bool {
@@ -585,6 +623,20 @@ impl NativeChatKeyEnds {
         Self {
             slots: std::array::from_fn(|_| None),
         }
+    }
+    /// Actual retained admission DATA for one exact source/purpose, even after
+    /// that source or UI closes. A partial UI-only admission is insufficient.
+    /// This cannot admit another primitive or authenticate a Root operation;
+    /// it only lets an already admitted finite worker prove its original End
+    /// has not been retired while it continues the SAME bounded unit.
+    pub fn holds_admitted_purpose_data(
+        &self,
+        original: &NativeChatSourceObservation,
+        purpose: NativeChatKeyPurpose,
+    ) -> bool {
+        self.slots[purpose.slot()].as_ref().is_some_and(|end| {
+            end.source_entered && std::ptr::eq(Arc::as_ptr(&end.source), original.original.as_ptr())
+        })
     }
 }
 impl Default for NativeChatKeyEnds {

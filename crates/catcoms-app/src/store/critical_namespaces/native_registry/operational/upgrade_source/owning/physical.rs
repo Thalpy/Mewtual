@@ -574,6 +574,28 @@ impl SourceWork {
             ),
         )
     }
+    /// Actual physical Current stays private to the owning native source.
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_invite_intent<
+        T,
+        R,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<([u8; 32], u64), AppError>
+    where
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    {
+        driver.prepare_native_invite_intent_data(
+            self.physical.current()?,
+            request,
+            routing_plan,
+            keys,
+        )
+    }
     /// Bounded history setup/recovery through the exact retained NativeRequired
     /// Host. No raw Current/Store getter or library-origin fallback escapes.
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_member_history<
