@@ -12,6 +12,9 @@ export interface NativeVaultLockOutcome {
 
 /** Result returned only when native close deliberately leaves the window alive or cannot destroy it. */
 export interface NativeVaultCloseOutcome extends NativeVaultLockOutcome {
+  /** Native-only correlation for the exact attempted failure shown to the user. */
+  continuity_revision?: string;
+  continuity_discardable?: boolean;
   /** A server snapshot failed. A second close retries; it never discards message history. */
   history_error?: string | null;
   /** True when the first close paused so the user can acknowledge lost latest screen state. */
@@ -91,4 +94,24 @@ export class NativeVaultLockCoordinator {
 export function captureLockContinuity(capture: () => string | null): { json: string | null; error: string } {
   try { return { json: capture(), error: "" }; }
   catch (e) { return { json: null, error: `Locked, but the latest Studio edits could not be saved: ${String(e)}` }; }
+}
+
+/** The UI echoes only the exact failure it displayed. Pending work cannot be
+ * acknowledged by an older close warning; old native versions keep their policy. */
+export function closeContinuityAcknowledgement(result: NativeVaultCloseOutcome): {
+  discard: boolean; revision: string | null;
+} {
+  if (!result.deferred || !result.continuity_error || result.history_error) {
+    return { discard: false, revision: null };
+  }
+  if (result.continuity_discardable === undefined) {
+    return { discard: true, revision: null };
+  }
+  const revision = result.continuity_revision;
+  if (result.continuity_discardable && typeof revision === "string"
+    && /^[1-9][0-9]{0,19}$/.test(revision)
+    && BigInt(revision) <= 18446744073709551615n) {
+    return { discard: true, revision };
+  }
+  return { discard: false, revision: null };
 }

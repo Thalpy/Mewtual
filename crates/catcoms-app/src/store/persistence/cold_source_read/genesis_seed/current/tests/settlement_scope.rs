@@ -1,25 +1,25 @@
 //! Scope half only: genuine Current + independently paid prepared cleanup. A unit callback
 //! observes the real Durable role but does not fabricate a Saved cleanup or unlink anything.
 //! Declare as a child of current::tests when the complete settlement consumer is paired.
-//! The audited native fixed-folder cleanup profile is initially Windows-only: three positive
+//! The audited native fixed-folder cleanup supports Windows and Linux: three positive
 //! tests run there; other platforms run an explicit no-effect refusal test, not those positives.
 use super::*;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use crate::store::critical_namespaces::archive_current_codec::SCOPE_BUFFER_FEE;
 use crate::store::persistence::v2_genesis_activation::settlement::PreparedGenesisSeedSettlement;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use catcoms_sync::local_chat_scope::ManagedChatScopeReservation;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use std::cell::Cell;
 use std::sync::atomic::Ordering;
 use zeroize::Zeroizing;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 struct CountRng<'rng> {
     inner: &'rng mut ChaCha20Rng,
     draws: usize,
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl RngCore for CountRng<'_> {
     fn next_u32(&mut self) -> u32 {
         self.draws += 1;
@@ -38,7 +38,7 @@ impl RngCore for CountRng<'_> {
         self.inner.try_fill_bytes(dest)
     }
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl CryptoRng for CountRng<'_> {}
 
 /// Compare the COMPLETE actual serialized inventory without logging its nonce/key rows.
@@ -49,7 +49,7 @@ fn inventory(store: &ServerStore) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(catcoms_crypto::unseal(&store.keys.db_key().unwrap(), &sealed).unwrap())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn even_clean_scope_barrier_precedes_cleanup_and_retains_exact_owner_on_both_write_faults() {
     for after_rename in [false, true] {
@@ -142,7 +142,7 @@ fn even_clean_scope_barrier_precedes_cleanup_and_retains_exact_owner_on_both_wri
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn covering_scope_credit_is_original_account_bound_and_cancelled_owner_cannot_enter() {
     let mut f = fixture(0xef10);
@@ -221,7 +221,7 @@ fn covering_scope_credit_is_original_account_bound_and_cancelled_owner_cannot_en
     assert!(current.validate_original(&f.layout).is_err());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn even_clean_covering_write_preserves_all_unrelated_rows_and_their_original_owners() {
     use crate::store::ChatAdmissionKey;
@@ -272,7 +272,7 @@ fn even_clean_covering_write_preserves_all_unrelated_rows_and_their_original_own
     current.validate_original(&f.layout).unwrap();
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn unaudited_native_cleanup_profile_refuses_without_scope_effect_or_seed_loss() {
     let mut f = fixture(0xef30);

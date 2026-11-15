@@ -420,22 +420,22 @@ async fn original_history_survives_end_lock_cycle_and_explicit_local_pending_clo
     case.native
         .state
         .session_lock_requested
-        .store(true, Ordering::Release);
+        .store(true, Ordering::SeqCst);
     case.native
         .state
         .ui_session_generation
-        .fetch_add(1, Ordering::AcqRel);
+        .fetch_add(1, Ordering::SeqCst);
     let response = case.query(1);
     assert!(response.result.as_ref().unwrap().0 == id);
     drop(response);
     case.native
         .state
         .session_lock_requested
-        .store(false, Ordering::Release);
+        .store(false, Ordering::SeqCst);
     case.native
         .state
         .ui_session_generation
-        .fetch_add(1, Ordering::AcqRel);
+        .fetch_add(1, Ordering::SeqCst);
     // No SDK work was ever exposed in this fixture. Local preparation closure remains
     // distinct from uncertain Root publication and from Phase/Workflow retirement.
     case.native

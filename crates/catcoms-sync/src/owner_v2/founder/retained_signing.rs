@@ -83,7 +83,16 @@ impl RawSignature {
             calls: 0,
         }
     }
-    pub(super) fn sign(&mut self, device: &MlsDevice, bytes: &[u8]) -> Result<[u8; 64], ChatError> {
+    pub(super) fn sign(
+        &mut self,
+        device: &MlsDevice,
+        bytes: &[u8],
+        native: Option<(
+            &catcoms_rt::NativeChatSourceObservation,
+            &mut catcoms_rt::NativeChatPreparedKeyCut,
+            &mut catcoms_rt::NativeChatKeyEnds,
+        )>,
+    ) -> Result<[u8; 64], ChatError> {
         let mut binding = blake3::Hasher::new();
         binding.update(match self.kind {
             SignatureKind::Profile => b"retained-bootstrap-profile/v1\0",
@@ -98,6 +107,19 @@ impl RawSignature {
                 return Err(ChatError::Signature);
             }
             return self.raw.ok_or(ChatError::Signature);
+        }
+        if let Some((original, cut, ends)) = native {
+            let purpose = match self.kind {
+                SignatureKind::Profile => catcoms_rt::NativeChatKeyPurpose::BootstrapProfile,
+                SignatureKind::Header => catcoms_rt::NativeChatKeyPurpose::BootstrapHeader,
+            };
+            // Source validation and canonical full-key/payload hashing above
+            // precede the final concrete native edge. Refusal leaves this slot
+            // unentered; SDK/Core accounting elsewhere is never refunded.
+            #[cfg(test)]
+            observe_native_key_boundary(self.kind);
+            cut.enter(original, purpose, ends)
+                .map_err(|_| ChatError::Signature)?;
         }
         // Do not infer "unused" from signer error/unwind. Bind entry before the primitive;
         // returned raw is cached immediately, before any verification or source recheck.
@@ -145,6 +167,33 @@ enum Fault {
 #[cfg(test)]
 thread_local! {
     static FAULT: std::cell::Cell<Option<(u8, Fault)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+type NativeKeyBoundaryHook = Option<(u8, Box<dyn FnOnce()>)>;
+#[cfg(test)]
+thread_local! {
+    static NATIVE_KEY_BOUNDARY: std::cell::RefCell<NativeKeyBoundaryHook> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+#[cfg(test)]
+fn observe_native_key_boundary(kind: SignatureKind) {
+    let kind = match kind {
+        SignatureKind::Profile => 0,
+        SignatureKind::Header => 1,
+    };
+    let hook = NATIVE_KEY_BOUNDARY.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(expected, _)| *expected == kind) {
+            slot.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 #[cfg(test)]
 fn take_fault(kind: SignatureKind, fault: Fault) -> bool {

@@ -188,7 +188,7 @@ async fn native_media_shared_helpers_reject_bad_input_and_lock_without_retaining
     crate::studio_exports::publish_pixa_with_state(&state, 7, valid.clone())
         .await
         .unwrap();
-    state.session_lock_requested.store(true, Ordering::Release);
+    state.session_lock_requested.store(true, Ordering::SeqCst);
     assert!(
         crate::studio_exports::publish_pixa_with_state(&state, 7, valid)
             .await
@@ -332,15 +332,17 @@ async fn gate7_reopened_native_composition_exports_and_other_peer_reads_actual_p
     actor.shutdown().await;
     task.await.unwrap();
     drain.await.unwrap();
-    state.servers.lock().await.clear();
+    state.servers.lock().await.clear_legacy_fixture();
     drop(state.store.lock().await.take());
     *state.store.lock().await =
-        Some(ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap());
+        Some((ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap()).into());
     let snapshot = state
         .store
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .load_server(7)
         .unwrap();
@@ -402,7 +404,7 @@ async fn gate7_reopened_native_composition_exports_and_other_peer_reads_actual_p
     let b_root = tempfile::tempdir().unwrap();
     let b_state = Arc::new(AppState::default());
     *b_state.store.lock().await =
-        Some(ServerStore::open(b_root.path(), b"studio-native", &mut rng()).unwrap());
+        Some((ServerStore::open(b_root.path(), b"studio-native", &mut rng()).unwrap()).into());
     *b_state.session_resumable.lock().await = true;
     attach_blob_store(&b_state, &mut bob).await;
     let device = bob.device_id();
@@ -443,6 +445,8 @@ async fn gate7_reopened_native_composition_exports_and_other_peer_reads_actual_p
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .blob_store(&hex::encode(&group))
         .unwrap()

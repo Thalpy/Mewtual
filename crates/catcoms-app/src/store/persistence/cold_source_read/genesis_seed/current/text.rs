@@ -5,6 +5,28 @@
 //! cached original ownership; they deliberately never invoke strict genesis physical proof.
 use super::UnexposedV2GenesisCurrent;
 
+impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    /// Warm-only original, never a node extracted from decoded cold metadata.
+    /// No raw SDK/RNG loan escapes; the SAME node owns every retained draw.
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn prepare_text_invite_data(
+        &mut self,
+        store: &crate::store::ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        native: &catcoms_rt::NativeChatSourceObservation,
+        slot: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderInviteData>,
+    ) -> Result<(), crate::AppError> {
+        self.require_text_original_data(store)
+            .map_err(|_| crate::store::critical_namespaces::refused())?;
+        let result = self
+            .node
+            .prepare_invite_data(request, native, slot)
+            .map_err(crate::AppError::from);
+        self.require_text_original_data(store)
+            .map_err(|_| crate::store::critical_namespaces::refused())?;
+        result
+    }
+}
+
 macro_rules! node_call_throughs {
     ($ty:ident) => {
         impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> $ty<T, R> {
@@ -158,6 +180,21 @@ macro_rules! node_call_throughs {
                 catcoms_sync::owner_v2::V2MemberSignRefusal,
             > {
                 self.node.sign_ordinary_admitted(inputs, guard)
+            }
+
+            /// Concrete native edge on the SAME family/node; caller retains
+            /// the native pins and Ends outside Current/Core guards.
+            pub(in crate::store::persistence::cold_source_read::genesis_seed::current)
+            fn sign_text_ordinary_admitted_native<'a>(
+                &self,
+                inputs: &catcoms_sync::owner_v2::V2MemberDraftInputs,
+                guard: catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+                original: &catcoms_rt::NativeChatSourceObservation,
+                cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+                ends: &mut catcoms_rt::NativeChatKeyEnds,
+            ) -> Result<catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+                catcoms_sync::owner_v2::V2MemberSignRefusal> {
+                self.node.sign_ordinary_admitted_native(inputs, guard, original, cut, ends)
             }
         }
     };

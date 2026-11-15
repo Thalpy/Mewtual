@@ -241,7 +241,6 @@ async fn released_global_ceiling_and_truncated_frames_fail_before_false_success(
 /// TCP/Noise/yamux stream, so refusal must happen in the production client's read_response.
 #[derive(Clone, Debug, Default)]
 struct HostileCodec(BytesCodec, Arc<AtomicUsize>);
-#[async_trait::async_trait]
 impl Codec for HostileCodec {
     type Protocol = StreamProtocol;
     type Request = Vec<u8>;

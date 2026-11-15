@@ -16,21 +16,29 @@ pub use retained_signing::{RetainedFounderSigning, RETAINED_FOUNDER_SIGNING_INVO
 pub use snapshot::{FounderPrivateSnapshotView, FounderSnapshotDigest, FounderSnapshotLimits};
 mod archive_candidate;
 pub use archive_candidate::{
-    open_bootstrap_source_data, prepare_v2_genesis_seed, ArchiveSourceRefusal,
-    BootstrapSourceContextData, BootstrapSourceContextSpec, BootstrapSourceDataView,
-    BootstrapSourceId, BootstrapSourceRefusal, DetachedV2AppendData, DetachedV2CreateData,
-    FounderArchivePreparation, FounderBootstrapPreparation, GenesisArchiveView,
-    OpenedBootstrapSourceData, OriginalV2GenesisSeedObservation, PreparedBootstrapSource,
-    PreparedUnboundV2GenesisNode, PreparedV2AppendData, PreparedV2CreateData,
-    ReturnedV2GenesisAttach, UnboundV2GenesisNode, UnboundV2GenesisSeed, V2AppendDataView,
-    V2AppendPlanObservation, V2CreateDataView, V2CreatePacketId, V2CreateRefusal, V2CreateRequest,
-    V2GenesisRuntimeParts, V2GenesisRuntimeRefusal, V2GenesisSeedData, V2GenesisSeedLimits,
-    V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE,
-    BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES, BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES,
-    CREATE_DATA_BUFFER_BYTES, GENESIS_ARCHIVE_PRIVATE_INVOICE, MAX_BOOTSTRAP_SOURCE_FRAME_BYTES,
-    MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, MAX_CREATE_ACTION_BYTES, MAX_CREATE_CIPHERTEXT_BYTES,
-    MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES, MAX_CREATE_PADDED_BYTES,
-    V2_GENESIS_SEED_METADATA_BYTES,
+    open_bootstrap_source_data, prepare_v2_genesis_seed, prepare_v2_genesis_seed_native_warm,
+    ArchiveSourceRefusal, BootstrapSourceContextData, BootstrapSourceContextSpec,
+    BootstrapSourceDataView, BootstrapSourceId, BootstrapSourceRefusal, DetachedV2AppendData,
+    DetachedV2CreateData, FounderArchivePreparation, FounderBootstrapPreparation,
+    GenesisArchiveView, OpenedBootstrapSourceData, OriginalV2GenesisSeedObservation,
+    PreparedBootstrapSource, PreparedUnboundV2GenesisNode, PreparedV2AppendData,
+    PreparedV2CreateData, ReturnedV2GenesisAttach, UnboundV2GenesisNode, UnboundV2GenesisSeed,
+    V2AppendDataView, V2AppendPlanObservation, V2CreateDataView, V2CreatePacketId, V2CreateRefusal,
+    V2CreateRequest, V2GenesisRuntimeParts, V2GenesisRuntimeRefusal, V2GenesisSeedData,
+    V2GenesisSeedLimits, V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES,
+    BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE, BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES,
+    BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES, CREATE_DATA_BUFFER_BYTES, GENESIS_ARCHIVE_PRIVATE_INVOICE,
+    MAX_BOOTSTRAP_SOURCE_FRAME_BYTES, MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, MAX_CREATE_ACTION_BYTES,
+    MAX_CREATE_CIPHERTEXT_BYTES, MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES,
+    MAX_CREATE_PADDED_BYTES, V2_GENESIS_SEED_METADATA_BYTES,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use archive_candidate::{
+    PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData, RetiredV2FounderAddNativeCustody,
+    V2FounderAddNativeStage, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
+    V2FounderGovernanceNegative, V2FounderInviteRequestData, V2InstalledFounderAddData,
+    FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
+    MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 
 /// Conservative logical invoice for the named private public-record/scope/watch/signature
@@ -164,7 +172,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// A host using a native scope must reserve/stage/attach it FIRST, so freeze observes the
     /// same original reservation. Preparing unmanaged DATA then changing scope cannot rebind.
     pub fn prepare_owner_v2_founder(&self) -> Result<PreparedFounder, SyncError> {
-        self.prepare_owner_v2_founder_with_cache(None)
+        self.prepare_owner_v2_founder_with_cache(None, None)
     }
 
     /// Begin a retained preparation on this ACTUAL original node/scope. The host must
@@ -182,12 +190,38 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         signing: &mut RetainedFounderSigning,
     ) -> Result<PreparedFounder, SyncError> {
         signing.validate_original(self)?;
-        self.prepare_owner_v2_founder_with_cache(Some(signing))
+        self.prepare_owner_v2_founder_with_cache(Some(signing), None)
+    }
+
+    /// Concrete native Profile/Header cuts at each actual primitive. This is
+    /// still a private-record producer, not native command authentication: the
+    /// Root NativeRequired owner must bind `original` to its actual retained
+    /// creator and reject all library advancing paths. The caller owns `ends`
+    /// outside every Root writer, including refusal and unwind.
+    pub fn prepare_owner_v2_founder_native_retained(
+        &self,
+        signing: &mut RetainedFounderSigning,
+        original: &catcoms_rt::NativeChatSourceObservation,
+        profile: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        header: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+    ) -> Result<PreparedFounder, SyncError> {
+        signing.validate_original(self)?;
+        self.prepare_owner_v2_founder_with_cache(
+            Some(signing),
+            Some(&mut NativeBootstrapSigning {
+                original,
+                profile,
+                header,
+                ends,
+            }),
+        )
     }
 
     fn prepare_owner_v2_founder_with_cache(
         &self,
         mut signing: Option<&mut RetainedFounderSigning>,
+        mut native: Option<&mut NativeBootstrapSigning<'_>>,
     ) -> Result<PreparedFounder, SyncError> {
         let source = self.fresh_chat_admission().ok_or_else(unavailable)?;
         let origin = source
@@ -218,7 +252,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     signing
                         .validate_original(self)
                         .map_err(|_| catcoms_replication::chat::ChatError::Signature)?;
-                    return signing.profile.sign(&self.device, bytes);
+                    let cut = native
+                        .as_deref_mut()
+                        .map(|native| (native.original, &mut *native.profile, &mut *native.ends));
+                    return signing.profile.sign(&self.device, bytes, cut);
                 }
                 self.device
                     .sign(bytes)
@@ -282,7 +319,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     signing
                         .validate_original(self)
                         .map_err(|_| catcoms_replication::chat::ChatError::Signature)?;
-                    return signing.header.sign(&self.device, bytes);
+                    let cut = native
+                        .map(|native| (native.original, &mut *native.header, &mut *native.ends));
+                    return signing.header.sign(&self.device, bytes, cut);
                 }
                 self.device
                     .sign(bytes)
@@ -304,6 +343,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(result)
     }
 }
+
+// Borrowed concrete custody only; no callback can run at the final key edge.
+struct NativeBootstrapSigning<'a> {
+    original: &'a catcoms_rt::NativeChatSourceObservation,
+    profile: &'a mut catcoms_rt::NativeChatPreparedKeyCut,
+    header: &'a mut catcoms_rt::NativeChatPreparedKeyCut,
+    ends: &'a mut catcoms_rt::NativeChatKeyEnds,
+}
+
 impl PreparedFounder {
     /// Inert semantic label only; native/root/current authority is not created by reading it.
     pub fn profile_id(&self) -> OwnerFactId {

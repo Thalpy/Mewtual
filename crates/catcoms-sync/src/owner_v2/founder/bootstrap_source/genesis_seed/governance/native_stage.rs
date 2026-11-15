@@ -1,0 +1,316 @@
+//! Finite native work versus retained closed DATA. These APIs do not issue
+//! Root cancellation/saved/current authority. In particular a native key drain
+//! is not actual SDK/body/physical-IO destruction or a whole Source close.
+use super::*;
+
+/// A local stage selector, never a serialized WebView permission or Root proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V2FounderAddNativeStage {
+    Sdk,
+    GoverningHeader,
+    Welcome,
+}
+impl V2FounderAddNativeStage {
+    fn purpose(self) -> NativeChatKeyPurpose {
+        match self {
+            Self::Sdk => NativeChatKeyPurpose::AddSdk,
+            Self::GoverningHeader => NativeChatKeyPurpose::GoverningHeader,
+            Self::Welcome => NativeChatKeyPurpose::JoinWelcome,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdmissionState {
+    Unstarted,
+    Attempting,
+    KnownLocalRefusal,
+    Admitted,
+}
+
+/// Private witness from the ACTUAL native enter call. Neither missing raw nor
+/// a protocol phase can manufacture it. Attempt accounting survives reauth.
+pub(super) struct NativeStageAdmission {
+    state: AdmissionState,
+    attempts: u64,
+}
+impl NativeStageAdmission {
+    pub(super) fn new() -> Self {
+        Self {
+            state: AdmissionState::Unstarted,
+            attempts: 0,
+        }
+    }
+    pub(super) fn may_enter(&self) -> bool {
+        self.state == AdmissionState::Unstarted
+    }
+    fn eligible(&self) -> bool {
+        matches!(
+            self.state,
+            AdmissionState::Unstarted | AdmissionState::KnownLocalRefusal
+        )
+    }
+    fn can_retire(
+        &self,
+        cut: &NativeChatPreparedKeyCut,
+        source: &NativeChatSourceObservation,
+        purpose: NativeChatKeyPurpose,
+    ) -> bool {
+        self.state == AdmissionState::KnownLocalRefusal
+            || (self.state == AdmissionState::Unstarted
+                && cut.require_never_entered_data(source, purpose).is_ok())
+    }
+    pub(super) fn enter(
+        &mut self,
+        cut: &mut NativeChatPreparedKeyCut,
+        source: &NativeChatSourceObservation,
+        purpose: NativeChatKeyPurpose,
+        ends: &mut NativeChatKeyEnds,
+    ) -> Result<(), SyncError> {
+        if self.state != AdmissionState::Unstarted {
+            return Err(unavailable());
+        }
+        self.attempts = self.attempts.checked_add(1).ok_or_else(unavailable)?;
+        // BEFORE calling RT: an unwind must stay terminal, rather than a retry
+        // receiving AlreadyEntered and laundering it into a refusal witness.
+        self.state = AdmissionState::Attempting;
+        #[cfg(test)]
+        test_cut(TestCut::NativeAdmissionAttempting);
+        match cut.enter(source, purpose, ends) {
+            Ok(()) => {
+                self.state = AdmissionState::Admitted;
+                Ok(())
+            }
+            Err(
+                catcoms_rt::NativeChatKeyRefusal::Busy
+                | catcoms_rt::NativeChatKeyRefusal::Unavailable,
+            ) => {
+                self.state = AdmissionState::KnownLocalRefusal;
+                Err(unavailable())
+            }
+            // Foreign/WrongPurpose/AlreadyEntered are invariant failures, not
+            // evidence that a fresh native admission is safe.
+            Err(_) => Err(unavailable()),
+        }
+    }
+    fn reauthorize(&mut self) {
+        debug_assert!(self.eligible());
+        self.state = AdmissionState::Unstarted; // attempts are never reset
+    }
+    #[cfg(test)]
+    pub(super) fn attempts_for_test(&self) -> u64 {
+        self.attempts
+    }
+}
+
+/// Dispose OUTSIDE every native/Root/Core writer. Metadata pins are retired
+/// with their actual End batch, rather than retaining obsolete UI-generation
+/// payments for the lifetime of an inert closed SDK snapshot.
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode;
+/// fn ignore(node: &mut PreparedV2FounderGovernanceNode<(), ()>) {
+///     node.retire_closed_add_native_data().unwrap();
+/// }
+/// ```
+///
+/// ```
+/// use catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode;
+/// fn retire_outside_writers(node: &mut PreparedV2FounderGovernanceNode<(), ()>) {
+///     let retired = node.retire_closed_add_native_data().unwrap();
+///     drop(retired);
+/// }
+/// ```
+#[must_use = "retain and dispose native custody outside every native/Root/Core writer"]
+pub struct RetiredV2FounderAddNativeCustody {
+    _sdk: Option<NativeChatPreparedKeyCut>,
+    _header: Option<NativeChatPreparedKeyCut>,
+    _welcome: Option<NativeChatPreparedKeyCut>,
+    // LAST: displaced cuts are gone before counter retirement can wake the
+    // native close job. Its own metadata pins survive through that retirement.
+    _ends: NativeChatKeyEnds,
+}
+impl std::fmt::Debug for RetiredV2FounderAddNativeCustody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetiredV2FounderAddNativeCustody")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
+    /// Complete ONLY the SAME already-admitted finite SDK unit from its frozen
+    /// inputs/time and retained RNG. It neither constructs another Cell nor
+    /// enters a new native cut. A real retained source End is mandatory even
+    /// after UI closure. Root's cleanup owner must retain this capsule through
+    /// all partial/lost-return continuations before waiting on key drainage.
+    pub fn finish_admitted_add_data_native(&mut self) -> Result<(), SyncError> {
+        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        if p.sdk_continuation_retired
+            || p.phase != Phase::SdkEntered
+            || !p
+                .ends
+                .holds_admitted_purpose_data(&p.original, NativeChatKeyPurpose::AddSdk)
+        {
+            return Err(unavailable());
+        }
+        p.cell
+            .as_mut()
+            .ok_or_else(unavailable)?
+            .execute_private_with_routing(&mut self.node._parts.body._rng)
+            .map_err(|_| unavailable())?;
+        // Actual routing/provider/output closure, not a caller flag or a
+        // previously spent cut. Cache phase before any hook/lost return.
+        p.cell
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .completed_result_data()
+            .map_err(|_| unavailable())?;
+        p.phase = Phase::Complete;
+        #[cfg(test)]
+        test_cut(TestCut::SdkComplete);
+        Ok(())
+    }
+}
+
+impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
+    /// Move finite native custody only AFTER the actual Cell is fully closed.
+    /// Partial resumable SDK work must keep its original End; there is no
+    /// inference from phase alone or another UI generation. The closed Cell
+    /// remains historical DATA, while SDK continuation is permanently fenced.
+    ///
+    /// Root must independently own the real stage/IO worker and dispose this
+    /// returned envelope outside writers. Key drain alone supplies no Root
+    /// save, whole Source acknowledgement or response-release permission.
+    pub fn retire_closed_add_native_data(
+        &mut self,
+    ) -> Result<RetiredV2FounderAddNativeCustody, SyncError> {
+        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        p.cell
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .completed_result_data()
+            .map_err(|_| unavailable())?;
+        if p.phase == Phase::SdkEntered {
+            // A lost Sync return may leave phase behind the actual Cell.
+            p.phase = Phase::Complete;
+        }
+        p.sdk_continuation_retired = true;
+        record_key_eligibility(p);
+        Ok(RetiredV2FounderAddNativeCustody {
+            _sdk: p.sdk_cut.take(),
+            _header: p.header_cut.take(),
+            _welcome: p.welcome_cut.take(),
+            _ends: std::mem::take(&mut p.ends),
+        })
+    }
+
+    /// Retire cancelled/pre-effect native metadata ONLY before any SDK Cell
+    /// exists. Unknown native entry is not recoverable from phase alone.
+    /// The same request/payment stays owned and all prior debits remain spent.
+    pub fn retire_unstarted_add_native_data(
+        &mut self,
+    ) -> Result<RetiredV2FounderAddNativeCustody, SyncError> {
+        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        let cut = p.sdk_cut.as_ref().ok_or_else(unavailable)?;
+        if p.phase != Phase::Prepared
+            || p.cell.is_some()
+            || p.admission.is_none()
+            || p.sdk_continuation_retired
+            || !p
+                .sdk_native
+                .can_retire(cut, &p.original, NativeChatKeyPurpose::AddSdk)
+        {
+            return Err(unavailable());
+        }
+        p.sdk_may_reauthorize = true;
+        record_key_eligibility(p);
+        Ok(RetiredV2FounderAddNativeCustody {
+            _sdk: p.sdk_cut.take(),
+            _header: p.header_cut.take(),
+            _welcome: p.welcome_cut.take(),
+            _ends: std::mem::take(&mut p.ends),
+        })
+    }
+
+    /// Bind a fresh, genuinely never-entered SAME-source cut after displaced
+    /// custody has retired outside writers. Root MUST freshly authenticate the
+    /// exact operation, covered intent/outcome, current parent and source.
+    /// This DATA seam grants none of those permissions and refunds no attempt.
+    pub fn prepare_add_native_stage_data(
+        &mut self,
+        stage: V2FounderAddNativeStage,
+        cut: NativeChatPreparedKeyCut,
+    ) -> Result<(), NativeChatPreparedKeyCut> {
+        let Some(p) = self.pending.as_mut() else {
+            return Err(cut);
+        };
+        if cut
+            .require_never_entered_data(&p.original, stage.purpose())
+            .is_err()
+            || cut.preflight(&p.original, stage.purpose()).is_err()
+        {
+            return Err(cut);
+        }
+        match stage {
+            V2FounderAddNativeStage::Sdk
+                if p.phase == Phase::Prepared
+                    && p.cell.is_none()
+                    && p.sdk_cut.is_none()
+                    && p.sdk_may_reauthorize
+                    && !p.sdk_continuation_retired
+                    && p.sdk_native.eligible() =>
+            {
+                p.sdk_native.reauthorize();
+                p.sdk_may_reauthorize = false;
+                p.sdk_cut = Some(cut);
+            }
+            V2FounderAddNativeStage::GoverningHeader
+                if p.phase == Phase::Complete
+                    && p.unsigned.is_some()
+                    && p.raw.is_none()
+                    && p.header_cut.is_none()
+                    && p.header_may_reauthorize
+                    && p.header_native.eligible() =>
+            {
+                p.header_native.reauthorize();
+                p.header_may_reauthorize = false;
+                p.header_cut = Some(cut);
+            }
+            V2FounderAddNativeStage::Welcome
+                if p.phase == Phase::Materialized
+                    && p.welcome_cut.is_none()
+                    && p.welcome_may_reauthorize
+                    && p.welcome_native.eligible() =>
+            {
+                let Some(w) = p.welcome.as_mut() else {
+                    return Err(cut);
+                };
+                if !w.may_reauthorize_native_data() {
+                    return Err(cut);
+                }
+                p.welcome_native.reauthorize();
+                p.welcome_may_reauthorize = false;
+                p.welcome_cut = Some(cut);
+            }
+            _ => return Err(cut),
+        }
+        Ok(())
+    }
+}
+
+fn record_key_eligibility(p: &mut PendingAdd) {
+    if let Some(cut) = &p.header_cut {
+        // Native eligibility only: pre-SDK cleanup must retain evidence that
+        // this future Header cut never entered. The actual completed SDK and
+        // frozen preimage are required again at fresh stage authorization.
+        p.header_may_reauthorize =
+            p.header_native
+                .can_retire(cut, &p.original, NativeChatKeyPurpose::GoverningHeader);
+    }
+    if let Some(cut) = &p.welcome_cut {
+        p.welcome_may_reauthorize =
+            p.welcome_native
+                .can_retire(cut, &p.original, NativeChatKeyPurpose::JoinWelcome);
+    }
+}
