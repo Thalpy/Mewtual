@@ -97,9 +97,9 @@ async fn check_preview_conversion(expire_after_conversion: bool) {
                 // the actual native guard; session fields and cancellation stay untouched.
                 assert!(state.servers.try_lock().is_err());
                 assert!(state.ui_session_commit.try_lock().is_err());
-                assert!(!state.session_lock_requested.load(Ordering::Acquire));
+                assert!(!state.session_lock_requested.load(Ordering::SeqCst));
                 assert_eq!(
-                    state.ui_session_generation.load(Ordering::Acquire),
+                    state.ui_session_generation.load(Ordering::SeqCst),
                     generation
                 );
                 Ok(value)
@@ -119,7 +119,16 @@ async fn check_preview_conversion(expire_after_conversion: bool) {
         } else {
             assert_eq!(result.unwrap()["awaitingTenureReceipt"], true);
         }
-        assert_eq!(state.servers.lock().await[&fixture::SERVER].instance, 1);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&fixture::SERVER)
+                .expect("Legacy fixture row")
+                .instance,
+            1
+        );
         f.shutdown().await;
     }
 }

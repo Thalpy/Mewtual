@@ -31,8 +31,10 @@ pub(in crate::store) const MAX_SEED_PLAIN: usize =
     2 * MAX_CATALOG_FRAME + MAX_FRAME + MAX_MARKER_FRAME + 1024;
 pub(in crate::store) const MAX_SEED_FRAME: usize = MAX_SEED_PLAIN + 40;
 const SEED_TAG: &[u8] = b"catcoms/private-native-backend-declaration/v1\0";
-const INDEX_KEY: &str = "catcoms/private-native-backend-index-key/v1";
-const MARKER_KEY: &str = "catcoms/private-native-backend-marker-key/v1";
+pub(in crate::store::critical_namespaces::native_registry) const INDEX_KEY: &str =
+    "catcoms/private-native-backend-index-key/v1";
+pub(in crate::store::critical_namespaces::native_registry) const MARKER_KEY: &str =
+    "catcoms/private-native-backend-marker-key/v1";
 const SEED_KEY: &str = "catcoms/private-native-backend-declaration-key/v1";
 mod installation;
 pub use installation::{NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryStore};
@@ -40,7 +42,75 @@ pub use installation::{NativeRegistryInstallation, NativeRegistryPolicy, NativeR
 /// Private handler plus its original prepaid lifetime. No public Current policy can
 /// construct this switch, and ordinary openers cannot opt in by decoding an ID7.
 #[derive(Clone)]
-pub(in crate::store) struct NativeRegistryHandler {
+pub(in crate::store) enum NativeRegistryHandler {
+    Migration(NativeMigrationHandler),
+    Operational(super::operational::Handler),
+    Lifecycle(super::lifecycle::admission::Handler),
+    GovernedLifecycle(super::lifecycle::admission::Handler),
+    GovernanceOpening(super::lifecycle::admission::Handler),
+}
+impl NativeRegistryHandler {
+    pub(in crate::store) fn require(&self) -> Result<(), AppError> {
+        match self {
+            Self::Migration(handler) => handler.require(),
+            Self::Operational(handler) => handler.require(),
+            Self::Lifecycle(handler)
+            | Self::GovernedLifecycle(handler)
+            | Self::GovernanceOpening(handler) => handler.require(),
+        }
+    }
+    pub(in crate::store) fn namespace_version(&self) -> u32 {
+        match self {
+            Self::Migration(_) => 1,
+            Self::Operational(_) => 2,
+            Self::Lifecycle(_) | Self::GovernedLifecycle(_) | Self::GovernanceOpening(_) => 3,
+        }
+    }
+    pub(in crate::store::critical_namespaces) fn parse_layout<'a>(
+        &self,
+        plain: &'a [u8],
+        domain: &[u8; 32],
+        executing: bool,
+    ) -> Result<super::super::pending_join_codec::Parsed<'a>, AppError> {
+        match self {
+            Self::Migration(_) => super::super::pending_join_codec::parse_native_registry_layout(
+                plain, domain, executing, false,
+            ),
+            Self::Operational(_) => {
+                super::super::pending_join_codec::parse_operational_native_registry_layout(
+                    plain, domain, executing,
+                )
+            }
+            Self::Lifecycle(_) => {
+                super::super::pending_join_codec::parse_lifecycle_native_registry_layout(
+                    plain, domain, executing,
+                )
+            }
+            Self::GovernedLifecycle(_) => {
+                super::super::pending_join_codec::parse_governed_native_registry_layout(
+                    plain, domain, executing,
+                )
+            }
+            Self::GovernanceOpening(_) => {
+                super::super::pending_join_codec::parse_native_governance_family(
+                    plain, domain, executing,
+                )
+            }
+        }
+    }
+    /// Exact concrete native3 handler loan, never a version-number conversion.
+    pub(in crate::store) fn lifecycle(&self) -> Option<&super::lifecycle::admission::Handler> {
+        match self {
+            Self::Lifecycle(h) | Self::GovernedLifecycle(h) | Self::GovernanceOpening(h) => Some(h),
+            _ => None,
+        }
+    }
+    pub(in crate::store) fn is_governed(&self) -> bool {
+        matches!(self, Self::GovernedLifecycle(_))
+    }
+}
+#[derive(Clone)]
+pub(in crate::store) struct NativeMigrationHandler {
     policy: NativeRegistryPreparationPolicy,
     fee: Arc<CatalogReadReservation>,
     physical_fee: Arc<CatalogReadReservation>,
@@ -147,7 +217,16 @@ impl PreparedNativeRegistryMigration {
         // Failure here must precede even prerequisite opening, KDF and RNG.
         let fee = Arc::new(policy.pool.try_reserve(PREPARATION_FEE)?);
         crate::store::persistence::native_registry::refuse_unsupported_storage(dir.as_ref())?;
-        let mut opening = PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current_policy)?;
+        let opening = PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current_policy)?;
+        Self::from_opening(opening, rng, policy, fee)
+    }
+
+    fn from_opening(
+        mut opening: PreparedV2CurrentLayoutStore,
+        rng: &mut impl CryptoRngCore,
+        policy: NativeRegistryPreparationPolicy,
+        fee: Arc<CatalogReadReservation>,
+    ) -> Result<Self, AppError> {
         opening.retry(rng)?;
         let current = opening.into_current_layout_store().map_err(|_| refused())?;
         let store = current.checked_store()?;
@@ -319,7 +398,7 @@ fn seal_kind(
     let derived = Zeroizing::new(blake3::derive_key(domain, key));
     Ok(Zeroizing::new(frame(&seal(&derived, plain, rng)?)))
 }
-fn open_kind(
+pub(in crate::store::critical_namespaces::native_registry) fn open_kind(
     key: &[u8; 32],
     domain: &str,
     raw: &[u8],
@@ -440,4 +519,4 @@ impl MigrationOutput {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::store::critical_namespaces::native_registry) mod tests;

@@ -18,6 +18,7 @@ test("retry refuses IPC until the caller identity survives an actual successful 
   const body = transpile("  async function submitPendingSend(", "  // Inline edit of one of your own messages.");
   const app = new Function("addPendingSend", "matchingPendingSend", "samePendingIntent", "sendAndRefresh", "persistenceWarning", "sendOutcome", "pendingSendRetryBlock", "quarantinedPendingIntent", "validateSendPayload", "pendingContinuityVersion", "sendRefusedUnaccepted", `
     let draft = "retain this identity", cur = { active: "1" }, activeServerId = 1, sending = false;
+    const chatBackend="legacy";
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
     let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;
@@ -73,7 +74,7 @@ test("failed continuity hydration cannot replace the sealed pending identities w
   const studioDraft = JSON.stringify({ version: 1, scope: { server: 1, channel: "1" }, group: "a".repeat(64), records: [] });
   const initial = sanitizeUiContinuity({ pendingSends: { [intent.token]: intent }, drafts: { room: intent.text }, studioDraft });
   const app = new Function("initial", "sanitizeUiContinuity", "planLegacyReadMarkMigration", "console", `
-    let locked = false, uiStateLoadGeneration = 7, uiStateHydrationAttempt = 0, uiStateReady = false, uiStateSaveTimer;
+    let locked = false, uiStateLoadGeneration = 7, uiStateHydrationAttempt = 0, uiStateReady = false, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = structuredClone(initial.pendingSends), drafts = structuredClone(initial.drafts), uiContinuityVersion = 1;
     let recoveredSendDrafts = {};

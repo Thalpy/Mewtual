@@ -279,7 +279,7 @@ pub struct StudioView {
 /// initial publication, until lease destruction. No locks
 /// may be awaited after the actor is Ready: use fail-fast acquisition and retry on contention.
 pub struct StudioVaultLease {
-    pub(crate) store: OwnedMutexGuard<Option<ServerStore>>,
+    pub(crate) store: crate::store::LegacyStoreCustody,
     pub(crate) server: u64,
     _ordering: Box<dyn Send>,
     pub(crate) preview_reads: bool,
@@ -297,12 +297,30 @@ impl StudioVaultLease {
         ordering: impl Send + 'static,
     ) -> Self {
         Self {
-            store,
+            store: crate::store::LegacyStoreCustody::Standalone(store),
             server,
             _ordering: Box::new(ordering),
             preview_reads: false,
             cancellation: None,
         }
+    }
+
+    /// Preserve the original native mutex and refuse Native V2 rather than
+    /// letting a legacy Studio actor acquire its hidden physical Store.
+    pub fn new_mounted(
+        store: OwnedMutexGuard<Option<crate::store::MountedVault>>,
+        server: u64,
+        ordering: impl Send + 'static,
+    ) -> Result<Self, crate::store::MountedLeaseRefusal> {
+        let (store, ordering) =
+            crate::store::LegacyStoreCustody::from_mounted(store, Box::new(ordering))?;
+        Ok(Self {
+            store,
+            server,
+            _ordering: ordering,
+            preview_reads: false,
+            cancellation: None,
+        })
     }
 
     /// Transfer native cancellation AND its operation-slot keepalive to the actual worker/send

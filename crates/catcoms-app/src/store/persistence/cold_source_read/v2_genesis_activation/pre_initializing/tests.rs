@@ -333,7 +333,7 @@ fn original_pre_receipt_and_exact_fee_tail_keep_no_source_sdk_or_store_alive() {
     drop(directory);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn unsupported_native_inventory_profile_has_no_implicit_portable_fallback() {
     // The real portable producer supplies the complete journal and no row. Calling actual

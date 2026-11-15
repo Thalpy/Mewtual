@@ -66,7 +66,7 @@ impl NativeRegistryPolicy {
         Ok(Arc::new(self.preparation.pool.try_reserve(PHYSICAL_FEE)?))
     }
 }
-impl NativeRegistryHandler {
+impl NativeMigrationHandler {
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         self.fee.validate(&self.policy.pool, PREPARATION_FEE)?;
         self.physical_fee
@@ -85,7 +85,7 @@ pub struct NativeRegistryInstallation {
     // maximum phase overlap are included in PHYSICAL_FEE's metadata allowance.
     io: Box<NativeDeclarationIo>,
     prepared: Box<PreparedNativeRegistryMigration>,
-    handler: NativeRegistryHandler,
+    handler: NativeMigrationHandler,
     complete: bool,
 }
 impl std::fmt::Debug for NativeRegistryInstallation {
@@ -113,7 +113,48 @@ impl NativeRegistryInstallation {
             current,
             policy.preparation.clone(),
         )?;
-        let handler = NativeRegistryHandler {
+        Self::from_prepared(prepared, policy, physical_fee)
+    }
+
+    /// Create one new empty vault and retain the SAME session/keys/lineage
+    /// through critical activation and every private namespace declaration.
+    /// Existing vaults/artifacts refuse; this is no general cold selector.
+    /// Initial preparation errors preserve files and require cold recovery.
+    pub fn prepare_fresh(
+        dir: impl AsRef<Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: V2CurrentLayoutPolicy,
+        policy: NativeRegistryPolicy,
+    ) -> Result<Self, AppError> {
+        let physical_fee = policy.physical_payment(&current)?;
+        let fee = Arc::new(policy.preparation.pool.try_reserve(PREPARATION_FEE)?);
+        let opening = PreparedV2CurrentLayoutStore::create_for_native_registry(
+            dir.as_ref(),
+            passphrase,
+            rng,
+            current,
+        )?;
+        let prepared = PreparedNativeRegistryMigration::from_opening(
+            opening,
+            rng,
+            policy.preparation.clone(),
+            fee,
+        )?;
+        #[cfg(test)]
+        super::super::super::current_layout::native_fresh_test_edge(
+            super::super::super::current_layout::NativeFreshEdge::NativePrepared,
+            prepared.current.cached_store()?,
+        );
+        Self::from_prepared(prepared, policy, physical_fee)
+    }
+
+    fn from_prepared(
+        prepared: PreparedNativeRegistryMigration,
+        policy: NativeRegistryPolicy,
+        physical_fee: Arc<CatalogReadReservation>,
+    ) -> Result<Self, AppError> {
+        let handler = NativeMigrationHandler {
             policy: policy.preparation,
             fee: prepared.fee.clone(),
             physical_fee,
@@ -151,7 +192,7 @@ impl NativeRegistryInstallation {
         if self
             .prepared
             .current
-            .install_native_registry_handler(self.handler.clone())
+            .install_native_registry_handler(NativeRegistryHandler::Migration(self.handler.clone()))
             .is_err()
         {
             return Err(self);
@@ -201,7 +242,7 @@ pub struct NativeRegistryStore {
     #[cfg(test)]
     read_hook: std::sync::Mutex<Option<ReadHook>>,
     current: V2CurrentLayoutStore,
-    handler: NativeRegistryHandler,
+    handler: NativeMigrationHandler,
 }
 #[cfg(test)]
 type ReadHook = Box<dyn FnOnce() + Send>;
@@ -212,6 +253,15 @@ impl std::fmt::Debug for NativeRegistryStore {
     }
 }
 impl NativeRegistryStore {
+    /// Sole consuming internal transfer into the distinct version2 upgrade.
+    /// No public Store/Current getter or handler switch is introduced.
+    pub(in crate::store::critical_namespaces::native_registry) fn into_index_upgrade_current(
+        self,
+    ) -> Result<V2CurrentLayoutStore, AppError> {
+        self.handler.require()?;
+        require_settled(self.current.checked_store()?)?;
+        Ok(self.current)
+    }
     /// Regression access to the actual mounted owner for the real JOIN writer. This is
     /// absent from production and confers no native command/signing authorization.
     #[cfg(test)]
@@ -231,14 +281,14 @@ impl NativeRegistryStore {
     ) -> Result<Self, AppError> {
         let physical_fee = policy.physical_payment(&current)?;
         let fee = Arc::new(policy.preparation.pool.try_reserve(PREPARATION_FEE)?);
-        let handler = NativeRegistryHandler {
+        let handler = NativeMigrationHandler {
             policy: policy.preparation,
             fee,
             physical_fee,
             persistent_capacity: policy.persistent_capacity,
         };
         handler.require()?;
-        current.native_registry = Some(handler.clone());
+        current.native_registry = Some(NativeRegistryHandler::Migration(handler.clone()));
         let mut opening = PreparedV2CurrentLayoutStore::open(dir, passphrase, rng, current)?;
         opening.retry(rng)?;
         let current = opening.into_current_layout_store().map_err(|_| refused())?;
@@ -413,6 +463,13 @@ impl crate::store::ServerStore {
         handler.require()?;
         // This presence probe reads no content through a possibly substituted root. The
         // actual root/directory custody is captured before opening any root artifact.
+        if let NativeRegistryHandler::Operational(handler) = handler {
+            return handler.inspect_storage(self);
+        }
+        if let Some(handler) = handler.lifecycle() {
+            return handler.inspect_storage(self);
+        }
+        crate::store::persistence::native_registry::operational::refuse_upgrade_debt(self)?;
         let present = crate::store::persistence::native_registry::native_artifacts_present(self)?;
         let raw = read_native_current(self)?.ok_or_else(refused)?;
         let key = Zeroizing::new(self.keys.db_key()?);
