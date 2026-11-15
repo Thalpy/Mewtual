@@ -37,6 +37,11 @@ impl Default for ExpiryClock {
     }
 }
 impl ExpiryClock {
+    /// Test observation only. Injected authority expiry must not prevent a
+    /// bounded read of already-retained history; it grants no new call time.
+    fn observer_monotonic_ms(&self) -> u64 {
+        catcoms_rt::Clock::monotonic_ms(&catcoms_rt::SystemClock)
+    }
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -172,7 +177,138 @@ pub(crate) async fn with_expiry_clock<F: std::future::Future>(
     EXPIRY_CLOCK.scope(clock, future).await
 }
 
+/// Retry only a proven pre-body lock/capacity refusal. The SAME authenticated
+/// physical position stays held and the original intent deadline never moves.
+/// No admitted body, native row, Action or SDK result is retried here.
+pub(super) async fn begin_intake_after_capacity(
+    state: &AppState,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    authenticated: &channel::AuthenticatedRequest,
+) -> Result<channel::sdp::Permit, VoiceError> {
+    let clock = crate::voice_runtime(state).clock();
+    let intent = parent.pc_test_intent().ok_or(VoiceError::Unauthorized)?;
+    let mono = clock.monotonic_ms();
+    let remaining = intent.remaining_at(clock.now_ms(), mono)?;
+    let deadline = mono
+        .checked_add(remaining)
+        .ok_or(VoiceError::Unauthorized)?;
+    for attempt in 0..32 {
+        if clock.monotonic_ms() >= deadline {
+            return Err(VoiceError::Unauthorized);
+        }
+        match state.voice_handoff.sdp_begin_intake(
+            route.selected(),
+            route.session().identity(),
+            authenticated,
+            clock.clone(),
+        ) {
+            Err(VoiceError::Capacity) => {
+                if attempt == 31 {
+                    return Err(VoiceError::Capacity);
+                }
+                let remaining = deadline.saturating_sub(clock.monotonic_ms());
+                if remaining == 0 {
+                    return Err(VoiceError::Unauthorized);
+                }
+                clock
+                    .sleep(std::time::Duration::from_millis(remaining.min(10)))
+                    .await;
+            }
+            result => return result,
+        }
+    }
+    Err(VoiceError::Capacity)
+}
+
+#[derive(Clone, Copy)]
+struct OriginalOpen<'a> {
+    request: &'a [u8],
+    child: [u8; 16],
+}
+
+/// Capacity is not a history snapshot. Observe this exact no-action Open with
+/// a single pre-arm, unshifted deadline; reject every other refusal/shape.
+async fn read_original_open_history_after_capacity(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    original: OriginalOpen<'_>,
+    observer: (&ExpiryClock, u64),
+) -> Vec<u8> {
+    let capacity =
+        super::super::sdp_replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    for attempt in 0..32 {
+        let remaining = observer
+            .1
+            .checked_sub(observer.0.observer_monotonic_ms())
+            .filter(|remaining| *remaining > 0)
+            .expect("original history observer deadline");
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_millis(remaining),
+            exchange(
+                state,
+                public,
+                route,
+                parent,
+                parent.id().logical(),
+                27,
+                &resolve(original.request, false, false),
+            ),
+        )
+        .await
+        .expect("same bounded history observer");
+        if reply == capacity {
+            if attempt == 31 {
+                break;
+            }
+            let remaining = observer
+                .1
+                .saturating_sub(observer.0.observer_monotonic_ms());
+            assert!(remaining > 0, "original history observer deadline");
+            catcoms_rt::Clock::sleep(
+                observer.0,
+                std::time::Duration::from_millis(remaining.min(10)),
+            )
+            .await;
+            continue;
+        }
+        assert_eq!(
+            reply.len(),
+            super::super::sdp_replies::HISTORY_BYTES,
+            "actual Open history required"
+        );
+        assert_eq!(&reply[..2], &[8, 0]);
+        assert_eq!(&reply[2..18], &original.child);
+        assert_eq!(&reply[18..34], &parent.id().logical());
+        assert_eq!(reply[34], 1, "Open purpose");
+        assert_eq!(reply[37], 0, "this original has no Action");
+        return reply;
+    }
+    panic!("original no-action history stayed Capacity for 32 observations");
+}
+
 async fn exchange(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    logical: [u8; 16],
+    operation: u8,
+    body: &[u8],
+) -> Vec<u8> {
+    let result =
+        exchange_before_collection_check(state, public, route, parent, logical, operation, body)
+            .await;
+    require_collected_publication(state).await;
+    result
+}
+
+/// One decoded reply with its actual CompletedReply already dropped. The
+/// intentional commit-lock probe must release its OWN guard before asking
+/// require_collected_publication to reacquire that same mutex.
+async fn exchange_before_collection_check(
     state: &AppState,
     public: &bootstrap::SetupOutput,
     route: &bootstrap::Route,
@@ -190,14 +326,8 @@ async fn exchange(
     let incoming = if operation == 15 {
         let wire = service::tests::signed_frame(public, header, body);
         let authenticated = service::tests::authenticated_header(route, &wire);
-        let permit = state
-            .voice_handoff
-            .sdp_begin_intake(
-                route.selected(),
-                route.session().identity(),
-                &authenticated,
-                crate::voice_runtime(state).clock(),
-            )
+        let permit = begin_intake_after_capacity(state, route, parent, &authenticated)
+            .await
             .unwrap();
         let mut incoming = authenticated.admit_sdp(permit).unwrap();
         let count = incoming.remaining_mut().len();
@@ -219,6 +349,11 @@ async fn exchange(
     .unwrap();
     let result = opened_reply(public, header, body, &reply);
     drop(reply);
+    assert!(parent.id().logical() != [0; 16]);
+    result
+}
+
+async fn require_collected_publication(state: &AppState) {
     // Other native maintenance may briefly own this same fence. A forgotten
     // Completion publication guard would instead keep it locked indefinitely.
     drop(
@@ -229,8 +364,6 @@ async fn exchange(
         .await
         .expect("actual completed worker publication guard was not collected"),
     );
-    assert!(parent.id().logical() != [0; 16]);
-    result
 }
 fn resolve(original: &[u8], seal: bool, close: bool) -> Vec<u8> {
     let mut body = original[..225].to_vec();
@@ -459,7 +592,19 @@ pub(super) async fn exercise(
     }
     if !seal {
         if let Ok(clock) = EXPIRY_CLOCK.try_with(Arc::clone) {
-            expiry_after_history(state, public, route, parent, &original, intent, clock).await;
+            expiry_after_history(
+                state,
+                public,
+                route,
+                parent,
+                OriginalOpen {
+                    request: &original,
+                    child,
+                },
+                intent,
+                clock,
+            )
+            .await;
         }
         if effect >= 2 {
             let action = requests::Action {
@@ -615,22 +760,49 @@ async fn expiry_after_history(
     public: &bootstrap::SetupOutput,
     route: &bootstrap::Route,
     parent: &ledger::ResolvedRow,
-    original: &[u8],
+    original: OriginalOpen<'_>,
     intent: &Arc<InitialSdpIntent>,
     clock: Arc<ExpiryClock>,
 ) {
     let before = state.voice_handoff.sdp_test_rows(parent.id());
-    let open_before = exchange(
+    let authority = crate::voice_runtime(state).clock();
+    let remaining = intent
+        .remaining_at(authority.now_ms(), authority.monotonic_ms())
+        .unwrap();
+    let observer_deadline = clock
+        .observer_monotonic_ms()
+        .checked_add(remaining)
+        .unwrap();
+    // Deterministic real-lock control: a refused read must neither become the
+    // comparison baseline nor create/close a native row or Action.
+    let commit = state.ui_session_commit.lock().await;
+    let blocked = exchange_before_collection_check(
         state,
         public,
         route,
         parent,
         parent.id().logical(),
         27,
-        &resolve(original, false, false),
+        &resolve(original.request, false, false),
     )
     .await;
-    let mut body = original.to_vec();
+    assert_eq!(
+        blocked,
+        super::super::sdp_replies::refused(factory::Refused::Protocol(VoiceError::Capacity))
+    );
+    drop(commit);
+    require_collected_publication(state).await;
+    assert_eq!(state.voice_handoff.sdp_test_rows(parent.id()), before);
+    let open_before = read_original_open_history_after_capacity(
+        state,
+        public,
+        route,
+        parent,
+        original,
+        (&clock, observer_deadline),
+    )
+    .await;
+    let mut body = original.request.to_vec();
     body.extend_from_slice(&3u16.to_be_bytes());
     body.extend_from_slice(b"v=0");
     let header = (
@@ -641,14 +813,8 @@ async fn expiry_after_history(
     );
     let wire = service::tests::signed_frame(public, header, &body);
     let authenticated = service::tests::authenticated_header(route, &wire);
-    let permit = state
-        .voice_handoff
-        .sdp_begin_intake(
-            route.selected(),
-            route.session().identity(),
-            &authenticated,
-            crate::voice_runtime(state).clock(),
-        )
+    let permit = begin_intake_after_capacity(state, route, parent, &authenticated)
+        .await
         .unwrap();
     let mut incoming = authenticated.admit_sdp(permit).unwrap();
     let count = incoming.remaining_mut().len();
@@ -686,14 +852,13 @@ async fn expiry_after_history(
         "expiry installed no Seal row/worker/outcome"
     );
     assert_eq!(
-        exchange(
+        read_original_open_history_after_capacity(
             state,
             public,
             route,
             parent,
-            parent.id().logical(),
-            27,
-            &resolve(original, false, false)
+            original,
+            (&witness, observer_deadline)
         )
         .await,
         open_before,
@@ -706,7 +871,7 @@ async fn expiry_after_history(
         parent,
         parent.id().logical(),
         27,
-        &resolve(original, true, true),
+        &resolve(original.request, true, true),
     )
     .await;
     assert_eq!(

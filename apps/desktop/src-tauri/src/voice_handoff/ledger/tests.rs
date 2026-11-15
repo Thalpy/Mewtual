@@ -98,10 +98,13 @@ fn sdp_failure_diagnostics_refuse_contended_and_equal_label_foreign_parents() {
         ledger.fixture_sdp_diagnostic(&foreign, Some(id)).1,
         "original parent absent"
     );
-    assert_eq!(
-        ledger.fixture_sdp_diagnostic(&selected, Some(id)).1,
-        "parent has no plan"
+    let (original, diagnostic) = ledger.fixture_sdp_diagnostic(&selected, Some(id));
+    assert!(
+        original == Some(selector),
+        "absence must retain original selector"
     );
+    assert!(diagnostic.contains("custody LOW/claim_released/key_Ready_released=(None, None, None)"));
+    assert!(diagnostic.contains("original parent action/settled/ack/drained"));
     assert_eq!(selected.resources().counts(), before);
     assert_eq!(registration.id(), id);
 }

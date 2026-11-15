@@ -32,6 +32,14 @@ pub use archive_candidate::{
     MAX_CREATE_CIPHERTEXT_BYTES, MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES,
     MAX_CREATE_PADDED_BYTES, V2_GENESIS_SEED_METADATA_BYTES,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use archive_candidate::{
+    PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData, RetiredV2FounderAddNativeCustody,
+    V2FounderAddNativeStage, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
+    V2FounderGovernanceNegative, V2FounderInviteRequestData, V2InstalledFounderAddData,
+    FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
+    MAX_FOUNDER_INVITE_LIFETIME_MS,
+};
 
 /// Conservative logical invoice for the named private public-record/scope/watch/signature
 /// buffers in this producer, NOT a quota debit, SDK/provider heap or active Server bound.

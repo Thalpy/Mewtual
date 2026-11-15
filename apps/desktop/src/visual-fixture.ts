@@ -5,6 +5,7 @@ import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
 import { createVisualFileUploads } from "./visual-file-uploads.ts";
 import { VISUAL_SAVED_FILES, visualTransfersResponse } from "./visual-transfers-fixture.ts";
 import { visualChatLedgerResponse } from "./visual-chat-ledger-fixture.ts";
+import { createVisualNativeTextFixture } from "./visual-native-text-fixture.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -856,12 +857,15 @@ export function installVisualFixture(name: string): void {
   const studio = new URLSearchParams(window.location.search).get("studio") === "1";
   const transfers = new URLSearchParams(window.location.search).get("transfers") === "1";
   const pendingRecovery = new URLSearchParams(window.location.search).get("pending") === "oversized";
+  const nativeMode = new URLSearchParams(window.location.search).get("nativeText");
+  const nativeText = nativeMode ? createVisualNativeTextFixture(nativeMode === "empty") : null;
   const uploads = studio ? createVisualFileUploads(ME.repeat(2)) : null;
   mockIPC(
     (command, payload) => {
       const args = payload as Record<string, unknown> ?? {};
       const fileResponse = uploads?.response(command, args);
-      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio, transfers, pendingRecovery);
+      const nativeResponse = nativeText?.(command, args);
+      let response = nativeResponse?.handled ? nativeResponse.value : fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio, transfers, pendingRecovery);
       if (uploads && command === "get_files") {
         const list = response as { files: unknown[]; has_peers: boolean };
         response = { ...list, files: [...list.files, ...uploads.files(Number(args.server))] };
@@ -870,7 +874,7 @@ export function installVisualFixture(name: string): void {
       // fonts and the next task so Svelte can flush its pending microtasks. Do not use
       // requestAnimationFrame here: screenshot browsers intentionally run in the background and
       // Chromium may throttle background frames indefinitely.
-      if (command === "get_moderation") {
+      if (command === "get_moderation" || (nativeText && (command === "get_message_page" || (nativeMode === "empty" && command === "resume_session")))) {
         void document.fonts.ready.then(() => {
           setTimeout(() => {
             document.documentElement.dataset.visualReady = name;

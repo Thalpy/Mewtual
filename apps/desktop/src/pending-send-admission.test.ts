@@ -47,7 +47,7 @@ test("full Send custody is validated on queue insertion while retained invalid o
   }
   assert.equal(quarantinedPendingIntent({ ...post, replyTo: "x".repeat(150) }), false);
   assert.equal(pendingContinuityVersion({ ...post, replyTo: "x".repeat(150) }), 3);
-  assert.throws(() => sanitizeUiContinuity({ version: 4 }), /unsupported/);
+  assert.throws(() => sanitizeUiContinuity({ version: 5 }), /unsupported/);
 });
 
 test("old invalid Sends in either shelf upgrade exact root to3 and recover losslessly without positive or Stop IPC", async () => {
