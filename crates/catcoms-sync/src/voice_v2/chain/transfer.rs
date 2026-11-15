@@ -266,6 +266,39 @@ impl ConfirmationControl {
         &self,
         before_slots: impl FnOnce(),
     ) -> Result<PreparedSdpCapacity, VoiceError> {
+        self.prepare_sdp_capacity_at(|| {}, before_slots)
+    }
+
+    // Private scheduling seams run outside Control/Workflow. Production passes
+    // empty callbacks; tests can close the actual original at either payment
+    // boundary without substituting a synthetic capacity/authority result.
+    fn prepare_sdp_capacity_at(
+        &self,
+        before_payment: impl FnOnce(),
+        before_slots: impl FnOnce(),
+    ) -> Result<PreparedSdpCapacity, VoiceError> {
+        self.prepare_sdp_capacity_inner(before_payment, before_slots)
+            .map_err(|error| {
+                // Whole retirement can close prepaid metadata, forwarding or
+                // row backing AFTER the first open observation. Once this SAME
+                // irreversible latch is visible, a Capacity refusal is no
+                // longer retryable pressure. Classify after the whole failed
+                // preparation has released its owning resources/custody.
+                if error == VoiceError::Capacity
+                    && self.binding.successor_closed.load(Ordering::Acquire)
+                {
+                    VoiceError::Unauthorized
+                } else {
+                    error
+                }
+            })
+    }
+
+    fn prepare_sdp_capacity_inner(
+        &self,
+        before_payment: impl FnOnce(),
+        before_slots: impl FnOnce(),
+    ) -> Result<PreparedSdpCapacity, VoiceError> {
         let chain = self.control.upgrade().ok_or(VoiceError::Unauthorized)?;
         let (original_slots, preparation, custody, reserve, ready) = {
             let control = chain.control.lock().unwrap_or_else(|e| e.into_inner());
@@ -299,6 +332,7 @@ impl ConfirmationControl {
         };
         let resources = self.binding.resources().clone();
         let group = self.binding.scope.group;
+        before_payment();
         // The successor's existing 4 KiB metadata allowance covers these prepared/ticket
         // wrappers and child reservation too; no allocation precedes its payment.
         let metadata = ByteBudget::Reserved(reserve.clone()).charge(

@@ -56,6 +56,30 @@ ambient/raw-fs/exact-count static gates passed. Full current Root/native suites
 and final native startup remain pending; these focused results do not close
 Chat V2 acceptance.
 
+The native build (4m36s), actual startup marker and all real frontend flow checks
+also passed. These exercise the shipping Legacy selection; the native-text
+feature remains off. The native text route evidence uses actual Tauri ACL and
+AppState with MockRuntime, not a physical WebView/two-device acceptance claim.
+
+## Full-suite CI follow-up
+
+PR #124 runtime 502b565e's full run 43658076181 completed: Linux Root passed
+(except the user-deferred cost case), and both native workspaces passed. Windows
+Root failed one unchanged voice-capacity concurrency assertion: simultaneous
+whole retirement returned Capacity instead of Unauthorized; its Sync library
+result was 1,505 passed / 1 failed. This is not a green full Root result.
+
+The actual metadata-payment boundary could observe already-closed original
+backing before reaching the existing slots-only closure mapper. Preparation now
+classifies Capacity as Unauthorized only when the SAME irreversible successor
+latch is observed, after complete failed-preparation cleanup. Open pressure and
+other errors retain their existing meanings; successful owning preparations are
+unchanged. A deterministic real-retirement-before-metadata case removes the
+external Workflow, checks actual old-phase drainage while successor custody
+still blocks whole drainage, and verifies final resources/slots return. All 26
+transfer cases passed; the original concurrent assertion remains strict. This
+separate correction needs the new full run before acceptance.
+
 ## Whole-close ordering
 
 Native whole-close bypasses the Legacy freeze barrier. After continuity permits

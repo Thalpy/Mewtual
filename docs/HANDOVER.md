@@ -1,5 +1,14 @@
 # Mewtual; Handover
 
+CI follow-up: PR #124 full run 43658076181 completed with Linux Root and both
+native jobs passing; Windows Root failed one Sync retirement classification
+race (Capacity versus Unauthorized). The separate correction classifies only
+Capacity after the same irreversible successor close, after actual cleanup.
+The new deterministic metadata-boundary regression and all 26 transfer tests
+passed; the original concurrency assertion stays strict. A current full run is
+still required. Native build/startup and real frontend flows for 4183bcf9 passed.
+Chat V2 remains disabled and incomplete.
+
 Active continuation: `chat-v2-native-text-dispatch` in its isolated worktree,
 based on PR #124. The actual tagged table, native founding and plain local send
 are wired behind the OFF switch. Four initial founder cases passed in 29.85 seconds,
